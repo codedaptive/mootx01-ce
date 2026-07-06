@@ -95,10 +95,6 @@ public extension GeniusLocusKit {
         // back a GrantStore with the estate's own database. The grant
         // store and scope vault are built lazily on first use.
         storages[handle] = storage
-        // Mint an empty unified audit log for the estate (GLK-03). The
-        // log is fed lazily via feedAuditLog(for:); it starts empty so a
-        // verify pass before any feed reports a clean, zero-entry chain.
-        auditLogs[handle] = UnifiedAuditLog()
         // Mark the estate mounted (GLK_PROVISION_001) so the admin plane
         // can observe mount state without polling the registry directly.
         mountStates[handle] = .mounted
@@ -189,7 +185,6 @@ public extension GeniusLocusKit {
             // audit log is dropped with it — a closed handle must not
             // resolve to a live log (GLK-03).
             registry[handle] = nil
-            auditLogs[handle] = nil
             diaryStores[handle] = nil
             kgStores[handle] = nil
             fingerprintStores[handle] = nil
@@ -218,7 +213,6 @@ public extension GeniusLocusKit {
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")
         }
         registry[handle] = nil
-        auditLogs[handle] = nil
         diaryStores[handle] = nil
         kgStores[handle] = nil
         fingerprintStores[handle] = nil

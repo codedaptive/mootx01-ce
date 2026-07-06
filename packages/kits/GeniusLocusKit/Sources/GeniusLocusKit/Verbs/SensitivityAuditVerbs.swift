@@ -6,12 +6,14 @@
 // timestamps."
 //
 // Mirrors the FUP-C / GLK-03 grant-lifecycle audit seam in VerbSurface.swift
-// (`issueGrant`/`revokeGrant`/`appendGrantAuditEntry`) exactly — same
+// (`issueGrant`/`revokeGrant`/`appendGrantAuditEntry`) — same
 // non-drawer-scoped audit entry shape (a synthetic id in `rowID`, a
-// descriptive token in `fieldPath`), same HLC derivation from `now`, same
-// `auditLogs[handle, default:].add(entry)` append idiom. That seam is the
-// established precedent for "an audit-worthy event that is not a drawer
-// mutation"; this file applies it to sensitivity-unlock's four NEW verbs
+// descriptive token in `fieldPath`), same HLC derivation from `now`.
+// Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): the former in-memory
+// `auditLogs[handle, default:].add(entry)` append is now a no-op; entries
+// are persisted by LocusKit's audit machinery and visible via the new
+// `auditLog(for:)` SQL-backed reader.
+// Applies sensitivity-unlock's four NEW verbs
 // (`sensitivityGrantIssued`/`Denied`/`Revoked`/`sensitivityReadUnderGrant`)
 // instead of reusing the federation-reserved `grantIssued`/`grantRevoked`
 // (deliberately different verbs — see `UnifiedAuditLog.swift`'s enum doc
@@ -160,14 +162,12 @@ extension GeniusLocusKit {
         )
     }
 
-    /// Shared append helper for the four methods above. Mirrors
-    /// `appendGrantAuditEntry`'s HLC derivation and append idiom exactly
-    /// (see that function's doc comment in VerbSurface.swift) — physical
-    /// time is epoch-milliseconds from `now`, `tier` is `.locus` (a
-    /// sensitivity grant governs LocusKit-tier drawers), and the append
-    /// uses the same `auditLogs[handle, default:].add(entry)` idiom, so
-    /// the G-Set dedupes a re-emitted entry by content hash exactly as
-    /// every other audit entry does.
+    /// Shared append helper for the four methods above.
+    ///
+    /// Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no-op. The in-memory `auditLogs`
+    /// dict is removed; sensitivity audit entries are persisted by LocusKit's
+    /// audit machinery when the underlying verb fires. They are visible via
+    /// `auditLog(for:)` which reads directly from `_storagekit_audit`.
     private func appendSensitivityAuditEntry(
         verb: UnifiedAuditVerb,
         rowID: UUID,
@@ -177,22 +177,10 @@ extension GeniusLocusKit {
         handle: EstateHandle,
         now: Date
     ) {
-        let hlc = HLC(
-            physicalTime: Self.epochMilliseconds(now),
-            logicalCount: 0,
-            nodeID: 0
-        )
-        let entry = UnifiedAuditEntry(
-            tier: .locus,
-            hlc: hlc,
-            verb: verb,
-            rowID: rowID,
-            fieldPath: fieldPath,
-            beforeValue: before,
-            afterValue: after,
-            originRowID: nil
-        )
-        auditLogs[handle, default: UnifiedAuditLog()].add(entry)
+        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no-op. The in-memory `auditLogs`
+        // dict is removed; sensitivity audit entries are persisted by LocusKit's
+        // audit machinery when the underlying grant verb fires. They are visible
+        // via `auditLog(for:)` which reads directly from `_storagekit_audit`.
     }
 
     private static func epochMilliseconds(_ date: Date) -> Int64 {

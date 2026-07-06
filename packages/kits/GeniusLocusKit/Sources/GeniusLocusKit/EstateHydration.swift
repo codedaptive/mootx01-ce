@@ -179,17 +179,16 @@ public extension GeniusLocusKit {
     ///   - now: Persist timestamp for the saved snapshot's `updated_at` (metadata
     ///          only; the matrix math itself is deterministic and clock-free).
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale.
-    ///           Any LocusKit error surfaced by `feedAuditLog`.
+    ///           Any storage-tier error surfaced by `AuditLog.iterate`.
     func rebuildDerivedAccelerators(
         for handle: EstateHandle,
         now: Date = Date()
     ) async throws {
-        // Step 3 — Feed the unified audit log.
-        // feedAuditLog bridges per-drawer audit events from the estate's durable
-        // storage into the GLK-level UnifiedAuditLog CRDT. This is required before
-        // matrix rebuild: MatrixTier consumes the CRDT, not raw storage events.
-        try await feedAuditLog(for: handle)
-        let log_ = try auditLog(for: handle)
+        // Step 3 — Load the unified audit log.
+        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): `feedAuditLog` (N+1 per-drawer
+        // queries into a grow-only RAM dict) is removed. `auditLog(for:)` now
+        // issues a single bounded SQL query against `_storagekit_audit`.
+        let log_ = try await auditLog(for: handle)
 
         // Build the eventTime map (rowID → authored-in-world epoch ms) so the
         // temporal (T) matrix pass keys off `eventTime`, not the capture HLC —

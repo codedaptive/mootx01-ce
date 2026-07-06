@@ -27,6 +27,25 @@ enum NeuronKitManifestKey {
     static let dreamingState = "neuronkit.dreaming.state"
     static let maintenancePolicy = "neuronkit.maintenance.policy"
     static let maintenanceState = "neuronkit.maintenance.state"
+
+    // Governor compute-cache keys (ADR025-AUDITLOG-GOVERNOR O(N) RAM fix).
+    // Each duty persists its computed output + an audit-event-count watermark
+    // so that the next cadence invocation can skip an expensive full-estate
+    // load when the estate is unchanged.
+    //
+    // Key format: "governor.<duty>.scores.v1" (JSON blob of [String: Float])
+    //             "governor.<duty>.count.v1"  (Int as JSON — audit event count
+    //                                          when the scores were last fitted)
+    //
+    // Why Int not HLC: `AuditLog.count()` is a single O(1) SQL COUNT(*).
+    // It advances on every new event, so "count unchanged" == "nothing new".
+    // No HLC round-trip, no schema change. See AuditProbe.swift for the
+    // `hasAuditGrown(for:since:)` helper that reads this watermark.
+    static let centralityScores = "governor.centrality.scores.v1"
+    static let centralityCount  = "governor.centrality.count.v1"
+    static let preferenceScores = "governor.preference.scores.v1"
+    static let preferenceCount  = "governor.preference.count.v1"
+    static let topologyCount    = "governor.topology.count.v1"
 }
 
 /// Deterministic JSON encoder (sorted keys) so the persisted manifest value is

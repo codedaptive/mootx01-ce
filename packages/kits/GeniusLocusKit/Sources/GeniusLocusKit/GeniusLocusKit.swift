@@ -28,11 +28,13 @@ import VectorKit
 ///   `RecallFrame` to every open estate whose zoom window overlaps the
 ///   query region, then aggregates results.
 ///
-/// The per-estate unified audit log is wired (GLK-03): each open
-/// estate carries a `UnifiedAuditLog` in `auditLogs`, fed from the
-/// LocusKit tier through `feedAuditLog(for:)` and verified through the
-/// `verifyAuditChain` verb. The Brain layer (standing-signal scheduler,
-/// matrix tier, dreaming/maintenance daemons) is live.
+/// The per-estate unified audit log is wired (GLK-03): `auditLog(for:)`
+/// issues a single SQL query against the estate's `_storagekit_audit`
+/// table (Bug 1 fix, ADR025-AUDITLOG-GOVERNOR — replaced the former grow-
+/// only in-memory G-Set CRDT fed by an N+1 per-drawer walk). Audit chain
+/// verification is provided through the `verifyAuditChain` verb. The
+/// Brain layer (standing-signal scheduler, matrix tier,
+/// dreaming/maintenance daemons) is live.
 ///
 /// Per the standing-signal serial-dispatch decision recorded for
 /// GLK-04, the public type is an actor so the registry is serialized
@@ -70,14 +72,6 @@ public actor GeniusLocusKit {
     /// _2026-05-21) applies per-estate, never across estates.
     internal var schedulers: [EstateHandle: StandingSignalScheduler] = [:]
 
-    /// Registry of per-estate unified audit logs (GLK-03). One
-    /// `UnifiedAuditLog` per open estate, minted empty when the estate
-    /// is admitted in `open` and dropped in `close`. The log is a value
-    /// type (G-Set CRDT); `feedAuditLog(for:)` bridges the estate's
-    /// LocusKit audit rows into it and `verifyAuditChain` reads it.
-    /// Internal so the audit extension and coordinator reach it while
-    /// callers go through `auditLog(for:)`.
-    internal var auditLogs: [EstateHandle: UnifiedAuditLog] = [:]
 
     /// Registry of active and terminal COW branches keyed by `BranchID`.
     ///
@@ -560,46 +554,32 @@ public extension GeniusLocusKit {
 
     /// Return a snapshot of the unified audit log for the given handle.
     ///
-    /// The log is a value type, so the returned snapshot is safe to use
-    /// outside the actor — it does not alias the registry's copy.
+    /// Issues a single SQL query against `_storagekit_audit` — one
+    /// `SELECT * FROM _storagekit_audit ORDER BY hlc ASC LIMIT 50_000`
+    /// regardless of estate size. This replaces the former in-memory
+    /// G-Set CRDT pattern (Bug 1 fix, ADR025-AUDITLOG-GOVERNOR): the
+    /// old approach kept a grow-only `auditLogs: [EstateHandle:
+    /// UnifiedAuditLog]` dictionary and fed it via an N+1 per-drawer
+    /// walk (`feedAuditLog`). Both are removed — audit data lives on
+    /// disk in `_storagekit_audit` and this method reads it directly.
+    ///
+    /// The returned `UnifiedAuditLog` is a value type, safe to use
+    /// outside the actor without aliasing any shared state.
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is
-    ///   not in the registry (stale or never issued).
-    func auditLog(for handle: EstateHandle) throws -> UnifiedAuditLog {
-        guard let log = auditLogs[handle] else {
+    ///   not in the registry (stale or never issued); any storage-tier
+    ///   error surfaced by `AuditLog.iterate`.
+    func auditLog(for handle: EstateHandle) async throws -> UnifiedAuditLog {
+        guard let storage = storages[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
+        // One SQL round-trip instead of N+1 per-drawer calls. AuditBridge
+        // converts each substrate AuditEvent to one or more UnifiedAuditEntries
+        // (one per changed bitmap column); the 50 000 row limit caps unbounded
+        // growth on very large estates while covering normal usage.
+        let events = try await storage.auditLog.iterate(after: nil, rowID: nil, limit: 50_000)
+        var log = UnifiedAuditLog()
+        log.add(contentsOf: events.flatMap { AuditBridge.bridge($0) })
         return log
-    }
-
-    /// Pull audit rows from the estate's LocusKit tier, bridge them into
-    /// `UnifiedAuditEntry` values, and merge them into the registry's
-    /// log for the handle.
-    ///
-    /// Idempotent: entries are content-addressed, so re-feeding the same
-    /// rows is a G-Set no-op (the same ids merge over themselves). The
-    /// pull is unbounded — `until: nil` means "every row since the
-    /// distant past" — so no wall-clock read happens inside this method
-    /// and the result is determined entirely by the estate's stored
-    /// audit history. In production the standing-signals scheduler calls
-    /// this before a verify pass.
-    ///
-    /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is
-    ///   stale; any LocusKit failure surfaced by `auditTrail`.
-    func feedAuditLog(for handle: EstateHandle) async throws {
-        let estate = try estate(for: handle)
-        // Cross-row enumeration: the substrate exposes audit history
-        // per-row via `auditTrail(rowID:)`. To feed the unified log we
-        // walk every drawer in the estate and pull its event stream.
-        // `bridge(event:)` returns one or more UnifiedAuditEntries per
-        // event (one per column changed), so the flatMap shape is
-        // deliberate.
-        let drawers = try await estate.allDrawers()
-        var entries: [UnifiedAuditEntry] = []
-        for drawer in drawers {
-            let events = try await estate.auditTrail(rowID: drawer.id)
-            entries.append(contentsOf: events.flatMap { AuditBridge.bridge($0) })
-        }
-        auditLogs[handle, default: UnifiedAuditLog()].add(contentsOf: entries)
     }
 }

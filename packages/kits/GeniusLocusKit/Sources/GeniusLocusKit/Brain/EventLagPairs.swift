@@ -111,19 +111,22 @@ public extension GeniusLocusKit {
         guard registry[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
-        guard let log = auditLogs[handle] else {
-            // No audit log means no entries have been fed yet — return empty
-            // rather than throwing; an empty return is correct for a fresh estate.
-            return []
-        }
+        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): `auditLogs` dict is removed.
+        // Load entries directly from `_storagekit_audit` via the new async
+        // `auditLog(for:)` which issues a single bounded SQL query.
+        // The returned `UnifiedAuditLog.orderedEntries` is sorted HLC-ascending
+        // (already ordered by the SQL `ORDER BY hlc ASC`), no re-sort needed.
+        // `auditLog(for:)` returns an empty log for a fresh estate — matching
+        // the former `guard let log = auditLogs[handle] else { return [] }` contract.
+        let log = try await auditLog(for: handle)
 
         // Convert Date window bounds to physicalTime (ms since Unix epoch).
         // HLC.physicalTime is Int64 milliseconds since Unix epoch.
         let lowerMs = Int64(window.lowerBound.timeIntervalSince1970 * 1_000)
         let upperMs = Int64(window.upperBound.timeIntervalSince1970 * 1_000)
 
-        // orderedEntries is already sorted HLC-ascending (physicalTime ASC,
-        // then logicalCount ASC, then nodeID ASC), so no re-sort needed.
+        // `orderedEntries` is sorted HLC-ascending (physicalTime ASC,
+        // then logicalCount ASC, then nodeID ASC) — SQL ORDER BY preserved.
         let temporalEntries: [TemporalAuditEntry] = log.orderedEntries
             .filter { entry in
                 // HLC window gate: retain entries whose ingest clock falls

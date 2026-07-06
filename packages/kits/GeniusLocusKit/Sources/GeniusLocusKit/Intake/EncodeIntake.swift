@@ -357,6 +357,16 @@ public extension GeniusLocusKit {
     /// GeniusLocusKit/rust/src/intake.rs.
     static let deltaReindexThresholdPercent = 5
 
+    /// Page size for `reindexMissing`'s upfront sweep of the drawers table
+    /// via `Estate.activeDrawersAfter(id:limit:)`. Bounds how many full
+    /// (content-hydrated) `Drawer` rows any single storage-tier query call
+    /// materializes; the sweep walks the whole table in pages of this size
+    /// rather than one unbounded `allDrawers()` call (MEDIUM perf fix —
+    /// see `reindexMissing` below). Independent of `reindexMaxJobs`, which
+    /// bounds how many jobs are ENQUEUED per pass, not how many rows are
+    /// SCANNED per storage query.
+    static let reindexScanPageSize = 2_000
+
     /// Enqueue ingest jobs for every active drawer in the estate that is NOT
     /// already present in the Corpus BundleStore, up to `reindexMaxJobs` total.
     ///
@@ -397,64 +407,79 @@ public extension GeniusLocusKit {
         guard let corpus = corpusKits[handle] else { return 0 }
         let estate = try estate(for: handle)
 
-        // Auto-continuation loop: each pass collects at most reindexMaxJobs
-        // missing drawers, enqueues them, then POLLS their drain to idle so the
-        // next pass sees them as indexed and moves to the remainder — repeating
-        // until none remain. A large import reaches FULL coverage with no operator
-        // follow-up, at any corpus size, while each pass stays bounded. The actor
-        // interleaves awaits, so the daemon stays responsive during the (possibly
-        // long) drain. The 1000-pass ceiling is a backstop against a drawer that
-        // never indexes (e.g. an encode error) spinning forever (covers 10M
-        // drawers at the 10k cap).
-        var total = 0
-        // Delta-aware tail: decided on the FIRST pass (whose uncapped collect
-        // sees the ENTIRE missing set) and sticky for the rest of the loop.
-        // When the missing set is a small fraction of an already-trained corpus,
-        // the O(corpus) tail below (full basis retrain + full re-embed + index
-        // rebuild) is grossly oversized — a ~1k-note vault import into a 50k
-        // estate burned ~70 min of CPU, and an UNCHANGED reimport burned the
-        // same for literally nothing. Small deltas instead ride the ENCODE
-        // stream, whose drain embeds each chunk through the LIVE basis as it
-        // ingests (the live-capture machinery, reused verbatim), and the tail
-        // retrain is skipped: new vocabulary enters the basis at the next large
-        // import, explicit `moot_reindex`, or scheduled maintenance.
-        var smallDelta = false
-        for pass in 0..<1000 {
-            // Fetch the set of source IDs already indexed in the BundleStore — the
-            // drawer IDs that already have chunks and can be skipped.
-            let indexedIDs = try await corpus.indexedSourceIDs()
+        // Fetch the set of source IDs already indexed in the BundleStore — the
+        // drawer IDs that already have chunks and can be skipped. A single
+        // snapshot, not re-fetched per pass: the missing set below is
+        // determined once, up front, and the per-pass loop only enqueues
+        // slices of that already-known list — see the sweep comment below
+        // for why a mid-sweep re-fetch is unnecessary.
+        let indexedIDs = try await corpus.indexedSourceIDs()
 
-            // Recall all active (non-tombstoned) drawers. .full hydration is
-            // required because we need the content to enqueue the ingest payload.
-            let allDrawers = try await estate.allDrawers()
-            let activeDrawers = allDrawers.filter { $0.tombstonedAt == nil }
-
-            // Collect the active, not-yet-indexed, non-empty drawers. The drawer's
-            // filedAt is the capture instant so vector filing timestamps are
-            // deterministic (not now). Hint drawers encode like any other.
-            var uncappedBatch: [(text: String, sourceID: String, now: Date)] = []
-            for drawer in activeDrawers {
+        // MEDIUM perf fix (NT-reindex-sweep): walk the drawers table ONCE,
+        // in bounded pages via `Estate.activeDrawersAfter(id:limit:)`,
+        // instead of the previous design's `estate.allDrawers()` — an
+        // unbounded, full-table, full-hydration load — called on EVERY one
+        // of up to 1000 passes below. `reindexMissing` backfills drawers
+        // captured before the encode pipeline was wired; that population
+        // does not grow while this function runs (a normal live capture is
+        // indexed via its OWN capture-time enqueue, not this backfill), so
+        // one upfront sweep against the `indexedIDs` snapshot above is
+        // sufficient — only the ENQUEUE below needs to repeat in bounded
+        // passes. `id > cursor` is a portable, indexed cursor (the drawers
+        // table's declared TEXT primary key, present on every backend), so
+        // no single query call ever materializes more than
+        // `reindexScanPageSize` full `Drawer` rows.
+        var uncappedBatch: [(text: String, sourceID: String, now: Date)] = []
+        var scannedCount = 0
+        var cursor: String?
+        while true {
+            let page = try await estate.activeDrawersAfter(id: cursor, limit: Self.reindexScanPageSize)
+            if page.isEmpty { break }
+            cursor = page.last?.id
+            scannedCount += page.count
+            for drawer in page {
                 guard !drawer.content.isEmpty else { continue }          // nothing to encode
                 guard !indexedIDs.contains(drawer.id) else { continue }  // already indexed (idempotent)
                 uncappedBatch.append((text: drawer.content, sourceID: drawer.id, now: drawer.filedAt))
             }
-            if uncappedBatch.isEmpty { break }  // every active drawer is indexed — done
+            if page.count < Self.reindexScanPageSize { break }  // partial page: table exhausted
+        }
 
-            // First pass sees the whole missing set — classify the import size.
-            // Small = the missing set is under deltaReindexThresholdPercent of
-            // the sources already indexed. An EMPTY corpus is never small (a
-            // cold initial load must take the full train-once+embed-once path).
-            if pass == 0 {
-                smallDelta = !indexedIDs.isEmpty
-                    && uncappedBatch.count * 100
-                        < indexedIDs.count * Self.deltaReindexThresholdPercent
-            }
+        if uncappedBatch.isEmpty {
+            Self.intakeLog.info(
+                "reindexMissing: nothing to index for estate \(handle.estateUUID, privacy: .public) — reindex tail skipped")
+            return 0
+        }
+
+        // The sweep above saw the WHOLE missing set — classify the import
+        // size once, up front (previously decided on the loop's first pass,
+        // whose `allDrawers()` collect also happened to see everything).
+        // Small = the missing set is under deltaReindexThresholdPercent of
+        // the sources already indexed. An EMPTY corpus is never small (a
+        // cold initial load must take the full train-once+embed-once path).
+        let smallDelta = !indexedIDs.isEmpty
+            && uncappedBatch.count * 100
+                < indexedIDs.count * Self.deltaReindexThresholdPercent
+
+        // Auto-continuation loop: each pass enqueues at most reindexMaxJobs
+        // drawers from the pre-computed missing list, then POLLS their drain
+        // to idle before advancing to the next slice — repeating until the
+        // list is exhausted. A large import reaches FULL coverage with no
+        // operator follow-up, at any corpus size, while each pass stays
+        // bounded. The actor interleaves awaits, so the daemon stays
+        // responsive during the (possibly long) drain. The 1000-pass
+        // ceiling is a backstop consistent with the previous design (covers
+        // 10M drawers at the 10k cap).
+        var total = 0
+        var missingOffset = 0
+        for _ in 0..<1000 {
+            guard missingOffset < uncappedBatch.count else { break }  // every missing drawer enqueued — done
 
             // Cap this pass to reindexMaxJobs so a single pass cannot flood the
             // encode queue and starve live captures (Part 6 DoS bound).
-            let batch = uncappedBatch.count > Self.reindexMaxJobs
-                ? Array(uncappedBatch.prefix(Self.reindexMaxJobs))
-                : uncappedBatch
+            let passEnd = min(missingOffset + Self.reindexMaxJobs, uncappedBatch.count)
+            let batch = Array(uncappedBatch[missingOffset..<passEnd])
+            missingOffset = passEnd
 
             // Batch-enqueue in chunks so the backend commits new/ ONCE per chunk
             // instead of per job.
@@ -483,19 +508,16 @@ public extension GeniusLocusKit {
             }
             total += batch.count
             Self.intakeLog.info(
-                "reindexMissing: enqueued \(batch.count, privacy: .public) drawers on the \(smallDelta ? "encode" : "import", privacy: .public) stream for estate \(handle.estateUUID, privacy: .public) (\(activeDrawers.count, privacy: .public) active, \(indexedIDs.count, privacy: .public) already indexed)")
+                "reindexMissing: enqueued \(batch.count, privacy: .public) drawers on the \(smallDelta ? "encode" : "import", privacy: .public) stream for estate \(handle.estateUUID, privacy: .public) (\(scannedCount, privacy: .public) scanned, \(indexedIDs.count, privacy: .public) already indexed at sweep time)")
 
-            // Wait for THIS pass to reach TRUE idle before re-collecting, so the
-            // next collect sees the batch's chunks as indexed and does NOT
-            // re-enqueue still-in-flight jobs (that duplicate-enqueue stalls the
-            // drain).
+            // Wait for THIS pass to reach TRUE idle before advancing to the next
+            // slice, so an in-flight batch is never starved of drain capacity by
+            // the next pass's enqueue.
             //
             // POLL, do not pump — the single lease-holding drain worker
             // (runImportDrainLoop / runIngestDrainLoop) owns the drain; this loop
             // only observes the read-only depth probe FOR THE STREAM the batch
-            // was enqueued on. indexedSourceIDs keys on chunk presence (written
-            // inside the drain), so (0, 0) depth means the pass is fully indexed
-            // and the next collect returns only the remainder.
+            // was enqueued on.
             while true {
                 let depth = smallDelta
                     ? ((try? await corpus.ingestQueueDepth()) ?? (pending: 0, inFlight: 0))
@@ -505,19 +527,16 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Nothing was missing: no new chunks entered the corpus, so the basis,
-        // every embedding, and the Merkle tree are exactly as current as before
-        // this call — the O(corpus) tail below would be pure waste (observed:
-        // an UNCHANGED vault reimport into a 50k estate burned ~70 min of full
-        // retrain + re-embed for a no-op). A previously interrupted import
-        // (chunks present but basis stale) is repaired by the explicit
-        // `moot_reindex` tool, which exists for exactly that.
-        if total == 0 {
-            Self.intakeLog.info(
-                "reindexMissing: nothing to index for estate \(handle.estateUUID, privacy: .public) — reindex tail skipped")
-            return 0
-        }
-
+        // total == 0 is unreachable here: the empty-sweep case (nothing was
+        // missing — no new chunks would enter the corpus, so the basis,
+        // every embedding, and the Merkle tree are exactly as current as
+        // before this call, and the O(corpus) tail below would be pure
+        // waste, observed: an UNCHANGED vault reimport into a 50k estate
+        // burned ~70 min of full retrain + re-embed for a no-op) already
+        // returned early, right after the sweep, before `smallDelta` was
+        // even classified. A previously interrupted import (chunks present
+        // but basis stale) is repaired by the explicit `moot_reindex` tool,
+        // which exists for exactly that.
         if smallDelta {
             // Small delta: every enqueued chunk was already embedded through the
             // LIVE basis by the encode drain. Await the barrier once — it

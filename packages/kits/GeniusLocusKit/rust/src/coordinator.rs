@@ -3324,6 +3324,26 @@ impl EstateCoordinator {
             .map_err(|e| remap("all_drawers_bounded", "", e).into())
     }
 
+    // MARK: - active_drawers_after
+
+    /// Bounded page of active (non-tombstoned) drawers ordered by `id`
+    /// ascending, optionally starting strictly after `after_id`. Delegates
+    /// to `Estate::active_drawers_after`. Used by `sweep_reindex_missing`
+    /// (MEDIUM perf fix) to walk the drawers table in bounded,
+    /// cursor-advancing pages instead of reloading the full table on
+    /// every pass of a reindex backfill loop.
+    pub fn active_drawers_after(
+        &self,
+        handle: &EstateHandle,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Drawer>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .active_drawers_after(after_id, limit)
+            .map_err(|e| remap("active_drawers_after", "", e).into())
+    }
+
     // MARK: - resolve_drawer_node_names
 
     /// Resolve `parent_node_id` values to human-readable `(wing, room)`

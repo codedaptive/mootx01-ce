@@ -10,22 +10,22 @@ import LocusKit
 /// surface rather than reaching LocusKit directly.
 public extension GeniusLocusKit {
 
-    /// Feed the in-memory audit log from the estate's LocusKit audit trail
-    /// and return a snapshot of the unified log.
+    /// Return a current snapshot of the unified audit log for an estate.
     ///
     /// The maintenance daemon calls this to supply `AuditChainVerifier.verify`
     /// with a current log snapshot (NEURONKIT_SPEC § 3.5 audit-chain integrity
-    /// monitor). The feed step is idempotent: the G-Set deduplicates entries by
-    /// content-addressed id, so repeated calls over the same estate history are
-    /// no-ops. The snapshot is a value copy safe to use outside the actor.
+    /// monitor).
     ///
-    /// - Parameter handle: the estate whose audit log to refresh and return.
+    /// Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no longer calls `feedAuditLog`
+    /// (the N+1 per-drawer query pattern, now removed). Delegates to
+    /// `auditLog(for:)` which issues a single bounded SQL query against
+    /// `_storagekit_audit`. The returned `UnifiedAuditLog` is a value copy
+    /// safe to use outside the actor.
+    ///
+    /// - Parameter handle: the estate whose audit log to return.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale;
-    ///   any LocusKit failure surfaced by `feedAuditLog`.
+    ///   any storage-tier error surfaced by `AuditLog.iterate`.
     func currentAuditLog(in handle: EstateHandle) async throws -> UnifiedAuditLog {
-        // Pull the latest audit rows from LocusKit into the in-memory G-Set.
-        try await feedAuditLog(for: handle)
-        // Return a value-type snapshot; the G-Set copy is safe outside the actor.
-        return try auditLog(for: handle)
+        return try await auditLog(for: handle)
     }
 }

@@ -2284,54 +2284,75 @@ fn run_reindex_responsive(
     // against concurrent live captures.
     const ENQUEUE_CHUNK: usize = 1024;
     let mut total = 0usize;
-    // Delta-aware tail: decided on the FIRST pass and sticky for the loop.
-    // When the missing set is a small fraction of an already-trained corpus,
-    // the O(corpus) tail below (full basis retrain + full re-embed + index
-    // rebuild) is grossly oversized — a ~1k-note vault import into a 50k
-    // estate burned ~70 min of CPU, and an UNCHANGED reimport burned the same
-    // for literally nothing. Small deltas instead ride the ENCODE stream,
-    // whose drain embeds each chunk through the LIVE basis as it ingests (the
-    // live-capture machinery, reused verbatim), and the tail retrain is
-    // skipped: new vocabulary enters the basis at the next large import,
-    // explicit `moot_reindex`, or scheduled maintenance. Swift twin: the
-    // smallDelta branch in GeniusLocusKit.reindexMissing.
-    let mut small_delta = false;
-    // Auto-continuation loop: collect_reindex_jobs caps each pass at
-    // REINDEX_MAX_JOBS. Enqueue the pass LOCK-FREE, poll its drain to idle
-    // (lock-free — the Corpus queue is independent of the coord Mutex, so
-    // concurrent HTTP handlers are never blocked while a pass encodes), then
-    // re-collect: the drained pass is now indexed, so the next collect returns
-    // only the remainder. Repeat until no unindexed drawer remains — a large
-    // import reaches FULL coverage with no operator follow-up, at any corpus
-    // size, while each pass stays bounded. The 1000-pass ceiling is a backstop
-    // against a drawer that never indexes (e.g. an encode error) spinning
-    // forever (covers 10M drawers at the 10k cap).
-    for pass in 0..1000 {
-        let (corpus, jobs) = {
-            let mut c = coord_arc
-                .lock()
-                .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
-            match c
-                .collect_reindex_jobs(handle)
-                .map_err(|e| describe_verb_dispatch_error(&e))?
-            {
-                Some(plan) => plan,
-                None => return Ok(total), // no Corpus registered — nothing to reindex
-            }
-        };
-        if jobs.is_empty() {
-            break; // every active drawer is indexed — done
+
+    // MEDIUM perf fix (Swift twin: `EncodeIntake.reindexMissing`'s upfront
+    // sweep). Previously this function called `collect_reindex_jobs` once
+    // PER PASS below, and `collect_reindex_jobs` internally reloaded the
+    // WHOLE `drawers` table on every call — so a large backfill reloaded
+    // the full table on every one of up to 1000 passes. `sweep_reindex_missing`
+    // walks the table exactly ONCE, in bounded pages, and returns the
+    // complete missing-job list (uncapped); this function then slices that
+    // list into `REINDEX_MAX_JOBS`-sized passes itself, purely in-memory,
+    // with no further table scans. `collect_reindex_jobs` is untouched and
+    // still used wherever a single bounded collect is wanted (see its test
+    // in encode_intake_parity.rs).
+    let (corpus, missing_jobs, indexed_count) = {
+        let mut c = coord_arc
+            .lock()
+            .map_err(|_| "reindex: coordinator lock poisoned".to_string())?;
+        match c
+            .sweep_reindex_missing(handle)
+            .map_err(|e| describe_verb_dispatch_error(&e))?
+        {
+            Some(plan) => plan,
+            None => return Ok(total), // no Corpus registered — nothing to reindex
         }
-        if pass == 0 {
-            // Classify the import size from the first pass (the decision logic
-            // and threshold live in GLK, beside the Swift twin's).
-            let indexed_count = corpus.indexed_source_ids().map(|ids| ids.len()).unwrap_or(0);
-            small_delta =
-                genius_locus_kit::coordinator::EstateCoordinator::is_small_reindex_delta(
-                    jobs.len(),
-                    indexed_count,
-                );
+    };
+    if missing_jobs.is_empty() {
+        eprintln!("[reindex] nothing to index — reindex tail skipped");
+        return Ok(0);
+    }
+
+    // Delta-aware tail: decided ONCE from the complete sweep above (which
+    // saw the WHOLE missing set) — previously decided on the FIRST pass's
+    // capped collect. When the missing set is a small fraction of an
+    // already-trained corpus, the O(corpus) tail below (full basis retrain +
+    // full re-embed + index rebuild) is grossly oversized — a ~1k-note vault
+    // import into a 50k estate burned ~70 min of CPU, and an UNCHANGED
+    // reimport burned the same for literally nothing. Small deltas instead
+    // ride the ENCODE stream, whose drain embeds each chunk through the LIVE
+    // basis as it ingests (the live-capture machinery, reused verbatim), and
+    // the tail retrain is skipped: new vocabulary enters the basis at the
+    // next large import, explicit `moot_reindex`, or scheduled maintenance.
+    // Swift twin: the smallDelta branch in GeniusLocusKit.reindexMissing.
+    let small_delta = genius_locus_kit::coordinator::EstateCoordinator::is_small_reindex_delta(
+        missing_jobs.len(),
+        indexed_count,
+    );
+
+    // Auto-continuation loop: slice the pre-computed missing_jobs list into
+    // REINDEX_MAX_JOBS-sized passes, enqueue LOCK-FREE, poll its drain to
+    // idle (lock-free — the Corpus queue is independent of the coord Mutex,
+    // so concurrent HTTP handlers are never blocked while a pass encodes),
+    // then advance to the next slice — repeating until the list is
+    // exhausted. A large import reaches FULL coverage with no operator
+    // follow-up, at any corpus size, while each pass stays bounded. The
+    // 1000-pass ceiling is a backstop consistent with the previous design
+    // (covers 10M drawers at the 10k cap).
+    let mut missing_offset = 0usize;
+    for _pass in 0..1000 {
+        if missing_offset >= missing_jobs.len() {
+            break; // every missing drawer enqueued — done
         }
+        // Cap this pass to REINDEX_MAX_JOBS so a single pass cannot flood
+        // the encode queue and starve live captures (Part 6 DoS bound).
+        let pass_end = std::cmp::min(
+            missing_offset
+                + genius_locus_kit::coordinator::EstateCoordinator::reindex_max_jobs_cap(),
+            missing_jobs.len(),
+        );
+        let jobs = &missing_jobs[missing_offset..pass_end];
+        missing_offset = pass_end;
         // Stream choice is the delta decision above:
         //   • LARGE import → IMPORT stream: the discrete corpus-import-drain
         //     worker ingests chunk + BM25 only — no bootstrap train, no embed.
@@ -2353,15 +2374,13 @@ fn run_reindex_responsive(
                 total += chunk.len();
             }
         }
-        // Wait for THIS pass to reach TRUE idle before re-collecting, so the next
-        // collect sees the batch's chunks as indexed and does NOT re-enqueue
-        // still-in-flight jobs (that duplicate-enqueue was the encode stall).
+        // Wait for THIS pass to reach TRUE idle before advancing to the next
+        // slice, so an in-flight batch is never starved of drain capacity by
+        // the next pass's enqueue.
         //
         // POLL, do not pump — the single lease-holding drain worker owns the
         // drain; this loop only observes the read-only depth probe FOR THE
-        // STREAM the batch was enqueued on. collect_reindex_jobs keys on chunk
-        // presence (written inside the drain), so (0, 0) depth means the pass
-        // is fully indexed and the next collect returns only the remainder.
+        // STREAM the batch was enqueued on.
         loop {
             let depth = if small_delta {
                 corpus.ingest_queue_depth()

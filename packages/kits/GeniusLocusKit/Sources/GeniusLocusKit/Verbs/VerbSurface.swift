@@ -1085,10 +1085,12 @@ public extension GeniusLocusKit {
     ///   stale; any LocusKit failure surfaced while feeding the log.
     func verifyAuditChain(_ handle: EstateHandle) async throws -> AuditChainReport {
         // Resolve the handle up front so a stale handle raises
-        // estateNotOpen before any feed work, matching the other verbs.
+        // estateNotOpen before any storage work, matching the other verbs.
         _ = try estate(for: handle)
-        try await feedAuditLog(for: handle)
-        let log = try auditLog(for: handle)
+        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): auditLog(for:) now reads directly
+        // from the _storagekit_audit table via a single bounded SQL query —
+        // the former feedAuditLog N+1 call is gone; the log is populated here.
+        let log = try await auditLog(for: handle)
         return AuditChainVerifier.verify(log)
     }
 
@@ -1771,22 +1773,12 @@ extension GeniusLocusKit {
         handle: EstateHandle,
         now: Date
     ) {
-        let hlc = HLC(
-            physicalTime: Int64((now.timeIntervalSince1970 * 1000).rounded()),
-            logicalCount: 0,
-            nodeID: 0
-        )
-        let entry = UnifiedAuditEntry(
-            tier: .locus,
-            hlc: hlc,
-            verb: verb,
-            rowID: grantID,
-            fieldPath: custodyToken,
-            beforeValue: before,
-            afterValue: after,
-            originRowID: nil
-        )
-        auditLogs[handle, default: UnifiedAuditLog()].add(entry)
+        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no-op. The in-memory `auditLogs`
+        // dict is removed; grant audit entries are persisted by LocusKit's audit
+        // machinery when the underlying grant verb fires. They are visible via
+        // `auditLog(for:)` which reads directly from `_storagekit_audit`.
+        // The docstring above is preserved for history; this method will be removed
+        // in a follow-up cleanup once all callers are verified.
     }
 
     /// Drop the grant surface for a handle on close. The vault is

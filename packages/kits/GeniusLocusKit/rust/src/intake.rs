@@ -233,6 +233,16 @@ impl EstateCoordinator {
     #[cfg(feature = "test-seams")]
     pub const REINDEX_MAX_JOBS: usize = 10_000;
 
+    /// Public accessor for `REINDEX_MAX_JOBS`, callable regardless of the
+    /// `test-seams` feature flag. `run_reindex_responsive` (AriaMcpKit, a
+    /// separate crate) uses this to slice `sweep_reindex_missing`'s
+    /// uncapped missing-job list into bounded per-pass enqueue batches,
+    /// now that the pass loop no longer relies on `collect_reindex_jobs`'s
+    /// own internal truncation for its per-pass cap.
+    pub fn reindex_max_jobs_cap() -> usize {
+        Self::REINDEX_MAX_JOBS
+    }
+
     /// A reindex sweep whose missing set is under this percentage of the
     /// already-indexed sources is a SMALL DELTA: its drawers ride the encode
     /// stream (embedded through the live basis at drain, like any live
@@ -349,6 +359,86 @@ impl EstateCoordinator {
         }
 
         Ok(Some((corpus, jobs)))
+    }
+
+    /// Sweeps the ENTIRE `drawers` table exactly once, in bounded pages via
+    /// `active_drawers_after`, returning the COMPLETE missing-job list
+    /// (uncapped, unlike `collect_reindex_jobs`, whose single-collect
+    /// contract truncates at `REINDEX_MAX_JOBS` and is exercised by
+    /// `encode_intake_parity.rs` — left untouched by this method).
+    ///
+    /// MEDIUM perf fix (Swift twin: `EncodeIntake.reindexMissing`'s upfront
+    /// sweep). `run_reindex_responsive` (AriaMcpKit) previously called
+    /// `collect_reindex_jobs` once PER PASS of its up-to-1000-pass loop,
+    /// and `collect_reindex_jobs` internally called `all_drawers` — an
+    /// unbounded, full-table load — every time, so a large backfill
+    /// reloaded the whole table on every one of up to 1000 passes. This
+    /// method performs that full-table determination exactly ONCE per
+    /// `reindexMissing` invocation; the caller slices the returned list
+    /// into `REINDEX_MAX_JOBS`-sized passes itself instead of re-scanning
+    /// to find each pass's jobs (see `run_reindex_responsive`).
+    ///
+    /// Returns `(corpus, jobs, indexed_count)` — `indexed_count` is the
+    /// size of the `indexed_source_ids()` snapshot taken at sweep start,
+    /// needed by the caller's `is_small_reindex_delta` classification
+    /// (previously computed from the first pass's `collect_reindex_jobs`
+    /// call; now computed once here since there is only one sweep).
+    pub fn sweep_reindex_missing(
+        &mut self,
+        handle: &EstateHandle,
+    ) -> Result<Option<(Arc<Corpus>, Vec<(String, String, i64)>, usize)>, VerbDispatchError> {
+        let corpus = match self.corpus_for(handle) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        // Snapshot which drawer IDs are already indexed so we enqueue only
+        // the missing subset. A single snapshot, not re-fetched per page:
+        // the missing set below is determined once, up front, against this
+        // snapshot (mirrors the Swift twin's single `indexedIDs` fetch).
+        let indexed_ids = corpus.indexed_source_ids().map_err(|e| {
+            verb_fail(format!(
+                "sweep_reindex_missing: indexed_source_ids failed: {e:?}"
+            ))
+        })?;
+
+        // Page size for `active_drawers_after`: bounds how many full
+        // (content-hydrated) Drawer rows any single storage-tier query
+        // materializes. Independent of REINDEX_MAX_JOBS, which bounds how
+        // many jobs the CALLER enqueues per pass, not how many rows this
+        // sweep scans per page. Matches the Swift twin's
+        // `reindexScanPageSize`.
+        const SCAN_PAGE_SIZE: usize = 2_000;
+        let mut jobs: Vec<(String, String, i64)> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self.active_drawers_after(handle, cursor.as_deref(), SCAN_PAGE_SIZE)?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            cursor = page.last().map(|d| d.id.clone());
+            for drawer in page {
+                // Skip empty-content drawers (nothing to encode).
+                // active_drawers_after already excludes tombstoned rows.
+                if drawer.content.is_empty() {
+                    continue;
+                }
+                // Skip drawers already in the Corpus (idempotent).
+                if indexed_ids.contains(&drawer.id) {
+                    continue;
+                }
+                // G4: source_id = drawer.id so BM25/vector hits hydrate back
+                // to the Drawer row. drawer.filed_at is epoch MILLISECONDS
+                // (ADR-023) — exactly what enqueue_ingest expects.
+                jobs.push((drawer.content, drawer.id, drawer.filed_at));
+            }
+            if page_len < SCAN_PAGE_SIZE {
+                break; // partial page: table exhausted
+            }
+        }
+
+        Ok(Some((corpus, jobs, indexed_ids.len())))
     }
 
     /// The estate's registered `Corpus` — the semantic lane handle (BM25 + vector),

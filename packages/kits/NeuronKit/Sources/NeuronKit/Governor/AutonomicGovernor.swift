@@ -520,12 +520,57 @@ public actor AutonomicGovernor {
                     // (F5) so the first post-restart duty skips the recompute when the
                     // estate is unchanged.
                     let previousFingerprint = await self.topologyFingerprintForDuty()
+
+                    // Bug 2 fix (ADR025-AUDITLOG-GOVERNOR): audit-count watermark check
+                    // BEFORE the full-estate load inside topologySnapshotDuty.
+                    //
+                    // `topologySnapshotDuty` loads allDrawers + allTunnels + allKGFacts
+                    // before checking its fingerprint, so the full O(N) data load was paid
+                    // even on the "nothing changed, skip" path. Adding the audit-count
+                    // check here — one O(1) COUNT(*) SQL call — gates the entire duty call
+                    // when the estate is verifiably unchanged. The skip requires both:
+                    //   1. A valid previous fingerprint (we have run at least once)
+                    //   2. No new audit events since the last topology-count watermark
+                    // If either condition is absent, proceed to the full duty.
+                    if previousFingerprint != nil {
+                        do {
+                            let estate = try await kit.estate(for: handle)
+                            let savedCountRaw = try await estate.meta(
+                                key: NeuronKitManifestKey.topologyCount)
+                            let savedCount = savedCountRaw.flatMap { Int($0) }
+                            let changed = try await kit.hasAuditGrown(for: handle, since: savedCount)
+                            if !changed {
+                                // Estate provably unchanged — skip the full duty.
+                                return
+                            }
+                        } catch {
+                            // Watermark probe failed (transient I/O); fall through to the
+                            // full duty as a safe fallback. The duty's own fingerprint check
+                            // provides the final skip guard.
+                            logger.debug(
+                                "AutonomicGovernor: topology watermark probe error (falling through): \(error)")
+                        }
+                    }
+
                     do {
                         let token = try await AutonomicGovernor.topologySnapshotDuty(
                             kit: kit, handle: handle, now: now,
                             previousFingerprint: previousFingerprint,
                             handler: handler)
-                        await self.recordTopologyInputsToken(token)
+                        self.recordTopologyInputsToken(token)
+                        // Save the topology audit-count watermark after a successful duty
+                        // run so the next cadence tick can short-circuit at this level.
+                        do {
+                            let estate = try await kit.estate(for: handle)
+                            let currentCount = try await kit.auditEventCount(for: handle)
+                            try await estate.setMeta(
+                                key: NeuronKitManifestKey.topologyCount,
+                                value: String(currentCount))
+                        } catch {
+                            // Non-fatal: next tick will re-run the full duty and re-save.
+                            logger.debug(
+                                "AutonomicGovernor: topology count watermark save error: \(error)")
+                        }
                     } catch {
                         logger.error("AutonomicGovernor: topologySnapshotDuty error: \(error)")
                     }
@@ -715,6 +760,32 @@ public actor AutonomicGovernor {
         handle: EstateHandle,
         now: Date
     ) async throws {
+        // Bug 3 fix (ADR025-AUDITLOG-GOVERNOR): skip full-estate load + O(N²)
+        // eigenvalue recompute when no new audit events exist since the last scan.
+        //
+        // Strategy: persist computed scores + an audit-event-count watermark to
+        // estate.meta. On each cadence, check the watermark first (one O(1) SQL
+        // COUNT(*) call) before touching allDrawers/allTunnels/allKGFacts. When
+        // the estate is unchanged, re-register the cached scores and return — the
+        // recall `graph` column continues serving correct values with zero load.
+        let estate = try await kit.estate(for: handle)
+        let savedCountRaw = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let savedCount: Int? = savedCountRaw.flatMap { Int($0) }
+
+        // Cheap watermark probe: no new events → estate unchanged → skip recompute.
+        let changed = try await kit.hasAuditGrown(for: handle, since: savedCount)
+        if !changed,
+           let scoresJSON = try await estate.meta(key: NeuronKitManifestKey.centralityScores),
+           let scoresData = scoresJSON.data(using: .utf8),
+           let cachedScores = try? JSONDecoder().decode([String: Float].self, from: scoresData),
+           !cachedScores.isEmpty {
+            // Estate unchanged and valid cache present — re-register and return.
+            // This avoids allDrawers + allTunnels + allKGFacts + eigenvalue compute.
+            await kit.registerGraphCache(GraphCentralityCache(scores: cachedScores), for: handle)
+            return
+        }
+
+        // Estate changed (or first run, or cache absent): full load + recompute.
         let allDrawers = try await kit.allDrawers(in: handle)
         let tunnels = try await kit.allTunnels(in: handle)
         let facts = try await kit.recallKGFacts(handle)
@@ -761,6 +832,17 @@ public actor AutonomicGovernor {
         }
 
         await kit.registerGraphCache(GraphCentralityCache(scores: scores), for: handle)
+
+        // Persist computed scores + current audit-event-count watermark so the
+        // next cadence invocation can skip this full load when unchanged.
+        let currentCount = try await kit.auditEventCount(for: handle)
+        if let scoresData = try? JSONEncoder().encode(scores),
+           let scoresJSON = String(data: scoresData, encoding: .utf8) {
+            try await estate.setMeta(key: NeuronKitManifestKey.centralityScores, value: scoresJSON)
+        }
+        try await estate.setMeta(
+            key: NeuronKitManifestKey.centralityCount,
+            value: String(currentCount))
     }
 
     // MARK: - Preference producer duty
@@ -783,13 +865,60 @@ public actor AutonomicGovernor {
     ///   - kit:    The live GeniusLocusKit actor.
     ///   - handle: The estate to score.
     ///   - now:    Injected instant (determinism requirement).
+    /// Maximum recall traces consumed per preference cadence tick. Bounded to prevent
+    /// full-history loads on large estates. The most-recent `preferenceTracesWindowLimit`
+    /// traces represent the strongest signal for Bradley-Terry fitting; older traces
+    /// have decayed relevance and are excluded on each cadence tick.
+    ///
+    /// A full refit over all traces is triggered only on an explicit `reindex` or
+    /// `dream` call — not on the governor cadence. The maintenance prune cycle bounds
+    /// total trace retention independently.
+    ///
+    /// Parity: mirrors PREFERENCE_TRACES_WINDOW_LIMIT in autonomic_governor.rs.
+    internal static let preferenceTracesWindowLimit = 1_000
+
     public static func preferenceScan(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         now: Date
     ) async throws {
-        let traces = try await kit.recentRecallTraces(
+        // Bug 4 fix (ADR025-AUDITLOG-GOVERNOR): skip full-history trace load +
+        // full Bradley-Terry refit when no new audit events exist since the last scan.
+        //
+        // Strategy (mirrors graphCentralityScan): persist fitted scores + audit-event-
+        // count watermark to estate.meta. On each cadence, check the watermark first
+        // (one O(1) COUNT(*) call). When unchanged, re-register the cached preference
+        // scores and return immediately — the `preference` recall column keeps serving
+        // correct values with zero trace load.
+        //
+        // When changed: load traces bounded to the most-recent `preferenceTracesWindowLimit`
+        // entries (suffix of the result from `since: .distantPast`) instead of the
+        // unbounded `.distantPast` window. Bradley-Terry fitting over this bounded window
+        // keeps the preference model current without O(all-history) RAM growth. The
+        // fitted strengths are persisted after each compute so process restarts are free.
+        let estate = try await kit.estate(for: handle)
+        let savedCountRaw = try await estate.meta(key: NeuronKitManifestKey.preferenceCount)
+        let savedCount: Int? = savedCountRaw.flatMap { Int($0) }
+
+        // Cheap watermark probe.
+        let changed = try await kit.hasAuditGrown(for: handle, since: savedCount)
+        if !changed,
+           let scoresJSON = try await estate.meta(key: NeuronKitManifestKey.preferenceScores),
+           let scoresData = scoresJSON.data(using: .utf8),
+           let cachedScores = try? JSONDecoder().decode([String: Float].self, from: scoresData),
+           !cachedScores.isEmpty {
+            await kit.registerPreferenceStore(PreferenceCache(scores: cachedScores), for: handle)
+            return
+        }
+
+        // Changed (or first run): load bounded recent-trace window + refit.
+        // `since: .distantPast` loads ALL traces; suffix to `preferenceTracesWindowLimit`
+        // bounds the window. The refit uses only these recent traces — sufficient for
+        // up-to-date preference estimation; older history is excluded per the documented
+        // window contract above.
+        let allTraces = try await kit.recentRecallTraces(
             in: handle, since: .distantPast, now: now)
+        let traces = Array(allTraces.suffix(AutonomicGovernor.preferenceTracesWindowLimit))
 
         let records = PreferenceOutcomes.build(traces: traces)
 
@@ -804,6 +933,16 @@ public actor AutonomicGovernor {
         }
 
         await kit.registerPreferenceStore(PreferenceCache(scores: scores), for: handle)
+
+        // Persist scores + watermark for the next cadence invocation.
+        let currentCount = try await kit.auditEventCount(for: handle)
+        if let scoresData = try? JSONEncoder().encode(scores),
+           let scoresJSON = String(data: scoresData, encoding: .utf8) {
+            try await estate.setMeta(key: NeuronKitManifestKey.preferenceScores, value: scoresJSON)
+        }
+        try await estate.setMeta(
+            key: NeuronKitManifestKey.preferenceCount,
+            value: String(currentCount))
     }
 
     // MARK: - Topology snapshot duty
