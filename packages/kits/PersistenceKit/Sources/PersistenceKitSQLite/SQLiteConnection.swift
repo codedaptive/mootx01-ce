@@ -95,6 +95,19 @@ final class SQLiteConnection: @unchecked Sendable {
         // otherwise request via NSPersistentStoreFileProtectionKey.
         Self.applyDataProtection(to: url)
 
+        // Lock database files to owner-only (0600). The default SQLite
+        // creation mode is 0644 (world-readable), which lets any process read
+        // the file with sqlite3. 0600 blocks other users; for same-user AI
+        // agent subprocesses, the instruction-file prohibition ("NEVER touch
+        // the database directly") is the primary defense, and SQLCipher
+        // (Mode 3) makes raw reads return ciphertext. The permissions cover
+        // the main DB, WAL, and SHM files.
+        for suffix in ["", "-wal", "-shm"] {
+            let path = url.path + suffix
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: path)
+        }
+
         // WAL mode and busy timeout.
         // Durability pragmas per SQLiteDurabilityTail (cookbook § 4.3.3):
         // WAL for crash-safe concurrent reads, NORMAL fsync,
