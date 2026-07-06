@@ -35,8 +35,15 @@ struct StoreState {
     conn: Connection,
     term_freqs: TermFreqTable,
     doc_lengths: HashMap<String, usize>,
-    /// Cached (index, term_mapping). Cleared by every write.
-    cached: Option<(InvertedIndex, HashMap<String, u32>)>,
+    /// Cached (parameters, index, term_mapping), read by `top_k` on every
+    /// query once populated. Keyed on the `BM25Parameters` it was built
+    /// with (`BM25Parameters` is `PartialEq`) — `top_k` accepts parameters
+    /// per call, so a cache built for one k1/b must not be silently reused
+    /// for a different one. In practice every current caller passes
+    /// `BM25Parameters::default()`, but the key guards against a future
+    /// caller that varies it. Cleared (`None`) by every write so the next
+    /// query rebuilds from current term/doc state.
+    cached: Option<(BM25Parameters, InvertedIndex, HashMap<String, u32>)>,
 }
 
 impl InvertedIndexStore {
@@ -334,23 +341,31 @@ impl InvertedIndexStore {
 
     // MARK: — Index building
 
-    /// Build (or return cached) InvertedIndex with BM25 impacts.
+    /// Rebuild the `InvertedIndex` from current term/doc state.
+    ///
+    /// Kept for API parity with the Swift twin's `buildIndex(parameters:)`,
+    /// which does serve from its cache. `InvertedIndex` does not implement
+    /// `Clone`, so this method cannot hand a cached copy to a caller by
+    /// value without cloning it — it always rebuilds. Nothing in this crate
+    /// calls it: the hot query path is `top_k`, which reads the store's
+    /// parameter-keyed cache by reference under the lock instead of
+    /// extracting an owned copy.
     pub fn build_index(&self, parameters: BM25Parameters) -> (InvertedIndex, HashMap<String, u32>) {
-        let mut state = self.state.lock().expect("mutex poisoned");
-        if let Some((ref idx, ref tm)) = state.cached {
-            // We can't clone InvertedIndex cheaply; rebuild if needed.
-            // In practice the caller caches the mapping; rebuilding is O(postings).
-            let _ = (idx, tm); // check if cached is Some
-        }
-        // Always rebuild (no Clone impl on InvertedIndex needed by callers).
-        let pair = BM25Weighting::build(&state.term_freqs, &state.doc_lengths, parameters);
-        state.cached = None; // don't cache (InvertedIndex has no Clone)
-        pair
+        let state = self.state.lock().expect("mutex poisoned");
+        BM25Weighting::build(&state.term_freqs, &state.doc_lengths, parameters)
     }
 
     // MARK: — Convenience top-k
 
-    /// Build the index and return top-k SparseHit results.
+    /// Build (or return cached) the index and return top-k SparseHit results.
+    ///
+    /// Builds only when the cache is empty or was built for different
+    /// `parameters` (first query, or first query after `index`/`remove`/
+    /// `fold_postings`/`clear_all` invalidated it); otherwise queries the
+    /// already-built index in place through the held lock. Previously this
+    /// called `build_index`, which rebuilt the whole `InvertedIndex` from
+    /// the raw term-frequency table on every query — O(vocabulary ×
+    /// documents) per query instead of O(query terms × matching postings).
     pub fn top_k(
         &self,
         query_terms: &[String],
@@ -358,8 +373,19 @@ impl InvertedIndexStore {
         parameters: BM25Parameters,
         algorithm: Algorithm,
     ) -> Vec<SparseHit> {
-        let (index, term_mapping) = self.build_index(parameters);
-        let query = BM25Weighting::query_pairs(query_terms, &term_mapping);
+        let mut state = self.state.lock().expect("mutex poisoned");
+        let needs_build = match &state.cached {
+            Some((cached_params, _, _)) => *cached_params != parameters,
+            None => true,
+        };
+        if needs_build {
+            let (index, term_mapping) =
+                BM25Weighting::build(&state.term_freqs, &state.doc_lengths, parameters);
+            state.cached = Some((parameters, index, term_mapping));
+        }
+        // Just populated above if it was stale or absent, so this is always `Some`.
+        let (_, index, term_mapping) = state.cached.as_ref().expect("cache populated above");
+        let query = BM25Weighting::query_pairs(query_terms, term_mapping);
         if query.is_empty() { return Vec::new(); }
         index.top_k(&query, k, algorithm)
     }

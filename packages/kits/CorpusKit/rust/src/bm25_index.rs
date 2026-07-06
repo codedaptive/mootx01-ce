@@ -19,9 +19,12 @@
 //! The ordering is consistent within each port.
 //!
 //! Interior-mutability note: `cached` is wrapped in `Mutex<Option<...>>`
-//! to let `top_k` take `&self`, but `top_k` builds a fresh `InvertedIndex`
-//! on every call rather than reading from `cached`; the field is populated
-//! and invalidated by writes but not consumed by queries.
+//! to let `top_k` take `&self`. `top_k` builds the `InvertedIndex` only
+//! when `cached` is `None` (first query after construction, or the first
+//! query after a write invalidated it); every subsequent query reads the
+//! already-built index through the held `MutexGuard` — no rebuild, no
+//! clone. `index_documents`/`remove` set `cached` back to `None` so the
+//! next query rebuilds from the now-current term/doc tables.
 
 use crate::engine::bm25_weighting::{BM25Weighting, TermFreqTable};
 use crate::engine::inverted_index::Algorithm;
@@ -40,8 +43,10 @@ pub struct BM25Index {
     term_freqs: TermFreqTable,
     /// item_id string → document length
     doc_lengths: HashMap<String, usize>,
-    /// Lazily-built (index, term_mapping). Invalidated by every write.
-    /// Wrapped in Mutex<Option<...>> so `top_k` can take `&self`.
+    /// Lazily-built (index, term_mapping), read by `top_k` on every query
+    /// once populated. Invalidated (set back to `None`) by every write so
+    /// the next query rebuilds from current state. Wrapped in
+    /// `Mutex<Option<...>>` so `top_k` can take `&self`.
     cached: Mutex<Option<(crate::engine::inverted_index::InvertedIndex, HashMap<String, u32>)>>,
 }
 
@@ -116,17 +121,27 @@ impl BM25Index {
     ///
     /// Takes `&self` — the lazy-built index cache is behind an interior
     /// `Mutex<Option<...>>` so callers that hold `BM25Index` behind their
-    /// own `Mutex` do not need a mutable guard.
+    /// own `Mutex` do not need a mutable guard. The index is built at most
+    /// once per write: this call builds only when `cached` is `None`
+    /// (first query, or first query after `index_documents`/`remove`
+    /// invalidated it) and otherwise queries the already-built index in
+    /// place through the held guard. Previously this rebuilt the whole
+    /// `InvertedIndex` from the raw term-frequency table on every call —
+    /// O(vocabulary × documents) per query instead of O(query terms ×
+    /// matching postings).
     pub fn top_k(&self, k: usize, tokens: &[String]) -> Vec<(Uuid, f32)> {
         if k == 0 || tokens.is_empty() || self.doc_lengths.is_empty() {
             return Vec::new();
         }
-        // Build a fresh index each call (no persistent cache on &self path,
-        // since InvertedIndex is not Clone). This is acceptable at query
-        // granularity; index sizes are bounded by in-session document sets.
-        let (index, term_mapping) =
-            BM25Weighting::build(&self.term_freqs, &self.doc_lengths, self.parameters);
-        let query = BM25Weighting::query_pairs(tokens, &term_mapping);
+        let mut cache = self.cached.lock().expect("BM25Index cache mutex poisoned");
+        if cache.is_none() {
+            let built =
+                BM25Weighting::build(&self.term_freqs, &self.doc_lengths, self.parameters);
+            *cache = Some(built);
+        }
+        // Just populated above if it was `None`, so this is always `Some`.
+        let (index, term_mapping) = cache.as_ref().expect("cache populated above");
+        let query = BM25Weighting::query_pairs(tokens, term_mapping);
         if query.is_empty() { return Vec::new(); }
 
         let hits = index.top_k(&query, k, Algorithm::BlockMaxWand);

@@ -93,8 +93,21 @@ public actor InvertedIndexStore {
     private var termFreqs: BM25Weighting.TermFreqTable = [:]
     /// itemID → document length in tokens
     private var docLengths: [String: Int] = [:]
-    /// Cached (index, termMapping). Invalidated by every write.
+    /// Last-built (index, termMapping), served by `buildIndex(parameters:)`
+    /// while `isDirty` is false. Writes no longer clear this to `nil`
+    /// immediately — they set `isDirty = true` and leave the stale pair in
+    /// place, so `buildIndex` only rebuilds lazily on the next query. A
+    /// burst of single-document `index()` calls (the common pattern during
+    /// live capture and vault import, one call per chunk) previously forced
+    /// a full BM25 rebuild before the very next query every time, because
+    /// the old code nilled this out on every write.
     private var cachedPair: (index: InvertedIndex, termMapping: [String: UInt32])? = nil
+    /// True when `termFreqs`/`docLengths` have changed since `cachedPair`
+    /// was built. Starts `true` — there is nothing to serve until the
+    /// first build. Set by every mutating call (`index`, `foldPostings`,
+    /// `remove`, `deleteAll`); cleared only inside `buildIndex(parameters:)`
+    /// once a fresh pair has been built.
+    private var isDirty: Bool = true
 
     // MARK: - Init
 
@@ -190,7 +203,7 @@ public actor InvertedIndexStore {
             conflictColumns: ["item_id"]
         )
         docLengths[itemID] = docLen
-        cachedPair = nil
+        isDirty = true
     }
 
     /// Fold worker-computed postings into the IN-MEMORY maps only — the memory
@@ -198,8 +211,10 @@ public actor InvertedIndexStore {
     /// `SQLiteStorage.mergeShard` (SQLite copies the shard rows internally; this
     /// method folds the same postings the workers already computed, so nothing
     /// is re-read from disk). Re-delivered items simply overwrite their prior
-    /// entries (idempotent under queue-retry). Clears the cached BM25 index once
-    /// for the batch. Rust twin: `InvertedIndexStore::fold_postings`.
+    /// entries (idempotent under queue-retry). Marks the cached BM25 index
+    /// dirty once for the whole batch (see `isDirty`) rather than per item —
+    /// the next query rebuilds once, not once per folded item. Rust twin:
+    /// `InvertedIndexStore::fold_postings`.
     public func foldPostings(_ items: [(itemID: String, tf: [String: Int], docLen: Int)]) {
         for item in items {
             for (term, freq) in item.tf {
@@ -207,7 +222,7 @@ public actor InvertedIndexStore {
             }
             docLengths[item.itemID] = item.docLen
         }
-        cachedPair = nil
+        isDirty = true
     }
 
     /// Remove a document from the index.
@@ -216,7 +231,7 @@ public actor InvertedIndexStore {
     public func remove(itemID: String) async throws {
         try await deleteFromStorage(itemID: itemID)
         deleteMem(itemID: itemID)
-        cachedPair = nil
+        isDirty = true
     }
 
     private func deleteFromStorage(itemID: String) async throws {
@@ -247,13 +262,14 @@ public actor InvertedIndexStore {
     public func buildIndex(
         parameters: BM25Parameters = BM25Parameters()
     ) -> (index: InvertedIndex, termMapping: [String: UInt32]) {
-        if let cached = cachedPair { return cached }
+        if let cached = cachedPair, !isDirty { return cached }
         let pair = BM25Weighting.build(
             termFreqs: termFreqs,
             docLengths: docLengths,
             parameters: parameters
         )
         cachedPair = pair
+        isDirty = false
         return pair
     }
 
@@ -302,7 +318,7 @@ public actor InvertedIndexStore {
         // Clear in-memory state to match the now-empty tables.
         termFreqs.removeAll()
         docLengths.removeAll()
-        cachedPair = nil
+        isDirty = true
         logger.info("InvertedIndexStore: deleteAll cleared all term-freq + doc-len rows")
     }
 
