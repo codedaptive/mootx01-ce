@@ -57,5 +57,22 @@ Reach for MOOTx01 when the user asks about:
 10. Use correction tools instead of silently rewriting history.
 11. Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
+## Vault Import
+
+When importing a vault (moot_vault_import), ALWAYS specify a meaningful wing
+and room structure. Never let MOOT infer placement from content — it will
+default to "Agentic Memory" which is wrong for imported material. Decide the
+wing and room taxonomy BEFORE importing. Example: wing=CodexSecurity,
+room=mootx01-ce. Vault imports are long-running (~2 seconds per document). Do
+NOT cancel or re-issue an import that appears slow — poll moot_vault_job.
+
+## Do Not Use The CLI For Data Access
+
+Use only MCP tools for reading and writing estate data. Do not use the
+mootx01 query CLI, mootx01 status, or any other shell command to access
+estate content. The CLI is an operator tool, not an AI data-access path. If an
+MCP tool returns unexpected results, try a different MCP tool or query — do not
+fall back to the CLI or the database.
+
 If MOOTx01 is unavailable, say so plainly and answer only from current context.
 

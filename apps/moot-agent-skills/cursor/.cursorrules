@@ -44,5 +44,15 @@ Write back what matters:
 
 Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
+Vault Import:
+When importing a vault, ALWAYS specify a meaningful wing and room structure.
+Never let MOOT infer placement. Vault imports take ~2 seconds per document.
+Do NOT cancel or re-issue — poll moot_vault_job.
+
+Do Not Use The CLI For Data Access:
+Use only MCP tools. Do not use the mootx01 CLI or shell commands to access
+estate content. If an MCP tool returns unexpected results, try a different
+MCP tool or query.
+
 If MOOTx01 is unavailable, say so plainly and answer only from current context.
 

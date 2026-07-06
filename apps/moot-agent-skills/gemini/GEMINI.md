@@ -64,4 +64,19 @@ Before ending meaningful work:
 - Write continuity with `moot_write_journal`.
 - Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
 
+## Vault Import
+
+When importing a vault (`moot_vault_import`), ALWAYS specify a meaningful wing
+and room structure. Never let MOOT infer placement from content — it will
+default to "Agentic Memory" which is wrong for imported material. Decide the
+wing and room taxonomy BEFORE importing. Vault imports are long-running (~2
+seconds per document). Do NOT cancel or re-issue — poll `moot_vault_job`.
+
+## Do Not Use The CLI For Data Access
+
+Use only MCP tools for reading and writing estate data. Do not use the
+`mootx01` CLI or shell commands to access estate content. If an MCP tool
+returns unexpected results, try a different MCP tool or query — do not fall
+back to the CLI or the database.
+
 Never claim MOOTx01 recall unless you actually queried it.
