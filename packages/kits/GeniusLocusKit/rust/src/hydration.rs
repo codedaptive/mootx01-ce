@@ -157,7 +157,7 @@ pub fn composite_schema() -> SchemaDeclaration {
 
     SchemaDeclaration {
         kit_id: "GeniusLocusKit".to_string(),
-        // LocusKit v8 + VectorKit v3 + CorpusKit v3 + Grants v1 + MatrixSnapshot v1 = 16
+        // LocusKit v9 + VectorKit v3 + CorpusKit v3 + Grants v1 + MatrixSnapshot v1 = 17
         version: composite_version,
         tables,
         indices,
@@ -175,8 +175,8 @@ mod composite_version_tests {
 
     /// The composite version is the SUM of the three GLK-composed component
     /// versions plus two GLK-owned addends: grants (+1) and matrix_snapshot (+1).
-    /// LocusKit v8 + VectorKit v3 + CorpusKit/BundleStore v3 + Grants v1
-    ///   + MatrixSnapshot v1 = 16.
+    /// LocusKit v9 + VectorKit v3 + CorpusKit/BundleStore v3 + Grants v1
+    ///   + MatrixSnapshot v1 = 17.
     /// This guards the coupling the global-MAX replication gate depends on:
     /// a drift between composite and components would let a fresh estate open
     /// at a version the gate rejects. Mirrors Swift `CompositeSchemaVersionTests`.
@@ -189,7 +189,7 @@ mod composite_version_tests {
         let s = composite_schema();
         // Two GLK-owned addends: +1 grants, +matrix_snapshot version
         assert_eq!(s.version, lk + vk + ck + 1 + mx);
-        assert_eq!(s.version, 16);
+        assert_eq!(s.version, 17);
         assert!(s.tables.iter().any(|t| t.name == "grants"));
         // matrix_snapshot must be in composite for hydration to copy it from durable storage
         assert!(s.tables.iter().any(|t| t.name == "matrix_snapshot"));
