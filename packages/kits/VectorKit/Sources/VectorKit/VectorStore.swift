@@ -1440,6 +1440,14 @@ public actor VectorStore {
     /// fsync, no per-row existence SELECT) and rebuilds the resident binary index
     /// ONCE from the table (O(n)). Mirrors Rust `VectorStore::replace_model_vectors`.
     public func replaceModelVectors(modelID: String, _ batch: [VectorPayloadInput]) async throws {
+        // PRECONDITION GUARD: reject any int8 payload in the batch fail-closed (#6).
+        // Matches the guard in addPayload and addPayloads — the quantization policy
+        // (scale, per-dim scale) has not been ratified.
+        if let bad = batch.first(where: { $0.payload.kind == .int8 }) {
+            throw VectorKitError.int8QuantizationPolicyUndefined(
+                "int8 writes are rejected: quantization policy is unspecified. " +
+                "replaceModelVectors received an int8 payload for item \(bad.itemID)")
+        }
         // Flush any in-flight deferred burst so the table is the single source of
         // truth before the resident index is rebuilt from it below.
         if deferredIndexDirty { try await publishResidentIndex() }
