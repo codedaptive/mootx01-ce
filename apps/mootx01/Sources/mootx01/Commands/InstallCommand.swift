@@ -32,6 +32,9 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Do not write to settings.json at all (skips the default tiered permissions).")
     var noPermissions: Bool = false
 
+    @Flag(name: .long, help: "Skip binary placement (the copy to ~/.mootx01/bin + PATH wrapper). Use when a package manager (Homebrew, apt) already placed the binary on PATH.")
+    var noPlace: Bool = false
+
     @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
     var noManager: Bool = false
 
@@ -81,18 +84,24 @@ struct InstallCommand: AsyncParsableCommand {
             depth = AgentPicker.pickDepth()
         }
 
-        // Place the binary FIRST and use its installed absolute path as the
-        // config `command`. This is the core fix: configs point at
-        // ~/.mootx01/bin/mootx01 (a stable location), never at the CWD or
-        // dev-tree path the binary happened to run from.
+        // Place the binary and use its installed absolute path as the config
+        // `command`. --no-place skips this step for package-manager installs
+        // (Homebrew, apt) where the binary is already on PATH and the package
+        // manager owns placement. In that case, client configs point at the
+        // running binary's resolved path directly.
         let binaryPath: String
-        do {
-            binaryPath = try Installer.placeBinary(sourcePath: sourcePath, homeDirectory: home)
-            print("Placed binary at \(binaryPath)")
-            print("Linked   \(MootPaths.binarySymlinkURL(homeDirectory: home).path)")
-        } catch {
-            print("Could not place binary: \(error)")
-            throw error
+        if noPlace {
+            binaryPath = sourcePath
+            print("Using binary at \(binaryPath) (--no-place: skipping ~/.mootx01 placement)")
+        } else {
+            do {
+                binaryPath = try Installer.placeBinary(sourcePath: sourcePath, homeDirectory: home)
+                print("Placed binary at \(binaryPath)")
+                print("Linked   \(MootPaths.binarySymlinkURL(homeDirectory: home).path)")
+            } catch {
+                print("Could not place binary: \(error)")
+                throw error
+            }
         }
 
         print("\nInstalling mootx01 into \(clients.count) client(s)...")
@@ -329,32 +338,40 @@ struct InstallCommand: AsyncParsableCommand {
                 .deletingLastPathComponent()
                 .appendingPathComponent("moot-mgr")
                 .path
-            do {
-                if let mgrPath = try Installer.placeMgrBinary(sourceMgrPath: mgrSource, homeDirectory: home) {
-                    switch LaunchAgent.install(mgrBinaryPath: mgrPath, homeDirectory: home) {
-                    case let .installed(plistPath, dashboardURL):
-                        print("")
-                        print("  ✓ Management console running in the background (launchd: \(MootPaths.launchAgentLabel))")
-                        print("    Dashboard:   \(dashboardURL)")
-                        print("    LaunchAgent: \(plistPath)")
-                    case let .launchctlFailed(message):
-                        print("")
-                        print("  ✗ Could not start the management console via launchd: \(message)")
-                        print("    Start it manually any time with:  moot-mgr serve")
-                    case .binaryNotFound:
-                        // placeMgrBinary returned a path but the file vanished;
-                        // treat as "not available" and stay quiet beyond a hint.
-                        print("")
-                        print("  ⓘ Management console binary missing — run `moot-mgr serve` manually.")
-                    }
-                } else {
-                    print("")
-                    print("  ⓘ moot-mgr console not found beside mootx01 — skipping the background")
-                    print("    service. Install via the release (install.sh) or build apps/moot-mgr,")
-                    print("    then re-run `mootx01 install`.")
+            let mgrPath: String?
+            if noPlace {
+                // Package manager owns placement — use the sibling binary
+                // directly without copying to ~/.mootx01/bin.
+                let fm = FileManager.default
+                mgrPath = fm.isExecutableFile(atPath: mgrSource) ? mgrSource : nil
+            } else {
+                do {
+                    mgrPath = try Installer.placeMgrBinary(sourceMgrPath: mgrSource, homeDirectory: home)
+                } catch {
+                    print("  ✗ Could not place moot-mgr: \(error)")
+                    mgrPath = nil
                 }
-            } catch {
-                print("  ✗ Could not place moot-mgr: \(error)")
+            }
+            if let mgrPath {
+                switch LaunchAgent.install(mgrBinaryPath: mgrPath, homeDirectory: home) {
+                case let .installed(plistPath, dashboardURL):
+                    print("")
+                    print("  ✓ Management console running in the background (launchd: \(MootPaths.launchAgentLabel))")
+                    print("    Dashboard:   \(dashboardURL)")
+                    print("    LaunchAgent: \(plistPath)")
+                case let .launchctlFailed(message):
+                    print("")
+                    print("  ✗ Could not start the management console via launchd: \(message)")
+                    print("    Start it manually any time with:  moot-mgr serve")
+                case .binaryNotFound:
+                    print("")
+                    print("  ⓘ Management console binary missing — run `moot-mgr serve` manually.")
+                }
+            } else {
+                print("")
+                print("  ⓘ moot-mgr console not found beside mootx01 — skipping the background")
+                print("    service. Install via the release (install.sh) or build apps/moot-mgr,")
+                print("    then re-run `mootx01 install`.")
             }
         }
         #endif
