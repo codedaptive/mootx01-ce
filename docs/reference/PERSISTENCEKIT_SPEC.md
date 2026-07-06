@@ -459,8 +459,9 @@ concept. The Mode 2 content seam is wired in the SQLite and PostgreSQL backends
   AEAD seam) so a memory dump, debugger, or swap yields ciphertext, plus RAM
   hardening (no-swap / `mlock`, zero-on-free). (Currently plaintext — to build.)
 
-Mode 2 (per-row AEAD) is the cross-backend content-encryption mechanism; Mode 3
-(whole-file) is SQLite-only. See ADR-014 (Backend coverage).
+Mode 2 (per-row AEAD) is the cross-backend content-encryption mechanism that
+works on SQLite AND PostgreSQL. Mode 3 (whole-file SQLCipher) is SQLite-only
+(both Swift and Rust ports). See ADR-014 (Backend coverage).
 
 **B-12a (cross-port at-rest format parity — Mode 2 only):** for Mode 2
 (RowEncryption), the Rust SQLite backend encrypts the `content` column at

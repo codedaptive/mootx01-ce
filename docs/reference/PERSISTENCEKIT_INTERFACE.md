@@ -858,9 +858,11 @@ no-op on every path. Cross-port compatibility applies to Mode 2
 (RowEncryption) only: a Mode 2 content value encrypted by the Swift backend
 is decryptable by the Rust backend because both use AES-GCM-256 with the same
 `[nonce][tag][ciphertext]` envelope layout and the same key bytes from
-`EstateEncryptionConfig.key`. Mode 3 (FullDatabase) uses each platform's
-native whole-file mechanism and is not cross-port byte-compatible; the ports
-never share a file, so Mode 3 parity is behavioral, not byte-identical.
+`EstateEncryptionConfig.key`. Mode 3 (FullDatabase) uses SQLCipher on every platform (CommonCrypto
+backend on Apple, OpenSSL FIPS on Rust). Apple Data Protection and
+FileVault are additive defense-in-depth layers, not the encryption
+mechanism. The ports never share a physical file, so Mode 3 parity is
+behavioral (same rows retrieved), not on-disk byte-identical.
 
 ### EstateConfiguration field parity
 
