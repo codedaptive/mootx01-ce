@@ -47,7 +47,12 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v8 changes nodes.merkle_root from TEXT
+/// Current schema version. v9 added content_fingerprint BLOB nullable
+/// to drawers (CRITICAL fix — `fingerprints_captured_in`/
+/// `fingerprint_bit_series` previously recomputed every drawer's
+/// Fingerprint256 from scratch on every call; the value is now
+/// computed once at write time and read back from this column). v8
+/// changes nodes.merkle_root from TEXT
 /// to BLOB (NT-Q1 — eliminates hex encoding waste). v7 added
 /// content_hash BLOB nullable to drawers (NT-L3) and
 /// snapshot_registry + snapshot_attestations tables (NT-L3 Part 3).
@@ -56,7 +61,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// wing/room with parent_node_id (NT-L2). v3 added nodes (NT-L1).
 /// v2 added keys.ext (ADR-012). No migration ladder — no estate
 /// data has shipped. Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 8;
+pub const SCHEMA_VERSION: i32 = 9;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -150,6 +155,31 @@ fn drawers_table() -> TableDeclaration {
             // written before hash-on-write was wired. The Merkle rollup
             // (NT-L3) reads this column to build room/wing/estate roots.
             ColumnDeclaration::blob("content_hash").nullable(),
+            // The row's Fingerprint256 (32-byte little-endian wire
+            // format via `Fingerprint256::wire_bytes()`), computed by
+            // DrawerStore at every insert and refreshed at every update
+            // that can change a fingerprint input (adjectiveBitmap,
+            // operationalBitmap, provenance, udcCode, wikidataQID — see
+            // `EstateFingerprintFamilies::fingerprint`).
+            // `fingerprints_captured_in`/`fingerprint_bit_series` read
+            // this column directly instead of recomputing per call.
+            // Deliberately `ColumnType::Blob`, NOT the native
+            // `ColumnType::Fingerprint`/`TypedValue::Fingerprint` pair:
+            // the Postgres backend's `to_param` (postgres.rs) binds
+            // `TypedValue::Fingerprint` as `Option::<i64>::None` — a
+            // silent-NULL stub explicitly marked "not exercised by
+            // Phase-1 conformance" — so using the native type here would
+            // silently drop every fingerprint on a Postgres-backed
+            // estate. `Blob` is fully wired on every backend (SQLite,
+            // Postgres BYTEA, InMemory) today; DrawerStore encodes/decodes
+            // the wire bytes explicitly (mirrors Swift, whose TypedValue
+            // has no Fingerprint case at all). Nullable only so a row can
+            // never fail a NOT NULL constraint if a future write path is
+            // added without going through DrawerStore's refresh helper;
+            // DrawerStore always populates it and treats a NULL/malformed
+            // value at read time as a fail-loud LocusKitError, not a
+            // silent fallback.
+            ColumnDeclaration::blob("content_fingerprint").nullable(),
         ],
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
@@ -1010,14 +1040,15 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
-    /// v8 changed nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added
-    /// content_hash BLOB to drawers and snapshot tables (NT-L3). v6 added
-    /// order_key to tunnels (ADR-017 §11, NT-L5). v5 added erasure_ledger
-    /// (NT-L4). v4 replaced wing/room with parent_node_id (NT-L2). No
-    /// migration ladder — no estate data has shipped.
+    /// v9 added content_fingerprint BLOB to drawers (CRITICAL persist-at-
+    /// write fix). v8 changed nodes.merkle_root from TEXT to BLOB (NT-Q1).
+    /// v7 added content_hash BLOB to drawers and snapshot tables (NT-L3).
+    /// v6 added order_key to tunnels (ADR-017 §11, NT-L5). v5 added
+    /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
+    /// (NT-L2). No migration ladder — no estate data has shipped.
     #[test]
-    fn schema_version_is_eight() {
-        assert_eq!(SCHEMA_VERSION, 8);
+    fn schema_version_is_nine() {
+        assert_eq!(SCHEMA_VERSION, 9);
         assert!(schema().migrations.is_empty());
     }
 
@@ -1181,6 +1212,7 @@ mod tests {
                 "ext",
                 "keyID",
                 "content_hash",
+                "content_fingerprint",
             ]
         );
     }

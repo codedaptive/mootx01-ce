@@ -213,6 +213,19 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.all_drawers_bounded_projected(limit)
     }
 
+    // Forwarding override for the reindex-sweep cursor scan. Without this,
+    // trait-object dispatch (Arc<dyn DrawerStore>) hits the O(estate)
+    // default (load all_drawers, filter, sort, truncate) instead of the
+    // efficient (id > cursor, tombstonedAt IS NULL, LIMIT) query in
+    // DrawerStoreCore.
+    fn active_drawers_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.active_drawers_after(after_id, limit)
+    }
+
     // Forwarding overrides for the DESC bounded scan methods. Without these,
     // trait-object dispatch (Arc<dyn DrawerStore>) hits the O(estate) default
     // (load all_drawers, reverse, truncate) instead of the efficient

@@ -337,6 +337,51 @@ pub trait DrawerStore: Send + Sync {
         })
     }
 
+    /// Bounded page of active (non-tombstoned) drawers ordered by `id`
+    /// ascending, optionally starting strictly after `after_id`. `id` is
+    /// the declared TEXT primary key, present and indexed on every
+    /// backend (SQLite, PostgreSQL, InMemory).
+    ///
+    /// Built for GeniusLocusKit's reindex-missing sweep (MEDIUM perf fix;
+    /// mirrors Swift `DrawerStore.activeDrawersAfter(id:limit:)`): a caller
+    /// walks the whole `drawers` table exactly once, in bounded pages,
+    /// advancing `after_id` forward each call, instead of reloading the
+    /// full table (via `all_drawers`) on every pass of a backfill loop —
+    /// see `GeniusLocusKit::EstateCoordinator::sweep_reindex_missing`.
+    ///
+    /// Ordered by `id` (not `filed_at`) because callers of this method
+    /// have no ordering requirement beyond "visit every row exactly
+    /// once" — a simple `id > after_id` cursor is sufficient and does not
+    /// need the `(filed_at, id)` compound key `all_drawers_bounded` uses
+    /// for its recall-facing recency ordering.
+    ///
+    /// ## Default impl — derive from `all_drawers`, never silently empty
+    ///
+    /// The default loads the full corpus via [`all_drawers`](Self::all_drawers),
+    /// filters out tombstoned rows and anything at or before `after_id`,
+    /// sorts by `id`, and truncates to `limit` — correct for any backend
+    /// but O(estate) per call. SQLite, Postgres, and InMemory override
+    /// with a storage-tier `id > ? AND tombstonedAt IS NULL ORDER BY id
+    /// LIMIT ?` query for O(limit) I/O.
+    fn active_drawers_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let mut all: Vec<Drawer> = self
+            .all_drawers()?
+            .into_iter()
+            .filter(|d| d.tombstoned_at.is_none())
+            .filter(|d| match after_id {
+                Some(cursor) => d.id.as_str() > cursor,
+                None => true,
+            })
+            .collect();
+        all.sort_by(|a, b| a.id.cmp(&b.id));
+        all.truncate(limit);
+        Ok(all)
+    }
+
     /// Bounded full-corpus scan ordered by `filed_at` ascending, projected to
     /// the structured (no-blob) column set — the `content` column is omitted
     /// so decoded drawers carry `content == ""`.
@@ -1706,6 +1751,13 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         limit: Option<usize>,
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().all_drawers_bounded_projected(limit)
+    }
+    fn active_drawers_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().active_drawers_after(after_id, limit)
     }
     fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().all_drawers_bounded_desc(limit)

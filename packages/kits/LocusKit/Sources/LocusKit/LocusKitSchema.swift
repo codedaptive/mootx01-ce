@@ -79,7 +79,12 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v8 changes nodes.merkle_root from TEXT
+    /// Current schema version. v9 added content_fingerprint BLOB
+    /// nullable to drawers (CRITICAL fix — `fingerprintsCaptured`/
+    /// `fingerprintBitSeries` previously recomputed every drawer's
+    /// Fingerprint256 from scratch on every call; the value is now
+    /// computed once at write time and read back from this column).
+    /// v8 changes nodes.merkle_root from TEXT
     /// to BLOB (NT-Q1 — eliminates hex encoding waste). v7 added
     /// content_hash BLOB nullable to drawers (NT-L3) and
     /// snapshot_registry + snapshot_attestations tables (NT-L3 Part 3).
@@ -88,7 +93,7 @@ public enum LocusKitSchema {
     /// wing/room with parent_node_id (NT-L2). v3 added nodes (NT-L1).
     /// v2 added keys.ext (ADR-012). No migration ladder — no estate
     /// data has shipped.
-    public static let version = 8
+    public static let version = 9
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -185,7 +190,21 @@ public enum LocusKitSchema {
             // (NT-P2 HashingRowStore). BLOB nullable: NULL for rows
             // written before hash-on-write was wired. The Merkle rollup
             // (NT-L3) reads this column to build room/wing/estate roots.
-            .blob("content_hash", nullable: true)
+            .blob("content_hash", nullable: true),
+            // The row's Fingerprint256 (32-byte little-endian wire
+            // format, see Fingerprint256.wireBytes), computed by
+            // DrawerStore at every insert and refreshed at every update
+            // that can change a fingerprint input (adjectiveBitmap,
+            // operationalBitmap, provenance, udcCode, wikidataQID —
+            // see EstateFingerprintFamilies.fingerprint(of:)).
+            // `fingerprintsCaptured`/`fingerprintBitSeries` read this
+            // column directly instead of recomputing per call. Nullable
+            // only so a row can never fail a NOT NULL constraint if a
+            // future write path is added without going through
+            // DrawerStore's refresh helper; DrawerStore always populates
+            // it and treats a NULL/malformed value at read time as a
+            // fail-loud LocusKitError, not a silent fallback.
+            .blob("content_fingerprint", nullable: true)
         ],
         primaryKey: ["id"],
         generatedColumns: [

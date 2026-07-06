@@ -766,6 +766,49 @@ public actor DrawerStore {
         return result
     }
 
+    /// Bounded page of active (non-tombstoned) drawers, ordered by `id`
+    /// ascending, optionally starting strictly after `afterID`. `.full`
+    /// hydration (content included) — matches `allDrawers()`'s contract.
+    ///
+    /// Built for GeniusLocusKit's `reindexMissing` backfill (MEDIUM fix,
+    /// see EncodeIntake.swift): that loop used to call `allDrawers()` — an
+    /// unbounded, full-table scan — on EVERY pass of its up-to-1000-pass
+    /// loop, just to filter down to the handful of drawers not yet present
+    /// in the Corpus BundleStore. This method lets the caller walk the
+    /// `drawers` table exactly once across the whole run, in bounded
+    /// `limit`-sized pages, advancing `afterID` forward each pass instead
+    /// of re-scanning from the start every time — O(N_estate) total across
+    /// the run instead of O(passes × N_estate).
+    ///
+    /// Ordered by `id` (not `filedAt`) because the caller has no ordering
+    /// requirement here, only a "visit every row exactly once" requirement;
+    /// `id` is the declared TEXT primary key, present and indexed on every
+    /// backend (SQLite, PostgreSQL, InMemory), so a simple `id > afterID`
+    /// cursor is portable and does not need the `(filedAt, id)` compound
+    /// key `allDrawers(hydrationLevel:limit:direction:)` uses for its
+    /// recall-facing recency ordering.
+    ///
+    /// - Parameters:
+    ///   - afterID: exclusive lower bound on `id`; `nil` starts from the
+    ///     beginning of the table.
+    ///   - limit: maximum rows to return; `LIMIT` is applied at the
+    ///     storage tier, so this is O(min(N_estate, limit)) per call.
+    public func activeDrawersAfter(id afterID: String?, limit: Int) async throws -> [Drawer] {
+        let idColumn = Column(table: "drawers", name: "id")
+        let tombstoneClause = StoragePredicate.isNull(Column(table: "drawers", name: "tombstonedAt"))
+        let predicate: StoragePredicate = afterID.map {
+            .and([tombstoneClause, .gt(idColumn, .text($0))])
+        } ?? tombstoneClause
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: predicate,
+            orderBy: [OrderClause(column: idColumn, direction: .ascending)],
+            limit: limit,
+            offset: nil
+        )
+        return try decodeDrawerRowsResilient(rows, scan: "activeDrawersAfter(id:limit:)")
+    }
+
     // MARK: - Provenance mutation
 
     /// Mutate a drawer's provenance bitmap and append one sealed
@@ -887,13 +930,18 @@ public actor DrawerStore {
         let anchor = SubstrateTypes.LatticeAnchor.udcQid(d.udcCode, qid: d.wikidataQID ?? "")
         let nowTs = now.timeIntervalSince1970
         let estateTag = estate.uuidString
+        // Computed once, outside the @Sendable closure (Fingerprint256 is
+        // Sendable, so it can cross into the closure below). Persisted at
+        // capture time instead of recomputed on every fingerprintsCaptured/
+        // fingerprintBitSeries call — see LocusKitSchema v9.
+        let fingerprint = EstateFingerprintFamilies(estateUUID: estate.uuidString).fingerprint(of: d)
 
         // The returned closure captures only Sendable values.  `Drawer` is
         // Sendable; all computed values above (UUID, Vocabulary, [FieldWrite],
         // LatticeAnchor, HLCTimestamp, Double, String) are Sendable.
         return { txn in
             _ = try await txn.rowStore.insert(
-                table: "drawers", values: Self.drawerValues(d))
+                table: "drawers", values: Self.drawerValues(d, fingerprint: fingerprint))
             let result = AuditGate.admit(
                 estateUuid: estate, rowId: rowUuid, nounType: .drawer, verb: .capture,
                 prior: nil, priorLatticeAnchor: nil, writes: allWrites,
@@ -941,12 +989,17 @@ public actor DrawerStore {
         // closure (both access actor-isolated state: hlc and UUID parsing).
         let stamps = drawers.map { _ in hlc.send(now: nowMillis) }
         let rowUuids = try drawers.map { d in try Self.requireUuid(d.id, label: "id") }
+        // One families instance for the whole batch (same estate); computed
+        // once per drawer, outside the @Sendable closure. See gatedCaptureBody
+        // for the single-drawer twin of this same persist-at-capture fix.
+        let families = EstateFingerprintFamilies(estateUUID: estateID.uuidString)
+        let fingerprints = drawers.map { families.fingerprint(of: $0) }
 
         // All INSERTs + audit events in one transaction — single fsync under WAL.
         try await storage.transaction(isolation: .serializable) { txn in
-            for (d, (stamp, rowUuid)) in zip(drawers, zip(stamps, rowUuids)) {
+            for ((d, (stamp, rowUuid)), fingerprint) in zip(zip(drawers, zip(stamps, rowUuids)), fingerprints) {
                 _ = try await txn.rowStore.insert(
-                    table: "drawers", values: Self.drawerValues(d))
+                    table: "drawers", values: Self.drawerValues(d, fingerprint: fingerprint))
 
                 // Assemble FieldWrites for all three bitmap columns.
                 func writes(for column: FieldSlot.Column, from value: Int64) -> [FieldWrite] {
@@ -976,6 +1029,47 @@ public actor DrawerStore {
                 }
             }
         }
+    }
+
+    /// Recomputes `content_fingerprint` for one drawer row and writes it
+    /// back, inside the caller's open transaction.
+    ///
+    /// Called after every write to the `drawers` table that can change a
+    /// fingerprint input — `adjectiveBitmap`, `operationalBitmap`,
+    /// `provenance`, `udcCode`, `wikidataQID`, `lineageID`, `eventTime`
+    /// (see `EstateFingerprintFamilies.fingerprint(of:)`) — so the stored
+    /// column never drifts from the row it summarizes. Deliberately called
+    /// unconditionally after *every* `drawers` UPDATE in this file, even
+    /// ones that only touch non-fingerprint columns (e.g. `content`,
+    /// `tombstonedAt`): a blanket rule ("always refresh after a drawers
+    /// write") is one invariant to verify, versus a per-site "does this
+    /// particular update touch a fingerprint input" judgment call that a
+    /// future call site could get wrong. The added cost is one row re-read
+    /// plus one cheap hash-family recompute (substrate math, not I/O-bound)
+    /// — negligible next to the write path's existing gate/audit-log work,
+    /// and it happens once per write, never on the `fingerprintsCaptured`/
+    /// `fingerprintBitSeries` read path that this column exists to spare
+    /// (CRITICAL fix — that path used to recompute on every read).
+    ///
+    /// No-ops silently if the row is gone (e.g. concurrent tombstone-and-
+    /// erase raced ahead of this refresh) — nothing to refresh.
+    private func refreshContentFingerprint(
+        drawerId: String,
+        txn: any StorageTransaction
+    ) async throws {
+        let rows = try await txn.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
+        guard let row = rows.first else { return }
+        let drawer = try Self.drawerFromRow(row)
+        let families = EstateFingerprintFamilies(estateUUID: estateUuid.uuidString)
+        let fingerprint = families.fingerprint(of: drawer)
+        _ = try await txn.rowStore.update(
+            table: "drawers",
+            values: ["content_fingerprint": .blob(Data(fingerprint.toBytes()))],
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
     }
 
     public func mutateState(
@@ -1068,6 +1162,7 @@ public actor DrawerStore {
                 values: ["adjectiveBitmap": .bitmap(event.afterBitmaps.adjective)],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
+            try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
             try await txn.auditLog.append(event)
         }
     }
@@ -1213,6 +1308,7 @@ public actor DrawerStore {
                 ],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
+            try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
 
             // Record head drawer in the erasure ledger (ADR-017 §17).
             try await ErasureLedgerOps.recordErasure(
@@ -1243,6 +1339,7 @@ public actor DrawerStore {
                         values: ["content": .text("")],
                         where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                     )
+                    try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
                 } else {
                     // Gate the sibling through the state machine.
                     let sibUuid = try Self.requireUuid(siblingId, label: "siblingId")
@@ -1288,6 +1385,7 @@ public actor DrawerStore {
                             ],
                             where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                         )
+                        try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
                         if sealAudit {
                             try await txn.auditLog.append(sibEventWithReason)
                         }
@@ -1303,6 +1401,7 @@ public actor DrawerStore {
                             values: ["content": .text("")],
                             where: .eq(Column(table: "drawers", name: "id"), .text(siblingId))
                         )
+                        try await refreshContentFingerprint(drawerId: siblingId, txn: txn)
                     }
                 }
 
@@ -1678,6 +1777,10 @@ public actor DrawerStore {
                     values: updateValues,
                     where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
                 )
+                // updateValues can include udcCode/wikidataQID (fingerprint
+                // inputs) when toLattice is set — refresh unconditionally
+                // rather than branching on which fields changed.
+                try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
             }
             try await txn.auditLog.append(event)
         }
@@ -1776,6 +1879,7 @@ public actor DrawerStore {
             _ = try await txn.rowStore.update(
                 table: "drawers", values: [columnName: .bitmap(merged)],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+            try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
             try await txn.auditLog.append(event)
         }
     }
@@ -3162,7 +3266,16 @@ public actor DrawerStore {
 
     // MARK: - Row encode helpers
 
-    private static func drawerValues(_ d: Drawer) -> [String: TypedValue] {
+    /// Encodes a `Drawer` for insert, including the pre-computed
+    /// `content_fingerprint` column (32-byte `Fingerprint256.toBytes()`).
+    /// `fingerprint` is a required parameter (not computed here) because
+    /// this helper is `static` and has no access to `estateUuid`; callers
+    /// compute it via `EstateFingerprintFamilies(estateUUID:).fingerprint(of:)`
+    /// before calling. Required, not optional, so a new insert call site
+    /// cannot forget to populate the column (CRITICAL fix — this column
+    /// replaces the old recompute-on-every-read path in
+    /// `fingerprintsCaptured`/`fingerprintBitSeries`).
+    private static func drawerValues(_ d: Drawer, fingerprint: Fingerprint256) -> [String: TypedValue] {
         [
             "id": .text(d.id),
             "content": .text(d.content),
@@ -3185,7 +3298,8 @@ public actor DrawerStore {
             "udcCode": .text(d.udcCode),
             "udcFacets": d.udcFacets.map { TypedValue.text($0) } ?? .null,
             "wikidataQID": d.wikidataQID.map { TypedValue.text($0) } ?? .null,
-            "wikidataQidsSecondary": d.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null
+            "wikidataQidsSecondary": d.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
+            "content_fingerprint": .blob(Data(fingerprint.toBytes()))
         ]
     }
 
@@ -3700,12 +3814,39 @@ public actor DrawerStore {
             limit: nil,
             offset: nil
         )
-        // Construct on-demand — one FNV hash, cheap and correct.
-        let families = EstateFingerprintFamilies(estateUUID: estateUuid.uuidString)
+        // Read the persisted content_fingerprint column directly (LocusKitSchema
+        // v9). CRITICAL fix: this method used to decode the full Drawer row and
+        // recompute the fingerprint via EstateFingerprintFamilies on every call,
+        // for every non-tombstoned row in the window, on every invocation.
+        // DrawerStore now computes the fingerprint once at insert and refreshes
+        // it at every update that can change a fingerprint input (see
+        // `refreshContentFingerprint`), so this read path is a column decode,
+        // not a recompute.
         return try rows.map { row in
-            let drawer = try Self.drawerFromRow(row)
-            return families.fingerprint(of: drawer)
+            try Self.storedFingerprint(row, drawerId: Self.string(row["id"]))
         }
+    }
+
+    /// Decodes the persisted `content_fingerprint` BLOB column. Fails loudly
+    /// (does not silently recompute or substitute a zero fingerprint) if the
+    /// column is missing or the wrong length — per this file's error-handling
+    /// convention, a row that reaches this path without a fingerprint means a
+    /// write path bypassed `drawerValues`/`refreshContentFingerprint`, which is
+    /// a programming error worth surfacing, not papering over.
+    private static func storedFingerprint(_ row: StorageRow, drawerId: String) throws -> Fingerprint256 {
+        guard case .blob(let data)? = row["content_fingerprint"] else {
+            throw LocusKitError.invalidContent(
+                "drawer \(drawerId) has no content_fingerprint (LocusKitSchema v9) — " +
+                "write path did not persist it"
+            )
+        }
+        guard let fingerprint = Fingerprint256.fromBytes([UInt8](data)) else {
+            throw LocusKitError.invalidContent(
+                "drawer \(drawerId) content_fingerprint is malformed " +
+                "(expected 32 bytes, got \(data.count))"
+            )
+        }
+        return fingerprint
     }
 
     /// Returns one Bool per time bucket (oldest first): whether any
@@ -3766,12 +3907,14 @@ public actor DrawerStore {
             limit: nil,
             offset: nil
         )
-        let families = EstateFingerprintFamilies(estateUUID: estateUuid.uuidString)
         // Pre-compute (effectiveCaptureTime, fingerprint) for all drawers in the window.
-        // drawer.eventTime already carries the ING-01 filedAt backfill from drawerFromRow.
+        // drawer.eventTime already carries the ING-01 filedAt backfill from
+        // drawerFromRow. The fingerprint itself is read from the persisted
+        // content_fingerprint column (LocusKitSchema v9), not recomputed —
+        // see `fingerprintsCaptured` above for the same CRITICAL fix.
         let captures: [(time: Date, fp: Fingerprint256)] = try rows.map { row in
             let drawer = try Self.drawerFromRow(row)
-            return (time: drawer.eventTime, fp: families.fingerprint(of: drawer))
+            return (time: drawer.eventTime, fp: try Self.storedFingerprint(row, drawerId: drawer.id))
         }
 
         return (0..<bucketCount).map { i in

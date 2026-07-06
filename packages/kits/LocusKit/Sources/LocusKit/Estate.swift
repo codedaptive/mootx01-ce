@@ -459,6 +459,23 @@ public actor Estate {
         try await store.allDrawers(hydrationLevel: hydrationLevel, limit: limit)
     }
 
+    /// Bounded page of active (non-tombstoned) drawers ordered by `id`
+    /// ascending, optionally starting strictly after `afterID`. Exposes
+    /// `DrawerStore.activeDrawersAfter(id:limit:)` through the `Estate`
+    /// boundary so GeniusLocusKit's `reindexMissing` backfill can walk the
+    /// drawers table in bounded, cursor-advancing pages instead of
+    /// reloading the full table on every pass (MEDIUM perf fix — see
+    /// `EncodeIntake.swift`).
+    ///
+    /// - Parameters:
+    ///   - afterID: exclusive lower bound on `id`; `nil` starts from the
+    ///     beginning of the table.
+    ///   - limit: maximum rows to return; `LIMIT` is applied at the
+    ///     storage tier.
+    public func activeDrawersAfter(id afterID: String?, limit: Int) async throws -> [Drawer] {
+        try await store.activeDrawersAfter(id: afterID, limit: limit)
+    }
+
     /// The set of lineage IDs whose rows have been permanently erased (cluster C:
     /// `tombstonedAt IS NOT NULL`). Delegates to `DrawerStore.tombstonedLineageIDs()`,
     /// which reads the `lineageID` column directly via a storage-tier `.isNotNull`

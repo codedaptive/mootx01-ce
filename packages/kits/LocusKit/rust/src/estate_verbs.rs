@@ -1270,6 +1270,21 @@ impl Estate {
         self.store.all_drawers_bounded(limit)
     }
 
+    /// Bounded page of active (non-tombstoned) drawers ordered by `id`
+    /// ascending, optionally starting strictly after `after_id`.
+    /// Estate-level pass-through over `DrawerStore::active_drawers_after`.
+    /// Used by GeniusLocusKit's reindex-missing sweep to walk the drawers
+    /// table in bounded, cursor-advancing pages instead of reloading the
+    /// full table on every pass (MEDIUM perf fix; mirrors the Swift
+    /// `Estate.activeDrawersAfter(id:limit:)`).
+    pub fn active_drawers_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.active_drawers_after(after_id, limit)
+    }
+
     /// Fingerprints of every non-tombstoned drawer captured in the closed
     /// epoch-milliseconds window `[start_epoch, end_epoch]` (ADR-023), in
     /// HLC-ascending order within the window. Estate-level pass-through over

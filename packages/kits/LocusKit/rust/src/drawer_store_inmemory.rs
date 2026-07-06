@@ -605,6 +605,56 @@ impl DrawerStoreCore {
         Ok(string_value_of(row.get("udcCode")))
     }
 
+    /// Reads the current drawer row, applies `patch` to the decoded
+    /// `Drawer` (the field(s) a caller is about to write), and returns the
+    /// resulting `content_fingerprint` as a ready-to-insert `TypedValue`.
+    ///
+    /// Called by every mutation path that writes to the `drawers` table,
+    /// so the merged value can be folded into the SAME `update`/`insert`
+    /// call the mutation already makes — one row write, not a separate
+    /// read-modify-write pass. Mirrors Swift's `refreshContentFingerprint`,
+    /// which instead re-reads the row AFTER the update inside the same
+    /// transaction; the two mechanisms differ (Rust computes the
+    /// post-update value from data already in hand and writes it in the
+    /// original call, Swift re-reads post-write) but the outcome is
+    /// identical: `content_fingerprint` never drifts from the row it
+    /// summarizes.
+    ///
+    /// Deliberately called unconditionally after *every* `drawers` write in
+    /// this file, even ones that only touch non-fingerprint columns (e.g.
+    /// `content`, `tombstonedAt`) — see the Swift twin's doc comment for
+    /// why a blanket rule is safer than a per-site "does this field affect
+    /// the fingerprint" judgment call.
+    fn recomputed_fingerprint(
+        &self,
+        drawer_id: &str,
+        patch: impl FnOnce(&mut Drawer),
+    ) -> Result<TypedValue, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_DRAWERS,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(drawer_id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let row = rows.first().ok_or_else(|| LocusKitError::DrawerNotFound {
+            id: drawer_id.to_string(),
+        })?;
+        let mut drawer = drawer_from_row(row)?;
+        patch(&mut drawer);
+        let families = EstateFingerprintFamilies::new(&self.estate_uuid.to_string());
+        Ok(TypedValue::Blob(
+            families.fingerprint(&drawer).wire_bytes().to_vec(),
+        ))
+    }
+
     /// Decompose a whole-column replacement value into per-field
     /// FieldWrites for that column's declared slots, then route through
     /// the gate. Closes F8: legacy whole-column mutators wrote an entire
@@ -700,6 +750,14 @@ impl DrawerStoreCore {
         };
         let mut update_vals = BTreeMap::new();
         update_vals.insert(col_name.to_string(), TypedValue::Bitmap(merged));
+        // Fold the recomputed content_fingerprint into the SAME update
+        // (LocusKitSchema v9) rather than a separate write.
+        let fingerprint_value = self.recomputed_fingerprint(drawer_id, |d| match column {
+            audit_gate::Column::Adjective => d.adjective_bitmap = merged,
+            audit_gate::Column::Operational => d.operational_bitmap = merged,
+            audit_gate::Column::Provenance => d.provenance = merged,
+        })?;
+        update_vals.insert("content_fingerprint".to_string(), fingerprint_value);
         let update_pred = StoragePredicate::Eq(
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
@@ -789,7 +847,12 @@ impl DrawerStoreCore {
         // Materialized projection row + sealed genesis event — both writes
         // are atomic in one transaction (codex 016fcb23). If the audit
         // append fails the drawer insert is rolled back: no unaudited state.
-        let drawer_row = drawer_values(drawer);
+        // Fingerprint persisted at capture time instead of recomputed on
+        // every fingerprints_captured_in/fingerprint_bit_series call — see
+        // LocusKitSchema v9.
+        let fingerprint =
+            EstateFingerprintFamilies::new(&self.estate_uuid.to_string()).fingerprint(drawer);
+        let drawer_row = drawer_values(drawer, &fingerprint);
         let audit_row = pk_audit_event_from(&event);
         // The closure returns StorageResult<()>; errors are converted to
         // LocusKitError by map_storage_err on the outer transaction() call.
@@ -1449,6 +1512,45 @@ impl DrawerStore for DrawerStoreCore {
         Ok(drawers)
     }
 
+    fn active_drawers_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        // Storage-tier predicate, not an in-memory filter: `tombstonedAt IS
+        // NULL` plus, when a cursor is supplied, `id > after_id`. Ordered by
+        // `id` ASC with `LIMIT limit` — O(limit) I/O regardless of table
+        // size, unlike the trait default (which loads every row via
+        // all_drawers() first). See trait doc for the reindex-sweep caller.
+        let tombstone_clause =
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt"));
+        let pred = match after_id {
+            Some(cursor) => StoragePredicate::And(vec![
+                tombstone_clause,
+                StoragePredicate::Gt(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(cursor.to_string()),
+                ),
+            ]),
+            None => tombstone_clause,
+        };
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_DRAWERS,
+                Some(&pred),
+                &[OrderClause::new(
+                    Column::new(T_DRAWERS, "id"),
+                    OrderDirection::Ascending,
+                )],
+                Some(limit),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()
+    }
+
     fn all_drawers_bounded_projected(
         &self,
         limit: Option<usize>,
@@ -1749,6 +1851,12 @@ impl DrawerStore for DrawerStoreCore {
             "adjectiveBitmap".to_string(),
             TypedValue::Bitmap(event.after_bitmaps.0),
         );
+        // Fold the recomputed content_fingerprint into the SAME update
+        // (LocusKitSchema v9) rather than a separate write.
+        let fingerprint_value = self.recomputed_fingerprint(drawer_id, |d| {
+            d.adjective_bitmap = event.after_bitmaps.0;
+        })?;
+        update_vals.insert("content_fingerprint".to_string(), fingerprint_value);
         let update_pred = StoragePredicate::Eq(
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
@@ -1895,6 +2003,18 @@ impl DrawerStore for DrawerStoreCore {
         );
         update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
         update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
+        // Fold the recomputed content_fingerprint into the SAME update
+        // (LocusKitSchema v9) rather than a separate write. Refreshed
+        // unconditionally even though this row becomes tombstoned (and so
+        // invisible to fingerprints_captured_in/fingerprint_bit_series
+        // going forward) — see recomputed_fingerprint's doc comment for
+        // why a blanket rule beats a per-site judgment call.
+        let fingerprint_value = self.recomputed_fingerprint(drawer_id, |d| {
+            d.adjective_bitmap = event.after_bitmaps.0;
+            d.content = String::new();
+            d.tombstoned_at = Some(now);
+        })?;
+        update_vals.insert("content_fingerprint".to_string(), fingerprint_value);
         row_store
             .update(
                 T_DRAWERS,
@@ -1932,6 +2052,15 @@ impl DrawerStore for DrawerStoreCore {
                 // Already tombstoned — just ensure content is empty.
                 let mut vals = BTreeMap::new();
                 vals.insert("content".to_string(), TypedValue::Text(String::new()));
+                // Best-effort, matching this branch's existing tolerance
+                // for a concurrently-removed sibling row: if the refresh
+                // read fails, still scrub content, just without an
+                // updated fingerprint value in this call.
+                if let Ok(fingerprint_value) =
+                    self.recomputed_fingerprint(sibling_id, |d| d.content = String::new())
+                {
+                    vals.insert("content_fingerprint".to_string(), fingerprint_value);
+                }
                 let _ = row_store.update(
                     T_DRAWERS,
                     vals,
@@ -1988,6 +2117,15 @@ impl DrawerStore for DrawerStoreCore {
                     );
                     vals.insert("content".to_string(), TypedValue::Text(String::new()));
                     vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
+                    // Best-effort, matching this branch's existing
+                    // tolerance for a concurrently-removed sibling row.
+                    if let Ok(fingerprint_value) = self.recomputed_fingerprint(sibling_id, |d| {
+                        d.adjective_bitmap = sib_event.after_bitmaps.0;
+                        d.content = String::new();
+                        d.tombstoned_at = Some(now);
+                    }) {
+                        vals.insert("content_fingerprint".to_string(), fingerprint_value);
+                    }
                     let _ = row_store.update(
                         T_DRAWERS,
                         vals,
@@ -2161,6 +2299,14 @@ impl DrawerStore for DrawerStoreCore {
     /// Does NOT delete the manifest row or audit events — those remain as
     /// a forensic record that the estate existed. The SQLite FILE is
     /// deleted by the application layer (moot-mgr) after this call returns.
+    ///
+    /// INTENTIONALLY does not refresh `content_fingerprint` (unlike every
+    /// other `drawers` write in this file): `content` is not a
+    /// fingerprint input (see `EstateFingerprintFamilies::fingerprint`),
+    /// and the estate is destroyed immediately after this call returns —
+    /// recomputing a fingerprint that will never be read again, for every
+    /// row in the table, would be pure wasted work on the destruction hot
+    /// path.
     fn wipe_all_content(&self) -> Result<(), LocusKitError> {
         let row_store = self.storage.row_store();
         let mut values = std::collections::BTreeMap::new();
@@ -2308,6 +2454,17 @@ impl DrawerStore for DrawerStoreCore {
             }
         }
         if !update_vals.is_empty() {
+            // update_vals can include udcCode/wikidataQID (fingerprint
+            // inputs) when to_lattice is Some — fold the recomputed
+            // content_fingerprint into the SAME update (LocusKitSchema
+            // v9) rather than branching on which fields changed.
+            let fingerprint_value = self.recomputed_fingerprint(drawer_id, |d| {
+                if let Some(ref new_lat) = to_lattice {
+                    d.udc_code = new_lat.udc_code.clone();
+                    d.wikidata_qid = new_lat.wikidata_qid.clone();
+                }
+            })?;
+            update_vals.insert("content_fingerprint".to_string(), fingerprint_value);
             row_store
                 .update(
                     T_DRAWERS,
@@ -3881,10 +4038,23 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        // Construct on-demand — one FNV hash per call.
-        let families = EstateFingerprintFamilies::new(&self.estate_uuid.to_string());
+        // Read the persisted content_fingerprint column directly
+        // (LocusKitSchema v9). CRITICAL fix: this method used to decode the
+        // full Drawer row and recompute the fingerprint via
+        // EstateFingerprintFamilies on every call, for every non-tombstoned
+        // row in the window, on every invocation. DrawerStore now computes
+        // the fingerprint once at insert and refreshes it at every update
+        // that can change a fingerprint input (see
+        // `refresh_content_fingerprint`), so this read path is a column
+        // decode, not a recompute.
         rows.iter()
-            .map(|row| drawer_from_row(row).map(|d| families.fingerprint(&d)))
+            .map(|row| {
+                let id = match row.get("id") {
+                    Some(TypedValue::Text(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                stored_fingerprint(row, &id)
+            })
             .collect::<Result<Vec<_>, _>>()
     }
 
@@ -3950,14 +4120,17 @@ impl DrawerStore for DrawerStoreCore {
             .row_store()
             .query(T_DRAWERS, Some(&pred), &[], None, None)
             .map_err(map_storage_err)?;
-        let families = EstateFingerprintFamilies::new(&self.estate_uuid.to_string());
         // Pre-compute (event_time, fingerprint) for all drawers in the window.
-        // drawer.event_time carries the ING-01 filedAt backfill from drawer_from_row.
+        // drawer.event_time carries the ING-01 filedAt backfill from
+        // drawer_from_row. The fingerprint itself is read from the persisted
+        // content_fingerprint column (LocusKitSchema v9), not recomputed —
+        // see `fingerprints_captured_in` above for the same CRITICAL fix.
         let captures: Vec<(i64, Fingerprint256)> = rows
             .iter()
             .map(|row| {
                 let d = drawer_from_row(row)?;
-                Ok((d.event_time, families.fingerprint(&d)))
+                let fp = stored_fingerprint(row, &d.id)?;
+                Ok((d.event_time, fp))
             })
             .collect::<Result<Vec<_>, LocusKitError>>()?;
 
@@ -4170,6 +4343,17 @@ impl DrawerStore for InMemoryDrawerStore {
         limit: Option<usize>,
     ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.all_drawers_bounded_projected(limit)
+    }
+    // Forwarding override for the reindex-sweep cursor scan. Without this,
+    // Arc<dyn DrawerStore> callers hit the O(estate) trait default instead
+    // of the efficient (id > cursor, tombstonedAt IS NULL, LIMIT) query in
+    // DrawerStoreCore.
+    fn active_drawers_after(
+        &self,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.active_drawers_after(after_id, limit)
     }
 
     // Forwarding overrides for the DESC bounded scan methods. Without these,
@@ -4594,7 +4778,16 @@ impl DrawerStore for InMemoryDrawerStore {
 // Row encode helpers
 // ---------------------------------------------------------------------------
 
-fn drawer_values(d: &Drawer) -> BTreeMap<String, TypedValue> {
+/// Encodes a `Drawer` for insert, including the pre-computed
+/// `content_fingerprint` column (32-byte `Fingerprint256::wire_bytes()`).
+/// `fingerprint` is a required parameter (not computed here) because this
+/// is a free function with no `estate_uuid` in scope; callers compute it
+/// via `EstateFingerprintFamilies::new(...).fingerprint(d)` before calling.
+/// Required, not `Option`, so a new insert call site cannot forget to
+/// populate the column (CRITICAL fix — this column replaces the old
+/// recompute-on-every-read path in `fingerprints_captured_in`/
+/// `fingerprint_bit_series`).
+fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, TypedValue> {
     let mut m = BTreeMap::new();
     m.insert("id".to_string(), TypedValue::Text(d.id.clone()));
     m.insert("content".to_string(), TypedValue::Text(d.content.clone()));
@@ -4676,7 +4869,36 @@ fn drawer_values(d: &Drawer) -> BTreeMap<String, TypedValue> {
             .map(|s| TypedValue::Text(s.clone()))
             .unwrap_or(TypedValue::Null),
     );
+    m.insert(
+        "content_fingerprint".to_string(),
+        TypedValue::Blob(fingerprint.wire_bytes().to_vec()),
+    );
     m
+}
+
+/// Decodes the persisted `content_fingerprint` BLOB column. Fails loudly
+/// (does not silently recompute or substitute a zero fingerprint) if the
+/// column is missing or the wrong length — a row that reaches this path
+/// without a fingerprint means a write path bypassed `drawer_values`/
+/// `refresh_content_fingerprint`, which is a programming error worth
+/// surfacing, not papering over. Mirrors Swift's
+/// `DrawerStore.storedFingerprint(_:drawerId:)`.
+fn stored_fingerprint(row: &StorageRow, drawer_id: &str) -> Result<Fingerprint256, LocusKitError> {
+    match row.get("content_fingerprint") {
+        Some(TypedValue::Blob(bytes)) => {
+            Fingerprint256::from_wire_bytes(bytes).map_err(|_| {
+                LocusKitError::InvalidContent(format!(
+                    "drawer {} content_fingerprint is malformed (expected 32 bytes, got {})",
+                    drawer_id,
+                    bytes.len()
+                ))
+            })
+        }
+        _ => Err(LocusKitError::InvalidContent(format!(
+            "drawer {} has no content_fingerprint (LocusKitSchema v9) — write path did not persist it",
+            drawer_id
+        ))),
+    }
 }
 
 fn tunnel_values(t: &Tunnel) -> BTreeMap<String, TypedValue> {
