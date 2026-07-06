@@ -3,6 +3,20 @@
 Use MOOTx01 automatically as this repository's long-term memory and reasoning
 substrate.
 
+## NEVER touch the database directly
+
+MOOTx01 stores its data in SQLite files under the estate data directory. You
+MUST NOT read, query, modify, or inspect these files directly — no sqlite3
+commands, no cat/head/hexdump on .db files, no filesystem inspection of the
+estate storage. All access goes through the MCP tools listed below. The database
+schema, file layout, and internal encoding are private implementation details
+that change between versions.
+
+If a tool returns unexpected results, try a different query or a different tool
+(moot_memory_search, moot_recall_precise, moot_recall_shaped, moot_fact_search).
+If all tools fail, report the problem to the user — do not attempt to diagnose
+or repair the database yourself.
+
 ## MOOT Reflex
 
 Before answering any request that may depend on prior context, user preferences,
