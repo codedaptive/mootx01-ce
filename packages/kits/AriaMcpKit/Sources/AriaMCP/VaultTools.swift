@@ -99,7 +99,7 @@ enum VaultTools {
                 provenance: .vault),
             ProjectedTool(
                 name: "moot_vault_import",
-                description: "Import a Markdown vault into a MOOT estate via the capture seam. Idempotent per note; returns written/updated/tunnel/skipped and FDC-classification counts.",
+                description: "Import a Markdown vault into a MOOT estate via the capture seam. Returns a job_id immediately — the import runs in the background and takes approximately 2 seconds per document. A 100-note vault takes ~3 minutes; a 500-note vault takes ~17 minutes. Do NOT cancel or re-issue an import because it appears slow — it is working. Poll with moot_vault_job to check progress. Duplicate imports are idempotent but waste time.",
                 inputSchema: objectSchema(
                     properties: [
                         "vaultPath": vaultPathSchema,
@@ -395,7 +395,10 @@ enum VaultTools {
         job_id: \(jobID)
         vault: \(vaultURL.path)
         note_count: \(noteCount)
-        poll: moot_vault_job to check status
+        status: RUNNING — import is processing in the background.
+        IMPORTANT: Vault imports are long-running (~2 seconds per document). A \(noteCount)-note \
+        vault will take approximately \(noteCount * 2 / 60) minutes. Do NOT cancel or re-issue \
+        the import — it is running correctly. Poll moot_vault_job with this job_id to check progress.
         """)
     }
 

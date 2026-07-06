@@ -1179,7 +1179,7 @@ fn vault_tool(name: &str, description: &str) -> serde_json::Value {
 fn vault_import_tool() -> serde_json::Value {
     json!({
         "name": "moot_vault_import",
-        "description": "Import a vault archive into the estate.",
+        "description": "Import a Markdown vault into a MOOT estate via the capture seam. Returns a job_id immediately — the import runs in the background and takes approximately 2 seconds per document. A 100-note vault takes ~3 minutes; a 500-note vault takes ~17 minutes. Do NOT cancel or re-issue an import because it appears slow — it is working. Poll with moot_vault_job to check progress. Duplicate imports are idempotent but waste time.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "vaultPath": string_schema("Filesystem path to the vault directory."),
