@@ -31,23 +31,27 @@ out="${1:-$here/../StaticAssets.swift}"
 if [ -f "$out" ] && \
    [ "$out" -nt "$here/index.html" ] && \
    [ "$out" -nt "$here/app.css" ] && \
-   [ "$out" -nt "$here/app.js" ]; then
+   [ "$out" -nt "$here/app.js" ] && \
+   [ "$out" -nt "$here/three.min.js" ] && \
+   [ "$out" -nt "$here/OrbitControls.js" ]; then
   echo "StaticAssets.swift is up to date, skipping regeneration"
   exit 0
 fi
 
-for f in index.html app.css app.js; do
-  if grep -qF '"""#' "$here/$f"; then
+for f in index.html app.css app.js three.min.js OrbitControls.js; do
+  if grep -qF '"""##' "$here/$f"; then
     echo "ERROR: $f contains the raw-string close delimiter; raise the delimiter." >&2
     exit 1
   fi
 done
 
+# Two-pound delimiter (##"""..."""##) so that \#( in Three.js is treated
+# as literal text, not Swift string interpolation (which is \##( at this level).
 emit_asset() {
   local var="$1" file="$2"
-  printf '    static let %s = #"""\n' "$var"
+  printf '    static let %s = ##"""\n' "$var"
   cat "$here/$file"
-  printf '\n"""#\n\n'
+  printf '\n"""##\n\n'
 }
 
 {
@@ -80,6 +84,8 @@ HEADER
   emit_asset indexHTML index.html
   emit_asset appCSS app.css
   emit_asset appJS app.js
+  emit_asset threeJS three.min.js
+  emit_asset orbitControlsJS OrbitControls.js
 
   cat <<'FOOTER'
     // MARK: Lookup
@@ -92,16 +98,20 @@ HEADER
 
     /// Resolve a request path to an embedded asset, or `nil` for anything not on
     /// the allow-list. The list is fixed (no directory mapping), so an arbitrary
-    /// path cannot escape it — `/`, `/index.html`, `/app.css`, `/app.js` only.
-    /// Everything else returns `nil` and the caller answers 404.
+    /// path cannot escape it. Everything else returns `nil` and the caller answers 404.
     static func asset(for path: String) -> Asset? {
-        switch path {
+        let bare = path.split(separator: "?").first.map(String.init) ?? path
+        switch bare {
         case "/", "/index.html":
             return Asset(body: indexHTML, contentType: "text/html; charset=utf-8")
         case "/app.css":
             return Asset(body: appCSS, contentType: "text/css; charset=utf-8")
         case "/app.js":
             return Asset(body: appJS, contentType: "text/javascript; charset=utf-8")
+        case "/three.min.js":
+            return Asset(body: threeJS, contentType: "text/javascript; charset=utf-8")
+        case "/OrbitControls.js":
+            return Asset(body: orbitControlsJS, contentType: "text/javascript; charset=utf-8")
         default:
             return nil
         }

@@ -1,10 +1,13 @@
+import * as THREE from 'three';
+import { OrbitControls } from '/OrbitControls.js';
+
 /*
   moot-mgr read-plane dashboard logic.
 
-  Vanilla JS — no frameworks, no CDN. All data comes from the resident host's
-  loopback GET /api/* endpoints. This script issues ONLY reads (GET + the SSE
-  GET /api/events?stream=1); it never POSTs to the control surface — the
-  dashboard is read-only (GUI SPEC §2.1).
+  Vanilla JS + Three.js r170 (vendored, MIT) for the topology WebGL renderer.
+  All data comes from the resident host's loopback GET /api/* endpoints. This
+  script issues ONLY reads (GET + the SSE GET /api/events?stream=1); it never
+  POSTs to the control surface — the dashboard is read-only (GUI SPEC §2.1).
 
   Fields the API does not yet serve are rendered as "n/a" rather than "pending"
   chips — they are honest absent values, not planned future probes.
@@ -1305,71 +1308,58 @@
 
   let topoFeedTimer = null;
 
-  // Canvas2D brain renderer state
-  let brainCanvas = null, brainCtx = null;
+  // Three.js WebGL renderer state — replaces Canvas2D brain renderer.
+  let brainScene = null, brainCamera = null, brainGLRenderer = null;
+  let brainControls = null;          // OrbitControls instance
+  let brainPointsMesh = null;        // THREE.Points for all nodes
+  let brainEdgesMesh = null;         // THREE.LineSegments for all edges
+  let brainLabelEls = [];            // HTML overlay label elements
+  let brainLabelContainer = null;    // div holding the HTML labels
   let brainNodes = [], brainEdges = [], brainNodeMap = Object.create(null);
   let brainAnimId = null, brainT = 0;
-  let brainW = 0, brainH = 0;       // current logical canvas dimensions (updated on resize)
-  let brainResizeObs = null;         // ResizeObserver — disconnected in stopBrainAnimation
-  // Zoom state — lerped each frame toward target values.
-  let brainZoomScale = 1, brainZoomX = 0, brainZoomY = 0;
-  let brainZoomTS = 1, brainZoomTX = 0, brainZoomTY = 0; // target
-  let brainZoomedNode = null;        // currently zoomed node (white ring + zoom in)
-  let brainClickHandler = null;      // stored so stopBrainAnimation can remove it
-  let brainKeyHandler = null;
+  let brainW = 0, brainH = 0;
+  // Pixel-to-world coordinate transform: centers layout at origin and
+  // scales so the longest axis spans [-1, 1].
+  let brainWorldScale = 1, brainWorldCX = 0, brainWorldCY = 0;
+  let brainResizeObs = null;
+  let brainContainer = null;         // DOM container for the renderer
   // Selection state — set by selectBrainNode(); drives neighbor highlighting.
   let brainSelectedNode = null;
-  let brainHop1 = Object.create(null);    // id → true for 1-hop neighbors of selected node
-  let brainHop2 = Object.create(null);    // id → true for 2-hop neighbors of selected node
-  let brainAdjacency = Object.create(null);  // id → [neighbor ids] — built once from brainEdges
-  // L4 strata (3D) state — toggled by #topoDimToggle. 2D is the default; all
-  // 2D behavior is unchanged when off (brainProject is the identity then).
+  let brainHop1 = Object.create(null);
+  let brainHop2 = Object.create(null);
+  let brainAdjacency = Object.create(null);
+  // L4 strata (3D depth) — toggled by #topoDimToggle.
   let brain3D = false;
-  // Drag-to-orbit state (3D only): yaw/pitch offsets set while dragging,
-  // spring back to the fixed reading angle on release. dragging suppresses
-  // the click-select that fires after mouseup.
-  let brainOrbit = { yaw: 0, pitch: 0, tyaw: 0, tpitch: 0, dragging: false, moved: 0 };
-  // Orbit handler refs — stored so stopBrainAnimation can detach them
-  // (startBrainAnimation runs on every topology render; without removal the
-  // window-level listeners would accumulate).
-  let brainOrbitDown = null, brainOrbitMove = null, brainOrbitUp = null;
-  let brainDrawOrder = [];  // painter-sorted node list (deepest first in 3D)
-  let brainEdgesDraw = [];  // painter-sorted edge list (deepest first in 3D)
-  // L3 lobe labels — community rank (lobe index) → FDC label string. Built by
-  // buildRealBrainNodes from the proxy's enriched communities []{id,label,size};
-  // empty on the synthetic path (synthetic lobes carry no real community).
+  // L3 lobe labels — community rank → FDC label string.
   let brainLobeLabels = Object.create(null);
-  // Content picker (community filter) state. Keys are CONTENT identities —
-  // the community's FDC label, or the '(unlabeled)' / 'fragments' buckets —
-  // because Louvain ids renumber on every governor cycle while labels are
-  // stable. null = no filter (all visible); a Set fades non-members to 8%.
-  // Module-level so the selection survives re-renders and snapshot refreshes.
   let topoCommFilter = null;
-  // Picker rows for the current real-data build: [{key, label, size, cIdx}].
   let topoCommRows = [];
-  // Lobe rank → content key, for hull/label fading.
   let brainLobeKey = Object.create(null);
-  // The full real dataset, retained so the content picker can re-render a
-  // SUBSET: filtering hides deselected communities entirely and re-lays-out
-  // the selected ones to fill the canvas (solo "Business" → its nodes get
-  // the whole stage). {rawNodes, rawEdges, communities, W, H, container}.
   let topoRealData = null;
-  // Content key per community id for the CURRENT snapshot (rebuilt each
-  // load); used to filter raw nodes before layout.
   let topoCommKeyById = Object.create(null);
-  // Stable palette: content key → palette index, assigned ONCE from the
-  // full dataset's size ranking so hues do not reshuffle on every filter
-  // toggle or snapshot refresh.
   let topoCommPaletteByKey = Object.create(null);
-  // community index → [nodes] pools — L5 estate-hash pulse fallback target.
   let brainCommPools = Object.create(null);
-  // Effective "now" for recency brightness + the L5 alive(t) filter. Wall clock
-  // normally; frozen to the playhead timestamp while playback is active.
   let brainNowMs = 0;
+  // Raycaster for click-to-select.
+  let brainRaycaster = null;
+  let brainPointer = new THREE.Vector2();
   // L5 radar-loop playback state. active = a playback session holds the playhead
   // (playing or paused mid-loop); playing = the step timer is running.
   let topoPlay = { active: false, playing: false, idx: 0, timer: null, playheadMs: 0 };
   let topoPlayEvents = [];  // /api/events parsed + sorted ascending by ts
+  // Ripple ring buffer: up to 20 active ripples overlapping like singing in
+  // a round — each at a different phase of its expand+fade lifecycle.
+  let brainRipples = [];         // [{nodeId, age, x, y, z, rgb}]
+  let brainRippleMesh = null;    // THREE.Points for ripple rings
+  var RIPPLE_MAX = 20;           // max concurrent ripples
+  var RIPPLE_DURATION = 2.0;     // seconds per ripple lifecycle
+  // Constellation trail buffer: glowing lines between consecutive same-
+  // community events, each fading independently over ~2s.
+  let brainTrails = [];          // [{x1,y1,z1, x2,y2,z2, age, rgb}]
+  let brainTrailMesh = null;     // THREE.LineSegments for trails
+  var TRAIL_MAX = 20;
+  var TRAIL_DURATION = 2.5;      // seconds per trail fade
+  let brainLastPulseNode = null; // last pulsed node for trail linking
 
   // Twelve community colors — one per lobe / cluster.
   const BRAIN_COMM_COLORS = [
@@ -1601,7 +1591,11 @@
       brainLobeKey[rank] = key;
       var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
       if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)");
-      var spread = Math.max(28, members.length * 0.18);
+      // sqrt scaling keeps scatter proportional to canvas even for huge
+      // communities (6k+ nodes); linear scaling scatters far outside the
+      // canvas, clamping all nodes to edges and collapsing via physics.
+      var spread = Math.min(Math.max(28, Math.sqrt(members.length) * 3.5),
+                            Math.min(W, H) * 0.16);
       var center = centers[rank];
       members.forEach(function (n) {
         var angle = Math.random() * Math.PI * 2;
@@ -1677,21 +1671,25 @@
     return edges;
   }
 
-  // Start the Canvas2D animation loop inside the topo-canvas container div.
-  // Canvas gets explicit pixel CSS dimensions (not 100%) so the coordinate space
-  // exactly matches what getBoundingClientRect reports — preventing the "nodes packed
-  // into a sub-rectangle" bounding-box appearance. ResizeObserver keeps them in sync.
   // L2 community-aware force micro-sim. Anchor springs hold the lobe /
   // periphery layout; edge springs pull tunnel-linked nodes toward a short
   // rest length so connected memory visibly drifts together and settles;
   // damping keeps the motion organic rather than oscillating. O(N + E) per
   // frame — no pairwise repulsion (the anchor scatter already provides
   // separation at this density).
+  //
+  // For large graphs (>2k nodes) edge springs are scaled down so anchors
+  // dominate — without this, inter-community edges collapse all communities
+  // into a single blob since K_EDGE > K_ANCHOR and there is no repulsion.
   function brainPhysicsStep(dt) {
-    var K_ANCHOR = 1.6;   // spring toward layout anchor (s^-2)
+    var K_ANCHOR = 2.4;   // spring toward layout anchor (s^-2)
     var K_EDGE = 2.2;     // spring along edges (s^-2), scaled by weight
     var REST = 26;        // edge rest length, px
     var DAMP = 0.90;      // per-frame velocity retention at 60fps
+    // Scale edge springs inversely with node count so large graphs keep
+    // their community structure instead of collapsing into a hairball.
+    var edgeScale = Math.min(1, 800 / Math.max(1, brainNodes.length));
+    var kEdge = K_EDGE * edgeScale;
     var i, e, s, t;
     for (i = 0; i < brainEdges.length; i++) {
       e = brainEdges[i];
@@ -1699,7 +1697,7 @@
       if (!s || !t) continue;
       var dx = t.x - s.x, dy = t.y - s.y;
       var d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      var f = K_EDGE * (d - REST) / d * (e.w || 0.5) * dt;
+      var f = kEdge * (d - REST) / d * (e.w || 0.5) * dt;
       s.vx += dx * f; s.vy += dy * f;
       t.vx -= dx * f; t.vy -= dy * f;
     }
@@ -1714,38 +1712,102 @@
     }
   }
 
+  // Point shader: each node is a screen-space circle with per-point size,
+  // color, and alpha. The fragment shader draws a soft-edged disc and applies
+  // per-point alpha for breathing, recency, selection dimming, and depth fog.
+  // Point vertex shader: size is in world-space units; the projection
+  // converts to screen pixels via the viewport height (resolution.y)
+  // so points remain a consistent angular size as you orbit.
+  var POINT_VS = [
+    'uniform float uPixelRatio;',
+    'uniform float uViewportH;',
+    'attribute float size;',
+    'attribute float alpha;',
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  vColor = color;',
+    '  vAlpha = alpha;',
+    '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+    '  gl_PointSize = size * uViewportH * uPixelRatio / -mv.z;',
+    '  gl_Position = projectionMatrix * mv;',
+    '}',
+  ].join('\n');
+  var POINT_FS = [
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  float d = length(gl_PointCoord - vec2(0.5));',
+    '  if (d > 0.5) discard;',
+    '  float edge = 1.0 - smoothstep(0.38, 0.5, d);',
+    '  gl_FragColor = vec4(vColor, vAlpha * edge);',
+    '}',
+  ].join('\n');
+
+  // Ripple ring shader: hollow expanding circle that fades as it grows.
+  // The `alpha` attribute carries (1 - age/duration) so the ring fades
+  // out over its lifecycle. The `size` attribute grows with age.
+  var RIPPLE_FS = [
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  float d = length(gl_PointCoord - vec2(0.5));',
+    '  if (d > 0.5) discard;',
+    // Hollow ring: only the outer band is visible.
+    '  float ring = smoothstep(0.32, 0.40, d) * (1.0 - smoothstep(0.44, 0.50, d));',
+    '  if (ring < 0.01) discard;',
+    '  gl_FragColor = vec4(vColor, vAlpha * ring);',
+    '}',
+  ].join('\n');
+
   function startBrainAnimation(container, W, H) {
     stopBrainAnimation();
-
-    var canvas = container.querySelector("canvas");
-    if (!canvas) {
-      canvas = document.createElement("canvas");
-      canvas.style.position = "absolute";
-      canvas.style.top = "0";
-      canvas.style.left = "0";
-      container.appendChild(canvas);
-    }
-    brainCanvas = canvas;
     brainW = W;
     brainH = H;
+    brainContainer = container;
 
-    // Explicit pixel CSS dimensions ensure the drawn coordinate space matches display.
-    // Using 100% would stretch the canvas when W/H don't match the container.
-    var dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(W * dpr);
-    canvas.height = Math.round(H * dpr);
-    canvas.style.width = W + "px";
-    canvas.style.height = H + "px";
-    brainCtx = canvas.getContext("2d");
-    brainCtx.scale(dpr, dpr);
+    // Scene — dark background.
+    brainScene = new THREE.Scene();
 
-    // Reset zoom to default view centered on the canvas.
-    brainZoomScale = 1; brainZoomX = W / 2; brainZoomY = H / 2;
-    brainZoomTS = 1;    brainZoomTX = W / 2; brainZoomTY = H / 2;
-    brainZoomedNode = null;
+    // Normalized world-space: the layout runs in pixel coordinates (0..W,
+    // 0..H) for physics, but the GPU geometry is centered at origin and
+    // scaled so the longest canvas axis maps to [-1, 1]. This keeps orbit,
+    // perspective, and point sizing well-behaved regardless of canvas size.
+    brainWorldScale = 2 / Math.max(W, H);  // px → world multiplier
+    brainWorldCX = W / 2;                   // pixel center X
+    brainWorldCY = H / 2;                   // pixel center Y
 
-    // Pre-build O(1) node lookup used by edge rendering, plus per-community
-    // pools used by the L5 estate-hash pulse fallback.
+    // Camera — looking down the -Z axis at origin; distance 2.4 shows
+    // the full [-1,1] scene with some margin in a 50° FOV.
+    var aspect = W / H;
+    brainCamera = new THREE.PerspectiveCamera(50, aspect, 0.01, 100);
+    // Camera further back to encompass the deeper z-range (-1.4).
+    brainCamera.position.set(0, 0, 3.2);
+    brainCamera.lookAt(0, 0, -0.4);
+
+    // WebGL renderer
+    brainGLRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    brainGLRenderer.setSize(W, H);
+    brainGLRenderer.setPixelRatio(window.devicePixelRatio);
+    brainGLRenderer.setClearColor(0x06070e, 1);
+    var glCanvas = brainGLRenderer.domElement;
+    glCanvas.style.position = 'absolute';
+    glCanvas.style.top = '0';
+    glCanvas.style.left = '0';
+    container.appendChild(glCanvas);
+
+    // OrbitControls — scroll-wheel zoom, drag to orbit, right-drag to pan.
+    brainControls = new OrbitControls(brainCamera, glCanvas);
+    // Orbit target at the midpoint of the z-range so rotation reveals depth.
+    brainControls.target.set(0, 0, -0.4);
+    brainControls.enableDamping = true;
+    brainControls.dampingFactor = 0.12;
+    brainControls.minDistance = 0.5;
+    brainControls.maxDistance = 8;
+    brainControls.zoomSpeed = 1.2;
+    brainControls.update();
+
+    // Pre-build node lookup + community pools.
     brainNodeMap = Object.create(null);
     brainCommPools = Object.create(null);
     brainNodes.forEach(function (n) {
@@ -1753,87 +1815,62 @@
       (brainCommPools[n.community] = brainCommPools[n.community] || []).push(n);
     });
 
-    // Painter-sorted draw lists (depends on brainNodeMap, so built here).
-    brainUpdateDrawOrder();
-
-    // Pre-build undirected adjacency map for O(1) hop-1/hop-2 neighbor lookups.
+    // Pre-build undirected adjacency map for hop-1/hop-2 lookups.
     brainAdjacency = Object.create(null);
     brainEdges.forEach(function (e) {
       (brainAdjacency[e.src] = brainAdjacency[e.src] || []).push(e.tgt);
       (brainAdjacency[e.tgt] = brainAdjacency[e.tgt] || []).push(e.src);
     });
 
-    // Drag-to-orbit (3D only): horizontal drag yaws the camera ±~17°,
-    // vertical drag tilts the strata pitch ±0.10; both spring back to the
-    // reading angle on release (lerp in the frame loop). A drag past 5px
-    // suppresses the click-select that fires on mouseup.
-    brainOrbit = { yaw: 0, pitch: 0, tyaw: 0, tpitch: 0, dragging: false, moved: 0 };
-    var orbLastX = 0, orbLastY = 0;
-    brainOrbitDown = function (e) {
-      if (!brain3D) return;
-      brainOrbit.dragging = true;
-      brainOrbit.moved = 0;
-      orbLastX = e.clientX; orbLastY = e.clientY;
-    };
-    brainOrbitMove = function (e) {
-      if (!brainOrbit.dragging) return;
-      var dx = e.clientX - orbLastX, dy = e.clientY - orbLastY;
-      orbLastX = e.clientX; orbLastY = e.clientY;
-      brainOrbit.moved += Math.abs(dx) + Math.abs(dy);
-      brainOrbit.tyaw = Math.max(-0.3, Math.min(0.3, brainOrbit.tyaw + dx * 0.003));
-      brainOrbit.tpitch = Math.max(-0.10, Math.min(0.10, brainOrbit.tpitch + dy * 0.0006));
-    };
-    brainOrbitUp = function () {
-      if (!brainOrbit.dragging) return;
-      brainOrbit.dragging = false;
-      // Spring back to the reading angle.
-      brainOrbit.tyaw = 0;
-      brainOrbit.tpitch = 0;
-    };
-    canvas.addEventListener("mousedown", brainOrbitDown);
-    window.addEventListener("mousemove", brainOrbitMove);
-    window.addEventListener("mouseup", brainOrbitUp);
+    brainRaycaster = new THREE.Raycaster();
+    // Threshold in world-space units — ~8px at default zoom.
+    brainRaycaster.params.Points.threshold = 8 * brainWorldScale;
 
-    // Click: zoom in on nearest node + select it; click same node or background to deselect.
-    brainClickHandler = function (e) {
-      // A completed orbit drag is not a selection click.
-      if (brainOrbit.moved > 5) { brainOrbit.moved = 0; return; }
-      var node = brainHitTest(e.offsetX, e.offsetY);
-      if (node && node !== brainZoomedNode) {
-        brainZoomedNode = node;
-        brainZoomTS = 3.5;
-        // Zoom centers on draw-space coordinates: in 3D that is the projected
-        // position (the zoom transform wraps the projected scene).
-        var zp = brainProject(node);
-        brainZoomTX = zp.x;
-        brainZoomTY = zp.y;
-        selectBrainNode(node);
+    // Build Three.js geometry for nodes and edges.
+    buildBrainPoints();
+    buildBrainLines();
+    buildRippleMesh();
+    buildTrailMesh();
+    brainRipples = [];
+    brainTrails = [];
+    brainLastPulseNode = null;
+
+    // HTML overlay for community labels.
+    brainLabelContainer = document.createElement('div');
+    brainLabelContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden;';
+    container.appendChild(brainLabelContainer);
+
+    // Click: raycaster hit → select node.
+    glCanvas.addEventListener('click', function (e) {
+      var rect = glCanvas.getBoundingClientRect();
+      brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      brainRaycaster.setFromCamera(brainPointer, brainCamera);
+      var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
+      if (hits.length > 0) {
+        var idx = hits[0].index;
+        var node = brainNodes[idx];
+        if (node && !brainHidden(node)) {
+          if (node === brainSelectedNode) {
+            selectBrainNode(null);
+          } else {
+            selectBrainNode(node);
+          }
+        }
       } else {
-        brainZoomedNode = null;
-        brainZoomTS = 1;
-        brainZoomTX = brainW / 2;
-        brainZoomTY = brainH / 2;
         selectBrainNode(null);
       }
-    };
-    canvas.addEventListener("click", brainClickHandler);
+    });
 
-    // Escape: zoom out and clear selection.
-    brainKeyHandler = function (e) {
-      if (e.key === "Escape" && brainZoomedNode) {
-        brainZoomedNode = null;
-        brainZoomTS = 1;
-        brainZoomTX = brainW / 2;
-        brainZoomTY = brainH / 2;
-        selectBrainNode(null);
-      }
-    };
-    document.addEventListener("keydown", brainKeyHandler);
+    // Escape clears selection.
+    document.addEventListener('keydown', function brainKey(e) {
+      if (e.key === 'Escape' && brainSelectedNode) selectBrainNode(null);
+    });
 
-    // ResizeObserver: scale node positions + canvas dimensions when container resizes.
-    if (typeof ResizeObserver !== "undefined") {
+    // ResizeObserver: scale node positions + renderer when container resizes.
+    if (typeof ResizeObserver !== 'undefined') {
       brainResizeObs = new ResizeObserver(function (entries) {
-        if (!brainCanvas) return;
+        if (!brainGLRenderer) return;
         var entry = entries[0];
         var newW = entry.contentRect.width;
         var newH = entry.contentRect.height;
@@ -1841,18 +1878,19 @@
         var sx = newW / brainW, sy = newH / brainH;
         brainNodes.forEach(function (n) {
           n.x *= sx; n.y *= sy;
-          n.ax *= sx; n.ay *= sy;  // physics anchors track the layout scale
+          n.ax *= sx; n.ay *= sy;
         });
-        // Translate zoom focus proportionally.
-        brainZoomX *= sx; brainZoomY *= sy;
-        brainZoomTX *= sx; brainZoomTY *= sy;
         brainW = newW; brainH = newH;
-        var d = window.devicePixelRatio || 1;
-        brainCanvas.width = Math.round(newW * d);
-        brainCanvas.height = Math.round(newH * d);
-        brainCanvas.style.width = newW + "px";
-        brainCanvas.style.height = newH + "px";
-        brainCtx.setTransform(d, 0, 0, d, 0, 0);
+        brainWorldScale = 2 / Math.max(newW, newH);
+        brainWorldCX = newW / 2;
+        brainWorldCY = newH / 2;
+        brainCamera.aspect = newW / newH;
+        brainCamera.updateProjectionMatrix();
+        brainGLRenderer.setSize(newW, newH);
+        // Update shader uniform for point sizing.
+        if (brainPointsMesh) {
+          brainPointsMesh.material.uniforms.uViewportH.value = newH;
+        }
       });
       brainResizeObs.observe(container);
     }
@@ -1865,43 +1903,445 @@
       brainT += dt;
       tickBrainDecay(dt);
       brainPhysicsStep(dt);
-      // Lerp zoom toward target each frame (smooth ease-out approach).
-      var ease = 1 - Math.pow(0.92, dt * 60);
-      brainZoomScale += (brainZoomTS - brainZoomScale) * ease;
-      brainZoomX += (brainZoomTX - brainZoomX) * ease;
-      brainZoomY += (brainZoomTY - brainZoomY) * ease;
-      // Orbit lerp: while dragging, track the hand closely; after release,
-      // a slower spring carries the camera back to the reading angle.
-      var oease = brainOrbit.dragging ? ease : 1 - Math.pow(0.96, dt * 60);
-      brainOrbit.yaw += (brainOrbit.tyaw - brainOrbit.yaw) * oease;
-      brainOrbit.pitch += (brainOrbit.tpitch - brainOrbit.pitch) * oease;
-      drawBrainFrame(brainCtx, brainW, brainH);
+      brainControls.update();
+      updateBrainFrame();
+      updateRipplesAndTrails(dt);
+      brainGLRenderer.render(brainScene, brainCamera);
       brainAnimId = requestAnimationFrame(frame);
     }
     brainAnimId = requestAnimationFrame(frame);
   }
 
-  // Find the nearest node to canvas CSS coordinates (ex, ey), accounting for zoom.
-  // Returns the node or null if nothing is within the click radius.
-  function brainHitTest(ex, ey) {
-    // Invert zoom transform: screen coord → draw-space coord.
-    // drawn_x = (draw.x - brainZoomX) * scale + W/2  →  draw.x = (ex - W/2) / scale + brainZoomX
-    var logX = (ex - brainW / 2) / brainZoomScale + brainZoomX;
-    var logY = (ey - brainH / 2) / brainZoomScale + brainZoomY;
-    var HIT = 18 / brainZoomScale; // 18px hit radius in screen space
-    var best = null, bestD = HIT;
-    brainNodes.forEach(function (n) {
-      // Hidden entities (dead in live view, unborn/dead at the playhead)
-      // are not drawn, so they must not capture clicks either.
-      if (brainHidden(n)) return;
-      // Compare against the projected position — in 3D nodes are drawn at
-      // their perspective coordinates, not their logical layout coordinates.
-      var p = brainProject(n);
-      var dx = p.x - logX, dy = p.y - logY;
-      var d = Math.sqrt(dx * dx + dy * dy);
-      if (d < bestD) { best = n; bestD = d; }
+  // Build THREE.Points mesh from brainNodes.
+  function buildBrainPoints() {
+    if (brainPointsMesh) { brainScene.remove(brainPointsMesh); brainPointsMesh.geometry.dispose(); }
+    var N = brainNodes.length;
+    var positions = new Float32Array(N * 3);
+    var colors = new Float32Array(N * 3);
+    var sizes = new Float32Array(N);
+    var alphas = new Float32Array(N);
+    // Z depth: in 3D mode, z3 ∈ [0,1] maps to [0, -0.6] in world-space
+    // (keystones at z=0, periphery sinks ~60% of the visible range).
+    // Z depth: 1.4 world units gives the z-axis real visual weight when
+    // orbiting — keystones at z=0, periphery sinks to z=-1.4.
+    var zDepth = brain3D ? 1.4 : 0;
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
+    for (var i = 0; i < N; i++) {
+      var n = brainNodes[i];
+      // Pixel → world: center at origin, scale to [-1,1], flip Y.
+      positions[i * 3]     = (n.x - cx) * ws;
+      positions[i * 3 + 1] = (cy - n.y) * ws;   // Y-flip
+      positions[i * 3 + 2] = -(n.z3 || 0) * zDepth;
+      var style = nounStyle(n.nounType);
+      var rgb = n.rgb || style.rgb;
+      // Desaturate colors: mix 40% toward gray so the palette reads as
+      // tinted rather than neon. The gray target is the luminance of the
+      // original color, preserving relative brightness.
+      var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
+      var sat = 0.6;  // 0 = full gray, 1 = full color
+      colors[i * 3]     = lum + (rgb[0] / 255 - lum) * sat;
+      colors[i * 3 + 1] = lum + (rgb[1] / 255 - lum) * sat;
+      colors[i * 3 + 2] = lum + (rgb[2] / 255 - lum) * sat;
+      // Smaller dots: ~3px base at default zoom.
+      sizes[i] = (style.r * (1 + n.centrality * 1.2)) * 0.005;
+      alphas[i] = style.a;
+    }
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+    geom.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+    var mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uPixelRatio: { value: window.devicePixelRatio || 1 },
+        uViewportH:  { value: brainH },
+      },
+      vertexShader: POINT_VS,
+      fragmentShader: POINT_FS,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
     });
-    return best;
+    brainPointsMesh = new THREE.Points(geom, mat);
+    brainScene.add(brainPointsMesh);
+  }
+
+  // Build THREE.LineSegments mesh from brainEdges.
+  function buildBrainLines() {
+    if (brainEdgesMesh) { brainScene.remove(brainEdgesMesh); brainEdgesMesh.geometry.dispose(); }
+    var E = brainEdges.length;
+    var positions = new Float32Array(E * 6);
+    var colors = new Float32Array(E * 6);
+    var zDepth = brain3D ? 1.4 : 0;
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
+    for (var i = 0; i < E; i++) {
+      var e = brainEdges[i];
+      var s = brainNodeMap[e.src], t = brainNodeMap[e.tgt];
+      if (!s || !t) continue;
+      positions[i * 6]     = (s.x - cx) * ws;
+      positions[i * 6 + 1] = (cy - s.y) * ws;
+      positions[i * 6 + 2] = -(s.z3 || 0) * zDepth;
+      positions[i * 6 + 3] = (t.x - cx) * ws;
+      positions[i * 6 + 4] = (cy - t.y) * ws;
+      positions[i * 6 + 5] = -(t.z3 || 0) * zDepth;
+      var col = e.type === 'tunnel' ? [0.86, 0.88, 0.94]
+              : e.type === 'lattice' ? [1.0, 0.71, 0.24]
+              : [0.23, 0.71, 1.0];
+      // Dim edges by the degree of their highest-degree endpoint so hub
+      // nodes don't accumulate hundreds of near-white edges into a comet.
+      var sDeg = (brainAdjacency[e.src] || []).length;
+      var tDeg = (brainAdjacency[e.tgt] || []).length;
+      var maxDeg = Math.max(sDeg, tDeg, 1);
+      var degDim = Math.min(1, 8 / Math.sqrt(maxDeg));
+      colors[i * 6]     = col[0] * degDim; colors[i * 6 + 1] = col[1] * degDim; colors[i * 6 + 2] = col[2] * degDim;
+      colors[i * 6 + 3] = col[0] * degDim; colors[i * 6 + 4] = col[1] * degDim; colors[i * 6 + 5] = col[2] * degDim;
+    }
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    // Base opacity scales inversely with edge count. The per-vertex color
+    // channel carries per-edge dimming (hub-degree scaling, selection state)
+    // so this base just sets the floor.
+    var edgeOpacity = Math.min(0.15, 30 / Math.max(1, E));
+    var mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: edgeOpacity, depthWrite: false });
+    brainEdgesMesh = new THREE.LineSegments(geom, mat);
+    brainScene.add(brainEdgesMesh);
+  }
+
+  // Build the ripple ring mesh — fixed-size buffer for RIPPLE_MAX concurrent
+  // ripple rings. Each ripple is a single point rendered as a hollow expanding
+  // disc via the RIPPLE_FS shader.
+  function buildRippleMesh() {
+    if (brainRippleMesh) { brainScene.remove(brainRippleMesh); brainRippleMesh.geometry.dispose(); }
+    var N = RIPPLE_MAX;
+    var pos = new Float32Array(N * 3);
+    var col = new Float32Array(N * 3);
+    var siz = new Float32Array(N);
+    var alp = new Float32Array(N);
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geom.setAttribute('size', new THREE.BufferAttribute(siz, 1));
+    geom.setAttribute('alpha', new THREE.BufferAttribute(alp, 1));
+    var mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uPixelRatio: { value: window.devicePixelRatio || 1 },
+        uViewportH:  { value: brainH },
+      },
+      vertexShader: POINT_VS,
+      fragmentShader: RIPPLE_FS,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+    });
+    brainRippleMesh = new THREE.Points(geom, mat);
+    brainScene.add(brainRippleMesh);
+  }
+
+  // Build the constellation trail mesh — TRAIL_MAX line segments that glow
+  // between consecutive same-community events then fade.
+  function buildTrailMesh() {
+    if (brainTrailMesh) { brainScene.remove(brainTrailMesh); brainTrailMesh.geometry.dispose(); }
+    var N = TRAIL_MAX;
+    var pos = new Float32Array(N * 6);
+    var col = new Float32Array(N * 6);
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    var mat = new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false,
+    });
+    brainTrailMesh = new THREE.LineSegments(geom, mat);
+    brainScene.add(brainTrailMesh);
+  }
+
+  // Per-frame ripple + trail animation update. Called from updateBrainFrame.
+  function updateRipplesAndTrails(dt) {
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
+    var zDepth = brain3D ? 1.4 : 0;
+
+    // --- Ripples ---
+    if (brainRippleMesh) {
+      var rPos = brainRippleMesh.geometry.attributes.position.array;
+      var rCol = brainRippleMesh.geometry.attributes.color.array;
+      var rSiz = brainRippleMesh.geometry.attributes.size.array;
+      var rAlp = brainRippleMesh.geometry.attributes.alpha.array;
+      // Age all active ripples; remove expired ones.
+      for (var i = brainRipples.length - 1; i >= 0; i--) {
+        brainRipples[i].age += dt;
+        if (brainRipples[i].age >= RIPPLE_DURATION) brainRipples.splice(i, 1);
+      }
+      for (var i = 0; i < RIPPLE_MAX; i++) {
+        var r = brainRipples[i];
+        if (!r) {
+          rSiz[i] = 0; rAlp[i] = 0;
+          continue;
+        }
+        var t = r.age / RIPPLE_DURATION;  // 0→1 over lifecycle
+        // Position tracks the node (which drifts under physics).
+        var node = brainNodeMap[r.nodeId];
+        if (node) {
+          rPos[i * 3]     = (node.x - cx) * ws;
+          rPos[i * 3 + 1] = (cy - node.y) * ws;
+          rPos[i * 3 + 2] = -(node.z3 || 0) * zDepth;
+        }
+        // Ring expands from 0.02 to 0.12 world units; alpha fades out.
+        rSiz[i] = 0.02 + t * 0.10;
+        rAlp[i] = (1 - t) * 0.8;
+        rCol[i * 3]     = r.rgb[0]; rCol[i * 3 + 1] = r.rgb[1]; rCol[i * 3 + 2] = r.rgb[2];
+      }
+      brainRippleMesh.geometry.attributes.position.needsUpdate = true;
+      brainRippleMesh.geometry.attributes.color.needsUpdate = true;
+      brainRippleMesh.geometry.attributes.size.needsUpdate = true;
+      brainRippleMesh.geometry.attributes.alpha.needsUpdate = true;
+    }
+
+    // --- Trails ---
+    if (brainTrailMesh) {
+      var tPos = brainTrailMesh.geometry.attributes.position.array;
+      var tCol = brainTrailMesh.geometry.attributes.color.array;
+      for (var i = brainTrails.length - 1; i >= 0; i--) {
+        brainTrails[i].age += dt;
+        if (brainTrails[i].age >= TRAIL_DURATION) brainTrails.splice(i, 1);
+      }
+      for (var i = 0; i < TRAIL_MAX; i++) {
+        var tr = brainTrails[i];
+        if (!tr) {
+          // Zero-length invisible line.
+          tPos[i * 6] = -99; tPos[i * 6 + 1] = -99; tPos[i * 6 + 2] = -99;
+          tPos[i * 6 + 3] = -99; tPos[i * 6 + 4] = -99; tPos[i * 6 + 5] = -99;
+          tCol[i * 6] = 0; tCol[i * 6 + 1] = 0; tCol[i * 6 + 2] = 0;
+          tCol[i * 6 + 3] = 0; tCol[i * 6 + 4] = 0; tCol[i * 6 + 5] = 0;
+          continue;
+        }
+        var t = tr.age / TRAIL_DURATION;
+        var fade = (1 - t) * (1 - t);  // quadratic fade for a gentle tail
+        // Track node positions so trails follow physics drift.
+        var n1 = brainNodeMap[tr.fromId], n2 = brainNodeMap[tr.toId];
+        if (n1) {
+          tPos[i * 6]     = (n1.x - cx) * ws;
+          tPos[i * 6 + 1] = (cy - n1.y) * ws;
+          tPos[i * 6 + 2] = -(n1.z3 || 0) * zDepth;
+        }
+        if (n2) {
+          tPos[i * 6 + 3] = (n2.x - cx) * ws;
+          tPos[i * 6 + 4] = (cy - n2.y) * ws;
+          tPos[i * 6 + 5] = -(n2.z3 || 0) * zDepth;
+        }
+        tCol[i * 6]     = tr.rgb[0] * fade; tCol[i * 6 + 1] = tr.rgb[1] * fade; tCol[i * 6 + 2] = tr.rgb[2] * fade;
+        tCol[i * 6 + 3] = tr.rgb[0] * fade; tCol[i * 6 + 4] = tr.rgb[1] * fade; tCol[i * 6 + 5] = tr.rgb[2] * fade;
+      }
+      brainTrailMesh.geometry.attributes.position.needsUpdate = true;
+      brainTrailMesh.geometry.attributes.color.needsUpdate = true;
+    }
+  }
+
+  // Per-frame update: sync node positions, colors, and alphas into the GPU
+  // buffers, update edge positions, and reposition HTML labels.
+  function updateBrainFrame() {
+    brainNowMs = topoPlay.active ? topoPlay.playheadMs : Date.now();
+    if (!brainPointsMesh) return;
+    var geom = brainPointsMesh.geometry;
+    var pos = geom.attributes.position.array;
+    var col = geom.attributes.color.array;
+    var siz = geom.attributes.size.array;
+    var alp = geom.attributes.alpha.array;
+    var hasSel = !!brainSelectedNode;
+    var N = brainNodes.length;
+    var zDepth = brain3D ? 1.4 : 0;
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
+    for (var i = 0; i < N; i++) {
+      var n = brainNodes[i];
+      pos[i * 3]     = (n.x - cx) * ws;
+      pos[i * 3 + 1] = (cy - n.y) * ws;
+      pos[i * 3 + 2] = -(n.z3 || 0) * zDepth;
+      var style = nounStyle(n.nounType);
+      var rgb = n.rgb || style.rgb;
+      var breath = 0.82 + 0.18 * Math.sin(brainT * 0.72 + n.breathPhase);
+      var alpha = style.a * breath;
+      var mod = 1;
+      if (hasSel) {
+        // Gentler dimming: unselected nodes stay at 30% (not 12%).
+        if (n === brainSelectedNode || brainHop1[n.id]) { /* full */ }
+        else if (brainHop2[n.id]) mod *= 0.6;
+        else mod *= 0.3;
+      }
+      mod *= recencyFactor(n, brainNowMs);
+      if (brain3D) mod *= 1 - 0.35 * (n.z3 || 0);
+      alpha *= mod;
+      if (brainDead(n)) alpha = 0;
+      // Desaturate: mix toward luminance gray, same ratio as buildBrainPoints.
+      var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
+      var sat = 0.6;
+      var pr = lum + (rgb[0] / 255 - lum) * sat;
+      var pg = lum + (rgb[1] / 255 - lum) * sat;
+      var pb = lum + (rgb[2] / 255 - lum) * sat;
+      if (n.pulseOrange > 0.01) {
+        var t2 = n.pulseOrange;
+        pr = pr + (1 - pr) * t2 * 0.6;
+        pg = pg + (0.55 - pg) * t2 * 0.6;
+        pb = pb * (1 - t2 * 0.4);
+        siz[i] = (style.r * (1 + n.centrality * 1.2) + n.pulseOrange * 6) * 0.005;
+      } else if (n.pulseBlue > 0.01) {
+        pr = pr + (0.23 - pr) * n.pulseBlue * 0.5;
+        pg = pg + (0.71 - pg) * n.pulseBlue * 0.5;
+        pb = pb + (1.0 - pb) * n.pulseBlue * 0.5;
+        siz[i] = (style.r * (1 + n.centrality * 1.2) + n.pulseBlue * 6) * 0.005;
+      } else {
+        siz[i] = (style.r * (1 + n.centrality * 1.2)) * 0.005;
+      }
+      col[i * 3] = pr; col[i * 3 + 1] = pg; col[i * 3 + 2] = pb;
+      alp[i] = alpha;
+    }
+    geom.attributes.position.needsUpdate = true;
+    geom.attributes.color.needsUpdate = true;
+    geom.attributes.size.needsUpdate = true;
+    geom.attributes.alpha.needsUpdate = true;
+
+    // Update edge positions from current node positions.
+    if (brainEdgesMesh) {
+      var epos = brainEdgesMesh.geometry.attributes.position.array;
+      var ecol = brainEdgesMesh.geometry.attributes.color.array;
+      var E = brainEdges.length;
+      var eZDepth = brain3D ? 1.4 : 0;
+      var eWs = brainWorldScale, eCx = brainWorldCX, eCy = brainWorldCY;
+      // Off-screen collapse point for hidden edges.
+      var hideX = -99, hideY = -99, hideZ = -99;
+      for (var j = 0; j < E; j++) {
+        var e = brainEdges[j];
+        var s = brainNodeMap[e.src], t2e = brainNodeMap[e.tgt];
+        if (!s || !t2e) {
+          // Missing node lookup: collapse to off-screen degenerate line.
+          epos[j * 6] = hideX; epos[j * 6 + 1] = hideY; epos[j * 6 + 2] = hideZ;
+          epos[j * 6 + 3] = hideX; epos[j * 6 + 4] = hideY; epos[j * 6 + 5] = hideZ;
+          ecol[j * 6] = 0; ecol[j * 6 + 1] = 0; ecol[j * 6 + 2] = 0;
+          ecol[j * 6 + 3] = 0; ecol[j * 6 + 4] = 0; ecol[j * 6 + 5] = 0;
+          continue;
+        }
+        var hidden = brainDead(s) || brainDead(t2e);
+        if (e.deadMs && (topoPlay.active ? e.deadMs <= brainNowMs : true)) hidden = true;
+        if (hidden) {
+          epos[j * 6] = hideX; epos[j * 6 + 1] = hideY; epos[j * 6 + 2] = hideZ;
+          epos[j * 6 + 3] = hideX; epos[j * 6 + 4] = hideY; epos[j * 6 + 5] = hideZ;
+          ecol[j * 6] = 0; ecol[j * 6 + 1] = 0; ecol[j * 6 + 2] = 0;
+          ecol[j * 6 + 3] = 0; ecol[j * 6 + 4] = 0; ecol[j * 6 + 5] = 0;
+          continue;
+        }
+        epos[j * 6]     = (s.x - eCx) * eWs;
+        epos[j * 6 + 1] = (eCy - s.y) * eWs;
+        epos[j * 6 + 2] = -(s.z3 || 0) * eZDepth;
+        epos[j * 6 + 3] = (t2e.x - eCx) * eWs;
+        epos[j * 6 + 4] = (eCy - t2e.y) * eWs;
+        epos[j * 6 + 5] = -(t2e.z3 || 0) * eZDepth;
+        // Selection-aware and degree-aware edge dimming via vertex color.
+        var isTunnel = e.type === 'tunnel';
+        var isLattice = e.type === 'lattice';
+        // Degree-based dimming: edges at hub nodes (high degree) are
+        // individually fainter so hundreds of overlapping edges don't
+        // stack into a bright comet at the hub vertex.
+        var sDeg = (brainAdjacency[e.src] || []).length;
+        var tDeg = (brainAdjacency[e.tgt] || []).length;
+        var maxDeg = Math.max(sDeg, tDeg, 1);
+        var degDim = Math.min(1, 8 / Math.sqrt(maxDeg));
+        var ea = degDim;
+        if (hasSel) {
+          var srcCore = e.src === brainSelectedNode.id || brainHop1[e.src];
+          var tgtCore = e.tgt === brainSelectedNode.id || brainHop1[e.tgt];
+          if (srcCore && tgtCore) { /* full degDim */ }
+          else if (srcCore || tgtCore || brainHop2[e.src] || brainHop2[e.tgt]) ea *= 0.3;
+          else ea *= 0.05;
+        }
+        var bc = isTunnel ? [0.86, 0.88, 0.94] : isLattice ? [1.0, 0.71, 0.24] : [0.23, 0.71, 1.0];
+        ecol[j * 6] = bc[0] * ea; ecol[j * 6 + 1] = bc[1] * ea; ecol[j * 6 + 2] = bc[2] * ea;
+        ecol[j * 6 + 3] = bc[0] * ea; ecol[j * 6 + 4] = bc[1] * ea; ecol[j * 6 + 5] = bc[2] * ea;
+      }
+      brainEdgesMesh.geometry.attributes.position.needsUpdate = true;
+      brainEdgesMesh.geometry.attributes.color.needsUpdate = true;
+    }
+
+    // Update HTML label overlays for community lobes.
+    updateBrainLabels();
+  }
+
+  // Project a world-space point to screen-space for HTML label positioning.
+  function worldToScreen(x, y, z) {
+    var v = new THREE.Vector3(x, y, z);
+    v.project(brainCamera);
+    return {
+      x: (v.x * 0.5 + 0.5) * brainW,
+      y: (-v.y * 0.5 + 0.5) * brainH,
+      visible: v.z < 1,
+    };
+  }
+
+  // Community lobe labels as HTML overlays — crisp text at any zoom.
+  function updateBrainLabels() {
+    var ranks = Object.keys(brainLobeLabels);
+    // Rebuild label elements if count changed.
+    if (brainLabelEls.length !== ranks.length && brainLabelContainer) {
+      brainLabelContainer.innerHTML = '';
+      brainLabelEls = [];
+      ranks.forEach(function () {
+        var lbl = document.createElement('div');
+        lbl.style.cssText = 'position:absolute;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;'
+          + 'color:rgba(232,234,240,0.5);letter-spacing:1.5px;text-transform:uppercase;white-space:nowrap;';
+        brainLabelContainer.appendChild(lbl);
+        brainLabelEls.push(lbl);
+      });
+    }
+    // Position each label at its lobe centroid.
+    var groups = Object.create(null);
+    brainNodes.forEach(function (n) {
+      if (!n.lobe || brainLobeLabels[n.community] === undefined) return;
+      (groups[n.community] = groups[n.community] || []).push(n);
+    });
+    ranks.forEach(function (rank, ri) {
+      var lbl = brainLabelEls[ri];
+      if (!lbl) return;
+      var members = groups[rank];
+      if (!members || !members.length) { lbl.style.display = 'none'; return; }
+      var lCx = 0, lCy = 0, lCz = 0;
+      var lblZDepth = brain3D ? 1.4 : 0;
+      var lWs = brainWorldScale, lWcx = brainWorldCX, lWcy = brainWorldCY;
+      members.forEach(function (n) {
+        lCx += n.x; lCy += n.y;
+        lCz += -(n.z3 || 0) * lblZDepth;
+      });
+      lCx /= members.length; lCy /= members.length; lCz /= members.length;
+      var spread = members.reduce(function (s, n) {
+        return s + Math.hypot(n.x - lCx, n.y - lCy);
+      }, 0) / members.length;
+      // Convert pixel centroid to world-space for projection, placing
+      // the label above the lobe centroid.
+      var wx = (lCx - lWcx) * lWs;
+      var wy = (lWcy - lCy) * lWs + spread * lWs * 1.2;
+      var sp = worldToScreen(wx, wy, lCz);
+      if (!sp.visible) { lbl.style.display = 'none'; return; }
+      lbl.style.display = '';
+      lbl.style.left = sp.x + 'px';
+      lbl.style.top = sp.y + 'px';
+      lbl.style.transform = 'translate(-50%, -100%)';
+      var col = members[0].rgb || BRAIN_COMM_COLORS[parseInt(rank, 10) % BRAIN_COMM_COLORS.length];
+      lbl.innerHTML = '<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:rgb('
+        + col[0] + ',' + col[1] + ',' + col[2] + ');margin-right:6px;vertical-align:middle;opacity:0.65"></span>'
+        + String(brainLobeLabels[rank]).toUpperCase();
+    });
+  }
+
+  // Hit test via raycaster — not needed externally, selection uses the
+  // click handler's inline raycaster. Provided for compatibility.
+  function brainHitTest(ex, ey) {
+    if (!brainPointsMesh || !brainGLRenderer) return null;
+    var rect = brainGLRenderer.domElement.getBoundingClientRect();
+    brainPointer.x = ((ex - rect.left) / rect.width) * 2 - 1;
+    brainPointer.y = -((ey - rect.top) / rect.height) * 2 + 1;
+    brainRaycaster.setFromCamera(brainPointer, brainCamera);
+    var hits = brainRaycaster.intersectObject(brainPointsMesh);
+    if (hits.length > 0) {
+      var node = brainNodes[hits[0].index];
+      if (node && !brainHidden(node)) return node;
+    }
+    return null;
   }
 
   // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from brainAdjacency.
@@ -1923,16 +2363,44 @@
   function stopBrainAnimation() {
     if (brainAnimId) { cancelAnimationFrame(brainAnimId); brainAnimId = null; }
     if (brainResizeObs) { brainResizeObs.disconnect(); brainResizeObs = null; }
-    if (brainCanvas && brainClickHandler) brainCanvas.removeEventListener("click", brainClickHandler);
-    if (brainKeyHandler) document.removeEventListener("keydown", brainKeyHandler);
-    if (brainCanvas && brainOrbitDown) brainCanvas.removeEventListener("mousedown", brainOrbitDown);
-    if (brainOrbitMove) window.removeEventListener("mousemove", brainOrbitMove);
-    if (brainOrbitUp) window.removeEventListener("mouseup", brainOrbitUp);
-    brainOrbitDown = null; brainOrbitMove = null; brainOrbitUp = null;
-    brainClickHandler = null; brainKeyHandler = null;
-    brainZoomedNode = null; brainZoomScale = 1; brainZoomTS = 1;
+    if (brainPointsMesh) {
+      brainPointsMesh.geometry.dispose();
+      brainPointsMesh.material.dispose();
+      brainScene.remove(brainPointsMesh);
+      brainPointsMesh = null;
+    }
+    if (brainEdgesMesh) {
+      brainEdgesMesh.geometry.dispose();
+      brainEdgesMesh.material.dispose();
+      brainScene.remove(brainEdgesMesh);
+      brainEdgesMesh = null;
+    }
+    if (brainRippleMesh) {
+      brainRippleMesh.geometry.dispose();
+      brainRippleMesh.material.dispose();
+      brainScene.remove(brainRippleMesh);
+      brainRippleMesh = null;
+    }
+    if (brainTrailMesh) {
+      brainTrailMesh.geometry.dispose();
+      brainTrailMesh.material.dispose();
+      brainScene.remove(brainTrailMesh);
+      brainTrailMesh = null;
+    }
+    brainRipples = []; brainTrails = []; brainLastPulseNode = null;
+    if (brainControls) { brainControls.dispose(); brainControls = null; }
+    if (brainGLRenderer) {
+      brainGLRenderer.dispose();
+      if (brainGLRenderer.domElement && brainGLRenderer.domElement.parentNode)
+        brainGLRenderer.domElement.parentNode.removeChild(brainGLRenderer.domElement);
+      brainGLRenderer = null;
+    }
+    if (brainLabelContainer && brainLabelContainer.parentNode) {
+      brainLabelContainer.parentNode.removeChild(brainLabelContainer);
+    }
+    brainLabelContainer = null; brainLabelEls = [];
     brainSelectedNode = null; brainHop1 = Object.create(null); brainHop2 = Object.create(null); brainAdjacency = Object.create(null);
-    brainCanvas = null; brainCtx = null;
+    brainScene = null; brainCamera = null; brainContainer = null;
   }
 
   // Decay pulse and glow magnitudes each frame — keeps magnitudes from needing
@@ -1959,91 +2427,61 @@
     return 0.35 + 0.65 * Math.exp(-(age - BRAIN_HOUR_MS) / (7 * BRAIN_DAY_MS));
   }
 
-  // L4 depth assignment — z3 ∈ [0,1] per node: newest 0 (surface), oldest 1
-  // (deep). Birth instant prefers createdTs (ingest clock) over lastActiveTs.
-  // Nodes without any timestamp (the synthetic path) get a stable pseudo-random
-  // depth derived from breathPhase so the 3D toggle still reads as strata.
-  // Two distinct time semantics:
-  //   birthMs (createdMs preferred)  → the alive(t) playback filter: when the
-  //                                    entity entered the estate.
-  //   dormancy (lastMs preferred)    → the strata Z axis: recently-touched
-  //                                    memory floats at the surface, dormant
-  //                                    memory settles into the depths. This is
-  //                                    the "memory sediment" reading — depth is
-  //                                    how long since the drawer was active,
-  //                                    not how long since it was filed.
+  // Structural depth: z3 ∈ [0,1] = hop distance from the estate's keystone
+  // nodes (top-centrality pillars). Keystones float at z=0, periphery sinks
+  // to z=1. Multi-source BFS from the top-K centrality nodes; nodes
+  // unreachable from any keystone (disconnected fragments) get z3=1.
+  // Also sets birthMs for the L5 alive(t) playback filter.
   function brainAssignDepth(nowMs) {
-    var minA = Infinity, maxA = -Infinity;
+    // Timestamp bookkeeping for L5 playback (independent of z-mapping).
     brainNodes.forEach(function (n) {
       n.birthMs = n.createdMs || n.lastMs || null;
-      n.dormMs = n.lastMs || n.createdMs || null;
-      if (n.dormMs) {
-        var a = nowMs - n.dormMs;
-        if (a < minA) minA = a;
-        if (a > maxA) maxA = a;
-      }
     });
-    var range = Math.max(1, maxA - minA);
-    brainNodes.forEach(function (n) {
-      n.z3 = n.dormMs
-        ? (nowMs - n.dormMs - minA) / range
-        : n.breathPhase / (Math.PI * 2);
+
+    // Find the top-K keystone nodes by centrality.
+    var K = Math.max(1, Math.min(5, Math.ceil(brainNodes.length * 0.02)));
+    var sorted = brainNodes.slice().sort(function (a, b) {
+      return (b.centrality || 0) - (a.centrality || 0);
     });
-  }
+    var seeds = sorted.slice(0, K);
 
-  // L4 perspective projection constants. PERSP is the camera distance and
-  // DEPTH the pixel extent z3 maps onto — together they give the deepest
-  // stratum a scale of PERSP/(PERSP+DEPTH) ≈ 0.57.
-  var BRAIN_PERSP = 700;
-  var BRAIN_DEPTH = 520;
+    // Build adjacency from brainEdges for BFS.
+    var adj = Object.create(null);
+    brainEdges.forEach(function (e) {
+      (adj[e.src] = adj[e.src] || []).push(e.tgt);
+      (adj[e.tgt] = adj[e.tgt] || []).push(e.src);
+    });
 
-  // Project a node's logical (x, y, z3) to draw coordinates. Identity in 2D.
-  // 3D: fixed tilt camera looking down ~35° — points shrink and converge
-  // toward an upper-middle vanishing center while deeper strata are pushed
-  // down (tilt factor 0.22·H) and sway ±3° with time for parallax. Drag adds
-  // a user yaw (±~17°) and pitch (±0.1 tilt) on top, springing back to the
-  // reading angle on release (the orbit lerp lives in the frame loop).
-  //
-  // NEAR-PLANE SAFETY: the formula s = BRAIN_PERSP / (BRAIN_PERSP + z·BRAIN_DEPTH)
-  // is bounded [0.57, 1.0] for z ∈ [0,1], but z3 can drift outside that range in
-  // edge cases (future-timestamped nodes, physics overshoot, floating-point
-  // accumulation). Hard-clamping s prevents baseR from blowing up and producing
-  // viewport-spanning radial-gradient fills that render as giant flashing sheets.
-  // s_max = 1.0 for 2D-parity; s_min = 0.05 prevents degenerate near-zero draws.
-  function brainProject(n) {
-    if (!brain3D) return { x: n.x, y: n.y, s: 1, culled: false };
-    var z = n.z3 || 0;
-    var denom = BRAIN_PERSP + z * BRAIN_DEPTH;
-    // Near-plane guard: if denom is at or below zero the node is behind the
-    // camera; cull it entirely rather than inverting or exploding the scale.
-    if (denom <= 0) return { x: n.x, y: n.y, s: 0, culled: true };
-    var s = Math.min(1.0, Math.max(0.05, BRAIN_PERSP / denom));
-    var vx = brainW / 2, vy = brainH * 0.32;
-    var drift = Math.sin(brainT * 0.15) * (3 * Math.PI / 180) + brainOrbit.yaw;
-    var px = vx + (n.x - vx) * s + drift * z * brainW * 0.35;
-    var py = vy + (n.y - vy) * s + z * brainH * (0.22 + brainOrbit.pitch);
-    return { x: px, y: py, s: s, culled: false };
-  }
-
-  // Deepest endpoint of an edge — used for painter sorting and depth fog.
-  function brainEdgeZ(e) {
-    var s = brainNodeMap[e.src], t = brainNodeMap[e.tgt];
-    return Math.max(s ? (s.z3 || 0) : 0, t ? (t.z3 || 0) : 0);
-  }
-
-  // Rebuild painter-sorted draw lists. In 3D the deepest nodes/edges draw
-  // first so surface strata occlude them; in 2D the original arrays are used
-  // unsorted. Requires brainNodeMap (called after startBrainAnimation builds
-  // it, and again from the #topoDimToggle handler).
-  function brainUpdateDrawOrder() {
-    if (brain3D) {
-      brainDrawOrder = brainNodes.slice().sort(function (a, b) { return (b.z3 || 0) - (a.z3 || 0); });
-      brainEdgesDraw = brainEdges.slice().sort(function (a, b) { return brainEdgeZ(b) - brainEdgeZ(a); });
-    } else {
-      brainDrawOrder = brainNodes;
-      brainEdgesDraw = brainEdges;
+    // Multi-source BFS: distance from nearest keystone.
+    var dist = Object.create(null);
+    var queue = [];
+    seeds.forEach(function (n) { dist[n.id] = 0; queue.push(n.id); });
+    var head = 0;
+    while (head < queue.length) {
+      var cur = queue[head++];
+      var d = dist[cur];
+      (adj[cur] || []).forEach(function (nbr) {
+        if (dist[nbr] === undefined) {
+          dist[nbr] = d + 1;
+          queue.push(nbr);
+        }
+      });
     }
+
+    // Normalize to [0,1]. Unreachable nodes (disconnected) get max depth.
+    var maxDist = 1;
+    brainNodes.forEach(function (n) {
+      var d = dist[n.id];
+      if (d !== undefined && d > maxDist) maxDist = d;
+    });
+    brainNodes.forEach(function (n) {
+      var d = dist[n.id];
+      n.z3 = d !== undefined ? d / maxDist : 1;
+    });
   }
+
+  // Three.js handles projection and depth sorting natively via the GPU
+  // pipeline — no manual brainProject, brainEdgeZ, or brainUpdateDrawOrder.
 
   // L5 alive(t) filter — true when the node has not been ingested yet at the
   // current playhead time. Only meaningful while a playback session is active.
@@ -2066,370 +2504,9 @@
   }
 
 
-  function drawBrainFrame(ctx, W, H) {
-    ctx.clearRect(0, 0, W, H);
-    // Effective "now": the playhead timestamp while playback is active (so
-    // recency brightness and the alive(t) filter replay history), wall clock
-    // otherwise.
-    brainNowMs = topoPlay.active ? topoPlay.playheadMs : Date.now();
-    // Cache per-frame projected coordinates (px, py) and projection scale (ps)
-    // on every node — hulls, edges, nodes, and rings all draw from these.
-    // In 2D the projection is the identity (px = x, ps = 1).
-    //
-    // VIEWPORT CULLING: also mark nodes that project outside 3× the canvas
-    // extent (logical-space check). Such nodes can never appear on screen even
-    // at maximum zoom (3.5×), and their radial-gradient fills can produce
-    // giant viewport-spanning sheets in some Chrome/WebKit versions when the
-    // gradient circle is larger than the render surface. All draw sites
-    // (drawBrainNodes, drawBrainEdges, drawCommHulls) respect n.culled.
-    brainNodes.forEach(function (n) {
-      var p = brainProject(n);
-      n.px = p.x; n.py = p.y; n.ps = p.s;
-      n.culled = p.culled
-          || !isFinite(n.px) || !isFinite(n.py) || !isFinite(n.ps)
-          || Math.abs(n.px) > 3 * W
-          || Math.abs(n.py) > 3 * H;
-    });
-    // Apply zoom transform: center on brainZoomX/Y at current scale.
-    ctx.save();
-    ctx.translate(W / 2 - brainZoomX * brainZoomScale, H / 2 - brainZoomY * brainZoomScale);
-    ctx.scale(brainZoomScale, brainZoomScale);
-    drawCommHulls(ctx);
-    drawBrainEdges(ctx);
-    drawBrainNodes(ctx);
-    drawLobeLabels(ctx);
-    // White highlight ring on the zoomed/selected node — drawn after nodes so it sits on top.
-    if (brainZoomedNode) {
-      var n = brainZoomedNode;
-      var ns = nounStyle(n.nounType);
-      var r = (ns.r + n.centrality * 5) * n.ps * (0.82 + 0.18 * Math.sin(brainT * 0.72 + n.breathPhase));
-      ctx.beginPath();
-      ctx.arc(n.px, n.py, r + 4 / brainZoomScale, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(255,255,255,0.7)";
-      ctx.lineWidth = 1.5 / brainZoomScale;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(n.px, n.py, r + 8 / brainZoomScale, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(255,255,255,0.25)";
-      ctx.lineWidth = 1 / brainZoomScale;
-      ctx.stroke();
-    }
-    // Accent rings on neighbor nodes: orange for hop-1, faint orange for hop-2.
-    if (brainSelectedNode) {
-      Object.keys(brainHop1).forEach(function (id) {
-        var nd = brainNodeMap[id];
-        if (!nd) return;
-        var ns2 = nounStyle(nd.nounType);
-        var nr = (ns2.r + nd.centrality * 5) * nd.ps * (0.82 + 0.18 * Math.sin(brainT * 0.72 + nd.breathPhase));
-        ctx.beginPath();
-        ctx.arc(nd.px, nd.py, nr + 3 / brainZoomScale, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(255,140,0,0.80)";
-        ctx.lineWidth = 1.2 / brainZoomScale;
-        ctx.stroke();
-      });
-      Object.keys(brainHop2).forEach(function (id) {
-        var nd = brainNodeMap[id];
-        if (!nd) return;
-        var ns2 = nounStyle(nd.nounType);
-        var nr = (ns2.r + nd.centrality * 5) * nd.ps * (0.82 + 0.18 * Math.sin(brainT * 0.72 + nd.breathPhase));
-        ctx.beginPath();
-        ctx.arc(nd.px, nd.py, nr + 2 / brainZoomScale, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(255,140,0,0.35)";
-        ctx.lineWidth = 0.8 / brainZoomScale;
-        ctx.stroke();
-      });
-    }
-    ctx.restore();
-  }
-
-  // Feathered radial-gradient blobs behind each community lobe.
-  // Periphery fragments (lobe === false on the real-data path) are skipped:
-  // they share palette indexes with lobes but are scattered canvas-wide, so
-  // including them would paint phantom hulls over empty space. Synthetic
-  // nodes carry no lobe flag and keep their hulls.
-  function drawCommHulls(ctx) {
-    var byComm = Object.create(null);
-    brainNodes.forEach(function (n) {
-      if (n.lobe === false) return;
-      (byComm[n.community] = byComm[n.community] || []).push(n);
-    });
-
-    Object.keys(byComm).forEach(function (c) {
-      var members = byComm[c];
-      // Exclude culled members from hull geometry — an off-screen node would
-      // pull the centroid off-canvas and its gradient fill could span the viewport.
-      var visible = members.filter(function (n) { return !n.culled; });
-      if (!visible.length) return;
-      var ci = parseInt(c, 10);
-      // Centroid/spread from projected coordinates so hulls track the 3D view.
-      var cx = visible.reduce(function (s, n) { return s + n.px; }, 0) / visible.length;
-      var cy = visible.reduce(function (s, n) { return s + n.py; }, 0) / visible.length;
-      var spread = visible.reduce(function (s, n) { return s + Math.hypot(n.px - cx, n.py - cy); }, 0) / visible.length;
-      var r = Math.min(spread * 1.85, 200);
-      // Skip degenerate hull: all visible members at the same pixel — nothing
-      // useful to draw and createRadialGradient(r1=0) is browser-undefined.
-      if (r < 1) return;
-
-      // Hull tint follows the members' stable content hue (n.rgb), not the
-      // layout rank — ranks reshuffle under content-filter re-layouts.
-      var col = members[0].rgb || BRAIN_COMM_COLORS[ci % BRAIN_COMM_COLORS.length];
-      var grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-      grad.addColorStop(0,   "rgba(" + col[0] + "," + col[1] + "," + col[2] + ",0.065)");
-      grad.addColorStop(0.5, "rgba(" + col[0] + "," + col[1] + "," + col[2] + ",0.03)");
-      grad.addColorStop(1,   "rgba(" + col[0] + "," + col[1] + "," + col[2] + ",0)");
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fillStyle = grad;
-      ctx.fill();
-    });
-  }
-
-  // Thin edge lines — three style classes:
-  //   tunnel : gray    rgba(220,224,240,α)  — explicit structural link (weight 1.0)
-  //   kgFact : blue    rgba(58,180,255,α)   — derived shared-subject bond (weight 0.3)
-  //   lattice: amber   rgba(255,180,60,α)   — derived classification bond (weight 0.2)
-  //
-  // When a node is selected, edges in the selected cluster brighten; edges
-  // touching 2-hop neighbors are medium; all others near-invisible. Hop-1 on
-  // a lattice hub highlights its entire topic group — intended behavior.
-  //
-  // The final alpha is then weight-scaled (L2: heavier edges read stronger),
-  // depth-fogged in 3D, and edges to not-yet-born nodes are hidden during
-  // playback (L5 alive(t) filter).
-  function drawBrainEdges(ctx) {
-    ctx.lineWidth = 0.55;
-    var hasSel = !!brainSelectedNode;
-    var selId = hasSel ? brainSelectedNode.id : null;
-    brainEdgesDraw.forEach(function (e) {
-      var s = brainNodeMap[e.src], t = brainNodeMap[e.tgt];
-      if (!s || !t) return;
-      // Hide edges to tombstoned endpoints and tombstoned edges — edges to
-      // merely-unborn nodes are kept so the full base layer stays visible
-      // throughout radar-loop playback (pulses draw on top of the base layer,
-      // not through it). The alive(t) birth filter is not applied to edges.
-      if (brainDead(s) || brainDead(t)) return;
-      if (e.deadMs && (topoPlay.active ? e.deadMs <= brainNowMs : true)) return;
-      // Skip edges to culled nodes — same culling that suppresses node draw also
-      // suppresses the edge so no phantom beam points toward off-screen space.
-      if (s.culled || t.culled) return;
-      var isTunnel = e.type === "tunnel";
-      // Lattice edges: faint amber — below kgFact (0.045) to maintain the
-      // evidence-strength visual hierarchy (tunnel > kgFact > lattice).
-      var isLattice = e.type === "lattice";
-      var alpha;
-      if (!hasSel) {
-        alpha = isTunnel ? 0.10 : (isLattice ? 0.035 : 0.045);
-      } else {
-        var srcCore = e.src === selId || brainHop1[e.src];
-        var tgtCore = e.tgt === selId || brainHop1[e.tgt];
-        if (srcCore && tgtCore) {
-          // Edge fully inside selected + hop-1 cluster: bright.
-          // Lattice 0.30 vs kgFact 0.55 — preserves evidence-strength hierarchy
-          // in the selected state (mirrors the ~2:1 gap from the unselected state).
-          alpha = isTunnel ? 0.70 : (isLattice ? 0.30 : 0.55);
-        } else if (srcCore || tgtCore || brainHop2[e.src] || brainHop2[e.tgt]) {
-          // Edge touches outer ring: medium visibility
-          alpha = isTunnel ? 0.20 : (isLattice ? 0.08 : 0.12);
-        } else {
-          // Unrelated: nearly invisible
-          alpha = isTunnel ? 0.015 : (isLattice ? 0.006 : 0.008);
-        }
-      }
-      // L2 weight encoding: scale the selection-state alpha into [0.4, 1.0]×
-      // by edge weight — never to zero, so weak edges stay faintly present.
-      alpha *= 0.4 + 0.6 * Math.min(1, e.w || 0);
-      // L4 depth fog on the deepest endpoint, matching the node fog curve.
-      if (brain3D) alpha *= 1 - 0.55 * brainEdgeZ(e);
-      ctx.beginPath();
-      ctx.moveTo(s.px, s.py);
-      ctx.lineTo(t.px, t.py);
-      ctx.strokeStyle = isTunnel
-        ? "rgba(220,224,240," + alpha + ")"
-        : (isLattice ? "rgba(255,180,60," + alpha + ")" : "rgba(58,180,255," + alpha + ")");
-      ctx.stroke();
-    });
-  }
-
-  // Draw each node: staggered breathing opacity + centrality-scaled radius +
-  // bioluminescent blue glow (think) and expanding orange pulse ring (capture).
-  // When a node is selected, unrelated nodes fade to 12% and hop-2 nodes to 55%.
-  // Layered on top (multiplicative on alpha): L2 recency brightness, L4 depth
-  // fog. High-centrality hubs (> 0.55) get a soft L2 halo. Iterates
-  // brainDrawOrder, which is painter-sorted deepest-first in 3D.
-  //
-  // Radar-loop invariant: the base layer (galaxy of lobes, nodes, labels) is
-  // ALWAYS visible at full fidelity during playback — event pulses draw on top
-  // of it, not instead of it. The alive(t) birth filter is NOT applied here;
-  // only tombstoned nodes (brainDead) are hidden outright.
-  function drawBrainNodes(ctx) {
-    var hasSel = !!brainSelectedNode;
-    brainDrawOrder.forEach(function (n) {
-      // Cull nodes whose projection is degenerate or off-screen — this covers
-      // near-plane camera nodes, physics overshoots, and finite-but-huge
-      // projected coordinates that produce viewport-spanning gradient fills.
-      // n.culled is set each frame by drawBrainFrame's projection cache loop.
-      if (n.culled) return;
-
-      var style = nounStyle(n.nounType);
-      // Community hue (the original encoding-map rule: communityId → hue).
-      // Real-data nodes carry n.rgb from the community palette; synthetic
-      // nodes fall back to the noun-type style (they have noun variety —
-      // real drawers are all nounType 0 and would render uniformly white).
-      var rgb = n.rgb || style.rgb;
-      // ps scales radii with the perspective projection (1 in 2D).
-      var baseR = style.r * (1 + n.centrality * 1.9) * n.ps;
-
-      // Slow breathing: per-node staggered sine wave on alpha
-      var breath = 0.82 + 0.18 * Math.sin(brainT * 0.72 + n.breathPhase);
-      var alpha = style.a * breath;
-
-      // mod accumulates the brightness modifiers shared by fill + halo:
-      // selection dimming, recency, and depth fog.
-      var mod = 1;
-      if (hasSel) {
-        if (n === brainSelectedNode || brainHop1[n.id]) {
-          // Selected + direct neighbors: full brightness
-        } else if (brainHop2[n.id]) {
-          mod *= 0.55;
-        } else {
-          mod *= 0.12;
-        }
-      }
-      // L2 recency: stale nodes dim toward the 0.35 floor. Keys off
-      // brainNowMs, which is the playhead time during playback.
-      mod *= recencyFactor(n, brainNowMs);
-      // L4 depth fog: deeper strata fade.
-      if (brain3D) mod *= 1 - 0.55 * (n.z3 || 0);
-      alpha *= mod;
-
-      // Tombstoned: hidden in live view; during playback the node vanishes
-      // once the playhead passes its death time (dissolution made visible).
-      if (brainDead(n)) return;
-
-      // Think event: blue bioluminescent glow spreads outward (~10s decay)
-      if (n.glowBlue > 0.01) {
-        var glowR = baseR * 5;
-        var glowGrad = ctx.createRadialGradient(n.px, n.py, baseR, n.px, n.py, glowR);
-        glowGrad.addColorStop(0, "rgba(58,180,255," + (n.glowBlue * 0.30) + ")");
-        glowGrad.addColorStop(1, "rgba(58,180,255,0)");
-        ctx.beginPath();
-        ctx.arc(n.px, n.py, glowR, 0, Math.PI * 2);
-        ctx.fillStyle = glowGrad;
-        ctx.fill();
-      }
-
-      // L2 centrality glow: hubs above 0.55 get a soft halo in the node's own
-      // color — radius and alpha both grow with centrality, capped subtle
-      // (max halo alpha 0.18 before the shared brightness modifiers).
-      if (n.centrality > 0.55) {
-        var haloR = baseR * (2.5 + n.centrality * 3);
-        var haloA = 0.18 * ((n.centrality - 0.55) / 0.45) * mod;
-        var haloGrad = ctx.createRadialGradient(n.px, n.py, baseR, n.px, n.py, haloR);
-        haloGrad.addColorStop(0, "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + "," + haloA + ")");
-        haloGrad.addColorStop(1, "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ",0)");
-        ctx.beginPath();
-        ctx.arc(n.px, n.py, haloR, 0, Math.PI * 2);
-        ctx.fillStyle = haloGrad;
-        ctx.fill();
-      }
-
-      var rv = rgb[0], gv = rgb[1], bv = rgb[2];
-      ctx.beginPath();
-      ctx.arc(n.px, n.py, baseR, 0, Math.PI * 2);
-
-      if (n.anomaly) {
-        // Anomaly: dimmer fill + dashed red-pink outline
-        ctx.fillStyle = "rgba(" + rv + "," + gv + "," + bv + "," + (alpha * 0.55) + ")";
-        ctx.fill();
-        ctx.setLineDash([2, 2]);
-        ctx.lineWidth = 0.9;
-        ctx.strokeStyle = "rgba(255,80,120,0.65)";
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.lineWidth = 0.55;
-      } else {
-        ctx.fillStyle = "rgba(" + rv + "," + gv + "," + bv + "," + alpha + ")";
-        ctx.fill();
-      }
-
-      // Capture event: expanding orange pulse ring (~1s decay).
-      // Ring grows outward as magnitude falls (1.0 → small, 0 → 5× baseR),
-      // so it reads as a shockwave radiating from the node.
-      if (n.pulseOrange > 0.01) {
-        var ringR = baseR * (1 + (1 - n.pulseOrange) * 4);
-        ctx.beginPath();
-        ctx.arc(n.px, n.py, ringR, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(255,140,0," + (n.pulseOrange * 0.85) + ")";
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
-        ctx.lineWidth = 0.55;
-      }
-
-      // Think/non-capture event: expanding blue pulse ring (~1s decay).
-      // Identical mechanics to orange ring — ensures every playback step
-      // produces immediately visible animation regardless of event kind.
-      if (n.pulseBlue > 0.01) {
-        var blueRingR = baseR * (1 + (1 - n.pulseBlue) * 4);
-        ctx.beginPath();
-        ctx.arc(n.px, n.py, blueRingR, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(58,180,255," + (n.pulseBlue * 0.85) + ")";
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
-        ctx.lineWidth = 0.55;
-      }
-    });
-  }
-
-  // L3 community labels — FDC label text near each lobe centroid: uppercase,
-  // letter-spaced, with a small leading dot in the lobe's palette color.
-  // Sizes divide by brainZoomScale so labels hold a constant on-screen size
-  // while zooming. Only communities that earned a lobe (and a non-null label
-  // from the proxy) appear in brainLobeLabels; everything else draws nothing.
-  function drawLobeLabels(ctx) {
-    var ranks = Object.keys(brainLobeLabels);
-    if (!ranks.length) return;
-
-    // Group lobe members by community rank (projected coords already cached).
-    var groups = Object.create(null);
-    brainNodes.forEach(function (n) {
-      if (!n.lobe || brainLobeLabels[n.community] === undefined) return;
-      (groups[n.community] = groups[n.community] || []).push(n);
-    });
-
-    ctx.save();
-    var fontPx = 11 / brainZoomScale;
-    ctx.font = fontPx + "px ui-monospace, SFMono-Regular, Menlo, monospace";
-    // letterSpacing is supported in current Chromium/WebKit canvas; harmless no-op otherwise.
-    if ("letterSpacing" in ctx) ctx.letterSpacing = (1.5 / brainZoomScale) + "px";
-    ctx.textBaseline = "middle";
-    ctx.textAlign = "left";
-
-    Object.keys(groups).forEach(function (rank) {
-      var members = groups[rank];
-      var cx = members.reduce(function (s, n) { return s + n.px; }, 0) / members.length;
-      var cy = members.reduce(function (s, n) { return s + n.py; }, 0) / members.length;
-      var spread = members.reduce(function (s, n) { return s + Math.hypot(n.px - cx, n.py - cy); }, 0) / members.length;
-      // Sit the label just above the lobe's node cloud.
-      var ly = cy - spread * 1.2 - 10 / brainZoomScale;
-
-      var text = String(brainLobeLabels[rank]).toUpperCase();
-      var dotR = 2.5 / brainZoomScale;
-      var gap = 6 / brainZoomScale;
-      var textW = ctx.measureText(text).width;
-      var startX = cx - (dotR * 2 + gap + textW) / 2;
-
-      // Label dot follows the members' stable content hue, matching the fill.
-      var col = members[0].rgb || BRAIN_COMM_COLORS[parseInt(rank, 10) % BRAIN_COMM_COLORS.length];
-      ctx.beginPath();
-      ctx.arc(startX + dotR, ly, dotR, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(" + col[0] + "," + col[1] + "," + col[2] + ",0.65)";
-      ctx.fill();
-
-      ctx.fillStyle = "rgba(232,234,240,0.4)";
-      ctx.fillText(text, startX + dotR * 2 + gap, ly);
-    });
-    ctx.restore();
-  }
+  // Canvas2D drawing functions removed — replaced by Three.js WebGL renderer
+  // (buildBrainPoints, buildBrainLines, updateBrainFrame, updateBrainLabels
+  // defined above in startBrainAnimation's section).
 
   // ===========================================================================
   // CONTENT PICKER — check/uncheck the estate's knowledge domains
@@ -2977,43 +3054,54 @@
     if (ev.kind === "capture") {
       node.pulseOrange = 1.0;
     } else {
-      // Non-capture events get a visible expanding blue ring (pulseBlue) on top of
-      // the slow ambient blue glow. Both decay together — ring same ~1s as orange,
-      // glow over ~10s. This ensures every playback step produces immediate visible
-      // animation regardless of event kind.
       node.pulseBlue = 1.0;
       node.glowBlue = Math.min(1.0, node.glowBlue + 0.55);
     }
+    // Ripple: add an expanding ring at the event node, capped at RIPPLE_MAX.
+    // Oldest ripple is evicted if the buffer is full — singing in a round.
+    var rgb = node.rgb || BRAIN_COMM_COLORS[node.community % BRAIN_COMM_COLORS.length];
+    var rippleColor = [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255];
+    if (brainRipples.length >= RIPPLE_MAX) brainRipples.shift();
+    brainRipples.push({ nodeId: node.id, age: 0, rgb: rippleColor });
+
+    // Constellation trail: if the previous pulsed node is in the same
+    // community as this one, draw a glowing line between them.
+    if (brainLastPulseNode && brainLastPulseNode !== node &&
+        brainLastPulseNode.community === node.community) {
+      if (brainTrails.length >= TRAIL_MAX) brainTrails.shift();
+      brainTrails.push({
+        fromId: brainLastPulseNode.id, toId: node.id, age: 0,
+        rgb: rippleColor,
+      });
+    }
+    brainLastPulseNode = node;
     return true;
   }
 
   // Advance the playhead one event, then schedule the next step.
   //
-  // Pacing is event-indexed: each event gets a fixed 650ms dwell regardless of
-  // the real inter-event gap. Rationale: pulseOrange/pulseBlue decay at 1.1/s,
-  // so at 650ms the ring is still at ~28% intensity when the next event fires —
-  // each pulse is individually watchable. 13 events ≈ 8-9s per pass.
+  // Dwell is 350ms per event — fast enough for 20 ripples to overlap in
+  // their 2s lifecycle (20 × 0.35 = 7s, so the oldest ripple is at 100%
+  // when the newest splashes). The effect is a continuous rain of droplets
+  // with ~6 concurrently visible at any moment.
   //
-  // If topoPlaybackPulse returns false (no visible node found for the event),
-  // the step advances immediately (0ms dwell) so missing nodes never produce
-  // dead-air pauses. This enforces the invariant: every visible step has an
-  // animation; invisible steps consume no wall-clock time.
+  // If topoPlaybackPulse returns false (no visible node), advance
+  // immediately (0ms) so dead-air never accumulates.
   //
-  // After the last event a short 700ms pause (longer than one dwell to let the
-  // final ring fully fade) clears residual pulse state and loops back to the
-  // start so each pass begins from a clean base layer.
+  // End-of-pass: 2.5s pause lets all ripples and trails fully fade before
+  // the next loop starts clean.
   function topoPlayStep() {
     var win = topoPlayWindowEvents();
     if (!win.length) { topoPlayToggle(); return; }
     if (topoPlay.idx >= win.length) {
-      // End-of-pass pause: base layer is visible, final pulse ring fades out.
-      // Clear both pulse channels on all nodes so the next loop starts clean —
-      // prevents residual pulses from the previous pass accumulating.
       topoPlay.timer = setTimeout(function () {
         brainNodes.forEach(function (n) { n.pulseOrange = 0; n.pulseBlue = 0; });
+        brainRipples = [];
+        brainTrails = [];
+        brainLastPulseNode = null;
         topoPlay.idx = 0;
         topoPlayStep();
-      }, 700);
+      }, 2500);
       return;
     }
     var ev = win[topoPlay.idx];
@@ -3022,8 +3110,7 @@
     if (clock) clock.textContent = new Date(ev.ms).toLocaleString();
     var pulsed = topoPlaybackPulse(ev);
     topoPlay.idx++;
-    // If no node was found to pulse, advance immediately — never dwell on nothing.
-    topoPlay.timer = setTimeout(topoPlayStep, pulsed ? 650 : 0);
+    topoPlay.timer = setTimeout(topoPlayStep, pulsed ? 350 : 0);
   }
 
   // Play/pause toggle. Pause freezes the playhead (the session stays active,
@@ -3178,12 +3265,14 @@
     $("#pipelineEstate").addEventListener("change", renderPipeline);
     $("#topoEstate").addEventListener("change", renderTopology);
     $("#topoReset").addEventListener("click", renderTopology);
-    // L4 strata toggle — flips projection + painter sort; the running rAF
-    // loop picks the mode up on its next frame (no re-render needed).
+    // L4 strata toggle — flips 3D depth on/off; Three.js geometry is
+    // rebuilt to update z-coordinates. The running rAF loop renders
+    // the new positions on its next frame.
     $("#topoDimToggle").addEventListener("click", function () {
       brain3D = !brain3D;
       this.setAttribute("aria-pressed", brain3D ? "true" : "false");
-      brainUpdateDrawOrder();
+      buildBrainPoints();
+      buildBrainLines();
     });
     // L5 playback controls.
     $("#topoPlayBtn").addEventListener("click", topoPlayToggle);

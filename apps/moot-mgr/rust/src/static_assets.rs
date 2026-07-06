@@ -33,16 +33,19 @@ const INDEX_HTML: &str =
 const APP_CSS: &str = include_str!("../../Sources/MootManager/DashboardAssets/app.css");
 /// The dashboard logic (shared source of truth).
 const APP_JS: &str = include_str!("../../Sources/MootManager/DashboardAssets/app.js");
+/// Three.js r170 — vendored WebGL rendering library (MIT, mrdoob/three.js).
+const THREE_JS: &str = include_str!("../../Sources/MootManager/DashboardAssets/three.min.js");
+/// OrbitControls addon from Three.js — pan/zoom/orbit camera interaction.
+const ORBIT_CONTROLS_JS: &str =
+    include_str!("../../Sources/MootManager/DashboardAssets/OrbitControls.js");
 
 /// Resolve a request path to an embedded asset, or `None` for anything not on the
 /// fixed allow-list. Mirrors Swift `StaticAssets.asset(for:)`.
 ///
-/// The allow-list maps only "/", "/index.html", "/app.css", "/app.js" — there is
-/// no directory mapping, so an arbitrary path cannot traverse the filesystem.
-/// Query suffixes (e.g. "/app.css?v=24") are stripped before matching so the
-/// dashboard's cache-busting query strings resolve.
+/// The allow-list is fixed — there is no directory mapping, so an arbitrary path
+/// cannot traverse the filesystem. Query suffixes (e.g. "/app.css?v=25") are
+/// stripped before matching so the dashboard's cache-busting query strings resolve.
 pub fn asset_for(path: &str) -> Option<Asset> {
-    // Strip any cache-busting query suffix the dashboard appends.
     let path = path.split('?').next().unwrap_or(path);
     match path {
         "/" | "/index.html" => Some(Asset {
@@ -55,6 +58,14 @@ pub fn asset_for(path: &str) -> Option<Asset> {
         }),
         "/app.js" => Some(Asset {
             body: APP_JS.to_string(),
+            content_type: "text/javascript; charset=utf-8",
+        }),
+        "/three.min.js" => Some(Asset {
+            body: THREE_JS.to_string(),
+            content_type: "text/javascript; charset=utf-8",
+        }),
+        "/OrbitControls.js" => Some(Asset {
+            body: ORBIT_CONTROLS_JS.to_string(),
             content_type: "text/javascript; charset=utf-8",
         }),
         _ => None,
