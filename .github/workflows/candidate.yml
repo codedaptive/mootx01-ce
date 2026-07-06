@@ -99,11 +99,14 @@ jobs:
           echo "MGR_BIN=$MGR_BIN"   >> "$GITHUB_ENV"
 
       - name: Import Developer ID Application Certificate
-        if: ${{ secrets.APPLE_SIGNING_CERT_P12 != '' }}
         env:
           CERT_P12_BASE64: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
           CERT_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
         run: |
+          if [ -z "$CERT_P12_BASE64" ]; then
+            echo "::warning::APPLE_SIGNING_CERT_P12 not set — skipping code signing"
+            exit 0
+          fi
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
           KEYCHAIN_PASS="$(openssl rand -base64 32)"
           security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
@@ -131,7 +134,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
 
       - name: Notarize binaries (best-effort)
-        if: ${{ env.SIGNING_READY == '1' && secrets.APPLE_API_KEY_P8 != '' }}
+        if: ${{ env.SIGNING_READY == '1' }}
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
@@ -178,11 +181,14 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
 
       - name: Import Developer ID Installer Certificate (best-effort)
-        if: ${{ secrets.APPLE_INSTALLER_CERT_P12 != '' }}
         env:
           CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
           CERT_P12_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
         run: |
+          if [ -z "$CERT_P12_BASE64" ]; then
+            echo "::warning::APPLE_INSTALLER_CERT_P12 not set — skipping installer cert"
+            exit 0
+          fi
           INST_KEYCHAIN="$RUNNER_TEMP/installer.keychain"
           INST_KEYCHAIN_PASS="$(openssl rand -base64 32)"
           security create-keychain -p "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
@@ -217,7 +223,7 @@ jobs:
           echo "PKG=$pkg" >> "$GITHUB_ENV"
 
       - name: Notarize macOS .pkg (best-effort)
-        if: ${{ env.INSTALLER_CERT_READY == '1' && secrets.APPLE_API_KEY_P8 != '' }}
+        if: ${{ env.INSTALLER_CERT_READY == '1' }}
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
