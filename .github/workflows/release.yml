@@ -921,3 +921,18 @@ jobs:
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Homebrew tap to update formula
+        # Fire a repository_dispatch to the Homebrew tap repo so it re-runs
+        # update-formula.sh with this release's tag. The tap workflow also
+        # runs on a daily cron as a safety net, so a failed dispatch is
+        # self-healing. Best-effort: a missing or expired PAT must not block
+        # the release itself.
+        if: ${{ always() && secrets.HOMEBREW_TAP_PAT != '' }}
+        run: |
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.HOMEBREW_TAP_PAT }}" \
+            "https://api.github.com/repos/codedaptive/homebrew-mootx01-ce/dispatches" \
+            -d "{\"event_type\":\"ce-release\",\"client_payload\":{\"tag\":\"$RELEASE_TAG\"}}" \
+          || echo "::warning::Homebrew tap dispatch failed — the daily cron will catch up"
