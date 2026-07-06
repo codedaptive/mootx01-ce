@@ -952,3 +952,36 @@ jobs:
             "https://api.github.com/repos/codedaptive/homebrew-mootx01-ce/dispatches" \
             -d "{\"event_type\":\"ce-release\",\"client_payload\":{\"tag\":\"$RELEASE_TAG\"}}" \
           || echo "::warning::Homebrew tap dispatch failed — the daily cron will catch up"
+
+  # ── Update winget manifests and commit back ──────────────────────────────
+  # Keeps distribution/windows/winget/* current with every release so the
+  # wingetcreate submit step is always a one-liner. Updates the local
+  # manifests (version, URLs, SHA256s) and commits to develop. Best-effort:
+  # must not block the release.
+  update-winget:
+    name: Update winget manifests
+    if: ${{ github.event_name == 'push' }}
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: develop/1.0.x
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update winget manifests
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          bash distribution/windows/update-winget.sh "$VERSION"
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet -- distribution/windows/winget/; then
+            echo "Winget manifests already current — nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add distribution/windows/winget/
+          git commit -m "ci: update winget manifests to ${RELEASE_TAG} (automated)"
+          git push
