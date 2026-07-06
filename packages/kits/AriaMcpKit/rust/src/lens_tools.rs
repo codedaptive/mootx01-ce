@@ -928,6 +928,13 @@ pub fn dispatch(
             for drawer in drawers.iter().filter(|d| {
                 // event_time is epoch milliseconds; always set (falls back to filed_at).
                 d.event_time >= lower_ms && d.event_time <= upper_ms
+                // Sensitivity ceiling (#20): exclude restricted/secret drawers
+                // so their lattice-anchor metadata is not emitted as field/value
+                // coordinates in the precedence output.
+                    && {
+                        let sens = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
+                        sens != AdjectiveSensitivity::Restricted && sens != AdjectiveSensitivity::Secret
+                    }
             }) {
                 let events = estate.store.audit_events_for_row(&drawer.id).map_err(|e| {
                     JSONRPCError::new(
