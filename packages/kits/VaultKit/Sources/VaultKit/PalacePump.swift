@@ -472,7 +472,7 @@ public struct PalacePump: Sendable {
     public func run(
         estate handle: EstateHandle,
         kit: GeniusLocusKit,
-        scope: VaultExportScope = .believedIncludingPrivate
+        scope: VaultExportScope = .exportable
     ) async throws -> PalacePumpResult {
         // GAP F: refuse to write against a drifted surface.
         try await checkDrift()
