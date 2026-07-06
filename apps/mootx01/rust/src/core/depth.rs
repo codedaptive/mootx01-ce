@@ -47,7 +47,22 @@ pub struct ProcessClaudeCliRunner;
 
 impl ClaudeCliRunning for ProcessClaudeCliRunner {
     fn run(&self, args: &[&str]) -> bool {
-        std::process::Command::new("claude")
+        // Resolve the claude binary from known install locations before
+        // falling back to unqualified PATH lookup (#10). A malicious binary
+        // named "claude" earlier in PATH could be executed otherwise.
+        let home_claude = std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".claude/local/claude"))
+            .unwrap_or_default();
+        let candidates = [
+            std::path::PathBuf::from("/usr/local/bin/claude"),
+            home_claude,
+        ];
+        let bin = candidates
+            .iter()
+            .find(|p| p.is_file())
+            .cloned()
+            .unwrap_or_else(|| std::path::PathBuf::from("claude"));
+        std::process::Command::new(bin)
             .args(args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -477,9 +477,14 @@ public enum DepthInstaller {
         var root: [String: Any] = [:]
         if fm.fileExists(atPath: settingsURL.path) {
             try Installer.backupExisting(at: settingsURL)
-            if let data = try? Data(contentsOf: settingsURL),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let data = try Data(contentsOf: settingsURL)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 root = obj
+            } else {
+                // File exists but is not valid JSON (#70). Do NOT overwrite
+                // with an empty dict — that destroys the user's settings.
+                // The backup above preserves the original; skip silently.
+                return
             }
         }
         var markets = root["extraKnownMarketplaces"] as? [String: Any] ?? [:]
