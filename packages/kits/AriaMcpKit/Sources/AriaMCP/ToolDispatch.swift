@@ -1880,9 +1880,12 @@ extension ToolDispatcher {
         let fromID = try requireString(args, "from_id")
         let estate = try await kit.estate(for: handle)
         let allTunnels = try await estate.allTunnels()
-        // Keep only non-tombstoned tunnels originating from this drawer.
+        // Keep only non-tombstoned, exportable tunnels originating from this
+        // drawer. Sensitivity ceiling (#58): restricted/secret tunnels are
+        // excluded at the MCP boundary, matching the default recall ceiling.
         let outgoing = allTunnels.filter {
             $0.sourceDrawerId == fromID && $0.tombstonedAt == nil
+                && $0.adjectiveSensitivity.isBulkExportable
         }
         let lines = outgoing.prefix(50).map { t -> String in
             "\(t.id)  → \(t.targetDrawerId ?? "\(t.targetWing)/\(t.targetRoom)")  [\(t.label)]"
@@ -1899,9 +1902,11 @@ extension ToolDispatcher {
         let toID = try requireString(args, "to_id")
         let estate = try await kit.estate(for: handle)
         let allTunnels = try await estate.allTunnels()
-        // Keep only non-tombstoned tunnels pointing to this drawer.
+        // Keep only non-tombstoned, exportable tunnels pointing to this
+        // drawer. Sensitivity ceiling (#58): same gate as connection_search.
         let incoming = allTunnels.filter {
             $0.targetDrawerId == toID && $0.tombstonedAt == nil
+                && $0.adjectiveSensitivity.isBulkExportable
         }
         let lines = incoming.prefix(50).map { t -> String in
             "\(t.id)  \(t.sourceDrawerId ?? "\(t.sourceWing)/\(t.sourceRoom)") →  [\(t.label)]"

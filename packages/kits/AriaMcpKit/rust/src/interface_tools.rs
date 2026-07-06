@@ -1403,9 +1403,15 @@ fn run_connection_search(
         .recall_tunnels(&estate.handle, &wing)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
+    // Sensitivity ceiling (#58): exclude restricted/secret tunnels at the
+    // MCP boundary, matching the default recall ceiling.
     let outgoing: Vec<_> = tunnels
         .iter()
-        .filter(|t| t.source_drawer_id.as_deref() == Some(from_id))
+        .filter(|t| {
+            t.source_drawer_id.as_deref() == Some(from_id)
+                && t.tombstoned_at.is_none()
+                && t.adjective_sensitivity().is_bulk_exportable()
+        })
         .collect();
 
     let mut lines = vec![format!("connections from {from_id}: {}", outgoing.len())];
@@ -1455,7 +1461,10 @@ fn run_connection_map(
             .recall_tunnels(&estate.handle, wing)
             .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
         for t in tunnels {
-            if t.target_drawer_id.as_deref() == Some(to_id) {
+            if t.target_drawer_id.as_deref() == Some(to_id)
+                && t.tombstoned_at.is_none()
+                && t.adjective_sensitivity().is_bulk_exportable()
+            {
                 incoming.push(t);
             }
         }
