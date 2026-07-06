@@ -20,8 +20,8 @@
 SHELL := /bin/bash
 
 # ── Discovery ─────────────────────────────────────────────────────────────
-SWIFT_PKGS  := $(shell find . -name Package.swift  -not -path '*/.build/*' | xargs -n1 dirname | sort)
-RUST_CRATES := $(shell find . -name Cargo.toml -not -path '*/target/*' -not -path '*/.build/*' | xargs -n1 dirname | sort)
+SWIFT_PKGS  := $(shell find . -name Package.swift  -not -path '*/.build/*' -print0 | xargs -0 -n1 dirname | sort)
+RUST_CRATES := $(shell find . -name Cargo.toml -not -path '*/target/*' -not -path '*/.build/*' -print0 | xargs -0 -n1 dirname | sort)
 
 HARNESS := docs/validation/substrate_math_performance/test-harness
 DIST    ?= dist
