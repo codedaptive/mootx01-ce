@@ -134,7 +134,19 @@ public enum POSIXSocket {
     /// nil if accept was interrupted/failed (the caller decides whether to retry).
     public static func acceptOne(_ listenFD: Int32) -> Int32? {
         let cfd = accept(listenFD, nil, nil)
-        return cfd >= 0 ? cfd : nil
+        guard cfd >= 0 else { return nil }
+        // SIGPIPE suppression: a peer that closes its end mid-response (a
+        // browser tab closing, an origin-rejected probe hanging up, a curl ^C)
+        // must surface as a write error (EPIPE) handled by sendAll's
+        // `written <= 0` path — NOT as a SIGPIPE that kills the whole daemon
+        // process. Darwin has no MSG_NOSIGNAL flag for write(2), so the
+        // suppression is set on the accepted fd itself; on Linux the option
+        // does not exist and sendAll passes MSG_NOSIGNAL to send(2) instead.
+        #if !canImport(Glibc)
+        var one: Int32 = 1
+        setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        #endif
+        return cfd
     }
 
     /// Read up to `max` bytes. Returns the data read (possibly empty on EOF) or
@@ -146,13 +158,19 @@ public enum POSIXSocket {
         return Data(buf[0..<n])
     }
 
-    /// Write all of `data` to the fd. Returns true on success.
+    /// Write all of `data` to the fd. Returns true on success. A peer-closed
+    /// connection returns false (EPIPE) rather than raising SIGPIPE — Darwin
+    /// fds are marked SO_NOSIGPIPE at accept; Linux passes MSG_NOSIGNAL here.
     @discardableResult
     public static func sendAll(_ fd: Int32, _ data: Data) -> Bool {
         var remaining = data
         while !remaining.isEmpty {
             let written = remaining.withUnsafeBytes { ptr -> Int in
+                #if canImport(Glibc)
+                send(fd, ptr.baseAddress, remaining.count, Int32(MSG_NOSIGNAL))
+                #else
                 write(fd, ptr.baseAddress, remaining.count)
+                #endif
             }
             if written <= 0 { return false }
             remaining.removeFirst(written)
