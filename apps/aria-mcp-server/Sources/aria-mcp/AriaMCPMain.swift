@@ -131,7 +131,7 @@ struct AriaMCPMain {
             // same storage handle (shared pool connection, same PG schema).
             storage = PostgreSQLStorage(configuration: configuration)
             wireSemanticRecall = true
-        } else if !rawSQLitePath.isEmpty {
+        } else if !rawSQLitePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // Only ARIA_MCP_SQLITE_PATH set → SQLite-backed durable estate.
             let dbURL = URL(fileURLWithPath: rawSQLitePath)
             Logging.stderr.log("ARIA_MCP starting (stdio, SQLite backend: \(rawSQLitePath))")

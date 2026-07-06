@@ -130,7 +130,11 @@ impl SolverBandit {
     /// count is correct, or a fresh uniform-prior bandit otherwise. Mirrors
     /// Swift `SolverBandit.init(from:)` guard. (NK-11 planned hardening)
     pub fn validate(self) -> Self {
-        if self.arms.len() == ALL_MODES.len() {
+        let count_ok = self.arms.len() == ALL_MODES.len();
+        let params_ok = self.arms.iter().all(|a| {
+            a.alpha > 0.0 && a.beta > 0.0 && a.alpha.is_finite() && a.beta.is_finite()
+        });
+        if count_ok && params_ok {
             self
         } else {
             Self::new()

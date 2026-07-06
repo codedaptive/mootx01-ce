@@ -732,7 +732,9 @@ public actor Corpus {
     ///     `modelID`s are expected — two slots with the same modelID would key
     ///     the same vector/basis rows and is a caller error.
     public init(storage: any Storage, models: [EmbeddingModel]) async throws {
-        precondition(!models.isEmpty, "Corpus requires at least one embedding model")
+        guard !models.isEmpty else {
+            throw CorpusKitError.storeUnavailable("Corpus requires at least one embedding model")
+        }
 
         // Apply both schema declarations. `open(schema:)` is version-gated
         // (skips if the schema version is already current). Since both

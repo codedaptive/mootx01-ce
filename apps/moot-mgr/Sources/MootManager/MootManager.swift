@@ -702,7 +702,7 @@ public actor MootManager {
         let monitoringEnabled = try await store.isMonitoringEnabled()
         return ConfigPayload(
             monitoringEnabled: monitoringEnabled,
-            retentionSeconds: Int(effectiveRetentionWindow),
+            retentionSeconds: Int(exactly: effectiveRetentionWindow.rounded()) ?? Int(max(0, min(effectiveRetentionWindow, Double(Int.max)))),
             retentionCutoff: Self.iso8601String(from: lastRetentionCutoff)
         )
     }

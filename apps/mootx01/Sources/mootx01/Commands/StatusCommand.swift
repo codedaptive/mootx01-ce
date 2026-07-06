@@ -28,7 +28,8 @@ struct StatusCommand: AsyncParsableCommand {
         // truth. Without this, `status` reported "not running" while the daemon
         // was live on 4242, which read as a broken install.
         let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
-        let residentPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
+        let rawPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
+        let residentPort = (1...65535).contains(rawPort) ? rawPort : MootPaths.defaultResidentPort
         if let pidString = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            let pid = Int32(pidString),
            processIsRunning(pid: pid) {

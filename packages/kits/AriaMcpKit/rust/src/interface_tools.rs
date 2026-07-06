@@ -1682,7 +1682,13 @@ fn parse_iso8601_to_ms(s: &str) -> Option<i64> {
     let (h, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
     // Days since Unix epoch via Howard Hinnant's algorithm (same as lens_tools).
     let days = days_from_ymd_interface(y, m, d)?;
-    Some((days * 86400 + h * 3600 + min * 60 + sec) * 1000 + millis)
+    // Overflow-checked arithmetic: extreme year values (e.g. year 292278994)
+    // can overflow i64 multiplication. Return None instead of panicking.
+    let secs = days.checked_mul(86400)?
+        .checked_add(h.checked_mul(3600)?)?
+        .checked_add(min.checked_mul(60)?)?
+        .checked_add(sec)?;
+    secs.checked_mul(1000)?.checked_add(millis)
 }
 
 fn days_from_ymd_interface(y: i64, m: i64, d: i64) -> Option<i64> {
