@@ -14,12 +14,24 @@ adapter covers all six surfaces:
   (the one hook that touches the network; see below).
 - `.claude/settings.json` - hook wiring.
 
-Copy the contents of this directory into a repository root or user-level
-Claude configuration location. Keep only the surfaces you want active.
+Copy the contents of this directory into a repository root after you trust
+that repository. Keep only the surfaces you want active.
+
+Do **not** install `.claude/settings.json` in a user-level Claude configuration
+location. The hook commands intentionally execute scripts from
+`$CLAUDE_PROJECT_DIR/.claude/hooks`, which is safe only for a trusted
+per-project install where this adapter's hook files were copied into that same
+project. Installing these hook settings globally would make Claude execute hook
+scripts supplied by whatever project is currently open.
+
+If you want user-level instructions, install only the non-executable surfaces
+(for example `CLAUDE.md`, rules, skills, or slash commands) and leave lifecycle
+hooks disabled until you install them per project.
 
 **Merging:** if the project already has a `.claude/settings.json`, merge the
-`"hooks"` block from this adapter into it instead of replacing the file.
-Everything else installs as new files.
+`"hooks"` block from this adapter into it instead of replacing the file, and do
+so only after trusting the project contents. Everything else installs as new
+files.
 
 ## Try It
 

@@ -238,6 +238,37 @@ struct URLRouterTests {
         }
     }
 
+
+    @Test("recall verb forces exportable filter before routing")
+    func recallVerbForcesExportableFilter() async throws {
+        let bridge = try await TestBridge.makeInMemory()
+
+        _ = await bridge.callTool("moot_file_memory", arguments: [
+            "content": .string("url private default drawer"),
+            "location": .string("urls"),
+        ])
+        let publicCapture = await bridge.callTool("moot_file_memory", arguments: [
+            "content": .string("url public drawer"),
+            "location": .string("urls"),
+            "exportability": .string("public"),
+        ])
+        #expect(publicCapture.isError == false, "public capture should succeed")
+
+        let router = MootURLRouter(permittedCallbackSchemes: ["app"])
+        let url = URL(string: "mootx01://x-callback-url/recall?query=url&filter=userConfirmed&x-success=app://done")!
+        let outcome = await router.route(url, using: bridge)
+        guard case .routed(let returnURL, let text, let isError) = outcome else {
+            Issue.record("expected routed, got \(outcome)")
+            return
+        }
+
+        #expect(isError == false)
+        #expect(text.contains("url public drawer"), "exportable recall should include public drawers")
+        #expect(!text.contains("url private default drawer"), "x-callback recall must not return private default drawers")
+        #expect(returnURL?.absoluteString.contains("url%20public%20drawer") == true)
+        #expect(returnURL?.absoluteString.contains("url%20private%20default%20drawer") != true)
+    }
+
     @Test("callback scheme not in allowlist: returnURL is nil")
     func callbackSchemeGate() async throws {
         let bridge = try await TestBridge.makeInMemory()

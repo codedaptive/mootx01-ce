@@ -35,7 +35,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # create the pre-release + prune old ones
+  contents: read
 
 concurrency:
   group: candidate-build
@@ -52,6 +52,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: candidate/1.0.x
+          persist-credentials: false
       - id: v
         run: |
           # Source version constant (matches Swift Mootx01.currentVersion).
@@ -81,6 +82,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: candidate/1.0.x
+          persist-credentials: false
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
@@ -269,6 +271,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: candidate/1.0.x
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Build
         run: |
@@ -304,6 +307,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: candidate/1.0.x
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
@@ -345,11 +349,14 @@ jobs:
   # ── Publish the pre-release + prune to the last 4 ───────────────────────────
   prerelease:
     needs: [meta, macos, linux, windows]
+    permissions:
+      contents: write   # create the pre-release + prune old ones
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: candidate/1.0.x
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
@@ -426,6 +433,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: candidate/1.0.x
+          persist-credentials: false
       - name: install.sh against the published pre-release (sandbox HOME)
         env:
           TAG: ${{ needs.meta.outputs.tag }}
