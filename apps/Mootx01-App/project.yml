@@ -22,8 +22,17 @@ targets:
   Mootx01-macOS:
     type: application
     platform: macOS
+    # PrivacyInfo.xcprivacy (M-MXA-5): the app-level privacy manifest must land
+    # in the Resources build phase (not Sources) so App Store submission and
+    # Xcode's Generate Privacy Report find it at the bundle root. It is listed
+    # explicitly with buildPhase: resources and excluded from the App/ source
+    # glob so it is not added twice.
     sources:
       - path: App
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: App/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: Mootx01
         product: GatewayUI
@@ -63,8 +72,14 @@ targets:
   Mootx01-iOS:
     type: application
     platform: iOS
+    # PrivacyInfo.xcprivacy (M-MXA-5): same Resources-phase wiring as the
+    # macOS target — see the comment there.
     sources:
       - path: App
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: App/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: Mootx01
         product: GatewayUI

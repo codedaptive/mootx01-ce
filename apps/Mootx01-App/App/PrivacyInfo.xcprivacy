@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  App-level privacy manifest (M-MXA-5 submission sweep).
+
+  Aggregate declaration for the Mootx01 app bundle: the app plus every
+  statically linked first-party kit (AriaMCP, GeniusLocusKit, LocusKit,
+  PersistenceKit + vendored SQLCipher, MootIntentKit, and their intra-repo
+  lib dependencies). Third-party packages in Package.resolved (postgres-nio,
+  swift-nio family) link only into test targets and are NOT in this bundle.
+
+  Required-reason API usage compiled into the app:
+  - FileTimestamp (C617.1 — files inside the app container / app group):
+      SQLCipher amalgamation stat/fstat/lstat on the estate DB and sidecars;
+      QueueKit.cleanStaleTmpFiles reads .modificationDate of queue tmp files;
+      AriaMCP ToolDispatch.deriveBuildSerial reads the bundled executable's
+      own mtime.
+  - DiskSpace (E174.1 — check space before writing):
+      SQLCipher amalgamation statfs/fstatvfs before/while writing the estate.
+
+  No data is collected (nothing leaves the device: the estate is local,
+  transports are loopback-only), and no tracking occurs, so
+  NSPrivacyCollectedDataTypes and NSPrivacyTrackingDomains are empty.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

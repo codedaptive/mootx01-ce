@@ -126,7 +126,11 @@ let package = Package(
                 // LoopbackHTTP backs HTTPServer.swift (the resident HTTP MCP transport).
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
             ],
-            path: "Sources/AriaMCP"
+            path: "Sources/AriaMCP",
+            // Privacy manifest (M-MXA-5): deriveBuildSerial reads the running
+            // executable's mtime (FileTimestamp C617.1); the manifest rides
+            // the resource bundle so Xcode's privacy report aggregates it.
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .target(
             name: "AriaResident",
