@@ -86,6 +86,9 @@ public enum QIDClosure {
         // `qid` is excluded from its own closure.
         var frontier: [String] = edges[qid] ?? []
         while let node = frontier.popLast() {
+            // Skip the queried Q-ID itself (#96): a cyclic edge back to `qid`
+            // must not include `qid` in its own closure.
+            if node == qid { continue }
             if seen.contains(node) { continue }
             seen.insert(node)
             if let parents = edges[node] { frontier.append(contentsOf: parents) }
