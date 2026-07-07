@@ -465,6 +465,19 @@ fn run_file_memory(
                 format!("event_time is not a valid ISO8601 instant: {raw}"),
             )
         })?;
+        // Bounds check (#16): reject event_time more than 10 years in the
+        // past or more than 1 day in the future. An extreme back-date forces
+        // the matrix temporal buckets to span a huge range, triggering a full
+        // rebuild on every subsequent capture.
+        let now_ms = crate::dispatch::wall_now();
+        let ten_years_ms: i64 = 10 * 365 * 86_400 * 1_000;
+        let one_day_ms: i64 = 86_400 * 1_000;
+        if ms < now_ms - ten_years_ms || ms > now_ms + one_day_ms {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "event_time is outside the acceptable range (10 years past to 1 day future)".to_string(),
+            ));
+        }
         frame.event_time = Some(ms);
     }
 
