@@ -99,6 +99,13 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     ///   unknown format version, or a provider-magic mismatch — never crashes.
     func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable
 
+    /// Release the in-memory trained vocabulary (ADR-026). The next
+    /// `embed` call will need to reload from BasisStore. Called after
+    /// reindex/reembed completes to free the ~2GB of `[Float]` arrays
+    /// that the vocab dictionary holds. Providers that have no in-memory
+    /// state (FDC, stateless providers) are no-ops.
+    func releaseBasis()
+
     // MARK: - Maintained counts (incremental-counts change set, P3)
     //
     // The counts seam lets `Corpus` keep each trainable provider's raw additive

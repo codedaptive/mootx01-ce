@@ -10,8 +10,8 @@ name: Mootx01-App
 options:
   bundleIdPrefix: com.codedaptive.mootx01
   deploymentTarget:
-    macOS: "26.0"
-    iOS: "26.0"
+    macOS: "27.0"
+    iOS: "27.0"
   createIntermediateGroups: true
 
 packages:

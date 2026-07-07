@@ -1061,6 +1061,8 @@ extension ToolDispatcher {
 enum InterfaceTools {
 
     private static let names: Set<String> = [
+        // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+        "memory",
         // Tier 1 — Core Memory
         "moot_file_memory", "moot_memory_search", "moot_memory_get",
         "moot_memory_list",
@@ -1093,6 +1095,8 @@ enum InterfaceTools {
         dispatcher: ToolDispatcher
     ) async throws -> JSONValue {
         switch name {
+        // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+        case "memory":                 return try await dispatcher.runMemoryTool(args)
         // Tier 1
         case "moot_file_memory":       return try await dispatcher.runFileMemory(args)
         case "moot_memory_search":     return try await dispatcher.runMemorySearch(args)

@@ -103,6 +103,7 @@ public enum ToolProjection {
     /// Production code uses `tools()` (no args).
     public static func tools(environment: [String: String]) -> [ProjectedTool] {
         var raw: [ProjectedTool] = []
+        raw.append(contentsOf: memoryAdapterTools())
         raw.append(contentsOf: coreMemoryTools())
         raw.append(contentsOf: connectionTools())
         raw.append(contentsOf: knowledgeGraphTools())
@@ -131,6 +132,12 @@ public enum ToolProjection {
                 provenance: tool.provenance
             )
         }
+    }
+
+    // MARK: - Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+
+    private static func memoryAdapterTools() -> [ProjectedTool] {
+        [memoryTool()]
     }
 
     // MARK: - Tier 1: Core Memory (8 tools)

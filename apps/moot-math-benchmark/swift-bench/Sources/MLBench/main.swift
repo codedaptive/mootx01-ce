@@ -142,7 +142,7 @@ func measureCommunityDetection(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UI
     var out: [Measurement] = []
     for n in [50, 200, 1_000] {
         let adj = buildAdjacency(&rng, n: n)
-        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = CommunityDetection.detect(adjacency: adj, maxPasses: 10) }
+        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = CommunityDetection.detect(adjacency: adj, maxPasses: 10, estate: "bench", ts: 0) }
         out.append(make("community_detection", "n=\(n)", t))
     }
     return out
@@ -160,7 +160,7 @@ func measureEigenvalueCentrality(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: 
     var out: [Measurement] = []
     for n in [50, 200, 1_000] {
         let adj = buildAdjacency(&rng, n: n)
-        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 100, tolerance: 1e-6) }
+        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 100, tolerance: 1e-6, estate: "bench", ts: 0) }
         out.append(make("eigenvalue_centrality", "n=\(n)", t))
     }
     return out

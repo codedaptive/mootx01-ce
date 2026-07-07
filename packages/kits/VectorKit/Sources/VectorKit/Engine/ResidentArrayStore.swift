@@ -759,7 +759,7 @@ public actor ResidentArrayStore {
             kind: kind,
             stride: stride,
             count: count,
-            storage: Data(vectorData),
+            storage: vectorData,
             keys: keys,
             modelPartitions: partitions,
             tombstones: tombstones

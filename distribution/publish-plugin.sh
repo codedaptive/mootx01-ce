@@ -64,11 +64,18 @@ Requires the mootx01 binary: brew install codedaptive/mootx01-ce/mootx01"
   echo "✓ pushed v$VERSION"
 fi
 
-# Tag the plugin release (idempotent: skip if the tag exists).
+# Create a GitHub Release (not just a tag) — required for Gemini gallery indexing.
 if ! git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
   git tag "v$VERSION"
   git push -q origin "v$VERSION"
-  echo "✓ published and tagged v$VERSION"
+  if command -v gh >/dev/null 2>&1; then
+    gh release create "v$VERSION" --title "MOOTx01 Plugin v$VERSION" \
+      --notes "MOOTx01 memory plugin v$VERSION. Requires the mootx01 binary: brew install codedaptive/mootx01-ce/mootx01. See README for install commands." \
+      2>/dev/null || true
+    echo "✓ published, tagged, and released v$VERSION"
+  else
+    echo "✓ published and tagged v$VERSION (install gh CLI to auto-create GitHub Releases)"
+  fi
 else
   echo "✓ published v$VERSION (tag already existed)"
 fi

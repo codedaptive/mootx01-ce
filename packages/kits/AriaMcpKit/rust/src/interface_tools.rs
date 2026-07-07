@@ -87,6 +87,8 @@ const DEFAULT_LATTICE_CODE: &str = "000";
 /// The 19 interface tool names (Tier 1–5) plus 2 Maintenance tools (21 total),
 /// in the order they appear in the tool list. Mirrors Swift `InterfaceTools`.
 pub const INTERFACE_TOOLS: &[&str] = &[
+    // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+    "memory",
     // Tier 1 — Core memory (8)
     "moot_file_memory",
     "moot_memory_search",
@@ -347,6 +349,8 @@ pub fn dispatch(
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
+        // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+        "memory" => crate::memory_adapter::dispatch_memory(args, registry),
         "moot_file_memory" => run_file_memory(args, registry),
         "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger),
         "moot_memory_list" => run_memory_list(args, registry),
