@@ -2086,16 +2086,11 @@ impl Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         self.persist_maintained_counts(filed_at_secs)?;
 
-        // ADR-026: release the in-memory trained vocabulary from each provider.
-        // The vocab dictionaries hold ~2GB of Vec<f32> arrays on a 50K estate.
-        // The basis is persisted in BasisStore; the next embed call will
-        // reconstruct from the stored blob.
-        for slot in &self.slots {
-            let mut handle = slot.handle.lock().unwrap();
-            if let ProviderHandle::Trainable(ref mut trainable) = *handle {
-                trainable.release_basis();
-            }
-        }
+        // ADR-026 NOTE: release_basis() was here but is REMOVED because the
+        // serving providers have no on-demand reconstruction path. Calling it
+        // clears the live vocab, making subsequent embeds return zero vectors.
+        // The ~2GB vocab RAM stays resident until a lazy-load-from-BasisStore
+        // mechanism is implemented.
 
         eprintln!(
             "[corpus] reindex: complete — {} chunks re-embedded across {} slots",

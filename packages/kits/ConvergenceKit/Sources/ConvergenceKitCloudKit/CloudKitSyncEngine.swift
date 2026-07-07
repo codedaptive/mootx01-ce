@@ -435,7 +435,10 @@ actor CloudKitStateActor {
             ],
             indices: []
         )
-        try await storage.open(schema: schema)
+        // migrate(to:) is ADDITIVE — it creates missing tables without
+        // replacing the backend's active schema declaration. open(schema:)
+        // would clobber the application schema, breaking all row operations.
+        try await storage.migrate(to: schema)
     }
 
     /// Read the persisted sync HLC for a specific row.
