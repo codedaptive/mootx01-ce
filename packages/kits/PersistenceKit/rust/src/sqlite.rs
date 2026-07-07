@@ -771,7 +771,7 @@ impl SqliteStorage {
         }
         let _ = conn.busy_timeout(Duration::from_secs_f64(busy));
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA mmap_size=2147483648;",
         )
         .map_err(|e| StorageError::BackendError {
             underlying: format!("sqlite pragmas: {e}"),

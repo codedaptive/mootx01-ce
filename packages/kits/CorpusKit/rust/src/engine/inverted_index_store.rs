@@ -33,16 +33,12 @@ pub struct InvertedIndexStore {
 
 struct StoreState {
     conn: Connection,
-    term_freqs: TermFreqTable,
-    doc_lengths: HashMap<String, usize>,
-    /// Cached (parameters, index, term_mapping), read by `top_k` on every
-    /// query once populated. Keyed on the `BM25Parameters` it was built
-    /// with (`BM25Parameters` is `PartialEq`) — `top_k` accepts parameters
-    /// per call, so a cache built for one k1/b must not be silently reused
-    /// for a different one. In practice every current caller passes
-    /// `BM25Parameters::default()`, but the key guards against a future
-    /// caller that varies it. Cleared (`None`) by every write so the next
-    /// query rebuilds from current term/doc state.
+    // ADR-026: term_freqs and doc_lengths are NO LONGER held in RAM.
+    // They are loaded from SQLite on demand inside `top_k`/`build_index`
+    // and discarded after the InvertedIndex is built. This eliminates
+    // ~500MB of HashMap heap on a 50K-memory estate.
+    /// Cached (parameters, index, term_mapping). Cleared by every write
+    /// so the next query reloads from SQLite and rebuilds.
     cached: Option<(BM25Parameters, InvertedIndex, HashMap<String, u32>)>,
 }
 
@@ -50,16 +46,15 @@ impl InvertedIndexStore {
     /// Create and open a store backed by the given SQLite connection.
     ///
     /// Creates tables if absent (idempotent) and loads existing state.
+    /// ADR-026: open validates tables are accessible but does NOT load
+    /// term frequencies or document lengths into RAM. They are loaded
+    /// from SQLite on demand inside `top_k` and discarded after the
+    /// InvertedIndex is built.
     pub fn open(conn: Connection) -> Result<Self, rusqlite::Error> {
         Self::create_tables(&conn)?;
-        let mut term_freqs = TermFreqTable::new();
-        let mut doc_lengths = HashMap::new();
-        Self::load_state(&conn, &mut term_freqs, &mut doc_lengths)?;
         Ok(InvertedIndexStore {
             state: Mutex::new(StoreState {
                 conn,
-                term_freqs,
-                doc_lengths,
                 cached: None,
             }),
         })
@@ -174,30 +169,27 @@ impl InvertedIndexStore {
     ) -> Result<(), rusqlite::Error> {
         let mut state = self.state.lock().expect("mutex poisoned");
 
-        // Remove existing state.
+        // Remove existing state from durable tables only.
         Self::delete_from_db(&state.conn, item_id)?;
-        Self::delete_mem(&mut *state, item_id);
 
-        if tokens.is_empty() { return Ok(()); }
+        if tokens.is_empty() { state.cached = None; return Ok(()); }
 
         // Compute term frequencies.
         let mut tf: HashMap<String, usize> = HashMap::new();
         for t in tokens { *tf.entry(t.clone()).or_insert(0) += 1; }
         let doc_len = tokens.len();
 
-        // Persist.
+        // Persist to SQLite only — no in-memory mirror (ADR-026).
         for (term, freq) in &tf {
             state.conn.execute(
                 "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq) VALUES (?1, ?2, ?3)",
                 params![term, item_id, *freq as i64],
             )?;
-            state.term_freqs.entry(term.clone()).or_default().insert(item_id.to_owned(), *freq);
         }
         state.conn.execute(
             "INSERT OR REPLACE INTO iix_doclens (item_id, length) VALUES (?1, ?2)",
             params![item_id, doc_len as i64],
         )?;
-        state.doc_lengths.insert(item_id.to_owned(), doc_len);
         state.cached = None;
         Ok(())
     }
@@ -294,21 +286,13 @@ impl InvertedIndexStore {
     /// `(item_id, term→freq, doc_len)`; re-delivered items replace their prior
     /// entries (same semantics as `index`'s delete-then-insert for an item that
     /// was already present). Clears the cached BM25 index once for the batch.
+    /// ADR-026: no in-memory mirror. The durable tables (written by
+    /// merge_shard) are the source of truth; just invalidate the cache.
     pub fn fold_postings(
         &self,
-        items: &[(String, HashMap<String, usize>, usize)],
+        _items: &[(String, HashMap<String, usize>, usize)],
     ) -> Result<(), rusqlite::Error> {
         let mut state = self.state.lock().expect("mutex poisoned");
-        for (item_id, tf, doc_len) in items {
-            for (term, freq) in tf {
-                state
-                    .term_freqs
-                    .entry(term.clone())
-                    .or_default()
-                    .insert(item_id.clone(), *freq);
-            }
-            state.doc_lengths.insert(item_id.clone(), *doc_len);
-        }
         state.cached = None;
         Ok(())
     }
@@ -317,7 +301,6 @@ impl InvertedIndexStore {
     pub fn remove(&self, item_id: &str) -> Result<(), rusqlite::Error> {
         let mut state = self.state.lock().expect("mutex poisoned");
         Self::delete_from_db(&state.conn, item_id)?;
-        Self::delete_mem(&mut *state, item_id);
         state.cached = None;
         Ok(())
     }
@@ -328,16 +311,7 @@ impl InvertedIndexStore {
         Ok(())
     }
 
-    fn delete_mem(state: &mut StoreState, item_id: &str) {
-        state.doc_lengths.remove(item_id);
-        let terms: Vec<String> = state.term_freqs.keys().cloned().collect();
-        for term in terms {
-            if let Some(docs) = state.term_freqs.get_mut(&term) {
-                docs.remove(item_id);
-                if docs.is_empty() { state.term_freqs.remove(&term); }
-            }
-        }
-    }
+    // ADR-026: delete_mem removed — no in-memory mirror to update.
 
     // MARK: — Index building
 
@@ -350,9 +324,15 @@ impl InvertedIndexStore {
     /// calls it: the hot query path is `top_k`, which reads the store's
     /// parameter-keyed cache by reference under the lock instead of
     /// extracting an owned copy.
+    /// ADR-026: loads term_freqs and doc_lengths from SQLite into transient
+    /// locals, builds the index, and discards the raw dictionaries.
     pub fn build_index(&self, parameters: BM25Parameters) -> (InvertedIndex, HashMap<String, u32>) {
         let state = self.state.lock().expect("mutex poisoned");
-        BM25Weighting::build(&state.term_freqs, &state.doc_lengths, parameters)
+        let mut term_freqs = TermFreqTable::new();
+        let mut doc_lengths = HashMap::new();
+        // Errors during load produce an empty index (fail-open for reads).
+        let _ = Self::load_state(&state.conn, &mut term_freqs, &mut doc_lengths);
+        BM25Weighting::build(&term_freqs, &doc_lengths, parameters)
     }
 
     // MARK: — Convenience top-k
@@ -366,6 +346,9 @@ impl InvertedIndexStore {
     /// called `build_index`, which rebuilt the whole `InvertedIndex` from
     /// the raw term-frequency table on every query — O(vocabulary ×
     /// documents) per query instead of O(query terms × matching postings).
+    /// ADR-026: loads term_freqs and doc_lengths from SQLite when cache
+    /// is stale, builds the InvertedIndex, caches THAT, discards the
+    /// raw dictionaries. No persistent in-memory mirror.
     pub fn top_k(
         &self,
         query_terms: &[String],
@@ -379,11 +362,14 @@ impl InvertedIndexStore {
             None => true,
         };
         if needs_build {
+            // Load from SQLite into transient locals — released after build.
+            let mut term_freqs = TermFreqTable::new();
+            let mut doc_lengths = HashMap::new();
+            let _ = Self::load_state(&state.conn, &mut term_freqs, &mut doc_lengths);
             let (index, term_mapping) =
-                BM25Weighting::build(&state.term_freqs, &state.doc_lengths, parameters);
+                BM25Weighting::build(&term_freqs, &doc_lengths, parameters);
             state.cached = Some((parameters, index, term_mapping));
         }
-        // Just populated above if it was stale or absent, so this is always `Some`.
         let (_, index, term_mapping) = state.cached.as_ref().expect("cache populated above");
         let query = BM25Weighting::query_pairs(query_terms, term_mapping);
         if query.is_empty() { return Vec::new(); }
@@ -401,16 +387,16 @@ impl InvertedIndexStore {
         let mut state = self.state.lock().expect("mutex poisoned");
         state.conn.execute("DELETE FROM iix_termfreqs", [])?;
         state.conn.execute("DELETE FROM iix_doclens", [])?;
-        state.term_freqs.clear();
-        state.doc_lengths.clear();
         state.cached = None;
         Ok(())
     }
 
-    /// Number of indexed documents.
+    /// Number of indexed documents. Queries the durable table (ADR-026).
     pub fn document_count(&self) -> usize {
         let state = self.state.lock().expect("mutex poisoned");
-        state.doc_lengths.len()
+        state.conn
+            .query_row("SELECT COUNT(*) FROM iix_doclens", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) as usize
     }
 }
 

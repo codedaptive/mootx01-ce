@@ -1371,6 +1371,11 @@ impl VectorStore {
     ///
     /// Returns up to `k` matches, nearest first. Empty if `k` is 0, the
     /// probe is empty, or no float rows exist.
+    /// ADR-026: float NN search scans the SQLite `vectors` table directly.
+    /// No FloatBruteForceIndex, no cached ResidentVectorArray, no multi-GB
+    /// heap copy. With PRAGMA mmap_size, row reads come from the OS page
+    /// cache. Cosine distance is computed per row; the result set is sorted
+    /// and truncated to k.
     pub fn find_nearest_float(
         &self,
         probe: &[f32],
@@ -1380,55 +1385,14 @@ impl VectorStore {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
         }
-        let mut state = self.state.lock().map_err(|_| {
-            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
-        })?;
-        // Build (once, lazily) the Lane D index for THIS modelID from its float
-        // rows only — uniform stride, so the search dimension guard is satisfied
-        // even when the table holds several models' float rows of differing
-        // dimension (mission 6a-iii-core). Returns false when the model has no
-        // float rows (no float lane for it).
-        if !self.ensure_float_index_built_locked(&mut state, model_id)? {
-            return Ok(Vec::new());
-        }
-
-        let probe_payload = VectorPayload::from_f32(probe);
-        // The index already holds only this model's rows, but keep the modelID
-        // metadata filter for defence-in-depth.
-        let filter = MetadataFilter {
-            model_id: Some(model_id.to_string()),
-            model_version: None,
-        };
-
-        // FloatBruteForceIndex computes cosine distance and applies the
-        // (distance ASC, item_id ASC) tie-break (retrieval algorithms ref §0.3).
-        // The per-model index is guaranteed present here (ensure returned true).
-        let model_index = state
-            .float_indices
-            .get(model_id)
-            .expect("ensure_float_index_built_locked returned true → index present");
-        let hits = model_index.search(
-            &probe_payload,
-            DenseMetric::Float(crate::engine::metric::FloatMetric::Cosine),
-            k,
-            Some(&filter),
-        )?;
-
-        // Map DenseHit → VectorMatch. The float lane's raw_distance is the
-        // cosine distance × 10_000 (DenseHit convention), so it carries
-        // straight into VectorMatch.distance — the same integer scale the
-        // Swift findNearestFloat produces, so the cross-language
-        // rank-identity fixtures compare like-for-like.
-        let result: Vec<VectorMatch> = hits
-            .into_iter()
-            .map(|h| VectorMatch {
-                item_id: h.key.item_id.clone(),
-                distance: h.raw_distance,
-                model_id: model_id.to_string(),
-            })
-            .collect();
-
-        Ok(result)
+        let mut scored = self.float_scan_from_table(probe, model_id)?;
+        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
+            item_id,
+            distance: (dist * 10_000.0).round() as i32,
+            model_id: model_id.to_string(),
+        }).collect())
     }
 
     /// k-FARTHEST neighbours over the float32 (Lane D) vectors by cosine —
@@ -1457,43 +1421,15 @@ impl VectorStore {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
         }
-        let mut state = self.state.lock().map_err(|_| {
-            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
-        })?;
-        // Same lazy per-model build as find_nearest_float.
-        if !self.ensure_float_index_built_locked(&mut state, model_id)? {
-            return Ok(Vec::new());
-        }
-
-        let probe_payload = VectorPayload::from_f32(probe);
-        let filter = MetadataFilter {
-            model_id: Some(model_id.to_string()),
-            model_version: None,
-        };
-
-        let model_index = state
-            .float_indices
-            .get(model_id)
-            .expect("ensure_float_index_built_locked returned true → index present");
-        // search_farthest applies the SAME cosine, the (item_id ASC) tie-break,
-        // ordered by distance DESCENDING.
-        let hits = model_index.search_farthest(
-            &probe_payload,
-            DenseMetric::Float(crate::engine::metric::FloatMetric::Cosine),
-            k,
-            Some(&filter),
-        )?;
-
-        let result: Vec<VectorMatch> = hits
-            .into_iter()
-            .map(|h| VectorMatch {
-                item_id: h.key.item_id.clone(),
-                distance: h.raw_distance,
-                model_id: model_id.to_string(),
-            })
-            .collect();
-
-        Ok(result)
+        let mut scored = self.float_scan_from_table(probe, model_id)?;
+        // Farthest = descending by distance.
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
+            item_id,
+            distance: (dist * 10_000.0).round() as i32,
+            model_id: model_id.to_string(),
+        }).collect())
     }
 
     /// Coarse keyword pre-filter: returns distinct item IDs whose
@@ -1896,6 +1832,49 @@ impl VectorStore {
     /// map entry's presence is the per-model "built" flag. Unlike the binary
     /// lane there is no sidecar for the float lane yet — the float resident
     /// array is rebuilt from the table on first use.
+    /// ADR-026: scan the SQLite `vectors` table directly for float NN
+    /// search, computing cosine distance per row. No cached index, no
+    /// heap-resident vector array. Returns (distance, item_id) pairs.
+    fn float_scan_from_table(
+        &self,
+        probe: &[f32],
+        model_id: &str,
+    ) -> Result<Vec<(f32, String)>, VectorKitError> {
+        let records = self.fetch_float_records(model_id)?;
+        let mut scored: Vec<(f32, String)> = Vec::with_capacity(records.len());
+        for (key, payload) in &records {
+            let bytes = &payload.bytes;
+            let dim = bytes.len() / 4;
+            if dim != probe.len() { continue; }
+            // Decode float vector from BLOB bytes (LE f32).
+            let mut candidate = Vec::with_capacity(dim);
+            for i in 0..dim {
+                let off = i * 4;
+                let bits = u32::from_le_bytes([
+                    bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3],
+                ]);
+                candidate.push(f32::from_bits(bits));
+            }
+            // Cosine distance: 1 − dot(a,b)/(‖a‖·‖b‖).
+            let mut dot: f32 = 0.0;
+            let mut norm_a: f32 = 0.0;
+            let mut norm_b: f32 = 0.0;
+            for j in 0..dim {
+                dot += probe[j] * candidate[j];
+                norm_a += probe[j] * probe[j];
+                norm_b += candidate[j] * candidate[j];
+            }
+            let denom = norm_a.sqrt() * norm_b.sqrt();
+            let dist = if denom > 0.0 {
+                1.0 - (dot / denom).clamp(-1.0, 1.0)
+            } else {
+                1.0
+            };
+            scored.push((dist, key.item_id.clone()));
+        }
+        Ok(scored)
+    }
+
     fn ensure_float_index_built_locked(
         &self,
         state: &mut HotState,
@@ -1950,6 +1929,18 @@ impl VectorStore {
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
+        // ADR-026 string interning: model_id and model_version repeat for
+        // every row in a partition. Interning collapses N identical String
+        // heap allocations to one shared instance per unique value.
+        let mut intern_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let intern = |cache: &mut std::collections::HashMap<String, String>, s: String| -> String {
+            if let Some(existing) = cache.get(&s) {
+                existing.clone()
+            } else {
+                cache.insert(s.clone(), s.clone());
+                s
+            }
+        };
         let mut records: Vec<(VectorRecordKey, VectorPayload)> = Vec::with_capacity(rows.len());
         for row in rows {
             let item_id = match row.get("item_id") {
@@ -1960,11 +1951,11 @@ impl VectorStore {
                 Some(TypedValue::Int(v)) => *v as u32,
                 _ => continue,
             };
-            let model_id = match row.get("model_id") {
+            let raw_model_id = match row.get("model_id") {
                 Some(TypedValue::Text(s)) => s.clone(),
                 _ => continue,
             };
-            let model_version = match row.get("model_version") {
+            let raw_model_version = match row.get("model_version") {
                 Some(TypedValue::Text(s)) => s.clone(),
                 _ => continue,
             };
@@ -1972,7 +1963,12 @@ impl VectorStore {
                 Ok(p) if p.kind == VectorKind::Float32 => p,
                 _ => continue,
             };
-            let key = VectorRecordKey::new(item_id, vector_index, model_id, model_version);
+            let key = VectorRecordKey::new(
+                item_id,
+                vector_index,
+                intern(&mut intern_cache, raw_model_id),
+                intern(&mut intern_cache, raw_model_version),
+            );
             records.push((key, payload));
         }
         records.sort_by(|a, b| a.0.cmp(&b.0));
