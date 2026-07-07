@@ -196,7 +196,35 @@ public enum DatabaseManager {
         guard FileManager.default.fileExists(atPath: dir.path) else {
             throw MOOTx01DatabaseError.notFound(name)
         }
+        // Data retention (#47): platform-appropriate removal so the user
+        // has a recovery window on desktop OSes.
+        //   macOS  → NSFileManager.trashItem (moves to Trash)
+        //   Linux  → zero all regular files, then removeItem (no Trash)
+        //   Windows → handled by the Rust port (Recycle Bin via SHFileOperation)
+        #if os(macOS)
+        try FileManager.default.trashItem(at: dir, resultingItemURL: nil)
+        #elseif os(Linux)
+        // Zero all regular files in the estate directory before deletion
+        // so content is not recoverable from the raw filesystem.
+        if let enumerator = FileManager.default.enumerator(atPath: dir.path) {
+            while let file = enumerator.nextObject() as? String {
+                let fileURL = dir.appendingPathComponent(file)
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDir),
+                   !isDir.boolValue {
+                    if let handle = try? FileHandle(forWritingTo: fileURL) {
+                        let size = handle.seekToEndOfFile()
+                        handle.seek(toFileOffset: 0)
+                        handle.write(Data(count: Int(size)))
+                        handle.closeFile()
+                    }
+                }
+            }
+        }
         try FileManager.default.removeItem(at: dir)
+        #else
+        try FileManager.default.removeItem(at: dir)
+        #endif
     }
 
     /// Delete the default estate database files (SQLite + WAL/SHM).
