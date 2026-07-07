@@ -157,9 +157,14 @@ final class SetupViewModel {
         let displayNames = clients.filter(\.isAlreadyWired).map(\.client.displayName)
         let launchPath = binaryPath
         let mode = depth.rawValue
+        // Preserve prior vault posture (#5): read the daemon plist's
+        // MOOTX01_VAULT value. If the user previously chose --vault-off
+        // (MOOTX01_VAULT=0), pass --vault-off to the convergence install
+        // so it doesn't silently re-enable vault tools.
+        let vaultOff = Self.readDaemonVaultPosture(home: home)
         Task {
             let (converged, failed) = await Self.runInstall(
-                launchPath: launchPath, ids: ids.joined(separator: ","), mode: mode, names: displayNames)
+                launchPath: launchPath, ids: ids.joined(separator: ","), mode: mode, names: displayNames, vaultOff: vaultOff)
             if failed.isEmpty {
                 self.convergenceOutcome = "converged: \(converged.joined(separator: ", "))"
             } else {
@@ -216,12 +221,27 @@ final class SetupViewModel {
     }
 
     /// Run the CLI install off the main actor and return (results, skipped).
+    /// Read the daemon LaunchAgent plist's MOOTX01_VAULT value. Returns true
+    /// when the user's prior posture was vault-off (MOOTX01_VAULT=0).
+    private static func readDaemonVaultPosture(home: URL) -> Bool {
+        let plistURL = home
+            .appendingPathComponent("Library/LaunchAgents/com.mootx01.daemon.plist")
+        guard let data = try? Data(contentsOf: plistURL),
+              let plist = try? PropertyListSerialization.propertyList(
+                from: data, format: nil) as? [String: Any],
+              let envVars = plist["EnvironmentVariables"] as? [String: String]
+        else { return false }
+        return envVars["MOOTX01_VAULT"] == "0"
+    }
+
     private nonisolated static func runInstall(
-        launchPath: String, ids: String, mode: String, names: [String]
+        launchPath: String, ids: String, mode: String, names: [String], vaultOff: Bool = false
     ) async -> ([String], [String]) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launchPath)
-        proc.arguments = ["install", "--target", ids, "--mode", mode, "--yes"]
+        var args = ["install", "--target", ids, "--mode", mode, "--yes"]
+        if vaultOff { args.append("--vault-off") }
+        proc.arguments = args
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
