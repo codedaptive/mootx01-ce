@@ -38,6 +38,25 @@ public struct CaptureDrawerIntent: AppIntent {
     @Parameter(title: "Sensitivity", default: .normal)
     public var sensitivity: SensitivityAppEnum
 
+    // Ingestion targeting (M-ING-1). The targeting model for miners and
+    // Shortcuts recipes: `location` = room (subject matter), `wing` = life
+    // area (e.g. "Personal Life"), `eventTime` = when the captured fact was
+    // TRUE (mined-history support — a health sample from last Tuesday files
+    // with last Tuesday's event_time, not today's). Estate targeting is a
+    // future parameter once multi-estate exists; it is deliberately NOT
+    // modeled yet. Both parameters are optional with nil defaults so every
+    // existing Shortcut, callback URL, and test is unchanged.
+
+    /// Wing to route the drawer into. Maps to moot_file_memory `wing`.
+    /// nil = the server default wing ("Agentic Memory").
+    @Parameter(title: "Wing")
+    public var wing: String?
+
+    /// When the captured content was true, for historical ingestion. Maps to
+    /// moot_file_memory `event_time` (ISO8601). nil = now (streaming capture).
+    @Parameter(title: "Event Time")
+    public var eventTime: Date?
+
     /// The tool caller injected by the host. `nil` triggers the
     /// `IntentRuntimeBridge.shared.bridge()` fallback so the
     /// system-instantiated Shortcuts path also reaches the live estate.
@@ -49,22 +68,37 @@ public struct CaptureDrawerIntent: AppIntent {
         content: String,
         location: String = "memories",
         sensitivity: SensitivityAppEnum = .normal,
+        wing: String? = nil,
+        eventTime: Date? = nil,
         caller: (any MootToolCalling)? = nil
     ) {
         self.content = content
         self.location = location
         self.sensitivity = sensitivity
+        self.wing = wing
+        self.eventTime = eventTime
         self.caller = caller
     }
 
     @MainActor
     public func perform() async throws -> some IntentResult & ProvidesDialog {
         let c = try await resolvedCaller()
-        let result = await c.callTool("moot_file_memory", arguments: [
+        var arguments: [String: JSONValue] = [
             "content": .string(content),
             "location": .string(location),
             "sensitivity": .string(sensitivity.rawValue),
-        ])
+        ]
+        if let wing, !wing.isEmpty {
+            arguments["wing"] = .string(wing)
+        }
+        if let eventTime {
+            // moot_file_memory expects ISO8601 text (schema invariant: dates
+            // are TEXT, never epoch numbers).
+            arguments["event_time"] = .string(
+                ISO8601DateFormatter().string(from: eventTime)
+            )
+        }
+        let result = await c.callTool("moot_file_memory", arguments: arguments)
         if result.isError { throw IntentToolError.substrateRefused(result.text) }
         return .result(dialog: IntentDialog(stringLiteral: result.text))
     }
