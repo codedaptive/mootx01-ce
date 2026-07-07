@@ -44,11 +44,16 @@ import Foundation
 public struct ModelPartitionEntry: Sendable, Equatable {
     /// The model this partition covers.
     public let modelID: String
+    /// Model weights version for this partition (ADR-026: moved from
+    /// per-slot VectorRecordKey to partition-level). All slots in a
+    /// partition share the same modelVersion.
+    public let modelVersion: String
     /// Half-open index range [start, end) into the keys and storage arrays.
     public let range: Range<Int>
 
-    public init(modelID: String, range: Range<Int>) {
+    public init(modelID: String, modelVersion: String = "", range: Range<Int>) {
         self.modelID = modelID
+        self.modelVersion = modelVersion
         self.range = range
     }
 }

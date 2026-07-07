@@ -1679,20 +1679,29 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
+        // ADR-026 string interning: modelID is the same for every row
+        // (we're fetching a single modelID partition). Intern to avoid
+        // N identical String heap allocations.
+        var internCache: [String: String] = [:]
+        func intern(_ s: String) -> String {
+            if let existing = internCache[s] { return existing }
+            internCache[s] = s
+            return s
+        }
         var records: [(key: VectorRecordKey, payload: VectorPayload)] = []
         records.reserveCapacity(rows.count)
         for row in rows {
             guard case let .text(itemID) = row["item_id"] ?? .null,
                   case let .int(vectorIndex) = row["vector_index"] ?? .null,
-                  case let .text(modelID) = row["model_id"] ?? .null,
-                  case let .text(modelVersion) = row["model_version"] ?? .null,
+                  case let .text(rawModelID) = row["model_id"] ?? .null,
+                  case let .text(rawModelVersion) = row["model_version"] ?? .null,
                   let payload = Self.decodePayload(from: row),
                   payload.kind == .float32 else { continue }
             let key = VectorRecordKey(
                 itemID: itemID,
                 vectorIndex: UInt32(vectorIndex),
-                modelID: modelID,
-                modelVersion: modelVersion
+                modelID: intern(rawModelID),
+                modelVersion: intern(rawModelVersion)
             )
             records.append((key: key, payload: payload))
         }
@@ -1793,6 +1802,15 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
+        // ADR-026 string interning: modelID and modelVersion repeat for
+        // every row in a partition. Interning collapses 200K+ identical
+        // String heap allocations to one shared instance per unique value.
+        var internCache: [String: String] = [:]
+        func intern(_ s: String) -> String {
+            if let existing = internCache[s] { return existing }
+            internCache[s] = s
+            return s
+        }
         var records: [(key: VectorRecordKey, bytes: [UInt8])] = []
         records.reserveCapacity(rows.count)
         for row in rows {
@@ -1800,8 +1818,8 @@ public actor VectorStore {
             let key = VectorRecordKey(
                 itemID: sv.itemID,
                 vectorIndex: sv.vectorIndex,
-                modelID: sv.modelID,
-                modelVersion: sv.modelVersion
+                modelID: intern(sv.modelID),
+                modelVersion: intern(sv.modelVersion)
             )
             records.append((key: key, bytes: sv.engram.wireBytes))
         }
