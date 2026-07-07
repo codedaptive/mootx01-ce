@@ -152,6 +152,9 @@ pub fn default_submitter() -> Submitter {
 
 /// Writes `submission` as a JSON file inside `dir`.
 /// Called from the submitter closure — fire-and-forget; never panics.
+/// Maximum pool files before new submissions are discarded (#45).
+const MAX_POOL_FILES: usize = 500;
+
 fn write_submission(submission: &PoolSubmission, dir: &Path) {
     // Create the directory if it does not exist yet.
     if let Err(e) = fs::create_dir_all(dir) {
@@ -160,6 +163,17 @@ fn write_submission(submission: &PoolSubmission, dir: &Path) {
             dir, e
         );
         return;
+    }
+    // Cap check: count existing pool files and skip if at capacity.
+    if let Ok(entries) = fs::read_dir(dir) {
+        let count = entries.filter(|e| e.is_ok()).count();
+        if count >= MAX_POOL_FILES {
+            eprintln!(
+                "novel pool: {} files at cap ({}); discarding submission until reducer drains",
+                count, MAX_POOL_FILES
+            );
+            return;
+        }
     }
     // Build a unique file name using millisecond epoch + a simple counter-like
     // nonce derived from the system time nanoseconds, avoiding external crates.
