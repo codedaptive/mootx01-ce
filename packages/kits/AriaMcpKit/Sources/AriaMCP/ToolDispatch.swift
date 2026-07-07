@@ -2382,8 +2382,14 @@ extension ToolDispatcher {
         let room = try optionalString(args["room"], argument: "room")
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
-        let active = drawers.filter { $0.tombstonedAt == nil }
-        let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
+        // Filter to Cluster A (currently-believed) only (#9): withdrawn,
+        // superseded, expired, rejected rows have tombstonedAt==nil but are
+        // NOT currently-believed. Also apply the sensitivity ceiling.
+        let visible = drawers.filter {
+            $0.tombstonedAt == nil
+            && !$0.isKnewPast && !$0.isTerminal
+            && $0.adjectiveSensitivity.isBulkExportable
+        }
 
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: visible.map(\.parentNodeId))
