@@ -973,7 +973,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: develop/1.0.x
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.WINGET_PUSH_PAT }}
 
       - name: Update winget manifests
         run: |
