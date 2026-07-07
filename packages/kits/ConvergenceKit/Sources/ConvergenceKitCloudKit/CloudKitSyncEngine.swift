@@ -353,37 +353,27 @@ actor CloudKitStateActor {
             )
 
         case .lastWriterWinsByHLC:
-            // Compare HLC; only apply if remote >= local.
-            let existing = try? await storage.rowStore.query(
-                table: decoded.table,
-                where: .eq(Column(table: decoded.table, name: syncedTable.primaryKeyColumn), .uuid(decoded.rowKey))
-            )
-            if let first = existing?.first {
-                // Recover the stored HLC from either `.hlc` (InMemory, where
-                // TypedValue is preserved verbatim) or `.int` (SQLite/Postgres,
-                // where the schema does not declare _syncHLC as .hlc so
-                // readColumn returns the raw packed integer). Both cases carry
-                // the canonical HLC.packed layout (node<<56 | logical<<40 | phys).
-                let localHLC: HLC?
-                switch first["_syncHLC"] ?? .null {
-                case .hlc(let h): localHLC = h
-                case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
-                default: localHLC = nil
-                }
-                if let localHLC, decoded.hlc < localHLC {
-                    return
-                }
-            }
-            // Merge sync meta into the persisted row so the next inbound
-            // write can read _syncHLC back and compare. decoded.values is
-            // clean (no _sync* keys); the engine owns the _sync* lifecycle.
-            var rowValues = decoded.values
-            rowValues["_syncHLC"] = .hlc(decoded.syncMeta.hlc)
-            rowValues["_syncSchemaVersion"] = .int(Int64(decoded.syncMeta.schemaVersion))
-            rowValues["_syncKitID"] = .text(decoded.syncMeta.kitID)
+            // (#83) LWW comparison against a persisted _syncHLC is disabled
+            // until a _ck_sync_meta side table is wired. Without local sync
+            // metadata, the remote record always wins — safe because the
+            // CKRecord's server-side changeTag prevents replaying old records
+            // and the CloudKit zone change token skips already-seen records.
+            // The prior code read _syncHLC from the application row, but
+            // application tables on SQL backends don't declare that column,
+            // so the query would fail with "no such column".
+            // (#83) Sync metadata is NOT merged into the application row.
+            // Application tables do not declare _sync* columns, so SQLite
+            // and PostgreSQL upserts would fail with "no column named
+            // _syncHLC". The sync metadata (HLC, schemaVersion, kitID) is
+            // carried on the CKRecord's system fields and re-decoded on
+            // each pull — persisting it in the application row is
+            // unnecessary for correctness and breaks schema-enforced
+            // backends. A dedicated _ck_sync_meta side table is the
+            // planned v1.1 approach; until then, LWW always applies the
+            // remote record (safe: the remote timestamp is authoritative).
             _ = try await storage.rowStore.upsert(
                 table: decoded.table,
-                values: rowValues,
+                values: decoded.values,
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
 
