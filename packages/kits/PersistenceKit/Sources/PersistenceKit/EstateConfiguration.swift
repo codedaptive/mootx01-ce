@@ -29,18 +29,29 @@ public struct EstateConfiguration: Sendable {
     /// constraints, especially the federation-incompatibility note.
     public let novelTokenTagger: NovelTokenTaggerChoice
 
+    /// ADR-026: controls whether kits hold computed indexes in RAM
+    /// between queries (`.ramResident`) or load from the durable store
+    /// on demand (`.diskBacked`, the default). `.diskBacked` uses mmap
+    /// and OS page cache — small estates stay fully resident; large
+    /// estates page on demand. `.ramResident` is the pre-ADR-026
+    /// behavior: all indexes cached in heap for minimum query latency
+    /// at the cost of multi-GB memory on large estates.
+    public let residencyHint: ResidencyHint
+
     public init(
         estateID: UUID,
         backend: BackendConfiguration,
         encryptionConfig: EstateEncryptionConfig = .plaintext,
         cacheConfig: EstateCacheConfig = .disabled,
-        novelTokenTagger: NovelTokenTaggerChoice = .hmm
+        novelTokenTagger: NovelTokenTaggerChoice = .hmm,
+        residencyHint: ResidencyHint = .diskBacked
     ) {
         self.estateID = estateID
         self.backend = backend
         self.encryptionConfig = encryptionConfig
         self.cacheConfig = cacheConfig
         self.novelTokenTagger = novelTokenTagger
+        self.residencyHint = residencyHint
     }
 }
 
@@ -53,6 +64,21 @@ public enum BackendConfiguration: Sendable {
         idleTimeout: TimeInterval = 300.0
     )
     case inMemory
+}
+
+/// ADR-026: controls whether kits hold computed indexes in heap
+/// between queries or load from the durable store on demand.
+public enum ResidencyHint: Sendable, Equatable {
+    /// Indexes loaded from disk on demand; OS page cache manages RAM
+    /// residency. Default for all production estates. Multi-GB heap
+    /// savings on large estates; small estates stay fully cached by
+    /// the OS page cache with no measurable latency difference.
+    case diskBacked
+    /// All indexes cached in the Swift/Rust heap for minimum query
+    /// latency. Pre-ADR-026 behavior. Use for test fixtures, small
+    /// embedded deployments, or any path that needs guaranteed
+    /// sub-millisecond float NN search without a SQLite round-trip.
+    case ramResident
 }
 
 // MARK: — Queue sibling derivation (ADR-021 T3)

@@ -87,6 +87,12 @@ public actor InvertedIndexStore {
 
     private let storage: any Storage
 
+    /// ADR-026: when `.ramResident`, term frequencies and document lengths
+    /// are held in RAM between queries (pre-ADR-026 behavior). When
+    /// `.diskBacked` (default), they are loaded from SQLite on demand.
+    private var ramTermFreqs: BM25Weighting.TermFreqTable?
+    private var ramDocLengths: [String: Int]?
+
     // MARK: - Cached index (ADR-026: no persistent in-memory dictionaries)
 
     /// Last-built (index, termMapping), served by `buildIndex(parameters:)`
@@ -123,15 +129,21 @@ public actor InvertedIndexStore {
     /// are loaded from SQLite on demand inside `buildIndex` and discarded
     /// after the index is built.
     public func open() async throws {
-        // Verify tables are readable with a cheap count query. The actual
-        // data stays on disk until buildIndex needs it.
-        let docRows = try await storage.rowStore.query(
-            table: "iix_doclens", where: nil, orderBy: [], limit: 1, offset: nil)
-        let termRows = try await storage.rowStore.query(
-            table: "iix_termfreqs", where: nil, orderBy: [], limit: 1, offset: nil)
-        let hasDocs = !docRows.isEmpty
-        let hasTerms = !termRows.isEmpty
-        logger.info("InvertedIndexStore opened: tables accessible (docs=\(hasDocs), terms=\(hasTerms))")
+        if storage.configuration.residencyHint == .ramResident {
+            // Pre-ADR-026 behavior: load everything into RAM at open.
+            ramTermFreqs = try await loadTermFreqsTransient()
+            ramDocLengths = try await loadDocLengthsTransient()
+            let docCount = self.ramDocLengths?.count ?? 0
+            let termCount = self.ramTermFreqs?.count ?? 0
+            logger.info("InvertedIndexStore opened (ramResident): \(docCount) docs, \(termCount) terms")
+        } else {
+            // ADR-026: verify tables are readable. Data stays on disk.
+            let docRows = try await storage.rowStore.query(
+                table: "iix_doclens", where: nil, orderBy: [], limit: 1, offset: nil)
+            let termRows = try await storage.rowStore.query(
+                table: "iix_termfreqs", where: nil, orderBy: [], limit: 1, offset: nil)
+            logger.info("InvertedIndexStore opened (diskBacked): tables accessible (docs=\(!docRows.isEmpty), terms=\(!termRows.isEmpty))")
+        }
     }
 
     /// Load term frequencies from SQLite into a transient dictionary.
@@ -214,6 +226,13 @@ public actor InvertedIndexStore {
             ],
             conflictColumns: ["item_id"]
         )
+        // Maintain RAM mirror when ramResident.
+        if ramTermFreqs != nil {
+            for (term, freq) in tf {
+                ramTermFreqs?[term, default: [:]][itemID] = freq
+            }
+            ramDocLengths?[itemID] = docLen
+        }
         isDirty = true
     }
 
@@ -269,10 +288,15 @@ public actor InvertedIndexStore {
         parameters: BM25Parameters = BM25Parameters()
     ) async throws -> (index: InvertedIndex, termMapping: [String: UInt32]) {
         if let cached = cachedPair, !isDirty { return cached }
-        // Load from SQLite into transient dictionaries — these are released
-        // when this function returns. Only the compact InvertedIndex survives.
-        let termFreqs = try await loadTermFreqsTransient()
-        let docLengths = try await loadDocLengthsTransient()
+        // ADR-026: use RAM maps when ramResident, else load from SQLite.
+        let termFreqs: BM25Weighting.TermFreqTable
+        let docLengths: [String: Int]
+        if let rt = ramTermFreqs, let rd = ramDocLengths {
+            termFreqs = rt; docLengths = rd
+        } else {
+            termFreqs = try await loadTermFreqsTransient()
+            docLengths = try await loadDocLengthsTransient()
+        }
         let pair = BM25Weighting.build(
             termFreqs: termFreqs,
             docLengths: docLengths,

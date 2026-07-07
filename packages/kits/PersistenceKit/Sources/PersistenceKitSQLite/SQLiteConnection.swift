@@ -117,6 +117,15 @@ final class SQLiteConnection: @unchecked Sendable {
         try exec("PRAGMA wal_autocheckpoint = 1000;")
         try exec("PRAGMA busy_timeout = \(Int(busyTimeout * 1000));")
         try exec("PRAGMA foreign_keys = ON;")
+        // ADR-026: memory-map the database file so SQLite reads go through
+        // the OS page cache instead of malloc'd copies. This is the single
+        // change that eliminates multi-GB heap allocations for vector BLOBs
+        // and BM25 term-frequency reads — the OS manages which pages are
+        // resident in physical RAM based on actual access patterns. 2GB
+        // mmap window covers any realistic estate size; pages beyond the
+        // window fall back to normal read() I/O. Compatible with WAL mode
+        // and SQLCipher (mmap applies after decryption).
+        try exec("PRAGMA mmap_size = 2147483648;")
     }
 
     deinit {
