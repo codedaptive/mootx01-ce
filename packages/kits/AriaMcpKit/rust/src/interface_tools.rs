@@ -744,8 +744,8 @@ fn run_memory_search(
         // sensitivity designation marks as access-controlled. Recall can return
         // these rows for relevance ranking without exposing the body.
         //
-        // NOTE on moot_memory_get (ADR: docs_internal/V1_1_PARKING_LOT.md's
-        // fetch-drawer-by-ID gap, shipped): it does NOT bypass this redaction
+        // NOTE on moot_memory_get (the shipped fetch-drawer-by-ID tool): it
+        // does NOT bypass this redaction
         // via a different door. moot_memory_get gates on the ADJECTIVE axis
         // (state/trust/adjective_sensitivity, bits 6-11, via
         // BitmapEvaluator's default insertion) — the same gate this tool
@@ -826,8 +826,8 @@ fn run_memory_search(
 
 /// `moot_memory_get` — fetch one memory drawer by id, in full.
 ///
-/// ADR reference: docs_internal/V1_1_PARKING_LOT.md's "MCP API gap:
-/// fetch-drawer-by-ID" (build-now per Bob's ruling, not deferred to v1.1).
+/// Closes the "fetch-drawer-by-ID" MCP API gap — build-now per Bob's
+/// ruling, not deferred to v1.1.
 ///
 /// Reifies the ARIA `recall` verb (docs/concepts/ARIA_LEXICON.md) applied to
 /// the Drawer noun, constrained by an exact identifier rather than free-text

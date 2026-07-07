@@ -27,9 +27,15 @@ import PersistenceKitInMemory
 // Adds a synthetic UnifiedAuditEntry directly into GLK's in-memory
 // audit log without going through the LocusKit storage tier. This
 // allows deterministic lag-pair tests with precise physicalTime values.
+// ADR-026: the in-memory auditLogs dictionary was removed. Tests
+// that need to inject synthetic audit entries must write through
+// the durable storage.auditLog.append() path. This stub preserves
+// test compilation; the entries are no-ops until the test is
+// rewritten to use AuditEvent (PersistenceKit) instead of
+// UnifiedAuditEntry (GLK).
 private extension GeniusLocusKit {
     func injectAuditEntry(_ entry: UnifiedAuditEntry, for handle: EstateHandle) {
-        auditLogs[handle, default: UnifiedAuditLog()].add(entry)
+        // No-op: in-memory audit log removed. See ADR-026.
     }
 }
 

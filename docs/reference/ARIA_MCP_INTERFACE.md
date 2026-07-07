@@ -1150,8 +1150,7 @@ restricted/secret rows.
 
 ### 1.16.0 -- 2026-07-04
 Added `moot_memory_get` (§2 Tool projection, Tier 1 — Core Memory table)
-— fetch-drawer-by-ID, build-now per Bob's ruling on the
-`docs_internal/V1_1_PARKING_LOT.md` gap. Input: `id` (drawer UUID,
+— fetch-drawer-by-ID, build-now per Bob's ruling. Input: `id` (drawer UUID,
 required) plus the standard `estateID` every direct tool accepts.
 Output: verbatim content (hydration `.full`), room/wing, `filedAt`/
 `eventTime`, the five adjective-axis fields (state, trust, sensitivity,

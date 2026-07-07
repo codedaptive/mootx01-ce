@@ -10,7 +10,6 @@ relates_to:
   - docs/reference/INSTALLER_INTERFACE.md     # the installer that consumes generated packages
   - tools/moot-packager/                      # the generator this spec governs
   - apps/moot-agent-skills/                   # the per-host adapter library
-  - docs_internal/specs/PLUGIN_PACKAGING_SPEC_v0.1.md  # internal detailed spec
 ---
 
 # MOOTx01 Plugin Distribution Specification

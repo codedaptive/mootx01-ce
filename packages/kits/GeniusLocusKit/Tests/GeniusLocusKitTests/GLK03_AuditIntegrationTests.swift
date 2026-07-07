@@ -109,7 +109,7 @@ struct GLK03_AuditIntegrationTests {
         let stored = try await kit.capture(handle, captureFrame(content: "bridge target"))
         try await kit.withdraw(handle, WithdrawFrame(rowID: stored.id, reason: "glk03"))
 
-        try await kit.feedAuditLog(for: handle)
+        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
         let log = try await kit.auditLog(for: handle)
         #expect(log.count > 0, "bridged audit rows should populate the log")
         #expect(log.orderedEntries.allSatisfy { $0.tier == .locus },
