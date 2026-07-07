@@ -563,17 +563,21 @@ fn run_import(
     // that see no output for >10 seconds assume a hang and cancel/retry,
     // issuing duplicate imports that waste minutes.
     let est_minutes = (note_count * 2) / 60;
+    // The Rust import is synchronous — the bridge already completed above.
+    // Report COMPLETE with the actual stats, not RUNNING.
     Ok(text_result(&format!(
-        "job_id: {}\nvault: {}\nnote_count: {}\nstatus: RUNNING — import is processing in the background.\n\
-         IMPORTANT: Vault imports are long-running (~2 seconds per document). \
-         A {}-note vault will take approximately {} minutes. \
-         Do NOT cancel or re-issue the import — it is running correctly. \
-         Poll moot_vault_job with this job_id to check progress.",
+        "job_id: {}\nvault: {}\nnote_count: {}\nstatus: COMPLETE\n\
+         drawersWritten: {}\ndrawersUpdated: {}\nitemsSkipped: {}\n\
+         tunnelsCreated: {}\nfdcClassified: {}\nfdcUnclassified: {}",
         job_id,
         vault_path.display(),
         note_count,
-        note_count,
-        est_minutes,
+        report.drawers_written,
+        report.drawers_updated,
+        report.items_skipped,
+        report.tunnels_created,
+        report.fdc_classified,
+        report.fdc_unclassified,
     )))
 }
 
