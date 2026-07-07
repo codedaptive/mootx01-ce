@@ -169,7 +169,13 @@ struct AriaMCPMain {
             // the shared keychain access group (verified on a signed build) lets
             // them read the same item.
             do {
-                let dbKey = try KeychainKeyStore(service: "com.codedaptive.mootx01", estateURL: dbURL).loadOrCreateKey()
+                // Shared access group (#94): match the app's group so both
+                // processes read the same Keychain item for the same estate.
+                let dbKey = try KeychainKeyStore(
+                    service: "com.codedaptive.mootx01",
+                    estateURL: dbURL,
+                    accessGroup: "com.codedaptive.mootx01.shared"
+                ).loadOrCreateKey()
                 let configuration = EstateConfiguration(
                     estateID: UUID(),
                     backend: .sqlite(url: dbURL, busyTimeout: 5.0),

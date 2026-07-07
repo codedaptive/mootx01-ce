@@ -144,7 +144,11 @@ struct DbDeleteCommand: AsyncParsableCommand {
         #if canImport(Security)
         let estateURL = DatabaseManager.estateURL(for: name, in: dataDir)
         do {
-            try KeychainKeyStore(service: "com.codedaptive.mootx01", estateURL: estateURL).deleteKey()
+            try KeychainKeyStore(
+                service: "com.codedaptive.mootx01",
+                estateURL: estateURL,
+                accessGroup: "com.codedaptive.mootx01.shared"
+            ).deleteKey()
         } catch {
             FileHandle.standardError.write(Data(
                 "warning: estate deleted, but its encryption key could not be removed from the Keychain: \(error)\n".utf8))

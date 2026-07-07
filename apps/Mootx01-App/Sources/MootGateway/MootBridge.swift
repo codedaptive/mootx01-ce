@@ -123,7 +123,13 @@ public actor MootBridge {
         // derives the same account and loads the same key; sharing it across
         // processes needs a shared keychain access group + entitlement, verified
         // on a signed build.
-        let key = try KeychainKeyStore(service: "com.codedaptive.mootx01", estateURL: url).loadOrCreateKey()
+        // Shared access group (#94): both the app and the managed server
+        // must read the same Keychain item for the same SQLCipher estate.
+        let key = try KeychainKeyStore(
+            service: "com.codedaptive.mootx01",
+            estateURL: url,
+            accessGroup: "com.codedaptive.mootx01.shared"
+        ).loadOrCreateKey()
         let configuration = EstateConfiguration(
             estateID: UUID(),
             backend: .sqlite(url: url, busyTimeout: 5.0),
