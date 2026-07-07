@@ -90,6 +90,13 @@ public struct PersistenceStatsSink: StatsSink {
 
     private let logger = Logger(subsystem: "com.mootx01.kit", category: "ObserverSink")
 
+    /// In-flight task cap (#48): drop samples when this many tasks are
+    /// pending. Prevents unbounded memory growth from rapid telemetry
+    /// emission. 64 concurrent inserts is generous for any realistic
+    /// workload while bounding the task backlog.
+    private static let maxInFlight = 64
+    private let inFlight = InFlightCounter()
+
     // MARK: - Initialisation
 
     /// Create a `PersistenceStatsSink`.
@@ -121,12 +128,17 @@ public struct PersistenceStatsSink: StatsSink {
     /// can turn off the store flag without requiring every consumer to be
     /// restarted.
     public func receive(_ sample: StatSample) {
+        // In-flight cap (#48): drop the sample if too many tasks are pending.
+        guard inFlight.tryIncrement(cap: Self.maxInFlight) else { return }
+
         // Capture values for the async Task (Sendable crossing).
         let capturedStore = store
         let capturedDropboxID = dropboxID
         let capturedLogger = logger
+        let capturedCounter = inFlight
 
         Task {
+            defer { capturedCounter.decrement() }
             do {
                 // Check store-level monitoring flag before any write.
                 // This is the flag-row signal: the manager sets it to "1"
@@ -167,5 +179,27 @@ public struct PersistenceStatsSink: StatsSink {
                 capturedLogger.error("PersistenceStatsSink: store write failed: \(error)")
             }
         }
+    }
+}
+
+/// Thread-safe in-flight counter for backpressure (#48).
+/// NSLock-based to avoid Swift 6 Sendable issues with bare mutable state.
+final class InFlightCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    /// Increment if below cap. Returns true if the slot was acquired.
+    func tryIncrement(cap: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if count >= cap { return false }
+        count += 1
+        return true
+    }
+
+    func decrement() {
+        lock.lock()
+        defer { lock.unlock() }
+        count = max(0, count - 1)
     }
 }
