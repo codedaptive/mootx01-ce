@@ -235,9 +235,14 @@ public struct ResidentVectorArray: Sendable {
     public func vectorBytes(at i: Int) -> [UInt8]? {
         guard i >= 0 && i < Int(count) else { return nil }
         guard !isTombstoned(i) else { return nil }
-        let start = i * Int(stride)
+        // Offset from storage.startIndex — storage may be a non-zero-based
+        // Data slice (mmap'd sidecar region whose startIndex is the byte
+        // offset into the file, not 0). Zero-based arithmetic traps on
+        // non-zero-based slices.
+        let base = storage.startIndex
+        let start = base + i * Int(stride)
         let end   = start + Int(stride)
-        guard end <= storage.count else { return nil }
+        guard end <= storage.endIndex else { return nil }
         return [UInt8](storage[start..<end])
     }
 }
