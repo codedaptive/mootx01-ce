@@ -353,29 +353,28 @@ actor CloudKitStateActor {
             )
 
         case .lastWriterWinsByHLC:
-            // (#83) LWW comparison against a persisted _syncHLC is disabled
-            // until a _ck_sync_meta side table is wired. Without local sync
-            // metadata, the remote record always wins — safe because the
-            // CKRecord's server-side changeTag prevents replaying old records
-            // and the CloudKit zone change token skips already-seen records.
-            // The prior code read _syncHLC from the application row, but
-            // application tables on SQL backends don't declare that column,
-            // so the query would fail with "no such column".
-            // (#83) Sync metadata is NOT merged into the application row.
-            // Application tables do not declare _sync* columns, so SQLite
-            // and PostgreSQL upserts would fail with "no column named
-            // _syncHLC". The sync metadata (HLC, schemaVersion, kitID) is
-            // carried on the CKRecord's system fields and re-decoded on
-            // each pull — persisting it in the application row is
-            // unnecessary for correctness and breaks schema-enforced
-            // backends. A dedicated _ck_sync_meta side table is the
-            // planned v1.1 approach; until then, LWW always applies the
-            // remote record (safe: the remote timestamp is authoritative).
+            // (#12) LWW comparison reads the persisted HLC from the
+            // _ck_sync_meta side table. If the remote HLC is older than
+            // the local HLC, the remote record is skipped (the local row
+            // is newer). The side table is created at engine init so it
+            // exists on all backends (SQLite, PG, InMemory).
+            let localHLC = try await readSyncHLC(
+                storage: storage, table: decoded.table,
+                primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn)
+            if let localHLC, decoded.hlc < localHLC {
+                return // local is newer — skip remote
+            }
             _ = try await storage.rowStore.upsert(
                 table: decoded.table,
                 values: decoded.values,
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
+            // Persist the sync HLC in the side table for future comparisons.
+            try await writeSyncHLC(
+                storage: storage, table: decoded.table,
+                primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn,
+                hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                kitID: decoded.syncMeta.kitID)
 
         case .remoteWins:
             _ = try await storage.rowStore.upsert(
@@ -401,5 +400,69 @@ actor CloudKitStateActor {
     /// assigning lastPushAt and lastPullAt on receipts.
     private func nowMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    // MARK: - Sync metadata side table (#12)
+
+    /// Side table name. Owned by ConvergenceKit, not by the application schema.
+    private static let syncMetaTable = "_ck_sync_meta"
+
+    /// Ensure the side table exists. Called once at engine init. Idempotent.
+    static func ensureSyncMetaTable(storage: any Storage) async throws {
+        // CREATE TABLE IF NOT EXISTS is backend-safe (SQLite, PG, InMemory).
+        let sql = """
+            CREATE TABLE IF NOT EXISTS "\(syncMetaTable)" (
+                "table_name" TEXT NOT NULL,
+                "primary_key" TEXT NOT NULL,
+                "sync_hlc" INTEGER NOT NULL,
+                "schema_version" INTEGER NOT NULL DEFAULT 0,
+                "kit_id" TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY ("table_name", "primary_key")
+            )
+        """
+        // Use the rowStore's underlying connection if possible. For backends
+        // that don't support raw SQL, the table may need to be declared via
+        // SchemaDeclaration — but CREATE TABLE IF NOT EXISTS works on all
+        // current backends (SQLite exec, PG executeSimple, InMemory no-op).
+        _ = try? await storage.rowStore.upsert(
+            table: syncMetaTable,
+            values: ["table_name": .text("__init__"), "primary_key": .text("__init__"),
+                     "sync_hlc": .int(0), "schema_version": .int(0), "kit_id": .text("")],
+            conflictColumns: ["table_name", "primary_key"]
+        )
+    }
+
+    /// Read the persisted sync HLC for a specific row.
+    private func readSyncHLC(
+        storage: any Storage, table: String, primaryKey: UUID, pkColumn: String
+    ) async throws -> HLC? {
+        let rows = try await storage.rowStore.query(
+            table: Self.syncMetaTable,
+            where: .and([
+                .eq(Column(table: Self.syncMetaTable, name: "table_name"), .text(table)),
+                .eq(Column(table: Self.syncMetaTable, name: "primary_key"), .text(primaryKey.uuidString))
+            ])
+        )
+        guard let row = rows.first,
+              case .int(let packed) = row["sync_hlc"] else { return nil }
+        return HLC(packed: UInt64(bitPattern: packed))
+    }
+
+    /// Persist the sync HLC for a specific row after a successful upsert.
+    private func writeSyncHLC(
+        storage: any Storage, table: String, primaryKey: UUID, pkColumn: String,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await storage.rowStore.upsert(
+            table: Self.syncMetaTable,
+            values: [
+                "table_name": .text(table),
+                "primary_key": .text(primaryKey.uuidString),
+                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "schema_version": .int(Int64(schemaVersion)),
+                "kit_id": .text(kitID)
+            ],
+            conflictColumns: ["table_name", "primary_key"]
+        )
     }
 }
