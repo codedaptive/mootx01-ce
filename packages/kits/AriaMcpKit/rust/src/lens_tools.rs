@@ -748,9 +748,12 @@ pub fn dispatch(
                 optional_integer(args, "limit")?, "limit", 20, LIMIT_HARD_CEILING
             )?;
             frame.limit = Some(limit);
-            let min_support = opt_integer(args, "minSupport", 1)? as usize;
-            let max_intent_size = opt_integer(args, "maxIntentSize", 8)? as usize;
-            let max_concepts = opt_integer(args, "maxConcepts", 20)? as usize;
+            // Clamp mining bounds to non-negative (#61): negative i64 cast
+            // to usize becomes effectively unbounded, bypassing the miner's
+            // truncation. max() with 0 ensures sane usize values.
+            let min_support = opt_integer(args, "minSupport", 1)?.max(0) as usize;
+            let max_intent_size = opt_integer(args, "maxIntentSize", 8)?.max(0) as usize;
+            let max_concepts = opt_integer(args, "maxConcepts", 20)?.clamp(0, 1000) as usize;
             let miner = BoundedConceptMiner::new(min_support, max_intent_size, max_concepts);
             let out = run_formal_concepts(&coord, &estate.handle, frame, miner, now)
                 .map_err(lens_error)?;
@@ -774,7 +777,9 @@ pub fn dispatch(
             let min_support = opt_float(args, "minSupport", 0.0)?;
             let min_confidence = opt_float(args, "minConfidence", 0.0)?;
             let min_lift = opt_float(args, "minLift", 1.0)?;
-            let max_k = opt_integer(args, "maxK", 3)? as usize;
+            // Clamp max_k to non-negative (#61): negative i64 cast to usize
+            // would become effectively unbounded.
+            let max_k = opt_integer(args, "maxK", 3)?.clamp(0, 100) as usize;
             let thresholds = AprioriThresholds::new(min_support, min_confidence, min_lift, max_k);
             let out = run_apriori_rules(&coord, &estate.handle, thresholds).map_err(lens_error)?;
             let mut lines = vec![format!("apriori_rules: {} rule(s)", out.rules.len())];

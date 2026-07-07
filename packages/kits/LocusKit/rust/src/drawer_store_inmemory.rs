@@ -247,7 +247,17 @@ impl DrawerStoreCore {
         // Establish the clock: injected (holder) or made here (top).
         let generator = match hlc {
             Some(g) => g,
-            None => HLCGenerator::new(Self::maker_node_id(&identity)),
+            None => {
+                let mut gen = HLCGenerator::new(Self::maker_node_id(&identity));
+                // Seed the generator with the current wall clock (#84).
+                // Without this, a restart creates a generator at physical
+                // time 0 and the next send() can produce an HLC <= already-
+                // committed audit events. Advancing with `now` guarantees
+                // the next emitted HLC is strictly after any HLC committed
+                // before the restart. Mirrors Swift DrawerStore.init.
+                let _ = gen.send(now);
+                gen
+            }
         };
         *store.hlc.lock().unwrap() = generator;
         // Freeze the write-gate vocabulary once (freeze-at-instantiation).
