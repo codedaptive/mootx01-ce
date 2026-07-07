@@ -626,6 +626,14 @@ impl TrainableEmbeddingBasis for LsaProvider {
         Ok(Box::new(provider))
     }
 
+    fn release_basis(&mut self) {
+        self.idf_weights = Vec::new();
+        self.u = Vec::new();
+        self.vt = Vec::new();
+        self.sigma = Vec::new();
+        self.doc_vecs = Vec::new();
+    }
+
     /// Reconstruct a fresh LSA provider from a basis blob, boxed as TRAINABLE so
     /// `Corpus` can rebuild a from-scratch trainable provider for `reindex` /
     /// first-ingest (train_on_corpus is additive — see the trait doc). Same

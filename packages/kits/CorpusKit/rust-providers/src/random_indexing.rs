@@ -506,6 +506,12 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
         Ok(Box::new(provider))
     }
 
+    /// ADR-026: release the in-memory vocab to free heap.
+    fn release_basis(&mut self) {
+        self.vocab.clear();
+        self.vocab.shrink_to_fit();
+    }
+
     /// Reconstruct a fresh RI provider from a basis blob, boxed as TRAINABLE so
     /// `Corpus` can rebuild a from-scratch trainable provider for `reindex` /
     /// first-ingest (train_on_corpus is additive — see the trait doc). Same

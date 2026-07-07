@@ -92,7 +92,9 @@ enum Lib_eigenvalue_centrality {
             let centrality = EigenvalueCentrality.compute(
                 adjacency: adjacency,
                 maxIterations: maxIter,
-                tolerance: tolerance)
+                tolerance: tolerance,
+                estate: "validator",
+                ts: 0)
 
             // Canonical encoding: u32 LE length prefix, then one f64 LE
             // (IEEE-754 bit pattern) per element. Exactly the harness

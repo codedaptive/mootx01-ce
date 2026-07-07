@@ -654,6 +654,12 @@ impl TrainableEmbeddingBasis for NmfProvider {
         Ok(Box::new(provider))
     }
 
+    fn release_basis(&mut self) {
+        self.w = Vec::new();
+        self.h = Vec::new();
+        self.doc_embeddings = Vec::new();
+    }
+
     /// Reconstruct a fresh NMF provider from a basis blob, boxed as TRAINABLE so
     /// `Corpus` can rebuild a from-scratch trainable provider for `reindex` /
     /// first-ingest (train_on_corpus is additive — see the trait doc). Same

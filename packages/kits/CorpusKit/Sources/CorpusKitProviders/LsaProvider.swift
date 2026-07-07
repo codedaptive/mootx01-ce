@@ -687,6 +687,13 @@ extension LsaProvider: TrainableEmbeddingBasis {
         try LsaProvider(deserializing: basis)
     }
 
+    /// ADR-026: release the in-memory SVD result and weights.
+    public func releaseBasis() {
+        svd = nil
+        idfWeights.removeAll(keepingCapacity: false)
+        basisVocab.removeAll(keepingCapacity: false)
+    }
+
     // MARK: Maintained counts (incremental-counts change set, P3)
 
     /// Fold one chunk's text into the maintained vocabulary + document count.

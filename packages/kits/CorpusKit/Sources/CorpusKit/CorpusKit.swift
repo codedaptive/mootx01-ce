@@ -1843,6 +1843,19 @@ public actor Corpus {
         // accumulators were kept current by the ingest fold path; persisting here
         // re-anchors the growth trigger to the just-reindexed state.
         try await persistMaintainedCounts(now: now)
+
+        // ADR-026: release the in-memory trained vocabulary from each provider.
+        // The vocab dictionaries hold ~2GB of [Float] arrays on a 50K estate.
+        // The basis is persisted in BasisStore; the next embed call will
+        // reconstruct from the stored blob. This is acceptable because reindex
+        // is the last step that needs bulk embedding — after this, only
+        // single-drawer ingest embed calls occur (which reconstruct on demand).
+        for slot in slots {
+            if let trainable = slot.provider as? any TrainableEmbeddingBasis {
+                trainable.releaseBasis()
+            }
+        }
+
         corpusLog.info(
             "reindex: complete — \(chunks.count, privacy: .public) chunks re-embedded across \(self.slots.count, privacy: .public) slots")
     }
