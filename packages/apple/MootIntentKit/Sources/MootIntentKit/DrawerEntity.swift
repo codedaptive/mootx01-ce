@@ -48,6 +48,26 @@ public struct DrawerEntity: AppEntity, Identifiable, Sendable {
     public static let defaultQuery = DrawerEntityQuery()
 }
 
+// MARK: - SyncableEntity (M-MXA-1)
+//
+// Declares to the system that DrawerEntity.id is STABLE across devices, so
+// Siri can carry a drawer through a conversation that hops devices (App
+// Intents 2027 wave, wwdc2026-345). The id is the LocusKit `Drawer.id`
+// estate UUID: minted once at capture, identical on every device that opens
+// the estate (sync/vault replication copies rows verbatim; ids are never
+// re-minted). Because local id == stable id, no
+// `SyncableEntityIdentifier<LocalID, StableID>` pairing is needed — that
+// type exists for entities whose on-device ids differ per device (e.g.
+// CoreData row ids). If a device-local drawer id scheme is ever introduced,
+// this conformance must be revisited before it ships.
+//
+// Availability-gated rather than raising the package's platform floor:
+// MootIntentKit stays at macOS/iOS 26 (Bob ruling 2026-07-07 — app moves to
+// the 2027 wave, support kits stay on 26); the app targets 27, so the
+// conformance is always live in the app.
+@available(macOS 27.0, iOS 27.0, *)
+extension DrawerEntity: SyncableEntity {}
+
 // MARK: - DrawerEntityQuery
 //
 // App Intents requires an EntityQuery so the system can resolve an entity by
