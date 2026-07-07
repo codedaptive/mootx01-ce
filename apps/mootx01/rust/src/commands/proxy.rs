@@ -73,6 +73,12 @@ pub fn run(daemon_url: Option<String>) -> ExitCode {
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
+    // Frame size cap (#36): reject single lines larger than 4 MB. A normal
+    // JSON-RPC frame is a few KB; anything larger is a malformed or malicious
+    // input that would consume unbounded memory. The cap is generous enough
+    // for any legitimate MCP tool call (the largest is vault import which
+    // carries a path, not content) while preventing a multi-GB stdin attack.
+    const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
@@ -85,9 +91,23 @@ pub fn run(daemon_url: Option<String>) -> ExitCode {
         if line.trim().is_empty() {
             continue;
         }
+        if line.len() > MAX_LINE_BYTES {
+            eprintln!("mootx01 proxy: frame exceeds {} byte limit, dropped", MAX_LINE_BYTES);
+            continue;
+        }
         // Reap finished workers so the vec doesn't grow unboundedly over a
         // long session.
         workers.retain(|h| !h.is_finished());
+        // Concurrency cap (#12): limit in-flight frames to 16 threads. A burst
+        // of frames beyond this waits for an existing worker to finish before
+        // spawning. Prevents unbounded thread count from a fast stdin producer.
+        const MAX_CONCURRENT: usize = 16;
+        while workers.len() >= MAX_CONCURRENT {
+            workers.retain(|h| !h.is_finished());
+            if workers.len() >= MAX_CONCURRENT {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         let out = Arc::clone(&stdout);
         workers.push(std::thread::spawn(move || {
             forward_frame(port, &line, &out);

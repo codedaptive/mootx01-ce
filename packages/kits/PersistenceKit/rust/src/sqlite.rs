@@ -841,6 +841,10 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     };
     exec(MIGRATIONS_TABLE)?;
     exec(AUDIT_TABLE)?;
+    // Upgrade migration (#102): estates created before the reason column
+    // need ALTER TABLE. CREATE TABLE IF NOT EXISTS does not add columns.
+    // "duplicate column name" on new estates is expected — ignore it.
+    let _ = exec(r#"ALTER TABLE "_storagekit_audit" ADD COLUMN "reason" TEXT"#);
     exec(AUDIT_INDEX)?;
     exec(BLOB_TABLE)?;
     for table in &schema.tables {
@@ -2298,46 +2302,44 @@ impl AuditLog for SqliteAuditLog {
         if row_ids.is_empty() || verbs.is_empty() {
             return Ok(std::collections::HashSet::new());
         }
-        // Build a single SQL query:
-        //   SELECT DISTINCT "row_id" FROM "_storagekit_audit"
-        //   WHERE "row_id" IN (?,?,...) AND "verb" IN (?,?,...)
-        //
-        // row_id is stored as uppercase UUID TEXT (matching audit_binds).
-        // This is the read-side of the LEFT JOIN that
-        // tombstoned_rows_without_expunge_audit uses to avoid N per-row
-        // events_for_row calls. The idx_storagekit_audit_row_hlc index covers
-        // the row_id filter; the verb filter is a cheap post-scan predicate.
-        let row_placeholders: Vec<String> = (0..row_ids.len()).map(|_| "?".to_string()).collect();
+        // Chunk row_ids into batches of 500 (#28) to stay within SQLite's
+        // SQLITE_MAX_VARIABLE_NUMBER limit (default 999). Each chunk runs
+        // as a separate query; results are unioned into one HashSet.
+        const CHUNK_SIZE: usize = 500;
         let verb_placeholders: Vec<String> = (0..verbs.len()).map(|_| "?".to_string()).collect();
-        let sql = format!(
-            r#"SELECT DISTINCT "row_id" FROM "_storagekit_audit" WHERE "row_id" IN ({}) AND "verb" IN ({})"#,
-            row_placeholders.join(", "),
-            verb_placeholders.join(", "),
-        );
-        // Bind row_ids as uppercase TEXT (same encoding as audit_binds writes).
-        let mut binds: Vec<SqlValue> = row_ids
-            .iter()
-            .map(|id| SqlValue::Text(id.to_string().to_uppercase()))
-            .collect();
-        for v in verbs {
-            binds.push(SqlValue::Text((*v).to_string()));
+        let verb_ph_str = verb_placeholders.join(", ");
+        let verb_binds: Vec<SqlValue> = verbs.iter().map(|v| SqlValue::Text(v.to_string())).collect();
+        let mut result = std::collections::HashSet::new();
+        for chunk in row_ids.chunks(CHUNK_SIZE) {
+            let row_placeholders: Vec<String> = (0..chunk.len()).map(|_| "?".to_string()).collect();
+            let sql = format!(
+                r#"SELECT DISTINCT "row_id" FROM "_storagekit_audit" WHERE "row_id" IN ({}) AND "verb" IN ({})"#,
+                row_placeholders.join(", "),
+                verb_ph_str,
+            );
+            let mut binds: Vec<SqlValue> = chunk
+                .iter()
+                .map(|id| SqlValue::Text(id.to_string().to_uppercase()))
+                .collect();
+            binds.extend(verb_binds.iter().cloned());
+            let guard = self.inner.lock().unwrap();
+            let mut stmt = guard
+                .conn
+                .prepare(&sql)
+                .map_err(|e| map_sql_err(e, "_storagekit_audit"))?;
+            let covered: std::collections::HashSet<RowKey> = stmt
+                .query_map(params_from_iter(binds), |row| {
+                    let s: String = row.get(0)?;
+                    Ok(s)
+                })
+                .map_err(|e| map_sql_err(e, "_storagekit_audit"))?
+                .filter_map(|res| {
+                    res.ok().and_then(|s| Uuid::parse_str(&s).ok())
+                })
+                .collect();
+            result.extend(covered);
         }
-        let guard = self.inner.lock().unwrap();
-        let mut stmt = guard
-            .conn
-            .prepare(&sql)
-            .map_err(|e| map_sql_err(e, "_storagekit_audit"))?;
-        let covered = stmt
-            .query_map(params_from_iter(binds), |row| {
-                let s: String = row.get(0)?;
-                Ok(s)
-            })
-            .map_err(|e| map_sql_err(e, "_storagekit_audit"))?
-            .filter_map(|res| {
-                res.ok().and_then(|s| Uuid::parse_str(&s).ok())
-            })
-            .collect();
-        Ok(covered)
+        Ok(result)
     }
 
     fn count(&self) -> StorageResult<usize> {

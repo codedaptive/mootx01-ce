@@ -81,7 +81,12 @@ public struct SolverBandit: Sendable, Codable, Equatable {
         // Guard: persisted state must have one arm per trigger-mode case.
         // A missing or extra arm (truncated JSON, schema mismatch) produces
         // undefined select() behaviour; reset to a uniform prior instead.
-        if decoded.count == expected {
+        // Guard: persisted state must have the right arm count AND every
+        // arm must have finite positive alpha/beta (sampleBeta precondition).
+        // Any violation resets to a uniform prior rather than crashing.
+        let valid = decoded.count == expected
+            && decoded.allSatisfy { $0.alpha > 0 && $0.beta > 0 && $0.alpha.isFinite && $0.beta.isFinite }
+        if valid {
             arms = decoded
         } else {
             arms = DreamingTriggerMode.allCases.map { Arm(mode: $0) }

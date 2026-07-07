@@ -225,6 +225,16 @@ public final class CachingRowStore: RowStore, Sendable {
         }
     }
 
+    /// Evict ALL present-read cache entries across every table (#53).
+    /// Called after a transaction commits to ensure the public cache
+    /// does not serve stale rows that the transaction modified through
+    /// a raw backend RowStore. Snapshot (as-of) entries are unaffected
+    /// because pinned snapshot data is immutable.
+    public func invalidateAllPresent() async {
+        guard config.enabled else { return }
+        await cache.evictAllPresent()
+    }
+
     // MARK: — Internal query logic
 
     /// Shared implementation for both present and as-of queries with
@@ -388,6 +398,17 @@ private actor CacheActor {
         let key = TemporalCacheKey(handle: handle, asOf: .present)
         if let entry = entries.removeValue(forKey: key) {
             totalBytes -= entry.byteSize
+        }
+    }
+
+    /// Remove ALL present-read entries across every table (#53).
+    /// Snapshot entries are left intact.
+    func evictAllPresent() {
+        let toRemove = entries.keys.filter { $0.asOf == .present }
+        for key in toRemove {
+            if let entry = entries.removeValue(forKey: key) {
+                totalBytes -= entry.byteSize
+            }
         }
     }
 

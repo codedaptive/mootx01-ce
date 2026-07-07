@@ -109,12 +109,28 @@ public enum NovelPoolSubmitter {
     /// Writes one pool submission as a JSON file into `directory`.
     /// File name: `pool_<ISO8601>_<UUID short>.json` to avoid collisions
     /// when multiple processes write concurrently.
+    /// Maximum pool files before new submissions are discarded. Each file is
+    /// one drain cycle's worth of novel tokens (~50 entries, a few KB). 500
+    /// files ≈ 25k entries ≈ a few MB — generous for any realistic estate
+    /// while preventing unbounded disk growth from sustained injection (#45).
+    static let maxPoolFiles = 500
+
     static func writeSubmission(_ submission: PoolSubmission, to directory: URL) {
         do {
             try FileManager.default.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true
             )
+            // Cap check: count existing pool files and skip if at capacity.
+            let existing = (try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ))?.count ?? 0
+            if existing >= maxPoolFiles {
+                log.warning("novel pool: \(existing) files at cap (\(maxPoolFiles)); discarding submission until reducer drains")
+                return
+            }
             let timestamp = ISO8601DateFormatter().string(from: Date())
             // Sanitize: ISO8601 colons are illegal on some file systems.
             let safe = timestamp.replacingOccurrences(of: ":", with: "-")

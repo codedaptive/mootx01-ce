@@ -138,7 +138,17 @@ public actor DrawerStore {
             // classified value: a valid persisted uuid yields a stable
             // per-estate maker; an absent value yields node 0 (fresh).
             // A corrupt value already threw above, so it never reaches here.
-            self.hlc = HLCGenerator(nodeID: Self.makerNodeID(for: identity))
+            var gen = HLCGenerator(nodeID: Self.makerNodeID(for: identity))
+            // Seed the generator with the current wall clock (#84). Without
+            // this, a restart creates a generator at physical time 0, and the
+            // next send() would produce an HLC with a physical component that
+            // can be <= already-committed audit events (if the commit was in
+            // the same millisecond window). Advancing with the current wall
+            // time guarantees the next emitted HLC is strictly after any HLC
+            // committed before the restart.
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            _ = gen.send(now: nowMs)
+            self.hlc = gen
         }
     }
 

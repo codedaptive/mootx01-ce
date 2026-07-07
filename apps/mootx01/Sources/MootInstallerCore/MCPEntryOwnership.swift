@@ -76,6 +76,13 @@ public enum MCPEntryClassifier {
         guard looksLikeOurs(entry) else {
             return .foreign(reason: "entry shape does not resolve to the mootx01 binary or the loopback daemon endpoint")
         }
+        // Args-level override (#67): `serve --db <name>` selects a non-default
+        // estate without using either env key. Removing such an entry silently
+        // collapses the user's estate isolation into the default estate. Check
+        // args BEFORE env so both override mechanisms are honoured.
+        if let args = entry["args"] as? [String], args.contains("--db") {
+            return .foreign(reason: "args override: --db")
+        }
         guard let env = entry["env"] as? [String: Any] else { return .oursDefault }
         return classify(env: env)
     }

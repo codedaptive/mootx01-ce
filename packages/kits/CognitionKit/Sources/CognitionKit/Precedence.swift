@@ -79,7 +79,14 @@ public enum Precedence {
         // string representation); the audit log's UnifiedAuditEntry.rowID is a UUID.
         // allowedRowIDs carries lowercased UUID strings matched in glkEventLagPairs
         // via entry.rowID.uuidString.lowercased().
-        let allowedIDs = try await kit.glkDrawerIDsForEventTimeWindow(in: handle, window: window)
+        // Sensitivity ceiling (#38): only drawers within the MCP disclosure
+        // ceiling (normal/elevated) contribute causal pairs. Restricted/secret
+        // drawers are excluded so their field-value coordinates are not emitted.
+        let rawIDs = try await kit.glkDrawerIDsForEventTimeWindow(in: handle, window: window)
+        let estate = try await kit.estate(for: handle)
+        let allDrawers = try await estate.allDrawers()
+        let sensitiveIDs = Set(allDrawers.filter { !$0.adjectiveSensitivity.isBulkExportable }.map(\.id))
+        let allowedIDs = rawIDs.subtracting(sensitiveIDs)
         let entries = try await kit.glkEventLagPairs(
             in: handle, window: window, allowedRowIDs: allowedIDs)
         let entryCount = entries.count

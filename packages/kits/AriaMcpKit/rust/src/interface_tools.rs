@@ -465,6 +465,19 @@ fn run_file_memory(
                 format!("event_time is not a valid ISO8601 instant: {raw}"),
             )
         })?;
+        // Bounds check (#16): reject event_time more than 10 years in the
+        // past or more than 1 day in the future. An extreme back-date forces
+        // the matrix temporal buckets to span a huge range, triggering a full
+        // rebuild on every subsequent capture.
+        let now_ms = crate::dispatch::wall_now();
+        let ten_years_ms: i64 = 10 * 365 * 86_400 * 1_000;
+        let one_day_ms: i64 = 86_400 * 1_000;
+        if ms < now_ms - ten_years_ms || ms > now_ms + one_day_ms {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "event_time is outside the acceptable range (10 years past to 1 day future)".to_string(),
+            ));
+        }
         frame.event_time = Some(ms);
     }
 
@@ -1403,9 +1416,15 @@ fn run_connection_search(
         .recall_tunnels(&estate.handle, &wing)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
+    // Sensitivity ceiling (#58): exclude restricted/secret tunnels at the
+    // MCP boundary, matching the default recall ceiling.
     let outgoing: Vec<_> = tunnels
         .iter()
-        .filter(|t| t.source_drawer_id.as_deref() == Some(from_id))
+        .filter(|t| {
+            t.source_drawer_id.as_deref() == Some(from_id)
+                && t.tombstoned_at.is_none()
+                && t.adjective_sensitivity().is_bulk_exportable()
+        })
         .collect();
 
     let mut lines = vec![format!("connections from {from_id}: {}", outgoing.len())];
@@ -1455,7 +1474,10 @@ fn run_connection_map(
             .recall_tunnels(&estate.handle, wing)
             .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
         for t in tunnels {
-            if t.target_drawer_id.as_deref() == Some(to_id) {
+            if t.target_drawer_id.as_deref() == Some(to_id)
+                && t.tombstoned_at.is_none()
+                && t.adjective_sensitivity().is_bulk_exportable()
+            {
                 incoming.push(t);
             }
         }
@@ -1682,7 +1704,13 @@ fn parse_iso8601_to_ms(s: &str) -> Option<i64> {
     let (h, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
     // Days since Unix epoch via Howard Hinnant's algorithm (same as lens_tools).
     let days = days_from_ymd_interface(y, m, d)?;
-    Some((days * 86400 + h * 3600 + min * 60 + sec) * 1000 + millis)
+    // Overflow-checked arithmetic: extreme year values (e.g. year 292278994)
+    // can overflow i64 multiplication. Return None instead of panicking.
+    let secs = days.checked_mul(86400)?
+        .checked_add(h.checked_mul(3600)?)?
+        .checked_add(min.checked_mul(60)?)?
+        .checked_add(sec)?;
+    secs.checked_mul(1000)?.checked_add(millis)
 }
 
 fn days_from_ymd_interface(y: i64, m: i64, d: i64) -> Option<i64> {
@@ -1964,9 +1992,15 @@ fn run_estate_status(
         .recall_kg_facts(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    // Resolve wing display names from the active set (mirrors Swift).
-    let active_node_ids: Vec<String> = active.iter().map(|d| d.parent_node_id.clone()).collect();
-    let active_node_names = coord.resolve_drawer_node_names(&estate.handle, &active_node_ids);
+    // Sensitivity ceiling (#50): exclude restricted/secret drawers from
+    // the wing listing, matching the estate-map ceiling. Wing names derived
+    // from restricted/secret drawers can leak topic metadata.
+    let visible: Vec<_> = active.iter().filter(|d| {
+        let sensitivity = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
+        sensitivity != AdjectiveSensitivity::Restricted && sensitivity != AdjectiveSensitivity::Secret
+    }).collect();
+    let visible_node_ids: Vec<String> = visible.iter().map(|d| d.parent_node_id.clone()).collect();
+    let active_node_names = coord.resolve_drawer_node_names(&estate.handle, &visible_node_ids);
     let wings: std::collections::BTreeSet<String> = active_node_names
         .values()
         .map(|(w, _)| w.clone())

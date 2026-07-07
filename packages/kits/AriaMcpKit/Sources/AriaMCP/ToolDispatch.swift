@@ -1880,9 +1880,12 @@ extension ToolDispatcher {
         let fromID = try requireString(args, "from_id")
         let estate = try await kit.estate(for: handle)
         let allTunnels = try await estate.allTunnels()
-        // Keep only non-tombstoned tunnels originating from this drawer.
+        // Keep only non-tombstoned, exportable tunnels originating from this
+        // drawer. Sensitivity ceiling (#58): restricted/secret tunnels are
+        // excluded at the MCP boundary, matching the default recall ceiling.
         let outgoing = allTunnels.filter {
             $0.sourceDrawerId == fromID && $0.tombstonedAt == nil
+                && $0.adjectiveSensitivity.isBulkExportable
         }
         let lines = outgoing.prefix(50).map { t -> String in
             "\(t.id)  → \(t.targetDrawerId ?? "\(t.targetWing)/\(t.targetRoom)")  [\(t.label)]"
@@ -1899,9 +1902,11 @@ extension ToolDispatcher {
         let toID = try requireString(args, "to_id")
         let estate = try await kit.estate(for: handle)
         let allTunnels = try await estate.allTunnels()
-        // Keep only non-tombstoned tunnels pointing to this drawer.
+        // Keep only non-tombstoned, exportable tunnels pointing to this
+        // drawer. Sensitivity ceiling (#58): same gate as connection_search.
         let incoming = allTunnels.filter {
             $0.targetDrawerId == toID && $0.tombstonedAt == nil
+                && $0.adjectiveSensitivity.isBulkExportable
         }
         let lines = incoming.prefix(50).map { t -> String in
             "\(t.id)  \(t.sourceDrawerId ?? "\(t.sourceWing)/\(t.sourceRoom)") →  [\(t.label)]"
@@ -2268,13 +2273,17 @@ extension ToolDispatcher {
             let stateRaw = UInt8($0.adjectiveBitmap & 0x3F)
             return RowState.cluster(ofRawState: stateRaw) == .some(.a)
         }
+        // Sensitivity ceiling (#50): exclude restricted/secret drawers from
+        // the wing listing and counts, matching the estate-map ceiling. Wing
+        // names derived from restricted/secret drawers can leak topic metadata.
+        let visible = active.filter { $0.adjectiveSensitivity.isBulkExportable }
         // "total" counts all non-erased rows (tombstone = erased permanently).
         let total = drawers.filter { $0.tombstonedAt == nil }
         // Resolve parentNodeIds to display names for wing listing. Drawer
         // no longer carries stored wing/room after ADR-017 node-tree migration.
         let activeNodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: active.map(\.parentNodeId))
-        let wings = Set(active.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
+            parentNodeIds: visible.map(\.parentNodeId))
+        let wings = Set(visible.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
         let facts = try await kit.recallKGFacts(handle)
         // Trace row count — the reward pipeline's read log size. A read failure
         // must not break the whole status response, but it must NOT be reported
@@ -2509,10 +2518,19 @@ extension ToolDispatcher {
     /// background regardless of estate size. Poll `moot_drain_status` to watch it
     /// finish. (Mirrors the palace-import background-processing model — no
     /// repeated calls are needed.)
+    /// Concurrency guard (#19/#33): prevent multiple concurrent reindex runs.
+    /// A reindex is expensive and idempotent — a second concurrent run wastes
+    /// CPU and can enqueue duplicate encode jobs.
+    private static let reindexGuard = ReindexGuard()
+
     func runReindex(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let now = Date()
+        guard await Self.reindexGuard.tryStart() else {
+            return Self.textResult("reindex already running — poll moot_drain_status to watch progress")
+        }
         Task.detached { [kit] in
+            defer { Task { await Self.reindexGuard.finish() } }
             do {
                 let n = try await kit.reindexMissing(handle: handle, now: now)
                 fputs("reindex: background backfill complete — \(n) drawers indexed to full coverage\n", stderr)
@@ -2706,4 +2724,17 @@ extension ToolDispatcher {
 public enum ClassificationScheme: String, Sendable, CaseIterable {
     case udc
     case mdcc
+}
+
+/// Actor-isolated concurrency guard for reindex (#19/#33).
+/// Prevents multiple concurrent reindex runs — a second call returns
+/// immediately with "already running" instead of spawning a duplicate.
+private actor ReindexGuard {
+    private var running = false
+    func tryStart() -> Bool {
+        if running { return false }
+        running = true
+        return true
+    }
+    func finish() { running = false }
 }

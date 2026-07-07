@@ -92,7 +92,14 @@ public final class PostgreSQLStorage: Storage, Sendable {
         isolation: IsolationLevel,
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T {
-        try await backend.transaction(isolation: isolation, block: block)
+        let result = try await backend.transaction(isolation: isolation, block: block)
+        // Cache invalidation (#53): the transaction wrote through a raw
+        // backend RowStore, bypassing the public CachingRowStore. Evict
+        // all present-read entries so the next read hits the backing store.
+        if let caching = rowStore as? CachingRowStore {
+            await caching.invalidateAllPresent()
+        }
+        return result
     }
 }
 

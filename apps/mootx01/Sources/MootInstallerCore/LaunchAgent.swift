@@ -225,23 +225,46 @@ public enum LaunchAgent {
         // replacement job (observed live: install verified the job loaded,
         // and moments later launchd had nothing). Wait until launchd actually
         // reports the job gone before bootstrapping the new one.
-        for _ in 1...20 where runLaunchctl(["print", target]).code == 0 {
+        var teardownDone = false
+        for _ in 1...20 {
+            if runLaunchctl(["print", target]).code != 0 {
+                teardownDone = true
+                break
+            }
             usleep(250_000)  // 250 ms; up to 5 s for the teardown to finish
         }
+        // (#88) If the old job persists after 5 s, try one more forced bootout.
+        // Without this, bootstrap fails on "already loaded" and the verify
+        // step sees the STALE job, falsely reporting success.
+        if !teardownDone {
+            _ = runLaunchctl(["bootout", target])
+            usleep(500_000)
+            teardownDone = runLaunchctl(["print", target]).code != 0
+        }
+        if !teardownDone {
+            return (false, "prior job still registered after bootout; launchd teardown timed out")
+        }
         // Bootstrap with verify-and-retry: after each attempt, confirm launchd
-        // actually has the job before declaring success.
+        // actually has the job before declaring success. A bootstrap or load
+        // call must have succeeded at least once — print alone is not proof
+        // of the new job.
         var lastDetail = ""
         for attempt in 1...5 {
+            var loaded = false
             let boot = runLaunchctl(["bootstrap", domain, plistURL.path])
-            if boot.code != 0 {
+            if boot.code == 0 {
+                loaded = true
+            } else {
                 let legacy = runLaunchctl(["load", "-w", plistURL.path])
-                if legacy.code != 0 {
+                if legacy.code == 0 {
+                    loaded = true
+                } else {
                     lastDetail = (boot.output.isEmpty ? legacy.output : boot.output)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 }
             }
-            // Verify: is the job actually registered with launchd now?
-            if runLaunchctl(["print", target]).code == 0 {
+            // Verify: bootstrap/load succeeded AND launchd sees the job.
+            if loaded, runLaunchctl(["print", target]).code == 0 {
                 // RunAtLoad already started it; kickstart makes "running now" explicit.
                 _ = runLaunchctl(["kickstart", "-k", target])
                 return (true, "")

@@ -334,13 +334,18 @@ public enum Installer {
             || fm.fileExists(atPath: path.path) {
             try fm.removeItem(at: path)
         }
+        // Shell-escape the target path (#15): replace single quotes with
+        // the shell idiom '\'' (end quote, literal quote, reopen quote) and
+        // wrap in single quotes. This is safe for any path including those
+        // with double quotes, backticks, dollar signs, or spaces.
+        let escapedPath = "'" + execTarget.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let script = """
         #!/bin/sh
         # \(pathWrapperMarker) — exec the real binary from its install dir so
         # SPM resource bundles (<Target>_<Target>.bundle) resolve beside the
         # executable. A symlink here breaks that lookup. Written by
         # Installer.writePathWrapper; install.sh writes the same shape.
-        exec "\(execTarget.path)" "$@"
+        exec \(escapedPath) "$@"
         """
         try script.write(to: path, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
@@ -358,10 +363,32 @@ public enum Installer {
               let text = String(data: head, encoding: .utf8),
               text.hasPrefix("#!"),
               text.contains(pathWrapperMarker),
-              let execLine = text.split(separator: "\n").last(where: { $0.hasPrefix("exec \"") }),
-              let target = execLine.split(separator: "\"").dropFirst().first
+              let execLine = text.split(separator: "\n").last(where: { $0.hasPrefix("exec ") }),
+              let target = Self.extractExecTarget(String(execLine))
         else { return url }
-        return URL(fileURLWithPath: String(target))
+        return URL(fileURLWithPath: target)
+    }
+
+    /// Extract the binary path from an `exec` line that may use single-quote
+    /// or double-quote escaping. Handles both the new `exec '/path'` format
+    /// and the legacy `exec "/path"` format.
+    private static func extractExecTarget(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // New format: exec '/path/with '\''quotes'\'''
+        if let sqRange = trimmed.range(of: "exec '") {
+            let afterExec = trimmed[sqRange.upperBound...]
+            // Unescape '\'' back to ' and strip trailing ' before " $@"
+            let pathPart = String(afterExec).components(separatedBy: "' \"$@\"").first
+                ?? String(afterExec).components(separatedBy: "'").first
+                ?? String(afterExec)
+            return pathPart.replacingOccurrences(of: "'\\''", with: "'")
+        }
+        // Legacy format: exec "/path"
+        if let dqRange = trimmed.range(of: "exec \"") {
+            let afterExec = trimmed[dqRange.upperBound...]
+            return afterExec.split(separator: "\"").first.map(String.init)
+        }
+        return nil
     }
 
     /// Remove the placed binary and its PATH wrapper. Inverse of

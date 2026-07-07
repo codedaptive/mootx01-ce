@@ -123,6 +123,9 @@ fn compute_closure(qid: &str, edges: &HashMap<String, Vec<String>>) -> Vec<Strin
     // is excluded from its own closure.
     let mut frontier: Vec<String> = edges.get(qid).cloned().unwrap_or_default();
     while let Some(node) = frontier.pop() {
+        // Skip the queried Q-ID itself (#96): a cyclic edge back to `qid`
+        // must not include `qid` in its own closure.
+        if node == qid { continue; }
         if seen.contains(&node) {
             continue;
         }

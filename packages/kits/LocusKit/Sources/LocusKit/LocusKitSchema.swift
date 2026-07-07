@@ -123,7 +123,15 @@ public enum LocusKitSchema {
                 SnapshotSchema.registryTable,
                 SnapshotSchema.attestationsTable,
             ],
-            indices: indices
+            indices: indices,
+            migrations: [
+                // v8 → v9: add content_fingerprint BLOB nullable to drawers.
+                // Without this, an estate created at v8 hits "no such column"
+                // on every write after the daemon binary is upgraded to v9.
+                Migration(fromVersion: 8, toVersion: 9, operations: [
+                    .addColumn(table: "drawers", column: .blob("content_fingerprint", nullable: true))
+                ]),
+            ]
         )
     }
 

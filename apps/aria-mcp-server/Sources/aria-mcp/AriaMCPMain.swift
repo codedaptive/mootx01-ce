@@ -131,7 +131,7 @@ struct AriaMCPMain {
             // same storage handle (shared pool connection, same PG schema).
             storage = PostgreSQLStorage(configuration: configuration)
             wireSemanticRecall = true
-        } else if !rawSQLitePath.isEmpty {
+        } else if !rawSQLitePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // Only ARIA_MCP_SQLITE_PATH set → SQLite-backed durable estate.
             let dbURL = URL(fileURLWithPath: rawSQLitePath)
             Logging.stderr.log("ARIA_MCP starting (stdio, SQLite backend: \(rawSQLitePath))")
@@ -169,7 +169,13 @@ struct AriaMCPMain {
             // the shared keychain access group (verified on a signed build) lets
             // them read the same item.
             do {
-                let dbKey = try KeychainKeyStore(service: "com.codedaptive.mootx01", estateURL: dbURL).loadOrCreateKey()
+                // Shared access group (#94): match the app's group so both
+                // processes read the same Keychain item for the same estate.
+                let dbKey = try KeychainKeyStore(
+                    service: "com.codedaptive.mootx01",
+                    estateURL: dbURL,
+                    accessGroup: "com.codedaptive.mootx01.shared"
+                ).loadOrCreateKey()
                 let configuration = EstateConfiguration(
                     estateID: UUID(),
                     backend: .sqlite(url: dbURL, busyTimeout: 5.0),

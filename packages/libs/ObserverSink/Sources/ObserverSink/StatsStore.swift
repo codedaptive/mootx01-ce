@@ -495,13 +495,20 @@ public final class StatsStore: Sendable {
             // Existing estate: check current monitoring and source values.
             let currentMonitoring = try await readControlValue(key: StatsStoreSchema.monitoringKey)
             let currentSource = try await readControlValue(key: StatsStoreSchema.monitoringSourceKey)
-            if currentMonitoring == "0" && (currentSource == nil || currentSource == "default") {
-                // Monitoring was off by old default and user has not touched it.
-                // Flip to on and mark the source as "default" so this branch
-                // is skipped on the next open.
+            if currentMonitoring == "0" && currentSource == "default" {
+                // Monitoring was off by the pre-wave-8.1 default and user has
+                // NOT touched it (source is explicitly "default", not nil).
+                // Flip to on.
                 try await upsertControlValue(key: StatsStoreSchema.monitoringKey, value: "1")
                 try await upsertControlValue(key: StatsStoreSchema.monitoringSourceKey, value: "default")
-                logger.info("StatsStore: one-time migration — monitoring default ON (was 0, source absent/default)")
+                logger.info("StatsStore: one-time migration — monitoring default ON (was 0, source=default)")
+            } else if currentMonitoring == "0" && currentSource == nil {
+                // Monitoring was off but source is nil — we cannot distinguish
+                // an explicit user opt-out from the old default (#3/#66).
+                // Preserve the user's setting and seed the source as "unknown"
+                // so this branch is skipped on re-open.
+                try await upsertControlValue(key: StatsStoreSchema.monitoringSourceKey, value: "unknown")
+                logger.info("StatsStore: monitoring=0 with nil source — preserved as unknown (may be user opt-out)")
             } else if currentSource == nil {
                 // Existing estate with monitoring already ON (or explicitly OFF by user
                 // but source marker is absent): seed the source marker for future reads.

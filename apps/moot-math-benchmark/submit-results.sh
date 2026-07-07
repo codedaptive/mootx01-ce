@@ -57,6 +57,11 @@ detect_tag() {
 if [ -z "$TAG" ]; then
     TAG="$(detect_tag)"
 fi
+# Sanitize: strip anything that isn't alphanumeric, hyphen, or underscore.
+# The tag flows into directory names and through eval in run_bin; shell
+# metacharacters in it would be a command injection (#100).
+TAG="$(echo "$TAG" | tr -cd '[:alnum:]_-')"
+[ -z "$TAG" ] && TAG="unknown"
 DATE="$(date -u +%Y-%m-%d)"
 BUNDLE="results/${DATE}-${TAG}"
 

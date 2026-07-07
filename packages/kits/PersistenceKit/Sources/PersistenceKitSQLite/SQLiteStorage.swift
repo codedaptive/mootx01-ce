@@ -87,9 +87,16 @@ public final class SQLiteStorage: Storage, Sendable {
         isolation: IsolationLevel,
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T {
-        try await backend.runTransaction(isolation: isolation) { txn in
+        let result = try await backend.runTransaction(isolation: isolation) { txn in
             try await block(txn)
         }
+        // Cache invalidation (#53): the transaction wrote through a raw
+        // backend RowStore, bypassing the public CachingRowStore. Evict
+        // all present-read entries so the next read hits the backing store.
+        if let caching = rowStore as? CachingRowStore {
+            await caching.invalidateAllPresent()
+        }
+        return result
     }
 }
 
@@ -174,6 +181,18 @@ actor SQLiteBackend {
         // Internal tables first.
         try connection.exec(SQLiteSchema.migrationsTableSQL)
         try connection.exec(SQLiteSchema.auditTableSQL)
+        // Upgrade migration (#102): estates created before the reason column
+        // was added to the audit DDL need ALTER TABLE. CREATE TABLE IF NOT
+        // EXISTS does not add columns to an existing table. SQLite ADD COLUMN
+        // on an existing column returns "duplicate column name" — catch and
+        // ignore so this is idempotent on both old and new estates.
+        do {
+            try connection.exec("""
+                ALTER TABLE "_storagekit_audit" ADD COLUMN "reason" TEXT
+            """)
+        } catch {
+            // "duplicate column name: reason" on new estates — expected.
+        }
         try connection.exec(SQLiteSchema.auditIndexSQL)
         try connection.exec(SQLiteSchema.auditHLCIndexSQL)
         try connection.exec(SQLiteSchema.blobTableSQL)

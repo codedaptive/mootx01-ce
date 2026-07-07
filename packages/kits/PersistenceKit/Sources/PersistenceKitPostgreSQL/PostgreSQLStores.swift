@@ -35,8 +35,16 @@ final class PostgreSQLRowStore: RowStore, Sendable {
     private func withConnection<T: Sendable>(_ block: @Sendable (PostgresConnection) async throws -> T) async throws -> T {
         if let txn { return try await block(txn.connection) }
         let conn = try await backend.pool.acquire()
-        defer { Task { await backend.pool.release(conn) } }
-        return try await block(conn)
+        // Structured release (#55): release in both paths BEFORE returning
+        // so the pool never has a connection in limbo from a detached Task.
+        do {
+            let result = try await block(conn)
+            await backend.pool.release(conn)
+            return result
+        } catch {
+            await backend.pool.release(conn)
+            throw error
+        }
     }
 
     func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle {
@@ -268,8 +276,16 @@ final class PostgreSQLBlobStore: BlobStore, Sendable {
     private func withConnection<T: Sendable>(_ block: @Sendable (PostgresConnection) async throws -> T) async throws -> T {
         if let txn { return try await block(txn.connection) }
         let conn = try await backend.pool.acquire()
-        defer { Task { await backend.pool.release(conn) } }
-        return try await block(conn)
+        // Structured release (#55): release in both paths BEFORE returning
+        // so the pool never has a connection in limbo from a detached Task.
+        do {
+            let result = try await block(conn)
+            await backend.pool.release(conn)
+            return result
+        } catch {
+            await backend.pool.release(conn)
+            throw error
+        }
     }
 
     private func ensureBlobTable(_ conn: PostgresConnection) async throws {
@@ -362,8 +378,16 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
     private func withConnection<T: Sendable>(_ block: @Sendable (PostgresConnection) async throws -> T) async throws -> T {
         if let txn { return try await block(txn.connection) }
         let conn = try await backend.pool.acquire()
-        defer { Task { await backend.pool.release(conn) } }
-        return try await block(conn)
+        // Structured release (#55): release in both paths BEFORE returning
+        // so the pool never has a connection in limbo from a detached Task.
+        do {
+            let result = try await block(conn)
+            await backend.pool.release(conn)
+            return result
+        } catch {
+            await backend.pool.release(conn)
+            throw error
+        }
     }
 
     private func ensureAuditTable(_ conn: PostgresConnection) async throws {
@@ -388,6 +412,12 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
               "reason" TEXT,
               PRIMARY KEY ("event_id", "hlc_packed")
             )
+            """, logger: Logger(label: "pg.audit"))
+        // Upgrade migration (#102): old estates lack the reason column.
+        // PostgreSQL ADD COLUMN IF NOT EXISTS avoids errors on new estates.
+        try await conn.executeSimple("""
+            ALTER TABLE "_storagekit_audit"
+            ADD COLUMN IF NOT EXISTS "reason" TEXT
             """, logger: Logger(label: "pg.audit"))
         try await conn.executeSimple(
             "CREATE INDEX IF NOT EXISTS \"idx_audit_row_id\" ON \"_storagekit_audit\" (\"row_id\")",
