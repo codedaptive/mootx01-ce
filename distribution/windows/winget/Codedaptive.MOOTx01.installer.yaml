@@ -47,10 +47,10 @@ AppsAndFeaturesEntries:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/codedaptive/mootx01-ce/releases/download/v1.0.23/mootx01-1.0.23-windows-x86_64-setup.exe
-    InstallerSha256: AD3290F1912DE2A0A904C46EC7C944A3EDACF6254BBF182837F8D8756D93DE60
+    InstallerSha256: B168FB99EB7595EFB260DF8F3A596CC76EB3D043DD5995A34E53BFEF9538B949
   - Architecture: arm64
     InstallerUrl: https://github.com/codedaptive/mootx01-ce/releases/download/v1.0.23/mootx01-1.0.23-windows-arm64-setup.exe
-    InstallerSha256: 6193FA311361A3F9B8584C6CD28DF304EA390A72DE9698D79FE5C15428916B14
+    InstallerSha256: B4924C607F7C1CDD3972DD78392790387587C224BD3B86743FC0DD402C2AD14E
 
 ManifestType: installer
 ManifestVersion: 1.6.0
