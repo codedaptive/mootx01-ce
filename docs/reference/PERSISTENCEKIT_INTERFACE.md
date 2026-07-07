@@ -466,8 +466,8 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 ```
-**Rust:** `pub struct EstateConfiguration { estate_id, backend, encryption_config, cache_config, novel_token_tagger }`.
-The Rust version carries all five fields, mirroring the Swift struct field-for-field.
+**Rust:** `pub struct EstateConfiguration { estate_id, backend, encryption_config, cache_config, novel_token_tagger, residency_hint }`.
+The Rust version carries all six fields, mirroring the Swift struct field-for-field.
 `EstateConfiguration::new(estate_id, backend)` defaults all optional fields to plaintext /
 disabled / Hmm, so existing call sites are unchanged.
 `EstateConfiguration::new_with_tagger(estate_id, backend, choice)` accepts an explicit
@@ -764,6 +764,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `EstateConfiguration` | `EstateConfiguration` | See EstateConfiguration field parity table below. |
 | `BackendConfiguration` | `BackendConfiguration` | Three cases: `sqlite(url:busyTimeout:)`/`Sqlite{…}`, `postgresql(…)`/`Postgresql{…}`, `inMemory`/`InMemory`. |
 | `NovelTokenTaggerChoice` | `NovelTokenTaggerChoice` | See NovelTokenTaggerChoice parity table below. |
+| `ResidencyHint` | `ResidencyHint` | ADR-026: `.diskBacked`/`DiskBacked` (default), `.ramResident`/`RamResident`. Kits read this to choose index caching strategy. |
 | `StorageError` | `StorageError` | Closed error enum. Swift: `throws`; Rust: `StorageResult<T>`. Fifteen cases, case-for-case identical. |
 | `InMemoryStorage` | `InMemoryStorage` | In-memory `Storage` conformer/implementor. |
 | `SQLiteStorage` | `SqliteStorage` | SQLite backend (name idiom: `SQLite`/`Sqlite`). |
@@ -873,6 +874,7 @@ behavioral (same rows retrieved), not on-disk byte-identical.
 | Encryption config | `encryptionConfig: EstateEncryptionConfig` | `encryption_config: EstateEncryptionConfig` |
 | Cache config | `cacheConfig: EstateCacheConfig` | `cache_config: EstateCacheConfig` |
 | Novel-token tagger | `novelTokenTagger: NovelTokenTaggerChoice` default `.hmm` | `novel_token_tagger: NovelTokenTaggerChoice` default `Hmm` |
+| Residency hint | `residencyHint: ResidencyHint` default `.diskBacked` | `residency_hint: ResidencyHint` default `DiskBacked` |
 
 ### `NovelTokenTaggerChoice` parity (SPEC I-20)
 
