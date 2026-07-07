@@ -693,7 +693,7 @@ struct VectorStoreTests {
         let partitions = BruteForceIndex.buildPartitions(keys: keys, tombstones: [])
         let arrayWithPartitions = ResidentVectorArray(
             kind: .binary, stride: 32, count: UInt32(n),
-            storage: storage, keys: keys,
+            storage: Data(storage), keys: keys,
             modelPartitions: partitions, tombstones: []
         )
 

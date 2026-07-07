@@ -536,7 +536,7 @@ struct InvertedIndexStoreTests {
             now: now
         )
 
-        let hits = await store.topK(
+        let hits = try await store.topK(
             queryTerms: tok.keywordTokens("cat dog"),
             k: 2
         )
@@ -560,15 +560,15 @@ struct InvertedIndexStoreTests {
             tokens: tok.keywordTokens("ephemeral content keyword"),
             now: now
         )
-        #expect(await store.documentCount == 1)
+        #expect(await try await store.documentCount() == 1)
 
-        var hits = await store.topK(queryTerms: tok.keywordTokens("ephemeral"), k: 5)
+        var hits = try await store.topK(queryTerms: tok.keywordTokens("ephemeral"), k: 5)
         #expect(!hits.isEmpty, "should find ephemeral doc before removal")
 
         try await store.remove(itemID: "ephemeral-doc")
-        #expect(await store.documentCount == 0)
+        #expect(await try await store.documentCount() == 0)
 
-        hits = await store.topK(queryTerms: tok.keywordTokens("ephemeral"), k: 5)
+        hits = try await store.topK(queryTerms: tok.keywordTokens("ephemeral"), k: 5)
         #expect(hits.isEmpty, "should not find removed doc")
     }
 
@@ -600,10 +600,10 @@ struct InvertedIndexStoreTests {
         let store2 = InvertedIndexStore(storage: storage)
         try await store2.open()
 
-        let count = await store2.documentCount
+        let count = try await store2.documentCount()
         #expect(count == 2, "State must persist across InvertedIndexStore reopen, got \(count)")
 
-        let hits = await store2.topK(queryTerms: tok.keywordTokens("data"), k: 5)
+        let hits = try await store2.topK(queryTerms: tok.keywordTokens("data"), k: 5)
         #expect(!hits.isEmpty, "Persisted index must answer queries after reopen")
 
         await storage.close()
@@ -622,7 +622,7 @@ struct InvertedIndexStoreTests {
             tokens: tok.keywordTokens("original content"),
             now: now
         )
-        var hits = await store.topK(queryTerms: tok.keywordTokens("original"), k: 5)
+        var hits = try await store.topK(queryTerms: tok.keywordTokens("original"), k: 5)
         #expect(!hits.isEmpty, "original content must be findable")
 
         // Re-index with completely different content.
@@ -631,12 +631,12 @@ struct InvertedIndexStoreTests {
             tokens: tok.keywordTokens("completely different text"),
             now: now
         )
-        hits = await store.topK(queryTerms: tok.keywordTokens("original"), k: 5)
+        hits = try await store.topK(queryTerms: tok.keywordTokens("original"), k: 5)
         #expect(hits.isEmpty, "after re-index, original term must not be findable")
 
-        hits = await store.topK(queryTerms: tok.keywordTokens("different"), k: 5)
+        hits = try await store.topK(queryTerms: tok.keywordTokens("different"), k: 5)
         #expect(!hits.isEmpty, "after re-index, new term must be findable")
-        #expect(await store.documentCount == 1,
+        #expect(await try await store.documentCount() == 1,
                 "doc count must stay 1 after re-index, not double-count")
     }
 }

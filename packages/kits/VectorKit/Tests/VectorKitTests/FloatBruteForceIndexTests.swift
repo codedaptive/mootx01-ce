@@ -14,6 +14,7 @@
 // lane (arch spec §6). Any test that adds a "should be bit-identical across
 // Swift and Rust" assertion for float distances is WRONG and must be removed.
 
+import Foundation
 import Testing
 @testable import VectorKit
 import PersistenceKit
@@ -49,7 +50,7 @@ private func buildArray(vectors: [(VectorRecordKey, [Float])]) -> ResidentVector
         kind: .float32,
         stride: stride,
         count: UInt32(vectors.count),
-        storage: storage,
+        storage: Data(storage),
         keys: keys,
         modelPartitions: partitions,
         tombstones: []

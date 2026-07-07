@@ -568,7 +568,7 @@ struct MIHBuildFromTests {
                                                          tombstones: tombstones)
         let arr = ResidentVectorArray(
             kind: .binary, stride: 32, count: 3,
-            storage: storage, keys: [k1, k2, k3],
+            storage: Data(storage), keys: [k1, k2, k3],
             modelPartitions: partitions, tombstones: tombstones
         )
         let mihB = MIHIndex(bandCount: .m4)
@@ -593,7 +593,7 @@ struct MIHBuildFromTests {
                                                          tombstones: tombstones)
         let arr = ResidentVectorArray(
             kind: .binary, stride: 32, count: 3,
-            storage: storage, keys: [k1, k2, k3],
+            storage: Data(storage), keys: [k1, k2, k3],
             modelPartitions: partitions, tombstones: tombstones
         )
         let mih = MIHIndex(bandCount: .m4)
@@ -1284,7 +1284,7 @@ struct MIHBruteForceBulkBuildConformanceTests {
         let partitions = BruteForceIndex.buildPartitions(keys: keys3, tombstones: tombstones)
         let snapshot = ResidentVectorArray(
             kind: .binary, stride: 32, count: 3,
-            storage: rawBytes, keys: keys3,
+            storage: Data(rawBytes), keys: keys3,
             modelPartitions: partitions, tombstones: tombstones
         )
 
