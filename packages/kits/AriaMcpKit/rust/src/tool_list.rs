@@ -17,8 +17,7 @@
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
 //! The 8th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
-//! full — docs_internal/V1_1_PARKING_LOT.md's fetch-drawer-by-ID gap,
-//! build-now per Bob's ruling).
+//! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
 //! Vault-on (default): 64 tools (ADR-025 wave 8.2 added moot_monitoring_status).
 //! Vault-off (MOOTX01_VAULT=0): 58 tools —

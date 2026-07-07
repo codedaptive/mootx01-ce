@@ -8,8 +8,8 @@ import PersistenceKitInMemory
 
 /// `moot_memory_get` — fetch one memory drawer by id, in full.
 ///
-/// ADR reference: docs_internal/V1_1_PARKING_LOT.md's "MCP API gap:
-/// fetch-drawer-by-ID" (build-now per Bob's ruling). Reifies the ARIA
+/// Closes the "fetch-drawer-by-ID" MCP API gap — build-now per Bob's
+/// ruling. Reifies the ARIA
 /// `recall` verb constrained by an exact identifier.
 ///
 /// Four axes under test, per the mission's TDD ask:

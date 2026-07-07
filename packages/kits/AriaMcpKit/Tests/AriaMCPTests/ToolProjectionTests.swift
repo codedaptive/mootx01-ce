@@ -42,8 +42,8 @@ struct ToolProjectionTests {
     /// Hard contract gate: the total tool count must be exactly 63.
     /// 20 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 3 maintenance.
     /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory
-    /// drawer by id, in full; docs_internal/V1_1_PARKING_LOT.md's
-    /// fetch-drawer-by-ID gap, build-now per Bob's ruling).
+    /// drawer by id, in full; closes the fetch-drawer-by-ID gap,
+    /// build-now per Bob's ruling).
     /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
     /// ADR-DIFFUSION-001) added alongside moot_lens_contradiction.
     /// The 11th recipe tool is moot_recollect (DA1 — three distillation tools:

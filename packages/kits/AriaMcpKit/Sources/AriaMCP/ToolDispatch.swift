@@ -1467,8 +1467,8 @@ extension ToolDispatcher {
 
     /// `moot_memory_get` — fetch one memory drawer by id, in full.
     ///
-    /// ADR reference: docs_internal/V1_1_PARKING_LOT.md's "MCP API gap:
-    /// fetch-drawer-by-ID" (build-now per Bob's ruling, not deferred to v1.1).
+    /// Closes the "fetch-drawer-by-ID" MCP API gap — build-now per Bob's
+    /// ruling, not deferred to v1.1.
     ///
     /// Reifies the ARIA `recall` verb (docs/concepts/ARIA_LEXICON.md) applied
     /// to the Drawer noun, constrained by an exact identifier rather than

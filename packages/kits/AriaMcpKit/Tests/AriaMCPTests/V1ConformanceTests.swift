@@ -159,7 +159,7 @@ struct V1ConformanceTests {
         // distillation recipe tools added (DA1): moot_consolidate, moot_recall_distilled,
         // moot_recollect.
         // 20th core ARIA = moot_memory_get (Tier 1, fetch-drawer-by-ID, build-now
-        // per Bob's ruling — docs_internal/V1_1_PARKING_LOT.md).
+        // per Bob's ruling).
         // 23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
         // moot_palace_import (PAR-PB-1): direct palace → substrate import.
         // moot_drain_status: AI-queryable background drain progress.
