@@ -364,6 +364,9 @@ pub fn migrate_tiers(settings_path: &Path) -> Result<usize, MergeError> {
             if existing_key == "deny" {
                 continue; // Rule 1: deny is sacred.
             }
+            if existing_key == "ask" {
+                continue; // Rule 2 (#9): ask is sacred — may be user-intentional.
+            }
             if existing_key == target_key {
                 continue; // already correct.
             }

@@ -302,6 +302,7 @@ public enum PermissionsWriter {
                 let entry = "\(prefix)\(tool)"
                 guard let existingTier = currentTier[entry] else { continue } // absent — mergeTiered's job
                 guard existingTier != .deny else { continue }                 // Rule 1: deny is sacred
+                guard existingTier != .ask else { continue }                  // Rule 2 (#9): ask is sacred — may be user-intentional
                 guard existingTier != targetTier else { continue }            // already correct
                 lists[existingTier]?.removeAll { $0 == entry }
                 lists[targetTier, default: []].append(entry)
