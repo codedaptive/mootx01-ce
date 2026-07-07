@@ -89,6 +89,24 @@ pub struct EstateConfiguration {
     /// On Rust, constructing a configuration with `NlTagger` via
     /// `new_with_tagger` returns an error (fail-closed).
     pub novel_token_tagger: NovelTokenTaggerChoice,
+    /// ADR-026: controls whether kits hold computed indexes in heap
+    /// between queries (RamResident) or load from the durable store
+    /// on demand (DiskBacked, the default).
+    pub residency_hint: ResidencyHint,
+}
+
+/// ADR-026: controls whether kits hold computed indexes in heap
+/// between queries or load from the durable store on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidencyHint {
+    /// Indexes loaded from disk on demand; OS page cache manages RAM.
+    DiskBacked,
+    /// All indexes cached in heap for minimum query latency.
+    RamResident,
+}
+
+impl Default for ResidencyHint {
+    fn default() -> Self { Self::DiskBacked }
 }
 
 impl EstateConfiguration {
@@ -102,6 +120,7 @@ impl EstateConfiguration {
             encryption_config: EstateEncryptionConfig::plaintext(),
             cache_config: EstateCacheConfig::disabled(),
             novel_token_tagger: NovelTokenTaggerChoice::Hmm,
+            residency_hint: ResidencyHint::default(),
         }
     }
 
@@ -185,6 +204,7 @@ impl EstateConfiguration {
                     encryption_config: self.encryption_config.clone(),
                     cache_config: self.cache_config.clone(),
                     novel_token_tagger: self.novel_token_tagger,
+                    residency_hint: self.residency_hint,
                 })
             }
 
@@ -198,6 +218,7 @@ impl EstateConfiguration {
                     encryption_config: self.encryption_config.clone(),
                     cache_config: self.cache_config.clone(),
                     novel_token_tagger: self.novel_token_tagger,
+                    residency_hint: self.residency_hint,
                 })
             }
 
@@ -241,6 +262,7 @@ impl EstateConfiguration {
             encryption_config: EstateEncryptionConfig::plaintext(),
             cache_config: EstateCacheConfig::disabled(),
             novel_token_tagger,
+            residency_hint: ResidencyHint::default(),
         })
     }
 }

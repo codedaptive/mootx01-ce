@@ -1223,21 +1223,45 @@ public actor VectorStore {
     ///   - limit: maximum number of matches to return.
     /// - Returns: up to `limit` matches, nearest first. Empty if `limit`
     ///   is non-positive, the probe is empty, or no float rows exist.
-    /// ADR-026: float NN search scans the SQLite `vectors` table directly.
-    /// No ResidentVectorArray, no FloatBruteForceIndex, no 2GB heap copy.
-    /// With PRAGMA mmap_size, row reads come from the OS page cache.
+    /// ADR-026: float NN search. `.diskBacked` scans SQLite directly
+    /// (no heap copy). `.ramResident` caches a FloatBruteForceIndex.
     public func findNearestFloat(
         probe: [Float],
         modelID: String,
         limit: Int
     ) async throws -> [VectorMatch] {
         guard limit > 0, !probe.isEmpty else { return [] }
+        if storage.configuration.residencyHint == .ramResident {
+            return try await _findNearestFloatCached(probe: probe, modelID: modelID, limit: limit)
+        }
         let hits = try await _floatScanFromTable(
             modelID: modelID, probe: probe, k: limit, direction: .nearest)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int((hit.distance * 10_000).rounded()),
+                modelID: hit.key.modelID
+            )
+        }
+    }
+
+    /// Pre-ADR-026 cached float search path. Used when residencyHint == .ramResident.
+    private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
+        if floatIndices[modelID] == nil {
+            let records = try await _fetchFloatRecords(modelID: modelID)
+            guard let arr = Self.buildFloatArray(from: records) else { return [] }
+            let index = FloatBruteForceIndex()
+            await index.build(from: arr)
+            floatIndices[modelID] = index
+        }
+        guard let modelIndex = floatIndices[modelID] else { return [] }
+        let probePayload = VectorPayload(floats: probe)
+        let filter = MetadataFilter(modelID: modelID)
+        let hits = try await modelIndex.search(probe: probePayload, metric: .float(.cosine), k: limit, filter: filter)
+        return hits.map { hit in
+            VectorMatch(
+                itemID: hit.key.itemID,
+                distance: Int(((hit.floatDistance ?? 1.0) * 10_000).rounded()),
                 modelID: hit.key.modelID
             )
         }
@@ -1268,19 +1292,44 @@ public actor VectorStore {
     /// - Returns: up to `limit` matches, FARTHEST (most dissimilar) first.
     ///   Empty if `limit` is non-positive, the probe is empty, or no float
     ///   rows exist for the model.
-    /// ADR-026: farthest float search scans SQLite directly, same as nearest.
+    /// ADR-026: farthest float search. Same residencyHint dispatch as nearest.
     public func findFarthestFloat(
         probe: [Float],
         modelID: String,
         limit: Int
     ) async throws -> [VectorMatch] {
         guard limit > 0, !probe.isEmpty else { return [] }
+        if storage.configuration.residencyHint == .ramResident {
+            return try await _findFarthestFloatCached(probe: probe, modelID: modelID, limit: limit)
+        }
         let hits = try await _floatScanFromTable(
             modelID: modelID, probe: probe, k: limit, direction: .farthest)
         return hits.map { hit in
             VectorMatch(
                 itemID: hit.key.itemID,
                 distance: Int((hit.distance * 10_000).rounded()),
+                modelID: hit.key.modelID
+            )
+        }
+    }
+
+    /// Pre-ADR-026 cached farthest float path. Used when residencyHint == .ramResident.
+    private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
+        if floatIndices[modelID] == nil {
+            let records = try await _fetchFloatRecords(modelID: modelID)
+            guard let arr = Self.buildFloatArray(from: records) else { return [] }
+            let index = FloatBruteForceIndex()
+            await index.build(from: arr)
+            floatIndices[modelID] = index
+        }
+        guard let modelIndex = floatIndices[modelID] else { return [] }
+        let probePayload = VectorPayload(floats: probe)
+        let filter = MetadataFilter(modelID: modelID)
+        let hits = try await modelIndex.searchFarthest(probe: probePayload, metric: .float(.cosine), k: limit, filter: filter)
+        return hits.map { hit in
+            VectorMatch(
+                itemID: hit.key.itemID,
+                distance: Int(((hit.floatDistance ?? 1.0) * 10_000).rounded()),
                 modelID: hit.key.modelID
             )
         }
