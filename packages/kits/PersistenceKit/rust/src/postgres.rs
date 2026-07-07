@@ -904,6 +904,9 @@ fn apply_schema(
     };
     batch(client, META_TABLE)?;
     batch(client, AUDIT_TABLE)?;
+    // Upgrade migration (#102): old estates lack the reason column.
+    // ADD COLUMN IF NOT EXISTS avoids errors on new estates.
+    batch(client, r#"ALTER TABLE "_storagekit_audit" ADD COLUMN IF NOT EXISTS "reason" TEXT"#)?;
     batch(client, AUDIT_INDEX)?;
     batch(client, BLOB_TABLE)?;
     batch(client, REJECT_MUTATION_FN)?;

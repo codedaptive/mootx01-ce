@@ -841,6 +841,10 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     };
     exec(MIGRATIONS_TABLE)?;
     exec(AUDIT_TABLE)?;
+    // Upgrade migration (#102): estates created before the reason column
+    // need ALTER TABLE. CREATE TABLE IF NOT EXISTS does not add columns.
+    // "duplicate column name" on new estates is expected — ignore it.
+    let _ = exec(r#"ALTER TABLE "_storagekit_audit" ADD COLUMN "reason" TEXT"#);
     exec(AUDIT_INDEX)?;
     exec(BLOB_TABLE)?;
     for table in &schema.tables {

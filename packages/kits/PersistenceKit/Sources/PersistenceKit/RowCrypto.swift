@@ -253,7 +253,11 @@ package func assertContentKeyIDInvariant(
     config: EstateEncryptionConfig
 ) throws {
     guard config.usesRowCrypto else { return }
-    guard case .text? = values["content"] else { return }
+    // Exempt empty-string content (#76): expunge/zeroization writes
+    // content = "" to erase the blob — there is nothing to encrypt.
+    // Only non-empty plaintext without a keyID is the invariant violation.
+    guard case .text(let contentText)? = values["content"],
+          !contentText.isEmpty else { return }
     // A keyID is present only when the content is ciphertext; .text
     // content with no keyID is the unsafe, unencrypted write.
     if case .text(let keyID)? = values["keyID"], !keyID.isEmpty { return }
