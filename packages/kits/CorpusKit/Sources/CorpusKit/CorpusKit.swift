@@ -2156,7 +2156,7 @@ public actor Corpus {
     ///   - query: Natural language query text.
     ///   - limit: Maximum number of source-level results.
     /// - Returns: Up to `limit` (sourceID, score) pairs, descending by score.
-    public func bm25TopKBySource(query: String, limit: Int) async -> [(sourceID: String, score: Float)] {
+    public func bm25TopKBySource(query: String, limit: Int) async throws -> [(sourceID: String, score: Float)] {
         guard limit > 0, !query.isEmpty else { return [] }
         // Tokenise using the same vocabulary as the indexed chunks. The
         // CorpusDefaultTokenizer is stateless; a fresh instance is semantically
@@ -2173,7 +2173,7 @@ public actor Corpus {
         // returns the cached in-memory InvertedIndex and runs WAND/BMW), but
         // as an actor method it requires await to enter the actor's isolation
         // context. No async I/O occurs; the hop is cheap.
-        let sparseHits = await invertedIndex.topK(queryTerms: tokens, k: limit * 4)
+        let sparseHits = try await invertedIndex.topK(queryTerms: tokens, k: limit * 4)
 
         // Map SparseHit (itemID: String, impact: Float) to (id: UUID, score: Float).
         // Hits whose itemID is not a valid UUID string are dropped — should not

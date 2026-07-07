@@ -522,13 +522,13 @@ public actor ResidentArrayStore {
         stride: UInt32
     ) -> ResidentVectorArray {
         let count = UInt32(records.count)
-        var storage = [UInt8]()
-        storage.reserveCapacity(records.count * Int(stride))
+        var storageBytes = [UInt8]()
+        storageBytes.reserveCapacity(records.count * Int(stride))
         var keys = [VectorRecordKey]()
         keys.reserveCapacity(records.count)
 
         for r in records {
-            storage.append(contentsOf: r.bytes)
+            storageBytes.append(contentsOf: r.bytes)
             keys.append(r.key)
         }
 
@@ -540,7 +540,7 @@ public actor ResidentArrayStore {
             kind: kind,
             stride: stride,
             count: count,
-            storage: storage,
+            storage: Data(storageBytes),
             keys: keys,
             modelPartitions: partitions,
             tombstones: tombstones
@@ -721,14 +721,31 @@ public actor ResidentArrayStore {
         guard offset + vectorsBytes <= data.count else {
             throw VectorKitError.decodingFailure("ResidentArrayStore: truncated in vectors block")
         }
-        let storage = Array(data[offset..<(offset + vectorsBytes)])
+        // ADR-026: pass the Data slice directly instead of copying into
+        // a heap-allocated [UInt8]. When the sidecar was loaded via
+        // .mappedIfSafe, this keeps the vector bytes mmap-backed — the OS
+        // page cache manages residency instead of a 2GB+ malloc. The Data
+        // subscript range produces a zero-copy slice sharing the mmap.
+        let vectorData = data[offset..<(offset + vectorsBytes)]
         offset += vectorsBytes
 
         // --- Keys block ---
+        // ADR-026 string interning: on a 200K-vector estate with 1 model,
+        // decoding modelID + modelVersion per key allocates 400K identical
+        // String heap objects (~500MB). Interning collapses these to one
+        // shared instance per unique string. Swift String is CoW, so
+        // assigning the interned reference does not copy — all 200K keys
+        // hold ONE pointer to the same backing storage.
+        var stringIntern: [String: String] = [:]
+        func intern(_ s: String) -> String {
+            if let existing = stringIntern[s] { return existing }
+            stringIntern[s] = s
+            return s
+        }
         var keys = [VectorRecordKey]()
         keys.reserveCapacity(Int(count))
         for _ in 0..<Int(count) {
-            let (key, bytesRead) = try decodeKey(data, at: offset)
+            let (key, bytesRead) = try decodeKey(data, at: offset, intern: intern)
             keys.append(key)
             offset += bytesRead
         }
@@ -742,7 +759,7 @@ public actor ResidentArrayStore {
             kind: kind,
             stride: stride,
             count: count,
-            storage: storage,
+            storage: Data(vectorData),
             keys: keys,
             modelPartitions: partitions,
             tombstones: tombstones
@@ -771,10 +788,20 @@ public actor ResidentArrayStore {
 
     /// Decode a VectorRecordKey from `data` at `offset`.
     /// Returns (key, bytes consumed).
-    static func decodeKey(_ data: Data, at offset: Int) throws -> (VectorRecordKey, Int) {
+    /// Decode one key record from the sidecar binary format.
+    ///
+    /// The `intern` closure deduplicates modelID and modelVersion strings
+    /// (ADR-026): on a typical estate all 200K keys share one modelID and
+    /// one modelVersion. Without interning, each key allocates its own
+    /// String heap object for those fields (~500MB on a 50K estate).
+    /// itemID is NOT interned — it's unique per slot.
+    static func decodeKey(
+        _ data: Data, at offset: Int,
+        intern: ((String) -> String)? = nil
+    ) throws -> (VectorRecordKey, Int) {
         var pos = offset
 
-        func readString() throws -> (String, Int) {
+        func readString() throws -> String {
             guard pos + 4 <= data.count else {
                 throw VectorKitError.decodingFailure(
                     "ResidentArrayStore.decodeKey: truncated at string length (pos=\(pos))")
@@ -789,17 +816,22 @@ public actor ResidentArrayStore {
                     "ResidentArrayStore.decodeKey: invalid UTF-8 at pos=\(pos)")
             }
             pos += len
-            return (s, 0) // second element unused
+            return s
         }
 
-        let (itemID, _) = try readString()
+        let itemID = try readString()
         guard pos + 4 <= data.count else {
             throw VectorKitError.decodingFailure(
                 "ResidentArrayStore.decodeKey: truncated at vectorIndex")
         }
         let vectorIndex = data.readLE32(at: pos); pos += 4
-        let (modelID, _) = try readString()
-        let (modelVersion, _) = try readString()
+        let rawModelID = try readString()
+        let rawModelVersion = try readString()
+
+        // Intern modelID/modelVersion — these repeat for every slot in
+        // the same partition. itemID is unique, not interned.
+        let modelID = intern?(rawModelID) ?? rawModelID
+        let modelVersion = intern?(rawModelVersion) ?? rawModelVersion
 
         let key = VectorRecordKey(itemID: itemID,
                                   vectorIndex: vectorIndex,

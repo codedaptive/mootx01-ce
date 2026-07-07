@@ -117,7 +117,7 @@ public enum HybridRecall {
         // cached InvertedIndex and runs WAND/BMW), but as an actor method it
         // requires await for isolation. The async let for vectorHits proceeds
         // concurrently while we cross the actor boundary here.
-        let iixHits = await invertedIndex.topK(queryTerms: queryTokens, k: candidateK)
+        let iixHits = try await invertedIndex.topK(queryTerms: queryTokens, k: candidateK)
 
         let vectorResults = try await vectorHits
         // Map SparseHit (itemID: String, impact: Float) → (id: UUID, score: Float)

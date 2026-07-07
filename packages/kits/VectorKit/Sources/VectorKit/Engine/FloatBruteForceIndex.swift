@@ -431,7 +431,7 @@ private func dotProduct(_ a: [Float], _ b: [Float]) -> Float {
 ///
 /// The byte layout is the canonical VectorPayload.floats() wire format.
 /// No copy beyond the allocation of the Float array.
-private func floatSlice(from bytes: ArraySlice<UInt8>, count: Int) -> [Float] {
+private func floatSlice(from bytes: Data, count: Int) -> [Float] {
     var result = [Float]()
     result.reserveCapacity(count)
     var idx = bytes.startIndex
@@ -484,7 +484,7 @@ extension ResidentVectorArray {
     ///
     /// Only FloatBruteForceIndex calls this; it guards tombstone and range
     /// before the call.
-    fileprivate func vector_bytesUnchecked(at i: Int, stride: Int) -> ArraySlice<UInt8> {
+    fileprivate func vector_bytesUnchecked(at i: Int, stride: Int) -> Data {
         let start = i * stride
         return storage[start..<(start + stride)]
     }

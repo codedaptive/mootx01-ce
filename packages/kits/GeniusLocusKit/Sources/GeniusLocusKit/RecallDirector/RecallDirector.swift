@@ -374,7 +374,7 @@ public extension GeniusLocusKit {
         // BM25 lane: top-frontierK source-level hits from the keyword index.
         let bm25List: [(id: String, score: Float)]
         if let text = sketch.queryText, !text.isEmpty {
-            let hits = await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
+            let hits = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
             bm25List = hits.map { (id: $0.sourceID, score: $0.score) }
         } else {
             bm25List = []
@@ -563,7 +563,7 @@ public extension GeniusLocusKit {
         if let corpus = corpusKits[handle], let text = request.queryText, !text.isEmpty {
             let sketch = await compileSketch(
                 from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
-            let bm25Hits = await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
+            let bm25Hits = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
             bm25List = bm25Hits.map { (id: $0.sourceID, score: $0.score) }
 
             if let engram = sketch.queryEngram, let store = vectorStores[handle] {
@@ -1012,7 +1012,7 @@ public extension GeniusLocusKit {
         // Step 3 — BM25 lane (only when corpus is registered and query text present).
         var bm25Hits: [RecallHit] = []
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
-            let bm25Results = await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
+            let bm25Results = try await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
             bm25Hits = bm25Results.map { r in
                 let sv = RecallScoreVector(
                     locus: 0, bm25: r.score, vector: 0,
