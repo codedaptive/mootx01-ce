@@ -24,7 +24,9 @@
 // package has no executable target; `swift build`/`swift test` exercise the
 // libraries headlessly.
 //
-// Platforms: macOS 26 / iOS 26 (Apple Silicon), matching the kit stack.
+// Platforms: macOS 27 / iOS 27 (Apple Silicon) — the app leads the kit stack
+// here deliberately (Bob ruling 2026-07-07, estate F76F97BC): the WWDC26
+// adoption path (App Intents 2027 wave, Core AI, SpotlightSearchTool) is 27+.
 // Relative paths are ../../ — this package lives in apps/, siblings of packages/.
 
 import PackageDescription
@@ -32,8 +34,8 @@ import PackageDescription
 let package = Package(
     name: "Mootx01-App",
     platforms: [
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(name: "MootGateway", targets: ["MootGateway"]),
