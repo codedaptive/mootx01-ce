@@ -1711,12 +1711,12 @@ public actor VectorStore {
     ) -> ResidentVectorArray? {
         guard let first = records.first else { return nil }
         let stride = UInt32(first.payload.bytes.count)
-        var storage = [UInt8]()
-        storage.reserveCapacity(records.count * Int(stride))
+        var storageBytes = Data()
+        storageBytes.reserveCapacity(records.count * Int(stride))
         var keys = [VectorRecordKey]()
         keys.reserveCapacity(records.count)
         for r in records {
-            storage.append(contentsOf: r.payload.bytes)
+            storageBytes.append(contentsOf: r.payload.bytes)
             keys.append(r.key)
         }
         let tombstones = [UInt64](repeating: 0, count: (records.count + 63) / 64)
@@ -1725,7 +1725,7 @@ public actor VectorStore {
             kind: .float32,
             stride: stride,
             count: UInt32(records.count),
-            storage: storage,
+            storage: storageBytes,
             keys: keys,
             modelPartitions: partitions,
             tombstones: tombstones

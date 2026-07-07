@@ -87,11 +87,13 @@ public struct ResidentVectorArray: Sendable {
     /// Slot i occupies bytes[i*stride ..< (i+1)*stride].
     /// All slots are live unless the corresponding tombstone bit is set.
     ///
-    /// On Apple platforms this buffer may be mmap-backed (read-only).
-    /// On platforms without usable mmap semantics it is heap-allocated.
-    /// Both paths produce bit-identical scan results (mmap is a load
-    /// optimisation, not a semantic; arch spec §4.3).
-    public let storage: [UInt8]
+    /// Backed by `Data` so the sidecar can be memory-mapped (mmap) on
+    /// load without copying 2GB+ of vector bytes into the Swift heap.
+    /// When mmap-backed, only pages actually touched during a scan
+    /// fault into physical RAM — the OS page cache manages residency.
+    /// Heap-allocated Data works identically for in-memory construction.
+    /// Both paths produce bit-identical scan results (arch spec §4.3).
+    public let storage: Data
 
     /// Per-slot record keys, parallel to storage. keys[i] identifies
     /// the record whose vector occupies storage slot i.
@@ -152,7 +154,7 @@ public struct ResidentVectorArray: Sendable {
         kind: VectorKind,
         stride: UInt32,
         count: UInt32,
-        storage: [UInt8],
+        storage: Data,
         keys: [VectorRecordKey],
         modelPartitions: [ModelPartitionEntry],
         tombstones: [UInt64]
@@ -176,7 +178,7 @@ public struct ResidentVectorArray: Sendable {
             kind: kind,
             stride: stride,
             count: 0,
-            storage: [],
+            storage: Data(),
             keys: [],
             modelPartitions: [],
             tombstones: []
@@ -231,6 +233,6 @@ public struct ResidentVectorArray: Sendable {
         let start = i * Int(stride)
         let end   = start + Int(stride)
         guard end <= storage.count else { return nil }
-        return Array(storage[start..<end])
+        return [UInt8](storage[start..<end])
     }
 }

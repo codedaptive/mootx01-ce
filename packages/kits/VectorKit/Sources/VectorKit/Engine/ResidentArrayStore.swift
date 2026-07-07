@@ -522,13 +522,13 @@ public actor ResidentArrayStore {
         stride: UInt32
     ) -> ResidentVectorArray {
         let count = UInt32(records.count)
-        var storage = [UInt8]()
-        storage.reserveCapacity(records.count * Int(stride))
+        var storageBytes = [UInt8]()
+        storageBytes.reserveCapacity(records.count * Int(stride))
         var keys = [VectorRecordKey]()
         keys.reserveCapacity(records.count)
 
         for r in records {
-            storage.append(contentsOf: r.bytes)
+            storageBytes.append(contentsOf: r.bytes)
             keys.append(r.key)
         }
 
@@ -540,7 +540,7 @@ public actor ResidentArrayStore {
             kind: kind,
             stride: stride,
             count: count,
-            storage: storage,
+            storage: Data(storageBytes),
             keys: keys,
             modelPartitions: partitions,
             tombstones: tombstones
@@ -721,7 +721,12 @@ public actor ResidentArrayStore {
         guard offset + vectorsBytes <= data.count else {
             throw VectorKitError.decodingFailure("ResidentArrayStore: truncated in vectors block")
         }
-        let storage = Array(data[offset..<(offset + vectorsBytes)])
+        // ADR-026: pass the Data slice directly instead of copying into
+        // a heap-allocated [UInt8]. When the sidecar was loaded via
+        // .mappedIfSafe, this keeps the vector bytes mmap-backed — the OS
+        // page cache manages residency instead of a 2GB+ malloc. The Data
+        // subscript range produces a zero-copy slice sharing the mmap.
+        let vectorData = data[offset..<(offset + vectorsBytes)]
         offset += vectorsBytes
 
         // --- Keys block ---
@@ -742,7 +747,7 @@ public actor ResidentArrayStore {
             kind: kind,
             stride: stride,
             count: count,
-            storage: storage,
+            storage: Data(vectorData),
             keys: keys,
             modelPartitions: partitions,
             tombstones: tombstones
