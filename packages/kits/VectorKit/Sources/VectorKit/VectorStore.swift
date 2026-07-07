@@ -847,7 +847,11 @@ public actor VectorStore {
         //    policy. Dropping the map entry is the invalidation (its presence is
         //    the built flag); other models' indices are untouched.
         for input in batch where input.payload.kind == .float32 {
-            // ADR-026: float index is no longer cached; no invalidation needed.
+            // ADR-026: diskBacked scans SQLite directly (no cache). ramResident
+            // still uses floatIndices — invalidate so stale entries don't survive.
+            if storage.configuration.residencyHint == .ramResident {
+                floatIndices.removeAll()
+            }
         }
 
         let endTime = Date().timeIntervalSince1970
