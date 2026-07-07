@@ -1976,8 +1976,43 @@ public actor DrawerStore {
             }
         }
 
+        // Sensitivity ceiling (#57): a tunnel inherits the highest
+        // sensitivity of its two endpoints so filtering one endpoint
+        // automatically hides the tunnel. Look up both endpoint drawers
+        // (when drawer-level — nil means room-level, sensitivity = .normal).
+        var effectiveBitmap = t.adjectiveBitmap
+        let endpointIDs = [t.sourceDrawerId, t.targetDrawerId].compactMap { $0 }
+        if !endpointIDs.isEmpty {
+            var maxSens = AdjectiveSensitivity.normal
+            for eid in endpointIDs {
+                if let d = try await getDrawer(id: eid) {
+                    if d.adjectiveSensitivity.rawValue > maxSens.rawValue {
+                        maxSens = d.adjectiveSensitivity
+                    }
+                }
+            }
+            // Write the max sensitivity into bits 6–11 of the tunnel's
+            // adjectiveBitmap (cookbook §2.3, same layout as drawers).
+            effectiveBitmap = BitField.writeField(
+                Int64(maxSens.rawValue), into: effectiveBitmap, shift: 6, width: 6)
+        }
+        let tunnelWithSensitivity = Tunnel(
+            id: t.id,
+            sourceWing: t.sourceWing, sourceRoom: t.sourceRoom,
+            sourceDrawerId: t.sourceDrawerId,
+            targetWing: t.targetWing, targetRoom: t.targetRoom,
+            targetDrawerId: t.targetDrawerId,
+            label: t.label, kind: t.kind,
+            adjectiveBitmap: effectiveBitmap,
+            operationalBitmap: t.operationalBitmap,
+            provenanceBitmap: t.provenanceBitmap,
+            addedBy: t.addedBy, filedAt: t.filedAt,
+            tombstonedAt: t.tombstonedAt,
+            removedByBatch: t.removedByBatch,
+            orderKey: t.orderKey
+        )
         _ = try await storage.rowStore.insert(
-            table: "tunnels", values: Self.tunnelValues(t))
+            table: "tunnels", values: Self.tunnelValues(tunnelWithSensitivity))
         // Emit tunnel-add metric at the operation boundary.
         // Tunnel count tracks link density growth in the estate graph.
         emitTunnelAdd(
