@@ -2426,10 +2426,6 @@
     },
     {
       "code": "615.88",
-      "label": "Patent medicines"
-    },
-    {
-      "code": "615.88",
       "label": "Traditional medicine"
     },
     {
@@ -3425,7 +3421,7 @@
       "label": "Spanish essays"
     },
     {
-      "code": "855",
+      "code": "865",
       "label": "Speeches, addresses, etc., Spanish"
     },
     {
@@ -3433,7 +3429,7 @@
       "label": "Spanish letters"
     },
     {
-      "code": "857",
+      "code": "867",
       "label": "Spanish wit and humor"
     },
     {
@@ -4001,7 +3997,7 @@
       "label": "Florida"
     },
     {
-      "code": "975",
+      "code": "976",
       "label": "Gulf States + Southwest, Old"
     },
     {

@@ -1491,10 +1491,16 @@ impl AutonomicGovernor {
             self.last_graph_centrality_secs = Some(now_epoch_secs);
             // Watermark gate: skip the full eigenvalue recompute when the active
             // drawer count hasn't changed since the last computation. Mirrors
-            // Swift's hasAuditGrown + centralityCount estate.meta watermark.
-            let current_count = self.store.all_drawers()
+            // Composite watermark (#4): centrality depends on drawers, tunnels,
+            // and KG facts. Drawer count alone misses tunnel/fact changes.
+            let drawer_count = self.store.all_drawers()
                 .map(|d| d.iter().filter(|x| x.tombstoned_at.is_none()).count())
                 .unwrap_or(0);
+            let tunnel_count = self.store.all_tunnels()
+                .map(|t| t.len()).unwrap_or(0);
+            let fact_count = self.store.all_kg_facts()
+                .map(|f| f.len()).unwrap_or(0);
+            let current_count = drawer_count + tunnel_count * 1000 + fact_count * 1000000;
             if self.last_centrality_drawer_count == Some(current_count) {
                 // Estate unchanged — skip recompute. Scores from last run are
                 // still registered on the coordinator.

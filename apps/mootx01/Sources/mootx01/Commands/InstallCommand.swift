@@ -93,6 +93,20 @@ struct InstallCommand: AsyncParsableCommand {
         if noPlace {
             binaryPath = sourcePath
             print("Using binary at \(binaryPath) (--no-place: skipping ~/.mootx01 placement)")
+            // Proxy symlink (#3): placeBinary creates mootx01-proxy beside the
+            // placed binary. --no-place skips placeBinary, but proxy-bridge
+            // clients (Claude Desktop) still need the symlink beside the binary
+            // they point at. Create it next to the running binary.
+            let proxyURL = URL(fileURLWithPath: sourcePath)
+                .deletingLastPathComponent()
+                .appendingPathComponent("mootx01-proxy")
+            let fm = FileManager.default
+            if fm.fileExists(atPath: proxyURL.path) {
+                try? fm.removeItem(at: proxyURL)
+            }
+            try? fm.createSymbolicLink(
+                atPath: proxyURL.path,
+                withDestinationPath: URL(fileURLWithPath: sourcePath).lastPathComponent)
         } else {
             do {
                 binaryPath = try Installer.placeBinary(sourcePath: sourcePath, homeDirectory: home)

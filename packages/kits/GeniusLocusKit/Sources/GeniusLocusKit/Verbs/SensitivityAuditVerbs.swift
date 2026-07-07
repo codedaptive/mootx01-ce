@@ -168,6 +168,10 @@ extension GeniusLocusKit {
     /// dict is removed; sensitivity audit entries are persisted by LocusKit's
     /// audit machinery when the underlying verb fires. They are visible via
     /// `auditLog(for:)` which reads directly from `_storagekit_audit`.
+    /// Write a sensitivity audit entry to the durable audit log (#10).
+    /// These are synthetic events (not drawer mutations) — beforeBitmaps
+    /// is nil, afterBitmaps is all-zero. The `reason` field carries the
+    /// fieldPath (tier token) so the entry is self-describing.
     private func appendSensitivityAuditEntry(
         verb: UnifiedAuditVerb,
         rowID: UUID,
@@ -177,10 +181,27 @@ extension GeniusLocusKit {
         handle: EstateHandle,
         now: Date
     ) {
-        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no-op. The in-memory `auditLogs`
-        // dict is removed; sensitivity audit entries are persisted by LocusKit's
-        // audit machinery when the underlying grant verb fires. They are visible
-        // via `auditLog(for:)` which reads directly from `_storagekit_audit`.
+        guard let storage = storages[handle] else { return }
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        // Synthetic HLC: physical time from `now`, logical 0, node 0.
+        // These entries are not order-critical relative to drawer mutations
+        // (they don't feed bitmap fold), so a standalone HLC is acceptable.
+        let hlc = HLC(physicalTime: nowMs, logicalCount: 0, nodeID: 0)
+        let event = AuditEvent(
+            estateUuid: handle.estateUUID,
+            rowId: rowID,
+            hlc: hlc,
+            verb: verb.rawValue,
+            beforeBitmaps: nil,
+            afterBitmaps: (adjective: 0, operational: 0, provenance: 0),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0),
+            actor: "sensitivity-audit",
+            reason: fieldPath
+        )
+        Task {
+            try? await storage.auditLog.append(event)
+        }
     }
 
     private static func epochMilliseconds(_ date: Date) -> Int64 {

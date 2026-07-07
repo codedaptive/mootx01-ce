@@ -143,15 +143,22 @@ struct DbDeleteCommand: AsyncParsableCommand {
         // already gone, so a Keychain error is a warning, not a command failure.
         #if canImport(Security)
         let estateURL = DatabaseManager.estateURL(for: name, in: dataDir)
-        do {
-            try KeychainKeyStore(
-                service: "com.codedaptive.mootx01",
-                estateURL: estateURL,
-                accessGroup: "com.codedaptive.mootx01.shared"
-            ).deleteKey()
-        } catch {
-            FileHandle.standardError.write(Data(
-                "warning: estate deleted, but its encryption key could not be removed from the Keychain: \(error)\n".utf8))
+        // Delete from both the shared access group (current) AND the
+        // legacy default group (estates created before #94). Best-effort
+        // on both — a missing key is not an error.
+        for group in ["com.codedaptive.mootx01.shared", nil] as [String?] {
+            do {
+                try KeychainKeyStore(
+                    service: "com.codedaptive.mootx01",
+                    estateURL: estateURL,
+                    accessGroup: group
+                ).deleteKey()
+            } catch {
+                if group != nil {
+                    FileHandle.standardError.write(Data(
+                        "warning: could not remove Keychain key (group=\(group ?? "default")): \(error)\n".utf8))
+                }
+            }
         }
         #endif
 

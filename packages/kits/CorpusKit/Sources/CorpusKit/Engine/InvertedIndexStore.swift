@@ -259,6 +259,11 @@ public actor InvertedIndexStore {
     /// - Parameter itemID: item to remove. No-op if not present.
     public func remove(itemID: String) async throws {
         try await deleteFromStorage(itemID: itemID)
+        // Release cached index immediately on destructive ops so sensitive
+        // terms don't linger in process memory after deletion.
+        cachedPair = nil
+        ramTermFreqs = nil
+        ramDocLengths = nil
         isDirty = true
     }
 
@@ -349,7 +354,10 @@ public actor InvertedIndexStore {
             table: "iix_doclens",
             where: .isTrue
         )
-        // Clear cached index to match the now-empty tables.
+        // Release cached index immediately so sensitive terms don't linger.
+        cachedPair = nil
+        ramTermFreqs = nil
+        ramDocLengths = nil
         isDirty = true
         logger.info("InvertedIndexStore: deleteAll cleared all term-freq + doc-len rows")
     }

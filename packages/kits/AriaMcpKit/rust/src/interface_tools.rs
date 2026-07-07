@@ -2075,8 +2075,13 @@ fn run_memory_list(
     let all = coord
         .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
+    // Filter to Cluster A (currently-believed) + sensitivity ceiling (#9).
+    // State cluster is in bits 0–5 of adjectiveBitmap; Cluster A values are
+    // Active(0), Pending(1), Contested(2), Accepted(3) — all < 4.
     let drawers: Vec<_> = all.into_iter().filter(|d| {
         if d.tombstoned_at.is_some() { return false; }
+        let state_raw = d.adjective_bitmap & 0x3F;
+        if state_raw >= 4 { return false; } // Cluster B or C
         let sensitivity = AdjectiveSensitivity::from_raw((d.adjective_bitmap >> 6) & 0x3F);
         sensitivity != AdjectiveSensitivity::Restricted && sensitivity != AdjectiveSensitivity::Secret
     }).collect();

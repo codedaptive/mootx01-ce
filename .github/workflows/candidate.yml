@@ -57,6 +57,14 @@ jobs:
         run: |
           # Source version constant (matches Swift Mootx01.currentVersion).
           version="$(grep -m1 '^version = ' apps/mootx01/rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          # Supply-chain guard: reject version strings that aren't strict
+          # semver. A crafted Cargo.toml version containing shell metacharacters
+          # would be interpolated into later run blocks while the signing
+          # keychain is unlocked. Fail the job before any signing step.
+          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "ERROR: version '$version' is not valid semver — aborting" >&2
+            exit 1
+          fi
           # Tag is <version>-prerelease.<run> with NO leading v on purpose — a
           # v* tag would trigger release.yml and a signed public release. The
           # `-prerelease` suffix (with the `-`) is what the installers key on to
@@ -138,6 +146,10 @@ jobs:
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
+          if [ -z "$APPLE_API_KEY_P8" ] || [ -z "${{ secrets.APPLE_API_KEY_ID }}" ] || [ -z "${{ secrets.APPLE_API_KEY_ISSUER }}" ]; then
+            echo "::warning::Notarization secrets missing — skipping binary notarization"
+            exit 0
+          fi
           mkdir -p ~/.private_keys
           echo "$APPLE_API_KEY_P8" | base64 --decode > \
             ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
@@ -229,6 +241,10 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_KEY_ISSUER: ${{ secrets.APPLE_API_KEY_ISSUER }}
         run: |
+          if [ -z "$APPLE_API_KEY_P8" ] || [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_KEY_ISSUER" ]; then
+            echo "::warning::Notarization secrets missing — skipping pkg notarization"
+            exit 0
+          fi
           mkdir -p ~/.private_keys
           KEYFILE=~/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
           echo "$APPLE_API_KEY_P8" | base64 --decode > "$KEYFILE"

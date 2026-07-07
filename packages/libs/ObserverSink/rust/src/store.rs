@@ -591,7 +591,11 @@ impl StatsStore {
         // that choice here — the "user" marker is the guard.
         let current_monitoring = self.read_control_value(StatsStoreSchema::MONITORING_KEY)?;
         let current_source = self.read_control_value(StatsStoreSchema::MONITORING_SOURCE_KEY)?;
-        let source_is_default = current_source.as_deref().map_or(true, |s| s != "user");
+        // "user" means operator explicitly set the flag; "unknown" means
+        // Swift preserved a pre-existing opt-out with indeterminate origin.
+        // Both must be respected — only "default" (seeded, never touched)
+        // is eligible for the pre-8.1 upgrade to monitoring=1.
+        let source_is_default = current_source.as_deref().map_or(true, |s| s == "default");
         if current_monitoring.as_deref() == Some("0") && source_is_default {
             // Pre-8.1 seeded "0" with no operator override → upgrade to "1".
             self.upsert_control_value(StatsStoreSchema::MONITORING_KEY, "1")?;

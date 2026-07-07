@@ -84,8 +84,18 @@ public enum Precedence {
         // drawers are excluded so their field-value coordinates are not emitted.
         let rawIDs = try await kit.glkDrawerIDsForEventTimeWindow(in: handle, window: window)
         let estate = try await kit.estate(for: handle)
-        let allDrawers = try await estate.allDrawers()
-        let sensitiveIDs = Set(allDrawers.filter { !$0.adjectiveSensitivity.isBulkExportable }.map(\.id))
+        // Use structured hydration (no blob) — we only need IDs and
+        // sensitivity bits, not content. The prior allDrawers() loaded
+        // full content, causing a full-corpus scan per MCP request.
+        let allDrawers = try await estate.allDrawers(hydrationLevel: .structured, limit: nil)
+        // Lowercase sensitive IDs to match rawIDs, which are lowercased by
+        // glkDrawerIDsForEventTimeWindow. Without this, uppercase drawer
+        // IDs (from UUID().uuidString) are never subtracted and restricted/
+        // secret drawers leak their field-value coordinates.
+        let sensitiveIDs = Set(
+            allDrawers.filter { !$0.adjectiveSensitivity.isBulkExportable }
+                .map { $0.id.lowercased() }
+        )
         let allowedIDs = rawIDs.subtracting(sensitiveIDs)
         let entries = try await kit.glkEventLagPairs(
             in: handle, window: window, allowedRowIDs: allowedIDs)
