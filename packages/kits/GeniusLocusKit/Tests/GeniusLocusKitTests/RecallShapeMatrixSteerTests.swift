@@ -73,7 +73,7 @@ struct RecallShapeMatrixSteerTests {
     private func seedMatrixTier(
         _ kit: GeniusLocusKit, _ handle: EstateHandle, d1: String, d2: String
     ) async throws -> Bool {
-        try await kit.feedAuditLog(for: handle)
+        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
         let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []

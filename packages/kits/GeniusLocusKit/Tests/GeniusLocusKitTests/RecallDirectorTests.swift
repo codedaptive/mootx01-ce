@@ -1089,7 +1089,7 @@ struct RecallDirector004Tests {
         let d2 = try await kit.capture(handle, f2)
 
         // Feed audit log then rebuild the matrix tier.
-        try await kit.feedAuditLog(for: handle)
+        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
 
@@ -1263,7 +1263,7 @@ struct RecallDirectorSafetyTests {
         await kit.registerCorpus(corpus, for: handle)
 
         // Verify expunge precondition: BM25 finds the content BEFORE expunge.
-        let preExpungeHits = await corpus.bm25TopKBySource(query: "apple mango tombstone", limit: 10)
+        let preExpungeHits = try await corpus.bm25TopKBySource(query: "apple mango tombstone", limit: 10)
         #expect(
             !preExpungeHits.isEmpty,
             "BM25 must find the ingested content before expunge — if this fails the test setup is broken"
@@ -2021,7 +2021,7 @@ struct RecallDirectorAdaptiveLambdaTests {
         let d2 = try await kit.capture(handle, f2)
 
         // Build and register a MatrixTier with a strong temporal signal.
-        try await kit.feedAuditLog(for: handle)
+        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
         let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []
@@ -2106,7 +2106,7 @@ struct RecallDirectorAdaptiveLambdaTests {
         let d2 = try await kit.capture(handle, f2)
 
         // Feed and retrieve the audit log, then rebuild via rebuildTemporal.
-        try await kit.feedAuditLog(for: handle)
+        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
 
         // rebuildTemporal is the method under test: it uses
@@ -2431,7 +2431,7 @@ struct RecallDirectorMatrixConformanceTests {
         // Read the captured drawers to extract their actual operationalBitmap values.
         // We need the raw Int64 values to seed the MatrixTier with coordinates that
         // the scorer will produce when it walks the candidate buffer.
-        try await kit.feedAuditLog(for: handle)
+        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
         let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []
