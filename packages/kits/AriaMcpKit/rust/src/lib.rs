@@ -58,6 +58,7 @@ pub mod governor_topology_adapter;
 pub mod http_server;
 pub mod interface_tools;
 pub mod jsonrpc;
+pub mod memory_adapter;
 pub mod lens_tools;
 pub mod recall_discrimination;
 pub mod recipe_tools;

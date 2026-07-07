@@ -34,7 +34,8 @@ extension GeniusLocusKit {
         _ entries: [UnifiedAuditEntry],
         for handle: EstateHandle
     ) {
-        auditLogs[handle, default: UnifiedAuditLog()].add(contentsOf: entries)
+        // ADR-026: in-memory auditLogs removed. No-op stub.
+        _ = entries
     }
 }
 

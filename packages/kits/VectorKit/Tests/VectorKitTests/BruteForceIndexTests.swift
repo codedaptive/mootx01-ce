@@ -393,7 +393,7 @@ struct BruteForceIndexTests {
             keys: [k1, k2], tombstones: tombstones)
         let arr = ResidentVectorArray(
             kind: .binary, stride: 32, count: 2,
-            storage: storage, keys: [k1, k2],
+            storage: Data(storage), keys: [k1, k2],
             modelPartitions: partitions, tombstones: tombstones
         )
         let indexB = BruteForceIndex()
@@ -495,7 +495,7 @@ struct ResidentArrayStoreTests {
             keys: [k1, k2], tombstones: tombstones)
         let original = ResidentVectorArray(
             kind: .binary, stride: 32, count: 2,
-            storage: engramBytes(e1) + engramBytes(e2),
+            storage: Data(engramBytes(e1) + engramBytes(e2)),
             keys: [k1, k2], modelPartitions: partitions, tombstones: tombstones
         )
 
@@ -641,7 +641,7 @@ struct ResidentArrayStoreTests {
                                 modelID: "m1", modelVersion: "v2")
         let arr = ResidentVectorArray(
             kind: .binary, stride: 32, count: 1,
-            storage: engramBytes(e),
+            storage: Data(engramBytes(e)),
             keys: [k],
             modelPartitions: [ModelPartitionEntry(modelID: "m1", range: 0..<1)],
             tombstones: [0]

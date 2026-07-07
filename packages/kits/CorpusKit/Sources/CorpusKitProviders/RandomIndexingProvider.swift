@@ -432,6 +432,12 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
         try RandomIndexingProvider(deserializing: basis)
     }
 
+    /// ADR-026: release the in-memory vocab dictionary (~1GB on a 50K estate).
+    /// The next embed call must go through reconstructBasis from BasisStore.
+    public func releaseBasis() {
+        vocab.removeAll(keepingCapacity: false)
+    }
+
     // MARK: Maintained counts (incremental-counts change set, P3)
 
     /// 4-byte magic identifying an RI COUNTS blob ("RICT"). RI is unique among

@@ -630,6 +630,15 @@ impl TrainableEmbeddingBasis for PpmiProvider {
         Ok(Box::new(provider))
     }
 
+    fn release_basis(&mut self) {
+        self.ppmi_vectors.clear();
+        self.ppmi_vectors.shrink_to_fit();
+        self.co_count.clear();
+        self.co_count.shrink_to_fit();
+        self.term_count.clear();
+        self.term_count.shrink_to_fit();
+    }
+
     /// Reconstruct a fresh PPMI provider from a basis blob, boxed as TRAINABLE so
     /// `Corpus` can rebuild a from-scratch trainable provider for `reindex` /
     /// first-ingest (train_on_corpus is additive — see the trait doc). Same

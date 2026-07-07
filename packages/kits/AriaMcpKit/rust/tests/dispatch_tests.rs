@@ -133,8 +133,7 @@ fn tools_list_count_is_64() {
     // moot_lens_contradiction (genuine contradiction detector, Part 5) +
     // moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001) +
     // moot_palace_import (direct palace import, PAR-PB-1) +
-    // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling on
-    // docs_internal/V1_1_PARKING_LOT.md) +
+    // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling) +
     // moot_monitoring_status (ADR-025 wave 8.2, daemon telemetry monitoring control):
     //   21  interface tools (Tier 1–5 + monitoring_status)
     //    1  federation tool (moot_federated_search)

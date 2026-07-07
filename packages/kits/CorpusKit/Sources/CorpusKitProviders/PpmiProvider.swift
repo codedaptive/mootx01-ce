@@ -599,6 +599,12 @@ extension PpmiProvider: TrainableEmbeddingBasis {
         try PpmiProvider(deserializing: basis)
     }
 
+    /// ADR-026: release the in-memory ppmiVectors dictionary (~1GB on a 50K estate).
+    /// The next embed call must go through reconstructBasis from BasisStore.
+    public func releaseBasis() {
+        ppmiVectors.removeAll(keepingCapacity: false)
+    }
+
     // MARK: Maintained counts (incremental-counts change set, P3)
 
     /// Fold one chunk's text into the accumulated co-occurrence counts. PPMI's

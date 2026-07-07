@@ -520,7 +520,7 @@ struct StandingSignalsTests {
         _ = try await kit.capture(handle, frame2)
 
         // Pull the unified audit log and rebuild the T tier.
-        try await kit.feedAuditLog(for: handle)
+        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
 
         let tier1 = MatrixTier.rebuildTemporal(from: auditLog)

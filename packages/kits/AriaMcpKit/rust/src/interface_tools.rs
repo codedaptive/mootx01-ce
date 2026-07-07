@@ -87,6 +87,8 @@ const DEFAULT_LATTICE_CODE: &str = "000";
 /// The 19 interface tool names (Tier 1–5) plus 2 Maintenance tools (21 total),
 /// in the order they appear in the tool list. Mirrors Swift `InterfaceTools`.
 pub const INTERFACE_TOOLS: &[&str] = &[
+    // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+    "memory",
     // Tier 1 — Core memory (8)
     "moot_file_memory",
     "moot_memory_search",
@@ -347,6 +349,8 @@ pub fn dispatch(
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
+        // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+        "memory" => crate::memory_adapter::dispatch_memory(args, registry),
         "moot_file_memory" => run_file_memory(args, registry),
         "moot_memory_search" => run_memory_search(args, registry, ledger, sensitivity_ledger),
         "moot_memory_list" => run_memory_list(args, registry),
@@ -744,8 +748,8 @@ fn run_memory_search(
         // sensitivity designation marks as access-controlled. Recall can return
         // these rows for relevance ranking without exposing the body.
         //
-        // NOTE on moot_memory_get (ADR: docs_internal/V1_1_PARKING_LOT.md's
-        // fetch-drawer-by-ID gap, shipped): it does NOT bypass this redaction
+        // NOTE on moot_memory_get (the shipped fetch-drawer-by-ID tool): it
+        // does NOT bypass this redaction
         // via a different door. moot_memory_get gates on the ADJECTIVE axis
         // (state/trust/adjective_sensitivity, bits 6-11, via
         // BitmapEvaluator's default insertion) — the same gate this tool
@@ -826,8 +830,8 @@ fn run_memory_search(
 
 /// `moot_memory_get` — fetch one memory drawer by id, in full.
 ///
-/// ADR reference: docs_internal/V1_1_PARKING_LOT.md's "MCP API gap:
-/// fetch-drawer-by-ID" (build-now per Bob's ruling, not deferred to v1.1).
+/// Closes the "fetch-drawer-by-ID" MCP API gap — build-now per Bob's
+/// ruling, not deferred to v1.1.
 ///
 /// Reifies the ARIA `recall` verb (docs/concepts/ARIA_LEXICON.md) applied to
 /// the Drawer noun, constrained by an exact identifier rather than free-text
