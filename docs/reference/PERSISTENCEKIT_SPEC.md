@@ -257,6 +257,17 @@ The topology boundary (PersistenceKit upstream of LatticeLib) requires separate
 declarations; consumers bridge them with a trivial switch at the GLK/NeuronKit
 boundary when calling LatticeLib tagging APIs with the estate's choice.
 
+**I-22 (residency hint, ADR-026):** `EstateConfiguration` carries a
+`residencyHint: ResidencyHint` field (`.diskBacked` default) that kits
+read to choose their index caching strategy. `.diskBacked`: computed
+indexes (BM25, float vector) are loaded from the durable store on
+demand and discarded after use; the OS page cache manages RAM residency
+via `PRAGMA mmap_size`. `.ramResident`: all indexes are cached in the
+process heap between queries for minimum query latency (pre-ADR-026
+behavior). The hint is advisory — kits interpret it independently for
+their own index structures. PersistenceKit defines the enum and the
+field; it does not enforce or interpret the hint itself.
+
 **I-21 (SQL-identifier validation on all write paths, CAND-047):** every
 caller-supplied column name that reaches a dynamically-constructed SQL string
 MUST be validated against the safe-identifier charset `[A-Za-z_][A-Za-z0-9_]*`
