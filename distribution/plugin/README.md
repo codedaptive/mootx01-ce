@@ -76,7 +76,7 @@ Or run the orientation command in Claude Code:
   loopback HTTP, so every session shares the one running daemon instead of
   spawning a private `serve` process per session
 
-Version 1.0.18 — this plugin tracks the MOOTx01 product release.
+Version 1.0.23 — this plugin tracks the MOOTx01 product release.
 
 ## Documentation
 
