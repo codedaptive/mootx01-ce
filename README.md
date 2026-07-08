@@ -89,7 +89,13 @@ In plain English: it keeps what happened, finds what matters, and helps your AI 
 
 ## Drop-in replacement for Anthropic's memory system
 
-MOOTx01 implements Anthropic's `memory_20250818` tool contract — the same six commands Claude already knows — but backed by a governed estate instead of flat files. Every model-written memory lands as unconfirmed and auditable. Deletes are soft and reversible. Edits preserve full history. Enable it with `mootx01 enable memory-tool`, or `pip install moot-memory` for the Messages API. See the [Memory Adapter README](apps/moot-memory-adapter/README.md) for details.
+MOOTx01 implements Anthropic's `memory_20250818` tool contract — the same six commands Claude already knows — but backed by a governed estate instead of flat files. Every model-written memory lands as unconfirmed and auditable. Deletes are soft and reversible. Edits preserve full history.   
+Enable it with:   
+
+- `mootx01 enable memory-tool` for MCP and Interactive use.   
+- `pip install moot-memory` for the Messages API.   
+
+See the [Memory Adapter README](apps/moot-memory-adapter/README.md) for details.
 
 ## What it looks like
 
