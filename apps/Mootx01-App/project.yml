@@ -45,6 +45,11 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+        # M-ING-2: purpose strings for the live miner consent prompts
+        # (EventKit + Contacts). Shown in the system dialog on first live
+        # read; the readers themselves only run from attended sessions.
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads upcoming events to file them into your private, on-device memory estate."
+        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact birthdays to file them into your private, on-device memory estate."
         # Spawning the managed daemon needs no sandbox for this dev prototype.
         ENABLE_APP_SANDBOX: NO
     # App-group container (ADR-014, macOS 15+): when the estate lives in the
@@ -93,6 +98,11 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+        # M-ING-2: purpose strings for the live miner consent prompts
+        # (EventKit + Contacts). Shown in the system dialog on first live
+        # read; the readers themselves only run from attended sessions.
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads upcoming events to file them into your private, on-device memory estate."
+        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact birthdays to file them into your private, on-device memory estate."
     # A5: register the mootx01:// URL scheme so MootURLRouter receives
     # x-callback-url calls from other apps. CFBundleURLName is reverse-DNS
     # for uniqueness; CFBundleURLSchemes is what the system matches on.
