@@ -1844,17 +1844,16 @@ public actor Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         try await persistMaintainedCounts(now: now)
 
-        // ADR-026: release the in-memory trained vocabulary from each provider.
-        // The vocab dictionaries hold ~2GB of [Float] arrays on a 50K estate.
-        // The basis is persisted in BasisStore; the next embed call will
-        // reconstruct from the stored blob. This is acceptable because reindex
-        // is the last step that needs bulk embedding — after this, only
-        // single-drawer ingest embed calls occur (which reconstruct on demand).
-        for slot in slots {
-            if let trainable = slot.provider as? any TrainableEmbeddingBasis {
-                trainable.releaseBasis()
-            }
-        }
+        // ADR-026 NOTE: releaseBasis() was here but is REMOVED because the
+        // serving providers have no on-demand reconstruction path. Calling
+        // releaseBasis() clears the live vocab, making subsequent embeds
+        // return Engram.zero until the next full reindex or process restart.
+        // The ~2GB vocab RAM stays resident until a proper lazy-load-from-
+        // BasisStore mechanism is implemented. The diskBacked BM25 pattern
+        // (load from SQLite on demand) is the model — the embedding providers
+        // need the same treatment, but it's a larger refactor (each provider's
+        // embed path must check for empty vocab and reconstruct from the
+        // persisted basis blob before embedding).
 
         corpusLog.info(
             "reindex: complete — \(chunks.count, privacy: .public) chunks re-embedded across \(self.slots.count, privacy: .public) slots")
