@@ -65,3 +65,48 @@ struct MinerEngineTests {
         #expect(search.text.contains("82.1 kg"))
     }
 }
+
+// M-ING-2 Part 2 — concrete sources through the engine, fixture readers only.
+@Suite("Miner sources (M-ING-2 Part 2)", .serialized)
+struct MinerSourceTests {
+
+    @Test("calendar and birthday mappers encode stable identity in subjects")
+    func mappersEncodeIdentity() {
+        let event = MinerMappers.fact(CalendarEventSample(
+            eventID: "ev-9", title: "Dentist", start: Date(timeIntervalSince1970: 1_750_000_000)))
+        #expect(event.subject == "calendar.event.ev-9")
+        #expect(event.predicate == "scheduled")
+        #expect(event.object.contains("Dentist at 2025-06-15"))
+
+        let bday = MinerMappers.fact(BirthdaySample(
+            contactID: "cn-3", name: "Ada Lovelace", month: 12, day: 10))
+        #expect(bday.subject == "contact.birthday.cn-3")
+        #expect(bday.object == "Ada Lovelace on 12-10")
+    }
+
+    @Test("calendar miner is idempotent end-to-end through the engine")
+    func calendarMinerIdempotent() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let miner = CalendarMiner {
+            [CalendarEventSample(eventID: "ev-1", title: "Standup",
+                                 start: Date(timeIntervalSince1970: 1_750_000_000))]
+        }
+        let first = try await MinerEngine.run(miner, caller: bridge)
+        #expect(first == .init(filed: 1, skipped: 0, failed: 0))
+        let second = try await MinerEngine.run(miner, caller: bridge)
+        #expect(second == .init(filed: 0, skipped: 1, failed: 0))
+    }
+
+    @Test("birthday miner files facts queryable in the fact lane")
+    func birthdayMinerFilesFacts() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let miner = BirthdayMiner {
+            [BirthdaySample(contactID: "cn-7", name: "Grace Hopper", month: 12, day: 9)]
+        }
+        _ = try await MinerEngine.run(miner, caller: bridge)
+        let search = await bridge.callToolFull("moot_fact_search", arguments: [
+            "query": .string("contact.birthday.cn-7"),
+        ])
+        #expect(search.text.contains("Grace Hopper on 12-09"))
+    }
+}
