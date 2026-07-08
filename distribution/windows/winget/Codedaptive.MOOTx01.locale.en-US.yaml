@@ -5,7 +5,7 @@
 # publisher fields must match the LICENSE file and mootx01-setup.iss.
 
 PackageIdentifier: Codedaptive.MOOTx01
-PackageVersion: 1.0.23
+PackageVersion: 1.0.24
 PackageLocale: en-US
 Publisher: Codedaptive LLC
 PublisherUrl: https://github.com/codedaptive/mootx01-ce
