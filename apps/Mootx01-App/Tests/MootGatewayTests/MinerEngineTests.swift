@@ -110,3 +110,31 @@ struct MinerSourceTests {
         #expect(search.text.contains("Grace Hopper on 12-09"))
     }
 }
+
+// M-ING-2 — cadence policy (D7: user-configurable; deterministic time).
+@Suite("MinerScheduler (M-ING-2)")
+struct MinerSchedulerTests {
+    let t0 = Date(timeIntervalSince1970: 1_750_000_000)
+
+    @Test("never-mined scheduled cadences are due immediately; manual never")
+    func neverMinedSemantics() {
+        #expect(MinerScheduler.isDue(lastRun: nil, cadence: .daily, now: t0))
+        #expect(MinerScheduler.isDue(lastRun: nil, cadence: .weekly, now: t0))
+        #expect(!MinerScheduler.isDue(lastRun: nil, cadence: .manual, now: t0))
+    }
+
+    @Test("daily fires at +24h, not before; weekly at +7d")
+    func intervalBoundaries() {
+        let justUnder = t0.addingTimeInterval(86_399)
+        let exactly = t0.addingTimeInterval(86_400)
+        #expect(!MinerScheduler.isDue(lastRun: t0, cadence: .daily, now: justUnder))
+        #expect(MinerScheduler.isDue(lastRun: t0, cadence: .daily, now: exactly))
+        #expect(MinerScheduler.nextRun(after: t0, cadence: .weekly, now: t0)
+                == t0.addingTimeInterval(7 * 86_400))
+    }
+
+    @Test("manual cadence has no next run")
+    func manualNeverSchedules() {
+        #expect(MinerScheduler.nextRun(after: t0, cadence: .manual, now: t0) == nil)
+    }
+}
