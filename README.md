@@ -159,14 +159,12 @@ winget install Codedaptive.MOOTx01
 **Windows — script** (PowerShell)
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
-# review install.ps1, then:
-.\install.ps1
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1; powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-(Download-then-run, not `irm | iex` — the script itself should be reviewable
-before anything executes. The TLS line is required on Windows PowerShell 5.1.)
+(One line: downloads the script, then runs it with execution-policy bypass.
+The script lands on disk as `install.ps1` so you can review it before re-running.
+The TLS line is required on Windows PowerShell 5.1.)
 
 Script and tarball installs land in:
 
