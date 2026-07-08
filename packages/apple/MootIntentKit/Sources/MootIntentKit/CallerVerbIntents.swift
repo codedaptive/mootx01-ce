@@ -153,6 +153,12 @@ public struct ExpungeDrawerIntent: AppIntent {
 
     public static let isDiscoverable = true
 
+    /// Irreversible destruction must never run from a locked device
+    /// (wwdc2026-347 lock-screen hardening, M-MXA-2R rider). Complements —
+    /// does not replace — the substrate's confirmed:true tool-level guard.
+    @available(macOS 27.0, iOS 27.0, *)
+    public static var authenticationPolicy: IntentAuthenticationPolicy { .requiresAuthentication }
+
     @Parameter(title: "Memory ID") public var id: String
     @Parameter(title: "Reason") public var reason: String
     /// Guard bit: the substrate refuses the erase when this is false, keeping
