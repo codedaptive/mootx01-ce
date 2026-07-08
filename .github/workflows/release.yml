@@ -994,7 +994,8 @@ jobs:
 
   # ── Submit to winget-pkgs (Microsoft community repository) ──────────────
   # Opens a PR against microsoft/winget-pkgs so `winget install/upgrade`
-  # sees the new version. Requires WINGET_PUSH_PAT with public_repo scope.
+  # sees the new version. Requires WINGET_SUBMIT_PAT — a classic PAT with
+  # public_repo scope (fine-grained PATs cannot access repos outside the org).
   submit-winget:
     name: Submit to winget-pkgs
     if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
@@ -1003,7 +1004,7 @@ jobs:
     steps:
       - name: Submit via wingetcreate
         env:
-          WINGET_PAT: ${{ secrets.WINGET_PUSH_PAT }}
+          WINGET_PAT: ${{ secrets.WINGET_SUBMIT_PAT }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if (-not $env:WINGET_PAT) {
