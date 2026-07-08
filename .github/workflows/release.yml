@@ -1047,9 +1047,11 @@ jobs:
           $ARM_URL = "https://github.com/codedaptive/mootx01-ce/releases/download/$($env:RELEASE_TAG)/mootx01-$VERSION-windows-arm64-setup.exe"
           # Download wingetcreate
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/self-contained" -OutFile wingetcreate.exe
-          # Submit: creates a PR on microsoft/winget-pkgs
+          # Submit: creates a PR on microsoft/winget-pkgs.
+          # The package identifier is POSITIONAL — wingetcreate has no --id
+          # option and exits 1 with "Option 'id' is unknown" if given one.
           .\wingetcreate.exe update `
-            --id Codedaptive.MOOTx01 `
+            Codedaptive.MOOTx01 `
             --version $VERSION `
             --urls $X86_URL $ARM_URL `
             --token $env:WINGET_PAT `
