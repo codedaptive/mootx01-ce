@@ -31,8 +31,16 @@ struct Mootx01App: App {
     #endif
     @State private var model = AppModel()
 
+    // M-MXA-7: menu-bar headless mode is a user setting (default ON — the
+    // app is the macOS mining executor per ruling D9 and must survive its
+    // last window closing). The same flag drives menu-bar item insertion
+    // here and the termination policy in MacAppDelegate.
+    #if os(macOS)
+    @AppStorage(MenuBarPolicy.defaultsKey) private var menuBarModeEnabled = true
+    #endif
+
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "main") {
             #if os(macOS)
             ContentView(model: model)
                 .frame(minWidth: 900, minHeight: 600)
@@ -44,6 +52,18 @@ struct Mootx01App: App {
                 .task { Mootx01Shortcuts.updateAppShortcutParameters() }
             #endif
         }
+
+        #if os(macOS)
+        // Headless surface (M-MXA-7): estate status + reopen + quit; the
+        // embedded engine stays alive while only this item remains.
+        MenuBarExtra(
+            String(localized: "menubar.title", defaultValue: "MOOTx01"),
+            systemImage: "brain",
+            isInserted: $menuBarModeEnabled
+        ) {
+            MenuBarView(model: model)
+        }
+        #endif
     }
 }
 
@@ -55,6 +75,13 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// M-MXA-7 termination policy: with menu-bar mode ON the app survives
+    /// its last window closing (headless mining executor, ruling D9); with
+    /// it OFF the pre-M-MXA-7 quit-on-close behavior is preserved.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        MenuBarPolicy.shouldTerminateAfterLastWindowClosed(
+            menuBarModeEnabled: MenuBarPolicy.isEnabled()
+        )
+    }
 }
 #endif
