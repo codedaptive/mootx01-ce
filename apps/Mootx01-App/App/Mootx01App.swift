@@ -1,6 +1,7 @@
 import SwiftUI
 import AppIntents
 import GatewayUI
+import MootGateway  // MinerRunLoop + GatewayRuntime (M-ING-2 executor)
 #if os(macOS)
 import AppKit
 #endif
@@ -71,9 +72,24 @@ struct Mootx01App: App {
 /// A bundled macOS app activates normally; this only forces foreground focus
 /// when launched from a tool/`open` so the window comes forward.
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
+    /// M-ING-2 executor: process-lifetime scheduler tick (hourly), alive in
+    /// headless menu-bar mode where scene tasks are not. Every tick is a
+    /// no-op until the user enables a source in the Miners tab, and cadence
+    /// gating (MinerScheduler) decides when an enabled source actually runs.
+    private var minerTask: Task<Void, Never>?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        minerTask = Task {
+            let loop = MinerRunLoop.liveLoop()
+            while !Task.isCancelled {
+                if let bridge = try? await GatewayRuntime.shared.bridge() {
+                    _ = await loop.tick(now: Date(), caller: bridge)
+                }
+                try? await Task.sleep(for: .seconds(3_600))
+            }
+        }
     }
     /// M-MXA-7 termination policy: with menu-bar mode ON the app survives
     /// its last window closing (headless mining executor, ruling D9); with

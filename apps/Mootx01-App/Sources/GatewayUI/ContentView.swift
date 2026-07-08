@@ -41,6 +41,12 @@ public struct ContentView: View {
                 Tab(String(localized: "Engine"), systemImage: "cpu") {
                     EngineView(model: model)
                 }
+                // M-ING-2: per-source mining consent/config. Sources ship
+                // disabled; enabling arms them — the consent prompt fires on
+                // the first actual read, never from this view.
+                Tab(String(localized: "Miners"), systemImage: "square.and.arrow.down.on.square") {
+                    MinerSettingsView()
+                }
             }
             Divider()
             statusBar

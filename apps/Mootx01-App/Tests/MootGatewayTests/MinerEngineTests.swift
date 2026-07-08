@@ -138,3 +138,65 @@ struct MinerSchedulerTests {
         #expect(MinerScheduler.nextRun(after: t0, cadence: .manual, now: t0) == nil)
     }
 }
+
+// M-ING-2 — the executor: settings × scheduler × engine.
+@Suite("MinerRunLoop (M-ING-2)", .serialized)
+struct MinerRunLoopTests {
+    let t0 = Date(timeIntervalSince1970: 1_750_000_000)
+
+    private func freshDefaults() throws -> UserDefaults {
+        let d = try #require(UserDefaults(suiteName: "ming2-runloop-tests"))
+        d.removePersistentDomain(forName: "ming2-runloop-tests")
+        return d
+    }
+
+    private var fixtureSource: FixtureSource {
+        FixtureSource(facts: [MinedFact(
+            subject: "runloop.probe.1", predicate: "observed", object: "tick")])
+    }
+
+    @Test("disabled sources never run — the shipped default is silent")
+    func disabledSourcesSkipped() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let d = try freshDefaults()
+        let loop = MinerRunLoop(sources: [fixtureSource], defaults: d)
+        let summaries = await loop.tick(now: t0, caller: bridge)
+        #expect(summaries.isEmpty)
+        #expect(loop.lastRun(for: "fixture") == nil)
+    }
+
+    @Test("enabled + due runs, records lastRun, and respects cadence next tick")
+    func enabledDueRunsOnce() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let d = try freshDefaults()
+        d.set(true, forKey: "miner.fixture.enabled")
+        let loop = MinerRunLoop(sources: [fixtureSource], defaults: d)
+
+        let first = await loop.tick(now: t0, caller: bridge)
+        #expect(first == [MinerRunSummary(sourceID: "fixture",
+                                          result: .init(filed: 1, skipped: 0, failed: 0))])
+        #expect(loop.lastRun(for: "fixture") == t0)
+
+        // One hour later: daily cadence says not due — no run.
+        let second = await loop.tick(now: t0.addingTimeInterval(3_600), caller: bridge)
+        #expect(second.isEmpty)
+
+        // Next day: due again; engine dedup makes it a no-op file.
+        let third = await loop.tick(now: t0.addingTimeInterval(86_400), caller: bridge)
+        #expect(third == [MinerRunSummary(sourceID: "fixture",
+                                          result: .init(filed: 0, skipped: 1, failed: 0))])
+    }
+
+    @Test("manual cadence runs only through Mine Now")
+    func manualOnlyRunsExplicitly() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let d = try freshDefaults()
+        d.set(true, forKey: "miner.fixture.enabled")
+        d.set("manual", forKey: "miner.fixture.cadence")
+        let loop = MinerRunLoop(sources: [fixtureSource], defaults: d)
+
+        #expect(await loop.tick(now: t0, caller: bridge) == [])
+        let ran = await loop.runNow(sourceID: "fixture", now: t0, caller: bridge)
+        #expect(ran?.result.filed == 1)
+    }
+}
