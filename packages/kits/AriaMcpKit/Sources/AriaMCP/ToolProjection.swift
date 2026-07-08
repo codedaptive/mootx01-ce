@@ -85,6 +85,17 @@ public enum ToolProjection {
         vaultEnabled(environment: ProcessInfo.processInfo.environment)
     }
 
+    /// True when the Anthropic memory_20250818 adapter is enabled.
+    /// Opt-in: requires MOOTX01_MEMORY_TOOL=1 (set by `mootx01 enable memory-tool`).
+    /// Default (absent or any value ≠ "1") is OFF.
+    public static func memoryToolEnabled(environment: [String: String]) -> Bool {
+        environment["MOOTX01_MEMORY_TOOL"] == "1"
+    }
+
+    public static var memoryToolEnabled: Bool {
+        memoryToolEnabled(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// The complete advertised tool list.
     ///
     /// Order: tier 1–5 interface tools, then federation, recipe, lens, vault.
@@ -103,7 +114,11 @@ public enum ToolProjection {
     /// Production code uses `tools()` (no args).
     public static func tools(environment: [String: String]) -> [ProjectedTool] {
         var raw: [ProjectedTool] = []
-        raw.append(contentsOf: memoryAdapterTools())
+        // Anthropic memory_20250818 adapter: opt-in via MOOTX01_MEMORY_TOOL=1
+        // (mootx01 enable memory-tool sets this in the daemon env).
+        if memoryToolEnabled(environment: environment) {
+            raw.append(contentsOf: memoryAdapterTools())
+        }
         raw.append(contentsOf: coreMemoryTools())
         raw.append(contentsOf: connectionTools())
         raw.append(contentsOf: knowledgeGraphTools())
