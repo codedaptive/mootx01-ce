@@ -2754,9 +2754,35 @@ fn run_reclassify_fdc(
         }
 
         if apply {
-            let new_anchor = LatticeAnchor::new(new_code, None, new_qid, None);
+            // Repair only the primary udc_code + wikidata_qid that FDC
+            // re-lookup produced. udc_facets and wikidata_qids_secondary are
+            // carried forward unchanged from the existing drawer anchor —
+            // FDC re-lookup has no opinion on secondary classification, so a
+            // reclassify apply must not silently wipe facets/secondary QIDs
+            // a human or the enrichment daemon previously attached. Parity
+            // with Swift `runReclassifyFDC`.
+            let new_anchor = LatticeAnchor::new(
+                new_code,
+                drawer.udc_facets.clone(),
+                new_qid,
+                drawer.wikidata_qids_secondary.clone(),
+            );
             let coord = estate.coord.lock().unwrap();
-            if let Err(e) = coord.reanchor(&estate.handle, &drawer.id, None, None, Some(new_anchor)) {
+            // reanchor_anchor (not the generic reanchor) so the audit event
+            // attributes this repair to the running server identity with a
+            // tool-specific reason, matching Swift's
+            // `estate.reanchorAnchor(rowID:toLattice:changedBy: serverIdentity,
+            // reason: "FDC reclassified via moot_reclassify_fdc", now:)` —
+            // the generic `coord.reanchor` path stamps the estate owner and
+            // a generic "reanchored via Estate.reanchor" reason, which
+            // misattributes an automated repair in the audit trail.
+            if let Err(e) = coord.reanchor_anchor(
+                &estate.handle,
+                &drawer.id,
+                new_anchor,
+                registry.server_identity.as_str(),
+                "FDC reclassified via moot_reclassify_fdc",
+            ) {
                 return Ok(error_result(&describe_verb_dispatch_error(&e)));
             }
             applied += 1;

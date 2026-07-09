@@ -26,13 +26,19 @@ struct FdcReclassifyTests {
         _ handle: EstateHandle,
         content: String,
         code: String,
-        qid: String? = nil
+        qid: String? = nil,
+        facets: String? = nil,
+        secondaryQIDs: String? = nil
     ) async throws -> String {
         let frame = CaptureFrame(
             content: content,
             channel: .typed,
             room: "fdc-reclassify",
-            latticeAnchor: LatticeAnchor(udcCode: code, wikidataQID: qid),
+            latticeAnchor: LatticeAnchor(
+                udcCode: code,
+                udcFacets: facets,
+                wikidataQID: qid,
+                wikidataQidsSecondary: secondaryQIDs),
             addedBy: "fdc-reclassify-tests",
             embeddingModelID: "test-model-v1")
         return try await kit.capture(handle, frame).id
@@ -49,6 +55,11 @@ struct FdcReclassifyTests {
         let estate = try await kit.estate(for: handle)
         let drawer = try #require((try await estate.allDrawers()).first { $0.id == id })
         return drawer.udcCode
+    }
+
+    private func storedDrawer(_ kit: GeniusLocusKit, _ handle: EstateHandle, id: String) async throws -> Drawer {
+        let estate = try await kit.estate(for: handle)
+        return try #require((try await estate.allDrawers()).first { $0.id == id })
     }
 
     @Test func dryRunReportsSuspectButDoesNotMutate() async throws {
@@ -118,5 +129,36 @@ struct FdcReclassifyTests {
         #expect(resetBody.contains("mode: all"))
         #expect(resetBody.contains("candidates: 1"))
         #expect(resetBody.contains("would_update: 1"))
+    }
+
+    // Advisory 1 (FDC-RECLASSIFY-ADVISORIES): apply must repair only the
+    // primary udcCode/wikidataQID and carry udcFacets +
+    // wikidataQidsSecondary forward unchanged. Before the fix, the apply
+    // path constructed the replacement `LatticeAnchor` with only the two
+    // primary fields, silently defaulting facets/secondary QIDs to nil and
+    // wiping any enrichment a human or the enrichment daemon had attached.
+    @Test func applyRepairsPrimaryCodeButRetainsFacetsAndSecondaryQIDs() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        let id = try await capture(
+            kit,
+            handle,
+            content: "git update-index --refresh && rm .git/index.lock",
+            code: "362.4",
+            qid: "Q12131",
+            facets: "004, 621",
+            secondaryQIDs: "Q999, Q1000")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true)])
+        )
+        let body = try text(result)
+        #expect(body.contains("fdc_reclassify: applied"))
+        #expect(body.contains("updated: 1"))
+
+        let drawer = try await storedDrawer(kit, handle, id: id)
+        #expect(drawer.udcCode == "000")
+        #expect(drawer.udcFacets == "004, 621")
+        #expect(drawer.wikidataQidsSecondary == "Q999, Q1000")
     }
 }
