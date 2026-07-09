@@ -273,7 +273,11 @@ only — no API surface.
 Right-clicking a node copies a paste-ready natural-language query to the
 clipboard (and selects the node): it asks the user's own AI session to look
 up that memory by id, its hop-1 neighbors (capped list), and what the
-neighborhood is likely about, citing the MOOTx01 tools by name. The query is
+neighborhood is likely about, citing the MOOTx01 tools by name. Browsers
+that grant contextmenu events no user activation (Safari) refuse
+programmatic clipboard writes — the dashboard then opens a fallback dialog
+with the query pre-selected and a Copy button, whose click carries the
+activation. The query is
 built entirely from metadata already on the wire (drawer id, domain label,
 classification code, neighbor ids) — retrieval of memory CONTENT happens in
 the user's AI session under its own authorization, never through this

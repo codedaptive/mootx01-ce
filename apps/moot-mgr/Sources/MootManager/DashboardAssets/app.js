@@ -158,6 +158,11 @@ import { OrbitControls } from '/OrbitControls.js';
       "words dominate the text. That’s normal: the code is just the " +
       "shelf where similar-sounding memories sit, and it still groups " +
       "related things together.",
+
+      "Want to dig into one memory? On the Topology view, right-click any " +
+      "dot. That copies a ready-made question to your clipboard — paste it " +
+      "into your AI assistant, and it will pull up that memory and its " +
+      "closest neighbors and explain what they’re likely about.",
     ].forEach(function (t) { box.appendChild(el("p", "mx-modal-p", t)); });
 
     const close = el("button", "btn mx-modal-close", "Got it");
@@ -1911,9 +1916,16 @@ import { OrbitControls } from '/OrbitControls.js';
       if (!node || brainHidden(node)) return;
       e.preventDefault();
       selectBrainNode(node);   // highlight what the query refers to
-      copyText(buildNodeQuery(node), function (ok) {
-        topoToast(ok ? "Query copied — paste it into your AI to explore this memory"
-                     : "Could not access the clipboard");
+      var query = buildNodeQuery(node);
+      copyText(query, function (ok) {
+        if (ok) {
+          topoToast("Query copied — paste it into your AI to explore this memory");
+        } else {
+          // Safari: contextmenu events carry no user activation, so BOTH
+          // clipboard paths are refused. Show the query pre-selected with a
+          // Copy button — that click is an activation and always works.
+          showQueryFallback(query);
+        }
       });
     });
 
@@ -2471,6 +2483,63 @@ import { OrbitControls } from '/OrbitControls.js';
     try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
     ta.remove();
     return ok;
+  }
+
+  // Clipboard-refused fallback (Safari right-click): the query in a
+  // pre-selected textarea plus a Copy button. The button click carries the
+  // user activation that the contextmenu event lacked.
+  function showQueryFallback(text) {
+    if ($("#queryFallback")) return;
+    var wrap = el("div", "mx-modal-backdrop");
+    wrap.id = "queryFallback";
+    var box = el("div", "mx-modal");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-labelledby", "queryFallbackTitle");
+
+    var h = el("h2", "mx-modal-title", "Copy this query");
+    h.id = "queryFallbackTitle";
+    box.appendChild(h);
+    box.appendChild(el("p", "mx-modal-p",
+      "Your browser only allows copying from a click. Press Copy (or ⌘C — the text is already selected), then paste it into your AI."));
+
+    var ta = el("textarea", "mx-query-text");
+    ta.value = text;
+    ta.setAttribute("readonly", "readonly");
+    ta.setAttribute("aria-label", "Node query");
+    box.appendChild(ta);
+
+    var opener = document.activeElement;
+    function dismiss() {
+      document.removeEventListener("keydown", onKey);
+      wrap.remove();
+      if (opener && opener.focus) opener.focus();
+    }
+    function onKey(e) { if (e.key === "Escape") dismiss(); }
+    document.addEventListener("keydown", onKey);
+    wrap.addEventListener("click", function (e) { if (e.target === wrap) dismiss(); });
+
+    var copyBtn = el("button", "btn mx-modal-close", "Copy");
+    copyBtn.setAttribute("type", "button");
+    copyBtn.addEventListener("click", function () {
+      ta.select();
+      copyText(text, function (ok) {
+        dismiss();
+        topoToast(ok ? "Query copied — paste it into your AI to explore this memory"
+                     : "Copy failed — select the text and press ⌘C");
+      });
+    });
+    var closeBtn = el("button", "btn btn-ghost mx-modal-close", "Close");
+    closeBtn.setAttribute("type", "button");
+    closeBtn.style.marginLeft = "8px";
+    closeBtn.addEventListener("click", dismiss);
+
+    box.appendChild(copyBtn);
+    box.appendChild(closeBtn);
+    wrap.appendChild(box);
+    document.body.appendChild(wrap);
+    ta.focus();
+    ta.select();
   }
 
   // Transient toast on the topology stage (bottom-center, auto-fades).
