@@ -2757,47 +2757,115 @@ fn vault_export_stamps_manifest_then_status_reports_it() {
 
 #[test]
 fn vault_export_then_import_round_trips() {
-    // Export from the default estate to a vault, then import that vault into
-    // the same estate via a fresh VaultBridge. The import should report at
-    // least 1 written (idempotent per lineage_id, but the fresh import will
-    // write the note again as a new lineage or update). Even if it updates,
-    // the vault_import response is isError:false.
+    // Export from the default estate to a vault, then import that vault back
+    // into the SAME estate via a fresh VaultBridge. Even if the reimport is
+    // a content-idempotent no-op for every row (the same estate it was just
+    // exported from — every lineage already exists unchanged), no row's
+    // content may vanish: it must be accounted for as written, updated, or
+    // explicitly skipped-unchanged. The vault_import response must be
+    // isError:false throughout.
+    //
+    // scope: "believed" is passed explicitly on export. The default export
+    // scope (CAND-032) is `exportable`, which only includes drawers
+    // explicitly marked exportability==public; `file_one_memory` captures
+    // are born-private (LocusKit `CaptureFrame::new`: "Privacy-preserving
+    // default: drawers are born private"). Without an explicit `believed`
+    // scope the export would write zero files and the round trip would be
+    // vacuous — see the identical CAND-032 adaptation in
+    // `vault_reconcile_apply_deleted_files_are_never_expunged`.
+    use aria_mcp::{dispatch::dispatch_tool_with_vault_ledger, vault_tools::VaultJobLedger};
+
     let registry = EstateRegistry::new_inmemory();
     let vault = temp_vault_dir();
+    let ledger = VaultJobLedger::new();
+    let recall_ledger = SurfacedRecallLedger::new();
 
     file_one_memory(&registry, "Toluene is a solvent.", "chem/lab");
 
-    dispatch_tool(
+    dispatch_tool_with_vault_ledger(
         "moot_vault_export",
-        &args!["vaultPath" => vault.to_str().unwrap()],
+        &args!["vaultPath" => vault.to_str().unwrap(), "scope" => "believed"],
         &registry,
-        &SurfacedRecallLedger::new(),
+        &recall_ledger,
+        &ledger,
+        "", "",
     )
     .expect("export must succeed");
 
-    let import_result = dispatch_tool(
+    let import_result = dispatch_tool_with_vault_ledger(
         "moot_vault_import",
         &args!["vaultPath" => vault.to_str().unwrap()],
         &registry,
-        &SurfacedRecallLedger::new(),
+        &recall_ledger,
+        &ledger,
+        "", "",
     )
     .expect("moot_vault_import must not throw transport fault");
-
-    std::fs::remove_dir_all(&vault).ok();
 
     assert!(
         is_success(&import_result),
         "moot_vault_import must be isError:false; got: {import_result:?}"
     );
     let text = content_text(&import_result);
-    // Response shape now mirrors Swift async model: job_id / vault / note_count / poll.
+    // Response shape: job_id / vault / note_count / status: COMPLETE / stats.
+    // The Rust backend completes the import synchronously before returning
+    // (see `run_import`'s doc comment), so the response reports the finished
+    // result inline rather than a poll hint. Commit 68d5997f replaced the
+    // earlier "status: RUNNING" + poll-hint shape (612a5dab) with
+    // "status: COMPLETE" + real stats, because a job that is already done by
+    // the time the tool returns should not tell the caller to poll for a
+    // status it already has.
     assert!(
         text.contains("job_id:"),
         "import text must contain 'job_id:' (async job shape); got: {text}"
     );
     assert!(
-        text.contains("poll: moot_vault_job to check status"),
-        "import text must include poll hint (async job shape); got: {text}"
+        text.contains("status: COMPLETE"),
+        "import text must report status: COMPLETE (Rust backend is synchronous); got: {text}"
+    );
+
+    // Round-trip integrity: poll moot_vault_job for the full record — the
+    // immediate text response above omits drawersSkippedUnchanged /
+    // drawersSkippedTombstoned (see `run_import`), so only the job record
+    // can confirm every exported row was actually accounted for.
+    let job_id = text
+        .lines()
+        .find(|l| l.starts_with("job_id: "))
+        .and_then(|l| l.strip_prefix("job_id: "))
+        .expect("import response must contain 'job_id: <uuid>'")
+        .to_owned();
+    let job_result = dispatch_tool_with_vault_ledger(
+        "moot_vault_job",
+        &args!["job_id" => job_id.as_str()],
+        &registry,
+        &recall_ledger,
+        &ledger,
+        "", "",
+    )
+    .expect("moot_vault_job must not throw transport fault");
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&job_result),
+        "moot_vault_job for the import id must be isError:false; got: {job_result:?}"
+    );
+    let job_text = content_text(&job_result);
+    let field = |name: &str| -> i64 {
+        job_text
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{name}:")))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    let accounted_for = field("drawersWritten")
+        + field("drawersUpdated")
+        + field("drawersSkippedUnchanged")
+        + field("drawersSkippedTombstoned");
+    assert!(
+        accounted_for >= 1,
+        "round-tripped note must be written, updated, or explicitly skipped — \
+         not silently dropped; got job record:\n{job_text}"
     );
 }
 
