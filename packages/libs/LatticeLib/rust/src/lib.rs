@@ -37,6 +37,7 @@ pub mod word_class_table;
 pub mod lexicon;
 pub mod fdc_frame;
 pub mod fdc_signatures;
+pub mod fdc_semantic_ranker;
 pub mod concept_bag;
 pub mod fdc_matcher;
 pub mod fdc_runtime;
@@ -48,6 +49,7 @@ pub mod qid_closure;
 
 pub use fdc_runtime::Fdc;
 pub use fdc_matcher::FdcMatcher;
+pub use fdc_semantic_ranker::{FdcSemanticCandidate, FdcSemanticDecision, FdcSemanticRanker};
 pub use concept_bag::{build_bag, build_bag_with_tagger, build_encoder_bag_with_tagger, build_bag_no_record, build_encoder_bag_no_record};
 pub use lexicon::CanonicalizationLexicon;
 pub use fdc_frame::{FdcFrame, FdcEntry};

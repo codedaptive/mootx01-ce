@@ -420,36 +420,18 @@ fn explicit_udc_code_on_capture_frame_is_preserved_by_seam() {
 // high-frequency cross-domain jargon.
 // ---------------------------------------------------------------------------
 
-/// Generic high-frequency jargon must NOT produce a confidently-wrong specific
-/// UDC code. The FdcMatcher tie-count guard (MAX_TIED_WINNERS_FOR_CLASSIFICATION)
-/// detects when a large set of codes are tied at the top IDF score — signalling
-/// that the bag is dominated by common cross-domain vocabulary rather than
-/// subject-specific terms — and returns UNRESOLVED. The assertion accepts "000"
-/// or an empty string; both represent an honest non-classification.
+/// Reviewed relative-index aliases must classify modern computing vocabulary
+/// as computer science instead of allowing historical article terms to select
+/// an unrelated code.
 ///
 /// Real examples of the pre-fix bug (raw-scoring tie-break accidents):
 ///   "computer software programming" → UDC 235 (angels/devotional) WRONG
 ///   "network protocol internet"     → UDC 621.2 (hydraulic engineering) WRONG
 ///
-/// After the fix: cross-domain jargon with many tied candidates correctly
-/// lands at "000" rather than an arbitrary tie-broken code.
-///
-/// Note: some software/technical phrases contain incidental high-IDF Q-IDs
-/// (e.g. "architecture" → Q12271, which appears in building-architecture
-/// signatures) that produce a confident result under IDF scoring. Those
-/// cases are classifier-quality limitations — the v1.0 frame has no
-/// software-domain vocabulary. The tie-count guard does not prevent
-/// accidental wins from incidental high-IDF Q-IDs; the embedding encoder
-/// (future) handles those. This test proves the guard works for its target
-/// class: high-frequency cross-domain jargon with many tied candidates.
-///
-/// Parity with Swift AriaMCPTests.FdcCaptureTests.highFrequencyJargonProducesHonestUnclassifiedAnchor.
+/// After the reviewed aliases were added, both phrases resolve to 004 in the
+/// shared FDC conformance fixture. The capture seam must preserve that result.
 #[test]
-fn high_frequency_jargon_produces_honest_unclassified_anchor() {
-    // These phrases consist entirely of high-frequency Q-IDs shared across
-    // hundreds of UDC signatures. The tie-count guard fires and the capture
-    // seam preserves "000". These are the inputs that produced UDC 235
-    // (angels/devotional) and UDC 621.2 (hydraulic engineering) before the fix.
+fn reviewed_computing_aliases_survive_the_capture_seam() {
     let high_frequency_items = [
         ("computer software programming and information science", "cs-room"),
         ("internet network protocol server client communication system", "net-room"),
@@ -484,14 +466,9 @@ fn high_frequency_jargon_produces_honest_unclassified_anchor() {
         assert_eq!(drawers.len(), 1, "one drawer per content item");
 
         let udc = &drawers[0].udc_code;
-        // The honest-classification guard ensures that high-frequency jargon
-        // is stored as "000" (unclassified) rather than an arbitrary code
-        // selected from a degenerate tie. "000" is the correct honest
-        // representation when the bag carries no discriminating signal.
-        assert!(
-            udc == "000" || udc.is_empty(),
-            "high-frequency jargon with many tied candidates must land at '000', \
-            not a confidently-wrong code; content='{content}', got: '{udc}'"
+        assert_eq!(
+            udc, "004",
+            "reviewed computing aliases must survive capture; content='{content}'"
         );
     }
 }

@@ -4,8 +4,8 @@
 // FDCFrame.json, FDCSignatures.json, WordClassTable.json) once per process
 // via `include_bytes!` and exposes `Fdc::encode(text) -> Option<String>`.
 // Compact v2 signatures retain code-owned label, alias, title, and article
-// terms separately from inherited ancestor terms. Classifier v3 uses that
-// provenance to return the deepest defensible point in the hierarchy.
+// terms separately from inherited ancestor terms. Classifier v4 fuses that
+// hierarchy-first policy with portable integer semantic evidence.
 //
 // The Swift runtime loads via `Bundle.module.url(forResource:...)`. The Rust
 // equivalent is `include_bytes!` at compile time — same pinning guarantee,
@@ -18,9 +18,11 @@
 // which is correct for the position of this file at
 //   packages/libs/LatticeLib/rust/src/fdc_runtime.rs
 
+use std::sync::Arc;
 use std::sync::OnceLock;
 use crate::fdc_frame::FdcFrame;
 use crate::fdc_matcher::{FdcMatcher, ScoreMode};
+use crate::fdc_semantic_ranker::{FdcSemanticCandidate, FdcSemanticDecision, FdcSemanticRanker};
 use crate::fdc_signatures::FdcSignatures;
 use crate::lexicon::CanonicalizationLexicon;
 use crate::novel_pool_submitter::default_table_artifact;
@@ -33,11 +35,12 @@ use crate::word_class_table;
 // here. `1` is the pinned ship value; classification accuracy is governed by
 // within-region scoring (§5), not this cutoff. Mirrors Swift FDCRuntime.swift.
 const STOP_THRESHOLD: usize = 1;
-const CLASSIFIER_VERSION: &str = "3.0.0";
+const CLASSIFIER_VERSION: &str = "4.0.0";
 
 /// The bundled artifacts and the assembled matcher — loaded once per process.
 struct Bundle {
     matcher: FdcMatcher,
+    semantic_ranker: Arc<FdcSemanticRanker>,
     version: String,
     lexicon_version: String,
     // Retained for label lookups. FdcFrame derives Clone so we clone before moving
@@ -61,6 +64,12 @@ fn get_bundle() -> Option<&'static Bundle> {
         const SIGS_JSON: &[u8] = include_bytes!(
             "../../Sources/LatticeLib/Resources/FDCSignatures.json"
         );
+        const SEMANTIC_METADATA_JSON: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/FDCSemanticRanker.json"
+        );
+        const SEMANTIC_MODEL: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/FDCSemanticRanker.bin"
+        );
         const TABLE_JSON: &[u8] = include_bytes!(
             "../../Sources/LatticeLib/Resources/WordClassTable.json"
         );
@@ -68,6 +77,10 @@ fn get_bundle() -> Option<&'static Bundle> {
         let lexicon = CanonicalizationLexicon::from_json(LEXICON_JSON)?;
         let frame = FdcFrame::from_json(FRAME_JSON)?;
         let signatures = FdcSignatures::from_json(SIGS_JSON)?;
+        let semantic_ranker = Arc::new(FdcSemanticRanker::from_artifacts(
+            SEMANTIC_METADATA_JSON,
+            SEMANTIC_MODEL,
+        )?);
 
         // Parse the bundled table first to extract the version string. The version
         // is pinned and does not change with the writable artifact — it is the
@@ -108,16 +121,17 @@ fn get_bundle() -> Option<&'static Bundle> {
         // which passes `.idf` to FDCMatcher at construction time. The matcher
         // default stays Raw; the runtime opts in here. The matcher reads the
         // live global word-class table at encode time (it no longer owns one).
-        let matcher = FdcMatcher::new_with_mode_and_hierarchy(
+        let matcher = FdcMatcher::new_with_mode_hierarchy_and_semantic(
             lexicon,
             frame.clone(),   // matcher takes ownership; clone is retained below for label lookups
             &signatures,
             STOP_THRESHOLD,
             ScoreMode::Idf,
             true,
+            Some(Arc::clone(&semantic_ranker)),
         );
 
-        Some(Bundle { matcher, version, lexicon_version, frame })
+        Some(Bundle { matcher, semantic_ranker, version, lexicon_version, frame })
     }).as_ref()
 }
 
@@ -180,13 +194,44 @@ impl Fdc {
             .unwrap_or("0.0.0-unavailable")
     }
 
+    /// Deterministic semantic candidates from the bundled integer model.
+    pub fn semantic_candidates(text: &str, limit: usize) -> Vec<FdcSemanticCandidate> {
+        get_bundle()
+            .map(|bundle| bundle.semantic_ranker.rank(text, limit))
+            .unwrap_or_default()
+    }
+
+    /// Confidence-gated semantic hierarchy evidence used by classifier v4.
+    pub fn semantic_decision(text: &str) -> Option<FdcSemanticDecision> {
+        let bundle = get_bundle()?;
+        bundle
+            .semantic_ranker
+            .hierarchy_decision(text, &bundle.frame)
+    }
+
+    pub fn semantic_model_version() -> &'static str {
+        get_bundle()
+            .map(|bundle| bundle.semantic_ranker.metadata.version.as_str())
+            .unwrap_or("0.0.0-unavailable")
+    }
+
+    pub fn semantic_model_sha256() -> &'static str {
+        get_bundle()
+            .map(|bundle| bundle.semantic_ranker.metadata.model_sha256.as_str())
+            .unwrap_or("unavailable")
+    }
+
     /// Composite estate recalculation floor covering algorithm and all pinned
     /// classifier artifacts. Mirrors Swift `FDC.recalculationVersion`.
     pub fn recalculation_version() -> String {
         match get_bundle() {
             Some(bundle) => format!(
-                "classifier:{CLASSIFIER_VERSION}|frame:{}|lexicon:{}|signatures:{}",
-                bundle.frame.frame_version, bundle.lexicon_version, bundle.version
+                "classifier:{CLASSIFIER_VERSION}|frame:{}|lexicon:{}|signatures:{}|semantic:{}:{}",
+                bundle.frame.frame_version,
+                bundle.lexicon_version,
+                bundle.version,
+                bundle.semantic_ranker.metadata.version,
+                bundle.semantic_ranker.metadata.model_sha256
             ),
             None => "fdc-unavailable".to_owned(),
         }

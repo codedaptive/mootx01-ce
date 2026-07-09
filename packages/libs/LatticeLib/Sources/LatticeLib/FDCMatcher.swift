@@ -87,6 +87,10 @@ public struct FDCMatcher: Sendable {
     /// inherited/article recall terms to certify a narrow code.
     public let useHierarchicalResolution: Bool
 
+    /// Optional portable semantic evidence. Directly constructed matchers keep
+    /// v3 behavior unless a ranker is supplied; the bundled runtime enables it.
+    private let semanticRanker: FDCSemanticRanker?
+
     private let lexicon: CanonicalizationLexicon
     private let frame: FDCFrame
 
@@ -164,13 +168,15 @@ public struct FDCMatcher: Sendable {
         sourceSignatures: [String: FDCSignatureSources] = [:],
         stopThreshold: Int = 1,
         scoreMode: ScoreMode = .raw,
-        useHierarchicalResolution: Bool = false
+        useHierarchicalResolution: Bool = false,
+        semanticRanker: FDCSemanticRanker? = nil
     ) {
         self.lexicon = lexicon
         self.frame = frame
         self.stopThreshold = stopThreshold
         self.scoreMode = scoreMode
         self.useHierarchicalResolution = useHierarchicalResolution
+        self.semanticRanker = semanticRanker
 
         // 1. Collect every unique term across all signatures, sort alphabetically,
         //    and assign a dense integer id. Ascending String order → Int order ==
@@ -397,6 +403,51 @@ public struct FDCMatcher: Sendable {
         return common
     }
 
+    /// Fuse v3's source-owned lexical result with the semantic hierarchy
+    /// decision. Agreement preserves v3's defensible precision. A confident
+    /// disagreement replaces the result with the semantic safe ancestor and
+    /// clears the QID so provenance from the rejected branch cannot leak into
+    /// the stored anchor.
+    private func fuseSemantic(
+        _ result: (code: String?, conceptQID: String?),
+        text: String,
+        conceptBag: ConceptBag
+    ) -> (code: String?, conceptQID: String?) {
+        guard useHierarchicalResolution,
+              let semanticRanker else {
+            return result
+        }
+        let lexicalCode = result.code ?? "000"
+        if lexicalCode != "000", hasReviewedAliasEvidence(for: lexicalCode, in: conceptBag) {
+            return result
+        }
+        let candidates = semanticRanker.rank(text, limit: semanticRanker.metadata.codeCount)
+        guard let decision = semanticRanker.hierarchyDecision(candidates, frame: frame) else {
+            return result
+        }
+        let lexicalMain = Self.isMainClass(lexicalCode)
+            ? lexicalCode
+            : frame.ancestors(of: lexicalCode).reversed().first(where: Self.isMainClass) ?? "000"
+        if lexicalCode != "000", lexicalMain == decision.mainClass {
+            return result
+        }
+        if lexicalCode != "000",
+           let top = candidates.first,
+           let lexicalCandidate = candidates.first(where: { $0.code == lexicalCode }),
+           lexicalCandidate.score * 3 >= top.score * 2 {
+            return result
+        }
+        return (decision.code, nil)
+    }
+
+    private func hasReviewedAliasEvidence(for code: String, in bag: ConceptBag) -> Bool {
+        guard let aliases = sourceTermIDs[code]?.alias, !aliases.isEmpty else { return false }
+        for term in bag.keys {
+            if let id = termToID[term], aliases.contains(id) { return true }
+        }
+        return false
+    }
+
     /// Production v3 resolution: rank only code-owned evidence, require more
     /// than one distinct term before returning a narrow code, and fall back to
     /// the shared/supported parent when evidence is ambiguous or shallow.
@@ -558,7 +609,7 @@ public struct FDCMatcher: Sendable {
             return useHierarchicalResolution ? ("000", nil) : (nil, nil)
         }
         let bag = BagBuilder.bag(text, lexicon: lexicon)
-        let result = encodeFromBag(bag)
+        let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
         return useHierarchicalResolution && result.code == nil ? ("000", nil) : result
     }
 
@@ -573,7 +624,7 @@ public struct FDCMatcher: Sendable {
             return useHierarchicalResolution ? ("000", nil) : (nil, nil)
         }
         let bag = BagBuilder.bag(text, lexicon: lexicon, taggerChoice: taggerChoice)
-        let result = encodeFromBag(bag)
+        let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
         return useHierarchicalResolution && result.code == nil ? ("000", nil) : result
     }
 
@@ -603,7 +654,7 @@ public struct FDCMatcher: Sendable {
         // Non-recording: build bag via the non-recording BagBuilder overload so
         // novel user-memory tokens never accumulate in sharedNovelCache.
         let bag = BagBuilder.bag(text, lexicon: lexicon, recordNovel: false)
-        let result = encodeFromBag(bag)
+        let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
         return useHierarchicalResolution && result.code == nil ? ("000", nil) : result
     }
 
