@@ -238,8 +238,11 @@ try {
           <label class="topo-label" for="topoEstate">estate</label>
           <select class="topo-select" id="topoEstate" aria-label="Estate filter"></select>
           <button class="btn" id="topoReset">Reset layout</button>
-          <!-- L4 strata view: perspective projection with age-derived depth. Off = classic 2D. -->
+          <!-- L4 strata view: perspective projection with centrality-derived depth. Off = classic 2D. -->
           <button class="btn" id="topoDimToggle" aria-pressed="false">3D</button>
+          <!-- V2-P2b: nmf_bond (derived lattice/classification) edges are faint
+               tissue, hidden by default — this chip reveals them. -->
+          <button class="btn" id="topoLatticeToggle" aria-pressed="false">lattice</button>
           <span class="tag">structure <b id="topoStructure">—</b></span>
         </div>
       </div>
@@ -2502,14 +2505,18 @@ import { OrbitControls } from '/OrbitControls.js';
   //
   // VIZ_V2 layers on top of the base renderer:
   //   L2 — recency brightness (lastActiveTs), centrality halos (> 0.55),
-  //        weight-scaled edge alpha.
+  //        edge-type render channels (tunnel/kgFact/nmf_bond/association —
+  //        see brainEdgeVisual) under weight- and degree-scaled alpha.
   //   L3 — FDC community labels drawn at lobe centroids (proxy-enriched
   //        communities []{id, label, size}).
   //   L4 — optional strata view (#topoDimToggle): perspective projection with
-  //        age-derived depth, painter sort, depth fog, slow camera sway.
+  //        centrality-derived depth (keystone/high-centrality near the
+  //        camera, periphery far — see brainAssignDepth), painter sort,
+  //        depth fog, slow camera sway.
   //   L5 — radar-loop playback (#topoPlayBtn): event-indexed playhead over
-  //        /api/events with an alive(t) birth filter and playhead-keyed
-  //        recency. Live view is the default; SSE stays connected throughout.
+  //        /api/events with an alive(t) birth filter, playhead-keyed
+  //        recency, and a tombstone dissolve fade at deadMs. Live view is
+  //        the default; SSE stays connected throughout.
   // =========================================================================
 
   let topoFeedTimer = null;
@@ -2536,6 +2543,11 @@ import { OrbitControls } from '/OrbitControls.js';
   let brainAdjacency = Object.create(null);
   // L4 strata (3D depth) — toggled by #topoDimToggle.
   let brain3D = false;
+  // V2-P2b: nmf_bond (derived lattice/classification bond) edges are faint
+  // tissue, not primary structure — hidden by default, toggled on by
+  // #topoLatticeToggle. Read every frame in updateBrainFrame's edge loop
+  // (brainEdgeVisual), so flipping it needs no geometry rebuild.
+  let brainShowLattice = false;
   // L3 lobe labels — community rank → FDC label string.
   let brainLobeLabels = Object.create(null);
   // V2-P2a meaning channel — community rank → confidence label text
@@ -3274,6 +3286,53 @@ import { OrbitControls } from '/OrbitControls.js';
     brainScene.add(brainPointsMesh);
   }
 
+  // V2-P2b edge-type render channels — the single source of truth for what
+  // a given brainEdges[].type looks like, shared by the initial geometry
+  // build (buildBrainLines) and the per-frame update (updateBrainFrame) so
+  // the two can never drift the way the pre-P2b code did (its 'lattice'
+  // string compare never matched any live edgeType value once the wire
+  // ordinal mapping moved to tunnel/kgFact/association/nmf_bond — see
+  // APIPayloads.swift CompactEdge.edgeTypeOrdinal).
+  //
+  //   tunnel      — explicit LocusKit connection. The bright anchor color,
+  //                 full weight — this is the pre-P2b look, unchanged.
+  //   kgFact      — implicit knowledge-graph co-reference. A thinner,
+  //                 dimmer semantic signal at ~60% of tunnel's alpha.
+  //                 NOTE: THREE.LineBasicMaterial ignores `linewidth` on the
+  //                 WebGL core profile (a spec limitation, not a bug here),
+  //                 so "thinner" is expressed as lower brightness rather
+  //                 than narrower geometry — switching to real variable-
+  //                 width lines would mean THREE.Line2/LineMaterial (fat
+  //                 lines via per-segment quad expansion, ~4x the vertex
+  //                 count) which is not justified for a dimming-only ask.
+  //   nmf_bond    — derived lattice/classification bond. Faint tissue,
+  //                 hidden entirely unless brainShowLattice (the
+  //                 #topoLatticeToggle chip) is on.
+  //   association — not a standing structural edge. Hidden unless the
+  //                 viewer has a node selected AND this edge directly
+  //                 touches that exact node (not the wider hop-1/hop-2
+  //                 highlight sets — those still apply on top, via the
+  //                 existing selection-aware ea dimming below).
+  var EDGE_TUNNEL_RGB    = [0.86, 0.88, 0.94];
+  var EDGE_KGFACT_RGB    = [0.23, 0.71, 1.0];
+  var EDGE_LATTICE_RGB   = [1.0, 0.71, 0.24];
+  var EDGE_ASSOC_RGB     = [0.78, 0.42, 0.98];
+  var EDGE_KGFACT_SCALE  = 0.6;   // "~60% of tunnel's alpha" per mission spec
+  var EDGE_LATTICE_SCALE = 0.28;  // faint even when the toggle is on
+  function brainEdgeVisual(e, hasSel, selId) {
+    switch (e.type) {
+      case 'kgFact':
+        return { visible: true, rgb: EDGE_KGFACT_RGB, scale: EDGE_KGFACT_SCALE };
+      case 'nmf_bond':
+        return { visible: brainShowLattice, rgb: EDGE_LATTICE_RGB, scale: EDGE_LATTICE_SCALE };
+      case 'association':
+        var touches = hasSel && (e.src === selId || e.tgt === selId);
+        return { visible: touches, rgb: EDGE_ASSOC_RGB, scale: 1 };
+      default:  // 'tunnel' and any unrecognised type
+        return { visible: true, rgb: EDGE_TUNNEL_RGB, scale: 1 };
+    }
+  }
+
   // Build THREE.LineSegments mesh from brainEdges.
   function buildBrainLines() {
     if (brainEdgesMesh) { brainScene.remove(brainEdgesMesh); brainEdgesMesh.geometry.dispose(); }
@@ -3292,17 +3351,21 @@ import { OrbitControls } from '/OrbitControls.js';
       positions[i * 6 + 3] = (t.x - cx) * ws;
       positions[i * 6 + 4] = (cy - t.y) * ws;
       positions[i * 6 + 5] = -(t.z3 || 0) * zDepth;
-      var col = e.type === 'tunnel' ? [0.86, 0.88, 0.94]
-              : e.type === 'lattice' ? [1.0, 0.71, 0.24]
-              : [0.23, 0.71, 1.0];
+      // Initial static snapshot — reflects whatever selection is live right
+      // now (buildBrainLines also runs from the #topoDimToggle handler on
+      // an already-selected graph, not just at first build). The per-frame
+      // updateBrainFrame loop overwrites this on the next rAF tick either way.
+      var vis = brainEdgeVisual(e, !!brainSelectedNode, brainSelectedNode ? brainSelectedNode.id : null);
       // Dim edges by the degree of their highest-degree endpoint so hub
       // nodes don't accumulate hundreds of near-white edges into a comet.
       var sDeg = (brainAdjacency[e.src] || []).length;
       var tDeg = (brainAdjacency[e.tgt] || []).length;
       var maxDeg = Math.max(sDeg, tDeg, 1);
       var degDim = Math.min(1, 8 / Math.sqrt(maxDeg));
-      colors[i * 6]     = col[0] * degDim; colors[i * 6 + 1] = col[1] * degDim; colors[i * 6 + 2] = col[2] * degDim;
-      colors[i * 6 + 3] = col[0] * degDim; colors[i * 6 + 4] = col[1] * degDim; colors[i * 6 + 5] = col[2] * degDim;
+      var ea = vis.visible ? degDim * vis.scale : 0;
+      var col = vis.rgb;
+      colors[i * 6]     = col[0] * ea; colors[i * 6 + 1] = col[1] * ea; colors[i * 6 + 2] = col[2] * ea;
+      colors[i * 6 + 3] = col[0] * ea; colors[i * 6 + 4] = col[1] * ea; colors[i * 6 + 5] = col[2] * ea;
     }
     var geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -3477,7 +3540,27 @@ import { OrbitControls } from '/OrbitControls.js';
       mod *= recencyFactor(n, brainNowMs);
       if (brain3D) mod *= 1 - 0.35 * (n.z3 || 0);
       alpha *= mod;
-      if (brainDead(n)) alpha = 0;
+      // L5 alive(t) birth filter: a node that hasn't been ingested yet at
+      // the current playhead position doesn't exist on screen yet.
+      // brainUnborn/brainHidden also gate hit-testing (selection) below —
+      // this is the render-alpha gate, kept in sync with that same check.
+      if (brainUnborn(n)) {
+        alpha = 0;
+      } else if (n.deadMs) {
+        // Tombstone dissolve: during playback the node fades out over
+        // TOMBSTONE_FADE_MS as the playhead crosses deadMs, instead of the
+        // instant pop brainDead's boolean gate produces on its own. Live
+        // view (not playing back) still hides dead entities outright —
+        // there is no playhead to fade across.
+        if (topoPlay.active) {
+          var deadFor = brainNowMs - n.deadMs;
+          if (deadFor >= TOMBSTONE_FADE_MS) alpha = 0;
+          else if (deadFor >= 0) alpha *= 1 - deadFor / TOMBSTONE_FADE_MS;
+          // deadFor < 0: playhead hasn't reached deadMs yet — still alive.
+        } else {
+          alpha = 0;
+        }
+      }
       // Desaturate: mix toward luminance gray, same ratio as buildBrainPoints.
       var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
       var sat = 0.6;
@@ -3526,7 +3609,12 @@ import { OrbitControls } from '/OrbitControls.js';
           ecol[j * 6 + 3] = 0; ecol[j * 6 + 4] = 0; ecol[j * 6 + 5] = 0;
           continue;
         }
-        var hidden = brainDead(s) || brainDead(t2e);
+        // V2-P2b: brainEdgeVisual decides per-type visibility (nmf_bond
+        // gated by the lattice toggle, association gated by direct-touch
+        // selection) — same classification buildBrainLines used at build
+        // time, now re-evaluated every frame since selection changes.
+        var vis = brainEdgeVisual(e, hasSel, hasSel ? brainSelectedNode.id : null);
+        var hidden = brainDead(s) || brainDead(t2e) || brainUnborn(s) || brainUnborn(t2e) || !vis.visible;
         if (e.deadMs && (topoPlay.active ? e.deadMs <= brainNowMs : true)) hidden = true;
         if (hidden) {
           epos[j * 6] = hideX; epos[j * 6 + 1] = hideY; epos[j * 6 + 2] = hideZ;
@@ -3542,8 +3630,6 @@ import { OrbitControls } from '/OrbitControls.js';
         epos[j * 6 + 4] = (eCy - t2e.y) * eWs;
         epos[j * 6 + 5] = -(t2e.z3 || 0) * eZDepth;
         // Selection-aware and degree-aware edge dimming via vertex color.
-        var isTunnel = e.type === 'tunnel';
-        var isLattice = e.type === 'lattice';
         // Degree-based dimming: edges at hub nodes (high degree) are
         // individually fainter so hundreds of overlapping edges don't
         // stack into a bright comet at the hub vertex.
@@ -3551,7 +3637,7 @@ import { OrbitControls } from '/OrbitControls.js';
         var tDeg = (brainAdjacency[e.tgt] || []).length;
         var maxDeg = Math.max(sDeg, tDeg, 1);
         var degDim = Math.min(1, 8 / Math.sqrt(maxDeg));
-        var ea = degDim;
+        var ea = degDim * vis.scale;
         if (hasSel) {
           var srcCore = e.src === brainSelectedNode.id || brainHop1[e.src];
           var tgtCore = e.tgt === brainSelectedNode.id || brainHop1[e.tgt];
@@ -3559,7 +3645,7 @@ import { OrbitControls } from '/OrbitControls.js';
           else if (srcCore || tgtCore || brainHop2[e.src] || brainHop2[e.tgt]) ea *= 0.3;
           else ea *= 0.05;
         }
-        var bc = isTunnel ? [0.86, 0.88, 0.94] : isLattice ? [1.0, 0.71, 0.24] : [0.23, 0.71, 1.0];
+        var bc = vis.rgb;
         ecol[j * 6] = bc[0] * ea; ecol[j * 6 + 1] = bc[1] * ea; ecol[j * 6 + 2] = bc[2] * ea;
         ecol[j * 6 + 3] = bc[0] * ea; ecol[j * 6 + 4] = bc[1] * ea; ecol[j * 6 + 5] = bc[2] * ea;
       }
@@ -3857,6 +3943,12 @@ import { OrbitControls } from '/OrbitControls.js';
   // field — FIX 2 payload trim — so the createdMs fallback usually applies).
   var BRAIN_HOUR_MS = 3600000;
   var BRAIN_DAY_MS = 86400000;
+  // V2-P2b: playback-time width of the tombstone dissolve fade (in playhead
+  // ms, not wall-clock ms — playhead advance rate depends on the event
+  // window's dwell pacing, not real time). ~1s of playback per the mission
+  // spec, so a tombstoned node visibly dissolves rather than popping away
+  // the instant the playhead crosses its deadMs.
+  var TOMBSTONE_FADE_MS = 1000;
   function recencyFactor(n, nowMs) {
     if (!n.lastMs) return 1;
     var age = nowMs - n.lastMs;
@@ -3864,56 +3956,33 @@ import { OrbitControls } from '/OrbitControls.js';
     return 0.35 + 0.65 * Math.exp(-(age - BRAIN_HOUR_MS) / (7 * BRAIN_DAY_MS));
   }
 
-  // Structural depth: z3 ∈ [0,1] = hop distance from the estate's keystone
-  // nodes (top-centrality pillars). Keystones float at z=0, periphery sinks
-  // to z=1. Multi-source BFS from the top-K centrality nodes; nodes
-  // unreachable from any keystone (disconnected fragments) get z3=1.
+  // Structural depth: z3 ∈ [0,1] mapped directly from each node's own
+  // n.centrality (0..1, already on the wire — no derived proxy). High
+  // centrality (keystone/core) floats at z3≈0, low centrality (periphery)
+  // sinks toward z3≈1. Deterministic, O(N), no graph walk needed.
+  //
+  // V2-P2b: this replaces a prior multi-source-BFS-from-top-centrality-
+  // keystones approach (hop distance from the top 2% of nodes by
+  // centrality) that approximated "keystone near, periphery far" only
+  // indirectly — a node's OWN centrality didn't set its own depth, only
+  // its graph distance from a small keystone seed set did, so a
+  // high-centrality node several hops from the nearest seed (e.g. in a
+  // sparse/disconnected structure) could still render deep. Direct
+  // centrality mapping ties depth to what the mission spec calls out:
+  // "keystone/core = near, periphery = far — n.centrality is already on
+  // every node." (Not an age-derived depth — despite the VIZ_V2 module
+  // doc's prior wording, this z-mapping has never used node age; only the
+  // L2 recencyFactor brightness channel does. That comment drift is fixed
+  // above in the module-level doc block.)
   // Also sets birthMs for the L5 alive(t) playback filter.
   function brainAssignDepth(nowMs) {
     // Timestamp bookkeeping for L5 playback (independent of z-mapping).
     brainNodes.forEach(function (n) {
       n.birthMs = n.createdMs || n.lastMs || null;
     });
-
-    // Find the top-K keystone nodes by centrality.
-    var K = Math.max(1, Math.min(5, Math.ceil(brainNodes.length * 0.02)));
-    var sorted = brainNodes.slice().sort(function (a, b) {
-      return (b.centrality || 0) - (a.centrality || 0);
-    });
-    var seeds = sorted.slice(0, K);
-
-    // Build adjacency from brainEdges for BFS.
-    var adj = Object.create(null);
-    brainEdges.forEach(function (e) {
-      (adj[e.src] = adj[e.src] || []).push(e.tgt);
-      (adj[e.tgt] = adj[e.tgt] || []).push(e.src);
-    });
-
-    // Multi-source BFS: distance from nearest keystone.
-    var dist = Object.create(null);
-    var queue = [];
-    seeds.forEach(function (n) { dist[n.id] = 0; queue.push(n.id); });
-    var head = 0;
-    while (head < queue.length) {
-      var cur = queue[head++];
-      var d = dist[cur];
-      (adj[cur] || []).forEach(function (nbr) {
-        if (dist[nbr] === undefined) {
-          dist[nbr] = d + 1;
-          queue.push(nbr);
-        }
-      });
-    }
-
-    // Normalize to [0,1]. Unreachable nodes (disconnected) get max depth.
-    var maxDist = 1;
     brainNodes.forEach(function (n) {
-      var d = dist[n.id];
-      if (d !== undefined && d > maxDist) maxDist = d;
-    });
-    brainNodes.forEach(function (n) {
-      var d = dist[n.id];
-      n.z3 = d !== undefined ? d / maxDist : 1;
+      var c = n.centrality || 0;
+      n.z3 = 1 - Math.max(0, Math.min(1, c));
     });
   }
 
@@ -4718,6 +4787,15 @@ import { OrbitControls } from '/OrbitControls.js';
       this.setAttribute("aria-pressed", brain3D ? "true" : "false");
       buildBrainPoints();
       buildBrainLines();
+    });
+    // V2-P2b: nmf_bond lattice edges are hidden by default (faint derived
+    // tissue, not primary structure). brainShowLattice is read fresh every
+    // frame by brainEdgeVisual inside the existing rAF loop, so flipping it
+    // needs no geometry rebuild — same reason buildBrainLines is NOT called
+    // here, unlike the 3D toggle above which changes z-coordinates.
+    $("#topoLatticeToggle").addEventListener("click", function () {
+      brainShowLattice = !brainShowLattice;
+      this.setAttribute("aria-pressed", brainShowLattice ? "true" : "false");
     });
     // L5 playback controls.
     $("#topoPlayBtn").addEventListener("click", topoPlayToggle);
