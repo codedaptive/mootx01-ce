@@ -3,6 +3,9 @@
 // Port of FDCRuntime.swift. Loads the bundled pinned artifacts (Lexicon.json,
 // FDCFrame.json, FDCSignatures.json, WordClassTable.json) once per process
 // via `include_bytes!` and exposes `Fdc::encode(text) -> Option<String>`.
+// Compact v2 signatures retain code-owned label, alias, title, and article
+// terms separately from inherited ancestor terms. Classifier v3 uses that
+// provenance to return the deepest defensible point in the hierarchy.
 //
 // The Swift runtime loads via `Bundle.module.url(forResource:...)`. The Rust
 // equivalent is `include_bytes!` at compile time — same pinning guarantee,
@@ -30,11 +33,13 @@ use crate::word_class_table;
 // here. `1` is the pinned ship value; classification accuracy is governed by
 // within-region scoring (§5), not this cutoff. Mirrors Swift FDCRuntime.swift.
 const STOP_THRESHOLD: usize = 1;
+const CLASSIFIER_VERSION: &str = "3.0.0";
 
 /// The bundled artifacts and the assembled matcher — loaded once per process.
 struct Bundle {
     matcher: FdcMatcher,
     version: String,
+    lexicon_version: String,
     // Retained for label lookups. FdcFrame derives Clone so we clone before moving
     // into FdcMatcher, which takes ownership. This matches Swift's bundle tuple
     // which stores (matcher, frame, version) together.
@@ -95,6 +100,7 @@ fn get_bundle() -> Option<&'static Bundle> {
         init_shared_cache(&table_version_str);
 
         let version = signatures.version.clone();
+        let lexicon_version = lexicon.version.clone();
         // The runtime ships ScoreMode::Idf (Mission #4 Phase B.2): IDF-weighting
         // the overlap — penalizing concept terms common across many signatures,
         // rewarding distinctive ones — improved within-region code selection
@@ -102,15 +108,16 @@ fn get_bundle() -> Option<&'static Bundle> {
         // which passes `.idf` to FDCMatcher at construction time. The matcher
         // default stays Raw; the runtime opts in here. The matcher reads the
         // live global word-class table at encode time (it no longer owns one).
-        let matcher = FdcMatcher::new_with_mode(
+        let matcher = FdcMatcher::new_with_mode_and_hierarchy(
             lexicon,
             frame.clone(),   // matcher takes ownership; clone is retained below for label lookups
             &signatures,
             STOP_THRESHOLD,
             ScoreMode::Idf,
+            true,
         );
 
-        Some(Bundle { matcher, version, frame })
+        Some(Bundle { matcher, version, lexicon_version, frame })
     }).as_ref()
 }
 
@@ -119,8 +126,9 @@ fn get_bundle() -> Option<&'static Bundle> {
 pub struct Fdc;
 
 impl Fdc {
-    /// Encode `text` to an FDC code, or None for UNRESOLVED (or if the bundled
-    /// artifacts are unavailable). Pure over the pinned artifacts.
+    /// Encode `text` to an FDC code. Nonempty text without defensible subject
+    /// evidence returns `000`; None is reserved for empty input or unavailable
+    /// bundled artifacts. Pure over the pinned artifacts.
     pub fn encode(text: &str) -> Option<String> {
         get_bundle().and_then(|b| b.matcher.encode(text))
     }
@@ -170,6 +178,18 @@ impl Fdc {
         get_bundle()
             .map(|b| b.version.as_str())
             .unwrap_or("0.0.0-unavailable")
+    }
+
+    /// Composite estate recalculation floor covering algorithm and all pinned
+    /// classifier artifacts. Mirrors Swift `FDC.recalculationVersion`.
+    pub fn recalculation_version() -> String {
+        match get_bundle() {
+            Some(bundle) => format!(
+                "classifier:{CLASSIFIER_VERSION}|frame:{}|lexicon:{}|signatures:{}",
+                bundle.frame.frame_version, bundle.lexicon_version, bundle.version
+            ),
+            None => "fdc-unavailable".to_owned(),
+        }
     }
 
     /// The LatticeLib library version string — mirrors Swift `LatticeLib.version`
@@ -280,5 +300,14 @@ mod tests {
                 "label(\"006.6\") must return its own label, not \"006\"'s"
             );
         }
+    }
+
+    #[test]
+    fn bundled_labels_are_clean_and_corrected() {
+        assert_eq!(Fdc::label("002").as_deref(), Some("History of the book"));
+        assert_eq!(Fdc::label("004").as_deref(), Some("Computers + Computer science"));
+        assert_eq!(Fdc::label("615.88").as_deref(), Some("Patent medicines"));
+        assert_eq!(Fdc::label("615.89").as_deref(), Some("Traditional medicine"));
+        assert_eq!(Fdc::label("971.4").as_deref(), Some("Quebec (Province)"));
     }
 }

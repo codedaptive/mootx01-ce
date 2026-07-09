@@ -30,6 +30,8 @@ use aria_mcp::{
 // Test helpers
 // ---------------------------------------------------------------------------
 
+const FDC_FLOOR_KEY: &str = "aria.fdc.recalced_data_version";
+
 macro_rules! args {
     () => { BTreeMap::new() };
     ( $( $k:expr => $v:expr ),+ $(,)? ) => {{
@@ -203,6 +205,14 @@ fn stored_fdc_code(registry: &EstateRegistry, id: &str) -> String {
         .find(|d| d.id == id)
         .expect("seeded drawer must exist")
         .udc_code
+}
+
+fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
+    registry
+        .default
+        .store
+        .get_meta(FDC_FLOOR_KEY)
+        .expect("FDC floor metadata read must succeed")
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +451,7 @@ fn moot_reclassify_fdc_dry_run_reports_suspect_without_mutating() {
         "got: {text}"
     );
     assert_eq!(stored_fdc_code(&registry, &id), "362.4");
+    assert_eq!(fdc_floor(&registry), None, "dry-run must not stamp estate FDC floor");
 }
 
 #[test]
@@ -455,7 +466,7 @@ fn moot_reclassify_fdc_apply_repairs_false_positive_to_unclassified() {
 
     let result = dispatch_tool(
         "moot_reclassify_fdc",
-        &args!["apply" => true],
+        &args!["apply" => true, "mode" => "all"],
         &registry,
         &SurfacedRecallLedger::new(),
     )
@@ -464,8 +475,23 @@ fn moot_reclassify_fdc_apply_repairs_false_positive_to_unclassified() {
     assert!(is_success(&result), "apply should succeed; got: {result:?}");
     let text = content_text(&result);
     assert!(text.contains("fdc_reclassify: applied"), "got: {text}");
+    assert!(text.contains("fdc_data_version: "), "got: {text}");
+    assert!(text.contains("floor_stamp: stamped"), "got: {text}");
     assert!(text.contains("updated: 1"), "got: {text}");
     assert_eq!(stored_fdc_code(&registry, &id), "000");
+    assert_eq!(
+        fdc_floor(&registry),
+        Some(lattice_lib::Fdc::recalculation_version()),
+        "full apply must stamp the composite estate FDC floor"
+    );
+    let status = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    assert!(content_text(&status).contains("fdc_recalculation: current"));
 }
 
 #[test]
@@ -506,6 +532,89 @@ fn moot_reclassify_fdc_suspect_only_skips_broad_code_change_until_all_mode() {
     assert!(all_text.contains("mode: all"), "got: {all_text}");
     assert!(all_text.contains("candidates: 1"), "got: {all_text}");
     assert!(all_text.contains("would_update: 1"), "got: {all_text}");
+    assert_eq!(fdc_floor(&registry), None, "dry-run mode=all must not stamp");
+}
+
+#[test]
+fn moot_reclassify_fdc_apply_limited_run_does_not_stamp_floor() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_with_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true, "mode" => "all", "limit" => 1],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc limited apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains("floor_stamp: skipped: limited run cannot update estate-wide floor"),
+        "got: {text}"
+    );
+    assert_eq!(fdc_floor(&registry), None, "limited apply must not stamp estate FDC floor");
+}
+
+#[test]
+fn moot_reclassify_fdc_conservative_apply_does_not_stamp_floor() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_with_anchor(
+        &registry,
+        "Biology is the scientific study of life and living organisms including evolution",
+        "362.4",
+        None,
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc conservative apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("skipped_non_candidate_changes: 1"), "got: {text}");
+    assert!(
+        text.contains("floor_stamp: skipped: mode=all is required for an estate-wide floor"),
+        "got: {text}"
+    );
+    assert_eq!(fdc_floor(&registry), None, "conservative apply must not stamp the floor");
+}
+
+#[test]
+fn estate_status_distinguishes_missing_and_stale_fdc_floors() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let missing = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    assert!(content_text(&missing).contains("fdc_recalculation: missing"));
+
+    registry
+        .default
+        .store
+        .set_meta(FDC_FLOOR_KEY, "classifier:old|frame:old|lexicon:old|signatures:old")
+        .expect("stale FDC floor write must succeed");
+    let stale = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    assert!(content_text(&stale).contains("fdc_recalculation: stale"));
 }
 
 // Advisory 1 (FDC-RECLASSIFY-ADVISORIES): apply must repair only the primary

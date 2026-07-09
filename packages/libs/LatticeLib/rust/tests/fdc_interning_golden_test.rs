@@ -1,14 +1,13 @@
 // fdc_interning_golden_test.rs
 //
-// Golden-anchor conformance test for the FdcMatcher String→Int term-interning
-// change (#31 Phase 2). These anchors were captured from the pre-interning
-// Swift implementation on 2026-07-01 and verified against the Rust port via
-// the existing fdc_conformance_test.rs cross-language gate.
+// Golden-anchor conformance test for FdcMatcher runtime anchors. These anchors
+// pin the current hierarchy-first classifier behavior so Swift and Rust keep the
+// same code/QID output across matcher refactors.
 //
 // Purpose: assert that (code: Option<String>, conceptQID: Option<String>) from
-// Fdc::encode_anchor stays stable after the interning refactor. Any code
-// divergence means scoring-order/tie-break drift; any QID divergence means
-// winner-supported concept provenance changed.
+// Fdc::encode_anchor stays stable for the current classifier contract. Any code
+// divergence means scoring, descent, or source-evidence drift; any QID divergence
+// means winner-supported concept provenance changed.
 //
 // Matches Swift FDCMatcherInternedGoldenTests.swift. Both use the same 23
 // inputs and the same expected (code, qid) pairs.
@@ -21,62 +20,63 @@ struct GoldenAnchor {
     qid: Option<&'static str>,
 }
 
-/// 23 golden anchors — captured from the pre-interning FDCMatcher on 2026-07-01.
-/// Expected values are identical to those in Swift FDCMatcherInternedGoldenTests.
+/// 23 golden anchors for the current hierarchy-first FDC classifier.
+/// Expected values are identical to those in Swift
+/// FDCMatcherInternedGoldenTests.
 static GOLDEN_ANCHORS: &[GoldenAnchor] = &[
-    // From fdc_conformance.json — all 17 resolved vectors
+    // From fdc_conformance.json and focused historical failure vectors.
     GoldenAnchor { input: "machine learning neural networks artificial intelligence",
-                   code: Some("615.892"), qid: Some("Q11019") },
+                   code: Some("004"), qid: Some("Q11019") },
     GoldenAnchor { input: "computer graphics rendering visualization",
                    code: Some("006.6"), qid: Some("Q274988") },
     GoldenAnchor { input: "software engineering algorithms data structures",
                    code: Some("004"), qid: Some("Q2466334") },
     GoldenAnchor { input: "web development HTML programming",
-                   code: Some("942"), qid: Some("Q2740926") },
+                   code: Some("005"), qid: Some("Q2740926") },
     GoldenAnchor { input: "distributed systems cloud computing",
-                   code: Some("959"), qid: Some("Q1") },
+                   code: Some("004"), qid: Some("Q1") },
     GoldenAnchor { input: "geology rocks minerals earth science",
-                   code: Some("549"), qid: Some("Q1069") },
+                   code: Some("552"), qid: Some("Q1069") },
     GoldenAnchor { input: "economics markets trade finance",
-                   code: Some("336"), qid: Some("Q132510") },
+                   code: Some("330"), qid: Some("Q132510") },
     GoldenAnchor { input: "literature poetry novels writing",
-                   code: Some("823"), qid: Some("Q37260") },
+                   code: Some("800"), qid: Some("Q37260") },
     GoldenAnchor { input: "medicine surgery treatment disease",
-                   code: Some("617"), qid: Some("Q11190") },
+                   code: Some("610"), qid: Some("Q11190") },
     GoldenAnchor { input: "pharmacology drugs clinical trials",
-                   code: Some("615.85"), qid: Some("Q128406") },
+                   code: Some("615"), qid: Some("Q128406") },
     GoldenAnchor { input: "nursing patient care hospital",
-                   code: Some("131"), qid: Some("Q12456707") },
+                   code: Some("610"), qid: Some("Q12456707") },
     GoldenAnchor { input: "religion theology Christianity Islam",
-                   code: Some("297"), qid: Some("Q189746") },
+                   code: Some("200"), qid: Some("Q34178") },
     GoldenAnchor { input: "animal behavior mammals dogs cats",
-                   code: Some("636"), qid: Some("Q144") },
+                   code: Some("590"), qid: Some("Q168338") },
     GoldenAnchor { input: "agriculture farming crops soil",
                    code: Some("631"), qid: Some("Q131596") },
     GoldenAnchor { input: "environment climate change pollution",
-                   code: Some("385"), qid: Some("Q43619") },
+                   code: Some("363.73"), qid: Some("Q43619") },
     GoldenAnchor { input: "robotics automation mechanical engineering",
-                   code: Some("533"), qid: Some("Q170978") },
+                   code: Some("621"), qid: Some("Q184199") },
     GoldenAnchor { input: "materials science metals polymers",
-                   code: Some("667"), qid: Some("Q11426") },
+                   code: Some("668"), qid: Some("Q336") },
     // Additional diverse inputs
     GoldenAnchor {
         input: "Biology is the scientific study of life and living organisms including their physical structure chemical processes molecular interactions physiological mechanisms and evolution",
-        code: Some("612.6"), qid: Some("Q1053535"),
+        code: Some("570"), qid: Some("Q1053535"),
     },
     GoldenAnchor { input: "mathematics algebra calculus geometry topology number theory",
-                   code: Some("513"), qid: Some("Q1093379") },
+                   code: Some("510"), qid: Some("Q1093379") },
     GoldenAnchor { input: "astronomy stars planets galaxies universe cosmology",
-                   code: Some("521"), qid: Some("Q1059081") },
+                   code: Some("520"), qid: Some("Q1059081") },
     GoldenAnchor { input: "music theory harmony rhythm melody composition orchestra",
-                   code: Some("782"), qid: Some("Q170406") },
+                   code: Some("780"), qid: Some("Q170406") },
     GoldenAnchor { input: "cooking cuisine recipes ingredients gastronomy",
                    code: Some("641"), qid: Some("Q10675206") },
     GoldenAnchor { input: "photography film camera exposure lens aperture",
                    code: Some("778"), qid: Some("Q11633") },
 ];
 
-/// All 23 golden anchors must survive the String→Int term-interning refactor.
+/// All 23 golden anchors must match the pinned classifier contract.
 ///
 /// Exact port of Swift `FDCMatcherInternedGoldenTests.allGoldenAnchorsMatch`.
 /// Both ports must produce the same (code, qid) pairs for every input.

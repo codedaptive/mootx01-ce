@@ -5,10 +5,9 @@
 // once per process and exposes `FDC.encode(text) -> code`. This is what
 // consumers (EideticLib and above) call to classify text.
 //
-// The bundled signatures are the *compact* form (code -> term list): the
-// matcher uses only term membership (§5.2/§6), never the source weights, so
-// the weighted FDCSignatures.json is kept only as a build/seed record (and for
-// the future SimHash fingerprint).
+// The bundled compact v2 signatures retain code-owned label, alias, title, and
+// article terms separately from inherited ancestor terms. Classifier v3 uses
+// that provenance to return the deepest defensible point in the hierarchy.
 
 import Foundation
 
@@ -22,9 +21,19 @@ public enum FDC {
     /// scoring (§5), not this cutoff.
     public static let stopThreshold = 1
 
-    /// Encode `text` to an FDC code, or `nil` for UNRESOLVED (or if the bundled
-    /// artifacts are unavailable). Pure over the pinned artifacts.
+    /// Encode `text` to an FDC code. Nonempty text without defensible subject
+    /// evidence returns `000`; `nil` is reserved for empty input or unavailable
+    /// bundled artifacts. Pure over the pinned artifacts.
     public static func encode(_ text: String) -> String? { bundle?.matcher.encode(text) }
+
+    /// Explicit-tagger variant used by cross-runtime conformance tests and
+    /// estates that pin novel-token classification policy.
+    public static func encode(
+        _ text: String,
+        taggerChoice: NovelTokenTaggerChoice
+    ) -> String? {
+        bundle?.matcher.encode(text, taggerChoice: taggerChoice)
+    }
 
     /// Encode `text` and surface the dominant concept Q-ID of the input (see
     /// `FDCMatcher.encodeAnchor`). Returns `(nil, nil)` if the artifacts are
@@ -53,6 +62,17 @@ public enum FDC {
     /// The bundled signatures version — the pinned-artifact version that
     /// produced an encode answer. Callers record it as provenance.
     public static var dataVersion: String { bundle?.version ?? "0.0.0-unavailable" }
+
+    /// Version of the deterministic classifier algorithm itself.
+    public static let classifierVersion = "3.0.0"
+
+    /// Estate-wide recalculation floor. This covers every input that can change
+    /// an assigned code: algorithm, frame, lexicon, and signatures.
+    public static var recalculationVersion: String {
+        guard let bundle else { return "fdc-unavailable" }
+        return "classifier:\(classifierVersion)|frame:\(bundle.frame.frameVersion)" +
+            "|lexicon:\(bundle.lexiconVersion)|signatures:\(bundle.version)"
+    }
 
     /// Ancestor chain (root first, excluding `code` itself) for an FDC code,
     /// walked over the bundled frame's decimal hierarchy. Empty if the artifacts
@@ -93,27 +113,65 @@ public enum FDC {
     // MARK: - artifact loading (once per process)
 
     private struct SignaturesFile: Decodable {
-        struct Entry: Decodable { let code: String; let terms: [String] }
+        struct Entry: Decodable {
+            let code: String
+            let terms: [String]?
+            let labelTerms: [String]?
+            let aliasTerms: [String]?
+            let titleTerms: [String]?
+            let articleTerms: [String]?
+            let ancestorTerms: [String]?
+
+            private enum CodingKeys: String, CodingKey {
+                case code, terms
+                case labelTerms = "label_terms"
+                case aliasTerms = "alias_terms"
+                case titleTerms = "title_terms"
+                case articleTerms = "article_terms"
+                case ancestorTerms = "ancestor_terms"
+            }
+        }
         let version: String
         let codes: [Entry]
     }
 
     /// The matcher, the FDC frame (for label lookup), and the signatures
     /// version, all loaded together once per process.
-    private static let bundle: (matcher: FDCMatcher, frame: FDCFrame, version: String)? = {
+    private static let bundle: (
+        matcher: FDCMatcher,
+        frame: FDCFrame,
+        version: String,
+        lexiconVersion: String
+    )? = {
         guard let lexicon: CanonicalizationLexicon = load("Lexicon"),
               let frame: FDCFrame = load("FDCFrame"),
               let sigs: SignaturesFile = load("FDCSignatures") else { return nil }
         var terms: [String: Set<String>] = [:]
-        for e in sigs.codes { terms[e.code] = Set(e.terms) }
+        var sources: [String: FDCSignatureSources] = [:]
+        for e in sigs.codes {
+            var recallTerms = Set(e.terms ?? [])
+            recallTerms.formUnion(e.labelTerms ?? [])
+            recallTerms.formUnion(e.aliasTerms ?? [])
+            recallTerms.formUnion(e.titleTerms ?? [])
+            recallTerms.formUnion(e.articleTerms ?? [])
+            recallTerms.formUnion(e.ancestorTerms ?? [])
+            terms[e.code] = recallTerms
+            sources[e.code] = FDCSignatureSources(
+                label: Set(e.labelTerms ?? []),
+                alias: Set(e.aliasTerms ?? []),
+                title: Set(e.titleTerms ?? []),
+                article: Set(e.articleTerms ?? []))
+        }
         // The runtime ships `.idf` scoring (Mission #4): IDF-weighting the
         // overlap — penalizing concept terms common across many signatures,
         // rewarding distinctive ones — improved within-region code selection
         // over raw overlap (exact 31→36%, wrong-branch 63→58% on the v1.0
         // frame). The matcher default stays `.raw`; the runtime opts in here.
         let m = FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms,
-                           stopThreshold: stopThreshold, scoreMode: .idf)
-        return (m, frame, sigs.version)
+                           sourceSignatures: sources,
+                           stopThreshold: stopThreshold, scoreMode: .idf,
+                           useHierarchicalResolution: true)
+        return (m, frame, sigs.version, lexicon.version)
     }()
 
     private static func load<T: Decodable>(_ name: String) -> T? {
