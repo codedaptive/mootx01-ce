@@ -97,6 +97,30 @@ struct FDCRuntimeTests {
         )
     }
 
+    @Test("operational shell and markdown code fragments return UNRESOLVED")
+    func operationalFragmentsAreUnresolved() {
+        let shell = """
+        git worktree prune
+        rm -f .git/index.lock
+        read_signal() {
+          sqlite3 estate.sqlite 'select 1;'
+        }
+        """
+        let markdown = """
+        # Monthly Canon Audit
+
+        ```bash
+        set -euo pipefail
+        git status --short
+        ```
+        """
+
+        #expect(FDC.encode(shell) == nil)
+        #expect(FDC.encodeAnchor(shell).conceptQID == nil)
+        #expect(FDC.encode(markdown) == nil)
+        #expect(FDC.encodeAnchor(markdown).conceptQID == nil)
+    }
+
 
     @Test("deterministic")
     func deterministic() {

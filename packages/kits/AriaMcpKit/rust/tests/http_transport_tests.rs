@@ -222,6 +222,57 @@ fn http_get_lattice_returns_200_with_addresses_key() {
 }
 
 #[test]
+fn http_get_lattice_omits_unclassified_sentinel() {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let registry = aria_mcp::estate_registry::EstateRegistry::new_inmemory_bare();
+    let handle = registry.default.handle;
+    {
+        let coord = registry.coord.lock().unwrap();
+        let now = aria_mcp::dispatch::wall_now();
+        coord
+            .capture(
+                &handle,
+                CaptureFrame::new(
+                    "git status\nrm .git/index.lock",
+                    CaptureChannel::ImportedFile,
+                    "http-lattice",
+                    LatticeAnchor::udc("000"),
+                    "http-tests",
+                    "test-model",
+                ),
+                now,
+            )
+            .expect("000 fixture capture must succeed");
+        coord
+            .capture(
+                &handle,
+                CaptureFrame::new(
+                    "computing systems and data processing",
+                    CaptureChannel::ImportedFile,
+                    "http-lattice",
+                    LatticeAnchor::udc("006"),
+                    "http-tests",
+                    "test-model",
+                ),
+                now,
+            )
+            .expect("006 fixture capture must succeed");
+    }
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", "", None);
+    let (status, body) = round_trip_get_with("/api/lattice", dispatcher);
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let addresses = v["addresses"].as_array().expect("addresses array");
+    assert_eq!(addresses.len(), 1, "000 sentinel must not appear in /api/lattice: {v}");
+    assert_eq!(addresses[0]["code"].as_str(), Some("006"));
+    assert_eq!(addresses[0]["count"].as_i64(), Some(1));
+}
+
+#[test]
 fn http_get_graph_returns_200_with_nodes_edges_communities_keys() {
     let (status, body) = round_trip_get("/api/graph");
     assert_eq!(status, 200);

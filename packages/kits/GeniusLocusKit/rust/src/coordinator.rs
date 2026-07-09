@@ -2932,6 +2932,29 @@ impl EstateCoordinator {
             .map_err(|e| remap("reanchor", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
+    // MARK: - reanchor_anchor
+
+    /// Update a drawer's lattice anchor with an explicit audit identity and
+    /// reason, rather than the generic estate-owner attribution `reanchor`
+    /// (above) stamps. Twin of Swift's `Estate.reanchorAnchor` — for
+    /// automated tool-driven repairs (e.g. `moot_reclassify_fdc`) that must
+    /// not misattribute their audit event to the estate owner or a generic
+    /// reason string. Like `reanchor`, `now` is generated internally by the
+    /// LocusKit layer rather than threaded through this wrapper.
+    pub fn reanchor_anchor(
+        &self,
+        handle: &EstateHandle,
+        row_id: &str,
+        to_lattice: LatticeAnchor,
+        changed_by: &str,
+        reason: &str,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .reanchor_anchor(row_id, to_lattice, changed_by, reason)
+            .map_err(|e| remap("reanchor_anchor", &uuid_to_str(&handle.estate_uuid), e).into())
+    }
+
     // MARK: - learn
 
     /// Ingest a learned reference into the estate addressed by `handle`.

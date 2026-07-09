@@ -121,9 +121,15 @@ fn record_latency_ns(ns: u64) {
     GLOBAL_LATENCY_NS_TOTAL.fetch_add(ns as i64, Ordering::Relaxed);
     // Inclusive upper bounds prevent off-by-one gaps between buckets.
     match ns {
-        0..=999_999            => { GLOBAL_LATENCY_FAST.fetch_add(1, Ordering::Relaxed); }
-        1_000_000..=49_999_999 => { GLOBAL_LATENCY_MID.fetch_add(1, Ordering::Relaxed); }
-        _                      => { GLOBAL_LATENCY_SLOW.fetch_add(1, Ordering::Relaxed); }
+        0..=999_999 => {
+            GLOBAL_LATENCY_FAST.fetch_add(1, Ordering::Relaxed);
+        }
+        1_000_000..=49_999_999 => {
+            GLOBAL_LATENCY_MID.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            GLOBAL_LATENCY_SLOW.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -134,7 +140,10 @@ fn update_inflight_hwm(current: usize) {
     let mut stored = GLOBAL_INFLIGHT_HWM.load(Ordering::Relaxed);
     while current > stored {
         match GLOBAL_INFLIGHT_HWM.compare_exchange_weak(
-            stored, current, Ordering::Relaxed, Ordering::Relaxed,
+            stored,
+            current,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
         ) {
             Ok(_) => break,
             Err(new_stored) => stored = new_stored,
@@ -361,16 +370,14 @@ pub fn run_http_loop(
     // the same throughput profile as the previous sequential model but
     // allows concurrent read-only routing (GET endpoints) to proceed without
     // waiting on active dispatches.
-    let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(
-            config.registry,
-            &config.server_name,
-            &config.server_version,
-            &config.build_serial,
-            &config.version_skew,
-            monitoring_control,
-        )
-    ));
+    let dispatcher = Arc::new(Mutex::new(Dispatcher::new(
+        config.registry,
+        &config.server_name,
+        &config.server_version,
+        &config.build_serial,
+        &config.version_skew,
+        monitoring_control,
+    )));
 
     let listener = bind_loopback(port)?;
     let bound = listener.local_addr()?.port();
@@ -379,7 +386,10 @@ pub fn run_http_loop(
     loop {
         let (mut stream, _) = match listener.accept() {
             Ok(pair) => pair,
-            Err(e) => { eprintln!("aria-mcp: accept error: {e}"); continue; }
+            Err(e) => {
+                eprintln!("aria-mcp: accept error: {e}");
+                continue;
+            }
         };
 
         // Phase 1 (accept thread, NON-BLOCKING): depth check only. try_enqueue
@@ -481,7 +491,9 @@ pub fn run_http_loop(
                     sse_gate_clone.wait_for_slot();
                     // MUST be bound to a named variable so the guard lives until
                     // the SSE stream exits. An unbound call would release immediately.
-                    let _sse_guard = defer_on_drop(move || { sse_gate_clone.release(); });
+                    let _sse_guard = defer_on_drop(move || {
+                        sse_gate_clone.release();
+                    });
 
                     drive_sse_stream(&mut stream, SSE_HEARTBEAT_INTERVAL_MS);
                     return;
@@ -508,8 +520,12 @@ pub fn run_http_loop(
                 drop(dispatch);
 
                 match status {
-                    400..=499 => { GLOBAL_4XX_COUNTER.fetch_add(1, Ordering::Relaxed); }
-                    500..=599 => { GLOBAL_5XX_COUNTER.fetch_add(1, Ordering::Relaxed); }
+                    400..=499 => {
+                        GLOBAL_4XX_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    }
+                    500..=599 => {
+                        GLOBAL_5XX_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    }
                     _ => {}
                 }
                 if status != 202 {
@@ -530,9 +546,15 @@ pub fn run_http_loop(
 /// drops the guard immediately at the end of the statement.
 struct OnDrop<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> Drop for OnDrop<F> {
-    fn drop(&mut self) { if let Some(f) = self.0.take() { f(); } }
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
 }
-fn defer_on_drop<F: FnOnce()>(f: F) -> OnDrop<F> { OnDrop(Some(f)) }
+fn defer_on_drop<F: FnOnce()>(f: F) -> OnDrop<F> {
+    OnDrop(Some(f))
+}
 
 /// Bind a TCP listener to the loopback interface only. Never `INADDR_ANY`.
 pub fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
@@ -593,7 +615,8 @@ pub fn run_http_loop_for_test(
 
                 // SSE two-gate protocol (CAND-025): same as run_http_loop.
                 if let Some(ref req) = request {
-                    if req.method == "GET" && req.path == "/api/events" && req.wants_event_stream() {
+                    if req.method == "GET" && req.path == "/api/events" && req.wants_event_stream()
+                    {
                         // Release normal gate early before entering long-lived stream.
                         gate_c.release();
                         let _ = start.elapsed();
@@ -631,7 +654,9 @@ pub fn run_http_loop_for_test(
                             return;
                         }
                         sse_gate_c.wait_for_slot();
-                        let _sse_guard = defer_on_drop(move || { sse_gate_c.release(); });
+                        let _sse_guard = defer_on_drop(move || {
+                            sse_gate_c.release();
+                        });
                         drive_sse_stream(&mut stream, SSE_HEARTBEAT_INTERVAL_MS);
                         return;
                     }
@@ -647,8 +672,12 @@ pub fn run_http_loop_for_test(
                     let (status, body) = route(&req, &lock, None);
                     drop(lock);
                     match status {
-                        400..=499 => { GLOBAL_4XX_COUNTER.fetch_add(1, Ordering::Relaxed); }
-                        500..=599 => { GLOBAL_5XX_COUNTER.fetch_add(1, Ordering::Relaxed); }
+                        400..=499 => {
+                            GLOBAL_4XX_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        }
+                        500..=599 => {
+                            GLOBAL_5XX_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        }
                         _ => {}
                     }
                     if status != 202 {
@@ -721,7 +750,12 @@ impl HttpRequest {
 /// SSE request returns 403 before the counter block, so it is not counted as
 /// a 4xx response. The SSE stream does hold the concurrency-gate slot for its
 /// lifetime, mirroring the Swift `serve()` SSE branch.
-fn serve_stream(stream: &mut TcpStream, dispatcher: &Dispatcher, max_body_bytes: usize, stats_store: Option<&StatsStore>) {
+fn serve_stream(
+    stream: &mut TcpStream,
+    dispatcher: &Dispatcher,
+    max_body_bytes: usize,
+    stats_store: Option<&StatsStore>,
+) {
     let request = match read_request(stream, max_body_bytes) {
         Some(r) => r,
         None => return,
@@ -749,8 +783,12 @@ fn serve_stream(stream: &mut TcpStream, dispatcher: &Dispatcher, max_body_bytes:
 
     // Count by status class; mirror Swift HTTPServer.serve's counting logic.
     match status {
-        400..=499 => { GLOBAL_4XX_COUNTER.fetch_add(1, Ordering::Relaxed); }
-        500..=599 => { GLOBAL_5XX_COUNTER.fetch_add(1, Ordering::Relaxed); }
+        400..=499 => {
+            GLOBAL_4XX_COUNTER.fetch_add(1, Ordering::Relaxed);
+        }
+        500..=599 => {
+            GLOBAL_5XX_COUNTER.fetch_add(1, Ordering::Relaxed);
+        }
         _ => {}
     }
     // 202 is the notification path (no response per JSON-RPC spec); every
@@ -877,14 +915,26 @@ fn read_request(stream: &mut TcpStream, max_body_bytes: usize) -> Option<HttpReq
         body.truncate(want);
     }
 
-    Some(HttpRequest { method, path, query, host, origin, accept, body })
+    Some(HttpRequest {
+        method,
+        path,
+        query,
+        host,
+        origin,
+        accept,
+        body,
+    })
 }
 
 /// Route one request to `(status, body)`. The parse → decode → dispatch → encode
 /// path mirrors `server::handle_frame` so the JSON-RPC bytes match the stdio
 /// transport. JSON-RPC-level failures return HTTP 200 with a JSON-RPC error
 /// object (the error is in the body); a notification returns HTTP 202, empty.
-fn route(request: &HttpRequest, dispatcher: &Dispatcher, stats_store: Option<&StatsStore>) -> (u16, Vec<u8>) {
+fn route(
+    request: &HttpRequest,
+    dispatcher: &Dispatcher,
+    stats_store: Option<&StatsStore>,
+) -> (u16, Vec<u8>) {
     // DNS-rebinding / CSRF guard (runs first). Accept absent/loopback Origins
     // (native MCP clients send none); reject any other origin — that is a
     // cross-origin browser request. CSRF boundary, not authentication; mirrors
@@ -909,13 +959,13 @@ fn route(request: &HttpRequest, dispatcher: &Dispatcher, stats_store: Option<&St
             return (421, br#"{"error":"misdirected_request"}"#.to_vec());
         }
         return match request.path.as_str() {
-            "/api/graph"         => get_graph_snapshot(&dispatcher.registry, stats_store),
-            "/api/lattice"       => get_lattice_snapshot(&dispatcher.registry),
+            "/api/graph" => get_graph_snapshot(&dispatcher.registry, stats_store),
+            "/api/lattice" => get_lattice_snapshot(&dispatcher.registry),
             "/api/admin/estates" => get_admin_estates_snapshot(&dispatcher.registry),
             // ADR-025 §3: sensitivity-grant status, physically outside the
             // JSON-RPC / MCP surface so prompt-injected models cannot reach it.
             "/api/control/grants" => control_grants(dispatcher),
-            _                    => (404, br#"{"error":"not_found"}"#.to_vec()),
+            _ => (404, br#"{"error":"not_found"}"#.to_vec()),
         };
     }
 
@@ -966,7 +1016,10 @@ fn route(request: &HttpRequest, dispatcher: &Dispatcher, stats_store: Option<&St
         Ok(bytes) => (200, bytes),
         Err(e) => {
             eprintln!("aria-mcp: serialization error: {e}");
-            (200, error_frame(JSONRPCErrorCode::INTERNAL_ERROR, "Internal error"))
+            (
+                200,
+                error_frame(JSONRPCErrorCode::INTERNAL_ERROR, "Internal error"),
+            )
         }
     }
 }
@@ -989,9 +1042,7 @@ fn control_grants(dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
                 crate::sensitivity_grant_ledger::SensitivityTier::Secret => "secret",
             };
             let expires_str = ms_to_iso8601_utc(expires_at_ms);
-            let body = format!(
-                r#"{{"tier":"{tier_str}","expiresAt":"{expires_str}"}}"#
-            );
+            let body = format!(r#"{{"tier":"{tier_str}","expiresAt":"{expires_str}"}}"#);
             (200, body.into_bytes())
         }
         None => (200, br#"{"tier":null,"expiresAt":null}"#.to_vec()),
@@ -1011,16 +1062,27 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
     // Validate tier.
     let tier_raw = match root.get("tier").and_then(|v| v.as_str()) {
         Some(s) => s.to_owned(),
-        None => return (400, b"{\"error\":\"invalid_tier: must be restricted or secret\"}\n".to_vec()),
+        None => {
+            return (
+                400,
+                b"{\"error\":\"invalid_tier: must be restricted or secret\"}\n".to_vec(),
+            )
+        }
     };
 
     // Validate proof timestamp.
-    let proof_ts_ms = match root.get("proof")
+    let proof_ts_ms = match root
+        .get("proof")
         .and_then(|p| p.get("ts"))
         .and_then(|v| v.as_i64())
     {
         Some(ts) => ts,
-        None => return (400, b"{\"error\":\"missing_proof: proof.ts unix ms required\"}\n".to_vec()),
+        None => {
+            return (
+                400,
+                b"{\"error\":\"missing_proof: proof.ts unix ms required\"}\n".to_vec(),
+            )
+        }
     };
 
     // Freshness check: reject if timestamp is more than 10 s old or 5 s in the future.
@@ -1032,7 +1094,10 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
     let now_ms = wall_now_ms();
     let skew_ms = proof_ts_ms - now_ms;
     if skew_ms < -10_000 || skew_ms > 5_000 {
-        return (403, b"{\"error\":\"proof_stale: timestamp outside 10s window\"}\n".to_vec());
+        return (
+            403,
+            b"{\"error\":\"proof_stale: timestamp outside 10s window\"}\n".to_vec(),
+        );
     }
 
     // Grant the tier.
@@ -1042,21 +1107,26 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
             // Derive the local UTC offset at grant time via POSIX localtime_r.
             let now_secs = now_ms / 1000;
             let tz_offset = local_utc_offset_seconds(now_secs);
-            dispatcher.sensitivity_ledger.grant_restricted(now_ms, i64::from(tz_offset));
+            dispatcher
+                .sensitivity_ledger
+                .grant_restricted(now_ms, i64::from(tz_offset));
         }
         "secret" => {
             dispatcher.sensitivity_ledger.grant_secret(now_ms);
         }
-        _ => return (400, b"{\"error\":\"invalid_tier: must be restricted or secret\"}\n".to_vec()),
+        _ => {
+            return (
+                400,
+                b"{\"error\":\"invalid_tier: must be restricted or secret\"}\n".to_vec(),
+            )
+        }
     }
 
     // Read back the resulting expiry.
     match dispatcher.sensitivity_ledger.grant_state_snapshot(now_ms) {
         Some((_, expires_at_ms)) => {
             let expires_str = ms_to_iso8601_utc(expires_at_ms);
-            let body = format!(
-                r#"{{"ok":true,"tier":"{tier_raw}","expiresAt":"{expires_str}"}}"#
-            );
+            let body = format!(r#"{{"ok":true,"tier":"{tier_raw}","expiresAt":"{expires_str}"}}"#);
             eprintln!("ADR-025: {tier_raw} grant issued, expires {expires_str}");
             (200, body.into_bytes())
         }
@@ -1089,8 +1159,8 @@ fn ms_to_iso8601_utc(ms: i64) -> String {
     let day_number = (secs - time_of_day_s) / 86_400;
 
     let hour = time_of_day_s / 3600;
-    let min  = (time_of_day_s % 3600) / 60;
-    let sec  = time_of_day_s % 60;
+    let min = (time_of_day_s % 3600) / 60;
+    let sec = time_of_day_s % 60;
 
     // civil_from_days: maps days-since-epoch to (year, month, day)
     let z = day_number + 719_468;
@@ -1104,9 +1174,7 @@ fn ms_to_iso8601_utc(ms: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
 
-    format!(
-        "{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z"
-    )
+    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
 /// Current wall-clock time in epoch-milliseconds.
@@ -1156,17 +1224,17 @@ fn local_utc_offset_seconds(now_secs: i64) -> i32 {
         // the C ABI on both platforms. No explicit padding field is needed.
         #[repr(C)]
         struct Tm {
-            tm_sec:    i32,
-            tm_min:    i32,
-            tm_hour:   i32,
-            tm_mday:   i32,
-            tm_mon:    i32,
-            tm_year:   i32,
-            tm_wday:   i32,
-            tm_yday:   i32,
-            tm_isdst:  i32,
-            tm_gmtoff: i64,       // seconds east of UTC (POSIX extension)
-            tm_zone:   *const i8, // timezone abbreviation pointer (unused)
+            tm_sec: i32,
+            tm_min: i32,
+            tm_hour: i32,
+            tm_mday: i32,
+            tm_mon: i32,
+            tm_year: i32,
+            tm_wday: i32,
+            tm_yday: i32,
+            tm_isdst: i32,
+            tm_gmtoff: i64,     // seconds east of UTC (POSIX extension)
+            tm_zone: *const i8, // timezone abbreviation pointer (unused)
         }
 
         extern "C" {
@@ -1194,14 +1262,14 @@ fn local_utc_offset_seconds(now_secs: i64) -> i32 {
         // (DST adjustment). `long` is 32-bit on Windows even on 64-bit targets.
         #[repr(C)]
         struct WinTm {
-            tm_sec:   i32,
-            tm_min:   i32,
-            tm_hour:  i32,
-            tm_mday:  i32,
-            tm_mon:   i32,
-            tm_year:  i32,
-            tm_wday:  i32,
-            tm_yday:  i32,
+            tm_sec: i32,
+            tm_min: i32,
+            tm_hour: i32,
+            tm_mday: i32,
+            tm_mon: i32,
+            tm_year: i32,
+            tm_wday: i32,
+            tm_yday: i32,
             tm_isdst: i32, // positive = DST in effect; Windows tm ends here (no tm_gmtoff)
         }
 
@@ -1247,14 +1315,18 @@ fn local_utc_offset_seconds(now_secs: i64) -> i32 {
     // Unreachable on our target matrix (macOS, Linux, Windows), but the
     // function must compile on any target. UTC is correct for unknown platforms.
     #[cfg(not(any(unix, windows)))]
-    { let _ = now_secs; 0 }
+    {
+        let _ = now_secs;
+        0
+    }
 }
 
 /// Serialize a JSON-RPC error object (null id) to bytes.
 fn error_frame(code: i64, message: &str) -> Vec<u8> {
     let response = JSONRPCResponse::failure(JsonValue::Null, JSONRPCError::new(code, message));
     serde_json::to_vec(&response).unwrap_or_else(|_| {
-        br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error"}}"#.to_vec()
+        br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"internal error"}}"#
+            .to_vec()
     })
 }
 
@@ -1320,9 +1392,9 @@ fn is_loopback_origin(origin: &str) -> bool {
 /// Rejects `.evil`, `@user`, path components, and any other trailing content.
 fn is_valid_origin_suffix(suffix: &str) -> bool {
     suffix.is_empty()
-        || suffix.strip_prefix(':').is_some_and(|port| {
-            !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
-        })
+        || suffix
+            .strip_prefix(':')
+            .is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// True if the Host header is acceptable for a GET route: absent/empty (curl /
@@ -1369,8 +1441,8 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// GET /api/lattice — active lattice addresses (UDC/MDCC codes) with drawer counts.
-/// Groups non-tombstoned drawers by udc_code, omits empty-string sentinel
-/// (unanchored drawers), sorted by count descending.
+/// Groups non-tombstoned drawers by udc_code, omits empty-string and "000"
+/// unclassified sentinels, sorted by count descending.
 /// On store failure, returns HTTP 503 with an error field — NOT a fabricated
 /// empty-200. A `200 {"addresses":[]}` on a read fault is indistinguishable
 /// from a genuinely empty estate and would tell the client "no lattice" when
@@ -1388,14 +1460,18 @@ fn get_lattice_snapshot(registry: &crate::estate_registry::EstateRegistry) -> (u
             });
             return (
                 503,
-                serde_json::to_vec(&body)
-                    .unwrap_or_else(|_| br#"{"error":"lattice read failed","degraded":true}"#.to_vec()),
+                serde_json::to_vec(&body).unwrap_or_else(|_| {
+                    br#"{"error":"lattice read failed","degraded":true}"#.to_vec()
+                }),
             );
         }
     };
 
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for d in drawers.iter().filter(|d| d.tombstoned_at.is_none() && !d.udc_code.is_empty()) {
+    for d in drawers
+        .iter()
+        .filter(|d| d.tombstoned_at.is_none() && !d.udc_code.is_empty() && d.udc_code != "000")
+    {
         *counts.entry(d.udc_code.clone()).or_insert(0) += 1;
     }
 
@@ -1403,11 +1479,15 @@ fn get_lattice_snapshot(registry: &crate::estate_registry::EstateRegistry) -> (u
     let mut entries: Vec<(String, usize)> = counts.into_iter().collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    let items: Vec<serde_json::Value> = entries.iter()
+    let items: Vec<serde_json::Value> = entries
+        .iter()
         .map(|(code, cnt)| serde_json::json!({"code": code, "count": cnt}))
         .collect();
     let body = serde_json::json!({"addresses": items});
-    (200, serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"addresses":[]}"#.to_vec()))
+    (
+        200,
+        serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"addresses":[]}"#.to_vec()),
+    )
 }
 
 /// GET /api/graph — serve the pre-computed topology snapshot from the stats store.
@@ -1428,8 +1508,7 @@ fn get_graph_snapshot(
     registry: &crate::estate_registry::EstateRegistry,
     stats_store: Option<&StatsStore>,
 ) -> (u16, Vec<u8>) {
-    const PENDING: &[u8] =
-        br#"{"nodes":[],"edges":[],"structurePending":true,"communities":[]}"#;
+    const PENDING: &[u8] = br#"{"nodes":[],"edges":[],"structurePending":true,"communities":[]}"#;
 
     let store = match stats_store {
         Some(s) => s,
@@ -1473,14 +1552,18 @@ fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry)
         "mountState": "mounted"
     }));
     // Extras keyed by UUID; sort for deterministic output.
-    let mut extra_uuids: Vec<String> = registry.extras.keys()
+    let mut extra_uuids: Vec<String> = registry
+        .extras
+        .keys()
         .filter(|u| u.to_string() != default_uuid)
         .map(|u| u.to_string())
         .collect();
     extra_uuids.sort();
     for uuid_str in &extra_uuids {
         let uuid_parsed = uuid::Uuid::parse_str(uuid_str).unwrap_or_default();
-        let name = registry.extras.get(&uuid_parsed)
+        let name = registry
+            .extras
+            .get(&uuid_parsed)
             .map(|e| e.estate_name.as_str())
             .unwrap_or(uuid_str.as_str());
         estates.push(serde_json::json!({
@@ -1490,7 +1573,10 @@ fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry)
     }
 
     let body = serde_json::json!({"hosted": estates});
-    (200, serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"hosted":[]}"#.to_vec()))
+    (
+        200,
+        serde_json::to_vec(&body).unwrap_or_else(|_| br#"{"hosted":[]}"#.to_vec()),
+    )
 }
 
 #[cfg(test)]

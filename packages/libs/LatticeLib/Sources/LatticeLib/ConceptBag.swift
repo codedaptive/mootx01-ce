@@ -5,8 +5,8 @@
 // encoder and the build-time signature producer (cookbook §7 runs it over a
 // code's label / title / article texts).
 //
-//   Step 1  tag — keep Noun/Verb tokens (WordClassTagger), plus any token that
-//           resolves to a Wikidata Q-ID concept (cookbook §3.2 relaxation:
+//   Step 1  tag — keep Noun/Verb tokens (WordClassTagger), plus trusted tokens
+//           that resolve to a Wikidata Q-ID concept (cookbook §3.2 relaxation:
 //           recovers named entities the POS tagger drops, decided from the
 //           pinned lexicon so it stays deterministic across platforms).
 //   Step 2  canonicalize — normalize + Porter2-stem each kept token, then look
@@ -45,16 +45,18 @@ public enum BagBuilder {
             let key = Stemmer.stem(Normalizer.normalize(token))
             guard !key.isEmpty else { continue }
             let concept = lexicon.entries[key]          // nil if not in the lexicon
-            // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR any token
-            // that resolves to a Wikidata Q-ID concept. The Q-ID path recovers
+            let bagConcept = LexiconKeyPolicy.conceptForBag(token: token, key: key, concept: concept)
+            // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR trusted
+            // tokens that resolve to a Wikidata Q-ID concept. The Q-ID path recovers
             // named entities the POS tagger mislabels/drops, and it decides
             // membership from the PINNED lexicon (deterministic, identical
             // build+runtime) rather than fragile cross-platform proper-noun
-            // tagging — so it adds coverage without risking the agreement property.
-            let isQID = concept?.hasPrefix("Q") ?? false
+            // tagging — so it adds coverage without risking the agreement
+            // property. Weak aliases stay as surfaces when POS admits them.
+            let isQID = bagConcept?.hasPrefix("Q") ?? false
             guard keepClasses.contains(LatticeLib.wordClass(token)) || isQID else { continue }
             // Step 3: accumulate (hit -> conceptID; miss kept via POS -> surface).
-            bag[concept ?? key, default: 0] += 1
+            bag[bagConcept ?? key, default: 0] += 1
         }
         return bag
     }
@@ -90,11 +92,12 @@ public enum BagBuilder {
             let key = Stemmer.stem(Normalizer.normalize(token))
             guard !key.isEmpty else { continue }
             let concept = lexicon.entries[key]
-            let isQID = concept?.hasPrefix("Q") ?? false
+            let bagConcept = LexiconKeyPolicy.conceptForBag(token: token, key: key, concept: concept)
+            let isQID = bagConcept?.hasPrefix("Q") ?? false
             // Use non-recording wordClass so novel user-memory tokens never
             // accumulate in the pool cache when recordNovel is false.
             guard keepClasses.contains(LatticeLib.wordClass(token, recordNovel: recordNovel)) || isQID else { continue }
-            bag[concept ?? key, default: 0] += 1
+            bag[bagConcept ?? key, default: 0] += 1
         }
         return bag
     }
@@ -126,10 +129,11 @@ public enum BagBuilder {
             let key = Stemmer.stem(Normalizer.normalize(token))
             guard !key.isEmpty else { continue }
             let concept = lexicon.entries[key]
-            let isQID = concept?.hasPrefix("Q") ?? false
+            let bagConcept = LexiconKeyPolicy.conceptForBag(token: token, key: key, concept: concept)
+            let isQID = bagConcept?.hasPrefix("Q") ?? false
             // Use the estate-specified tagger choice for novel-token classification.
             guard keepClasses.contains(LatticeLib.wordClass(token, tagger: taggerChoice)) || isQID else { continue }
-            bag[concept ?? key, default: 0] += 1
+            bag[bagConcept ?? key, default: 0] += 1
         }
         return bag
     }

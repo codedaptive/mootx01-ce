@@ -67,6 +67,11 @@ observer-sink    = { path = "../../../libs/ObserverSink/rust" }
 # from autonomic_governor.rs. App→lib path dep (downstream→upstream), no
 # inversion. Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
 lattice-lib      = { path = "../../../libs/LatticeLib/rust" }
+# eidetic-lib: maintenance FDC reclassification uses the same deterministic
+# text->anchor seam as GeniusLocusKit capture, through lookup_no_record so
+# estate audits do not populate the novel-token learning pool. Direct dep
+# avoids relying on genius-locus-kit's transitive dependency.
+eidetic-lib      = { path = "../../../libs/EideticLib/rust" }
 # queuekit: dream_runner.rs acquires the "dreaming" DrainLease (per-(estate,stream)
 # stampede prevention, ADR-021 Decision 7). QueueKit is already a transitive dep
 # via neuron-kit; added as a direct dep so dream_runner can name DrainLease explicitly.
