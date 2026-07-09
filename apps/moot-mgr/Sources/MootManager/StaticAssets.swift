@@ -1087,7 +1087,7 @@ details.panel[open] summary::before{content:"▼ "}
    vertically when the estate has more domains than fit, and horizontally
    when a label is wider than the column. */
 .topo-commpicker{
-  flex:0 0 280px; height:100%; display:flex; flex-direction:column;
+  flex:0 0 308px; height:100%; display:flex; flex-direction:column;
   background:var(--bg2); border:1px solid var(--border); border-radius:var(--r);
   padding:10px 12px; font-family:var(--font-m); font-size:12.5px; color:var(--muted);
   min-height:0; overflow:hidden;
@@ -2540,7 +2540,7 @@ import { OrbitControls } from '/OrbitControls.js';
   //   L3 — FDC community labels drawn at lobe centroids (proxy-enriched
   //        communities []{id, label, size}).
   //   L4 — optional strata view (#topoDimToggle): perspective projection with
-  //        centrality-derived depth (keystone/high-centrality near the
+  //        centrality-RANK-derived depth (keystone/high-centrality near the
   //        camera, periphery far — see brainAssignDepth), painter sort,
   //        depth fog, slow camera sway.
   //   L5 — radar-loop playback (#topoPlayBtn): event-indexed playhead over
@@ -2731,10 +2731,6 @@ import { OrbitControls } from '/OrbitControls.js';
   // Per-lobe resolved color ([r,g,b] by lobe rank) — set by buildRealBrainNodes,
   // read by brainCommCSS so legend swatches, hulls, and nodes stay in sync.
   let brainLobeRGB = Object.create(null);
-  // Community FDC code by content key (label) — set by buildRealBrainNodes,
-  // read by the right-click query builder. Keyed by label, not Louvain id,
-  // for the same reason as the picker: ids renumber every governor cycle.
-  let brainCodeByKey = Object.create(null);
   // Raw FDC code → community/frame label — set by buildRealBrainNodes (the
   // same map confidenceLabelText resolves lobe labels through), also read
   // by the V2-P2c selection panel's Drawer line to resolve a selected node's
@@ -2886,11 +2882,8 @@ import { OrbitControls } from '/OrbitControls.js';
     brainLobeLabels = Object.create(null);
     brainLobeRGB = Object.create(null);
     brainLobeConfidence = Object.create(null);
-    brainCodeByKey = Object.create(null);
     function commMeta(cid) {
-      var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
-      if (meta && meta.label && meta.code) brainCodeByKey[meta.label] = meta.code;
-      return meta;
+      return (communities || []).find(function (c) { return String(c.id) === String(cid); });
     }
     lobeIds.forEach(function (cid, rank) {
       var meta = commMeta(cid);
@@ -3799,26 +3792,71 @@ import { OrbitControls } from '/OrbitControls.js';
     renderSelectionPanel();
   }
 
+  // Per-edge-type neighbor ids touching `nodeId`, deduped within each type
+  // (a node can have both a tunnel and a kgFact edge to the same neighbor —
+  // that's two distinct facts, so it's kept in both lists). Keyed the same
+  // as EDGE_TYPE_DISPLAY/EDGE_TYPE_ORDER above so callers can iterate one
+  // vocabulary for both the visual legend and this query builder.
+  function nodeNeighborsByType(nodeId) {
+    var byType = { tunnel: [], kgFact: [], association: [], nmf_bond: [] };
+    brainEdges.forEach(function (e) {
+      if (e.src !== nodeId && e.tgt !== nodeId) return;
+      var other = e.src === nodeId ? e.tgt : e.src;
+      var list = byType[e.type];
+      if (list && list.indexOf(other) === -1) list.push(other);
+    });
+    return byType;
+  }
+
+  // Edge types that are console-DERIVED signals rather than an estate tunnel
+  // — the receiving AI must not read these as confirmed links (2026-07-09
+  // incident: a Codex session treated "directly connected memories" as
+  // persisted tunnels, found none via moot_connection_search/map, and had to
+  // caveat the discrepancy after the fact. The query itself must say this
+  // up front, not leave the receiving AI to discover it).
+  var QUERY_DERIVED_EDGE_TYPES = ["kgFact", "association", "nmf_bond"];
+
   // Paste-ready AI query for a node: "what is likely this node and its
   // neighbors?" Built entirely from on-wire metadata; the user's AI session
   // (with the MOOTx01 tools) does the actual retrieval under its own
-  // authorization. Neighbor list is capped to keep the prompt readable.
+  // authorization. Neighbors are grouped by edge type so the receiving AI
+  // knows which are real MOOT tunnels versus console-derived relations that
+  // may not exist as tunnels at all. Total neighbor list is capped to keep
+  // the prompt readable — plain language throughout, no console-internal
+  // jargon, since the receiving AI may be any model.
   function buildNodeQuery(node) {
     var NEIGHBOR_CAP = 12;
-    var adj = brainAdjacency[node.id] || [];
-    var neighbors = adj.slice(0, NEIGHBOR_CAP);
-    var domain = (node.commKey && node.commKey !== "(unlabeled)" && node.commKey !== "fragments")
-      ? node.commKey : null;
-    var code = domain ? brainCodeByKey[domain] : null;
+    var byType = nodeNeighborsByType(node.id);
+    var total = EDGE_TYPE_ORDER.reduce(function (n, t) { return n + byType[t].length; }, 0);
 
     var lines = [];
     lines.push("Using my MOOTx01 memory estate, look up the memory with id " + node.id +
                " (moot_memory_get) and tell me in plain language what it is.");
-    if (neighbors.length) {
-      lines.push("Then look up its directly connected memories: " + neighbors.join(", ") +
-                 (adj.length > neighbors.length
-                   ? " (plus " + (adj.length - neighbors.length) + " more not listed)."
-                   : "."));
+
+    if (total) {
+      var budget = NEIGHBOR_CAP;
+      var tunnelShown = byType.tunnel.slice(0, budget);
+      budget -= tunnelShown.length;
+      if (tunnelShown.length) {
+        lines.push("It is explicitly linked (real MOOT tunnels) to: " + tunnelShown.join(", ") + ".");
+      }
+      var derivedParts = [];
+      QUERY_DERIVED_EDGE_TYPES.forEach(function (t) {
+        var ids = byType[t];
+        if (!ids.length) return;
+        var take = ids.slice(0, budget);
+        budget -= take.length;
+        if (take.length) derivedParts.push(EDGE_TYPE_DISPLAY[t] + ": " + take.join(", "));
+      });
+      if (derivedParts.length) {
+        lines.push("The console also shows console-derived relations (semantic/classification " +
+                   "signals, which may not exist as tunnels in the estate — verify with " +
+                   "moot_connection_map before treating them as links): " + derivedParts.join("; ") + ".");
+      }
+      var shown = NEIGHBOR_CAP - budget;
+      if (total > shown) {
+        lines.push("(" + (total - shown) + " more neighbor(s) not listed here.)");
+      }
       lines.push("Explain what this node and its neighborhood are likely about as a group, " +
                  "and point out anything similar or related that is worth reading next " +
                  "(moot_connection_search or moot_memory_search can find those).");
@@ -3826,9 +3864,17 @@ import { OrbitControls } from '/OrbitControls.js';
       lines.push("It has no direct connections yet — after summarizing it, search for " +
                  "related memories (moot_memory_search) and suggest what it should link to.");
     }
-    if (domain) {
-      lines.push("Console context: the management console files it under the knowledge domain " +
-                 "“" + domain + "”" + (code ? " (classification code " + code + ")" : "") + ".");
+
+    if (node.code) {
+      if (node.code === "000") {
+        lines.push("The console's word-level classifier marked this node's wording as " +
+                   "unclassified (code 000).");
+      } else {
+        var label = brainCodeLabelMap[node.code];
+        lines.push("The console classifies its wording under code " + node.code +
+                   (label ? " (\"" + label + "\")" : "") +
+                   " — this reflects word-level classification, not necessarily the memory's topic.");
+      }
     }
     return lines.join("\n");
   }
@@ -4192,34 +4238,54 @@ import { OrbitControls } from '/OrbitControls.js';
     return 0.35 + 0.65 * Math.exp(-(age - BRAIN_HOUR_MS) / (7 * BRAIN_DAY_MS));
   }
 
-  // Structural depth: z3 ∈ [0,1] mapped directly from each node's own
-  // n.centrality (0..1, already on the wire — no derived proxy). High
-  // centrality (keystone/core) floats at z3≈0, low centrality (periphery)
-  // sinks toward z3≈1. Deterministic, O(N), no graph walk needed.
+  // Structural depth: z3 ∈ [0,1] derived from each node's RANK by centrality
+  // among the currently-rendered nodes (its percentile position), NOT from the
+  // raw centrality value. Highest-centrality node → z3≈0 (near camera); median
+  // → z3≈0.5 (mid-field); lowest → z3≈1 (far plane). Ties broken by node id so
+  // the mapping is fully deterministic for a given node set. O(N log N).
   //
-  // V2-P2b: this replaces a prior multi-source-BFS-from-top-centrality-
-  // keystones approach (hop distance from the top 2% of nodes by
-  // centrality) that approximated "keystone near, periphery far" only
-  // indirectly — a node's OWN centrality didn't set its own depth, only
-  // its graph distance from a small keystone seed set did, so a
-  // high-centrality node several hops from the nearest seed (e.g. in a
-  // sparse/disconnected structure) could still render deep. Direct
-  // centrality mapping ties depth to what the mission spec calls out:
-  // "keystone/core = near, periphery = far — n.centrality is already on
-  // every node." (Not an age-derived depth — despite the VIZ_V2 module
-  // doc's prior wording, this z-mapping has never used node age; only the
-  // L2 recencyFactor brightness channel does. That comment drift is fixed
-  // above in the module-level doc block.)
+  // Why rank and not the value: eigenvector centrality on the live estate is
+  // extremely concentrated — the giant component's hub carries almost all the
+  // mass and ~99% of nodes sit at a numerical floor (~1e-41 on the measured
+  // /api/graph payload). Mapping z3 = 1 - centrality therefore pinned ~99% of
+  // nodes to z3≈1 — one flat far plane (measured: 99.2% at z3>0.99, which is
+  // exactly the "everything at Z of 0" flatness this fix addresses). Rank
+  // percentile spreads the estate evenly across the full depth range no matter
+  // how skewed the raw distribution is, while preserving the structural
+  // meaning the spec calls out: keystone/core near, periphery far. Rank is
+  // computed over the CURRENT node set, so a content-filtered subset still
+  // fills the whole depth range.
+  //
+  // History: V2-P2b changed a multi-source-BFS-from-top-centrality-keystones
+  // scheme (hop distance from the top 2% by centrality) to a direct
+  // z3 = 1 - centrality mapping; TOPO-DEPTH-FLAT changes that direct mapping to
+  // the rank percentile above, because on the real distribution the direct
+  // mapping rendered flat. (This z-mapping has never used node age — only the
+  // L2 recencyFactor brightness channel does.)
   // Also sets birthMs for the L5 alive(t) playback filter.
   function brainAssignDepth(nowMs) {
     // Timestamp bookkeeping for L5 playback (independent of z-mapping).
     brainNodes.forEach(function (n) {
       n.birthMs = n.createdMs || n.lastMs || null;
     });
-    brainNodes.forEach(function (n) {
-      var c = n.centrality || 0;
-      n.z3 = 1 - Math.max(0, Math.min(1, c));
+    var N = brainNodes.length;
+    if (N === 0) return;
+    if (N === 1) { brainNodes[0].z3 = 0; return; }
+    // Sort a COPY by centrality descending; break ties by id ascending so the
+    // depth of every node is fully deterministic for a given node set — no
+    // Math.random, no dependence on wire or array order. Missing centrality
+    // degrades to 0, so a payload with no centrality field still spreads
+    // evenly by id rather than collapsing to a single plane.
+    var ordered = brainNodes.slice().sort(function (a, b) {
+      var d = (b.centrality || 0) - (a.centrality || 0);
+      if (d !== 0) return d;
+      return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
     });
+    // z3 = rank percentile in [0,1]: rank-0 (most central) floats nearest,
+    // rank-(N-1) sinks to the far plane, the median lands mid-field.
+    for (var i = 0; i < N; i++) {
+      ordered[i].z3 = i / (N - 1);
+    }
   }
 
   // Three.js handles projection and depth sorting natively via the GPU

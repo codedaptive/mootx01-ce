@@ -1,10 +1,10 @@
-# Develop daily regression — `make test` on develop, once a day, only if it moved.
+# Develop daily regression — `make test-full` on develop, once a day, only if it moved.
 #
-# The regression backstop. `make test` (every Swift package + every Rust crate)
-# is heavy, so it does NOT gate builds — it runs here, on a schedule, against
-# the active development branch, to catch anything that slipped through review.
-# The first step short-circuits when develop had no commits in the last day, so
-# a quiet develop doesn't burn a macOS runner for nothing.
+# The regression backstop. Local `make test` is the fast unit lane for TDD;
+# this scheduled job runs the explicit full sweep (unit + product + validation
+# + checks) against the active development branch to catch anything that slipped
+# through review. The first step short-circuits when develop had no commits in
+# the last day, so a quiet develop doesn't burn a macOS runner for nothing.
 #
 # candidate/1.0.x and stable/1.0.x do NOT run make test — candidate proves
 # installers work (candidate.yml); stable is a tagged snapshot of already-tested
@@ -38,7 +38,7 @@ jobs:
             echo "moved=true" >> "$GITHUB_OUTPUT"; echo "manual dispatch — running"; exit 0
           fi
           if [ -n "$(git log --since='24 hours ago' --oneline)" ]; then
-            echo "moved=true"  >> "$GITHUB_OUTPUT"; echo "develop moved in the last 24h — running make test"
+            echo "moved=true"  >> "$GITHUB_OUTPUT"; echo "develop moved in the last 24h — running make test-full"
           else
             echo "moved=false" >> "$GITHUB_OUTPUT"; echo "develop unchanged in the last 24h — skipping"
           fi
@@ -55,4 +55,4 @@ jobs:
         with:
           xcode-version: latest-stable
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - run: make test
+      - run: make test-full
