@@ -1471,6 +1471,10 @@ import { OrbitControls } from '/OrbitControls.js';
   // Per-lobe resolved color ([r,g,b] by lobe rank) — set by buildRealBrainNodes,
   // read by brainCommCSS so legend swatches, hulls, and nodes stay in sync.
   let brainLobeRGB = Object.create(null);
+  // Community FDC code by content key (label) — set by buildRealBrainNodes,
+  // read by the right-click query builder. Keyed by label, not Louvain id,
+  // for the same reason as the picker: ids renumber every governor cycle.
+  let brainCodeByKey = Object.create(null);
 
   // Node visual style by noun type — matches the substrate NounType enum:
   //   0=Drawer (gray matter), 1=Tunnel, 2=KGFact, 3=DiaryEntry (blue activation),
@@ -1607,8 +1611,11 @@ import { OrbitControls } from '/OrbitControls.js';
     // nothing for them.
     brainLobeLabels = Object.create(null);
     brainLobeRGB = Object.create(null);
+    brainCodeByKey = Object.create(null);
     function commMeta(cid) {
-      return (communities || []).find(function (c) { return String(c.id) === String(cid); });
+      var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
+      if (meta && meta.label && meta.code) brainCodeByKey[meta.label] = meta.code;
+      return meta;
     }
     lobeIds.forEach(function (cid, rank) {
       var meta = commMeta(cid);
@@ -1885,6 +1892,29 @@ import { OrbitControls } from '/OrbitControls.js';
       } else {
         selectBrainNode(null);
       }
+    });
+
+    // Right-click: raycaster hit → copy a paste-ready AI query about the node.
+    // The dashboard holds only metadata (drawer id, domain label, FDC code,
+    // neighbor ids) — the query is executed by the user's own AI session,
+    // which has the MOOTx01 tools and authorization to read content. Nothing
+    // crosses this surface that isn't already on the wire. A miss falls
+    // through to the browser's own context menu.
+    glCanvas.addEventListener('contextmenu', function (e) {
+      var rect = glCanvas.getBoundingClientRect();
+      brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      brainRaycaster.setFromCamera(brainPointer, brainCamera);
+      var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
+      if (!hits.length) return;
+      var node = brainNodes[hits[0].index];
+      if (!node || brainHidden(node)) return;
+      e.preventDefault();
+      selectBrainNode(node);   // highlight what the query refers to
+      copyText(buildNodeQuery(node), function (ok) {
+        topoToast(ok ? "Query copied — paste it into your AI to explore this memory"
+                     : "Could not access the clipboard");
+      });
     });
 
     // Escape clears selection.
@@ -2383,6 +2413,73 @@ import { OrbitControls } from '/OrbitControls.js';
         if (id2 !== node.id && !brainHop1[id2]) brainHop2[id2] = true;
       });
     });
+  }
+
+  // Paste-ready AI query for a node: "what is likely this node and its
+  // neighbors?" Built entirely from on-wire metadata; the user's AI session
+  // (with the MOOTx01 tools) does the actual retrieval under its own
+  // authorization. Neighbor list is capped to keep the prompt readable.
+  function buildNodeQuery(node) {
+    var NEIGHBOR_CAP = 12;
+    var adj = brainAdjacency[node.id] || [];
+    var neighbors = adj.slice(0, NEIGHBOR_CAP);
+    var domain = (node.commKey && node.commKey !== "(unlabeled)" && node.commKey !== "fragments")
+      ? node.commKey : null;
+    var code = domain ? brainCodeByKey[domain] : null;
+
+    var lines = [];
+    lines.push("Using my MOOTx01 memory estate, look up the memory with id " + node.id +
+               " (moot_memory_get) and tell me in plain language what it is.");
+    if (neighbors.length) {
+      lines.push("Then look up its directly connected memories: " + neighbors.join(", ") +
+                 (adj.length > neighbors.length
+                   ? " (plus " + (adj.length - neighbors.length) + " more not listed)."
+                   : "."));
+      lines.push("Explain what this node and its neighborhood are likely about as a group, " +
+                 "and point out anything similar or related that is worth reading next " +
+                 "(moot_connection_search or moot_memory_search can find those).");
+    } else {
+      lines.push("It has no direct connections yet — after summarizing it, search for " +
+                 "related memories (moot_memory_search) and suggest what it should link to.");
+    }
+    if (domain) {
+      lines.push("Console context: the management console files it under the knowledge domain " +
+                 "“" + domain + "”" + (code ? " (classification code " + code + ")" : "") + ".");
+    }
+    return lines.join("\n");
+  }
+
+  // Copy text to the clipboard; cb(ok). The async Clipboard API needs a
+  // trustworthy origin — the console is loopback (127.0.0.1), which browsers
+  // treat as secure — with a hidden-textarea execCommand fallback for the
+  // rest.
+  function copyText(text, cb) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { cb(true); },
+                                               function () { cb(copyTextFallback(text)); });
+    } else {
+      cb(copyTextFallback(text));
+    }
+  }
+  function copyTextFallback(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;left:-9999px;top:0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+
+  // Transient toast on the topology stage (bottom-center, auto-fades).
+  function topoToast(msg) {
+    var stage = $("#topoStage");
+    if (!stage) return;
+    var t = el("div", "topo-toast", msg);
+    stage.appendChild(t);
+    setTimeout(function () { t.remove(); }, 4200);
   }
 
   function stopBrainAnimation() {

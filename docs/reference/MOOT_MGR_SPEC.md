@@ -267,3 +267,14 @@ mid-selection must never collapse the available choices). The panel renders
 as a fixed right-hand column beside the canvas (never an overlay above it)
 and scrolls horizontally when a label exceeds the column width. Client-side
 only — no API surface.
+
+### Node query-to-clipboard (dashboard)
+
+Right-clicking a node copies a paste-ready natural-language query to the
+clipboard (and selects the node): it asks the user's own AI session to look
+up that memory by id, its hop-1 neighbors (capped list), and what the
+neighborhood is likely about, citing the MOOTx01 tools by name. The query is
+built entirely from metadata already on the wire (drawer id, domain label,
+classification code, neighbor ids) — retrieval of memory CONTENT happens in
+the user's AI session under its own authorization, never through this
+console. Content-safety boundary is unchanged; no API surface.

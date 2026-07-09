@@ -709,3 +709,12 @@ details.panel[open] summary::before{content:"▼ "}
 .mx-modal-title{font-family:var(--font-d); font-size:19px; color:var(--hi); margin-bottom:10px}
 .mx-modal-p{font-size:13.5px; line-height:1.65; color:var(--text); margin-bottom:10px}
 .mx-modal-close{margin-top:4px}
+
+/* Topology toast — transient confirmation chip (bottom-center of the stage). */
+.topo-toast{
+  position:absolute; left:50%; bottom:52px; transform:translateX(-50%);
+  background:rgba(6,7,14,.88); border:1px solid var(--border2); border-radius:999px;
+  color:var(--hi); font-family:var(--font-m); font-size:12px; padding:7px 16px;
+  pointer-events:none; white-space:nowrap; animation:feedfade 4.2s ease forwards;
+}
+@media (prefers-reduced-motion:reduce){ .topo-toast{animation:none} }
