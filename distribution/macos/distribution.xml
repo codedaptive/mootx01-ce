@@ -10,9 +10,18 @@
   Built by: productbuild - -distribution distribution.xml - -package-path ./pkgs mootx01.pkg
   Signed by: productsign - -sign "Developer ID Installer: Codedaptive, LLC (G94X5T5GK7)"
 -->
-<installer-gui-script minSpecVersion="2" hostArchitectures="arm64">
+<installer-gui-script minSpecVersion="2">
     <title>MOOTx01</title>
     <organization>com.codedaptive</organization>
+
+    <!-- hostArchitectures MUST live on this <options/> element. The
+         Distribution XML schema defines it here and Installer ignores it
+         anywhere else — it then assumes the package is Intel-only and
+         prompts Apple Silicon Macs to install Rosetta before opening it.
+         The value below is the template default; build-pkg.sh rewrites it
+         to the target arch at build time so the x86_64 pkg remains
+         installable on Intel Macs. -->
+    <options hostArchitectures="arm64" />
 
     <!-- Welcome, license, and conclusion panels -->
     <welcome    file="welcome.html"    mime-type="text/html" />

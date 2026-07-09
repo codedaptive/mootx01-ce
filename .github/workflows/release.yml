@@ -991,3 +991,69 @@ jobs:
           git add distribution/windows/winget/
           git commit -m "ci: update winget manifests to ${RELEASE_TAG} (automated)"
           git push
+
+  # ── Publish moot-memory to PyPI ─────────────────────────────────────────
+  # pip install moot-memory for Messages API users.
+  # Requires PYPI_API_TOKEN secret (scoped to the moot-memory project).
+  publish-pypi:
+    name: Publish moot-memory to PyPI
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build and publish
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "$PYPI_TOKEN" ]; then
+            echo "::warning::PYPI_API_TOKEN missing — skipping PyPI publish"
+            exit 0
+          fi
+          cd apps/moot-memory-adapter
+          # Sync version from release tag
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          pip install build twine
+          python -m build
+          twine upload dist/* --username __token__ --password "$PYPI_TOKEN" --non-interactive
+
+  # ── Submit to winget-pkgs (Microsoft community repository) ──────────────
+  # Opens a PR against microsoft/winget-pkgs so `winget install/upgrade`
+  # sees the new version. Requires WINGET_SUBMIT_PAT — a classic PAT with
+  # public_repo scope (fine-grained PATs cannot access repos outside the org).
+  submit-winget:
+    name: Submit to winget-pkgs
+    if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+    needs: [update-winget]
+    runs-on: windows-latest
+    steps:
+      - name: Submit via wingetcreate
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_SUBMIT_PAT }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if (-not $env:WINGET_PAT) {
+            Write-Host "::warning::WINGET_PUSH_PAT missing — skipping winget-pkgs submission"
+            exit 0
+          }
+          $VERSION = $env:RELEASE_TAG -replace '^v',''
+          $X86_URL = "https://github.com/codedaptive/mootx01-ce/releases/download/$($env:RELEASE_TAG)/mootx01-$VERSION-windows-x86_64-setup.exe"
+          $ARM_URL = "https://github.com/codedaptive/mootx01-ce/releases/download/$($env:RELEASE_TAG)/mootx01-$VERSION-windows-arm64-setup.exe"
+          # Download wingetcreate
+          Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/self-contained" -OutFile wingetcreate.exe
+          # Submit: creates a PR on microsoft/winget-pkgs.
+          # The package identifier is POSITIONAL — wingetcreate has no --id
+          # option and exits 1 with "Option 'id' is unknown" if given one.
+          .\wingetcreate.exe update `
+            Codedaptive.MOOTx01 `
+            --version $VERSION `
+            --urls $X86_URL $ARM_URL `
+            --token $env:WINGET_PAT `
+            --submit
+        shell: pwsh

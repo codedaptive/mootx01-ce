@@ -321,20 +321,30 @@ struct CommunityEnrichmentTests {
         #expect(obj["label"] is NSNull)
     }
 
-    @Test("dominantUdcCode never crosses to the browser — only id/label/size")
-    func dominantUdcCodeDropped() throws {
+    @Test("dominantUdcCode crosses as `code` — wire shape is id/code/label/size")
+    func dominantUdcCodePassedThrough() throws {
+        // The community's classification code crosses the surface on the same
+        // basis as /api/lattice (a pure function of the pinned public frame,
+        // never memory content); the dashboard derives community colors from
+        // its digits. Only the wire key changes: dominantUdcCode → code.
         let enriched = MootManager.enrichCommunities([
             ARIACommunityDescriptor(id: 3, size: 7, dominantUdcCode: "000")
         ])
         let obj = try jsonDict(try #require(enriched.first))
-        #expect(Set(obj.keys) == ["id", "label", "size"])
+        #expect(Set(obj.keys) == ["id", "code", "label", "size"])
         #expect((obj["id"] as? Int) == 3)
+        #expect((obj["code"] as? String) == "000")
         #expect((obj["size"] as? Int) == 7)
 
-        // Serialized bytes carry no trace of the raw classification code key.
+        // The ARIA-side key never leaks; an empty code becomes an explicit null.
         let data = try APIJSON.encode(enriched)
         let text = String(data: data, encoding: .utf8) ?? ""
         #expect(!text.contains("dominantUdcCode"))
+        let emptied = MootManager.enrichCommunities([
+            ARIACommunityDescriptor(id: 4, size: 1, dominantUdcCode: "")
+        ])
+        let emptyObj = try jsonDict(try #require(emptied.first))
+        #expect(emptyObj["code"] is NSNull)
     }
 
     @Test("StoredGraphPayload descriptors with a missing dominantUdcCode enrich to nil label")

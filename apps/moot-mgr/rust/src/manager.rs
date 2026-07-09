@@ -42,9 +42,9 @@ use cognition_kit::capability::shipped_capabilities;
 use observer_sink::{DropboxMetricAggregate, EventRow, MetricRow, StatsStore};
 
 use crate::api_payloads::{
-    ConfigPayload, DropboxSummaryPayload, EstatePayload, EstatesPayload, EventPayload,
-    EventsPayload, GraphAnalyticPayload, GraphCommunityPayload, GraphPayload, ServerPayload,
-    StoredGraphPayload,
+    AriaCommunityDescriptor, ConfigPayload, DropboxSummaryPayload, EstatePayload, EstatesPayload,
+    EventPayload, EventsPayload, GraphAnalyticPayload, GraphCommunityPayload, GraphPayload,
+    ServerPayload, StoredGraphPayload,
 };
 use crate::status_report::{GroupCount, StatusReport};
 
@@ -593,8 +593,10 @@ impl MootManager {
     /// Structure (nodes/edges) is read from the shared stats store's
     /// `topology_snapshots` table (the autonomic governor writes a row per estate
     /// on its cadence). When no snapshot is available yet, `structure_pending` is
-    /// true with an honest enumeration. The analytic overlay (analytics/
-    /// communities) is always sourced locally from the VizGraph signal samples.
+    /// true with an honest enumeration. Analytics are sourced locally from the
+    /// VizGraph signal samples; communities prefer the snapshot's governor
+    /// descriptors enriched via `enrich_communities` (VIZ_V2 L3), keeping the
+    /// count-only local rollup when the snapshot predates the communities field.
     /// Mirrors Swift `MootManager.graphPayload(now:estate:)`.
     pub fn graph_payload(
         &self,
@@ -691,6 +693,7 @@ impl MootManager {
             for _ in 0..count {
                 communities.push(GraphCommunityPayload {
                     id: communities.len() as i64,
+                    code: None,
                     label: None,
                     size: 0,
                 });
@@ -721,6 +724,15 @@ impl MootManager {
                     structure_pending = false;
                     generated_ts = stored.generated_ts;
                     pending = Vec::new();
+                    // VIZ_V2 L3: prefer the governor's real community
+                    // descriptors, enriched with FDC labels (dominantUdcCode
+                    // passed through as `code` — it drives the digit-derived
+                    // community color). Keep the local count-only rollup when
+                    // the snapshot predates the communities field. Mirrors the
+                    // Swift host's enrichCommunities path.
+                    if let Some(raw) = &stored.communities {
+                        communities = Self::enrich_communities(raw);
+                    }
                 }
             }
         }
@@ -789,6 +801,37 @@ impl MootManager {
                 .unwrap_or_else(|| "all".to_string()),
             snapshot_ts: epoch_to_iso8601(now_epoch),
         })
+    }
+
+    /// Enrich governor community descriptors to the browser wire shape
+    /// (VIZ_V2 L3): `{id, size, dominantUdcCode}` → `{id, code, label, size}`.
+    ///
+    /// The dominant UDC code is resolved to its FDC heading label via
+    /// `Fdc::label` (bundled taxonomy — never estate content) and the code
+    /// itself is passed through: the dashboard derives the community color
+    /// from its digits (hundreds → hue, tens → shade, ones → brightness).
+    /// The code crosses this surface on the same basis as `/api/lattice`,
+    /// which already serves raw classification codes — a code is a pure
+    /// function of the pinned public frame, never memory content. An empty
+    /// or absent code yields explicit nulls. Governor order is preserved.
+    /// Mirrors Swift `MootManager.enrichCommunities(_:)`.
+    fn enrich_communities(raw: &[AriaCommunityDescriptor]) -> Vec<GraphCommunityPayload> {
+        raw.iter()
+            .map(|d| {
+                let code = d
+                    .dominant_udc_code
+                    .as_deref()
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_owned);
+                let label = code.as_deref().and_then(lattice_lib::Fdc::label);
+                GraphCommunityPayload {
+                    id: d.id,
+                    code,
+                    label,
+                    size: d.size,
+                }
+            })
+            .collect()
     }
 
     // MARK: - Lexicon payload (GET /api/lexicon)
@@ -1335,5 +1378,71 @@ mod tests {
         let meta = std::fs::metadata(&dir).expect("dir must exist after start");
         let mode = meta.mode() & 0o777;
         assert_eq!(mode, 0o700, "store dir must be 0700; got {:o}", mode);
+    }
+
+    // ── community enrichment (VIZ_V2 L3) — mirrors Swift CommunityEnrichmentTests ──
+
+    #[test]
+    fn enrich_communities_passes_code_and_resolves_own_label() {
+        if !lattice_lib::Fdc::is_available() {
+            return;
+        }
+        let enriched = MootManager::enrich_communities(&[AriaCommunityDescriptor {
+            id: 3,
+            size: 7,
+            dominant_udc_code: Some("000".into()),
+        }]);
+        assert_eq!(enriched.len(), 1);
+        assert_eq!(enriched[0].id, 3);
+        assert_eq!(enriched[0].size, 7);
+        assert_eq!(enriched[0].code.as_deref(), Some("000"));
+        // Label is the code's OWN frame label (must agree with Fdc::label).
+        assert_eq!(enriched[0].label, lattice_lib::Fdc::label("000"));
+        assert!(enriched[0].label.is_some());
+    }
+
+    #[test]
+    fn enrich_communities_empty_or_absent_code_yields_nulls() {
+        let enriched = MootManager::enrich_communities(&[
+            AriaCommunityDescriptor { id: 0, size: 5, dominant_udc_code: Some("".into()) },
+            AriaCommunityDescriptor { id: 1, size: 2, dominant_udc_code: None },
+        ]);
+        assert!(enriched[0].code.is_none() && enriched[0].label.is_none());
+        assert!(enriched[1].code.is_none() && enriched[1].label.is_none());
+    }
+
+    #[test]
+    fn enriched_community_wire_shape_is_id_code_label_size() {
+        // The wire object always carries all four keys, with explicit nulls
+        // for absent code/label — and the ARIA-side key name never leaks.
+        let enriched = MootManager::enrich_communities(&[AriaCommunityDescriptor {
+            id: 4,
+            size: 1,
+            dominant_udc_code: None,
+        }]);
+        let json = serde_json::to_value(&enriched[0]).expect("serialize");
+        let obj = json.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["code", "id", "label", "size"]);
+        assert!(obj["code"].is_null());
+        assert!(obj["label"].is_null());
+        let text = serde_json::to_string(&enriched).expect("serialize");
+        assert!(!text.contains("dominantUdcCode"));
+    }
+
+    #[test]
+    fn stored_snapshot_communities_decode_and_enrich() {
+        // Snapshot envelope with governor descriptors decodes tolerantly
+        // (older daemons omit dominantUdcCode) and enriches to wire shape.
+        let wire = r#"{"nodes":[],"edges":[],"structurePending":false,
+                       "communities":[{"id":0,"size":4,"dominantUdcCode":"000"},
+                                      {"id":1,"size":2}]}"#;
+        let stored: StoredGraphPayload = serde_json::from_str(wire).expect("decode");
+        let raw = stored.communities.expect("communities present");
+        let enriched = MootManager::enrich_communities(&raw);
+        assert_eq!(enriched.len(), 2);
+        assert_eq!(enriched[0].code.as_deref(), Some("000"));
+        assert!(enriched[1].code.is_none());
     }
 }

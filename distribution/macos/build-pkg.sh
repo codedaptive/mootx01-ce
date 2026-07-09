@@ -109,9 +109,33 @@ pkgbuild \
 echo "Component package: $(du -h "$COMPONENT" | cut -f1)"
 
 # 4. Build the distribution (product) package with branded panels.
+#
+# The Distribution XML is generated per-arch: hostArchitectures on the
+# <options/> element (the only place Installer reads it) must name the
+# payload's architecture, or Installer treats the package as Intel-only
+# and prompts Apple Silicon Macs to install Rosetta. Rewritten with an
+# XML parser, never sed/regex (.claude/rules/no-regex-structured-files.md).
+# python3 is safe here: build-pkg.sh only runs on CI runners and dev
+# machines with Xcode tools, never on end-user Macs (unlike postinstall).
+DIST_XML="$WORK/distribution.xml"
+python3 - "$DIST_DIR/distribution.xml" "$DIST_XML" "$ARCH" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+src, dst, arch = sys.argv[1], sys.argv[2], sys.argv[3]
+tree = ET.parse(src)
+options = tree.getroot().find("options")
+if options is None:
+    raise SystemExit("distribution.xml: missing <options/> element "
+                     "(hostArchitectures anchor) — refusing to build a "
+                     "pkg that would prompt for Rosetta")
+options.set("hostArchitectures", arch)
+tree.write(dst, encoding="utf-8", xml_declaration=True)
+PY
+
 UNSIGNED="$WORK/mootx01-unsigned.pkg"
 productbuild \
-    --distribution "$DIST_DIR/distribution.xml" \
+    --distribution "$DIST_XML" \
     --resources "$DIST_DIR/resources" \
     --package-path "$WORK" \
     "$UNSIGNED"

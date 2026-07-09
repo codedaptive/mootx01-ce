@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moot-memory"
+version = "1.0.24"
+description = "Drop-in /memories backend with governance for the Anthropic memory_20250818 tool"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "Codedaptive"}]
+keywords = ["anthropic", "claude", "memory", "mcp", "mootx01", "ai-memory"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40.0"]
+
+[project.urls]
+Homepage = "https://github.com/codedaptive/mootx01-ce"
+Repository = "https://github.com/codedaptive/mootx01-ce"
+Documentation = "https://github.com/codedaptive/mootx01-ce/tree/stable/1.0.x/apps/moot-memory-adapter"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["moot_memory*"]

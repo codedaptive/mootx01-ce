@@ -160,11 +160,12 @@ struct GraphAPITests {
         let communities = obj["communities"] as? [[String: Any]] ?? []
         // Seeded community.assignment value = 3 → three legend entries for "home".
         #expect(communities.count == 3)
-        // Wire shape is {id, label, size} (VIZ_V2 L3). The local fallback knows
-        // only the count: label is an explicit null (no udcCode locally) and
-        // size is 0 (member counts unknown without ARIA structure).
+        // Wire shape is {id, code, label, size} (VIZ_V2 L3). The local fallback
+        // knows only the count: code and label are explicit nulls (no udcCode
+        // locally) and size is 0 (member counts unknown without ARIA structure).
         let row = try #require(communities.first)
-        #expect(Set(row.keys) == ["id", "label", "size"])
+        #expect(Set(row.keys) == ["id", "code", "label", "size"])
+        #expect(row["code"] is NSNull)
         #expect(row["label"] is NSNull)
         #expect((row["size"] as? Int) == 0)
         // Ids are a stable running index across the fallback rollup.

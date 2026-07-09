@@ -138,10 +138,10 @@ obtain the ancestor chain without reaching into `FDCFrame`/`FdcFrame` directly;
 the decimal hierarchy math lives in LatticeLib only.
 
 `label(for:)` / `label()` resolves a UDC/MDCC decimal code to its human-readable
-frame label. For integer codes (no `.`), the function performs a parent walk via
-`FDC.decimalParent` / `Fdc::FdcFrame::decimal_parent` before looking up in the
-frame, because the bundled frame only stores three-digit integer entries (e.g.
-`"006"`, not `"6"`). Returns `nil`/`None` for unknown codes or empty input.
+frame label. Every code resolves to its OWN frame label — never an ancestor's —
+so sibling codes listed together (651, 652, 657 …) stay distinguishable; the
+frame ships a distinct label per code. Returns `nil`/`None` for unknown codes
+or empty input.
 
 #### `QIDClosure` / `qid_closure`
 
@@ -741,8 +741,8 @@ consumers use the `FDC`/`Fdc` runtime façade rather than reaching into
 `FDCFrame`/`FdcFrame` directly, and the decimal hierarchy math lives only in
 LatticeLib (Gate 2).
 
-`FDC.label(for:)` / `Fdc::label` (frame label lookup by code, including
-integer-code parent walk) is present in both ports and test-bound.
+`FDC.label(for:)` / `Fdc::label` (frame label lookup by code — every code
+resolves to its own frame label) is present in both ports and test-bound.
 
 Three rows that were previously marked DRIFT are now Confirmed:
 `NovelTokenCache`, `PoolEntry`, and `PoolSubmission`. The Rust port

@@ -67,6 +67,10 @@ packages/.audit-flagged
 # Local-only directories (any depth) — not pushed upstream
 _sandbox*/
 .claude*/
+# …except the plugin's Claude Code marketplace manifest dir: that is shipped
+# product content (publish-plugin.sh reads the plugin version from it), not
+# local agent config.
+!distribution/plugin/.claude-plugin/
 
 # Maintainer dev-bootstrap drop-ins (EE agent system reached via symlink for
 # v1.0.x bug-fix work — see ee-edition/tools/ce-dev-setup.sh). Never committed to

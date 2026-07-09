@@ -114,15 +114,17 @@ struct FDCRuntimeTests {
         #expect(FDC.label(for: "999.99999") == nil)
     }
 
-    @Test("label integer code walks to parent")
-    func labelIntegerWalksToParent() {
-        // 3-digit integer codes walk up one level for a cleaner heading.
-        // "006" (a leaf integer code) should walk to parent "000" and return
-        // the same label as querying "000" directly — verifying the walk path.
+    @Test("label integer code returns own label")
+    func labelIntegerReturnsSelf() {
+        // Integer codes resolve to their OWN frame label, never an ancestor's —
+        // sibling codes listed together must stay distinguishable. "006" and its
+        // parent "000" carry distinct labels in the frame, so the two lookups
+        // must differ.
         let leafLabel = FDC.label(for: "006")
         let parentLabel = FDC.label(for: "000")
         #expect(leafLabel != nil)
-        #expect(leafLabel == parentLabel)
+        #expect(parentLabel != nil)
+        #expect(leafLabel != parentLabel)
     }
 
     @Test("label decimal code returns own label")

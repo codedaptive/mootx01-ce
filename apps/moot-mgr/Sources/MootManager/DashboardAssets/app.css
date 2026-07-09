@@ -252,17 +252,6 @@ body::before{
 .topo-legend .lswatches{display:flex; gap:4px; flex-wrap:wrap; margin-top:2px}
 .topo-legend .lsw{width:11px; height:11px; border-radius:3px}
 
-/* Node count — top-left corner chip (synthetic and live paths) */
-.topo-nodecnt{
-  position:absolute; top:14px; left:14px; font-family:var(--font-m); font-size:10px;
-  color:var(--muted); letter-spacing:.06em; pointer-events:none;
-}
-.topo-nodecnt strong{color:var(--hi); font-weight:500}
-/* Watermark — top-right corner label (synthetic path only) */
-.topo-watermark{
-  position:absolute; top:14px; right:14px; font-family:var(--font-m); font-size:10px;
-  color:var(--muted); letter-spacing:.08em; opacity:.5; pointer-events:none;
-}
 /* Static legend sections (PoC-spec style: Node types / Activity / Edges) */
 .topo-lsect{
   font-size:9px; font-family:var(--font-m); color:var(--muted); text-transform:uppercase;
@@ -273,8 +262,7 @@ body::before{
 .topo-ldot{width:8px; height:8px; border-radius:50%; flex:none}
 .topo-lline{width:16px; height:1px; flex:none}
 /* topology pending overlay — analytics-present variant (topo-pending--has-analytics):
-   scrollable top-aligned panel. Overlay is hidden on the no-analytics synthetic path so
-   the brain canvas is the hero. When analytics are present the dark tint makes text readable. */
+   scrollable top-aligned panel. The dark tint makes text readable over the canvas. */
 .topo-pending--has-analytics {
   justify-content: flex-start;
   align-items: flex-start;
@@ -662,25 +650,36 @@ details.panel[open] summary::before{content:"▼ "}
   .phead{font-size:16px}
 }
 
-/* Content picker (top-right under controls): check/uncheck knowledge domains.
-   Same chrome family as .topo-legend; scrolls when the estate has many. */
+/* Stage + content-picker layout: the picker is a proper right-hand column
+   beside the canvas, never an overlay floating on top of it. The stage keeps
+   the explicit viewport height; the column stretches to match. */
+.topo-row{display:flex; gap:12px; align-items:stretch}
+.topo-row .topo-stage{flex:1 1 auto; min-width:0}
+
+/* Content picker (right-hand column): check/uncheck knowledge domains.
+   Rows scroll vertically when the estate has many domains and horizontally
+   when a label is wider than the column. */
 .topo-commpicker{
-  position:absolute; right:14px; top:14px; display:flex; flex-direction:column;
-  background:rgba(6,7,14,.72); border:1px solid var(--border); border-radius:var(--rsm);
-  padding:8px 10px; font-family:var(--font-m); font-size:10.5px; color:var(--muted);
-  max-width:280px; max-height:46%; overflow:hidden;
+  flex:0 0 280px; display:flex; flex-direction:column;
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--r);
+  padding:10px 12px; font-family:var(--font-m); font-size:12.5px; color:var(--muted);
+  min-height:0; overflow:hidden;
 }
+.topo-commpicker[hidden]{display:none}
 .topo-commpicker .cp-head{display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:6px}
-.topo-commpicker .cp-title{font-weight:700; color:var(--hi); letter-spacing:.6px; text-transform:uppercase; font-size:9.5px}
+.topo-commpicker .cp-title{font-weight:700; color:var(--hi); letter-spacing:.6px; text-transform:uppercase; font-size:11.5px}
 .topo-commpicker .cp-all{
   background:none; border:1px solid var(--border); border-radius:4px; color:var(--muted);
-  font:inherit; font-size:9.5px; padding:2px 8px; cursor:pointer;
+  font:inherit; font-size:11.5px; padding:2px 8px; cursor:pointer;
 }
 .topo-commpicker .cp-all[aria-pressed="true"]{color:var(--accent); border-color:var(--accent)}
-.topo-commpicker .cp-list{overflow-y:auto; display:flex; flex-direction:column; gap:2px; min-height:0}
+/* overflow-x on the list (not per row) gives one shared horizontal scrollbar
+   when any label exceeds the column width; rows size to their content so no
+   label is ever ellipsized away. */
+.topo-commpicker .cp-list{overflow-y:auto; overflow-x:auto; display:flex; flex-direction:column; gap:2px; min-height:0}
 .topo-commpicker .cp-row{
   display:flex; align-items:center; gap:7px; padding:2px 4px; border-radius:4px; cursor:pointer;
-  min-height:22px; /* compact rows; the panel is dense by design */
+  min-height:24px; min-width:max-content;
 }
 .topo-commpicker .cp-row:hover{background:rgba(232,234,240,.06)}
 .topo-commpicker .cp-row.off{opacity:.42}
@@ -689,10 +688,33 @@ details.panel[open] summary::before{content:"▼ "}
 }
 .topo-commpicker .cp-box.on{background:var(--accent); border-color:var(--accent)}
 .topo-commpicker .cp-dot{width:9px; height:9px; border-radius:50%; flex:none}
-.topo-commpicker .cp-label{
-  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--hi);
-}
-.topo-commpicker .cp-size{color:var(--muted); flex:none}
+.topo-commpicker .cp-label{flex:1; white-space:nowrap; color:var(--hi)}
+.topo-commpicker .cp-size{color:var(--muted); flex:none; margin-left:8px}
 
 /* Theme toggle — compact icon button in the topbar right cluster. */
 .btn-theme{font-size:15px; line-height:1; padding:4px 10px; margin-right:10px}
+
+/* "What are these codes?" explainer — trigger buttons + modal. */
+.btn-what{margin-left:auto; font-size:11px; padding:3px 10px}
+.cp-what{margin-bottom:6px; align-self:flex-start}
+.mx-modal-backdrop{
+  position:fixed; inset:0; z-index:200; display:grid; place-items:center;
+  background:rgba(6,7,14,.66); padding:24px;
+}
+.mx-modal{
+  max-width:520px; max-height:80vh; overflow-y:auto;
+  background:var(--bg2); border:1px solid var(--border2); border-radius:var(--r);
+  padding:20px 22px; box-shadow:0 18px 60px rgba(0,0,0,.5);
+}
+.mx-modal-title{font-family:var(--font-d); font-size:19px; color:var(--hi); margin-bottom:10px}
+.mx-modal-p{font-size:13.5px; line-height:1.65; color:var(--text); margin-bottom:10px}
+.mx-modal-close{margin-top:4px}
+
+/* Topology toast — transient confirmation chip (bottom-center of the stage). */
+.topo-toast{
+  position:absolute; left:50%; bottom:52px; transform:translateX(-50%);
+  background:rgba(6,7,14,.88); border:1px solid var(--border2); border-radius:999px;
+  color:var(--hi); font-family:var(--font-m); font-size:12px; padding:7px 16px;
+  pointer-events:none; white-space:nowrap; animation:feedfade 4.2s ease forwards;
+}
+@media (prefers-reduced-motion:reduce){ .topo-toast{animation:none} }

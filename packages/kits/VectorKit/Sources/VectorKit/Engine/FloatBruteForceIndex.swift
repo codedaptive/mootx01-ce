@@ -485,7 +485,8 @@ extension ResidentVectorArray {
     /// Only FloatBruteForceIndex calls this; it guards tombstone and range
     /// before the call.
     fileprivate func vector_bytesUnchecked(at i: Int, stride: Int) -> Data {
-        let start = i * stride
+        let base = storage.startIndex
+        let start = base + i * stride
         return storage[start..<(start + stride)]
     }
 }
