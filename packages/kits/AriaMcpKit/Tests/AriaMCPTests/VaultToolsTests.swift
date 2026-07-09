@@ -220,8 +220,14 @@ struct VaultToolsTests {
         #expect(pre.contains("no export manifest"))
 
         // export starts the background Task and returns a job_id immediately.
+        // CAND-032: the default scope (`exportable`) only exports drawers
+        // explicitly marked public; `capture` drawers are born private, so
+        // without `scope: believed` this export writes zero notes and the
+        // manifest honestly reports noteCount 0 (same fix as the Rust
+        // round-trip test in dispatch_tests.rs).
         let exportLaunch = try await dispatcher.dispatch(
-            name: "moot_vault_export", arguments: args(["vaultPath": vault.path]))
+            name: "moot_vault_export",
+            arguments: args(["vaultPath": vault.path, "scope": "believed"]))
         let exportJobID = try extractJobID(from: exportLaunch)
 
         // Wait until the background Task finishes writing the vault + manifest.
