@@ -1371,7 +1371,7 @@ import { OrbitControls } from '/OrbitControls.js';
   //   L3 — FDC community labels drawn at lobe centroids (proxy-enriched
   //        communities []{id, label, size}).
   //   L4 — optional strata view (#topoDimToggle): perspective projection with
-  //        centrality-derived depth (keystone/high-centrality near the
+  //        centrality-RANK-derived depth (keystone/high-centrality near the
   //        camera, periphery far — see brainAssignDepth), painter sort,
   //        depth fog, slow camera sway.
   //   L5 — radar-loop playback (#topoPlayBtn): event-indexed playhead over
@@ -3069,34 +3069,54 @@ import { OrbitControls } from '/OrbitControls.js';
     return 0.35 + 0.65 * Math.exp(-(age - BRAIN_HOUR_MS) / (7 * BRAIN_DAY_MS));
   }
 
-  // Structural depth: z3 ∈ [0,1] mapped directly from each node's own
-  // n.centrality (0..1, already on the wire — no derived proxy). High
-  // centrality (keystone/core) floats at z3≈0, low centrality (periphery)
-  // sinks toward z3≈1. Deterministic, O(N), no graph walk needed.
+  // Structural depth: z3 ∈ [0,1] derived from each node's RANK by centrality
+  // among the currently-rendered nodes (its percentile position), NOT from the
+  // raw centrality value. Highest-centrality node → z3≈0 (near camera); median
+  // → z3≈0.5 (mid-field); lowest → z3≈1 (far plane). Ties broken by node id so
+  // the mapping is fully deterministic for a given node set. O(N log N).
   //
-  // V2-P2b: this replaces a prior multi-source-BFS-from-top-centrality-
-  // keystones approach (hop distance from the top 2% of nodes by
-  // centrality) that approximated "keystone near, periphery far" only
-  // indirectly — a node's OWN centrality didn't set its own depth, only
-  // its graph distance from a small keystone seed set did, so a
-  // high-centrality node several hops from the nearest seed (e.g. in a
-  // sparse/disconnected structure) could still render deep. Direct
-  // centrality mapping ties depth to what the mission spec calls out:
-  // "keystone/core = near, periphery = far — n.centrality is already on
-  // every node." (Not an age-derived depth — despite the VIZ_V2 module
-  // doc's prior wording, this z-mapping has never used node age; only the
-  // L2 recencyFactor brightness channel does. That comment drift is fixed
-  // above in the module-level doc block.)
+  // Why rank and not the value: eigenvector centrality on the live estate is
+  // extremely concentrated — the giant component's hub carries almost all the
+  // mass and ~99% of nodes sit at a numerical floor (~1e-41 on the measured
+  // /api/graph payload). Mapping z3 = 1 - centrality therefore pinned ~99% of
+  // nodes to z3≈1 — one flat far plane (measured: 99.2% at z3>0.99, which is
+  // exactly the "everything at Z of 0" flatness this fix addresses). Rank
+  // percentile spreads the estate evenly across the full depth range no matter
+  // how skewed the raw distribution is, while preserving the structural
+  // meaning the spec calls out: keystone/core near, periphery far. Rank is
+  // computed over the CURRENT node set, so a content-filtered subset still
+  // fills the whole depth range.
+  //
+  // History: V2-P2b changed a multi-source-BFS-from-top-centrality-keystones
+  // scheme (hop distance from the top 2% by centrality) to a direct
+  // z3 = 1 - centrality mapping; TOPO-DEPTH-FLAT changes that direct mapping to
+  // the rank percentile above, because on the real distribution the direct
+  // mapping rendered flat. (This z-mapping has never used node age — only the
+  // L2 recencyFactor brightness channel does.)
   // Also sets birthMs for the L5 alive(t) playback filter.
   function brainAssignDepth(nowMs) {
     // Timestamp bookkeeping for L5 playback (independent of z-mapping).
     brainNodes.forEach(function (n) {
       n.birthMs = n.createdMs || n.lastMs || null;
     });
-    brainNodes.forEach(function (n) {
-      var c = n.centrality || 0;
-      n.z3 = 1 - Math.max(0, Math.min(1, c));
+    var N = brainNodes.length;
+    if (N === 0) return;
+    if (N === 1) { brainNodes[0].z3 = 0; return; }
+    // Sort a COPY by centrality descending; break ties by id ascending so the
+    // depth of every node is fully deterministic for a given node set — no
+    // Math.random, no dependence on wire or array order. Missing centrality
+    // degrades to 0, so a payload with no centrality field still spreads
+    // evenly by id rather than collapsing to a single plane.
+    var ordered = brainNodes.slice().sort(function (a, b) {
+      var d = (b.centrality || 0) - (a.centrality || 0);
+      if (d !== 0) return d;
+      return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
     });
+    // z3 = rank percentile in [0,1]: rank-0 (most central) floats nearest,
+    // rank-(N-1) sinks to the far plane, the median lands mid-field.
+    for (var i = 0; i < N; i++) {
+      ordered[i].z3 = i / (N - 1);
+    }
   }
 
   // Three.js handles projection and depth sorting natively via the GPU
