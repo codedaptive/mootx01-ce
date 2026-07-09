@@ -279,6 +279,42 @@ struct PermissionsWriterTests {
         #expect(second == 0)
     }
 
+    @Test("migrateTiers never loosens a user-set ask on a mutation or destructive tool")
+    func migrateTiersPreservesMutationAsk() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // Every mutation-class tool sits at ask (its shipped tier) and one
+        // destructive tool was user-moved from deny to ask. Convergence must
+        // not loosen ANY of them toward allow: mutation tools converge onto
+        // ask (no-op) and the destructive tool converges onto deny — a
+        // tightening, never a loosening. This pins the Rule 2 invariant that
+        // ask→allow movement exists ONLY for allow-class (read/additive)
+        // fossils.
+        let existing: [String: Any] = [
+            "permissions": [
+                "ask": [
+                    "mcp__mootx01__moot_withdraw_memory",
+                    "mcp__mootx01__moot_reclassify_fdc",
+                    "mcp__mootx01__moot_erase_memory",
+                ]
+            ]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.migrateTiers(at: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let ask = perms["ask"] as? [String] ?? []
+        #expect(!allow.contains("mcp__mootx01__moot_withdraw_memory"), "mutation ask must never loosen to allow")
+        #expect(!allow.contains("mcp__mootx01__moot_reclassify_fdc"), "mutation ask must never loosen to allow")
+        #expect(!allow.contains("mcp__mootx01__moot_erase_memory"), "destructive ask must never loosen to allow")
+        #expect(ask.contains("mcp__mootx01__moot_withdraw_memory"))
+        #expect(ask.contains("mcp__mootx01__moot_reclassify_fdc"))
+    }
+
     @Test("migrateTiers never moves an entry the user placed in deny (deny is sacred)")
     func migrateTiersPreservesUserDeny() throws {
         let dir = try makeSandboxDir()

@@ -302,6 +302,15 @@ public enum PermissionsWriter {
                 let entry = "\(prefix)\(tool)"
                 guard let existingTier = currentTier[entry] else { continue } // absent — mergeTiered's job
                 guard existingTier != .deny else { continue }                 // Rule 1: deny is sacred
+                // Rule 2 (ask convergence): an entry sitting at ask converges
+                // onto the shipped tier. This loosens ask→allow ONLY for
+                // allow-class tools (reads + additive writes) — the class an
+                // old default fossilized at ask, which made moot unusable
+                // from permission prompts (see InstallCommand's migrateTiers
+                // note). A user-set ask on a mutation/destructive tool is
+                // never loosened by construction: those classify as ask (or
+                // deny), so convergence is a no-op or a tightening for them —
+                // pinned by the mutation-ask survival test.
                 guard existingTier != targetTier else { continue }            // already correct
                 lists[existingTier]?.removeAll { $0 == entry }
                 lists[targetTier, default: []].append(entry)
