@@ -1,9 +1,9 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.11.0
+version: 1.12.0
 status: active
-date: 2026-06-28
-description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.11.0: G5 wing-scoped topology privacy + G6 reindexMissing fan-out cap."
+date: 2026-07-09
+description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -221,7 +221,15 @@ computed projection results, not stored entity columns.
 content hash over its wire encoding. `add` is idempotent; `merge` is set
 union and therefore commutative, associative, and idempotent. Entries
 are immutable; two replicas producing the same logical mutation produce
-identical IDs and dedupe on merge.
+identical IDs and dedupe on merge. Ingress (`add`, and therefore every
+path that routes through it) unconditionally rejects an entry whose
+stored id does not match its recomputed content hash — never re-admits
+it, never overwrites an honest entry with the same id (codex a477800,
+secfix ce-audit-content-id 5101e112). The rejection is counted
+(`rejectedEntryCount` / Rust `rejected_count()`), monotonic and excluded
+from structural equality, so a log's ingress history is observable
+without weakening the defence (AUDIT-ALERT-RESTORE, 2026-07-09;
+NeuronKit SPEC § 9 C-4/C-12).
 
 **I-12 (HLC total order across tiers):** `UnifiedHLC` defines a total
 order over `(physicalTime, logicalCount, nodeID)` with the same byte
@@ -536,14 +544,19 @@ record, drops any mode-1 vault key (cryptographic clawback), and appends
 a `grantRevoked` entry. Both append HLC-stamped entries that sort cleanly
 and cannot break the chain.
 
-**B-9 (audit feed, projection, recovery):** `feedAuditLog(for:)` pulls the
-estate's LocusKit-tier audit rows, bridges them to `UnifiedAuditEntry`
-values, and merges them into the estate's G-Set (idempotent by content
-hash, I-11). `AuditProjectionFold.project` folds the HLC-ordered log into
-per-row state; the asOf variant folds only entries at or before a cutoff
-HLC. `AuditRecovery.rebuild` replays the log into a `UnifiedProjection`
-and `verify` compares a rebuilt projection against an expected one
-field-by-field. All are order-independent given HLC (I-12).
+**B-9 (audit feed, projection, recovery):** `auditLog(for:)` (exposed to
+NeuronKit as `currentAuditLog(in:)`) issues a single bounded SQL query
+against `_storagekit_audit`, bridges the rows to `UnifiedAuditEntry`
+values, and folds them into a freshly-built `UnifiedAuditLog` via
+`add(contentsOf:)` (idempotent by content hash, I-11) — replacing the
+former N+1-per-drawer `feedAuditLog(for:)` walk into a persistent
+registry (ADR025-AUDITLOG-GOVERNOR Bug 1 fix / ADR-026); the returned
+log is a value-type snapshot, not accumulated state. `AuditProjectionFold.project`
+folds the HLC-ordered log into per-row state; the asOf variant folds only
+entries at or before a cutoff HLC. `AuditRecovery.rebuild` replays the
+log into a `UnifiedProjection` and `verify` compares a rebuilt projection
+against an expected one field-by-field. All are order-independent given
+HLC (I-12).
 
 **B-10 (chain verification):** `verifyAuditChain(_:)` feeds the log, then
 runs `AuditChainVerifier.verify`, returning an `AuditChainReport` per the
@@ -551,6 +564,11 @@ NeuronKit § 3.5 contract: `valid == true` and `firstBrokenAt == nil` on a
 clean chain (including an empty one); on the first entry whose stored ID
 does not match its recomputed content hash or whose HLC reverses,
 `valid == false` with `firstBrokenAt` set to that entry's timestamp.
+Because ingress (I-11) rejects a content-hash-mismatched entry before it
+can ever reach this walk, `valid` alone cannot surface ingress-level
+tampering — the snapshot's `rejectedEntryCount` (I-11) is the
+complementary signal; NeuronKit's maintenance daemon reads both (SPEC §
+9 C-4).
 
 **B-11 (branch derive/promote/merge preserve the parent):** `glkDeriveBranch`
 snapshots the parent's (or parent branch's) current rows into a fresh
@@ -1681,6 +1699,21 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.12.0 -- 2026-07-09
+AUDIT-ALERT-RESTORE (Bob's option-1 ruling). `UnifiedAuditLog` gained
+`rejectedEntryCount` (Rust `rejected_count()`) — a monotonic counter,
+excluded from structural equality, incremented at the same `add`
+ingress choke point that already rejects content-hash-mismatched
+entries (I-11). No change to the rejection defence itself; this is
+observability only, added because secfix 5101e112's ingress rejection
+had made NeuronKit's audit-chain integrity monitor's alerting
+structurally unreachable (a rejected entry never reaches
+`AuditChainVerifier`, so the chain walk always reported vacuously
+valid). I-11 and B-9/B-10 updated to describe the current ingress path
+(`auditLog(for:)` / `currentAuditLog(in:)`, ADR025-AUDITLOG-GOVERNOR /
+ADR-026 — the doc previously named the removed `feedAuditLog(for:)`
+per-drawer walk) and the new counter. See NEURONKIT_SPEC.md § 9 C-4/C-12.
 
 ### 1.11.0 -- 2026-06-28
 Security fixes (secfix/c-glk-remaining): two correctness and safety invariants added.

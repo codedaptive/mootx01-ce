@@ -597,10 +597,18 @@ pub struct EstateCoordinator {
     // coordinator reaches them through `corpus_kits[handle]` and is pure
     // orchestration — it enqueues work and, via the Corpus `on_encoded`
     // callback wired at provision, rolls up the touched LocusKit rooms.
-    /// Per-estate unified audit-log G-Set. Minted empty on `open`, fed from
-    /// the estate's LocusKit audit trail by `feed_audit_log`, and read back by
-    /// `current_audit_log` for the maintenance reader's audit-integrity input.
-    /// Mirrors the Swift actor's `auditLogs: [EstateHandle: UnifiedAuditLog]`.
+    /// Per-estate unified audit-log G-Set. Minted empty on `open`. Bug 4 fix
+    /// (ADR025-AUDITLOG-GOVERNOR): `current_audit_log` / `verify_audit_chain`
+    /// / `verify_audit_chain_with_rejections` no longer read from or write to
+    /// this registry — each builds a fresh transient log per call via
+    /// `hydration::feed_audit_log_from_estate` and returns it directly. This
+    /// map is now populated ONLY by `set_audit_log`, called from the
+    /// hydrate-on-launch path (`open_hydrating`) after replaying the durable
+    /// audit trail; a non-hydrated estate's entry stays at the empty log
+    /// minted here for the estate's lifetime. Read back by the public
+    /// `audit_log(&self, handle)` getter, which is therefore only meaningful
+    /// for hydrated estates. Mirrors the Swift actor's
+    /// `auditLogs: [EstateHandle: UnifiedAuditLog]`.
     audit_logs: HashMap<EstateHandle, crate::audit::UnifiedAuditLog>,
     /// Per-estate recall-scoring matrix tier. Registered by
     /// `register_matrix_tier` (called from `rebuild_derived_accelerators` and
@@ -1179,8 +1187,12 @@ impl EstateCoordinator {
         }
         // Mint an empty unified audit log for the estate (GLK-03 parity). The
         // log starts empty so a verify pass before any feed reports a clean,
-        // zero-entry chain; `feed_audit_log` populates it from the LocusKit
-        // audit trail on demand. Mirrors Swift `auditLogs[handle] = UnifiedAuditLog()`.
+        // zero-entry chain. Bug 4 fix (ADR025-AUDITLOG-GOVERNOR): nothing
+        // populates this registry entry on demand any more — `current_audit_log`
+        // / `verify_audit_chain` build a fresh transient log per call instead
+        // (see the `audit_logs` field doc). Only `set_audit_log` (the
+        // hydrate-on-launch path) ever overwrites this entry. Mirrors Swift
+        // `auditLogs[handle] = UnifiedAuditLog()`.
         self.audit_logs.insert(handle, crate::audit::UnifiedAuditLog::new());
 
         // Telemetry: emit mount-state transition to mounted (GLK_ROLLUPS_001).
@@ -3569,6 +3581,34 @@ impl EstateCoordinator {
                 ))
             })?;
         Ok(crate::audit::AuditChainVerifier::verify(&log))
+    }
+
+    /// Verify the estate's audit chain AND surface the ingress-rejected
+    /// entry count from the SAME freshly-replayed snapshot, read-only.
+    ///
+    /// AUDIT-ALERT-RESTORE (2026-07-09, Bob's option-1 ruling): additive
+    /// sibling of `verify_audit_chain` — same replay, same verifier call,
+    /// plus `UnifiedAuditLog::rejected_count()` off the SAME log build (no
+    /// second O(N) replay). `verify_audit_chain` is left unchanged for its
+    /// existing caller(s); this method exists because the maintenance
+    /// reader adapter (`estate_maintenance_reader.rs`) needs both values
+    /// to build the daemon's `AuditVerdict` and a second full replay per
+    /// audit-check cycle would double the read cost for no benefit.
+    pub fn verify_audit_chain_with_rejections(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<(crate::audit::AuditChainReport, usize), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let log: crate::audit::UnifiedAuditLog =
+            crate::hydration::feed_audit_log_from_estate(estate).map_err(|e| {
+                VerbDispatchError::from(remap(
+                    "verify_audit_chain_with_rejections",
+                    &uuid_to_str(&handle.estate_uuid),
+                    e,
+                ))
+            })?;
+        let report = crate::audit::AuditChainVerifier::verify(&log);
+        Ok((report, log.rejected_count()))
     }
 
     // MARK: - matrix tier (recall-scoring accelerator)
@@ -7789,17 +7829,28 @@ mod tests {
         );
     }
 
-    // ACC-5: feed_audit_log is idempotent — re-feeding the same trail is a
-    // G-Set no-op (entry count unchanged).
+    // ACC-5: current_audit_log is idempotent — re-reading the same trail
+    // produces an unchanged entry count.
+    //
+    // Pre-existing drift fix (found while verifying the mission's cargo
+    // test baseline, AUDIT-ALERT-RESTORE 2026-07-09, unrelated to this
+    // mission's blast radius): this test previously called
+    // `coord.feed_audit_log(&h)` / read back via the vestigial registry
+    // getter `coord.audit_log(&h)`. Both belong to the pre-Bug-4-fix
+    // accumulate-into-registry pattern (see `current_audit_log`'s doc
+    // comment) and no longer compile against the current coordinator
+    // surface — `feed_audit_log` was renamed to `current_audit_log`,
+    // which builds a fresh transient log per call instead of accumulating
+    // into `self.audit_logs`. Rewritten against the live API, preserving
+    // the test's original intent (repeated reads of unchanged estate
+    // state converge to the same entry count).
     #[test]
-    fn acc5_feed_audit_log_is_idempotent() {
-        let (mut coord, h) = open_one();
+    fn acc5_current_audit_log_is_idempotent() {
+        let (coord, h) = open_one();
         coord.capture(&h, cap_frame("alpha"), NOW).expect("capture");
-        coord.feed_audit_log(&h).expect("feed 1");
-        let first = coord.audit_log(&h).expect("log").count();
-        coord.feed_audit_log(&h).expect("feed 2");
-        let second = coord.audit_log(&h).expect("log").count();
-        assert_eq!(first, second, "re-feeding the same trail adds no entries");
+        let first = coord.current_audit_log(&h).expect("current audit log 1").count();
+        let second = coord.current_audit_log(&h).expect("current audit log 2").count();
+        assert_eq!(first, second, "re-reading the same trail yields the same entry count");
     }
 
     // ACC-6: verify_audit_chain on an empty (freshly opened) estate is
@@ -7834,7 +7885,17 @@ mod tests {
         coord.rebuild_derived_accelerators(&h, NOW).expect("rebuild");
         assert!(coord.matrix_tier(&h).is_some(), "tier present after rebuild");
         // The audit log was fed as part of the rebuild.
-        assert!(!coord.audit_log(&h).expect("log").is_empty());
+        //
+        // Pre-existing drift fix (found while verifying the mission's cargo
+        // test baseline, AUDIT-ALERT-RESTORE 2026-07-09, unrelated to this
+        // mission's blast radius): `rebuild_derived_accelerators` no longer
+        // accumulates into the registry `self.audit_logs` (Bug 4 fix — see
+        // its doc comment), so the registry getter `coord.audit_log(&h)`
+        // returns `EstateNotOpen` here for a non-hydrated test estate
+        // regardless of the rebuild. `current_audit_log` is the live
+        // replacement that rebuilds the same transient snapshot the rebuild
+        // step itself consumed.
+        assert!(!coord.current_audit_log(&h).expect("log").is_empty());
     }
 
     // ACC-9: closing an estate drops its audit log and matrix tier — a stale

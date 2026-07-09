@@ -278,15 +278,32 @@ impl UnifiedAuditEntry {
 
 /// Grow-only set of `UnifiedAuditEntry`. Set union, idempotent add.
 /// Wire-shape parity with the Swift reference.
-#[derive(Clone, Debug, Eq, PartialEq, Default)]
+///
+/// `Eq`/`PartialEq` are hand-written below (not derived) so `rejected_count`
+/// stays out of structural equality — see the `impl PartialEq` doc.
+#[derive(Clone, Debug, Default)]
 pub struct UnifiedAuditLog {
     entries: BTreeMap<[u8; 32], UnifiedAuditEntry>,
+    /// Count of entries rejected on THIS log's ingress (`add` calls that
+    /// failed the content-id check) since the log was constructed.
+    ///
+    /// AUDIT-ALERT-RESTORE (2026-07-09, Bob's option-1 ruling): mirrors
+    /// the Swift `UnifiedAuditLog.rejectedEntryCount`. Every `add` call
+    /// that rejects an entry increments it, regardless of which caller
+    /// invoked `add` (directly, via `with_entries`, or via `merge`).
+    /// Monotonic for the lifetime of this value; NOT part of the CRDT
+    /// state (excluded from `PartialEq`); not carried across `merge` —
+    /// merging only re-adds entries that already survived the source
+    /// log's own ingress, so a source log's rejections are not
+    /// double-counted into the destination log.
+    rejected_count: usize,
 }
 
 impl UnifiedAuditLog {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            rejected_count: 0,
         }
     }
 
@@ -302,21 +319,29 @@ impl UnifiedAuditLog {
     ///
     /// Security (codex a477800): the entry's SHA-256 content id is
     /// recomputed from its wire encoding before insertion. If the
-    /// recomputed id does not match `entry.id`, the entry is silently
-    /// rejected. This prevents a peer supplying a forged
-    /// (same-id, different-content) entry from overwriting an honest
-    /// one in the G-Set, which would break CRDT convergence and
-    /// constitute audit forgery. Federation peer-log merge relies on
-    /// this defence; any future non-local audit ingress must route
-    /// through `add` or `merge` to obtain it.
+    /// recomputed id does not match `entry.id`, the entry is rejected,
+    /// `rejected_count` is incremented, and the entry is not inserted.
+    /// This prevents a peer supplying a forged (same-id, different-
+    /// content) entry from overwriting an honest one in the G-Set,
+    /// which would break CRDT convergence and constitute audit forgery.
+    /// Federation peer-log merge relies on this defence; any future
+    /// non-local audit ingress must route through `add` or `merge` to
+    /// obtain it.
     pub fn add(&mut self, entry: UnifiedAuditEntry) {
         if !entry.content_id_matches() {
             // Entry rejected: recomputed id does not match entry.id.
             // Legitimate entries always pass because new() computes
             // the id from the same wire_bytes path used here.
+            self.rejected_count += 1;
             return;
         }
         self.entries.insert(entry.id, entry);
+    }
+
+    /// Number of entries rejected at ingress on this log instance. See the
+    /// `rejected_count` field doc for the AUDIT-ALERT-RESTORE rationale.
+    pub fn rejected_count(&self) -> usize {
+        self.rejected_count
     }
 
     /// CRDT join. Merging two G-Sets is set union over entry IDs.
@@ -392,6 +417,22 @@ impl UnifiedAuditLog {
         entries
     }
 }
+
+/// Structural equality over the G-Set only. `rejected_count` is
+/// deliberately excluded: it is per-ingress-operation telemetry, not CRDT
+/// state, and including it would break the convergence property tests
+/// rely on (two logs holding the same entries must compare equal
+/// regardless of how many rejected-entry `add` calls either one happened
+/// to observe on the way there). Mirrors the Swift `UnifiedAuditLog`'s
+/// custom `==`.
+impl PartialEq for UnifiedAuditLog {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for UnifiedAuditLog {}
+
 // Content-hash facade for audit entries. F18.3 (2026-05-27): the
 // self-contained SHA-256 that lived here was removed in favor of the
 // canonical `substrate_kernel::sha256` (FIPS 180-4, NIST-vector gated).

@@ -217,7 +217,8 @@ public actor MaintenanceDaemon {
                 Int64($0.timeIntervalSince1970 * 1000.0)
             }
             auditVerdict = MaintenanceDecision.AuditVerdict(
-                valid: report.valid, firstBrokenAtMillis: brokenMillis)
+                valid: report.valid, firstBrokenAtMillis: brokenMillis,
+                rejectedEntryCount: log.rejectedEntryCount)
         }
 
         // ── Steps 1–5 input gathering: read the seams and project each
@@ -522,8 +523,26 @@ public actor MaintenanceDaemon {
     ) -> ProposeFrame {
         switch decision.category {
         case .auditIntegrity:
-            // The break tag is the suffix of the audit key after the "|".
+            // The tag is the suffix of the audit key after the "|". Two key
+            // prefixes share this category: "audit_integrity|<brokenTag>"
+            // (a broken chain walk) and "audit_integrity_rejected|<count>"
+            // (AUDIT-ALERT-RESTORE, 2026-07-09: entries dropped at ingress
+            // before the walk ever saw them) — distinguish on the prefix so
+            // each gets a justification that names its own failure mode.
             let tag = decision.key.split(separator: "|", maxSplits: 1).last.map(String.init) ?? "unknown"
+            if decision.key.hasPrefix("audit_integrity_rejected|") {
+                return ProposeFrame(
+                    target: decision.target,
+                    // No typed ProposalKind case exists for audit integrity;
+                    // use the documented `.other` escape hatch rather than
+                    // adding a case to GLK's ProposalKind.
+                    kind: .other("audit_integrity"),
+                    justification:
+                        "maintenance: audit-log ingress rejected \(tag) "
+                        + "content-hash-mismatched (tampered or corrupted) "
+                        + "entr\(tag == "1" ? "y" : "ies") — chain walk itself "
+                        + "verifies clean because ingress already dropped them")
+            }
             return ProposeFrame(
                 target: decision.target,
                 // No typed ProposalKind case exists for audit integrity;
