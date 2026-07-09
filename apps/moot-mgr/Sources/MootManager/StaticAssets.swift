@@ -243,35 +243,36 @@ try {
           <span class="tag">structure <b id="topoStructure">—</b></span>
         </div>
       </div>
-      <div class="topo-stage" id="topoStage">
-        <!-- Canvas2D brain renderer mounts here (full remaining height). -->
-        <div class="topo-canvas" id="topoCanvas"></div>
-        <!-- Node count (top-left) and watermark (top-right): shown on synthetic path.
-             Overlay (#topoPending) is only shown when VizGraph analytics are present. -->
-        <div class="topo-nodecnt" id="topoNodeCnt" hidden></div>
-        <div class="topo-watermark" id="topoWatermark" hidden></div>
-        <!-- Pending overlay: shown only when analytics are present (analytics-grid mode).
-             Hidden on the no-analytics synthetic path so the brain canvas is the hero. -->
-        <div class="topo-pending" id="topoPending" hidden>
-          <div class="topo-pending-header" id="topoPendingHeader">
-            <span class="stubmark-sm" aria-hidden="true">◊</span>
-            <div>
-              <h2 id="topoPendingTitle">Topology structure</h2>
-              <p id="topoPendingText"></p>
+      <!-- Stage + content-filter column. The picker is a proper sibling column
+           (not an overlay) so it never floats over the graphic. -->
+      <div class="topo-row">
+        <div class="topo-stage" id="topoStage">
+          <!-- Canvas2D brain renderer mounts here (full remaining height). -->
+          <div class="topo-canvas" id="topoCanvas"></div>
+          <!-- Pending overlay: shown whenever real structure is absent — the
+               analytics grid when VizGraph analytics exist, a monitoring-aware
+               message otherwise. The canvas never shows invented data. -->
+          <div class="topo-pending" id="topoPending" hidden>
+            <div class="topo-pending-header" id="topoPendingHeader">
+              <span class="stubmark-sm" aria-hidden="true">◊</span>
+              <div>
+                <h2 id="topoPendingTitle">Topology structure</h2>
+                <p id="topoPendingText"></p>
+              </div>
             </div>
+            <!-- aria-live="polite": announces analytics updates when the estate filter changes
+                 while the overlay is already visible (WCAG 4.1.3). aria-atomic="false"
+                 lets AT announce additions rather than the full container. -->
+            <div class="topo-analytics" id="topoAnalytics" aria-live="polite" aria-atomic="false"></div>
           </div>
-          <!-- aria-live="polite": announces analytics updates when the estate filter changes
-               while the overlay is already visible (WCAG 4.1.3). aria-atomic="false"
-               lets AT announce additions rather than the full container. -->
-          <div class="topo-analytics" id="topoAnalytics" aria-live="polite" aria-atomic="false"></div>
+          <!-- Activity feed overlay (3 lines, auto-fade) — PoC spec §6.4. -->
+          <div class="topo-feed" id="topoFeed" aria-live="polite"></div>
+          <!-- Legend: VizGraph analytic signals available from the observer host. -->
+          <div class="topo-legend" id="topoLegend"></div>
         </div>
-        <!-- Content picker: check/uncheck the estate's knowledge domains
-             (community labels). Real-data path only; hidden on synthetic. -->
-        <div class="topo-commpicker" id="topoCommPicker" hidden aria-label="Content filter"></div>
-        <!-- Activity feed overlay (3 lines, auto-fade) — PoC spec §6.4. -->
-        <div class="topo-feed" id="topoFeed" aria-live="polite"></div>
-        <!-- Legend: VizGraph analytic signals available from the observer host. -->
-        <div class="topo-legend" id="topoLegend"></div>
+        <!-- Content picker column: check/uncheck the estate's knowledge domains
+             (community labels). Real-data path only; hidden while pending. -->
+        <aside class="topo-commpicker" id="topoCommPicker" hidden aria-label="Content filter"></aside>
       </div>
       <!-- L5 radar-loop playback bar — event-indexed playhead over the recorded
            /api/events history. Default state is NOT playing (live view). -->
@@ -641,17 +642,6 @@ body::before{
 .topo-legend .lswatches{display:flex; gap:4px; flex-wrap:wrap; margin-top:2px}
 .topo-legend .lsw{width:11px; height:11px; border-radius:3px}
 
-/* Node count — top-left corner chip (synthetic and live paths) */
-.topo-nodecnt{
-  position:absolute; top:14px; left:14px; font-family:var(--font-m); font-size:10px;
-  color:var(--muted); letter-spacing:.06em; pointer-events:none;
-}
-.topo-nodecnt strong{color:var(--hi); font-weight:500}
-/* Watermark — top-right corner label (synthetic path only) */
-.topo-watermark{
-  position:absolute; top:14px; right:14px; font-family:var(--font-m); font-size:10px;
-  color:var(--muted); letter-spacing:.08em; opacity:.5; pointer-events:none;
-}
 /* Static legend sections (PoC-spec style: Node types / Activity / Edges) */
 .topo-lsect{
   font-size:9px; font-family:var(--font-m); color:var(--muted); text-transform:uppercase;
@@ -662,8 +652,7 @@ body::before{
 .topo-ldot{width:8px; height:8px; border-radius:50%; flex:none}
 .topo-lline{width:16px; height:1px; flex:none}
 /* topology pending overlay — analytics-present variant (topo-pending--has-analytics):
-   scrollable top-aligned panel. Overlay is hidden on the no-analytics synthetic path so
-   the brain canvas is the hero. When analytics are present the dark tint makes text readable. */
+   scrollable top-aligned panel. The dark tint makes text readable over the canvas. */
 .topo-pending--has-analytics {
   justify-content: flex-start;
   align-items: flex-start;
@@ -1051,25 +1040,36 @@ details.panel[open] summary::before{content:"▼ "}
   .phead{font-size:16px}
 }
 
-/* Content picker (top-right under controls): check/uncheck knowledge domains.
-   Same chrome family as .topo-legend; scrolls when the estate has many. */
+/* Stage + content-picker layout: the picker is a proper right-hand column
+   beside the canvas, never an overlay floating on top of it. The stage keeps
+   the explicit viewport height; the column stretches to match. */
+.topo-row{display:flex; gap:12px; align-items:stretch}
+.topo-row .topo-stage{flex:1 1 auto; min-width:0}
+
+/* Content picker (right-hand column): check/uncheck knowledge domains.
+   Rows scroll vertically when the estate has many domains and horizontally
+   when a label is wider than the column. */
 .topo-commpicker{
-  position:absolute; right:14px; top:14px; display:flex; flex-direction:column;
-  background:rgba(6,7,14,.72); border:1px solid var(--border); border-radius:var(--rsm);
-  padding:8px 10px; font-family:var(--font-m); font-size:10.5px; color:var(--muted);
-  max-width:280px; max-height:46%; overflow:hidden;
+  flex:0 0 280px; display:flex; flex-direction:column;
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--r);
+  padding:10px 12px; font-family:var(--font-m); font-size:12.5px; color:var(--muted);
+  min-height:0; overflow:hidden;
 }
+.topo-commpicker[hidden]{display:none}
 .topo-commpicker .cp-head{display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:6px}
-.topo-commpicker .cp-title{font-weight:700; color:var(--hi); letter-spacing:.6px; text-transform:uppercase; font-size:9.5px}
+.topo-commpicker .cp-title{font-weight:700; color:var(--hi); letter-spacing:.6px; text-transform:uppercase; font-size:11.5px}
 .topo-commpicker .cp-all{
   background:none; border:1px solid var(--border); border-radius:4px; color:var(--muted);
-  font:inherit; font-size:9.5px; padding:2px 8px; cursor:pointer;
+  font:inherit; font-size:11.5px; padding:2px 8px; cursor:pointer;
 }
 .topo-commpicker .cp-all[aria-pressed="true"]{color:var(--accent); border-color:var(--accent)}
-.topo-commpicker .cp-list{overflow-y:auto; display:flex; flex-direction:column; gap:2px; min-height:0}
+/* overflow-x on the list (not per row) gives one shared horizontal scrollbar
+   when any label exceeds the column width; rows size to their content so no
+   label is ever ellipsized away. */
+.topo-commpicker .cp-list{overflow-y:auto; overflow-x:auto; display:flex; flex-direction:column; gap:2px; min-height:0}
 .topo-commpicker .cp-row{
   display:flex; align-items:center; gap:7px; padding:2px 4px; border-radius:4px; cursor:pointer;
-  min-height:22px; /* compact rows; the panel is dense by design */
+  min-height:24px; min-width:max-content;
 }
 .topo-commpicker .cp-row:hover{background:rgba(232,234,240,.06)}
 .topo-commpicker .cp-row.off{opacity:.42}
@@ -1078,13 +1078,27 @@ details.panel[open] summary::before{content:"▼ "}
 }
 .topo-commpicker .cp-box.on{background:var(--accent); border-color:var(--accent)}
 .topo-commpicker .cp-dot{width:9px; height:9px; border-radius:50%; flex:none}
-.topo-commpicker .cp-label{
-  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--hi);
-}
-.topo-commpicker .cp-size{color:var(--muted); flex:none}
+.topo-commpicker .cp-label{flex:1; white-space:nowrap; color:var(--hi)}
+.topo-commpicker .cp-size{color:var(--muted); flex:none; margin-left:8px}
 
 /* Theme toggle — compact icon button in the topbar right cluster. */
 .btn-theme{font-size:15px; line-height:1; padding:4px 10px; margin-right:10px}
+
+/* "What are these codes?" explainer — trigger buttons + modal. */
+.btn-what{margin-left:auto; font-size:11px; padding:3px 10px}
+.cp-what{margin-bottom:6px; align-self:flex-start}
+.mx-modal-backdrop{
+  position:fixed; inset:0; z-index:200; display:grid; place-items:center;
+  background:rgba(6,7,14,.66); padding:24px;
+}
+.mx-modal{
+  max-width:520px; max-height:80vh; overflow-y:auto;
+  background:var(--bg2); border:1px solid var(--border2); border-radius:var(--r);
+  padding:20px 22px; box-shadow:0 18px 60px rgba(0,0,0,.5);
+}
+.mx-modal-title{font-family:var(--font-d); font-size:19px; color:var(--hi); margin-bottom:10px}
+.mx-modal-p{font-size:13.5px; line-height:1.65; color:var(--text); margin-bottom:10px}
+.mx-modal-close{margin-top:4px}
 
 """##
 
@@ -1203,6 +1217,70 @@ import { OrbitControls } from '/OrbitControls.js';
     row.appendChild(el("h2", "phead", title));
     if (hint) row.appendChild(el("span", "phint", hint));
     container.appendChild(row);
+    return row;
+  }
+
+  // ----- "What are these codes?" explainer -----
+  // Plain-language (8th-grade) explanation of FDC classification codes,
+  // shown from the lattice table and the topology content picker. The key
+  // point users trip on: the code is derived from the WORDS in the text,
+  // not from the topic, so the code's label can differ from what the item
+  // is "about" — that is expected, not a filing error.
+  function codesExplainerButton() {
+    const b = el("button", "btn btn-what", "What are these codes?");
+    b.setAttribute("type", "button");
+    b.addEventListener("click", showCodesExplainer);
+    return b;
+  }
+
+  function showCodesExplainer() {
+    if ($("#codesExplainer")) return;   // already open
+    const wrap = el("div", "mx-modal-backdrop");
+    wrap.id = "codesExplainer";
+    const box = el("div", "mx-modal");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-labelledby", "codesExplainerTitle");
+
+    const h = el("h2", "mx-modal-title", "What are these codes?");
+    h.id = "codesExplainerTitle";
+    box.appendChild(h);
+
+    [
+      "Every memory that comes in gets a code — like the call number on a " +
+      "library book. Nearby numbers mean similar subjects, so related " +
+      "memories end up on the same shelf and can be found together.",
+
+      "The computer picks the code by looking at the actual words in the " +
+      "text and matching them against a fixed, public list of about a " +
+      "thousand subjects. The same words always land on the same code — on " +
+      "every computer, with no guessing.",
+
+      "Because the code comes from the words — not from what the item is " +
+      "“really about” — the label next to a code can look " +
+      "different from your topic. A note about your bakery’s budget " +
+      "might file under “Accounting + Bookkeeping,” because budget " +
+      "words dominate the text. That’s normal: the code is just the " +
+      "shelf where similar-sounding memories sit, and it still groups " +
+      "related things together.",
+    ].forEach(function (t) { box.appendChild(el("p", "mx-modal-p", t)); });
+
+    const close = el("button", "btn mx-modal-close", "Got it");
+    close.setAttribute("type", "button");
+    function dismiss() {
+      document.removeEventListener("keydown", onKey);
+      wrap.remove();
+      if (opener && opener.focus) opener.focus();
+    }
+    function onKey(e) { if (e.key === "Escape") dismiss(); }
+    const opener = document.activeElement;
+    close.addEventListener("click", dismiss);
+    wrap.addEventListener("click", function (e) { if (e.target === wrap) dismiss(); });
+    document.addEventListener("keydown", onKey);
+    box.appendChild(close);
+    wrap.appendChild(box);
+    document.body.appendChild(wrap);
+    close.focus();
   }
 
   // ----- top-bar status -----
@@ -2203,7 +2281,8 @@ import { OrbitControls } from '/OrbitControls.js';
 
     // Row 3: Active lattice addresses table
     const addrPanel = el("div", "panel");
-    panelHead(addrPanel, "Active Lattice Addresses", pending ? "requires ARIA_MCP" : addrs.length + " addresses · sorted by item count");
+    const addrHead = panelHead(addrPanel, "Active Lattice Addresses", pending ? "requires ARIA_MCP" : addrs.length + " addresses · sorted by item count");
+    addrHead.appendChild(codesExplainerButton());
     if (pending) {
       const note = el("div", "empty");
       note.style.marginTop = "12px";
@@ -2376,14 +2455,14 @@ import { OrbitControls } from '/OrbitControls.js';
   // lobes are rendered as feathered radial-gradient blobs. SSE events fire
   // real pulse animations on matching noun-type nodes.
   //
-  // When /api/graph returns structurePending the synthetic graph is built
-  // from event noun-type distributions — giving the visualization life while
-  // real VizGraph structure accumulates in the autonomic governor's recipe
-  // runs. The honest pending overlay is shown on top; it does not hide the
-  // brain canvas underneath.
+  // When /api/graph returns structurePending the canvas stays empty and the
+  // honest pending overlay explains why — the estate always holds real
+  // records (7 seeded at provisioning), so the dashboard renders real
+  // structure or an honest "pending" state, never invented data.
   //
   // Content-safety invariant: only metadata (counts, enums, ISO-8601
-  // timestamps, identifiers) crosses the wire — never rung/memory content.
+  // timestamps, identifiers, classification codes from the pinned public
+  // frame) crosses the wire — never rung/memory content.
   //
   // VIZ_V2 layers on top of the base renderer:
   //   L2 — recency brightness (lastActiveTs), centrality halos (> 0.55),
@@ -2409,6 +2488,9 @@ import { OrbitControls } from '/OrbitControls.js';
   let brainNodes = [], brainEdges = [], brainNodeMap = Object.create(null);
   let brainAnimId = null, brainT = 0;
   let brainW = 0, brainH = 0;
+  // Pixel-to-world coordinate transform: centers layout at origin and
+  // scales so the longest axis spans [-1, 1].
+  let brainWorldScale = 1, brainWorldCX = 0, brainWorldCY = 0;
   let brainResizeObs = null;
   let brainContainer = null;         // DOM container for the renderer
   // Selection state — set by selectBrainNode(); drives neighbor highlighting.
@@ -2435,13 +2517,65 @@ import { OrbitControls } from '/OrbitControls.js';
   // (playing or paused mid-loop); playing = the step timer is running.
   let topoPlay = { active: false, playing: false, idx: 0, timer: null, playheadMs: 0 };
   let topoPlayEvents = [];  // /api/events parsed + sorted ascending by ts
+  // Ripple ring buffer: up to 20 active ripples overlapping like singing in
+  // a round — each at a different phase of its expand+fade lifecycle.
+  let brainRipples = [];         // [{nodeId, age, x, y, z, rgb}]
+  let brainRippleMesh = null;    // THREE.Points for ripple rings
+  var RIPPLE_MAX = 20;           // max concurrent ripples
+  var RIPPLE_DURATION = 2.0;     // seconds per ripple lifecycle
+  // Constellation trail buffer: glowing lines between consecutive same-
+  // community events, each fading independently over ~2s.
+  let brainTrails = [];          // [{x1,y1,z1, x2,y2,z2, age, rgb}]
+  let brainTrailMesh = null;     // THREE.LineSegments for trails
+  var TRAIL_MAX = 20;
+  var TRAIL_DURATION = 2.5;      // seconds per trail fade
+  let brainLastPulseNode = null; // last pulsed node for trail linking
 
-  // Twelve community colors — one per lobe / cluster.
+  // Twelve fallback community colors — used only when a community carries no
+  // FDC code (fragments bucket, unlabeled lobes, code-less snapshots).
   const BRAIN_COMM_COLORS = [
     [255, 140,   0], [58, 180, 255], [180, 120, 255], [  0, 210, 140],
     [255,  80, 120], [255, 200,  60], [100, 200, 255], [255, 140,  80],
     [140, 200, 255], [200, 160, 255], [ 80, 220, 160], [255, 120, 160],
   ];
+
+  // Deterministic community color from the FDC code's leading digits.
+  // Encoding rule XYZ: hundreds digit X → hue family (10 hues around the
+  // wheel), tens digit Y → shade (saturation), ones digit Z → brightness
+  // (lightness). Sibling codes therefore share a hue family but stay
+  // tellable apart, and the same code renders the same color on every
+  // host and every refresh. Returns [r,g,b] or null for a non-numeric /
+  // absent code (callers fall back to BRAIN_COMM_COLORS).
+  // The lightness floor (35%) keeps every code visible on the dark canvas.
+  function fdcColor(code) {
+    var m = /^(\d)(\d)(\d)/.exec(String(code || ""));
+    if (!m) return null;
+    var hue = (+m[1]) * 36;          // X: 000s→0° … 900s→324°
+    var sat = 85 - (+m[2]) * 5;      // Y: 85% … 40%
+    var lit = 62 - (+m[3]) * 3;      // Z: 62% … 35%
+    return hslToRgb(hue, sat, lit);
+  }
+
+  // HSL → [r,g,b] 0-255. h in degrees, s/l in percent.
+  function hslToRgb(h, s, l) {
+    s /= 100; l /= 100;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var hp = (((h % 360) + 360) % 360) / 60;
+    var x = c * (1 - Math.abs((hp % 2) - 1));
+    var r1 = 0, g1 = 0, b1 = 0;
+    if      (hp < 1) { r1 = c; g1 = x; }
+    else if (hp < 2) { r1 = x; g1 = c; }
+    else if (hp < 3) { g1 = c; b1 = x; }
+    else if (hp < 4) { g1 = x; b1 = c; }
+    else if (hp < 5) { r1 = x; b1 = c; }
+    else             { r1 = c; b1 = x; }
+    var mm = l - c / 2;
+    return [Math.round((r1 + mm) * 255), Math.round((g1 + mm) * 255), Math.round((b1 + mm) * 255)];
+  }
+
+  // Per-lobe resolved color ([r,g,b] by lobe rank) — set by buildRealBrainNodes,
+  // read by brainCommCSS so legend swatches, hulls, and nodes stay in sync.
+  let brainLobeRGB = Object.create(null);
 
   // Node visual style by noun type — matches the substrate NounType enum:
   //   0=Drawer (gray matter), 1=Tunnel, 2=KGFact, 3=DiaryEntry (blue activation),
@@ -2482,66 +2616,6 @@ import { OrbitControls } from '/OrbitControls.js';
       });
     }
     return centers;
-  }
-
-  // Generate a synthetic brain graph from event noun-type distributions.
-  // N nodes across 12 community lobes — weighted by observed noun-type ratios.
-  function synthBrainNodes(events, W, H) {
-    var NUM_COMM = 12;
-    var totalNodes = Math.min(1500, Math.max(200, events.length * 3 + 300));
-    var perCommFrac = [0.15, 0.13, 0.11, 0.10, 0.09, 0.08, 0.08, 0.07, 0.06, 0.05, 0.04, 0.04];
-
-    // Build noun-type probability distribution from observed events.
-    var nc = [0, 0, 0, 0, 0, 0, 0, 0];
-    events.forEach(function (ev) { if (ev.nounType >= 0 && ev.nounType < 8) nc[ev.nounType]++; });
-    var evTotal = Math.max(1, nc.reduce(function (s, v) { return s + v; }, 0));
-    var ratios = nc.map(function (v) { return v / evTotal; });
-    // Floor: drawers are always the majority neuron type.
-    if (ratios[0] < 0.58) {
-      var excess = 0.58 - ratios[0];
-      var rest = ratios.slice(1).reduce(function (s, v) { return s + v; }, 0);
-      ratios[0] = 0.58;
-      if (rest > 0) {
-        for (var i = 1; i < 8; i++) ratios[i] = Math.max(0, ratios[i] * (1 - excess / rest));
-      }
-    }
-
-    var centers = brainCenters(NUM_COMM, W, H);
-    var nodes = [];
-    var id = 0;
-
-    for (var c = 0; c < NUM_COMM; c++) {
-      var count = Math.round(totalNodes * perCommFrac[c]);
-      var spread = 22 + count * 0.14;
-      var ox = centers[c].x, oy = centers[c].y;
-
-      for (var j = 0; j < count; j++) {
-        var angle = Math.random() * Math.PI * 2;
-        var dist = Math.abs(brainGauss()) * spread;
-
-        // Pick noun type by cumulative probability.
-        var nounType = 0;
-        var r = Math.random(), cum = 0;
-        for (var n = 0; n < 8; n++) { cum += ratios[n]; if (r < cum) { nounType = n; break; } }
-
-        var sx = Math.max(20, Math.min(W - 20, ox + Math.cos(angle) * dist));
-        var sy = Math.max(20, Math.min(H - 20, oy + Math.sin(angle) * dist));
-        nodes.push({
-          id: id++,
-          x: sx, y: sy,
-          ax: sx, ay: sy, vx: 0, vy: 0,  // physics anchor + velocity
-          community: c,
-          nounType: nounType,
-          centrality: Math.pow(Math.random(), 2.6), // skewed toward low centrality
-          breathPhase: Math.random() * Math.PI * 2,
-          pulseOrange: 0,   // capture pulse magnitude 0..1 — decays over ~1s
-          pulseBlue: 0,     // think pulse magnitude 0..1 — same decay, visible ring
-          glowBlue: 0,      // think ambient glow magnitude 0..1 — decays over ~10s
-          anomaly: Math.random() < 0.011,
-        });
-      }
-    }
-    return nodes;
   }
 
   // Map real /api/graph nodes into brain-hemisphere layout using community IDs.
@@ -2585,7 +2659,7 @@ import { OrbitControls } from '/OrbitControls.js';
     var centers = brainCenters(Math.max(1, lobeIds.length), W, H);
     var nodes = [];
 
-    function pushNode(n, x, y, cIdx, isLobe, commKey, colorIdx) {
+    function pushNode(n, x, y, cIdx, isLobe, commKey, rgb) {
       // Parse wire timestamps once at build. createdMs is the birth instant for
       // the L5 alive(t) filter; deadMs (tombstonedTs) hides the entity in live
       // view and ends its playback lifespan.
@@ -2610,8 +2684,10 @@ import { OrbitControls } from '/OrbitControls.js';
         // Content key for the picker filter — the community's FDC label or
         // a bucket. Stable across snapshots, unlike Louvain ids.
         commKey: commKey || null,
-        // Community hue for the node fill (encoding rule: communityId → hue).
-        rgb: BRAIN_COMM_COLORS[(colorIdx !== undefined ? colorIdx : cIdx) % BRAIN_COMM_COLORS.length],
+        // Community color for the node fill — digit-derived from the
+        // community's FDC code (fdcColor) with the static palette as the
+        // code-less fallback. Resolved once per community by the caller.
+        rgb: rgb || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length],
         // nounType removed from wire format (FIX 2 payload trim); all drawers
         // are type 0 — the rendering path is unchanged (defaults to 0).
         nounType: n.nounType || 0,
@@ -2629,13 +2705,18 @@ import { OrbitControls } from '/OrbitControls.js';
       nodes.push(node);
     }
 
-    // L3: record the FDC label for each community that earned a lobe.
-    // brainLobeLabels keys are the lobe rank (the node `community` index used
-    // on the lobe path), values are the proxy's enriched label strings.
-    // Null/empty labels are skipped — drawLobeLabels draws nothing for them.
+    // L3: record the FDC label + digit-derived color for each community that
+    // earned a lobe. brainLobeLabels/brainLobeRGB keys are the lobe rank (the
+    // node `community` index used on the lobe path); labels are the proxy's
+    // enriched strings. Null/empty labels are skipped — drawLobeLabels draws
+    // nothing for them.
     brainLobeLabels = Object.create(null);
+    brainLobeRGB = Object.create(null);
+    function commMeta(cid) {
+      return (communities || []).find(function (c) { return String(c.id) === String(cid); });
+    }
     lobeIds.forEach(function (cid, rank) {
-      var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
+      var meta = commMeta(cid);
       if (meta && meta.label) brainLobeLabels[rank] = meta.label;
     });
 
@@ -2644,7 +2725,7 @@ import { OrbitControls } from '/OrbitControls.js';
     // under 'fragments'. Labels are the stable identity across snapshots
     // (Louvain ids renumber every governor cycle).
     function contentKey(cid, members) {
-      var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
+      var meta = commMeta(cid);
       if (meta && meta.label) return meta.label;
       return members.length >= MIN_LOBE_SIZE ? "(unlabeled)" : "fragments";
     }
@@ -2652,47 +2733,59 @@ import { OrbitControls } from '/OrbitControls.js';
     // Picker rows: one per labeled lobe (size desc), then the two buckets.
     brainLobeKey = Object.create(null);
     var rowByKey = Object.create(null);
-    function addRow(key, size, cIdx, isBucket) {
+    function addRow(key, size, cIdx, isBucket, rgb) {
       if (!rowByKey[key]) {
-        rowByKey[key] = { key: key, size: 0, cIdx: cIdx, bucket: !!isBucket };
+        rowByKey[key] = { key: key, size: 0, cIdx: cIdx, bucket: !!isBucket, rgb: rgb || null };
       }
       rowByKey[key].size += size;
     }
 
-    // Lobe communities: members gathered around a shared center.
+    // Lobe communities: members gathered around a shared center. Color is
+    // digit-derived from the community's FDC code; the static palette (keyed
+    // by stable content key) covers code-less communities.
     lobeIds.forEach(function (cid, rank) {
       var members = byId[cid];
       var key = contentKey(cid, members);
       brainLobeKey[rank] = key;
       var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
-      if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)");
-      var spread = Math.max(28, members.length * 0.18);
+      var meta = commMeta(cid);
+      var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
+      brainLobeRGB[rank] = rgb;
+      if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)", rgb);
+      // sqrt scaling keeps scatter proportional to canvas even for huge
+      // communities (6k+ nodes); linear scaling scatters far outside the
+      // canvas, clamping all nodes to edges and collapsing via physics.
+      var spread = Math.min(Math.max(28, Math.sqrt(members.length) * 3.5),
+                            Math.min(W, H) * 0.16);
       var center = centers[rank];
       members.forEach(function (n) {
         var angle = Math.random() * Math.PI * 2;
         var dist = Math.abs(brainGauss()) * spread;
         pushNode(n, center.x + Math.cos(angle) * dist,
-                    center.y + Math.sin(angle) * dist, rank, true, key, cIdx);
+                    center.y + Math.sin(angle) * dist, rank, true, key, rgb);
       });
     });
 
     // Periphery fragments: each fragment gets one random anchor across the
     // canvas with its members placed tightly around it, so a tunnel-linked
-    // pair stays a visible pair. Color cycles the palette per fragment.
+    // pair stays a visible pair. Fragments with an FDC code get its
+    // digit-derived color; the rest cycle the fallback palette.
     var lobeSet = Object.create(null);
     lobeIds.forEach(function (cid) { lobeSet[cid] = true; });
     ranked.forEach(function (cid, rank) {
       if (lobeSet[cid]) return;
       var members = byId[cid];
       var key = contentKey(cid, members);
-      if (!isSubset) addRow(key, members.length, -1, true);
+      var meta = commMeta(cid);
+      var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
+      var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
+      if (!isSubset) addRow(key, members.length, -1, true, rgb);
       var ax = 20 + Math.random() * (W - 40);
       var ay = 20 + Math.random() * (H - 40);
-      var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
       members.forEach(function (n, mi) {
         var angle = (mi / members.length) * Math.PI * 2 + Math.random() * 0.8;
         var dist = members.length > 1 ? 6 + Math.random() * 8 : 0;
-        pushNode(n, ax + Math.cos(angle) * dist, ay + Math.sin(angle) * dist, cIdx, false, key, cIdx);
+        pushNode(n, ax + Math.cos(angle) * dist, ay + Math.sin(angle) * dist, cIdx, false, key, rgb);
       });
     });
 
@@ -2708,55 +2801,25 @@ import { OrbitControls } from '/OrbitControls.js';
     return nodes;
   }
 
-  // Sparse synthetic edges — intra-community tunnel synapses and sparse
-  // inter-community kgFact bridges (corpus callosum).
-  function synthBrainEdges(nodes) {
-    var edges = [];
-    var byComm = Object.create(null);
-    nodes.forEach(function (n) { (byComm[n.community] = byComm[n.community] || []).push(n.id); });
-
-    // Target average degree ~5 per node (2 × edges / nodes = 5 → multiplier 2.5).
-    // The previous 0.55 multiplier gave degree ~1.1, making hop-1 always a single node.
-    Object.values(byComm).forEach(function (members) {
-      var count = Math.floor(members.length * 2.5);
-      for (var i = 0; i < count; i++) {
-        var s = members[Math.floor(Math.random() * members.length)];
-        var t = members[Math.floor(Math.random() * members.length)];
-        if (s !== t) edges.push({ src: s, tgt: t, type: "tunnel", w: 0.3 + Math.random() * 0.7 });
-      }
-    });
-
-    var comms = Object.keys(byComm);
-    for (var i = 0; i < comms.length; i++) {
-      for (var j = i + 1; j < comms.length; j++) {
-        if (Math.random() < 0.11) {
-          var sm = byComm[comms[i]], tm = byComm[comms[j]];
-          edges.push({
-            src: sm[Math.floor(Math.random() * sm.length)],
-            tgt: tm[Math.floor(Math.random() * tm.length)],
-            type: "kgFact", w: 0.07 + Math.random() * 0.18,
-          });
-        }
-      }
-    }
-    return edges;
-  }
-
-  // Start the Canvas2D animation loop inside the topo-canvas container div.
-  // Canvas gets explicit pixel CSS dimensions (not 100%) so the coordinate space
-  // exactly matches what getBoundingClientRect reports — preventing the "nodes packed
-  // into a sub-rectangle" bounding-box appearance. ResizeObserver keeps them in sync.
   // L2 community-aware force micro-sim. Anchor springs hold the lobe /
   // periphery layout; edge springs pull tunnel-linked nodes toward a short
   // rest length so connected memory visibly drifts together and settles;
   // damping keeps the motion organic rather than oscillating. O(N + E) per
   // frame — no pairwise repulsion (the anchor scatter already provides
   // separation at this density).
+  //
+  // For large graphs (>2k nodes) edge springs are scaled down so anchors
+  // dominate — without this, inter-community edges collapse all communities
+  // into a single blob since K_EDGE > K_ANCHOR and there is no repulsion.
   function brainPhysicsStep(dt) {
-    var K_ANCHOR = 1.6;   // spring toward layout anchor (s^-2)
+    var K_ANCHOR = 2.4;   // spring toward layout anchor (s^-2)
     var K_EDGE = 2.2;     // spring along edges (s^-2), scaled by weight
     var REST = 26;        // edge rest length, px
     var DAMP = 0.90;      // per-frame velocity retention at 60fps
+    // Scale edge springs inversely with node count so large graphs keep
+    // their community structure instead of collapsing into a hairball.
+    var edgeScale = Math.min(1, 800 / Math.max(1, brainNodes.length));
+    var kEdge = K_EDGE * edgeScale;
     var i, e, s, t;
     for (i = 0; i < brainEdges.length; i++) {
       e = brainEdges[i];
@@ -2764,7 +2827,7 @@ import { OrbitControls } from '/OrbitControls.js';
       if (!s || !t) continue;
       var dx = t.x - s.x, dy = t.y - s.y;
       var d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      var f = K_EDGE * (d - REST) / d * (e.w || 0.5) * dt;
+      var f = kEdge * (d - REST) / d * (e.w || 0.5) * dt;
       s.vx += dx * f; s.vy += dy * f;
       t.vx -= dx * f; t.vy -= dy * f;
     }
@@ -2782,7 +2845,12 @@ import { OrbitControls } from '/OrbitControls.js';
   // Point shader: each node is a screen-space circle with per-point size,
   // color, and alpha. The fragment shader draws a soft-edged disc and applies
   // per-point alpha for breathing, recency, selection dimming, and depth fog.
+  // Point vertex shader: size is in world-space units; the projection
+  // converts to screen pixels via the viewport height (resolution.y)
+  // so points remain a consistent angular size as you orbit.
   var POINT_VS = [
+    'uniform float uPixelRatio;',
+    'uniform float uViewportH;',
     'attribute float size;',
     'attribute float alpha;',
     'varying vec3 vColor;',
@@ -2791,7 +2859,7 @@ import { OrbitControls } from '/OrbitControls.js';
     '  vColor = color;',
     '  vAlpha = alpha;',
     '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
-    '  gl_PointSize = size * (300.0 / -mv.z);',
+    '  gl_PointSize = size * uViewportH * uPixelRatio / -mv.z;',
     '  gl_Position = projectionMatrix * mv;',
     '}',
   ].join('\n');
@@ -2806,21 +2874,46 @@ import { OrbitControls } from '/OrbitControls.js';
     '}',
   ].join('\n');
 
+  // Ripple ring shader: hollow expanding circle that fades as it grows.
+  // The `alpha` attribute carries (1 - age/duration) so the ring fades
+  // out over its lifecycle. The `size` attribute grows with age.
+  var RIPPLE_FS = [
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  float d = length(gl_PointCoord - vec2(0.5));',
+    '  if (d > 0.5) discard;',
+    // Hollow ring: only the outer band is visible.
+    '  float ring = smoothstep(0.32, 0.40, d) * (1.0 - smoothstep(0.44, 0.50, d));',
+    '  if (ring < 0.01) discard;',
+    '  gl_FragColor = vec4(vColor, vAlpha * ring);',
+    '}',
+  ].join('\n');
+
   function startBrainAnimation(container, W, H) {
     stopBrainAnimation();
     brainW = W;
     brainH = H;
     brainContainer = container;
 
-    // Scene — dark transparent background so the CSS background shows through.
+    // Scene — dark background.
     brainScene = new THREE.Scene();
 
-    // Camera — positioned above center looking down; orbit provides full 3D.
+    // Normalized world-space: the layout runs in pixel coordinates (0..W,
+    // 0..H) for physics, but the GPU geometry is centered at origin and
+    // scaled so the longest canvas axis maps to [-1, 1]. This keeps orbit,
+    // perspective, and point sizing well-behaved regardless of canvas size.
+    brainWorldScale = 2 / Math.max(W, H);  // px → world multiplier
+    brainWorldCX = W / 2;                   // pixel center X
+    brainWorldCY = H / 2;                   // pixel center Y
+
+    // Camera — looking down the -Z axis at origin; distance 2.4 shows
+    // the full [-1,1] scene with some margin in a 50° FOV.
     var aspect = W / H;
-    brainCamera = new THREE.PerspectiveCamera(50, aspect, 1, 8000);
-    var camZ = Math.max(W, H) * 1.05;
-    brainCamera.position.set(W / 2, H / 2, camZ);
-    brainCamera.lookAt(W / 2, H / 2, 0);
+    brainCamera = new THREE.PerspectiveCamera(50, aspect, 0.01, 100);
+    // Camera further back to encompass the deeper z-range (-1.4).
+    brainCamera.position.set(0, 0, 3.2);
+    brainCamera.lookAt(0, 0, -0.4);
 
     // WebGL renderer
     brainGLRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -2835,11 +2928,12 @@ import { OrbitControls } from '/OrbitControls.js';
 
     // OrbitControls — scroll-wheel zoom, drag to orbit, right-drag to pan.
     brainControls = new OrbitControls(brainCamera, glCanvas);
-    brainControls.target.set(W / 2, H / 2, 0);
+    // Orbit target at the midpoint of the z-range so rotation reveals depth.
+    brainControls.target.set(0, 0, -0.4);
     brainControls.enableDamping = true;
     brainControls.dampingFactor = 0.12;
-    brainControls.minDistance = 50;
-    brainControls.maxDistance = camZ * 3;
+    brainControls.minDistance = 0.5;
+    brainControls.maxDistance = 8;
     brainControls.zoomSpeed = 1.2;
     brainControls.update();
 
@@ -2859,11 +2953,17 @@ import { OrbitControls } from '/OrbitControls.js';
     });
 
     brainRaycaster = new THREE.Raycaster();
-    brainRaycaster.params.Points.threshold = 8;
+    // Threshold in world-space units — ~8px at default zoom.
+    brainRaycaster.params.Points.threshold = 8 * brainWorldScale;
 
     // Build Three.js geometry for nodes and edges.
     buildBrainPoints();
     buildBrainLines();
+    buildRippleMesh();
+    buildTrailMesh();
+    brainRipples = [];
+    brainTrails = [];
+    brainLastPulseNode = null;
 
     // HTML overlay for community labels.
     brainLabelContainer = document.createElement('div');
@@ -2911,9 +3011,16 @@ import { OrbitControls } from '/OrbitControls.js';
           n.ax *= sx; n.ay *= sy;
         });
         brainW = newW; brainH = newH;
+        brainWorldScale = 2 / Math.max(newW, newH);
+        brainWorldCX = newW / 2;
+        brainWorldCY = newH / 2;
         brainCamera.aspect = newW / newH;
         brainCamera.updateProjectionMatrix();
         brainGLRenderer.setSize(newW, newH);
+        // Update shader uniform for point sizing.
+        if (brainPointsMesh) {
+          brainPointsMesh.material.uniforms.uViewportH.value = newH;
+        }
       });
       brainResizeObs.observe(container);
     }
@@ -2928,6 +3035,7 @@ import { OrbitControls } from '/OrbitControls.js';
       brainPhysicsStep(dt);
       brainControls.update();
       updateBrainFrame();
+      updateRipplesAndTrails(dt);
       brainGLRenderer.render(brainScene, brainCamera);
       brainAnimId = requestAnimationFrame(frame);
     }
@@ -2942,18 +3050,30 @@ import { OrbitControls } from '/OrbitControls.js';
     var colors = new Float32Array(N * 3);
     var sizes = new Float32Array(N);
     var alphas = new Float32Array(N);
+    // Z depth: in 3D mode, z3 ∈ [0,1] maps to [0, -0.6] in world-space
+    // (keystones at z=0, periphery sinks ~60% of the visible range).
+    // Z depth: 1.4 world units gives the z-axis real visual weight when
+    // orbiting — keystones at z=0, periphery sinks to z=-1.4.
+    var zDepth = brain3D ? 1.4 : 0;
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
     for (var i = 0; i < N; i++) {
       var n = brainNodes[i];
-      var z = brain3D ? (n.z3 || 0) * -400 : 0;
-      positions[i * 3]     = n.x;
-      positions[i * 3 + 1] = n.y;
-      positions[i * 3 + 2] = z;
+      // Pixel → world: center at origin, scale to [-1,1], flip Y.
+      positions[i * 3]     = (n.x - cx) * ws;
+      positions[i * 3 + 1] = (cy - n.y) * ws;   // Y-flip
+      positions[i * 3 + 2] = -(n.z3 || 0) * zDepth;
       var style = nounStyle(n.nounType);
       var rgb = n.rgb || style.rgb;
-      colors[i * 3]     = rgb[0] / 255;
-      colors[i * 3 + 1] = rgb[1] / 255;
-      colors[i * 3 + 2] = rgb[2] / 255;
-      sizes[i] = (style.r * (1 + n.centrality * 1.9)) * 3;
+      // Desaturate colors: mix 40% toward gray so the palette reads as
+      // tinted rather than neon. The gray target is the luminance of the
+      // original color, preserving relative brightness.
+      var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
+      var sat = 0.6;  // 0 = full gray, 1 = full color
+      colors[i * 3]     = lum + (rgb[0] / 255 - lum) * sat;
+      colors[i * 3 + 1] = lum + (rgb[1] / 255 - lum) * sat;
+      colors[i * 3 + 2] = lum + (rgb[2] / 255 - lum) * sat;
+      // Smaller dots: ~3px base at default zoom.
+      sizes[i] = (style.r * (1 + n.centrality * 1.2)) * 0.005;
       alphas[i] = style.a;
     }
     var geom = new THREE.BufferGeometry();
@@ -2962,6 +3082,10 @@ import { OrbitControls } from '/OrbitControls.js';
     geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
     geom.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
     var mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uPixelRatio: { value: window.devicePixelRatio || 1 },
+        uViewportH:  { value: brainH },
+      },
       vertexShader: POINT_VS,
       fragmentShader: POINT_FS,
       vertexColors: true,
@@ -2978,26 +3102,168 @@ import { OrbitControls } from '/OrbitControls.js';
     var E = brainEdges.length;
     var positions = new Float32Array(E * 6);
     var colors = new Float32Array(E * 6);
+    var zDepth = brain3D ? 1.4 : 0;
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
     for (var i = 0; i < E; i++) {
       var e = brainEdges[i];
       var s = brainNodeMap[e.src], t = brainNodeMap[e.tgt];
       if (!s || !t) continue;
-      var sz = brain3D ? (s.z3 || 0) * -400 : 0;
-      var tz = brain3D ? (t.z3 || 0) * -400 : 0;
-      positions[i * 6]     = s.x; positions[i * 6 + 1] = s.y; positions[i * 6 + 2] = sz;
-      positions[i * 6 + 3] = t.x; positions[i * 6 + 4] = t.y; positions[i * 6 + 5] = tz;
+      positions[i * 6]     = (s.x - cx) * ws;
+      positions[i * 6 + 1] = (cy - s.y) * ws;
+      positions[i * 6 + 2] = -(s.z3 || 0) * zDepth;
+      positions[i * 6 + 3] = (t.x - cx) * ws;
+      positions[i * 6 + 4] = (cy - t.y) * ws;
+      positions[i * 6 + 5] = -(t.z3 || 0) * zDepth;
       var col = e.type === 'tunnel' ? [0.86, 0.88, 0.94]
               : e.type === 'lattice' ? [1.0, 0.71, 0.24]
               : [0.23, 0.71, 1.0];
-      colors[i * 6]     = col[0]; colors[i * 6 + 1] = col[1]; colors[i * 6 + 2] = col[2];
-      colors[i * 6 + 3] = col[0]; colors[i * 6 + 4] = col[1]; colors[i * 6 + 5] = col[2];
+      // Dim edges by the degree of their highest-degree endpoint so hub
+      // nodes don't accumulate hundreds of near-white edges into a comet.
+      var sDeg = (brainAdjacency[e.src] || []).length;
+      var tDeg = (brainAdjacency[e.tgt] || []).length;
+      var maxDeg = Math.max(sDeg, tDeg, 1);
+      var degDim = Math.min(1, 8 / Math.sqrt(maxDeg));
+      colors[i * 6]     = col[0] * degDim; colors[i * 6 + 1] = col[1] * degDim; colors[i * 6 + 2] = col[2] * degDim;
+      colors[i * 6 + 3] = col[0] * degDim; colors[i * 6 + 4] = col[1] * degDim; colors[i * 6 + 5] = col[2] * degDim;
     }
     var geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    var mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.12, depthWrite: false });
+    // Base opacity scales inversely with edge count. The per-vertex color
+    // channel carries per-edge dimming (hub-degree scaling, selection state)
+    // so this base just sets the floor.
+    var edgeOpacity = Math.min(0.15, 30 / Math.max(1, E));
+    var mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: edgeOpacity, depthWrite: false });
     brainEdgesMesh = new THREE.LineSegments(geom, mat);
     brainScene.add(brainEdgesMesh);
+  }
+
+  // Build the ripple ring mesh — fixed-size buffer for RIPPLE_MAX concurrent
+  // ripple rings. Each ripple is a single point rendered as a hollow expanding
+  // disc via the RIPPLE_FS shader.
+  function buildRippleMesh() {
+    if (brainRippleMesh) { brainScene.remove(brainRippleMesh); brainRippleMesh.geometry.dispose(); }
+    var N = RIPPLE_MAX;
+    var pos = new Float32Array(N * 3);
+    var col = new Float32Array(N * 3);
+    var siz = new Float32Array(N);
+    var alp = new Float32Array(N);
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geom.setAttribute('size', new THREE.BufferAttribute(siz, 1));
+    geom.setAttribute('alpha', new THREE.BufferAttribute(alp, 1));
+    var mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uPixelRatio: { value: window.devicePixelRatio || 1 },
+        uViewportH:  { value: brainH },
+      },
+      vertexShader: POINT_VS,
+      fragmentShader: RIPPLE_FS,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+    });
+    brainRippleMesh = new THREE.Points(geom, mat);
+    brainScene.add(brainRippleMesh);
+  }
+
+  // Build the constellation trail mesh — TRAIL_MAX line segments that glow
+  // between consecutive same-community events then fade.
+  function buildTrailMesh() {
+    if (brainTrailMesh) { brainScene.remove(brainTrailMesh); brainTrailMesh.geometry.dispose(); }
+    var N = TRAIL_MAX;
+    var pos = new Float32Array(N * 6);
+    var col = new Float32Array(N * 6);
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    var mat = new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false,
+    });
+    brainTrailMesh = new THREE.LineSegments(geom, mat);
+    brainScene.add(brainTrailMesh);
+  }
+
+  // Per-frame ripple + trail animation update. Called from updateBrainFrame.
+  function updateRipplesAndTrails(dt) {
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
+    var zDepth = brain3D ? 1.4 : 0;
+
+    // --- Ripples ---
+    if (brainRippleMesh) {
+      var rPos = brainRippleMesh.geometry.attributes.position.array;
+      var rCol = brainRippleMesh.geometry.attributes.color.array;
+      var rSiz = brainRippleMesh.geometry.attributes.size.array;
+      var rAlp = brainRippleMesh.geometry.attributes.alpha.array;
+      // Age all active ripples; remove expired ones.
+      for (var i = brainRipples.length - 1; i >= 0; i--) {
+        brainRipples[i].age += dt;
+        if (brainRipples[i].age >= RIPPLE_DURATION) brainRipples.splice(i, 1);
+      }
+      for (var i = 0; i < RIPPLE_MAX; i++) {
+        var r = brainRipples[i];
+        if (!r) {
+          rSiz[i] = 0; rAlp[i] = 0;
+          continue;
+        }
+        var t = r.age / RIPPLE_DURATION;  // 0→1 over lifecycle
+        // Position tracks the node (which drifts under physics).
+        var node = brainNodeMap[r.nodeId];
+        if (node) {
+          rPos[i * 3]     = (node.x - cx) * ws;
+          rPos[i * 3 + 1] = (cy - node.y) * ws;
+          rPos[i * 3 + 2] = -(node.z3 || 0) * zDepth;
+        }
+        // Ring expands from 0.02 to 0.12 world units; alpha fades out.
+        rSiz[i] = 0.02 + t * 0.10;
+        rAlp[i] = (1 - t) * 0.8;
+        rCol[i * 3]     = r.rgb[0]; rCol[i * 3 + 1] = r.rgb[1]; rCol[i * 3 + 2] = r.rgb[2];
+      }
+      brainRippleMesh.geometry.attributes.position.needsUpdate = true;
+      brainRippleMesh.geometry.attributes.color.needsUpdate = true;
+      brainRippleMesh.geometry.attributes.size.needsUpdate = true;
+      brainRippleMesh.geometry.attributes.alpha.needsUpdate = true;
+    }
+
+    // --- Trails ---
+    if (brainTrailMesh) {
+      var tPos = brainTrailMesh.geometry.attributes.position.array;
+      var tCol = brainTrailMesh.geometry.attributes.color.array;
+      for (var i = brainTrails.length - 1; i >= 0; i--) {
+        brainTrails[i].age += dt;
+        if (brainTrails[i].age >= TRAIL_DURATION) brainTrails.splice(i, 1);
+      }
+      for (var i = 0; i < TRAIL_MAX; i++) {
+        var tr = brainTrails[i];
+        if (!tr) {
+          // Zero-length invisible line.
+          tPos[i * 6] = -99; tPos[i * 6 + 1] = -99; tPos[i * 6 + 2] = -99;
+          tPos[i * 6 + 3] = -99; tPos[i * 6 + 4] = -99; tPos[i * 6 + 5] = -99;
+          tCol[i * 6] = 0; tCol[i * 6 + 1] = 0; tCol[i * 6 + 2] = 0;
+          tCol[i * 6 + 3] = 0; tCol[i * 6 + 4] = 0; tCol[i * 6 + 5] = 0;
+          continue;
+        }
+        var t = tr.age / TRAIL_DURATION;
+        var fade = (1 - t) * (1 - t);  // quadratic fade for a gentle tail
+        // Track node positions so trails follow physics drift.
+        var n1 = brainNodeMap[tr.fromId], n2 = brainNodeMap[tr.toId];
+        if (n1) {
+          tPos[i * 6]     = (n1.x - cx) * ws;
+          tPos[i * 6 + 1] = (cy - n1.y) * ws;
+          tPos[i * 6 + 2] = -(n1.z3 || 0) * zDepth;
+        }
+        if (n2) {
+          tPos[i * 6 + 3] = (n2.x - cx) * ws;
+          tPos[i * 6 + 4] = (cy - n2.y) * ws;
+          tPos[i * 6 + 5] = -(n2.z3 || 0) * zDepth;
+        }
+        tCol[i * 6]     = tr.rgb[0] * fade; tCol[i * 6 + 1] = tr.rgb[1] * fade; tCol[i * 6 + 2] = tr.rgb[2] * fade;
+        tCol[i * 6 + 3] = tr.rgb[0] * fade; tCol[i * 6 + 4] = tr.rgb[1] * fade; tCol[i * 6 + 5] = tr.rgb[2] * fade;
+      }
+      brainTrailMesh.geometry.attributes.position.needsUpdate = true;
+      brainTrailMesh.geometry.attributes.color.needsUpdate = true;
+    }
   }
 
   // Per-frame update: sync node positions, colors, and alphas into the GPU
@@ -3012,41 +3278,47 @@ import { OrbitControls } from '/OrbitControls.js';
     var alp = geom.attributes.alpha.array;
     var hasSel = !!brainSelectedNode;
     var N = brainNodes.length;
+    var zDepth = brain3D ? 1.4 : 0;
+    var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
     for (var i = 0; i < N; i++) {
       var n = brainNodes[i];
-      var z = brain3D ? (n.z3 || 0) * -400 : 0;
-      pos[i * 3]     = n.x;
-      pos[i * 3 + 1] = n.y;
-      pos[i * 3 + 2] = z;
+      pos[i * 3]     = (n.x - cx) * ws;
+      pos[i * 3 + 1] = (cy - n.y) * ws;
+      pos[i * 3 + 2] = -(n.z3 || 0) * zDepth;
       var style = nounStyle(n.nounType);
       var rgb = n.rgb || style.rgb;
       var breath = 0.82 + 0.18 * Math.sin(brainT * 0.72 + n.breathPhase);
       var alpha = style.a * breath;
       var mod = 1;
       if (hasSel) {
+        // Gentler dimming: unselected nodes stay at 30% (not 12%).
         if (n === brainSelectedNode || brainHop1[n.id]) { /* full */ }
-        else if (brainHop2[n.id]) mod *= 0.55;
-        else mod *= 0.12;
+        else if (brainHop2[n.id]) mod *= 0.6;
+        else mod *= 0.3;
       }
       mod *= recencyFactor(n, brainNowMs);
-      if (brain3D) mod *= 1 - 0.55 * (n.z3 || 0);
+      if (brain3D) mod *= 1 - 0.35 * (n.z3 || 0);
       alpha *= mod;
       if (brainDead(n)) alpha = 0;
-      // Pulse: brighten toward white on orange pulse.
-      var pr = rgb[0] / 255, pg = rgb[1] / 255, pb = rgb[2] / 255;
+      // Desaturate: mix toward luminance gray, same ratio as buildBrainPoints.
+      var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
+      var sat = 0.6;
+      var pr = lum + (rgb[0] / 255 - lum) * sat;
+      var pg = lum + (rgb[1] / 255 - lum) * sat;
+      var pb = lum + (rgb[2] / 255 - lum) * sat;
       if (n.pulseOrange > 0.01) {
         var t2 = n.pulseOrange;
         pr = pr + (1 - pr) * t2 * 0.6;
         pg = pg + (0.55 - pg) * t2 * 0.6;
         pb = pb * (1 - t2 * 0.4);
-        siz[i] = (style.r * (1 + n.centrality * 1.9) + n.pulseOrange * 6) * 3;
+        siz[i] = (style.r * (1 + n.centrality * 1.2) + n.pulseOrange * 6) * 0.005;
       } else if (n.pulseBlue > 0.01) {
         pr = pr + (0.23 - pr) * n.pulseBlue * 0.5;
         pg = pg + (0.71 - pg) * n.pulseBlue * 0.5;
         pb = pb + (1.0 - pb) * n.pulseBlue * 0.5;
-        siz[i] = (style.r * (1 + n.centrality * 1.9) + n.pulseBlue * 6) * 3;
+        siz[i] = (style.r * (1 + n.centrality * 1.2) + n.pulseBlue * 6) * 0.005;
       } else {
-        siz[i] = (style.r * (1 + n.centrality * 1.9)) * 3;
+        siz[i] = (style.r * (1 + n.centrality * 1.2)) * 0.005;
       }
       col[i * 3] = pr; col[i * 3 + 1] = pg; col[i * 3 + 2] = pb;
       alp[i] = alpha;
@@ -3061,30 +3333,53 @@ import { OrbitControls } from '/OrbitControls.js';
       var epos = brainEdgesMesh.geometry.attributes.position.array;
       var ecol = brainEdgesMesh.geometry.attributes.color.array;
       var E = brainEdges.length;
+      var eZDepth = brain3D ? 1.4 : 0;
+      var eWs = brainWorldScale, eCx = brainWorldCX, eCy = brainWorldCY;
+      // Off-screen collapse point for hidden edges.
+      var hideX = -99, hideY = -99, hideZ = -99;
       for (var j = 0; j < E; j++) {
         var e = brainEdges[j];
         var s = brainNodeMap[e.src], t2e = brainNodeMap[e.tgt];
-        if (!s || !t2e) continue;
+        if (!s || !t2e) {
+          // Missing node lookup: collapse to off-screen degenerate line.
+          epos[j * 6] = hideX; epos[j * 6 + 1] = hideY; epos[j * 6 + 2] = hideZ;
+          epos[j * 6 + 3] = hideX; epos[j * 6 + 4] = hideY; epos[j * 6 + 5] = hideZ;
+          ecol[j * 6] = 0; ecol[j * 6 + 1] = 0; ecol[j * 6 + 2] = 0;
+          ecol[j * 6 + 3] = 0; ecol[j * 6 + 4] = 0; ecol[j * 6 + 5] = 0;
+          continue;
+        }
         var hidden = brainDead(s) || brainDead(t2e);
         if (e.deadMs && (topoPlay.active ? e.deadMs <= brainNowMs : true)) hidden = true;
-        var sz2 = brain3D ? (s.z3 || 0) * -400 : 0;
-        var tz2 = brain3D ? (t2e.z3 || 0) * -400 : 0;
-        epos[j * 6]     = hidden ? 0 : s.x;
-        epos[j * 6 + 1] = hidden ? 0 : s.y;
-        epos[j * 6 + 2] = hidden ? 0 : sz2;
-        epos[j * 6 + 3] = hidden ? 0 : t2e.x;
-        epos[j * 6 + 4] = hidden ? 0 : t2e.y;
-        epos[j * 6 + 5] = hidden ? 0 : tz2;
-        // Selection-aware edge alpha via color brightness.
+        if (hidden) {
+          epos[j * 6] = hideX; epos[j * 6 + 1] = hideY; epos[j * 6 + 2] = hideZ;
+          epos[j * 6 + 3] = hideX; epos[j * 6 + 4] = hideY; epos[j * 6 + 5] = hideZ;
+          ecol[j * 6] = 0; ecol[j * 6 + 1] = 0; ecol[j * 6 + 2] = 0;
+          ecol[j * 6 + 3] = 0; ecol[j * 6 + 4] = 0; ecol[j * 6 + 5] = 0;
+          continue;
+        }
+        epos[j * 6]     = (s.x - eCx) * eWs;
+        epos[j * 6 + 1] = (eCy - s.y) * eWs;
+        epos[j * 6 + 2] = -(s.z3 || 0) * eZDepth;
+        epos[j * 6 + 3] = (t2e.x - eCx) * eWs;
+        epos[j * 6 + 4] = (eCy - t2e.y) * eWs;
+        epos[j * 6 + 5] = -(t2e.z3 || 0) * eZDepth;
+        // Selection-aware and degree-aware edge dimming via vertex color.
         var isTunnel = e.type === 'tunnel';
         var isLattice = e.type === 'lattice';
-        var ea = hidden ? 0 : 1;
-        if (hasSel && !hidden) {
+        // Degree-based dimming: edges at hub nodes (high degree) are
+        // individually fainter so hundreds of overlapping edges don't
+        // stack into a bright comet at the hub vertex.
+        var sDeg = (brainAdjacency[e.src] || []).length;
+        var tDeg = (brainAdjacency[e.tgt] || []).length;
+        var maxDeg = Math.max(sDeg, tDeg, 1);
+        var degDim = Math.min(1, 8 / Math.sqrt(maxDeg));
+        var ea = degDim;
+        if (hasSel) {
           var srcCore = e.src === brainSelectedNode.id || brainHop1[e.src];
           var tgtCore = e.tgt === brainSelectedNode.id || brainHop1[e.tgt];
-          if (srcCore && tgtCore) ea = 1;
-          else if (srcCore || tgtCore || brainHop2[e.src] || brainHop2[e.tgt]) ea = 0.3;
-          else ea = 0.05;
+          if (srcCore && tgtCore) { /* full degDim */ }
+          else if (srcCore || tgtCore || brainHop2[e.src] || brainHop2[e.tgt]) ea *= 0.3;
+          else ea *= 0.05;
         }
         var bc = isTunnel ? [0.86, 0.88, 0.94] : isLattice ? [1.0, 0.71, 0.24] : [0.23, 0.71, 1.0];
         ecol[j * 6] = bc[0] * ea; ecol[j * 6 + 1] = bc[1] * ea; ecol[j * 6 + 2] = bc[2] * ea;
@@ -3135,16 +3430,22 @@ import { OrbitControls } from '/OrbitControls.js';
       if (!lbl) return;
       var members = groups[rank];
       if (!members || !members.length) { lbl.style.display = 'none'; return; }
-      var cx = 0, cy = 0, cz = 0;
+      var lCx = 0, lCy = 0, lCz = 0;
+      var lblZDepth = brain3D ? 1.4 : 0;
+      var lWs = brainWorldScale, lWcx = brainWorldCX, lWcy = brainWorldCY;
       members.forEach(function (n) {
-        cx += n.x; cy += n.y;
-        cz += brain3D ? (n.z3 || 0) * -400 : 0;
+        lCx += n.x; lCy += n.y;
+        lCz += -(n.z3 || 0) * lblZDepth;
       });
-      cx /= members.length; cy /= members.length; cz /= members.length;
+      lCx /= members.length; lCy /= members.length; lCz /= members.length;
       var spread = members.reduce(function (s, n) {
-        return s + Math.hypot(n.x - cx, n.y - cy);
+        return s + Math.hypot(n.x - lCx, n.y - lCy);
       }, 0) / members.length;
-      var sp = worldToScreen(cx, cy - spread * 1.2, cz);
+      // Convert pixel centroid to world-space for projection, placing
+      // the label above the lobe centroid.
+      var wx = (lCx - lWcx) * lWs;
+      var wy = (lWcy - lCy) * lWs + spread * lWs * 1.2;
+      var sp = worldToScreen(wx, wy, lCz);
       if (!sp.visible) { lbl.style.display = 'none'; return; }
       lbl.style.display = '';
       lbl.style.left = sp.x + 'px';
@@ -3204,6 +3505,19 @@ import { OrbitControls } from '/OrbitControls.js';
       brainScene.remove(brainEdgesMesh);
       brainEdgesMesh = null;
     }
+    if (brainRippleMesh) {
+      brainRippleMesh.geometry.dispose();
+      brainRippleMesh.material.dispose();
+      brainScene.remove(brainRippleMesh);
+      brainRippleMesh = null;
+    }
+    if (brainTrailMesh) {
+      brainTrailMesh.geometry.dispose();
+      brainTrailMesh.material.dispose();
+      brainScene.remove(brainTrailMesh);
+      brainTrailMesh = null;
+    }
+    brainRipples = []; brainTrails = []; brainLastPulseNode = null;
     if (brainControls) { brainControls.dispose(); brainControls = null; }
     if (brainGLRenderer) {
       brainGLRenderer.dispose();
@@ -3233,7 +3547,8 @@ import { OrbitControls } from '/OrbitControls.js';
   // L2 recency brightness — alpha multiplier from how recently the node was
   // active. 1.0 under an hour old, exponential decay (tau = 7 days) toward a
   // 0.35 floor; the floor is effectively reached past 30 days. Nodes without
-  // a lastActiveTs (all synthetic nodes) stay at full brightness.
+  // a lastActiveTs stay at full brightness (the wire format dropped the
+  // field — FIX 2 payload trim — so the createdMs fallback usually applies).
   var BRAIN_HOUR_MS = 3600000;
   var BRAIN_DAY_MS = 86400000;
   function recencyFactor(n, nowMs) {
@@ -3243,35 +3558,56 @@ import { OrbitControls } from '/OrbitControls.js';
     return 0.35 + 0.65 * Math.exp(-(age - BRAIN_HOUR_MS) / (7 * BRAIN_DAY_MS));
   }
 
-  // L4 depth assignment — z3 ∈ [0,1] per node: newest 0 (surface), oldest 1
-  // (deep). Birth instant prefers createdTs (ingest clock) over lastActiveTs.
-  // Nodes without any timestamp (the synthetic path) get a stable pseudo-random
-  // depth derived from breathPhase so the 3D toggle still reads as strata.
-  // Two distinct time semantics:
-  //   birthMs (createdMs preferred)  → the alive(t) playback filter: when the
-  //                                    entity entered the estate.
-  //   dormancy (lastMs preferred)    → the strata Z axis: recently-touched
-  //                                    memory floats at the surface, dormant
-  //                                    memory settles into the depths. This is
-  //                                    the "memory sediment" reading — depth is
-  //                                    how long since the drawer was active,
-  //                                    not how long since it was filed.
+  // Structural depth: z3 ∈ [0,1] = hop distance from the estate's keystone
+  // nodes (top-centrality pillars). Keystones float at z=0, periphery sinks
+  // to z=1. Multi-source BFS from the top-K centrality nodes; nodes
+  // unreachable from any keystone (disconnected fragments) get z3=1.
+  // Also sets birthMs for the L5 alive(t) playback filter.
   function brainAssignDepth(nowMs) {
-    var minA = Infinity, maxA = -Infinity;
+    // Timestamp bookkeeping for L5 playback (independent of z-mapping).
     brainNodes.forEach(function (n) {
       n.birthMs = n.createdMs || n.lastMs || null;
-      n.dormMs = n.lastMs || n.createdMs || null;
-      if (n.dormMs) {
-        var a = nowMs - n.dormMs;
-        if (a < minA) minA = a;
-        if (a > maxA) maxA = a;
-      }
     });
-    var range = Math.max(1, maxA - minA);
+
+    // Find the top-K keystone nodes by centrality.
+    var K = Math.max(1, Math.min(5, Math.ceil(brainNodes.length * 0.02)));
+    var sorted = brainNodes.slice().sort(function (a, b) {
+      return (b.centrality || 0) - (a.centrality || 0);
+    });
+    var seeds = sorted.slice(0, K);
+
+    // Build adjacency from brainEdges for BFS.
+    var adj = Object.create(null);
+    brainEdges.forEach(function (e) {
+      (adj[e.src] = adj[e.src] || []).push(e.tgt);
+      (adj[e.tgt] = adj[e.tgt] || []).push(e.src);
+    });
+
+    // Multi-source BFS: distance from nearest keystone.
+    var dist = Object.create(null);
+    var queue = [];
+    seeds.forEach(function (n) { dist[n.id] = 0; queue.push(n.id); });
+    var head = 0;
+    while (head < queue.length) {
+      var cur = queue[head++];
+      var d = dist[cur];
+      (adj[cur] || []).forEach(function (nbr) {
+        if (dist[nbr] === undefined) {
+          dist[nbr] = d + 1;
+          queue.push(nbr);
+        }
+      });
+    }
+
+    // Normalize to [0,1]. Unreachable nodes (disconnected) get max depth.
+    var maxDist = 1;
     brainNodes.forEach(function (n) {
-      n.z3 = n.dormMs
-        ? (nowMs - n.dormMs - minA) / range
-        : n.breathPhase / (Math.PI * 2);
+      var d = dist[n.id];
+      if (d !== undefined && d > maxDist) maxDist = d;
+    });
+    brainNodes.forEach(function (n) {
+      var d = dist[n.id];
+      n.z3 = d !== undefined ? d / maxDist : 1;
     });
   }
 
@@ -3398,6 +3734,13 @@ import { OrbitControls } from '/OrbitControls.js';
     head.appendChild(allBtn);
     panel.appendChild(head);
 
+    // Plain-language explainer for the classification codes behind these
+    // domain labels — same modal as the Lattice view's button.
+    var what = el("button", "cp-all cp-what", "What are these codes?");
+    what.setAttribute("type", "button");
+    what.addEventListener("click", showCodesExplainer);
+    panel.appendChild(what);
+
     var list = el("div", "cp-list");
     topoCommRows.forEach(function (row) {
       var on = !topoCommFilter || topoCommFilter.has(row.key);
@@ -3408,12 +3751,12 @@ import { OrbitControls } from '/OrbitControls.js';
       box.setAttribute("aria-checked", on ? "true" : "false");
 
       var dot = el("span", "cp-dot");
-      if (row.cIdx >= 0) {
-        var col = BRAIN_COMM_COLORS[row.cIdx % BRAIN_COMM_COLORS.length];
-        dot.style.background = "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")";
-      } else {
-        dot.style.background = "rgba(232,234,240,0.35)";
-      }
+      // row.rgb is the resolved community color (digit-derived from the FDC
+      // code, or the palette fallback); rows without one (buckets) go neutral.
+      var col = row.rgb || (row.cIdx >= 0 ? BRAIN_COMM_COLORS[row.cIdx % BRAIN_COMM_COLORS.length] : null);
+      dot.style.background = col
+        ? "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")"
+        : "rgba(232,234,240,0.35)";
 
       var label = el("span", "cp-label", row.key);
       var size = el("span", "cp-size", String(row.size));
@@ -3433,7 +3776,6 @@ import { OrbitControls } from '/OrbitControls.js';
     stopBrainAnimation();
     topoPlayReset();
     if (sse) sse.removeEventListener("message", topoSSEHandler);
-    topoHideCornerElements();
   }
 
   async function renderTopology() {
@@ -3445,7 +3787,8 @@ import { OrbitControls } from '/OrbitControls.js';
     try {
       g = await getJSON("/api/graph" + (estate ? "?estate=" + encodeURIComponent(estate) : ""));
     } catch (_) {
-      // Degrade to synthetic visualization when the graph endpoint is unreachable.
+      // Endpoint unreachable — fall through with structurePending:true so the
+      // honest pending overlay renders. The canvas never shows invented data.
     }
 
     $("#topoStructure").textContent = g.structurePending ? "pending" : "live";
@@ -3467,8 +3810,7 @@ import { OrbitControls } from '/OrbitControls.js';
     const W = stageRect.width > 10 ? stageRect.width : 800;
     const H = stageRect.height > 10 ? stageRect.height : 500;
 
-    // Fetch recent events: they weight the synthetic node noun-type
-    // distribution AND feed the L5 radar-loop playback timeline.
+    // Fetch recent events: they feed the L5 radar-loop playback timeline.
     let events = [];
     try { const ep = await getJSON("/api/events"); events = ep.events || []; } catch (_) {}
 
@@ -3490,7 +3832,8 @@ import { OrbitControls } from '/OrbitControls.js';
     // has content; the Pause button stops it.
     if (topoPlayEvents.length > 1) topoPlayToggle();
 
-    // Build node + edge sets: real VizGraph structure when available, synthetic otherwise.
+    // Build node + edge sets from real VizGraph structure; an empty canvas
+    // plus the pending overlay is the honest no-structure state.
     //
     // FIX 2b compact format: the server emits parallel arrays (g.ids, g.communityId, ...)
     // and compact edges ([[si, ti, w, et], ...]).  The legacy per-object format
@@ -3546,21 +3889,21 @@ import { OrbitControls } from '/OrbitControls.js';
       });
       buildBrainFromRealData(false);
     } else {
+      // No real structure — empty canvas + pending overlay. Never invented data.
       topoRealData = null;
-      brainNodes = synthBrainNodes(events, W, H);
-      brainEdges = synthBrainEdges(brainNodes);
-      brainLobeLabels = Object.create(null);  // synthetic lobes carry no real community labels
-      topoCommRows = [];     // no content picker on synthetic data
+      brainNodes = [];
+      brainEdges = [];
+      brainLobeLabels = Object.create(null);
+      brainLobeRGB = Object.create(null);
+      topoCommRows = [];     // no content picker without real communities
     }
     renderCommPicker();
     // L4: assign per-node depth from age now that the node set is final.
     brainAssignDepth(Date.now());
 
-    // Decide overlay visibility: the brain canvas is always the hero.
-    // The pending overlay is only shown when VizGraph analytics are present — the analytics
-    // grid needs a readable dark tint to be scannable over the animated neurons.
-    // On the synthetic no-analytics path the overlay stays hidden; corner elements
-    // (node count top-left, watermark top-right) communicate the synthetic state instead.
+    // Overlay visibility: real structure renders with the corner legend; any
+    // no-structure state shows the honest pending overlay (with the analytics
+    // grid when VizGraph analytics exist, a monitoring-aware message otherwise).
     const pending = $("#topoPending");
     const hasAnalytics = (g.analytics || []).length > 0;
     const monOn = lastServerData ? lastServerData.monitoringEnabled : false;
@@ -3572,28 +3915,32 @@ import { OrbitControls } from '/OrbitControls.js';
       $("#topoPendingText").textContent =
         "Showing VizGraph analytics — autonomic governor runs CognitionKit recipes on schedule to populate structure.";
       topoRenderAnalytics(g);
-      topoHideCornerElements();
     } else if (!hasRealStructure) {
-      // No-analytics synthetic path: brain is the hero; overlay stays hidden.
-      pending.hidden = true;
+      // No analytics either: centered overlay with a monitoring-aware message.
+      pending.hidden = false;
+      $("#topoPendingTitle").textContent = "Topology structure pending";
+      $("#topoPendingText").textContent = monOn
+        ? "The autonomic governor builds the knowledge graph on its schedule — structure appears after its next duty cycle."
+        : "Monitoring is off — turn it on to start capturing structure.";
       topoRenderAnalytics(g);    // renders static legend in #topoLegend
-      topoShowCornerElements(monOn);
     } else {
       // Real structure: overlay hidden, VizGraph legend in corner.
       pending.hidden = true;
       topoRenderAnalytics(g);
-      topoHideCornerElements();
     }
 
     startBrainAnimation(container, W, H);
     topoStartSSE();
   }
 
-  // CSS color string for community palette index i — keeps the DOM legend
-  // swatches in sync with the canvas community colors. communities[] arrives
-  // sorted by size desc, so array index == lobe rank for the top entries.
+  // CSS color string for lobe rank i — keeps the DOM legend swatches in sync
+  // with the canvas community colors. Reads the resolved per-lobe color
+  // (digit-derived from the FDC code) recorded by buildRealBrainNodes, with
+  // the static palette as the fallback for ranks that never earned a lobe.
+  // communities[] arrives sorted by size desc, so array index == lobe rank
+  // for the top entries.
   function brainCommCSS(i) {
-    const col = BRAIN_COMM_COLORS[i % BRAIN_COMM_COLORS.length];
+    const col = brainLobeRGB[i] || BRAIN_COMM_COLORS[i % BRAIN_COMM_COLORS.length];
     return "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")";
   }
 
@@ -3638,7 +3985,10 @@ import { OrbitControls } from '/OrbitControls.js';
       if ((g.communities || []).length) {
         const sw = el("div", "lswatches");
         g.communities.slice(0, 12).forEach((c, i) => {
-          const dot = el("div", "lsw"); dot.style.background = brainCommCSS(i); sw.appendChild(dot);
+          const dot = el("div", "lsw");
+          const rgb = fdcColor(c.code);
+          dot.style.background = rgb ? "rgb(" + rgb.join(",") + ")" : brainCommCSS(i);
+          sw.appendChild(dot);
         });
         legend.appendChild(sw);
       }
@@ -3700,7 +4050,8 @@ import { OrbitControls } from '/OrbitControls.js';
       const swatches = el("div", "topo-swatches");
       g.communities.slice(0, 12).forEach((c, i) => {
         const sw = el("div", "lsw");
-        sw.style.background = brainCommCSS(i);
+        const rgb = fdcColor(c.code);
+        sw.style.background = rgb ? "rgb(" + rgb.join(",") + ")" : brainCommCSS(i);
         sw.setAttribute("aria-hidden", "true");
         swatches.appendChild(sw);
       });
@@ -3711,29 +4062,6 @@ import { OrbitControls } from '/OrbitControls.js';
       commDiv.appendChild(swatches);
       analyticsBox.appendChild(commDiv);
     }
-  }
-
-  // Show node-count and watermark corner elements (synthetic no-analytics path).
-  function topoShowCornerElements(monOn) {
-    const nodeCnt = $("#topoNodeCnt");
-    const watermark = $("#topoWatermark");
-    if (nodeCnt) {
-      nodeCnt.hidden = false;
-      const n = brainNodes.length;
-      nodeCnt.innerHTML = "<strong>" + n.toLocaleString() + "</strong> synthetic nodes";
-    }
-    if (watermark) {
-      watermark.hidden = false;
-      watermark.textContent = monOn ? "synthetic · observing" : "synthetic · monitoring off";
-    }
-  }
-
-  // Hide corner elements (analytics-grid path and live-structure path).
-  function topoHideCornerElements() {
-    const nodeCnt = $("#topoNodeCnt");
-    const watermark = $("#topoWatermark");
-    if (nodeCnt) nodeCnt.hidden = true;
-    if (watermark) watermark.hidden = true;
   }
 
   // Render the static PoC-spec legend (node types / activity / edge types) in the legend panel.
@@ -3849,43 +4177,54 @@ import { OrbitControls } from '/OrbitControls.js';
     if (ev.kind === "capture") {
       node.pulseOrange = 1.0;
     } else {
-      // Non-capture events get a visible expanding blue ring (pulseBlue) on top of
-      // the slow ambient blue glow. Both decay together — ring same ~1s as orange,
-      // glow over ~10s. This ensures every playback step produces immediate visible
-      // animation regardless of event kind.
       node.pulseBlue = 1.0;
       node.glowBlue = Math.min(1.0, node.glowBlue + 0.55);
     }
+    // Ripple: add an expanding ring at the event node, capped at RIPPLE_MAX.
+    // Oldest ripple is evicted if the buffer is full — singing in a round.
+    var rgb = node.rgb || BRAIN_COMM_COLORS[node.community % BRAIN_COMM_COLORS.length];
+    var rippleColor = [rgb[0] / 255, rgb[1] / 255, rgb[2] / 255];
+    if (brainRipples.length >= RIPPLE_MAX) brainRipples.shift();
+    brainRipples.push({ nodeId: node.id, age: 0, rgb: rippleColor });
+
+    // Constellation trail: if the previous pulsed node is in the same
+    // community as this one, draw a glowing line between them.
+    if (brainLastPulseNode && brainLastPulseNode !== node &&
+        brainLastPulseNode.community === node.community) {
+      if (brainTrails.length >= TRAIL_MAX) brainTrails.shift();
+      brainTrails.push({
+        fromId: brainLastPulseNode.id, toId: node.id, age: 0,
+        rgb: rippleColor,
+      });
+    }
+    brainLastPulseNode = node;
     return true;
   }
 
   // Advance the playhead one event, then schedule the next step.
   //
-  // Pacing is event-indexed: each event gets a fixed 650ms dwell regardless of
-  // the real inter-event gap. Rationale: pulseOrange/pulseBlue decay at 1.1/s,
-  // so at 650ms the ring is still at ~28% intensity when the next event fires —
-  // each pulse is individually watchable. 13 events ≈ 8-9s per pass.
+  // Dwell is 350ms per event — fast enough for 20 ripples to overlap in
+  // their 2s lifecycle (20 × 0.35 = 7s, so the oldest ripple is at 100%
+  // when the newest splashes). The effect is a continuous rain of droplets
+  // with ~6 concurrently visible at any moment.
   //
-  // If topoPlaybackPulse returns false (no visible node found for the event),
-  // the step advances immediately (0ms dwell) so missing nodes never produce
-  // dead-air pauses. This enforces the invariant: every visible step has an
-  // animation; invisible steps consume no wall-clock time.
+  // If topoPlaybackPulse returns false (no visible node), advance
+  // immediately (0ms) so dead-air never accumulates.
   //
-  // After the last event a short 700ms pause (longer than one dwell to let the
-  // final ring fully fade) clears residual pulse state and loops back to the
-  // start so each pass begins from a clean base layer.
+  // End-of-pass: 2.5s pause lets all ripples and trails fully fade before
+  // the next loop starts clean.
   function topoPlayStep() {
     var win = topoPlayWindowEvents();
     if (!win.length) { topoPlayToggle(); return; }
     if (topoPlay.idx >= win.length) {
-      // End-of-pass pause: base layer is visible, final pulse ring fades out.
-      // Clear both pulse channels on all nodes so the next loop starts clean —
-      // prevents residual pulses from the previous pass accumulating.
       topoPlay.timer = setTimeout(function () {
         brainNodes.forEach(function (n) { n.pulseOrange = 0; n.pulseBlue = 0; });
+        brainRipples = [];
+        brainTrails = [];
+        brainLastPulseNode = null;
         topoPlay.idx = 0;
         topoPlayStep();
-      }, 700);
+      }, 2500);
       return;
     }
     var ev = win[topoPlay.idx];
@@ -3894,8 +4233,7 @@ import { OrbitControls } from '/OrbitControls.js';
     if (clock) clock.textContent = new Date(ev.ms).toLocaleString();
     var pulsed = topoPlaybackPulse(ev);
     topoPlay.idx++;
-    // If no node was found to pulse, advance immediately — never dwell on nothing.
-    topoPlay.timer = setTimeout(topoPlayStep, pulsed ? 650 : 0);
+    topoPlay.timer = setTimeout(topoPlayStep, pulsed ? 350 : 0);
   }
 
   // Play/pause toggle. Pause freezes the playhead (the session stays active,

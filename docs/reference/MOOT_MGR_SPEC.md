@@ -216,16 +216,20 @@ moot-mgr reads the topology snapshot from its own `topology_snapshots` table
 Source of truth: `StatsStore.latestTopologySnapshot(estate:)`. When a snapshot
 is present, moot-mgr decodes the stored `StoredGraphPayload` and enriches
 `communities` at the content boundary: the governor's `{id, size, dominantUdcCode}`
-becomes `{id, label, size}` where `label = FDC.label(for: dominantUdcCode)`
-(LatticeLib; parent-walk for 3-digit codes) or `null` when unresolvable. The
-raw `dominantUdcCode` is dropped — codes stay server-side, labels cross to the
-browser. `generatedTs` from the stored snapshot is forwarded verbatim on the
-`GraphPayload` wire.
+becomes `{id, code, label, size}` where `label = FDC.label(for: dominantUdcCode)`
+(LatticeLib; every code resolves to its own frame label) or `null` when
+unresolvable, and `code` is the dominant classification code passed through
+(`null` when empty/absent). The code crosses on the same basis as
+`GET /api/lattice`, which already serves raw codes: a classification code is a
+pure function of the pinned public frame, never memory content. The dashboard
+derives community colors from the code digits (hundreds → hue, tens → shade,
+ones → brightness). `generatedTs` from the stored snapshot is forwarded
+verbatim on the `GraphPayload` wire.
 
 When no snapshot has been written yet (governor first duty cycle not complete),
 or when no estate key is provided, the local fallback serves `{id: runningIndex,
-label: null, size: 0}` rows derived from the `community.assignment` analytic
-metric and `structurePending: true` with empty `nodes`/`edges`.
+code: null, label: null, size: 0}` rows derived from the `community.assignment`
+analytic metric and `structurePending: true` with empty `nodes`/`edges`.
 
 Full node/edge contract (createdTs, tombstonedTs, Louvain communityId, normalised
 centrality): ARIA_MCP_SPEC.md § response shapes.
@@ -253,8 +257,13 @@ click starts a selection containing just it); emptying the selection or
 re-checking everything resets to All. Filtering HIDES deselected content
 entirely and RE-LAYS-OUT the selection to fill the canvas. Selections are
 keyed by label (content identity), not Louvain community id — ids renumber
-on every governor recompute while labels are stable — and hues are pinned
-per label from the full-estate ranking so colors never reshuffle under
-filtering. Picker rows always derive from the FULL estate regardless of the
-active filter (a layout reset or snapshot refresh mid-selection must never
-collapse the available choices). Client-side only — no API surface.
+on every governor recompute while labels are stable. Community colors are
+digit-derived from each community's FDC code (hundreds → hue, tens → shade,
+ones → brightness), so a code renders the same color on every host and
+refresh; code-less communities fall back to a static palette pinned per
+label from the full-estate ranking. Picker rows always derive from the FULL
+estate regardless of the active filter (a layout reset or snapshot refresh
+mid-selection must never collapse the available choices). The panel renders
+as a fixed right-hand column beside the canvas (never an overlay above it)
+and scrolls horizontally when a label exceeds the column width. Client-side
+only — no API surface.

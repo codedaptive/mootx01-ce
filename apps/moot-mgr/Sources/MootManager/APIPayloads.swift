@@ -537,11 +537,13 @@ public struct GraphPayload: Encodable, Sendable {
 
     // MARK: - Unchanged fields
 
-    /// Community legend entries `{id, label, size}` (VIZ_V2 L3). When a snapshot
-    /// is available these are governor-produced descriptors enriched with FDC
-    /// heading labels (raw `dominantUdcCode` dropped at this boundary — content
-    /// boundary keeps labels only). On fallback they are count-only placeholders
-    /// from the `community.assignment` VizGraph signal.
+    /// Community legend entries `{id, code, label, size}` (VIZ_V2 L3). When a
+    /// snapshot is available these are governor-produced descriptors enriched
+    /// with FDC heading labels, with the dominant classification code passed
+    /// through (same content basis as `/api/lattice`, which serves raw codes;
+    /// the dashboard derives community colors from the code digits). On
+    /// fallback they are count-only placeholders from the
+    /// `community.assignment` VizGraph signal.
     public let communities: [GraphCommunityPayload]
     /// The VizGraph analytic-signal summary sourced from the stats store —
     /// one row per (estate, signal) with the latest value + freshness.
@@ -766,23 +768,30 @@ public struct GraphEdgePayload: Codable, Sendable, Equatable {
     }
 }
 
-/// One community legend entry on the wire: `{id, label, size}` (VIZ_V2 L3).
+/// One community legend entry on the wire: `{id, code, label, size}` (VIZ_V2 L3).
 ///
 /// Sourced two ways:
 /// - **ARIA proxy (live):** ARIA_MCP ships `{id, size, dominantUdcCode}` sorted
 ///   by size descending; the proxy enriches the dominant UDC code to its FDC
 ///   heading label (`FDC.label(for:)`, bundled taxonomy — never estate content)
-///   and DROPS the raw code. The content boundary keeps labels only: a
-///   classification code is an estate-derived datum, the heading label is a
-///   bundled-taxonomy datum.
+///   and passes the code through. The code crosses this surface on the same
+///   basis as `/api/lattice`, which already serves raw classification codes
+///   to the dashboard: a classification code is derived by a pure function of
+///   a pinned public frame, never memory content. The dashboard derives the
+///   community color from the code's digits (encoding rule: hundreds → hue,
+///   tens → shade, ones → brightness).
 /// - **Local fallback (structure pending):** derived from the
 ///   `community.assignment` VizGraph signal, which carries only the community
-///   count per estate — so `label` is nil and `size` is 0 (unknown).
+///   count per estate — so `code`/`label` are nil and `size` is 0 (unknown).
 public struct GraphCommunityPayload: Codable, Sendable, Equatable {
     /// Community id. From ARIA this is the Louvain community id matching
     /// `GraphNodePayload.communityId`; in the local fallback it is a running
     /// 0-based legend index (no node memberships exist to match).
     public let id: Int
+    /// The community's dominant UDC/FDC classification code (e.g. "657",
+    /// "615.85"), or nil when ARIA reports none. Drives the digit-derived
+    /// community color on the dashboard.
+    public let code: String?
     /// FDC heading label for the community's dominant UDC code, or nil when
     /// the code is empty, MDCC, or otherwise not in the bundled FDC frame.
     public let label: String?
@@ -790,17 +799,19 @@ public struct GraphCommunityPayload: Codable, Sendable, Equatable {
     /// ARIA structure).
     public let size: Int
 
-    public init(id: Int, label: String?, size: Int) {
+    public init(id: Int, code: String?, label: String?, size: Int) {
         self.id = id
+        self.code = code
         self.label = label
         self.size = size
     }
 
-    /// Custom encode so `label` is always present on the wire — an explicit
-    /// JSON null when nil (VIZ_V2 contract). Decoding stays synthesized.
+    /// Custom encode so `code` and `label` are always present on the wire — an
+    /// explicit JSON null when nil (VIZ_V2 contract). Decoding stays synthesized.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
+        try c.encode(code, forKey: .code)    // nil → null
         try c.encode(label, forKey: .label)  // nil → null
         try c.encode(size, forKey: .size)
     }

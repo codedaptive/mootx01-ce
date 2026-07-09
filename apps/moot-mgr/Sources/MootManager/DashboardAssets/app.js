@@ -112,6 +112,70 @@ import { OrbitControls } from '/OrbitControls.js';
     row.appendChild(el("h2", "phead", title));
     if (hint) row.appendChild(el("span", "phint", hint));
     container.appendChild(row);
+    return row;
+  }
+
+  // ----- "What are these codes?" explainer -----
+  // Plain-language (8th-grade) explanation of FDC classification codes,
+  // shown from the lattice table and the topology content picker. The key
+  // point users trip on: the code is derived from the WORDS in the text,
+  // not from the topic, so the code's label can differ from what the item
+  // is "about" — that is expected, not a filing error.
+  function codesExplainerButton() {
+    const b = el("button", "btn btn-what", "What are these codes?");
+    b.setAttribute("type", "button");
+    b.addEventListener("click", showCodesExplainer);
+    return b;
+  }
+
+  function showCodesExplainer() {
+    if ($("#codesExplainer")) return;   // already open
+    const wrap = el("div", "mx-modal-backdrop");
+    wrap.id = "codesExplainer";
+    const box = el("div", "mx-modal");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-labelledby", "codesExplainerTitle");
+
+    const h = el("h2", "mx-modal-title", "What are these codes?");
+    h.id = "codesExplainerTitle";
+    box.appendChild(h);
+
+    [
+      "Every memory that comes in gets a code — like the call number on a " +
+      "library book. Nearby numbers mean similar subjects, so related " +
+      "memories end up on the same shelf and can be found together.",
+
+      "The computer picks the code by looking at the actual words in the " +
+      "text and matching them against a fixed, public list of about a " +
+      "thousand subjects. The same words always land on the same code — on " +
+      "every computer, with no guessing.",
+
+      "Because the code comes from the words — not from what the item is " +
+      "“really about” — the label next to a code can look " +
+      "different from your topic. A note about your bakery’s budget " +
+      "might file under “Accounting + Bookkeeping,” because budget " +
+      "words dominate the text. That’s normal: the code is just the " +
+      "shelf where similar-sounding memories sit, and it still groups " +
+      "related things together.",
+    ].forEach(function (t) { box.appendChild(el("p", "mx-modal-p", t)); });
+
+    const close = el("button", "btn mx-modal-close", "Got it");
+    close.setAttribute("type", "button");
+    function dismiss() {
+      document.removeEventListener("keydown", onKey);
+      wrap.remove();
+      if (opener && opener.focus) opener.focus();
+    }
+    function onKey(e) { if (e.key === "Escape") dismiss(); }
+    const opener = document.activeElement;
+    close.addEventListener("click", dismiss);
+    wrap.addEventListener("click", function (e) { if (e.target === wrap) dismiss(); });
+    document.addEventListener("keydown", onKey);
+    box.appendChild(close);
+    wrap.appendChild(box);
+    document.body.appendChild(wrap);
+    close.focus();
   }
 
   // ----- top-bar status -----
@@ -1112,7 +1176,8 @@ import { OrbitControls } from '/OrbitControls.js';
 
     // Row 3: Active lattice addresses table
     const addrPanel = el("div", "panel");
-    panelHead(addrPanel, "Active Lattice Addresses", pending ? "requires ARIA_MCP" : addrs.length + " addresses · sorted by item count");
+    const addrHead = panelHead(addrPanel, "Active Lattice Addresses", pending ? "requires ARIA_MCP" : addrs.length + " addresses · sorted by item count");
+    addrHead.appendChild(codesExplainerButton());
     if (pending) {
       const note = el("div", "empty");
       note.style.marginTop = "12px";
@@ -1285,14 +1350,14 @@ import { OrbitControls } from '/OrbitControls.js';
   // lobes are rendered as feathered radial-gradient blobs. SSE events fire
   // real pulse animations on matching noun-type nodes.
   //
-  // When /api/graph returns structurePending the synthetic graph is built
-  // from event noun-type distributions — giving the visualization life while
-  // real VizGraph structure accumulates in the autonomic governor's recipe
-  // runs. The honest pending overlay is shown on top; it does not hide the
-  // brain canvas underneath.
+  // When /api/graph returns structurePending the canvas stays empty and the
+  // honest pending overlay explains why — the estate always holds real
+  // records (7 seeded at provisioning), so the dashboard renders real
+  // structure or an honest "pending" state, never invented data.
   //
   // Content-safety invariant: only metadata (counts, enums, ISO-8601
-  // timestamps, identifiers) crosses the wire — never rung/memory content.
+  // timestamps, identifiers, classification codes from the pinned public
+  // frame) crosses the wire — never rung/memory content.
   //
   // VIZ_V2 layers on top of the base renderer:
   //   L2 — recency brightness (lastActiveTs), centrality halos (> 0.55),
@@ -1361,12 +1426,51 @@ import { OrbitControls } from '/OrbitControls.js';
   var TRAIL_DURATION = 2.5;      // seconds per trail fade
   let brainLastPulseNode = null; // last pulsed node for trail linking
 
-  // Twelve community colors — one per lobe / cluster.
+  // Twelve fallback community colors — used only when a community carries no
+  // FDC code (fragments bucket, unlabeled lobes, code-less snapshots).
   const BRAIN_COMM_COLORS = [
     [255, 140,   0], [58, 180, 255], [180, 120, 255], [  0, 210, 140],
     [255,  80, 120], [255, 200,  60], [100, 200, 255], [255, 140,  80],
     [140, 200, 255], [200, 160, 255], [ 80, 220, 160], [255, 120, 160],
   ];
+
+  // Deterministic community color from the FDC code's leading digits.
+  // Encoding rule XYZ: hundreds digit X → hue family (10 hues around the
+  // wheel), tens digit Y → shade (saturation), ones digit Z → brightness
+  // (lightness). Sibling codes therefore share a hue family but stay
+  // tellable apart, and the same code renders the same color on every
+  // host and every refresh. Returns [r,g,b] or null for a non-numeric /
+  // absent code (callers fall back to BRAIN_COMM_COLORS).
+  // The lightness floor (35%) keeps every code visible on the dark canvas.
+  function fdcColor(code) {
+    var m = /^(\d)(\d)(\d)/.exec(String(code || ""));
+    if (!m) return null;
+    var hue = (+m[1]) * 36;          // X: 000s→0° … 900s→324°
+    var sat = 85 - (+m[2]) * 5;      // Y: 85% … 40%
+    var lit = 62 - (+m[3]) * 3;      // Z: 62% … 35%
+    return hslToRgb(hue, sat, lit);
+  }
+
+  // HSL → [r,g,b] 0-255. h in degrees, s/l in percent.
+  function hslToRgb(h, s, l) {
+    s /= 100; l /= 100;
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var hp = (((h % 360) + 360) % 360) / 60;
+    var x = c * (1 - Math.abs((hp % 2) - 1));
+    var r1 = 0, g1 = 0, b1 = 0;
+    if      (hp < 1) { r1 = c; g1 = x; }
+    else if (hp < 2) { r1 = x; g1 = c; }
+    else if (hp < 3) { g1 = c; b1 = x; }
+    else if (hp < 4) { g1 = x; b1 = c; }
+    else if (hp < 5) { r1 = x; b1 = c; }
+    else             { r1 = c; b1 = x; }
+    var mm = l - c / 2;
+    return [Math.round((r1 + mm) * 255), Math.round((g1 + mm) * 255), Math.round((b1 + mm) * 255)];
+  }
+
+  // Per-lobe resolved color ([r,g,b] by lobe rank) — set by buildRealBrainNodes,
+  // read by brainCommCSS so legend swatches, hulls, and nodes stay in sync.
+  let brainLobeRGB = Object.create(null);
 
   // Node visual style by noun type — matches the substrate NounType enum:
   //   0=Drawer (gray matter), 1=Tunnel, 2=KGFact, 3=DiaryEntry (blue activation),
@@ -1407,66 +1511,6 @@ import { OrbitControls } from '/OrbitControls.js';
       });
     }
     return centers;
-  }
-
-  // Generate a synthetic brain graph from event noun-type distributions.
-  // N nodes across 12 community lobes — weighted by observed noun-type ratios.
-  function synthBrainNodes(events, W, H) {
-    var NUM_COMM = 12;
-    var totalNodes = Math.min(1500, Math.max(200, events.length * 3 + 300));
-    var perCommFrac = [0.15, 0.13, 0.11, 0.10, 0.09, 0.08, 0.08, 0.07, 0.06, 0.05, 0.04, 0.04];
-
-    // Build noun-type probability distribution from observed events.
-    var nc = [0, 0, 0, 0, 0, 0, 0, 0];
-    events.forEach(function (ev) { if (ev.nounType >= 0 && ev.nounType < 8) nc[ev.nounType]++; });
-    var evTotal = Math.max(1, nc.reduce(function (s, v) { return s + v; }, 0));
-    var ratios = nc.map(function (v) { return v / evTotal; });
-    // Floor: drawers are always the majority neuron type.
-    if (ratios[0] < 0.58) {
-      var excess = 0.58 - ratios[0];
-      var rest = ratios.slice(1).reduce(function (s, v) { return s + v; }, 0);
-      ratios[0] = 0.58;
-      if (rest > 0) {
-        for (var i = 1; i < 8; i++) ratios[i] = Math.max(0, ratios[i] * (1 - excess / rest));
-      }
-    }
-
-    var centers = brainCenters(NUM_COMM, W, H);
-    var nodes = [];
-    var id = 0;
-
-    for (var c = 0; c < NUM_COMM; c++) {
-      var count = Math.round(totalNodes * perCommFrac[c]);
-      var spread = 22 + count * 0.14;
-      var ox = centers[c].x, oy = centers[c].y;
-
-      for (var j = 0; j < count; j++) {
-        var angle = Math.random() * Math.PI * 2;
-        var dist = Math.abs(brainGauss()) * spread;
-
-        // Pick noun type by cumulative probability.
-        var nounType = 0;
-        var r = Math.random(), cum = 0;
-        for (var n = 0; n < 8; n++) { cum += ratios[n]; if (r < cum) { nounType = n; break; } }
-
-        var sx = Math.max(20, Math.min(W - 20, ox + Math.cos(angle) * dist));
-        var sy = Math.max(20, Math.min(H - 20, oy + Math.sin(angle) * dist));
-        nodes.push({
-          id: id++,
-          x: sx, y: sy,
-          ax: sx, ay: sy, vx: 0, vy: 0,  // physics anchor + velocity
-          community: c,
-          nounType: nounType,
-          centrality: Math.pow(Math.random(), 2.6), // skewed toward low centrality
-          breathPhase: Math.random() * Math.PI * 2,
-          pulseOrange: 0,   // capture pulse magnitude 0..1 — decays over ~1s
-          pulseBlue: 0,     // think pulse magnitude 0..1 — same decay, visible ring
-          glowBlue: 0,      // think ambient glow magnitude 0..1 — decays over ~10s
-          anomaly: Math.random() < 0.011,
-        });
-      }
-    }
-    return nodes;
   }
 
   // Map real /api/graph nodes into brain-hemisphere layout using community IDs.
@@ -1510,7 +1554,7 @@ import { OrbitControls } from '/OrbitControls.js';
     var centers = brainCenters(Math.max(1, lobeIds.length), W, H);
     var nodes = [];
 
-    function pushNode(n, x, y, cIdx, isLobe, commKey, colorIdx) {
+    function pushNode(n, x, y, cIdx, isLobe, commKey, rgb) {
       // Parse wire timestamps once at build. createdMs is the birth instant for
       // the L5 alive(t) filter; deadMs (tombstonedTs) hides the entity in live
       // view and ends its playback lifespan.
@@ -1535,8 +1579,10 @@ import { OrbitControls } from '/OrbitControls.js';
         // Content key for the picker filter — the community's FDC label or
         // a bucket. Stable across snapshots, unlike Louvain ids.
         commKey: commKey || null,
-        // Community hue for the node fill (encoding rule: communityId → hue).
-        rgb: BRAIN_COMM_COLORS[(colorIdx !== undefined ? colorIdx : cIdx) % BRAIN_COMM_COLORS.length],
+        // Community color for the node fill — digit-derived from the
+        // community's FDC code (fdcColor) with the static palette as the
+        // code-less fallback. Resolved once per community by the caller.
+        rgb: rgb || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length],
         // nounType removed from wire format (FIX 2 payload trim); all drawers
         // are type 0 — the rendering path is unchanged (defaults to 0).
         nounType: n.nounType || 0,
@@ -1554,13 +1600,18 @@ import { OrbitControls } from '/OrbitControls.js';
       nodes.push(node);
     }
 
-    // L3: record the FDC label for each community that earned a lobe.
-    // brainLobeLabels keys are the lobe rank (the node `community` index used
-    // on the lobe path), values are the proxy's enriched label strings.
-    // Null/empty labels are skipped — drawLobeLabels draws nothing for them.
+    // L3: record the FDC label + digit-derived color for each community that
+    // earned a lobe. brainLobeLabels/brainLobeRGB keys are the lobe rank (the
+    // node `community` index used on the lobe path); labels are the proxy's
+    // enriched strings. Null/empty labels are skipped — drawLobeLabels draws
+    // nothing for them.
     brainLobeLabels = Object.create(null);
+    brainLobeRGB = Object.create(null);
+    function commMeta(cid) {
+      return (communities || []).find(function (c) { return String(c.id) === String(cid); });
+    }
     lobeIds.forEach(function (cid, rank) {
-      var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
+      var meta = commMeta(cid);
       if (meta && meta.label) brainLobeLabels[rank] = meta.label;
     });
 
@@ -1569,7 +1620,7 @@ import { OrbitControls } from '/OrbitControls.js';
     // under 'fragments'. Labels are the stable identity across snapshots
     // (Louvain ids renumber every governor cycle).
     function contentKey(cid, members) {
-      var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
+      var meta = commMeta(cid);
       if (meta && meta.label) return meta.label;
       return members.length >= MIN_LOBE_SIZE ? "(unlabeled)" : "fragments";
     }
@@ -1577,20 +1628,25 @@ import { OrbitControls } from '/OrbitControls.js';
     // Picker rows: one per labeled lobe (size desc), then the two buckets.
     brainLobeKey = Object.create(null);
     var rowByKey = Object.create(null);
-    function addRow(key, size, cIdx, isBucket) {
+    function addRow(key, size, cIdx, isBucket, rgb) {
       if (!rowByKey[key]) {
-        rowByKey[key] = { key: key, size: 0, cIdx: cIdx, bucket: !!isBucket };
+        rowByKey[key] = { key: key, size: 0, cIdx: cIdx, bucket: !!isBucket, rgb: rgb || null };
       }
       rowByKey[key].size += size;
     }
 
-    // Lobe communities: members gathered around a shared center.
+    // Lobe communities: members gathered around a shared center. Color is
+    // digit-derived from the community's FDC code; the static palette (keyed
+    // by stable content key) covers code-less communities.
     lobeIds.forEach(function (cid, rank) {
       var members = byId[cid];
       var key = contentKey(cid, members);
       brainLobeKey[rank] = key;
       var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
-      if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)");
+      var meta = commMeta(cid);
+      var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
+      brainLobeRGB[rank] = rgb;
+      if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)", rgb);
       // sqrt scaling keeps scatter proportional to canvas even for huge
       // communities (6k+ nodes); linear scaling scatters far outside the
       // canvas, clamping all nodes to edges and collapsing via physics.
@@ -1601,27 +1657,30 @@ import { OrbitControls } from '/OrbitControls.js';
         var angle = Math.random() * Math.PI * 2;
         var dist = Math.abs(brainGauss()) * spread;
         pushNode(n, center.x + Math.cos(angle) * dist,
-                    center.y + Math.sin(angle) * dist, rank, true, key, cIdx);
+                    center.y + Math.sin(angle) * dist, rank, true, key, rgb);
       });
     });
 
     // Periphery fragments: each fragment gets one random anchor across the
     // canvas with its members placed tightly around it, so a tunnel-linked
-    // pair stays a visible pair. Color cycles the palette per fragment.
+    // pair stays a visible pair. Fragments with an FDC code get its
+    // digit-derived color; the rest cycle the fallback palette.
     var lobeSet = Object.create(null);
     lobeIds.forEach(function (cid) { lobeSet[cid] = true; });
     ranked.forEach(function (cid, rank) {
       if (lobeSet[cid]) return;
       var members = byId[cid];
       var key = contentKey(cid, members);
-      if (!isSubset) addRow(key, members.length, -1, true);
+      var meta = commMeta(cid);
+      var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
+      var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
+      if (!isSubset) addRow(key, members.length, -1, true, rgb);
       var ax = 20 + Math.random() * (W - 40);
       var ay = 20 + Math.random() * (H - 40);
-      var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
       members.forEach(function (n, mi) {
         var angle = (mi / members.length) * Math.PI * 2 + Math.random() * 0.8;
         var dist = members.length > 1 ? 6 + Math.random() * 8 : 0;
-        pushNode(n, ax + Math.cos(angle) * dist, ay + Math.sin(angle) * dist, cIdx, false, key, cIdx);
+        pushNode(n, ax + Math.cos(angle) * dist, ay + Math.sin(angle) * dist, cIdx, false, key, rgb);
       });
     });
 
@@ -1635,40 +1694,6 @@ import { OrbitControls } from '/OrbitControls.js';
       });
     }
     return nodes;
-  }
-
-  // Sparse synthetic edges — intra-community tunnel synapses and sparse
-  // inter-community kgFact bridges (corpus callosum).
-  function synthBrainEdges(nodes) {
-    var edges = [];
-    var byComm = Object.create(null);
-    nodes.forEach(function (n) { (byComm[n.community] = byComm[n.community] || []).push(n.id); });
-
-    // Target average degree ~5 per node (2 × edges / nodes = 5 → multiplier 2.5).
-    // The previous 0.55 multiplier gave degree ~1.1, making hop-1 always a single node.
-    Object.values(byComm).forEach(function (members) {
-      var count = Math.floor(members.length * 2.5);
-      for (var i = 0; i < count; i++) {
-        var s = members[Math.floor(Math.random() * members.length)];
-        var t = members[Math.floor(Math.random() * members.length)];
-        if (s !== t) edges.push({ src: s, tgt: t, type: "tunnel", w: 0.3 + Math.random() * 0.7 });
-      }
-    });
-
-    var comms = Object.keys(byComm);
-    for (var i = 0; i < comms.length; i++) {
-      for (var j = i + 1; j < comms.length; j++) {
-        if (Math.random() < 0.11) {
-          var sm = byComm[comms[i]], tm = byComm[comms[j]];
-          edges.push({
-            src: sm[Math.floor(Math.random() * sm.length)],
-            tgt: tm[Math.floor(Math.random() * tm.length)],
-            type: "kgFact", w: 0.07 + Math.random() * 0.18,
-          });
-        }
-      }
-    }
-    return edges;
   }
 
   // L2 community-aware force micro-sim. Anchor springs hold the lobe /
@@ -2417,7 +2442,8 @@ import { OrbitControls } from '/OrbitControls.js';
   // L2 recency brightness — alpha multiplier from how recently the node was
   // active. 1.0 under an hour old, exponential decay (tau = 7 days) toward a
   // 0.35 floor; the floor is effectively reached past 30 days. Nodes without
-  // a lastActiveTs (all synthetic nodes) stay at full brightness.
+  // a lastActiveTs stay at full brightness (the wire format dropped the
+  // field — FIX 2 payload trim — so the createdMs fallback usually applies).
   var BRAIN_HOUR_MS = 3600000;
   var BRAIN_DAY_MS = 86400000;
   function recencyFactor(n, nowMs) {
@@ -2603,6 +2629,13 @@ import { OrbitControls } from '/OrbitControls.js';
     head.appendChild(allBtn);
     panel.appendChild(head);
 
+    // Plain-language explainer for the classification codes behind these
+    // domain labels — same modal as the Lattice view's button.
+    var what = el("button", "cp-all cp-what", "What are these codes?");
+    what.setAttribute("type", "button");
+    what.addEventListener("click", showCodesExplainer);
+    panel.appendChild(what);
+
     var list = el("div", "cp-list");
     topoCommRows.forEach(function (row) {
       var on = !topoCommFilter || topoCommFilter.has(row.key);
@@ -2613,12 +2646,12 @@ import { OrbitControls } from '/OrbitControls.js';
       box.setAttribute("aria-checked", on ? "true" : "false");
 
       var dot = el("span", "cp-dot");
-      if (row.cIdx >= 0) {
-        var col = BRAIN_COMM_COLORS[row.cIdx % BRAIN_COMM_COLORS.length];
-        dot.style.background = "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")";
-      } else {
-        dot.style.background = "rgba(232,234,240,0.35)";
-      }
+      // row.rgb is the resolved community color (digit-derived from the FDC
+      // code, or the palette fallback); rows without one (buckets) go neutral.
+      var col = row.rgb || (row.cIdx >= 0 ? BRAIN_COMM_COLORS[row.cIdx % BRAIN_COMM_COLORS.length] : null);
+      dot.style.background = col
+        ? "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")"
+        : "rgba(232,234,240,0.35)";
 
       var label = el("span", "cp-label", row.key);
       var size = el("span", "cp-size", String(row.size));
@@ -2638,7 +2671,6 @@ import { OrbitControls } from '/OrbitControls.js';
     stopBrainAnimation();
     topoPlayReset();
     if (sse) sse.removeEventListener("message", topoSSEHandler);
-    topoHideCornerElements();
   }
 
   async function renderTopology() {
@@ -2650,7 +2682,8 @@ import { OrbitControls } from '/OrbitControls.js';
     try {
       g = await getJSON("/api/graph" + (estate ? "?estate=" + encodeURIComponent(estate) : ""));
     } catch (_) {
-      // Degrade to synthetic visualization when the graph endpoint is unreachable.
+      // Endpoint unreachable — fall through with structurePending:true so the
+      // honest pending overlay renders. The canvas never shows invented data.
     }
 
     $("#topoStructure").textContent = g.structurePending ? "pending" : "live";
@@ -2672,8 +2705,7 @@ import { OrbitControls } from '/OrbitControls.js';
     const W = stageRect.width > 10 ? stageRect.width : 800;
     const H = stageRect.height > 10 ? stageRect.height : 500;
 
-    // Fetch recent events: they weight the synthetic node noun-type
-    // distribution AND feed the L5 radar-loop playback timeline.
+    // Fetch recent events: they feed the L5 radar-loop playback timeline.
     let events = [];
     try { const ep = await getJSON("/api/events"); events = ep.events || []; } catch (_) {}
 
@@ -2695,7 +2727,8 @@ import { OrbitControls } from '/OrbitControls.js';
     // has content; the Pause button stops it.
     if (topoPlayEvents.length > 1) topoPlayToggle();
 
-    // Build node + edge sets: real VizGraph structure when available, synthetic otherwise.
+    // Build node + edge sets from real VizGraph structure; an empty canvas
+    // plus the pending overlay is the honest no-structure state.
     //
     // FIX 2b compact format: the server emits parallel arrays (g.ids, g.communityId, ...)
     // and compact edges ([[si, ti, w, et], ...]).  The legacy per-object format
@@ -2751,21 +2784,21 @@ import { OrbitControls } from '/OrbitControls.js';
       });
       buildBrainFromRealData(false);
     } else {
+      // No real structure — empty canvas + pending overlay. Never invented data.
       topoRealData = null;
-      brainNodes = synthBrainNodes(events, W, H);
-      brainEdges = synthBrainEdges(brainNodes);
-      brainLobeLabels = Object.create(null);  // synthetic lobes carry no real community labels
-      topoCommRows = [];     // no content picker on synthetic data
+      brainNodes = [];
+      brainEdges = [];
+      brainLobeLabels = Object.create(null);
+      brainLobeRGB = Object.create(null);
+      topoCommRows = [];     // no content picker without real communities
     }
     renderCommPicker();
     // L4: assign per-node depth from age now that the node set is final.
     brainAssignDepth(Date.now());
 
-    // Decide overlay visibility: the brain canvas is always the hero.
-    // The pending overlay is only shown when VizGraph analytics are present — the analytics
-    // grid needs a readable dark tint to be scannable over the animated neurons.
-    // On the synthetic no-analytics path the overlay stays hidden; corner elements
-    // (node count top-left, watermark top-right) communicate the synthetic state instead.
+    // Overlay visibility: real structure renders with the corner legend; any
+    // no-structure state shows the honest pending overlay (with the analytics
+    // grid when VizGraph analytics exist, a monitoring-aware message otherwise).
     const pending = $("#topoPending");
     const hasAnalytics = (g.analytics || []).length > 0;
     const monOn = lastServerData ? lastServerData.monitoringEnabled : false;
@@ -2777,28 +2810,32 @@ import { OrbitControls } from '/OrbitControls.js';
       $("#topoPendingText").textContent =
         "Showing VizGraph analytics — autonomic governor runs CognitionKit recipes on schedule to populate structure.";
       topoRenderAnalytics(g);
-      topoHideCornerElements();
     } else if (!hasRealStructure) {
-      // No-analytics synthetic path: brain is the hero; overlay stays hidden.
-      pending.hidden = true;
+      // No analytics either: centered overlay with a monitoring-aware message.
+      pending.hidden = false;
+      $("#topoPendingTitle").textContent = "Topology structure pending";
+      $("#topoPendingText").textContent = monOn
+        ? "The autonomic governor builds the knowledge graph on its schedule — structure appears after its next duty cycle."
+        : "Monitoring is off — turn it on to start capturing structure.";
       topoRenderAnalytics(g);    // renders static legend in #topoLegend
-      topoShowCornerElements(monOn);
     } else {
       // Real structure: overlay hidden, VizGraph legend in corner.
       pending.hidden = true;
       topoRenderAnalytics(g);
-      topoHideCornerElements();
     }
 
     startBrainAnimation(container, W, H);
     topoStartSSE();
   }
 
-  // CSS color string for community palette index i — keeps the DOM legend
-  // swatches in sync with the canvas community colors. communities[] arrives
-  // sorted by size desc, so array index == lobe rank for the top entries.
+  // CSS color string for lobe rank i — keeps the DOM legend swatches in sync
+  // with the canvas community colors. Reads the resolved per-lobe color
+  // (digit-derived from the FDC code) recorded by buildRealBrainNodes, with
+  // the static palette as the fallback for ranks that never earned a lobe.
+  // communities[] arrives sorted by size desc, so array index == lobe rank
+  // for the top entries.
   function brainCommCSS(i) {
-    const col = BRAIN_COMM_COLORS[i % BRAIN_COMM_COLORS.length];
+    const col = brainLobeRGB[i] || BRAIN_COMM_COLORS[i % BRAIN_COMM_COLORS.length];
     return "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")";
   }
 
@@ -2843,7 +2880,10 @@ import { OrbitControls } from '/OrbitControls.js';
       if ((g.communities || []).length) {
         const sw = el("div", "lswatches");
         g.communities.slice(0, 12).forEach((c, i) => {
-          const dot = el("div", "lsw"); dot.style.background = brainCommCSS(i); sw.appendChild(dot);
+          const dot = el("div", "lsw");
+          const rgb = fdcColor(c.code);
+          dot.style.background = rgb ? "rgb(" + rgb.join(",") + ")" : brainCommCSS(i);
+          sw.appendChild(dot);
         });
         legend.appendChild(sw);
       }
@@ -2905,7 +2945,8 @@ import { OrbitControls } from '/OrbitControls.js';
       const swatches = el("div", "topo-swatches");
       g.communities.slice(0, 12).forEach((c, i) => {
         const sw = el("div", "lsw");
-        sw.style.background = brainCommCSS(i);
+        const rgb = fdcColor(c.code);
+        sw.style.background = rgb ? "rgb(" + rgb.join(",") + ")" : brainCommCSS(i);
         sw.setAttribute("aria-hidden", "true");
         swatches.appendChild(sw);
       });
@@ -2916,29 +2957,6 @@ import { OrbitControls } from '/OrbitControls.js';
       commDiv.appendChild(swatches);
       analyticsBox.appendChild(commDiv);
     }
-  }
-
-  // Show node-count and watermark corner elements (synthetic no-analytics path).
-  function topoShowCornerElements(monOn) {
-    const nodeCnt = $("#topoNodeCnt");
-    const watermark = $("#topoWatermark");
-    if (nodeCnt) {
-      nodeCnt.hidden = false;
-      const n = brainNodes.length;
-      nodeCnt.innerHTML = "<strong>" + n.toLocaleString() + "</strong> synthetic nodes";
-    }
-    if (watermark) {
-      watermark.hidden = false;
-      watermark.textContent = monOn ? "synthetic · observing" : "synthetic · monitoring off";
-    }
-  }
-
-  // Hide corner elements (analytics-grid path and live-structure path).
-  function topoHideCornerElements() {
-    const nodeCnt = $("#topoNodeCnt");
-    const watermark = $("#topoWatermark");
-    if (nodeCnt) nodeCnt.hidden = true;
-    if (watermark) watermark.hidden = true;
   }
 
   // Render the static PoC-spec legend (node types / activity / edge types) in the legend panel.

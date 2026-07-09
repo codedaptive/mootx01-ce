@@ -207,11 +207,12 @@ impl Fdc {
     /// Return the human-readable heading for an FDC code, or None when
     /// the code is absent from the frame or the artifacts are unavailable.
     ///
-    /// 3-digit integer codes (no decimal point) walk up one parent level so
-    /// the dashboard shows a single-topic heading rather than a raw compound
-    /// cluster label (e.g. "683" → parent "680" → "Handicraft", not the
-    /// raw "Firearms + Locksmithing" leaf label).
-    /// Decimal codes return their own label unchanged.
+    /// Every code resolves to its OWN frame label — never an ancestor's.
+    /// Sibling codes must stay distinguishable when listed together: the
+    /// lattice address table shows runs of active siblings (651, 652, 657 …),
+    /// and coarsening to a shared parent heading renders them as identical
+    /// rows that read as duplicated data. Multi-term compound leaf labels
+    /// (e.g. "683" → "Firearms + Locksmithing") are shown as-is.
     ///
     /// Mirrors Swift `FDC.label(for:)` in FDCRuntime.swift.
     pub fn label(code: &str) -> Option<String> {
@@ -219,14 +220,8 @@ impl Fdc {
         if code.is_empty() {
             return None;
         }
-        // Walk up one level for plain 3-digit codes; keep decimal codes as-is.
-        let lookup = if !code.contains('.') {
-            FdcFrame::decimal_parent(code).unwrap_or_else(|| code.to_owned())
-        } else {
-            code.to_owned()
-        };
         bundle.frame.codes.iter()
-            .find(|e| e.code == lookup)
+            .find(|e| e.code == code)
             .map(|e| e.label.clone())
     }
 }
@@ -256,17 +251,18 @@ mod tests {
     }
 
     #[test]
-    fn label_integer_code_walks_to_parent() {
+    fn label_integer_code_returns_own_label() {
         if !Fdc::is_available() {
             return;
         }
-        // For a 3-digit integer code, label() walks up one level via decimal_parent().
-        // "006" has parent "000"; label("006") and label("000") must both look up
-        // code "000" in the frame, so they return the same value.
-        let via_child = Fdc::label("006");
-        let direct_root = Fdc::label("000");
-        assert!(via_child.is_some(), "label(\"006\") should resolve via parent \"000\"");
-        assert_eq!(via_child, direct_root, "label(\"006\") must equal label(\"000\") — both look up the parent");
+        // Integer codes resolve to their OWN frame label, never an ancestor's —
+        // sibling codes listed together must stay distinguishable. "006" and its
+        // parent "000" carry distinct labels in the frame, so the lookups differ.
+        let leaf = Fdc::label("006");
+        let root = Fdc::label("000");
+        assert!(leaf.is_some(), "label(\"006\") should resolve to its own frame label");
+        assert!(root.is_some(), "label(\"000\") should resolve to its own frame label");
+        assert_ne!(leaf, root, "label(\"006\") must be \"006\"'s own label, not the parent's");
     }
 
     #[test]
@@ -274,14 +270,14 @@ mod tests {
         if !Fdc::is_available() {
             return;
         }
-        // A decimal code (contains '.') returns its own label, not the parent's.
-        // "006.6" must NOT equal label("006") (which is the "000" root label).
+        // A decimal code (contains '.') returns its own label, distinct from
+        // its integer parent's label.
         let decimal_label = Fdc::label("006.6");
         let parent_label = Fdc::label("006");
         if decimal_label.is_some() && parent_label.is_some() {
             assert_ne!(
                 decimal_label, parent_label,
-                "label(\"006.6\") must return its own label, not the parent-walked \"000\" label"
+                "label(\"006.6\") must return its own label, not \"006\"'s"
             );
         }
     }

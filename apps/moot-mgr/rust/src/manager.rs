@@ -691,6 +691,7 @@ impl MootManager {
             for _ in 0..count {
                 communities.push(GraphCommunityPayload {
                     id: communities.len() as i64,
+                    code: None,
                     label: None,
                     size: 0,
                 });

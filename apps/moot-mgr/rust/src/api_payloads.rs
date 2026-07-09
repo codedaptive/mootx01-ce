@@ -177,10 +177,17 @@ pub struct GraphAnalyticPayload {
 }
 
 /// One community legend entry on the wire (nested in GraphPayload). Mirrors
-/// Swift `GraphCommunityPayload`. `label` is always present (explicit null).
+/// Swift `GraphCommunityPayload`. `code` and `label` are always present
+/// (explicit null). `code` is the community's dominant UDC/FDC classification
+/// code — the dashboard derives the community color from its digits
+/// (hundreds → hue, tens → shade, ones → brightness). This Rust host's
+/// count-only local rollup always emits `code: None`; the Swift host's ARIA
+/// proxy path populates it (stored-communities enrichment is not yet ported
+/// to this leg).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphCommunityPayload {
     pub id: i64,
+    pub code: Option<String>,
     pub label: Option<String>,
     pub size: i64,
 }

@@ -836,7 +836,7 @@ public actor MootManager {
             let communityCount = max(0, min(Int(latest[key]!.value.rounded()), 10_000))
             for _ in 0..<communityCount {
                 communities.append(GraphCommunityPayload(
-                    id: communities.count, label: nil, size: 0
+                    id: communities.count, code: nil, label: nil, size: 0
                 ))
             }
         }
@@ -884,7 +884,8 @@ public actor MootManager {
                 generatedTs = stored.generatedTs
                 pendingReasons = []
                 // VIZ_V2 L3: prefer governor's real community descriptors,
-                // enriched with FDC labels (raw dominantUdcCode dropped here).
+                // enriched with FDC labels (dominantUdcCode passed through as
+                // `code` — it drives the digit-derived community color).
                 // Keep the local count-only rollup when the snapshot predates
                 // the communities field.
                 var enriched: [GraphCommunityPayload]? = nil
@@ -953,18 +954,23 @@ public actor MootManager {
     }
 
     /// Enrich ARIA community descriptors to the browser wire shape (VIZ_V2 L3):
-    /// `{id, size, dominantUdcCode}` → `{id, label, size}`.
+    /// `{id, size, dominantUdcCode}` → `{id, code, label, size}`.
     ///
     /// The dominant UDC code is resolved to its FDC heading label via
-    /// `FDC.label(for:)` (bundled taxonomy — never estate content) and then
-    /// DROPPED: a raw classification code is an estate-derived datum and stays
-    /// behind this content boundary; only the heading label crosses. An empty,
-    /// MDCC, or unknown code yields a nil label (JSON null). ARIA's
+    /// `FDC.label(for:)` (bundled taxonomy — never estate content) and the
+    /// code itself is passed through: the dashboard derives the community
+    /// color from its digits (hundreds → hue, tens → shade, ones →
+    /// brightness). The code crosses this surface on the same basis as
+    /// `/api/lattice`, which already serves raw classification codes — a code
+    /// is a pure function of a pinned public frame, never memory content. An
+    /// empty, MDCC, or unknown code yields a nil label (JSON null). ARIA's
     /// size-descending order is preserved.
     static func enrichCommunities(_ raw: [ARIACommunityDescriptor]) -> [GraphCommunityPayload] {
         raw.map { descriptor in
-            GraphCommunityPayload(
+            let code = descriptor.dominantUdcCode.flatMap { $0.isEmpty ? nil : $0 }
+            return GraphCommunityPayload(
                 id: descriptor.id,
+                code: code,
                 // FDC.label(for:) returns nil for "" — no special-casing needed.
                 label: FDC.label(for: descriptor.dominantUdcCode ?? ""),
                 size: descriptor.size

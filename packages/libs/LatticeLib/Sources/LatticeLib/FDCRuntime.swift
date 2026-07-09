@@ -75,26 +75,19 @@ public enum FDC {
     /// artifacts are unavailable). Used by dashboard surfaces to display
     /// readable names next to raw lattice address codes.
     ///
-    /// For 3-digit integer codes (no decimal subdivision), the leaf label is
-    /// often a compound of multiple subject terms joined with " + " (e.g.
-    /// "683" → "Firearms + Locksmithing"). The parent code carries a broader,
-    /// single-topic heading — walk up one level for these, so the dashboard
-    /// shows "Handicraft" (680) rather than the raw multi-term cluster.
-    /// Decimal codes retain their own specific label (e.g. "615.84" →
-    /// "Radiology, Medical").
+    /// Every code resolves to its OWN frame label — never an ancestor's.
+    /// Sibling codes must stay distinguishable when listed together: the
+    /// lattice address table shows runs of active siblings (651, 652, 657 …),
+    /// and any coarsening to a shared parent heading renders them as identical
+    /// rows that read as duplicated data. The frame ships a distinct label per
+    /// code (e.g. "651" → "Office management", "657" → "Accounting +
+    /// Bookkeeping"); multi-term compounds like "683" → "Firearms +
+    /// Locksmithing" are shown as-is.
     ///
     /// Mirrors Rust `Fdc::label()` in fdc_runtime.rs.
     public static func label(for code: String) -> String? {
         guard !code.isEmpty, let frame = bundle?.frame else { return nil }
-        // Decimal codes are already specific enough — use their own label.
-        // 3-digit integer codes walk up one parent level for a cleaner heading.
-        let lookup: String
-        if !code.contains("."), let parent = FDCFrame.decimalParent(of: code) {
-            lookup = parent
-        } else {
-            lookup = code
-        }
-        return frame.codes.first(where: { $0.code == lookup })?.label
+        return frame.codes.first(where: { $0.code == code })?.label
     }
 
     // MARK: - artifact loading (once per process)
