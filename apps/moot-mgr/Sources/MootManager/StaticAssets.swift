@@ -2538,6 +2538,11 @@ import { OrbitControls } from '/OrbitControls.js';
   let brain3D = false;
   // L3 lobe labels — community rank → FDC label string.
   let brainLobeLabels = Object.create(null);
+  // V2-P2a meaning channel — community rank → confidence label text
+  // ("Label · 82%" or "Mixed · top: …"), set alongside brainLobeLabels by
+  // buildRealBrainNodes. Read by updateBrainLabels (canvas overlay) and
+  // renderCommPicker (picker rows) in place of the bare label when present.
+  let brainLobeConfidence = Object.create(null);
   let topoCommFilter = null;
   let topoCommRows = [];
   let brainLobeKey = Object.create(null);
@@ -2607,6 +2612,72 @@ import { OrbitControls } from '/OrbitControls.js';
     else             { r1 = c; b1 = x; }
     var mm = l - c / 2;
     return [Math.round((r1 + mm) * 255), Math.round((g1 + mm) * 255), Math.round((b1 + mm) * 255)];
+  }
+
+  // Desaturate an [r,g,b] toward its OWN grayscale luma by `amount`
+  // (0 = untouched, 1 = fully gray at the same luma). Used to scale a
+  // lobe's aura/label color down as its dominant code's purity falls.
+  // Deliberately NOT a hue blend with the lobe's other codes — mixing
+  // complementary hues collapses to dead gray, which reads as "no code"
+  // rather than "mixed codes". Fading the dominant hue toward its own
+  // gray keeps it identifiable while honestly signalling low confidence.
+  function desaturateToward(rgb, amount) {
+    var a = Math.max(0, Math.min(1, amount));
+    var lum = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
+    return [
+      Math.round(rgb[0] + (lum - rgb[0]) * a),
+      Math.round(rgb[1] + (lum - rgb[1]) * a),
+      Math.round(rgb[2] + (lum - rgb[2]) * a),
+    ];
+  }
+
+  // Per-lobe FDC code purity (V2-P2a meaning channel): tallies each
+  // member's own `.code` (attached in renderTopology's compact-format
+  // unpack via codeIndex/codes — see that call site) and reports the
+  // dominant code's share among CODED members only. Members with no code
+  // are excluded from the denominator so an uncoded fragment sitting in an
+  // otherwise tightly-coded lobe doesn't dilute the stated confidence.
+  // `top` is the top 3 codes by share, for the "Mixed · top: …" breakdown.
+  // `dominant` is null when the lobe has zero coded members — callers fall
+  // back to the community-level `code` (the pre-V2-P2a behavior), which
+  // is also exactly what happens for payloads that lack codes/codeIndex.
+  function lobeCodeStats(members) {
+    var counts = Object.create(null);
+    var totalCoded = 0;
+    members.forEach(function (n) {
+      if (!n.code) return;
+      counts[n.code] = (counts[n.code] || 0) + 1;
+      totalCoded++;
+    });
+    var codes = Object.keys(counts);
+    if (!codes.length) return { dominant: null, purity: 0, totalCoded: 0, top: [] };
+    codes.sort(function (a, b) { return counts[b] - counts[a]; });
+    var top = codes.slice(0, 3).map(function (code) {
+      return { code: code, share: counts[code] / totalCoded };
+    });
+    return { dominant: codes[0], purity: counts[codes[0]] / totalCoded, totalCoded: totalCoded, top: top };
+  }
+
+  // Confidence label text for a lobe's code purity. A clear majority
+  // (purity >= 60%) states the label with its share ("Label · 82%");
+  // anything more mixed lists the top 3 codes by share of coded members
+  // instead of letting the dominant code speak for members it doesn't
+  // represent ("Mixed · top: label1 25% · label2 16% · label3 7%").
+  // `codeLabelMap` resolves a raw code to its community/frame label
+  // (falls back to the raw code itself when no community carries a label
+  // for it). `fallbackLabel` is the community's own label, returned
+  // verbatim for the zero-coded-members case — there's no honest
+  // percentage to state, so none is shown (matches current behavior).
+  function confidenceLabelText(stats, codeLabelMap, fallbackLabel) {
+    if (!stats || !stats.dominant) return fallbackLabel || null;
+    function labelFor(code) { return codeLabelMap[code] || code; }
+    if (stats.purity >= 0.60) {
+      return labelFor(stats.dominant) + " · " + Math.round(stats.purity * 100) + "%";
+    }
+    var parts = stats.top.map(function (t) {
+      return labelFor(t.code) + " " + Math.round(t.share * 100) + "%";
+    });
+    return "Mixed · top: " + parts.join(" · ");
   }
 
   // Per-lobe resolved color ([r,g,b] by lobe rank) — set by buildRealBrainNodes,
@@ -2724,10 +2795,19 @@ import { OrbitControls } from '/OrbitControls.js';
         // Content key for the picker filter — the community's FDC label or
         // a bucket. Stable across snapshots, unlike Louvain ids.
         commKey: commKey || null,
-        // Community color for the node fill — digit-derived from the
-        // community's FDC code (fdcColor) with the static palette as the
-        // code-less fallback. Resolved once per community by the caller.
-        rgb: rgb || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length],
+        // V2-P2a meaning channel: this node's own FDC code (string) when
+        // the wire carried codes/codeIndex, else null — a mixed lobe must
+        // visibly show which members carry which code, not just the
+        // lobe's dominant one. Absent-payload wire nodes have `n.code`
+        // undefined, which collapses to null here (graceful degrade).
+        code: n.code || null,
+        // Node fill color, fallback chain: this node's OWN code (fdcColor)
+        // → the caller's resolved community/lobe color (`rgb` — the lobe
+        // path is purity-scaled by buildRealBrainNodes, see brainLobeRGB)
+        // → the static per-community palette as the final code-less
+        // fallback. A mixed lobe therefore shows each node's real color
+        // even though the lobe aura/label reads as desaturated "mixed".
+        rgb: fdcColor(n.code) || rgb || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length],
         // nounType removed from wire format (FIX 2 payload trim); all drawers
         // are type 0 — the rendering path is unchanged (defaults to 0).
         nounType: n.nounType || 0,
@@ -2746,12 +2826,13 @@ import { OrbitControls } from '/OrbitControls.js';
     }
 
     // L3: record the FDC label + digit-derived color for each community that
-    // earned a lobe. brainLobeLabels/brainLobeRGB keys are the lobe rank (the
-    // node `community` index used on the lobe path); labels are the proxy's
-    // enriched strings. Null/empty labels are skipped — drawLobeLabels draws
-    // nothing for them.
+    // earned a lobe. brainLobeLabels/brainLobeRGB/brainLobeConfidence keys
+    // are the lobe rank (the node `community` index used on the lobe path);
+    // labels are the proxy's enriched strings. Null/empty labels are
+    // skipped — updateBrainLabels draws nothing for them.
     brainLobeLabels = Object.create(null);
     brainLobeRGB = Object.create(null);
+    brainLobeConfidence = Object.create(null);
     brainCodeByKey = Object.create(null);
     function commMeta(cid) {
       var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
@@ -2761,6 +2842,16 @@ import { OrbitControls } from '/OrbitControls.js';
     lobeIds.forEach(function (cid, rank) {
       var meta = commMeta(cid);
       if (meta && meta.label) brainLobeLabels[rank] = meta.label;
+    });
+
+    // Code → label reverse lookup for confidenceLabelText: multiple
+    // communities can carry the same FDC code, so first one wins —
+    // communities[] arrives size-desc from the proxy, a stable order.
+    // Falls back to the raw code string when no community carries a
+    // label for it (confidenceLabelText handles that fallback itself).
+    var codeLabelMap = Object.create(null);
+    (communities || []).forEach(function (c) {
+      if (c && c.code && c.label && codeLabelMap[c.code] === undefined) codeLabelMap[c.code] = c.label;
     });
 
     // Content keys for the picker: the community's FDC label when present;
@@ -2776,9 +2867,15 @@ import { OrbitControls } from '/OrbitControls.js';
     // Picker rows: one per labeled lobe (size desc), then the two buckets.
     brainLobeKey = Object.create(null);
     var rowByKey = Object.create(null);
-    function addRow(key, size, cIdx, isBucket, rgb) {
+    function addRow(key, size, cIdx, isBucket, rgb, confidence) {
       if (!rowByKey[key]) {
-        rowByKey[key] = { key: key, size: 0, cIdx: cIdx, bucket: !!isBucket, rgb: rgb || null };
+        rowByKey[key] = {
+          key: key, size: 0, cIdx: cIdx, bucket: !!isBucket, rgb: rgb || null,
+          // V2-P2a confidence label ("Label · 82%" / "Mixed · top: …");
+          // only lobes compute this (see lobeCodeStats) — periphery/bucket
+          // rows pass undefined and fall back to the bare key in the picker.
+          confidence: confidence || null,
+        };
       }
       rowByKey[key].size += size;
     }
@@ -2792,9 +2889,17 @@ import { OrbitControls } from '/OrbitControls.js';
       brainLobeKey[rank] = key;
       var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
       var meta = commMeta(cid);
-      var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
+      // V2-P2a meaning channel: the lobe aura/label color is the DOMINANT
+      // per-node code's color, desaturated toward gray as purity falls —
+      // not a hue blend of every code present (see desaturateToward). A
+      // lobe with zero coded members (stats.dominant === null) keeps the
+      // pre-V2-P2a behavior: the community's own `code`, or the palette.
+      var stats = lobeCodeStats(members);
+      var baseRgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
+      var rgb = stats.dominant ? desaturateToward(fdcColor(stats.dominant), 1 - stats.purity) : baseRgb;
       brainLobeRGB[rank] = rgb;
-      if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)", rgb);
+      brainLobeConfidence[rank] = confidenceLabelText(stats, codeLabelMap, meta && meta.label);
+      if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)", rgb, brainLobeConfidence[rank]);
       // sqrt scaling keeps scatter proportional to canvas even for huge
       // communities (6k+ nodes); linear scaling scatters far outside the
       // canvas, clamping all nodes to edges and collapsing via physics.
@@ -3524,10 +3629,14 @@ import { OrbitControls } from '/OrbitControls.js';
       lbl.style.left = sp.x + 'px';
       lbl.style.top = sp.y + 'px';
       lbl.style.transform = 'translate(-50%, -100%)';
-      var col = members[0].rgb || BRAIN_COMM_COLORS[parseInt(rank, 10) % BRAIN_COMM_COLORS.length];
+      // V2-P2a: the label swatch/text use the LOBE's resolved aura color
+      // (brainLobeRGB — purity-desaturated dominant code), not an
+      // individual member's own node color, since members in a mixed lobe
+      // carry different colors now (see pushNode's per-node fallback chain).
+      var col = brainLobeRGB[rank] || BRAIN_COMM_COLORS[parseInt(rank, 10) % BRAIN_COMM_COLORS.length];
       lbl.innerHTML = '<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:rgb('
         + col[0] + ',' + col[1] + ',' + col[2] + ');margin-right:6px;vertical-align:middle;opacity:0.65"></span>'
-        + String(brainLobeLabels[rank]).toUpperCase();
+        + String(brainLobeConfidence[rank] || brainLobeLabels[rank]).toUpperCase();
     });
   }
 
@@ -3955,7 +4064,10 @@ import { OrbitControls } from '/OrbitControls.js';
         ? "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")"
         : "rgba(232,234,240,0.35)";
 
-      var label = el("span", "cp-label", row.key);
+      // V2-P2a: show the confidence label ("Label · 82%" / "Mixed · top:
+      // …") when the row is a coded lobe; row.key (the filter identity —
+      // untouched) stays the fallback for buckets and code-less lobes.
+      var label = el("span", "cp-label", row.confidence || row.key);
       var size = el("span", "cp-size", String(row.size));
 
       line.appendChild(box);
@@ -4043,7 +4155,18 @@ import { OrbitControls } from '/OrbitControls.js';
     if (Array.isArray(g.ids)) {
       // Compact format — unpack parallel arrays into per-object form for the renderer.
       var tombstoned = g.tombstoned || {};
+      // V2-P2a meaning channel: `codes` is the FDC code dictionary and
+      // `codeIndex` is parallel to `ids` (-1 = no code). Both are new/
+      // optional wire keys from a parallel mission — older/live payloads
+      // lack them, in which case `codes`/`codeIndex` are null here and
+      // every node's `code` collapses to null below. That's the exact
+      // pre-V2-P2a state: fdcColor(null) and lobeCodeStats both already
+      // treat a null code as "no code", so this degrades to current
+      // behavior with no special-casing needed downstream.
+      var codes = Array.isArray(g.codes) ? g.codes : null;
+      var codeIndex = Array.isArray(g.codeIndex) ? g.codeIndex : null;
       rawNodes = g.ids.map(function (id, i) {
+        var ci = codeIndex ? codeIndex[i] : -1;
         return {
           id: id,
           communityId: g.communityId[i],
@@ -4051,6 +4174,7 @@ import { OrbitControls } from '/OrbitControls.js';
           anomaly:     g.anomaly[i],
           createdTs:   g.createdTs[i],
           tombstonedTs: tombstoned[String(i)] || null,
+          code: (codes && typeof ci === "number" && ci >= 0) ? (codes[ci] || null) : null,
         };
       });
       // Compact edges [[si, ti, w, et]] → per-object form the renderer expects.
@@ -4092,6 +4216,7 @@ import { OrbitControls } from '/OrbitControls.js';
       brainEdges = [];
       brainLobeLabels = Object.create(null);
       brainLobeRGB = Object.create(null);
+      brainLobeConfidence = Object.create(null);
       topoCommRows = [];     // no content picker without real communities
     }
     renderCommPicker();
