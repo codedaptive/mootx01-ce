@@ -43,7 +43,7 @@ struct MultiEstateRoutingTests {
             estateID: UUID(), backend: .inMemory
         ))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        return try await kit.open(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     }
 
     /// Seed content directly into any estate by calling `kit.capture`, bypassing

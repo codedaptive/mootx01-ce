@@ -46,7 +46,7 @@ struct DurableSemanticRecallTests {
         // Idempotent across restarts: Estate.create re-stamps the manifest in
         // place, kit.open re-issues a handle against the existing schema.
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // Mirror AriaMCPMain's semantic-recall wiring. .deterministic embedding
         // model matches the entry point (and provision's default) — no CoreML,

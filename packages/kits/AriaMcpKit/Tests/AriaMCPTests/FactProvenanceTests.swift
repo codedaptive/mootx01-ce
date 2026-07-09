@@ -44,7 +44,7 @@ private func openBareEstate(identity: String = "aria-mcp-server")
     let storage = InMemoryStorage(
         configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-    let handle = try await kit.open(storage: storage, owner: owner)
+    let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     // No corpus or vector store registered — dense lane dark.
     let dispatcher = ToolDispatcher(kit: kit, handle: handle, serverIdentity: identity)
     return (dispatcher, kit, handle)

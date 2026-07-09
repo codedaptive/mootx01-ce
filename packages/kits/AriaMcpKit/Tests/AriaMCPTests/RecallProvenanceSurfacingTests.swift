@@ -60,7 +60,7 @@ private func openInMemoryEstateWithSemanticRecall()
     let storage = InMemoryStorage(
         configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-    let handle = try await kit.open(storage: storage, owner: owner)
+    let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     let corpus = try await Corpus(storage: storage, model: .deterministic)
     await kit.registerCorpus(corpus, for: handle)
     let vectorStore = VectorStore(storage: storage)
@@ -79,7 +79,7 @@ private func openBareLocusOnlyEstate()
     let storage = InMemoryStorage(
         configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-    let handle = try await kit.open(storage: storage, owner: owner)
+    let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     // No corpus, no vector store — structural/locus-only lane.
     let dispatcher = ToolDispatcher(kit: kit, handle: handle)
     return (dispatcher, kit, handle)
