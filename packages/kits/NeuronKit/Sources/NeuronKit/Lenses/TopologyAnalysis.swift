@@ -104,12 +104,20 @@ public struct GraphTopologyNode: Sendable, Equatable, Codable {
     /// `communityId: -1` and `centrality: 0.0` and never participate in the
     /// community math — playback shows an entity within [createdTs, tombstonedTs).
     public let tombstonedTs: String?
+    /// FDC/UDC classification code of the drawer this node represents (e.g. "657",
+    /// "615.85"). Nil when the drawer is unanchored (empty-string udcCode from the
+    /// input is normalized here to nil — empty strings never cross this boundary).
+    /// Dead nodes (communityId == -1) retain their code: the field is informational
+    /// and independent of the node's alive/dead state.
+    public let udcCode: String?
 
-    public init(id: String, communityId: Int, centrality: Double, lastActiveTs: String?, createdTs: String?, tombstonedTs: String?) {
+    public init(id: String, communityId: Int, centrality: Double, lastActiveTs: String?,
+                createdTs: String?, tombstonedTs: String?, udcCode: String? = nil) {
         self.id = id; self.communityId = communityId
         self.centrality = centrality; self.lastActiveTs = lastActiveTs
         self.createdTs = createdTs
         self.tombstonedTs = tombstonedTs
+        self.udcCode = udcCode
     }
 }
 
@@ -409,7 +417,10 @@ extension NeuronKit {
                 // Ingest clock, not event semantics: filedAt is when the drawer
                 // entered the estate, which is the alive(t) playback boundary.
                 createdTs: iso.string(from: d.filedAt),
-                tombstonedTs: nil
+                tombstonedTs: nil,
+                // Empty-string udcCode ("" = unanchored sentinel) normalizes to nil
+                // here so downstream consumers never receive an empty classification.
+                udcCode: d.udcCode.isEmpty ? nil : d.udcCode
             )
         }
 
@@ -417,7 +428,8 @@ extension NeuronKit {
         // the "no community" sentinel and centrality 0.0 reflects that dead
         // entities carry no structural prominence. tombstonedTs may be nil
         // when the caller could not resolve the instant; the -1 sentinel
-        // still marks the node dead.
+        // still marks the node dead. udcCode is retained for dead nodes —
+        // it is informational and independent of the alive/dead state.
         for d in dead {
             nodes.append(GraphTopologyNode(
                 id: d.id,
@@ -425,7 +437,8 @@ extension NeuronKit {
                 centrality: 0.0,
                 lastActiveTs: iso.string(from: d.eventTime),
                 createdTs: iso.string(from: d.filedAt),
-                tombstonedTs: d.tombstonedAt.map { iso.string(from: $0) }
+                tombstonedTs: d.tombstonedAt.map { iso.string(from: $0) },
+                udcCode: d.udcCode.isEmpty ? nil : d.udcCode
             ))
         }
 

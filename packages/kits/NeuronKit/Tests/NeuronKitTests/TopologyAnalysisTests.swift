@@ -436,4 +436,80 @@ struct TopologyAnalysisTests {
         #expect(latEdge.target == "live-2")
         #expect(!lat.contains { $0.source == "dead" || $0.target == "dead" })
     }
+
+    // MARK: - udcCode carry-through (V2-P1a)
+
+    @Test("non-empty udcCode passes through to GraphTopologyNode on live and dead nodes")
+    func udcCodeCarryThrough() throws {
+        let live = TopologyDrawerInput(id: "anchor", udcCode: "615.85",
+                                       filedAt: t0, eventTime: t0,
+                                       tombstoned: false, tombstonedAt: nil)
+        let dead = TopologyDrawerInput(id: "gone", udcCode: "657",
+                                       filedAt: t0, eventTime: t0,
+                                       tombstoned: true, tombstonedAt: t0.addingTimeInterval(60))
+        let topo = NeuronKit.graphTopology(
+            drawers: [live, dead], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+
+        let liveNode = try #require(topo.nodes.first { $0.id == "anchor" })
+        #expect(liveNode.udcCode == "615.85", "non-empty code must be carried through on live node")
+
+        let deadNode = try #require(topo.nodes.first { $0.id == "gone" })
+        #expect(deadNode.udcCode == "657", "dead nodes retain their udcCode")
+    }
+
+    @Test("empty-string udcCode (unanchored sentinel) normalises to nil")
+    func udcCodeEmptyNormalisesToNil() throws {
+        let unanchored = TopologyDrawerInput(id: "x", udcCode: "",
+                                             filedAt: t0, eventTime: t0,
+                                             tombstoned: false, tombstonedAt: nil)
+        let topo = NeuronKit.graphTopology(
+            drawers: [unanchored], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+
+        let node = try #require(topo.nodes.first { $0.id == "x" })
+        #expect(node.udcCode == nil, "empty-string udcCode must normalise to nil at GraphTopologyNode boundary")
+    }
+
+    @Test("GraphTopologyNode JSON round-trip: udcCode present when set, key absent when nil, tolerates legacy JSON")
+    func graphTopologyNodeUdcCodeJsonRoundTrip() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        // GraphTopologyNode is Codable; verify the wire contract:
+        // udcCode present in JSON when set; key absent (not null) when nil;
+        // decodes without error when key is missing (tolerates pre-V2-P1a snapshots).
+        let live = TopologyDrawerInput(id: "anchored", udcCode: "510",
+                                       filedAt: t0, eventTime: t0,
+                                       tombstoned: false, tombstonedAt: nil)
+        let unanchored = TopologyDrawerInput(id: "none", udcCode: "",
+                                             filedAt: t0, eventTime: t0,
+                                             tombstoned: false, tombstonedAt: nil)
+        let topo = NeuronKit.graphTopology(
+            drawers: [live, unanchored], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+
+        let anchored = try #require(topo.nodes.first { $0.id == "anchored" })
+        let none     = try #require(topo.nodes.first { $0.id == "none" })
+
+        // Encode the anchored node and verify JSON key is present.
+        let anchoredData = try encoder.encode(anchored)
+        let anchoredJSON = try #require(
+            try? JSONSerialization.jsonObject(with: anchoredData) as? [String: Any])
+        #expect(anchoredJSON["udcCode"] as? String == "510",
+                "udcCode key must be present in JSON when code is set")
+
+        // Encode the unanchored node and verify JSON key is absent (not null).
+        let noneData = try encoder.encode(none)
+        let noneJSON = try #require(
+            try? JSONSerialization.jsonObject(with: noneData) as? [String: Any])
+        #expect(noneJSON["udcCode"] == nil,
+                "udcCode key must be absent in JSON when code is nil — not null")
+
+        // Decode a JSON snapshot that lacks udcCode — tolerate absence (older snapshots).
+        let oldSnapshotJSON = """
+            {"id":"legacy","communityId":0,"centrality":0.5,"tombstonedTs":null,\
+             "anomaly":false,"nounType":0}
+            """.data(using: .utf8)!
+        let legacy = try decoder.decode(GraphTopologyNode.self, from: oldSnapshotJSON)
+        #expect(legacy.udcCode == nil,
+                "GraphTopologyNode must decode without error when udcCode key is absent")
+    }
 }
