@@ -79,6 +79,10 @@ const DEFAULT_EMBEDDING_MODEL: &str = "default";
 /// (a child node); corrected to "000" (the UDC root, per the LatticeLib
 /// Code grammar — the three-digit root is the correct unresolved sentinel).
 const DEFAULT_LATTICE_CODE: &str = "000";
+/// Estate-wide floor: after a successful full FDC reclassification apply,
+/// this key records the composite classifier/artifact version against which
+/// every active stored anchor has been checked.
+const FDC_RECALCED_DATA_VERSION_META_KEY: &str = "aria.fdc.recalced_data_version";
 
 // ---------------------------------------------------------------------------
 // Tool surface declaration
@@ -2038,18 +2042,33 @@ fn run_estate_status(
     let sync_token = coord
         .sync_state_token(&estate.handle)
         .unwrap_or_else(|_| "local-only".to_string());
+    let fdc_floor = estate.store.get_meta(FDC_RECALCED_DATA_VERSION_META_KEY).map_err(|e| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+            format!("estate_status: failed to read estate FDC floor: {e}"),
+        )
+    })?;
+    let current_fdc_recalculation_version = lattice_lib::Fdc::recalculation_version();
+    let fdc_recalculation_state = if fdc_floor.as_deref() == Some(current_fdc_recalculation_version.as_str()) {
+        "current"
+    } else if fdc_floor.is_none() {
+        "missing"
+    } else {
+        "stale"
+    };
 
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
     //   [/ version_skew — ADR-024 §5, appended only when the host detected one]
     let mut body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
         active.len(),
         total.len(),
         wings_list,
         kg_facts.len(),
         trace_rows,
         sync_token,
+        fdc_floor.as_deref().unwrap_or("none"),
     );
     if !version_skew.is_empty() {
         body.push_str(&format!("\nversion_skew: {version_skew}"));
@@ -2679,10 +2698,18 @@ fn run_reclassify_fdc(
     let estate = registry.resolve_direct(args)?;
     let apply = optional_bool(args, "apply")?.unwrap_or(false);
     let mode = FdcReclassifyMode::parse(optional_string(args, "mode")?)?;
+    let current_fdc_data_version = lattice_lib::Fdc::data_version();
+    let current_fdc_recalculation_version = lattice_lib::Fdc::recalculation_version();
     let limit = match optional_integer(args, "limit")? {
         Some(raw) => Some(crate::dispatch::clamp_limit(Some(raw), "limit", 1, 50_000)?),
         None => None,
     };
+    let prior_floor = estate.store.get_meta(FDC_RECALCED_DATA_VERSION_META_KEY).map_err(|e| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+            format!("fdc_reclassify: failed to read estate FDC floor: {e}"),
+        )
+    })?;
 
     let drawers = {
         let coord = estate.coord.lock().unwrap();
@@ -2714,7 +2741,6 @@ fn run_reclassify_fdc(
         scanned += 1;
         if drawer.content.trim().is_empty() {
             empty_content += 1;
-            continue;
         }
 
         let old_code = normalized_fdc_code(&drawer.udc_code);
@@ -2789,11 +2815,41 @@ fn run_reclassify_fdc(
         }
     }
 
+    let mut floor_after = prior_floor.clone();
+    let floor_stamp_status = if apply
+        && mode == FdcReclassifyMode::All
+        && limit.is_none()
+        && skipped_non_candidate_changes == 0
+    {
+        estate
+            .store
+            .set_meta(FDC_RECALCED_DATA_VERSION_META_KEY, &current_fdc_recalculation_version)
+            .map_err(|e| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                    format!("fdc_reclassify: failed to stamp estate FDC floor: {e}"),
+                )
+            })?;
+        floor_after = Some(current_fdc_recalculation_version.clone());
+        "stamped".to_string()
+    } else if !apply {
+        "dry-run".to_string()
+    } else if limit.is_some() {
+        "skipped: limited run cannot update estate-wide floor".to_string()
+    } else if mode != FdcReclassifyMode::All {
+        "skipped: mode=all is required for an estate-wide floor".to_string()
+    } else {
+        "skipped: changed non-suspect anchors remain".to_string()
+    };
+
     let limit_suffix = limit.map(|n| format!(" (limit {n})")).unwrap_or_default();
     let mut lines = vec![
         format!("fdc_reclassify: {}", if apply { "applied" } else { "dry-run" }),
         format!("mode: {}", mode.as_str()),
         format!("estate: [{}]", Uuid::from_bytes(estate.handle.estate_uuid)),
+        format!("fdc_data_version: {current_fdc_data_version}"),
+        format!("fdc_recalculation_version: {current_fdc_recalculation_version}"),
+        format!("estate_recalced_data_version_before: {}", prior_floor.as_deref().unwrap_or("none")),
         format!("scanned: {scanned} active drawer(s){limit_suffix}"),
         format!("unchanged: {unchanged}"),
         format!("empty_content: {empty_content}"),
@@ -2805,6 +2861,8 @@ fn run_reclassify_fdc(
         },
         format!("unclassified_after: {unclassified_after}"),
         format!("skipped_non_candidate_changes: {skipped_non_candidate_changes}"),
+        format!("estate_recalced_data_version_after: {}", floor_after.as_deref().unwrap_or("none")),
+        format!("floor_stamp: {floor_stamp_status}"),
     ];
     if !apply {
         lines.push("dry_run: pass apply=true to write candidate anchor changes".to_string());

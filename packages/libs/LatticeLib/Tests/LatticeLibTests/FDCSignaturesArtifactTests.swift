@@ -2,12 +2,9 @@
 //
 // The bundled FDCSignatures.json artifact contract
 // (FDC_ENCODER_CANONICAL § 2/§ 7-build, cookbook § 7): the runtime
-// artifact is MEMBERSHIP-ONLY — per-term weights are dropped at
-// compaction and the matcher never sees a source weight; the
-// source_weights field is build provenance, not runtime input. These
-// tests pin the artifact shape the spec documents, so a regenerated
-// artifact that silently changes shape (weights reappearing, codes
-// dropped, unsorted terms) fails here before it ships.
+// artifact keeps source-owned term lists separate from inherited terms.
+// This is the v3 precision contract: article and ancestor recall cannot
+// masquerade as heading/alias evidence.
 
 import Foundation
 import Testing
@@ -20,7 +17,11 @@ struct FDCSignaturesArtifactTests {
     private struct Artifact: Decodable {
         struct Entry: Decodable {
             let code: String
-            let terms: [String]
+            let label_terms: [String]
+            let alias_terms: [String]
+            let title_terms: [String]
+            let article_terms: [String]
+            let ancestor_terms: [String]
         }
         let version: String
         let source_weights: [String: Int]
@@ -33,24 +34,25 @@ struct FDCSignaturesArtifactTests {
         return try JSONDecoder().decode(Artifact.self, from: Data(contentsOf: url))
     }
 
-    @Test("artifact is membership-only with provenance header")
+    @Test("artifact carries source ownership with provenance header")
     func artifactShapeAndProvenance() throws {
         let artifact = try loadArtifact()
         #expect(!artifact.version.isEmpty)
         // Build provenance: the pinned source weights ride along even
         // though the runtime never reads them.
-        #expect(artifact.source_weights == ["label": 3, "title": 2, "article": 1])
+        #expect(artifact.source_weights == ["label": 3, "alias": 4, "title": 2, "article": 1])
     }
 
-    @Test("all 1071 signature-bearing codes ship, sorted, non-empty")
+    @Test("all 1075 unique frame codes ship, sorted, non-empty")
     func fullCodeCoverageSortedNonEmpty() throws {
         let artifact = try loadArtifact()
-        #expect(artifact.codes.count == 1071)
+        #expect(artifact.codes.count == 1075)
         let codes = artifact.codes.map(\.code)
         #expect(codes == codes.sorted(), "codes are in sorted order")
         #expect(Set(codes).count == codes.count, "no duplicate codes")
         for entry in artifact.codes {
-            #expect(!entry.terms.isEmpty, "code \(entry.code) has a non-empty signature")
+            let own = entry.label_terms + entry.alias_terms + entry.title_terms + entry.article_terms
+            #expect(!own.isEmpty, "code \(entry.code) has non-empty owned evidence")
         }
     }
 
@@ -58,8 +60,11 @@ struct FDCSignaturesArtifactTests {
     func termListsSorted() throws {
         let artifact = try loadArtifact()
         for entry in artifact.codes {
-            #expect(entry.terms == entry.terms.sorted(),
-                    "code \(entry.code) terms are sorted")
+            for terms in [entry.label_terms, entry.alias_terms, entry.title_terms,
+                          entry.article_terms, entry.ancestor_terms] {
+                #expect(terms == terms.sorted(), "code \(entry.code) terms are sorted")
+                #expect(Set(terms).count == terms.count, "code \(entry.code) terms are unique")
+            }
         }
     }
 }

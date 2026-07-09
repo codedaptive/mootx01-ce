@@ -8,6 +8,7 @@ import PersistenceKitInMemory
 
 @Suite("FDC reclassification tool", .serialized)
 struct FdcReclassifyTests {
+    private static let fdcFloorKey = "aria.fdc.recalced_data_version"
 
     private func makeDispatcher() async throws -> (GeniusLocusKit, EstateHandle, ToolDispatcher) {
         let kit = GeniusLocusKit()
@@ -62,6 +63,11 @@ struct FdcReclassifyTests {
         return try #require((try await estate.allDrawers()).first { $0.id == id })
     }
 
+    private func fdcFloor(_ kit: GeniusLocusKit, _ handle: EstateHandle) async throws -> String? {
+        let estate = try await kit.estate(for: handle)
+        return try await estate.meta(key: Self.fdcFloorKey)
+    }
+
     @Test func dryRunReportsSuspectButDoesNotMutate() async throws {
         let (kit, handle, dispatcher) = try await makeDispatcher()
         let id = try await capture(
@@ -81,6 +87,7 @@ struct FdcReclassifyTests {
         #expect(body.contains("would_update: 1"))
         #expect(body.contains("\(id): 362.4 [Q12131] -> 000"))
         #expect(try await storedCode(kit, handle, id: id) == "362.4")
+        #expect(try await fdcFloor(kit, handle) == nil)
     }
 
     @Test func applyRepairsSuspectFalsePositiveToUnclassifiedSentinel() async throws {
@@ -94,12 +101,19 @@ struct FdcReclassifyTests {
 
         let result = try await dispatcher.dispatch(
             name: "moot_reclassify_fdc",
-            arguments: .object(["apply": .bool(true)])
+            arguments: .object(["apply": .bool(true), "mode": .string("all")])
         )
         let body = try text(result)
         #expect(body.contains("fdc_reclassify: applied"))
+        #expect(body.contains("fdc_data_version: "))
+        #expect(body.contains("floor_stamp: stamped"))
         #expect(body.contains("updated: 1"))
         #expect(try await storedCode(kit, handle, id: id) == "000")
+        #expect(try await fdcFloor(kit, handle)?.contains("classifier:3.0.0") == true)
+
+        let status = try await dispatcher.dispatch(
+            name: "moot_estate_status", arguments: .object([:]))
+        #expect(try text(status).contains("fdc_recalculation: current"))
     }
 
     @Test func suspectOnlyDoesNotOverwriteBroadCodeChangeWithoutAllMode() async throws {
@@ -129,6 +143,62 @@ struct FdcReclassifyTests {
         #expect(resetBody.contains("mode: all"))
         #expect(resetBody.contains("candidates: 1"))
         #expect(resetBody.contains("would_update: 1"))
+        #expect(try await fdcFloor(kit, handle) == nil)
+    }
+
+    @Test func applyDoesNotStampFloorWhenLimited() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        _ = try await capture(
+            kit,
+            handle,
+            content: "git update-index --refresh && rm .git/index.lock",
+            code: "362.4",
+            qid: "Q12131")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object([
+                "apply": .bool(true), "mode": .string("all"), "limit": .integer(1)
+            ])
+        )
+        let body = try text(result)
+        #expect(body.contains("fdc_reclassify: applied"))
+        #expect(body.contains("floor_stamp: skipped: limited run cannot update estate-wide floor"))
+        #expect(try await fdcFloor(kit, handle) == nil)
+    }
+
+    @Test func conservativeApplyDoesNotStampEstateFloor() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        _ = try await capture(
+            kit,
+            handle,
+            content: "Biology is the scientific study of life and living organisms " +
+                "including their physical structure chemical processes molecular " +
+                "interactions physiological mechanisms and evolution",
+            code: "362.4")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true)])
+        )
+        let body = try text(result)
+        #expect(body.contains("fdc_reclassify: applied"))
+        #expect(body.contains("skipped_non_candidate_changes: 1"))
+        #expect(body.contains("floor_stamp: skipped: mode=all is required for an estate-wide floor"))
+        #expect(try await fdcFloor(kit, handle) == nil)
+    }
+
+    @Test func estateStatusDistinguishesMissingAndStaleFDCFloors() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        let missing = try await dispatcher.dispatch(
+            name: "moot_estate_status", arguments: .object([:]))
+        #expect(try text(missing).contains("fdc_recalculation: missing"))
+
+        let estate = try await kit.estate(for: handle)
+        try await estate.setMeta(key: Self.fdcFloorKey, value: "classifier:old")
+        let stale = try await dispatcher.dispatch(
+            name: "moot_estate_status", arguments: .object([:]))
+        #expect(try text(stale).contains("fdc_recalculation: stale"))
     }
 
     // Advisory 1 (FDC-RECLASSIFY-ADVISORIES): apply must repair only the

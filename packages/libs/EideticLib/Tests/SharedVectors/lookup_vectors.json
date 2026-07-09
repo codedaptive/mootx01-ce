@@ -2,134 +2,152 @@
   "schema_version" : "2",
   "vectors" : [
     {
+      "expected_code" : "540",
+      "expected_qid" : "Q2329",
       "id" : "chemistry_single_token",
-      "input" : "chemistry",
-      "expected_code" : ""
+      "input" : "chemistry"
     },
     {
-      "input" : "organic chemistry",
-      "expected_code" : "",
-      "id" : "organic_chemistry_phrase"
+      "expected_code" : "547",
+      "expected_qid" : "Q2329",
+      "id" : "organic_chemistry_phrase",
+      "input" : "organic chemistry"
     },
     {
-      "expected_code" : "",
+      "expected_code" : "004",
+      "expected_qid" : "Q68",
       "id" : "computer_single_token",
       "input" : "computer"
     },
     {
-      "expected_code" : "",
-      "input" : "computer science programming",
-      "id" : "computer_science_phrase"
+      "expected_code" : "004",
+      "expected_qid" : "Q336",
+      "id" : "computer_science_phrase",
+      "input" : "computer science programming"
+    },
+    {
+      "expected_code" : "510",
+      "expected_qid" : "Q395",
+      "id" : "mathematics_single_token",
+      "input" : "mathematics"
+    },
+    {
+      "expected_code" : "530",
+      "expected_qid" : "Q413",
+      "id" : "physics_single_token",
+      "input" : "physics"
+    },
+    {
+      "expected_code" : "570",
+      "id" : "biology_single_token",
+      "input" : "biology"
+    },
+    {
+      "expected_code" : "100",
+      "id" : "psychology_single_token",
+      "input" : "psychology"
+    },
+    {
+      "expected_code" : "780",
+      "expected_qid" : "Q2743",
+      "id" : "music_single_token",
+      "input" : "music"
+    },
+    {
+      "expected_code" : "100",
+      "expected_qid" : "Q5891",
+      "id" : "philosophy_single_token",
+      "input" : "philosophy"
+    },
+    {
+      "expected_code" : "900",
+      "expected_qid" : "Q309",
+      "id" : "history_single_token",
+      "input" : "history"
+    },
+    {
+      "expected_code" : "910",
+      "expected_qid" : "Q1071",
+      "id" : "geography_single_token",
+      "input" : "geography"
+    },
+    {
+      "expected_code" : "600",
+      "expected_qid" : "Q44167",
+      "id" : "engineering_single_token",
+      "input" : "engineering"
+    },
+    {
+      "expected_code" : "610",
+      "expected_qid" : "Q11190",
+      "id" : "medicine_single_token",
+      "input" : "medicine"
+    },
+    {
+      "expected_code" : "340",
+      "expected_qid" : "Q34990",
+      "id" : "law_single_token",
+      "input" : "law"
+    },
+    {
+      "expected_code" : "330",
+      "expected_qid" : "Q8134",
+      "id" : "economics_single_token",
+      "input" : "economics"
+    },
+    {
+      "expected_code" : "700",
+      "expected_qid" : "Q36649",
+      "id" : "art_single_token",
+      "input" : "art"
+    },
+    {
+      "expected_code" : "800",
+      "id" : "literature_single_token",
+      "input" : "literature"
+    },
+    {
+      "expected_code" : "200",
+      "id" : "religion_single_token",
+      "input" : "religion"
     },
     {
       "expected_code" : "",
-      "input" : "mathematics",
-      "id" : "mathematics_single_token"
+      "id" : "empty_input",
+      "input" : ""
     },
     {
-      "expected_code" : "",
-      "input" : "physics",
-      "id" : "physics_single_token"
+      "expected_code" : "000",
+      "id" : "nonsense_token",
+      "input" : "qwertyzxcvb"
     },
     {
-      "expected_code" : "",
-      "input" : "biology",
-      "id" : "biology_single_token"
+      "expected_code" : "000",
+      "id" : "punctuation_only_drops_to_empty",
+      "input" : "!!!???"
     },
     {
-      "expected_code" : "",
-      "input" : "psychology",
-      "id" : "psychology_single_token"
+      "expected_code" : "507",
+      "expected_qid" : "Q2329",
+      "id" : "mixed_phrase_biology_pulls_to_class_5",
+      "input" : "biology and chemistry research"
     },
     {
-      "expected_code" : "",
-      "input" : "music",
-      "id" : "music_single_token"
+      "expected_code" : "010",
+      "id" : "single_letter_no_match",
+      "input" : "x"
     },
     {
-      "expected_code" : "",
-      "input" : "philosophy",
-      "id" : "philosophy_single_token"
+      "expected_code" : "621",
+      "expected_qid" : "Q192047",
+      "id" : "engineering_phrase",
+      "input" : "mechanical engineering"
     },
     {
-      "expected_code" : "",
-      "input" : "history",
-      "id" : "history_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "geography",
-      "id" : "geography_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "engineering",
-      "id" : "engineering_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "medicine",
-      "id" : "medicine_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "law",
-      "id" : "law_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "economics",
-      "id" : "economics_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "art",
-      "id" : "art_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "literature",
-      "id" : "literature_single_token"
-    },
-    {
-      "expected_code" : "297",
-      "input" : "religion",
-      "id" : "religion_single_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "",
-      "id" : "empty_input"
-    },
-    {
-      "expected_code" : "",
-      "input" : "qwertyzxcvb",
-      "id" : "nonsense_token"
-    },
-    {
-      "expected_code" : "",
-      "input" : "!!!???",
-      "id" : "punctuation_only_drops_to_empty"
-    },
-    {
-      "expected_code" : "",
-      "input" : "biology and chemistry research",
-      "id" : "mixed_phrase_biology_pulls_to_class_5"
-    },
-    {
-      "expected_code" : "",
-      "input" : "x",
-      "id" : "single_letter_no_match"
-    },
-    {
-      "expected_code" : "",
-      "input" : "mechanical engineering",
-      "id" : "engineering_phrase"
-    },
-    {
-      "expected_code" : "",
-      "input" : "chemical compounds",
-      "id" : "chemical_morphology_via_stemmer"
+      "expected_code" : "540",
+      "expected_qid" : "Q5156823",
+      "id" : "chemical_morphology_via_stemmer",
+      "input" : "chemical compounds"
     }
   ]
 }

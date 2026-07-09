@@ -117,7 +117,7 @@ struct LookupConformanceTests {
         }
 
         let file = try loadVectors()
-        guard let bundleURL = Bundle.module.url(forResource: "lookup_vectors", withExtension: "json", subdirectory: "SharedVectors") else {
+        guard Bundle.module.url(forResource: "lookup_vectors", withExtension: "json", subdirectory: "SharedVectors") != nil else {
             throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot locate lookup_vectors.json in bundle"])
         }
 
@@ -154,7 +154,7 @@ struct LookupConformanceTests {
         }
 
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let outputFile = OutputFile(schema_version: file.schemaVersion, vectors: updated)
         let data = try encoder.encode(outputFile)
         try data.write(to: sharedVectorsURL, options: .atomic)

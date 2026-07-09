@@ -1,6 +1,7 @@
 import Foundation
 import EideticLib
 import GeniusLocusKit
+import LatticeLib
 import LocusKit
 import SubstrateML
 import VaultKit
@@ -2308,6 +2309,16 @@ extension ToolDispatcher {
         // response; fall back to "local-only" so the field is always present
         // and honest. "local-only" means no sync engine is wired for this estate.
         let syncToken = (try? await kit.syncStateToken(for: handle)) ?? "local-only"
+        let fdcFloor = try await estate.meta(key: Self.fdcRecalcedDataVersionMetaKey)
+        let currentFDCRecalculationVersion = FDC.recalculationVersion
+        let fdcRecalculationState: String
+        if fdcFloor == currentFDCRecalculationVersion {
+            fdcRecalculationState = "current"
+        } else if fdcFloor == nil {
+            fdcRecalculationState = "missing"
+        } else {
+            fdcRecalculationState = "stale"
+        }
         var stats = [
             "estate: \(handle.estateName) [\(handle.estateUUID)]",
             "memories: \(active.count) active (\(total.count) total)",
@@ -2315,6 +2326,9 @@ extension ToolDispatcher {
             "kg facts: \(facts.count) active",
             "trace_rows: \(traceRows)",
             "sync: \(syncToken)",
+            "fdc_recalculation: \(fdcRecalculationState)",
+            "fdc_recalculation_floor: \(fdcFloor ?? "none")",
+            "fdc_recalculation_current: \(currentFDCRecalculationVersion)",
         ]
         // ADR-024 §5: surface a plugin/binary version-skew advisory when the
         // host detected one. Appended only when present so the common
@@ -2610,6 +2624,8 @@ extension ToolDispatcher {
         let apply = try optionalBool(args["apply"], argument: "apply") ?? false
         let mode = try FDCReclassifyMode.parse(
             try optionalString(args["mode"], argument: "mode"))
+        let currentFDCDataVersion = FDC.dataVersion
+        let currentFDCRecalculationVersion = FDC.recalculationVersion
 
         let limit: Int?
         if let rawLimit = try optionalInt(args["limit"], argument: "limit") {
@@ -2623,6 +2639,7 @@ extension ToolDispatcher {
         }
 
         let estate = try await kit.estate(for: handle)
+        let priorFloor = try await estate.meta(key: Self.fdcRecalcedDataVersionMetaKey)
         let drawers = try await estate.allDrawers()
         let active = drawers.filter {
             $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal
@@ -2643,7 +2660,6 @@ extension ToolDispatcher {
             scanned += 1
             if drawer.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 emptyContent += 1
-                continue
             }
 
             let oldCode = Self.normalizedFDCCode(drawer.udcCode)
@@ -2705,10 +2721,31 @@ extension ToolDispatcher {
             }
         }
 
+        var floorAfter = priorFloor
+        let floorStampStatus: String
+        if apply && mode == .all && limit == nil && skippedNonCandidateChanges == 0 {
+            try await estate.setMeta(
+                key: Self.fdcRecalcedDataVersionMetaKey,
+                value: currentFDCRecalculationVersion)
+            floorAfter = currentFDCRecalculationVersion
+            floorStampStatus = "stamped"
+        } else if !apply {
+            floorStampStatus = "dry-run"
+        } else if limit != nil {
+            floorStampStatus = "skipped: limited run cannot update estate-wide floor"
+        } else if mode != .all {
+            floorStampStatus = "skipped: mode=all is required for an estate-wide floor"
+        } else {
+            floorStampStatus = "skipped: changed non-suspect anchors remain"
+        }
+
         var lines = [
             "fdc_reclassify: \(apply ? "applied" : "dry-run")",
             "mode: \(mode.rawValue)",
             "estate: \(handle.estateName) [\(handle.estateUUID)]",
+            "fdc_data_version: \(currentFDCDataVersion)",
+            "fdc_recalculation_version: \(currentFDCRecalculationVersion)",
+            "estate_recalced_data_version_before: \(priorFloor ?? "none")",
             "scanned: \(scanned) active drawer(s)\(limit.map { " (limit \($0))" } ?? "")",
             "unchanged: \(unchanged)",
             "empty_content: \(emptyContent)",
@@ -2716,6 +2753,8 @@ extension ToolDispatcher {
             apply ? "updated: \(applied)" : "would_update: \(candidateCount)",
             "unclassified_after: \(unclassifiedAfter)",
             "skipped_non_candidate_changes: \(skippedNonCandidateChanges)",
+            "estate_recalced_data_version_after: \(floorAfter ?? "none")",
+            "floor_stamp: \(floorStampStatus)",
         ]
         if !apply {
             lines.append("dry_run: pass apply=true to write candidate anchor changes")
@@ -2871,6 +2910,11 @@ private extension ToolDispatcher {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? defaultLatticeAnchor.udcCode : trimmed
     }
+
+    /// Estate-wide floor: after a successful full FDC reclassification apply,
+    /// this manifest/meta key records the composite classifier/artifact version
+    /// against which all active stored anchors have been checked or repaired.
+    static let fdcRecalcedDataVersionMetaKey = "aria.fdc.recalced_data_version"
 
     static func normalizedQID(_ qid: String?) -> String? {
         guard let qid else { return nil }
