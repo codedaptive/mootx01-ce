@@ -65,14 +65,31 @@ jobs:
             echo "ERROR: version '$version' is not valid semver — aborting" >&2
             exit 1
           fi
-          # Tag is <version>-prerelease.<run> with NO leading v on purpose — a
-          # v* tag would trigger release.yml and a signed public release. The
-          # `-prerelease` suffix (with the `-`) is what the installers key on to
-          # skip their v-normalization, so it installs as-is.
-          tag="${version}-prerelease.${{ github.run_number }}"
+          # The tag previews the NEXT patch release. The tree's version
+          # constant equals the last SHIPPED release between bumps, so a
+          # candidate built from it contains post-<version> work: stamping it
+          # <version>-prerelease.N reads as if it predates the release it
+          # follows (and sorts that way under semver). <next>-prerelease.N
+          # sorts correctly before the upcoming <next> tag. Known edge: in the
+          # short window after a release bump lands on this branch but before
+          # its tag is cut, candidates stamp one patch high — harmless for
+          # test builds. `version` (unbumped) stays the assertion target for
+          # install-verify: the built binary prints the SOURCE version.
+          #
+          # Tag carries NO leading v on purpose — a v* tag would trigger
+          # release.yml and a signed public release. The `-prerelease` suffix
+          # (with the `-`) is what the installers key on to skip their
+          # v-normalization, so it installs as-is.
+          # Bump from the bare numeric triple — the guard above also admits
+          # -suffixed semver, where naive last-dot splitting grabs the wrong
+          # field.
+          base="${version%%-*}"
+          patch="${base##*.}"
+          next="${base%.*}.$((patch + 1))"
+          tag="${next}-prerelease.${{ github.run_number }}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Candidate build: $tag"
+          echo "Candidate build: $tag (source version $version)"
 
   # ── macOS builds (arm64 + x86_64) — signed best-effort ───────────────────────
   # Mirrors release.yml's signing pipeline when Apple Developer ID secrets are
