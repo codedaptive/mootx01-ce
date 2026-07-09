@@ -63,6 +63,16 @@ enum AuditBridge {
     ///   - originRowID: nil (no derived-mutation provenance yet)
     static func bridge(_ event: AuditEvent) -> [UnifiedAuditEntry] {
         let unifiedVerb = verb(for: event.verb)
+
+        // Synthetic verbs (grant lifecycle, sensitivity-unlock) are not
+        // drawer mutations — they have no `adjective`/`operational`/
+        // `provenance` bitmap columns to diff and no lattice anchor to
+        // track. The per-column diff path below does not apply; route
+        // them through the dedicated single-entry path instead.
+        if Self.syntheticVerbs.contains(unifiedVerb) {
+            return [Self.syntheticEntry(for: event, verb: unifiedVerb)]
+        }
+
         let after = event.afterBitmaps
         let before = event.beforeBitmaps  // nil for capture
 
@@ -174,7 +184,114 @@ enum AuditBridge {
         case "associate":         return .associate
         case "migrate":           return .migrate
         case "dreamCompact":      return .dreamCompact
+        // Grant-lifecycle verbs (VerbSurface.swift's `appendGrantAuditEntry`,
+        // GLK-03 seam / FUP-C) and sensitivity-unlock verbs
+        // (SensitivityAuditVerbs.swift's `appendSensitivityAuditEntry`,
+        // ADR-025 §4) both write their case name verbatim as
+        // `AuditEvent.verb` (UnifiedAuditVerb has no custom rawValues, so
+        // `verb.rawValue == "grantIssued"` etc. at the write site) — these
+        // six cases are the read-back symmetric to that write. Before
+        // AUDIT-TRAIL-RESTORE-GRANTS all six collapsed to `.mutate` here,
+        // so a durably-written sensitivity entry was unqueryable by verb
+        // even though fix C wired the write side correctly.
+        case "grantIssued":                return .grantIssued
+        case "grantRevoked":               return .grantRevoked
+        case "sensitivityGrantIssued":     return .sensitivityGrantIssued
+        case "sensitivityGrantDenied":     return .sensitivityGrantDenied
+        case "sensitivityGrantRevoked":    return .sensitivityGrantRevoked
+        case "sensitivityReadUnderGrant":  return .sensitivityReadUnderGrant
         default:                  return .mutate
+        }
+    }
+
+    // MARK: - Synthetic (non-drawer) entries
+
+    /// The six verbs that describe a grant-lifecycle or sensitivity-unlock
+    /// event rather than a drawer mutation. See `syntheticEntry(for:verb:)`.
+    private static let syntheticVerbs: Set<UnifiedAuditVerb> = [
+        .grantIssued, .grantRevoked,
+        .sensitivityGrantIssued, .sensitivityGrantDenied,
+        .sensitivityGrantRevoked, .sensitivityReadUnderGrant,
+    ]
+
+    /// Build the single `UnifiedAuditEntry` a synthetic (grant/sensitivity)
+    /// event represents.
+    ///
+    /// These events have no drawer row to diff three bitmap columns
+    /// against, so `appendGrantAuditEntry` / `appendSensitivityAuditEntry`
+    /// repurpose the event's bitmap slots as a `(kind, payload)` pair
+    /// (see `SyntheticAuditValueCodec`) instead of real column state, and
+    /// stamp the grant id / drawer id into `rowId` and the custody-mode or
+    /// sensitivity-tier token into `reason`. This decodes that shape back
+    /// into one `UnifiedAuditEntry`:
+    ///   - fieldPath: `event.reason` (the custody-mode / tier token) — the
+    ///     synthetic-write convention both call sites share.
+    ///   - beforeValue: decoded from `event.beforeBitmaps`, or `.null` when
+    ///     absent (the event's own capture — no synthetic write ever
+    ///     passes a genuinely-nil beforeBitmaps; every call sets it, even
+    ///     when the represented value is `.null`).
+    ///   - afterValue: decoded from `event.afterBitmaps`.
+    private static func syntheticEntry(for event: AuditEvent, verb: UnifiedAuditVerb) -> UnifiedAuditEntry {
+        let before: UnifiedAuditValue
+        if let beforeBitmaps = event.beforeBitmaps {
+            before = SyntheticAuditValueCodec.decode(
+                kind: beforeBitmaps.provenance, payload: beforeBitmaps.adjective
+            )
+        } else {
+            before = .null
+        }
+        let after = SyntheticAuditValueCodec.decode(
+            kind: event.afterBitmaps.provenance, payload: event.afterBitmaps.adjective
+        )
+        return UnifiedAuditEntry(
+            tier: .locus,
+            hlc: event.hlc,
+            verb: verb,
+            rowID: event.rowId,
+            fieldPath: event.reason ?? "",
+            beforeValue: before,
+            afterValue: after,
+            originRowID: nil
+        )
+    }
+}
+
+/// Encodes a `UnifiedAuditValue` into the `(kind, payload)` Int64 pair
+/// carried in a synthetic (grant-lifecycle / sensitivity-unlock)
+/// `AuditEvent`'s bitmap slot, and decodes it back.
+///
+/// Synthetic entries have no natural three-column bitmap to persist
+/// through — `appendGrantAuditEntry` (VerbSurface.swift) and
+/// `appendSensitivityAuditEntry` (SensitivityAuditVerbs.swift) repurpose
+/// the `adjective` slot as the raw payload and the `provenance` slot as a
+/// type discriminant (`operational` is left `0`, unused). Only `.null`,
+/// `.bitmap`, and `.integer` are supported — the only cases either call
+/// site ever constructs (grant active-bit transitions and sensitivity
+/// expiry epoch-ms timestamps). `.string` / `.bytes` cannot fit an Int64
+/// slot and degrade to `.null` on encode; no current caller passes them
+/// to a synthetic append.
+enum SyntheticAuditValueCodec {
+    static func encode(_ value: UnifiedAuditValue) -> (kind: Int64, payload: Int64) {
+        switch value {
+        case .null:
+            return (0, 0)
+        case .bitmap(let v):
+            return (1, Int64(bitPattern: v))
+        case .integer(let v):
+            return (2, v)
+        case .string, .bytes:
+            assertionFailure(
+                "SyntheticAuditValueCodec: .string/.bytes cannot be encoded into a synthetic audit event's Int64 slot"
+            )
+            return (0, 0)
+        }
+    }
+
+    static func decode(kind: Int64, payload: Int64) -> UnifiedAuditValue {
+        switch kind {
+        case 1: return .bitmap(UInt64(bitPattern: payload))
+        case 2: return .integer(payload)
+        default: return .null
         }
     }
 }
