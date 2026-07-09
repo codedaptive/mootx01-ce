@@ -101,8 +101,9 @@ jobs:
             test -x "$bin"
             file "$bin" | grep -E 'Mach-O.*arm64'
           done
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
           codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
           echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
@@ -189,7 +190,8 @@ jobs:
           # bundle. Application cert (already loaded from prior keychain import step)
           # with runtime hardening so the bundle passes Gatekeeper.
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
           codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
 
       - name: Import Developer ID Installer Certificate (arm64)
@@ -344,8 +346,9 @@ jobs:
             test -x "$bin"
             file "$bin" | grep -E 'Mach-O.*x86_64'
           done
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
           codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
           echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
@@ -418,7 +421,8 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
           codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
 
       - name: Import Developer ID Installer Certificate (x86_64)

@@ -136,8 +136,9 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
           codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
 
@@ -189,7 +190,8 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
           codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
 
       - name: Import Developer ID Installer Certificate (best-effort)

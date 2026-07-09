@@ -70,12 +70,14 @@ done
 # inside-out: any nested resource bundles that embed a Mach-O first, then the
 # .app itself. Without this seal the notary service returns status: Invalid.
 if [ -n "${APP_IDENTITY:-}" ]; then
+    # sign-retry.sh: --timestamp contacts Apple's TSA, which blips; retry
+    # transient outages instead of failing the build (see sign-retry.sh).
     find "$APP/Contents/MacOS" -name '*.bundle' -type d -print0 \
         | while IFS= read -r -d '' nested; do
-            codesign --force --options runtime --timestamp \
+            "$SCRIPT_DIR/sign-retry.sh" codesign --force --options runtime --timestamp \
                 --sign "$APP_IDENTITY" "$nested"
         done
-    codesign --force --options runtime --timestamp \
+    "$SCRIPT_DIR/sign-retry.sh" codesign --force --options runtime --timestamp \
         --sign "$APP_IDENTITY" "$APP"
     codesign --verify --strict --verbose=2 "$APP"
     echo "Signed .app bundle: $APP"
@@ -151,7 +153,8 @@ echo "Unsigned package: $(du -h "$UNSIGNED" | cut -f1)"
 # REQUIRE_SIGNING unset and are allowed to produce an unsigned, clearly
 # labeled package for layout testing — those artifacts are never published.
 if [ -n "${INSTALLER_IDENTITY:-}" ]; then
-    productsign \
+    # productsign timestamps unconditionally — same TSA dependency, same retry.
+    "$SCRIPT_DIR/sign-retry.sh" productsign \
         --sign "$INSTALLER_IDENTITY" \
         "$UNSIGNED" \
         "$ASSET"
