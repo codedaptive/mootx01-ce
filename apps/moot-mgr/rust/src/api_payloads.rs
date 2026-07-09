@@ -180,10 +180,9 @@ pub struct GraphAnalyticPayload {
 /// Swift `GraphCommunityPayload`. `code` and `label` are always present
 /// (explicit null). `code` is the community's dominant UDC/FDC classification
 /// code — the dashboard derives the community color from its digits
-/// (hundreds → hue, tens → shade, ones → brightness). This Rust host's
-/// count-only local rollup always emits `code: None`; the Swift host's ARIA
-/// proxy path populates it (stored-communities enrichment is not yet ported
-/// to this leg).
+/// (hundreds → hue, tens → shade, ones → brightness). Populated by the
+/// stored-snapshot enrichment (`Manager::enrich_communities`); the count-only
+/// local fallback emits explicit nulls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphCommunityPayload {
     pub id: i64,
@@ -338,6 +337,19 @@ where S: Serializer {
     seq.end()
 }
 
+/// One governor-written community descriptor inside a stored topology
+/// snapshot: `{id, size, dominantUdcCode}`. Mirrors Swift
+/// `ARIACommunityDescriptor`. `dominantUdcCode` decodes tolerantly (absent on
+/// older daemons → None).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AriaCommunityDescriptor {
+    pub id: i64,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(rename = "dominantUdcCode", default)]
+    pub dominant_udc_code: Option<String>,
+}
+
 /// The decodable envelope for a stored topology snapshot (what the governor
 /// writes into `topology_snapshots`). Only the fields moot-mgr composes into
 /// `GraphPayload` are decoded. Mirrors Swift `StoredGraphPayload`.
@@ -351,6 +363,11 @@ pub struct StoredGraphPayload {
     pub structure_pending: bool,
     #[serde(rename = "generatedTs", default)]
     pub generated_ts: Option<String>,
+    /// Governor community descriptors (VIZ_V2 L3). None when the snapshot
+    /// predates the communities field — the count-only local rollup then
+    /// stays in effect.
+    #[serde(default)]
+    pub communities: Option<Vec<AriaCommunityDescriptor>>,
 }
 
 /// Result of a gated control verb (POST /api/control/* and UDS responses).
