@@ -1041,16 +1041,20 @@ details.panel[open] summary::before{content:"▼ "}
 }
 
 /* Stage + content-picker layout: the picker is a proper right-hand column
-   beside the canvas, never an overlay floating on top of it. The stage keeps
-   the explicit viewport height; the column stretches to match. */
-.topo-row{display:flex; gap:12px; align-items:stretch}
-.topo-row .topo-stage{flex:1 1 auto; min-width:0}
+   beside the canvas, never an overlay floating on top of it. The ROW pins
+   the viewport-tracking height and both children fill it — the height must
+   live on the row, not just the stage: a flex row grows to its tallest
+   child, so a long domain list would otherwise stretch the row past the
+   viewport and scroll the PAGE instead of the picker. */
+.topo-row{display:flex; gap:12px; height:calc(100vh - 252px); min-height:380px}
+.topo-row .topo-stage{flex:1 1 auto; min-width:0; height:100%; min-height:0}
 
 /* Content picker (right-hand column): check/uncheck knowledge domains.
-   Rows scroll vertically when the estate has many domains and horizontally
+   Tracks the window height (100% of the pinned row); the row list scrolls
+   vertically when the estate has more domains than fit, and horizontally
    when a label is wider than the column. */
 .topo-commpicker{
-  flex:0 0 280px; display:flex; flex-direction:column;
+  flex:0 0 280px; height:100%; display:flex; flex-direction:column;
   background:var(--bg2); border:1px solid var(--border); border-radius:var(--r);
   padding:10px 12px; font-family:var(--font-m); font-size:12.5px; color:var(--muted);
   min-height:0; overflow:hidden;
@@ -1084,9 +1088,16 @@ details.panel[open] summary::before{content:"▼ "}
 /* Theme toggle — compact icon button in the topbar right cluster. */
 .btn-theme{font-size:15px; line-height:1; padding:4px 10px; margin-right:10px}
 
-/* "What are these codes?" explainer — trigger buttons + modal. */
+/* "What are these codes?" explainer — trigger buttons + modal.
+   Bold white on the product blue (--accent2) — deliberate accent use so
+   the explainer reads as a call-to-action, not chrome. */
 .btn-what{margin-left:auto; font-size:11px; padding:3px 10px}
 .cp-what{margin-bottom:6px; align-self:flex-start}
+.btn-what, .cp-what{
+  background:var(--accent2); border:1px solid var(--accent2);
+  color:#fff; font-weight:700;
+}
+.btn-what:hover, .cp-what:hover{filter:brightness(1.12)}
 .mx-modal-backdrop{
   position:fixed; inset:0; z-index:200; display:grid; place-items:center;
   background:rgba(6,7,14,.66); padding:24px;
@@ -1099,6 +1110,17 @@ details.panel[open] summary::before{content:"▼ "}
 .mx-modal-title{font-family:var(--font-d); font-size:19px; color:var(--hi); margin-bottom:10px}
 .mx-modal-p{font-size:13.5px; line-height:1.65; color:var(--text); margin-bottom:10px}
 .mx-modal-close{margin-top:4px}
+
+/* Node-query fallback dialog: shown when the browser refuses programmatic
+   clipboard access from a right-click (Safari does not grant contextmenu
+   events user activation). The text arrives pre-selected; the Copy button
+   click IS a user activation, so copying always works from here. */
+.mx-query-text{
+  width:100%; min-height:150px; resize:vertical; margin:4px 0 10px;
+  background:var(--bg3); color:var(--text); border:1px solid var(--border2);
+  border-radius:var(--rsm); font-family:var(--font-m); font-size:12px;
+  line-height:1.5; padding:8px 10px;
+}
 
 /* Topology toast — transient confirmation chip (bottom-center of the stage). */
 .topo-toast{
@@ -1272,6 +1294,11 @@ import { OrbitControls } from '/OrbitControls.js';
       "words dominate the text. That’s normal: the code is just the " +
       "shelf where similar-sounding memories sit, and it still groups " +
       "related things together.",
+
+      "Want to dig into one memory? On the Topology view, right-click any " +
+      "dot. That copies a ready-made question to your clipboard — paste it " +
+      "into your AI assistant, and it will pull up that memory and its " +
+      "closest neighbors and explain what they’re likely about.",
     ].forEach(function (t) { box.appendChild(el("p", "mx-modal-p", t)); });
 
     const close = el("button", "btn mx-modal-close", "Got it");
@@ -3025,9 +3052,16 @@ import { OrbitControls } from '/OrbitControls.js';
       if (!node || brainHidden(node)) return;
       e.preventDefault();
       selectBrainNode(node);   // highlight what the query refers to
-      copyText(buildNodeQuery(node), function (ok) {
-        topoToast(ok ? "Query copied — paste it into your AI to explore this memory"
-                     : "Could not access the clipboard");
+      var query = buildNodeQuery(node);
+      copyText(query, function (ok) {
+        if (ok) {
+          topoToast("Query copied — paste it into your AI to explore this memory");
+        } else {
+          // Safari: contextmenu events carry no user activation, so BOTH
+          // clipboard paths are refused. Show the query pre-selected with a
+          // Copy button — that click is an activation and always works.
+          showQueryFallback(query);
+        }
       });
     });
 
@@ -3585,6 +3619,63 @@ import { OrbitControls } from '/OrbitControls.js';
     try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
     ta.remove();
     return ok;
+  }
+
+  // Clipboard-refused fallback (Safari right-click): the query in a
+  // pre-selected textarea plus a Copy button. The button click carries the
+  // user activation that the contextmenu event lacked.
+  function showQueryFallback(text) {
+    if ($("#queryFallback")) return;
+    var wrap = el("div", "mx-modal-backdrop");
+    wrap.id = "queryFallback";
+    var box = el("div", "mx-modal");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-labelledby", "queryFallbackTitle");
+
+    var h = el("h2", "mx-modal-title", "Copy this query");
+    h.id = "queryFallbackTitle";
+    box.appendChild(h);
+    box.appendChild(el("p", "mx-modal-p",
+      "Your browser only allows copying from a click. Press Copy (or ⌘C — the text is already selected), then paste it into your AI."));
+
+    var ta = el("textarea", "mx-query-text");
+    ta.value = text;
+    ta.setAttribute("readonly", "readonly");
+    ta.setAttribute("aria-label", "Node query");
+    box.appendChild(ta);
+
+    var opener = document.activeElement;
+    function dismiss() {
+      document.removeEventListener("keydown", onKey);
+      wrap.remove();
+      if (opener && opener.focus) opener.focus();
+    }
+    function onKey(e) { if (e.key === "Escape") dismiss(); }
+    document.addEventListener("keydown", onKey);
+    wrap.addEventListener("click", function (e) { if (e.target === wrap) dismiss(); });
+
+    var copyBtn = el("button", "btn mx-modal-close", "Copy");
+    copyBtn.setAttribute("type", "button");
+    copyBtn.addEventListener("click", function () {
+      ta.select();
+      copyText(text, function (ok) {
+        dismiss();
+        topoToast(ok ? "Query copied — paste it into your AI to explore this memory"
+                     : "Copy failed — select the text and press ⌘C");
+      });
+    });
+    var closeBtn = el("button", "btn btn-ghost mx-modal-close", "Close");
+    closeBtn.setAttribute("type", "button");
+    closeBtn.style.marginLeft = "8px";
+    closeBtn.addEventListener("click", dismiss);
+
+    box.appendChild(copyBtn);
+    box.appendChild(closeBtn);
+    wrap.appendChild(box);
+    document.body.appendChild(wrap);
+    ta.focus();
+    ta.select();
   }
 
   // Transient toast on the topology stage (bottom-center, auto-fades).
