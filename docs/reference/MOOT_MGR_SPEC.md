@@ -1,6 +1,6 @@
 ---
 title: moot-mgr Specification
-version: 1.0.0
+version: 1.1.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -233,6 +233,34 @@ analytic metric and `structurePending: true` with empty `nodes`/`edges`.
 
 Full node/edge contract (createdTs, tombstonedTs, Louvain communityId, normalised
 centrality): ARIA_MCP_SPEC.md § response shapes.
+
+### `GET /api/graph` — per-node classification codes (`codes`/`codeIndex`)
+
+Stored topology snapshots carry an optional per-node `udcCode` (the node's
+FDC/UDC classification code) so the dashboard can color nodes by meaning.
+moot-mgr decodes it tolerantly — absent key or empty string both mean "no
+code" — and both legs (Swift `GraphNodePayload.udcCode: String?`, Rust
+`GraphNodePayload.udc_code: Option<String>` with `#[serde(default)]`)
+decode a snapshot written before this field existed without error.
+
+The code never crosses the wire per-node. `GraphPayload` dictionary-encodes
+it into two new top-level members, built from the decoded node array in the
+same pass as the other parallel arrays (`ids`, `communityId`, …):
+
+- `codes: [String]` — the deduped code dictionary, first-seen order over the
+  node array.
+- `codeIndex: [Int]` — parallel to `ids`; the index into `codes` for that
+  node, or `-1` when the node has no code.
+
+At up to 50k nodes and ~10^2 distinct codes, dictionary encoding keeps this
+addition inside the existing 5 MB `/api/graph` ceiling (§ size ceiling
+above) — a per-node string would have cost tens of bytes × 50k nodes,
+the dictionary costs bytes × ~135 distinct codes plus one small integer per
+node. Both arrays are always present, even on the local-fallback path
+(`codes: []`, `codeIndex: []`), never omitted or null. Codes cross this
+surface on the same basis as `GET /api/lattice` and the community `code`
+field above: a classification code is a pure function of the pinned public
+FDC/UDC frame, never memory content.
 
 ### `GET /api/graph` — enrichment cache
 
