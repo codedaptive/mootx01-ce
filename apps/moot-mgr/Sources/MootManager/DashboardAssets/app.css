@@ -694,7 +694,7 @@ details.panel[open] summary::before{content:"▼ "}
    vertically when the estate has more domains than fit, and horizontally
    when a label is wider than the column. */
 .topo-commpicker{
-  flex:0 0 280px; height:100%; display:flex; flex-direction:column;
+  flex:0 0 308px; height:100%; display:flex; flex-direction:column;
   background:var(--bg2); border:1px solid var(--border); border-radius:var(--r);
   padding:10px 12px; font-family:var(--font-m); font-size:12.5px; color:var(--muted);
   min-height:0; overflow:hidden;

@@ -1562,10 +1562,6 @@ import { OrbitControls } from '/OrbitControls.js';
   // Per-lobe resolved color ([r,g,b] by lobe rank) — set by buildRealBrainNodes,
   // read by brainCommCSS so legend swatches, hulls, and nodes stay in sync.
   let brainLobeRGB = Object.create(null);
-  // Community FDC code by content key (label) — set by buildRealBrainNodes,
-  // read by the right-click query builder. Keyed by label, not Louvain id,
-  // for the same reason as the picker: ids renumber every governor cycle.
-  let brainCodeByKey = Object.create(null);
   // Raw FDC code → community/frame label — set by buildRealBrainNodes (the
   // same map confidenceLabelText resolves lobe labels through), also read
   // by the V2-P2c selection panel's Drawer line to resolve a selected node's
@@ -1717,11 +1713,8 @@ import { OrbitControls } from '/OrbitControls.js';
     brainLobeLabels = Object.create(null);
     brainLobeRGB = Object.create(null);
     brainLobeConfidence = Object.create(null);
-    brainCodeByKey = Object.create(null);
     function commMeta(cid) {
-      var meta = (communities || []).find(function (c) { return String(c.id) === String(cid); });
-      if (meta && meta.label && meta.code) brainCodeByKey[meta.label] = meta.code;
-      return meta;
+      return (communities || []).find(function (c) { return String(c.id) === String(cid); });
     }
     lobeIds.forEach(function (cid, rank) {
       var meta = commMeta(cid);
@@ -2630,26 +2623,71 @@ import { OrbitControls } from '/OrbitControls.js';
     renderSelectionPanel();
   }
 
+  // Per-edge-type neighbor ids touching `nodeId`, deduped within each type
+  // (a node can have both a tunnel and a kgFact edge to the same neighbor —
+  // that's two distinct facts, so it's kept in both lists). Keyed the same
+  // as EDGE_TYPE_DISPLAY/EDGE_TYPE_ORDER above so callers can iterate one
+  // vocabulary for both the visual legend and this query builder.
+  function nodeNeighborsByType(nodeId) {
+    var byType = { tunnel: [], kgFact: [], association: [], nmf_bond: [] };
+    brainEdges.forEach(function (e) {
+      if (e.src !== nodeId && e.tgt !== nodeId) return;
+      var other = e.src === nodeId ? e.tgt : e.src;
+      var list = byType[e.type];
+      if (list && list.indexOf(other) === -1) list.push(other);
+    });
+    return byType;
+  }
+
+  // Edge types that are console-DERIVED signals rather than an estate tunnel
+  // — the receiving AI must not read these as confirmed links (2026-07-09
+  // incident: a Codex session treated "directly connected memories" as
+  // persisted tunnels, found none via moot_connection_search/map, and had to
+  // caveat the discrepancy after the fact. The query itself must say this
+  // up front, not leave the receiving AI to discover it).
+  var QUERY_DERIVED_EDGE_TYPES = ["kgFact", "association", "nmf_bond"];
+
   // Paste-ready AI query for a node: "what is likely this node and its
   // neighbors?" Built entirely from on-wire metadata; the user's AI session
   // (with the MOOTx01 tools) does the actual retrieval under its own
-  // authorization. Neighbor list is capped to keep the prompt readable.
+  // authorization. Neighbors are grouped by edge type so the receiving AI
+  // knows which are real MOOT tunnels versus console-derived relations that
+  // may not exist as tunnels at all. Total neighbor list is capped to keep
+  // the prompt readable — plain language throughout, no console-internal
+  // jargon, since the receiving AI may be any model.
   function buildNodeQuery(node) {
     var NEIGHBOR_CAP = 12;
-    var adj = brainAdjacency[node.id] || [];
-    var neighbors = adj.slice(0, NEIGHBOR_CAP);
-    var domain = (node.commKey && node.commKey !== "(unlabeled)" && node.commKey !== "fragments")
-      ? node.commKey : null;
-    var code = domain ? brainCodeByKey[domain] : null;
+    var byType = nodeNeighborsByType(node.id);
+    var total = EDGE_TYPE_ORDER.reduce(function (n, t) { return n + byType[t].length; }, 0);
 
     var lines = [];
     lines.push("Using my MOOTx01 memory estate, look up the memory with id " + node.id +
                " (moot_memory_get) and tell me in plain language what it is.");
-    if (neighbors.length) {
-      lines.push("Then look up its directly connected memories: " + neighbors.join(", ") +
-                 (adj.length > neighbors.length
-                   ? " (plus " + (adj.length - neighbors.length) + " more not listed)."
-                   : "."));
+
+    if (total) {
+      var budget = NEIGHBOR_CAP;
+      var tunnelShown = byType.tunnel.slice(0, budget);
+      budget -= tunnelShown.length;
+      if (tunnelShown.length) {
+        lines.push("It is explicitly linked (real MOOT tunnels) to: " + tunnelShown.join(", ") + ".");
+      }
+      var derivedParts = [];
+      QUERY_DERIVED_EDGE_TYPES.forEach(function (t) {
+        var ids = byType[t];
+        if (!ids.length) return;
+        var take = ids.slice(0, budget);
+        budget -= take.length;
+        if (take.length) derivedParts.push(EDGE_TYPE_DISPLAY[t] + ": " + take.join(", "));
+      });
+      if (derivedParts.length) {
+        lines.push("The console also shows console-derived relations (semantic/classification " +
+                   "signals, which may not exist as tunnels in the estate — verify with " +
+                   "moot_connection_map before treating them as links): " + derivedParts.join("; ") + ".");
+      }
+      var shown = NEIGHBOR_CAP - budget;
+      if (total > shown) {
+        lines.push("(" + (total - shown) + " more neighbor(s) not listed here.)");
+      }
       lines.push("Explain what this node and its neighborhood are likely about as a group, " +
                  "and point out anything similar or related that is worth reading next " +
                  "(moot_connection_search or moot_memory_search can find those).");
@@ -2657,9 +2695,17 @@ import { OrbitControls } from '/OrbitControls.js';
       lines.push("It has no direct connections yet — after summarizing it, search for " +
                  "related memories (moot_memory_search) and suggest what it should link to.");
     }
-    if (domain) {
-      lines.push("Console context: the management console files it under the knowledge domain " +
-                 "“" + domain + "”" + (code ? " (classification code " + code + ")" : "") + ".");
+
+    if (node.code) {
+      if (node.code === "000") {
+        lines.push("The console's word-level classifier marked this node's wording as " +
+                   "unclassified (code 000).");
+      } else {
+        var label = brainCodeLabelMap[node.code];
+        lines.push("The console classifies its wording under code " + node.code +
+                   (label ? " (\"" + label + "\")" : "") +
+                   " — this reflects word-level classification, not necessarily the memory's topic.");
+      }
     }
     return lines.join("\n");
   }
