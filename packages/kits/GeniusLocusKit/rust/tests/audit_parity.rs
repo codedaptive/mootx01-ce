@@ -577,6 +577,7 @@ fn audit_log_rejects_forged_content_id() {
     let mut log = UnifiedAuditLog::new();
     log.add(honest.clone());
     assert_eq!(log.count(), 1, "honest entry must be inserted");
+    assert_eq!(log.rejected_count(), 0, "no rejection yet");
 
     // Forge: steal the honest entry's id but inject different content.
     // The recomputed SHA-256 of this entry's wire bytes will not match
@@ -596,6 +597,10 @@ fn audit_log_rejects_forged_content_id() {
     // add path: forged entry must be silently rejected.
     log.add(forged.clone());
     assert_eq!(log.count(), 1, "forged entry on add must not increase count");
+    // AUDIT-ALERT-RESTORE (2026-07-09): the rejection is no longer
+    // silent-only — `rejected_count` observes it at the same ingress
+    // choke point that drops the entry.
+    assert_eq!(log.rejected_count(), 1, "rejected-entry count observes the add-boundary rejection");
 
     // The honest entry's value is retained — not overwritten by the forged one.
     let retained = log.ordered_entries();
@@ -613,8 +618,14 @@ fn audit_log_rejects_forged_content_id() {
     let mut source = UnifiedAuditLog::new();
     source.add(forged.clone()); // rejected at source too
     assert_eq!(source.count(), 0, "forged entry rejected in source log before merge");
+    assert_eq!(source.rejected_count(), 1, "the source log's own ingress observes its own rejection");
     log.merge(&source); // merging empty log is a no-op
     assert_eq!(log.count(), 1, "count unchanged after merging log with forged entry");
+    // `merge` only re-adds entries that survived the SOURCE log's own
+    // ingress (source.entries is empty), so the destination's
+    // rejected_count is untouched by the source's earlier rejection —
+    // merge does not double-count.
+    assert_eq!(log.rejected_count(), 1, "merge does not replay the source log's rejection into the destination's count");
     assert_eq!(
         log.ordered_entries()[0].after_value,
         UnifiedAuditValue::Integer(42),
@@ -624,6 +635,45 @@ fn audit_log_rejects_forged_content_id() {
     // Idempotent add of the honest entry leaves count unchanged.
     log.add(honest);
     assert_eq!(log.count(), 1, "re-adding honest entry must remain idempotent");
+    assert_eq!(log.rejected_count(), 1, "re-adding an honest entry is not a rejection");
+}
+
+// ── rejected_count surfacing (AUDIT-ALERT-RESTORE, 2026-07-09) ────────
+//
+// Feed/snapshot seam mirror of the Swift
+// `rejectedEntryCountAccumulatesAndIsExcludedFromEquality` test: a fresh
+// log accumulates one count per rejected `add` call, regardless of how
+// many honest entries are interleaved, and structural equality (`==`)
+// ignores the counter.
+#[test]
+fn rejected_count_accumulates_and_is_excluded_from_equality() {
+    let honest_a = entry(AuditTier::Locus, 1, ROW_A, "f", UnifiedAuditValue::Integer(1), UnifiedAuditVerb::Capture);
+    let honest_b = entry(AuditTier::Locus, 2, ROW_B, "g", UnifiedAuditValue::Integer(2), UnifiedAuditVerb::Capture);
+
+    let forge = |honest: &UnifiedAuditEntry, ms: i64, row: EntryUUID| UnifiedAuditEntry {
+        id: honest.id,
+        tier: AuditTier::Locus,
+        hlc: HLC::new(ms, 0, 1),
+        verb: UnifiedAuditVerb::Capture,
+        row_id: row,
+        field_path: "tampered".to_string(),
+        before_value: UnifiedAuditValue::Null,
+        after_value: UnifiedAuditValue::Integer(-1),
+        origin_row_id: None,
+    };
+
+    let mut log = UnifiedAuditLog::new();
+    log.add(honest_a.clone());
+    log.add(forge(&honest_a, 3, ROW_A));
+    log.add(honest_b.clone());
+    log.add(forge(&honest_b, 4, ROW_B));
+
+    assert_eq!(log.count(), 2, "two honest entries admitted");
+    assert_eq!(log.rejected_count(), 2, "two rejections counted, interleaved with honest adds");
+
+    let clean = UnifiedAuditLog::with_entries([honest_a, honest_b]);
+    assert_eq!(clean.rejected_count(), 0);
+    assert_eq!(log, clean, "structural equality compares entries only, not the rejection telemetry");
 }
 
 #[test]
