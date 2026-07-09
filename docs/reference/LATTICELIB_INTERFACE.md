@@ -118,11 +118,18 @@ public enum FDC {
     public static func label(for code: String) -> String?
     public static var isAvailable: Bool
     public static var dataVersion: String
+    public static let classifierVersion: String
+    public static var recalculationVersion: String
+    public static func semanticCandidates(_ text: String, limit: Int) -> [FDCSemanticCandidate]
+    public static func semanticDecision(_ text: String) -> FDCSemanticDecision?
+    public static var semanticModelVersion: String
+    public static var semanticModelSHA256: String
 }
 ```
 ```rust
 pub struct Fdc;
 // encode / encode_anchor / ancestors / is_available / data_version / label
+// semantic_candidates / semantic_decision / semantic_model_version / semantic_model_sha256
 impl Fdc {
     pub fn ancestors(code: &str) -> Vec<String>;
     pub fn label(code: &str) -> Option<String>;
@@ -670,6 +677,7 @@ import LatticeLib
 guard FDC.isAvailable else { /* artifacts missing */ return }
 let code = FDC.encode("computer graphics rendering")     // String? (FDC code or nil)
 let (c, qid) = FDC.encodeAnchor("computer graphics")     // (code, dominant Q-ID)
+let evidence = FDC.semanticDecision("stars and galaxy")  // hierarchy evidence
 let ok = Code.isWellFormed("006.6")                      // true
 let base = Code.integerBase(of: "006.6")                 // 6
 ```
@@ -693,6 +701,7 @@ stated, not silently dropped.
 | Module surface / version | `LatticeLib` (`LatticeLib.swift:12`) | (no namespace type; free fns in modules) | Swift public / Rust modules | Swift enum-namespace / Rust free-fn modules — idiom | N/A (structural) | Confirmed |
 | Word-class Step-1 entry | `LatticeLib.wordClass` (`WordClassTagger.swift:45`) | `WordClassTableCache::word_class` (`word_class_table.rs`) | both public | Swift method on `LatticeLib` ext / Rust method on cache; table fast path identical, novel-token path divergent (see Exempt row) | `FDCConformanceTests.swift::allConformanceVectorsMatch` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
 | Runtime encoder entry | `FDC` (`FDCRuntime.swift:15`) | `Fdc` (`fdc_runtime.rs:96`) | both public | Swift enum statics / Rust unit struct assoc fns — idiom (FDC/Fdc); `encode`/`encodeAnchor`/`ancestors`/`isAvailable`/`dataVersion` identical | `FDCRuntimeTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
+| Semantic micro-ranker | `FDCSemanticRanker` / `FDC.semanticCandidates` / `semanticDecision` | `FdcSemanticRanker` / `Fdc::semantic_candidates` / `semantic_decision` | both public | Same binary parser, ASCII/FNV features, integer scores, hierarchy thresholds, and tie-breaks | `FDCSemanticRankerTests.swift` / `fdc_semantic_conformance_test.rs` shared 12-vector fixture | **Confirmed** |
 | FDC ancestor façade | `FDC.ancestors(of:)` (`FDCRuntime.swift`) | `Fdc::ancestors` (`fdc_runtime.rs`) | both public | Swift static func / Rust associated fn on `Fdc` — idiom; delegates to `FDCFrame.ancestors(of:)` / `FdcFrame::ancestors`; returns `[]`/`vec![]` when artifacts unavailable; consumers use this façade — decimal hierarchy math lives only in `FDCFrame`/`FdcFrame` | `FdcProviderTests.swift::FdcAncestorsTests` (7 tests via `FDC.ancestors`) / `fdc_runtime.rs` (delegation to `FdcFrame::ancestors` already tested in `fdc_frame.rs::tests`) | **Confirmed** |
 | Frame label lookup | `FDC.label(for:)` (`FDCRuntime.swift`) | `Fdc::label` (`fdc_runtime.rs`) | both public | Swift static func / Rust associated fn on `Fdc` — idiom; returns the human-readable label for a UDC/MDCC code; integer codes walk to 3-digit parent before frame lookup; `nil`/`None` for empty or unknown input | `FDCRuntimeTests.swift::label*` / `fdc_runtime.rs::tests::label_*` (4 tests) | **Confirmed** |
 | Signature matcher | `FDCMatcher` (`FDCMatcher.swift:20`) | `FdcMatcher` (`fdc_matcher.rs:67`) | both public | Swift `init` / Rust `new`+`new_with_mode` — idiom; encode/encodeAnchor identical | `FDCMatcherTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |

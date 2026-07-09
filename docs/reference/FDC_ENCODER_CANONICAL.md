@@ -1,8 +1,8 @@
 ---
 title: FDC Encoder Canonical Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-07-09
 description: "Canonical specification of the FDC encoder: the deterministic content-to-classification mapping the substrate ships."
 spec_type: encoder
 authors: MOOTx01 maintainers
@@ -14,7 +14,7 @@ relates_to:
 
 ## 1. Thesis
 
-Any block of text can be deterministically assigned a single location code on a shared, public-domain classification frame without a learned model, without coordination between parties, and without a network call at runtime. Two independent devices encoding the same or similarly-worded content will land on the same code because every step of the process is a pure function of the input and a set of pinned, shared reference tables. This is what makes the encoder suitable as the filing backbone for federated data exchange: agreement is a mathematical property of the function, not a product of consensus.
+Any block of text can be deterministically assigned a single location code on a shared, public-domain classification frame without coordination between parties or a network call at runtime. Classifier v4 combines hierarchy-first lexical evidence with a pinned sparse semantic micro-ranker. The ranker is learned at build time, but runtime inference is a byte-defined integer calculation over a checked-in artifact, not a platform model or generative LLM. Two independent devices using the same artifacts produce the same code. Agreement remains a property of the function, not a product of runtime consensus.
 
 The engine lives in **LatticeLib** (`FDC`, `FDCMatcher`). It is what consumers call to classify text; `EideticLib.lookup` is the first such consumer (it calls `FDC.encodeAnchor` and carries the result onto an `Anchor`). There is one engine home and one frame.
 
@@ -44,6 +44,8 @@ Two encoders must use the same pinned lexicon version or their bags can diverge.
 
 **Wikipedia articles** (CC BY-SA, used at build time only). Each FDC code is backed by a reference article. The article is processed at build time to contribute to that code's signature. It is never fetched at runtime.
 
+**FDC semantic micro-ranker** (`FDCSemanticRanker.json` + `.bin`, pinned and versioned). The maintainer build tool derives positive hashed features from each code's source heading, reviewed aliases, resolved title, and article extract. Runtime tokenization is ASCII byte-defined; word, 3-5 byte prefix/suffix, and adjacent-word features are mapped through FNV-1a into 16,384 dimensions. Sparse weights, norms, hierarchy thresholds, and tie-breaks are integer-only and identical in Swift and Rust. The ranker supplies hierarchy evidence; it does not generate text or independently certify a narrow leaf.
+
 **LexRank** (Erkan and Radev, 2004). A deterministic graph-based algorithm — PageRank applied to a term-similarity graph — used at build time to reduce a full Wikipedia article to its key terms before those terms are incorporated into a code's signature. No model, no weights.
 
 **Step 1 tagger — platform implementations.** The tagger's job is to identify nouns and verbs (Step 1 additionally keeps Q-ID concepts via the §3 relaxation, decided from the lexicon rather than the tagger). The implementation differs by platform but the contract is identical on all: same input yields same noun/verb counts. Two tiers operate at runtime:
@@ -63,7 +65,7 @@ Two encoders must use the same pinned lexicon version or their bags can diverge.
 
 **SimHash / LSH** (Charikar, 2002) — *deferred, forward-looking*. The design reserves a SimHash pre-filter for long input: hash a long document to a fixed-width fingerprint with a deterministic feature hash and fixed accumulation order, then eliminate signatures far apart in Hamming distance before full overlap scoring. It is a speed optimization only and must never change which code is returned. **It is not implemented:** no fingerprints are produced at build time and the runtime scores against all signatures. The §6 scoring is exact without it. See cookbook §5.1.
 
-Nothing in this list includes a learned model, a proprietary dataset, or a runtime network dependency. Every algorithm is published and decades old. Every data source is CC0 or used only at build time.
+Nothing in this list requires a proprietary runtime, a generative model, or a runtime network dependency. The semantic artifact is learned offline from the named source material and is fully pinned, hashed, audited, and interpreted by both ports with the same integer algorithm.
 
 ---
 
@@ -75,7 +77,7 @@ The encoder runs the same five-step pipeline in two contexts:
 
 All 1071 signature-bearing codes of the v1.0 frame now carry Wikipedia-sourced article signatures (up from 793). Codes whose heading did not auto-resolve to a Wikipedia title were filled **resolve-first**: an LLM proposed the single best real Wikipedia article title, the title was frozen in a committed, auditable input, and it was validated by actually fetching the article. The model only *chose which article to pull*; every signature term is sourced from the FDC label, the Wikipedia title, or the Wikipedia article body — no model-generated text enters a signature. This build-time tooling ships in the maintainer Seed Generator (see cookbook §7.1.1).
 
-**Runtime:** steps 1–5 are run over the inbound text block to produce a code.
+**Runtime:** steps 1–5 produce the hierarchy-first lexical result. Step 6 applies confidence-gated semantic hierarchy evidence.
 
 Because both sides use identical steps on comparable inputs, the runtime bag is directly comparable to the build-time signatures. That comparability is the foundation of the agreement property.
 
@@ -93,6 +95,8 @@ Because both sides use identical steps on comparable inputs, the runtime bag is 
 A term that appears in many signatures contributes little; a distinctive term dominates. This is the scoring the runtime ships. The plain raw-overlap sum (`Σ bag[t]`, no IDF) lets codes with large, broad signatures win on breadth alone, which is why IDF — rewarding distinctive terms — was chosen over it; cosine and IDF-cosine variants were measured and rejected (cosine worse, IDF-cosine behind IDF). `idf(t)` is precomputed once from the pinned signatures at load (no additional shipped artifact). **Determinism:** the IDF-weighted sums are floating-point and float addition is non-associative, so every per-code sum is accumulated in sorted term order, making the result bit-identical across runs and across the Swift and Rust ports. If no candidate shares a term, return UNRESOLVED. The encoder never guesses. (The raw-overlap sum is the matcher's `.raw` mode and is what the direct unit tests use; the runtime is constructed in `.idf` mode.)
 
 **Step 5 — Descend the frame to the deepest passing code.** Take the highest-scoring top-level region under the same IDF scoring (tie-break: lowest code value). Check its children: a child is a descent candidate only if its **raw integer overlap** (`Σ bag[t]`, mode-independent) clears `STOP_THRESHOLD`; among the candidates that clear it, the highest IDF score wins (tie-break: lowest code value). Move to that child and repeat. Stop when no child clears the threshold. The descent cutoff gates on the raw overlap so its meaning is independent of the scoring mode; the IDF score only ranks the candidates that pass the gate. Coarse agreement is guaranteed; fine depth is best-effort and depends on whether the text is specific enough to light up a child signature.
+
+**Step 6 — Fuse semantic hierarchy evidence.** Reviewed relative-index aliases remain authoritative and bypass semantic correction. Otherwise the micro-ranker scores every FDC profile, aggregates the five strongest candidates per main class, and emits no decision unless evidence clears the pinned feature and dominance thresholds. It may descend at most one subdivision below the selected main class, and only when multiple candidates agree on that subtree. If lexical and semantic evidence agree on the main class, Step 5 keeps its supported precision. On a confident branch disagreement, v4 stores the semantic safe ancestor and clears the lexical Q-ID; provenance from a rejected branch is never retained. A lexical code whose semantic score remains within two-thirds of the semantic winner is treated as ambiguous and preserved.
 
 ---
 
@@ -199,7 +203,7 @@ build_signature(fdc_code) -> {conceptID: weight}:
 
 ## 6. Cross-Platform Conformance
 
-The encoder is implemented in Swift (`LatticeLib`) and ported to Rust (`LatticeLib/rust`). The shipped agreement property is **Swift-scalar == Rust-scalar**: both ports produce identical `encode` / `encodeAnchor` output for identical input and identical pinned artifacts, proven against a committed conformance fixture (52/52 passing). This is a pure string/concept-ID algorithm: there is no Metal or BLAS dimension and no SIMD kernel to conform — the only cross-port determinism concern is float summation order in the IDF scoring (§4), which both ports pin by summing in sorted term order.
+The encoder is implemented in Swift (`LatticeLib`) and ported to Rust (`LatticeLib/rust`). The shipped agreement property is **Swift-scalar == Rust-scalar**: both ports produce identical `encode` / `encodeAnchor` output for identical input and identical pinned artifacts. The 65-vector classifier fixture and 12-vector semantic fixture pin final codes; the semantic fixture also pins exact top-three integer scores and hierarchy decisions. There is no Metal or BLAS dimension. Lexical IDF sums use sorted term order, while semantic inference avoids floating point entirely.
 
 The cross-platform-*guaranteed* surface is the static word-class table plus the pinned lexicon and signatures: any token resolved through them is bit-identical on every platform. Novel-token tagging is platform-divergent **by design** — Apple uses `NLTagger`, non-Apple uses the (currently stubbed) Penn-Treebank HMM/Viterbi tagger — and is deliberately kept off the agreement-bearing path. The Step-1 Q-ID relaxation (§3) further moves named entities onto the deterministic lexicon path and off the divergent tagger path.
 
@@ -218,6 +222,9 @@ These are designed-but-unshipped surfaces. They are named here so a reader does 
 - **Novel-token pool reducer / submit endpoint** — the cache accumulates against a no-op submitter; the pool reducer is not yet built.
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-09
+Specified classifier v4: pinned sparse semantic artifact, integer Swift/Rust inference, confidence-gated hierarchy fusion, model-hash recalculation floor, and exact semantic conformance vectors.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

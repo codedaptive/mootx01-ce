@@ -48,9 +48,11 @@
 
 use crate::concept_bag::{build_encoder_bag, ConceptBag};
 use crate::fdc_frame::FdcFrame;
+use crate::fdc_semantic_ranker::FdcSemanticRanker;
 use crate::fdc_signatures::FdcSignatures;
 use crate::lexicon::CanonicalizationLexicon;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Scoring mode applied to both the Step-4 argmax and the Step-5 descent
 /// ranking. Mirrors `FDCMatcher.ScoreMode` in Swift exactly.
@@ -251,6 +253,7 @@ pub struct FdcMatcher {
     /// inherited/article recall terms to certify a narrow code. Mirrors Swift
     /// `useHierarchicalResolution`.
     pub use_hierarchical_resolution: bool,
+    semantic_ranker: Option<Arc<FdcSemanticRanker>>,
     lexicon: CanonicalizationLexicon,
     frame: FdcFrame,
 
@@ -328,6 +331,26 @@ impl FdcMatcher {
         stop_threshold: usize,
         score_mode: ScoreMode,
         use_hierarchical_resolution: bool,
+    ) -> Self {
+        Self::new_with_mode_hierarchy_and_semantic(
+            lexicon,
+            frame,
+            signatures,
+            stop_threshold,
+            score_mode,
+            use_hierarchical_resolution,
+            None,
+        )
+    }
+
+    pub fn new_with_mode_hierarchy_and_semantic(
+        lexicon: CanonicalizationLexicon,
+        frame: FdcFrame,
+        signatures: &FdcSignatures,
+        stop_threshold: usize,
+        score_mode: ScoreMode,
+        use_hierarchical_resolution: bool,
+        semantic_ranker: Option<Arc<FdcSemanticRanker>>,
     ) -> Self {
         let sig_terms_orig = &signatures.sig_terms;
 
@@ -476,6 +499,7 @@ impl FdcMatcher {
             stop_threshold,
             score_mode,
             use_hierarchical_resolution,
+            semantic_ranker,
             lexicon,
             frame,
             term_to_id,
@@ -670,6 +694,74 @@ impl FdcMatcher {
         common
     }
 
+    fn fuse_semantic(
+        &self,
+        result: (Option<String>, Option<String>),
+        text: &str,
+        concept_bag: &ConceptBag,
+    ) -> (Option<String>, Option<String>) {
+        if !self.use_hierarchical_resolution {
+            return result;
+        }
+        let Some(semantic_ranker) = &self.semantic_ranker else {
+            return result;
+        };
+        let lexical_code = result.0.as_deref().unwrap_or("000");
+        if lexical_code != "000" && self.has_reviewed_alias_evidence(lexical_code, concept_bag) {
+            return result;
+        }
+        let candidates = semantic_ranker.rank(text, semantic_ranker.metadata.code_count);
+        let Some(decision) =
+            semantic_ranker.hierarchy_decision_from_candidates(&candidates, &self.frame)
+        else {
+            return result;
+        };
+        let lexical_main = if Self::is_main_class(lexical_code) {
+            lexical_code.to_owned()
+        } else {
+            self.frame
+                .ancestors(lexical_code)
+                .into_iter()
+                .rev()
+                .find(|ancestor| Self::is_main_class(ancestor))
+                .unwrap_or_else(|| "000".to_owned())
+        };
+        if lexical_code != "000" && lexical_main == decision.main_class {
+            return result;
+        }
+        if lexical_code != "000" && self.has_reviewed_alias_evidence(lexical_code, concept_bag) {
+            return result;
+        }
+        if lexical_code != "000" {
+            if let (Some(top), Some(lexical_candidate)) = (
+                candidates.first(),
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.code == lexical_code),
+            ) {
+                if lexical_candidate.score * 3 >= top.score * 2 {
+                    return result;
+                }
+            }
+        }
+        (Some(decision.code), None)
+    }
+
+    fn has_reviewed_alias_evidence(&self, code: &str, bag: &ConceptBag) -> bool {
+        let Some(sources) = self.source_term_ids.get(code) else {
+            return false;
+        };
+        if sources.alias.is_empty() {
+            return false;
+        }
+        bag.keys().any(|term| {
+            self.term_to_id
+                .get(term)
+                .map(|id| sources.alias.contains(id))
+                .unwrap_or(false)
+        })
+    }
+
     fn hierarchical_resolution(
         &self,
         candidates: &[String],
@@ -743,7 +835,7 @@ impl FdcMatcher {
         // runs against the immutable snapshot — no torn read.
         let table = crate::word_class_table::global_table();
         let bag = build_encoder_bag(text, &self.lexicon, &table);
-        let result = self.encode_from_bag(bag);
+        let result = self.fuse_semantic(self.encode_from_bag(&bag), text, &bag);
         if self.use_hierarchical_resolution && result.0.is_none() {
             (Some("000".to_owned()), None)
         } else {
@@ -776,7 +868,7 @@ impl FdcMatcher {
         // Non-recording bag build: SHARED_NOVEL_CACHE.record is not called for
         // novel tokens, so no user-memory content leaks to the pool pipeline.
         let bag = crate::concept_bag::build_encoder_bag_no_record(text, &self.lexicon, &table);
-        let result = self.encode_from_bag(bag);
+        let result = self.fuse_semantic(self.encode_from_bag(&bag), text, &bag);
         if self.use_hierarchical_resolution && result.0.is_none() {
             (Some("000".to_owned()), None)
         } else {
@@ -794,7 +886,7 @@ impl FdcMatcher {
     /// pre-interning `index.get(term) == None` skip.
     ///
     /// Mirrors Swift `FDCMatcher.encodeFromBag(_:)`.
-    fn encode_from_bag(&self, bag: ConceptBag) -> (Option<String>, Option<String>) {
+    fn encode_from_bag(&self, bag: &ConceptBag) -> (Option<String>, Option<String>) {
         if bag.is_empty() {
             return if self.use_hierarchical_resolution {
                 (Some("000".to_owned()), None)
@@ -808,7 +900,7 @@ impl FdcMatcher {
         // dropped — they match no signature entry, identical behaviour to the
         // pre-interning path (which skipped them via `index.get(term) == None`).
         let mut interned_bag: InternedBag = HashMap::with_capacity(bag.len());
-        for (term, &count) in &bag {
+        for (term, &count) in bag {
             if let Some(&id) = self.term_to_id.get(term.as_str()) {
                 *interned_bag.entry(id).or_insert(0) += count;
             }
@@ -854,7 +946,7 @@ impl FdcMatcher {
         candidates.sort();
 
         if self.use_hierarchical_resolution {
-            return self.hierarchical_resolution(&candidates, &interned_bag, &bag);
+            return self.hierarchical_resolution(&candidates, &interned_bag, bag);
         }
 
         let mut score_by_code: HashMap<String, f64> = HashMap::with_capacity(candidates.len());
@@ -921,7 +1013,7 @@ impl FdcMatcher {
             }
         }
 
-        let qid = self.dominant_qid(&bag, &node, &interned_bag);
+        let qid = self.dominant_qid(bag, &node, &interned_bag);
         (Some(node), qid)
     }
 

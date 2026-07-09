@@ -170,10 +170,12 @@ struct FDCRuntimeTests {
 
     @Test("recalculation version covers algorithm and artifacts")
     func recalculationVersionIsComposite() {
-        #expect(FDC.recalculationVersion.contains("classifier:3.0.0"))
+        #expect(FDC.recalculationVersion.contains("classifier:4.0.0"))
         #expect(FDC.recalculationVersion.contains("frame:1.1.0"))
         #expect(FDC.recalculationVersion.contains("lexicon:1.1.0"))
         #expect(FDC.recalculationVersion.contains("signatures:2.0.0"))
+        #expect(FDC.recalculationVersion.contains("semantic:1.0.0:"))
+        #expect(FDC.recalculationVersion.contains(FDC.semanticModelSHA256))
     }
 
 

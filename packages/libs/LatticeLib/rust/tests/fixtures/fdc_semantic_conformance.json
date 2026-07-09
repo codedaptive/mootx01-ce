@@ -1,0 +1,126 @@
+{
+  "model_sha256": "138e42f09478db92ca261ad544e1f3143ce4b168d0e9f726dedd80614739d227",
+  "model_version": "1.0.0",
+  "vectors": [
+    {
+      "input": "a lender evaluates mortgage applications and consumer credit risk",
+      "candidates": [
+        { "code": "363.1", "score": 819691, "matched_features": 20 },
+        { "code": "332", "score": 799879, "matched_features": 33 },
+        { "code": "368", "score": 663157, "matched_features": 28 }
+      ],
+      "decision": { "code": "300", "main_class": "300", "score": 3290604, "runner_up_score": 2094195, "matched_features": 20 },
+      "final_code": "300"
+    },
+    {
+      "input": "a compiler translates source code into executable machine instructions",
+      "candidates": [
+        { "code": "005", "score": 1828212, "matched_features": 43 },
+        { "code": "621.7", "score": 929483, "matched_features": 28 },
+        { "code": "621.9", "score": 917431, "matched_features": 22 }
+      ],
+      "decision": { "code": "000", "main_class": "000", "score": 1828212, "runner_up_score": 929483, "matched_features": 43 },
+      "final_code": "005"
+    },
+    {
+      "input": "stars orbit through a galaxy while astronomers measure their spectra",
+      "candidates": [
+        { "code": "520", "score": 1541404, "matched_features": 48 },
+        { "code": "522", "score": 1319060, "matched_features": 47 },
+        { "code": "523", "score": 1242322, "matched_features": 48 }
+      ],
+      "decision": { "code": "520", "main_class": "500", "score": 5730753, "runner_up_score": 2352580, "matched_features": 48 },
+      "final_code": "520"
+    },
+    {
+      "input": "cells inherit traits through genes and natural selection changes populations",
+      "candidates": [
+        { "code": "213", "score": 1184991, "matched_features": 60 },
+        { "code": "575", "score": 1151260, "matched_features": 61 },
+        { "code": "116", "score": 1127445, "matched_features": 60 }
+      ],
+      "decision": { "code": "570", "main_class": "500", "score": 4167353, "runner_up_score": 3238907, "matched_features": 61 },
+      "final_code": "570"
+    },
+    {
+      "input": "engineers calculate the load capacity of a bridge and its concrete supports",
+      "candidates": [
+        { "code": "624", "score": 1563768, "matched_features": 37 },
+        { "code": "625", "score": 931853, "matched_features": 31 },
+        { "code": "628", "score": 879143, "matched_features": 26 }
+      ],
+      "decision": { "code": "620", "main_class": "600", "score": 1563768, "runner_up_score": 931853, "matched_features": 37 },
+      "final_code": "620"
+    },
+    {
+      "input": "a screen reader converts text to speech while braille supports blind readers",
+      "candidates": [
+        { "code": "362.4", "score": 2866763, "matched_features": 46 },
+        { "code": "028", "score": 943018, "matched_features": 41 },
+        { "code": "764", "score": 873076, "matched_features": 26 }
+      ],
+      "decision": { "code": "360", "main_class": "300", "score": 2866763, "runner_up_score": 943018, "matched_features": 46 },
+      "final_code": "362.4"
+    },
+    {
+      "input": "the molecule undergoes a carbon bonding reaction in the laboratory",
+      "candidates": [
+        { "code": "547", "score": 1062649, "matched_features": 38 },
+        { "code": "540", "score": 990952, "matched_features": 33 },
+        { "code": "542", "score": 801186, "matched_features": 23 }
+      ],
+      "decision": { "code": "540", "main_class": "500", "score": 4006561, "runner_up_score": 2419183, "matched_features": 38 },
+      "final_code": "547"
+    },
+    {
+      "input": "students learn through classroom teaching curriculum and assessment",
+      "candidates": [
+        { "code": "407", "score": 1666476, "matched_features": 43 },
+        { "code": "371", "score": 1553745, "matched_features": 43 },
+        { "code": "370", "score": 1443270, "matched_features": 35 }
+      ],
+      "decision": null,
+      "final_code": "371"
+    },
+    {
+      "input": "a painter uses pigment perspective and composition in a museum work",
+      "candidates": [
+        { "code": "069", "score": 1217931, "matched_features": 30 },
+        { "code": "750", "score": 1170842, "matched_features": 34 },
+        { "code": "667", "score": 1115075, "matched_features": 28 }
+      ],
+      "decision": { "code": "700", "main_class": "700", "score": 5200310, "runner_up_score": 3310706, "matched_features": 34 },
+      "final_code": "700"
+    },
+    {
+      "input": "database management system SQL",
+      "candidates": [
+        { "code": "651", "score": 1003861, "matched_features": 12 },
+        { "code": "612.8", "score": 802793, "matched_features": 13 },
+        { "code": "612.82", "score": 739062, "matched_features": 13 }
+      ],
+      "decision": { "code": "600", "main_class": "600", "score": 4007059, "runner_up_score": 2457896, "matched_features": 12 },
+      "final_code": "004"
+    },
+    {
+      "input": "internet network protocol server client communication",
+      "candidates": [
+        { "code": "384.3", "score": 1391766, "matched_features": 33 },
+        { "code": "384", "score": 780226, "matched_features": 33 },
+        { "code": "004", "score": 763648, "matched_features": 25 }
+      ],
+      "decision": { "code": "380", "main_class": "300", "score": 1391766, "runner_up_score": 780226, "matched_features": 33 },
+      "final_code": "004"
+    },
+    {
+      "input": "nursing patient care hospital",
+      "candidates": [
+        { "code": "362.1", "score": 1451321, "matched_features": 26 },
+        { "code": "362", "score": 1181007, "matched_features": 26 },
+        { "code": "610", "score": 1020452, "matched_features": 22 }
+      ],
+      "decision": { "code": "360", "main_class": "300", "score": 3806247, "runner_up_score": 2898297, "matched_features": 26 },
+      "final_code": "610"
+    }
+  ]
+}

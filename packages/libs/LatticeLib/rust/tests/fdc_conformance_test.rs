@@ -171,10 +171,12 @@ fn query_repetition_cannot_manufacture_precision() {
 #[test]
 fn recalculation_version_covers_algorithm_and_artifacts() {
     let version = Fdc::recalculation_version();
-    assert!(version.contains("classifier:3.0.0"));
+    assert!(version.contains("classifier:4.0.0"));
     assert!(version.contains("frame:1.1.0"));
     assert!(version.contains("lexicon:1.1.0"));
     assert!(version.contains("signatures:2.0.0"));
+    assert!(version.contains("semantic:1.0.0:"));
+    assert!(version.contains(Fdc::semantic_model_sha256()));
 }
 
 /// Stemmer conformance against SnowballEnglish.json (the same corpus used by

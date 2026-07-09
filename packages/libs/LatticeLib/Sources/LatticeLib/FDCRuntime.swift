@@ -6,8 +6,8 @@
 // consumers (EideticLib and above) call to classify text.
 //
 // The bundled compact v2 signatures retain code-owned label, alias, title, and
-// article terms separately from inherited ancestor terms. Classifier v3 uses
-// that provenance to return the deepest defensible point in the hierarchy.
+// article terms separately from inherited ancestor terms. Classifier v4 fuses
+// that hierarchy-first policy with portable integer semantic evidence.
 
 import Foundation
 
@@ -63,15 +63,41 @@ public enum FDC {
     /// produced an encode answer. Callers record it as provenance.
     public static var dataVersion: String { bundle?.version ?? "0.0.0-unavailable" }
 
+    /// Deterministic semantic candidates from the bundled micro-ranker. This
+    /// surface exposes model evidence for diagnostics and conformance; FDC's
+    /// hierarchy policy remains responsible for the final stored code.
+    public static func semanticCandidates(
+        _ text: String,
+        limit: Int = 8
+    ) -> [FDCSemanticCandidate] {
+        bundle?.semanticRanker.rank(text, limit: limit) ?? []
+    }
+
+    public static var semanticModelVersion: String {
+        bundle?.semanticRanker.metadata.version ?? "0.0.0-unavailable"
+    }
+
+    public static var semanticModelSHA256: String {
+        bundle?.semanticRanker.metadata.modelSHA256 ?? "unavailable"
+    }
+
+    /// Confidence-gated semantic hierarchy evidence used by classifier v4.
+    public static func semanticDecision(_ text: String) -> FDCSemanticDecision? {
+        guard let bundle else { return nil }
+        return bundle.semanticRanker.hierarchyDecision(text, frame: bundle.frame)
+    }
+
     /// Version of the deterministic classifier algorithm itself.
-    public static let classifierVersion = "3.0.0"
+    public static let classifierVersion = "4.0.0"
 
     /// Estate-wide recalculation floor. This covers every input that can change
     /// an assigned code: algorithm, frame, lexicon, and signatures.
     public static var recalculationVersion: String {
         guard let bundle else { return "fdc-unavailable" }
         return "classifier:\(classifierVersion)|frame:\(bundle.frame.frameVersion)" +
-            "|lexicon:\(bundle.lexiconVersion)|signatures:\(bundle.version)"
+            "|lexicon:\(bundle.lexiconVersion)|signatures:\(bundle.version)" +
+            "|semantic:\(bundle.semanticRanker.metadata.version):" +
+            bundle.semanticRanker.metadata.modelSHA256
     }
 
     /// Ancestor chain (root first, excluding `code` itself) for an FDC code,
@@ -139,13 +165,18 @@ public enum FDC {
     /// version, all loaded together once per process.
     private static let bundle: (
         matcher: FDCMatcher,
+        semanticRanker: FDCSemanticRanker,
         frame: FDCFrame,
         version: String,
         lexiconVersion: String
     )? = {
         guard let lexicon: CanonicalizationLexicon = load("Lexicon"),
               let frame: FDCFrame = load("FDCFrame"),
-              let sigs: SignaturesFile = load("FDCSignatures") else { return nil }
+              let sigs: SignaturesFile = load("FDCSignatures"),
+              let semanticMetadata = loadData("FDCSemanticRanker", extension: "json"),
+              let semanticModel = loadData("FDCSemanticRanker", extension: "bin"),
+              let semanticRanker = FDCSemanticRanker(
+                metadataData: semanticMetadata, modelData: semanticModel) else { return nil }
         var terms: [String: Set<String>] = [:]
         var sources: [String: FDCSignatureSources] = [:]
         for e in sigs.codes {
@@ -170,13 +201,21 @@ public enum FDC {
         let m = FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms,
                            sourceSignatures: sources,
                            stopThreshold: stopThreshold, scoreMode: .idf,
-                           useHierarchicalResolution: true)
-        return (m, frame, sigs.version, lexicon.version)
+                           useHierarchicalResolution: true,
+                           semanticRanker: semanticRanker)
+        return (m, semanticRanker, frame, sigs.version, lexicon.version)
     }()
 
     private static func load<T: Decodable>(_ name: String) -> T? {
         guard let url = Bundle.module.url(forResource: name, withExtension: "json"),
               let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func loadData(_ name: String, extension fileExtension: String) -> Data? {
+        guard let url = Bundle.module.url(forResource: name, withExtension: fileExtension) else {
+            return nil
+        }
+        return try? Data(contentsOf: url)
     }
 }

@@ -85,15 +85,25 @@ struct WordClassSeedTests {
 
     // MARK: - 2. Routing proof — seeded tokens never reach the HMM
 
-    /// A newly-seeded noun resolves via the fast path. Proof: the
-    /// sharedNovelCache delta is zero across the call (a table hit never
-    /// invokes `tagNovelToken`, which is the only call site that touches
-    /// `sharedNovelCache.record`). A genuine novel token, by contrast,
-    /// always moves the counter (or drains it to zero at the 50-entry
-    /// threshold). `.serialized` because sharedNovelCache is a
-    /// process-wide singleton other suites may also write to; the delta
-    /// (not the absolute count) is the assertion, matching the pattern in
-    /// WordClassRecordNovelTests.swift.
+    /// A newly-seeded noun resolves via the fast path. Proof: "astronaut"
+    /// is never witnessed by `sharedNovelCache.record` across the call (a
+    /// table hit never invokes `tagNovelToken`, which is the only call
+    /// site that touches `sharedNovelCache.record`). A genuine novel
+    /// token, by contrast, is always witnessed (see
+    /// genuineNovelTokenInvokesHMM below).
+    ///
+    /// This uses the `watch(token:)` / `wasRecorded(token:)` witness seam
+    /// (WORDCLASS-CACHE-RACE mission, 2026-07-09) rather than a
+    /// before/after `count` delta. `count` is a process-wide total that
+    /// a parallel suite sharing this singleton can move independently of
+    /// this call, producing a false failure with no bearing on whether
+    /// "astronaut" itself was recorded — exactly the failure mode this
+    /// fix addresses. Registering the specific token before the call and
+    /// checking it after is immune to that: `wasRecorded` only reports on
+    /// the exact literal token watched, so unrelated concurrent
+    /// record()/drain() traffic for OTHER tokens cannot flip it.
+    /// `.serialized` because sharedNovelCache is a process-wide singleton
+    /// other suites may also write to.
     @Test("newly-seeded noun classifies via fast path (no HMM invocation)")
     func newlySeededNounUsesFastPath() {
         // WordClassTableCache is a process-wide LIVE cache seeded once via
@@ -111,12 +121,12 @@ struct WordClassSeedTests {
         // not present in the original 21-noun fixture.
         #expect(WordClassTableCache.nounSet.contains("astronaut"))
 
-        let before = LatticeLib.sharedNovelCache.count
+        LatticeLib.sharedNovelCache.watch(token: "astronaut")
         let result = LatticeLib.wordClass("astronaut")
-        let after = LatticeLib.sharedNovelCache.count
 
         #expect(result == .noun)
-        #expect(after == before, "table-resident token must not touch sharedNovelCache; before=\(before) after=\(after)")
+        #expect(!LatticeLib.sharedNovelCache.wasRecorded(token: "astronaut"),
+                "table-resident token must not touch sharedNovelCache")
     }
 
     @Test("newly-seeded verb classifies via fast path (no HMM invocation)")
@@ -130,18 +140,34 @@ struct WordClassSeedTests {
         // directly in the mission spec).
         #expect(WordClassTableCache.verbSet.contains("clarify"))
 
-        let before = LatticeLib.sharedNovelCache.count
+        LatticeLib.sharedNovelCache.watch(token: "clarify")
         let result = LatticeLib.wordClass("clarify")
-        let after = LatticeLib.sharedNovelCache.count
 
         #expect(result == .verb)
-        #expect(after == before, "table-resident token must not touch sharedNovelCache; before=\(before) after=\(after)")
+        #expect(!LatticeLib.sharedNovelCache.wasRecorded(token: "clarify"),
+                "table-resident token must not touch sharedNovelCache")
     }
 
     /// Control case: a genuine novel token (guaranteed absent from both the
-    /// table and any prior test run via a UUID suffix) DOES move the
-    /// sharedNovelCache counter, proving the fast-path tests above are
+    /// table and any prior test run via a UUID suffix) DOES get recorded
+    /// into sharedNovelCache, proving the fast-path tests above are
     /// actually exercising the table and not a no-op counter.
+    ///
+    /// Uses the `watch(token:)` / `wasRecorded(token:)` witness seam
+    /// (WORDCLASS-CACHE-RACE mission, 2026-07-09) instead of a
+    /// before/after `count` delta. The original delta assertion
+    /// (`after == before + 1 || (after == 0 && before >= 1)`) fails under
+    /// full-package parallelism: a parallel suite in another file can
+    /// mutate/drain the same process-wide singleton between this test's
+    /// `before` and `after` reads, satisfying neither disjunct even
+    /// though THIS token was recorded correctly. Registering the exact
+    /// UUID-suffixed token before the call and confirming it after is
+    /// immune to that — `wasRecorded` is keyed on this one token, which
+    /// is unique to this run and cannot collide with any other suite's
+    /// traffic, and the witness mark is written inside `record`'s own
+    /// lock acquisition (before any drain can occur), so it also
+    /// survives this token itself triggering (or being caught up in) a
+    /// concurrent drain.
     @Test("genuine novel token (not in table) DOES invoke the HMM and record")
     func genuineNovelTokenInvokesHMM() {
         let uid = UUID().uuidString.prefix(8)
@@ -149,14 +175,17 @@ struct WordClassSeedTests {
         #expect(!WordClassTableCache.nounSet.contains(token))
         #expect(!WordClassTableCache.verbSet.contains(token))
 
-        let before = LatticeLib.sharedNovelCache.count
+        // wordClass(_:) lowercases internally before calling
+        // sharedNovelCache.record (WordClassTagger.swift: `let lowered =
+        // token.lowercased()`), and UUID().uuidString is uppercase hex —
+        // watch/check on the SAME lowercased form record() actually uses,
+        // or the witness never matches.
+        let lowered = token.lowercased()
+        LatticeLib.sharedNovelCache.watch(token: lowered)
         _ = LatticeLib.wordClass(token)
-        let after = LatticeLib.sharedNovelCache.count
 
-        let increased = after == before + 1
-        let drainedToZero = after == 0 && before >= 1
-        #expect(increased || drainedToZero,
-                "genuine novel token must record into sharedNovelCache; before=\(before) after=\(after)")
+        #expect(LatticeLib.sharedNovelCache.wasRecorded(token: lowered),
+                "genuine novel token must record into sharedNovelCache")
     }
 
     // MARK: - 3. Ambiguous-word absence guard
