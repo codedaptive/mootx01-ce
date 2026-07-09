@@ -33,7 +33,7 @@ struct HTTPServerTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         return (kit, handle)
     }
 

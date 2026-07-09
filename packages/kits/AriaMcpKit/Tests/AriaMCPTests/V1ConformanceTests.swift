@@ -33,7 +33,7 @@ struct V1ConformanceTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "1.0-test")
         let tooling = ToolDispatcher(kit: kit, handle: handle)
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)

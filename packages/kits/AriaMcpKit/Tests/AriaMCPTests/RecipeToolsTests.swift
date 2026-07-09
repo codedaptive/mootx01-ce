@@ -30,7 +30,7 @@ struct RecipeToolsTests {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        return try await kit.open(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     }
 
     private func fileArgs(content: String) -> JSONValue {
@@ -948,7 +948,8 @@ struct RecipeToolsSecurityTests {
         _ = try await LocusKit.Estate.create(
             storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"))
         return try await kit.open(
-            storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"))
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
     }
 
     @Test func preciseRecallNegativeLimitThrows() async throws {

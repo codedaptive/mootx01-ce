@@ -126,7 +126,7 @@ struct TraceRewardTests {
         )
         let storage = try SQLiteStorage(configuration: configuration)
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
         return (kit, handle, dispatcher)
     }
