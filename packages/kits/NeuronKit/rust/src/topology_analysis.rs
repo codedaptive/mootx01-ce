@@ -120,6 +120,12 @@ pub struct GraphTopologyNode {
     /// ISO-8601 tombstone instant; None = alive now (or unresolved for a
     /// dead node, which the -1 sentinel still marks dead).
     pub tombstoned_ts: Option<String>,
+    /// FDC/UDC classification code of the drawer this node represents.
+    /// None when the drawer is unanchored (empty-string `udc_code` from the
+    /// input is normalised here to None — empty strings never cross this
+    /// boundary). Dead nodes (-1 sentinel) retain their code: the field is
+    /// informational and independent of alive/dead state.
+    pub udc_code: Option<String>,
 }
 
 /// An edge in the estate topology graph. edge_type "tunnel" = explicit
@@ -369,6 +375,9 @@ pub fn graph_topology(
             // entered the estate — the alive(t) playback boundary.
             created_ts: Some(epoch_to_iso8601(d.filed_at)),
             tombstoned_ts: None,
+            // Empty-string udc_code ("" = unanchored sentinel) normalises to None
+            // here so downstream consumers never receive an empty classification.
+            udc_code: if d.udc_code.is_empty() { None } else { Some(d.udc_code.clone()) },
         })
         .collect();
 
@@ -382,6 +391,8 @@ pub fn graph_topology(
         last_active_ts: Some(epoch_to_iso8601(d.event_time)),
         created_ts: Some(epoch_to_iso8601(d.filed_at)),
         tombstoned_ts: d.tombstoned_at.map(epoch_to_iso8601),
+        // Dead nodes retain their code — informational and alive/dead-independent.
+        udc_code: if d.udc_code.is_empty() { None } else { Some(d.udc_code.clone()) },
     }));
 
     let tunnel_edge = |t: &TopologyTunnelInput| -> Option<GraphTopologyEdge> {
@@ -787,5 +798,43 @@ mod tests {
         assert_eq!(lat[0].source, "live-1");
         assert_eq!(lat[0].target, "live-2");
         assert!(!lat.iter().any(|e| e.source == "dead" || e.target == "dead"));
+    }
+
+    // ── udc_code carry-through (V2-P1a) ──────────────────────────────────────
+
+    /// Non-empty udc_code propagates from input to GraphTopologyNode on both
+    /// live and dead nodes.
+    #[test]
+    fn udc_code_carry_through_live_and_dead() {
+        let live = TopologyDrawerInput {
+            id: "anchor".to_string(), udc_code: "615.85".to_string(),
+            filed_at: T0, event_time: T0, tombstoned: false, tombstoned_at: None,
+        };
+        let dead = TopologyDrawerInput {
+            id: "gone".to_string(), udc_code: "657".to_string(),
+            filed_at: T0, event_time: T0, tombstoned: true, tombstoned_at: Some(T0 + 60),
+        };
+        let topo = graph_topology(&[live, dead], &[], &[], "", 0.0);
+
+        let live_node = topo.nodes.iter().find(|n| n.id == "anchor").unwrap();
+        assert_eq!(live_node.udc_code.as_deref(), Some("615.85"),
+            "non-empty udc_code must be carried through on live node");
+
+        let dead_node = topo.nodes.iter().find(|n| n.id == "gone").unwrap();
+        assert_eq!(dead_node.udc_code.as_deref(), Some("657"),
+            "dead nodes retain their udc_code");
+    }
+
+    /// Empty-string udc_code (unanchored sentinel) normalises to None at the
+    /// GraphTopologyNode boundary — empty strings never cross it.
+    #[test]
+    fn udc_code_empty_string_normalises_to_none() {
+        let unanchored = TopologyDrawerInput {
+            id: "x".to_string(), udc_code: String::new(),
+            filed_at: T0, event_time: T0, tombstoned: false, tombstoned_at: None,
+        };
+        let topo = graph_topology(&[unanchored], &[], &[], "", 0.0);
+        assert_eq!(topo.nodes[0].udc_code, None,
+            "empty-string udc_code must normalise to None at GraphTopologyNode boundary");
     }
 }

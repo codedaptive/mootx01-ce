@@ -2051,16 +2051,25 @@ fn topology_snapshot_duty(
     // Wire-shape serialization — field names match the Swift snapshot payload
     // (moot-mgr's GraphNodePayload/GraphEdgePayload decode both legs' bytes).
     let nodes: Vec<serde_json::Value> = topo.nodes.iter()
-        .map(|n| serde_json::json!({
-            "id": n.id,
-            "nounType": 0,
-            "communityId": n.community_id,
-            "centrality": n.centrality,
-            "anomaly": false,
-            "lastActiveTs": n.last_active_ts,
-            "createdTs": n.created_ts,
-            "tombstonedTs": n.tombstoned_ts
-        }))
+        .map(|n| {
+            // Build base object; conditionally insert udcCode so the key is ABSENT
+            // (not null) when the node is unanchored — matches Swift encodeIfPresent
+            // convention in TopologySnapshotNode.
+            let mut obj = serde_json::json!({
+                "id": n.id,
+                "nounType": 0,
+                "communityId": n.community_id,
+                "centrality": n.centrality,
+                "anomaly": false,
+                "lastActiveTs": n.last_active_ts,
+                "createdTs": n.created_ts,
+                "tombstonedTs": n.tombstoned_ts
+            });
+            if let Some(code) = &n.udc_code {
+                obj["udcCode"] = serde_json::Value::String(code.clone());
+            }
+            obj
+        })
         .collect();
     let edges: Vec<serde_json::Value> = topo.edges.iter()
         .map(|e| serde_json::json!({

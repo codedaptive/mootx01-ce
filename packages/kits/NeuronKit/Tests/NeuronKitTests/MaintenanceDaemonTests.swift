@@ -7,8 +7,9 @@
 // Maintenance/MaintenancePolicy.swift, Maintenance/MaintenanceSeams.swift
 // — the decision core, policy, and seams are exercised through the
 // daemon over the shared seam fakes below. Covers C-3 (all five scan
-// categories detected and proposed), C-4 / C-12 (audit-chain break →
-// integrity proposal; clean chain → none), C-6 (exactly one diary entry
+// categories detected and proposed), C-4 / C-12 (content-tampered entry
+// rejected at ingress → daemon sees a clean, vacuously-valid log; clean
+// chain → no integrity proposal either way), C-6 (exactly one diary entry
 // per cycle), B-2 (every detected issue is a proposal, never an action),
 // B-4 (idempotency across cycles), the policy-store round-trip, the pump
 // tick cadence, and Board item 14 (QID-pending enrichment retry batch:
@@ -20,9 +21,18 @@
 // only for the value types (ProposeFrame, Drawer, DiaryEntry,
 // UnifiedAuditLog) — never for a write path (B-1). The clock is injected
 // by passing `now` into every cycle/pump; there are no wall-clock sleeps.
-// The audit-break test exercises the REAL `AuditChainVerifier`, building
-// a tampered `UnifiedAuditLog` via the explicit-id entry initializer so
-// the stored id no longer matches the recomputed content hash.
+// The audit-break test exercises the REAL `AuditChainVerifier`, but as of
+// codex a477800 / secfix ce-audit-content-id (5101e112), `UnifiedAuditLog`
+// rejects content-hash-mismatched entries at the add / init(entries:)
+// ingress boundary — a tampered entry never reaches the verifier. The
+// tampered fixture below is still built via the explicit-id entry
+// initializer (zero id, mismatched content hash), but the test now pins
+// the ingress rejection: the log the daemon scans is empty, so the
+// verifier reports vacuously valid and the daemon emits zero integrity
+// proposals (mirrors GLK's `corruptedEntryRejectedAtAddBoundary`, GLK03
+// AuditIntegrationTests). Whether the daemon should surface an alert for
+// an entry rejected at ingress — since that never reaches the audit-chain
+// scan at all — is an open product decision, not addressed by this test.
 
 import Testing
 import Foundation
@@ -151,11 +161,13 @@ private func cleanAuditLog() -> UnifiedAuditLog {
 }
 
 /// A tampered audit log: one entry built through the explicit-id
-/// initializer with an all-zero id. The verifier recomputes the id from
-/// the entry's fields and finds it does not match the stored (zero) id,
-/// so the chain reports `valid == false`. firstBrokenAt is the entry's
-/// HLC physical time (2000 ms → 2.0s epoch). This drives the REAL
-/// AuditChainVerifier — no mock.
+/// initializer with an all-zero id, so its stored id does not match the
+/// SHA-256 of its wire encoding. `UnifiedAuditLog.init(entries:)` routes
+/// every entry through `add`, which recomputes the content id and
+/// rejects the entry when it does not match (codex a477800 / secfix
+/// ce-audit-content-id, 5101e112) — the returned log is empty. This
+/// fixture therefore exercises the ingress defence, not the chain
+/// verifier: the tampered entry never reaches `AuditChainVerifier`.
 private func tamperedAuditLog() -> UnifiedAuditLog {
     let zeroID = [UInt8](repeating: 0, count: 32)
     let e = UnifiedAuditEntry(
@@ -231,23 +243,26 @@ struct MaintenanceDaemonTests {
         #expect(kinds.contains(.byReferenceDrift))
     }
 
-    // MARK: - C-4 / C-12: audit-chain break → integrity proposal
+    // MARK: - C-4 / C-12: content-tampered entry is rejected at ingress; daemon sees a clean log
 
-    @Test("C-4/C-12: tampered audit log emits an integrity proposal")
-    func c4TamperedAuditLogEmitsIntegrityProposal() async throws {
-        let reader = FakeReader(auditLog: tamperedAuditLog())
+    @Test("C-4/C-12: content-tampered entry is rejected at ingress; daemon sees a clean log")
+    func c4TamperedEntryRejectedAtIngressDaemonSeesCleanLog() async throws {
+        // Pin the ingress defence first: the tampered fixture yields an
+        // empty log before it ever reaches the daemon (codex a477800 /
+        // secfix ce-audit-content-id, 5101e112).
+        let tampered = tamperedAuditLog()
+        #expect(tampered.count == 0, "content-hash-mismatched entry rejected at add / init(entries:) boundary")
+
+        let reader = FakeReader(auditLog: tampered)
         let sink = RecordingSink()
         let d = daemon(reader: reader, sink: sink)
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
 
         #expect(report.auditChecked == true)
-        #expect(report.auditReport?.valid == false, "real AuditChainVerifier flags the tampered entry")
-        #expect(report.proposalsEmitted.count == 1, "exactly the audit-integrity proposal")
-        let frame = try #require(report.proposalsEmitted.first)
-        #expect(frame.kind == .other("audit_integrity"))
-        // firstBrokenAt is 2000ms epoch → "2000" tag in the target RowID.
-        #expect(frame.target == "audit-break-2000")
+        #expect(report.auditReport?.valid == true, "empty log after ingress rejection is vacuously valid")
+        #expect(report.auditReport?.entryCount == 0)
+        #expect(report.proposalsEmitted.count == 0, "no integrity proposal — the tampered entry never reached the verifier")
     }
 
     @Test("C-4: clean audit log emits no integrity proposal")

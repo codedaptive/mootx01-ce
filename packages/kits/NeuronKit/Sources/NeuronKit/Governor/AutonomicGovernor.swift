@@ -1039,7 +1039,8 @@ public actor AutonomicGovernor {
                 anomaly: false,         // anomaly detection not yet surfaced from graphTopology
                 lastActiveTs: n.lastActiveTs,
                 createdTs: n.createdTs,
-                tombstonedTs: n.tombstonedTs)
+                tombstonedTs: n.tombstonedTs,
+                udcCode: n.udcCode)
         }
         let edges = topo.edges.map { e in
             TopologySnapshotEdge(
@@ -1213,10 +1214,15 @@ struct TopologySnapshotNode: Codable, Sendable {
     let lastActiveTs: String?
     let createdTs: String?
     let tombstonedTs: String?
+    /// FDC/UDC classification code of the drawer this node represents.
+    /// Nil when the drawer is unanchored. Encoded as ABSENT (not null) when nil,
+    /// matching the lastActiveTs/createdTs convention. Absent in older snapshots
+    /// (pre-V2-P1a) — decodable without the key present.
+    let udcCode: String?
 
     private enum CodingKeys: String, CodingKey {
         case id, nounType, communityId, centrality, anomaly
-        case lastActiveTs, createdTs, tombstonedTs
+        case lastActiveTs, createdTs, tombstonedTs, udcCode
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1230,6 +1236,8 @@ struct TopologySnapshotNode: Codable, Sendable {
         try c.encodeIfPresent(createdTs, forKey: .createdTs)
         // tombstonedTs is ALWAYS present: explicit null for live entities (VIZ_V2 contract).
         try c.encode(tombstonedTs, forKey: .tombstonedTs)
+        // udcCode is ABSENT when nil (not null) — unanchored drawers carry no classification key.
+        try c.encodeIfPresent(udcCode, forKey: .udcCode)
     }
 }
 

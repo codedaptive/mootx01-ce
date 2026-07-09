@@ -41,8 +41,11 @@ import LatticeLib
 ///
 /// Nodes/edges decode as the shared `GraphNodePayload`/`GraphEdgePayload`
 /// wire shapes, so per-entity fields (`createdTs`, `tombstonedTs` — the
-/// VIZ_V2 dissolution timestamp on tombstoned drawers/tunnels) pass through
-/// unchanged: absent-key-tolerant on decode, explicit JSON null on re-encode.
+/// VIZ_V2 dissolution timestamp on tombstoned drawers/tunnels, and `udcCode`
+/// — V2-P1b) pass through unchanged: absent-key-tolerant on decode, explicit
+/// JSON null on re-encode. `udcCode` is dictionary-encoded onto the compact
+/// `/api/graph` wire by `GraphPayload.init(nodes:edges:...)` (`codes`/
+/// `codeIndex`), not re-emitted per-node.
 struct StoredGraphPayload: Decodable {
     let nodes: [GraphNodePayload]
     let edges: [GraphEdgePayload]
@@ -130,7 +133,11 @@ public actor MootManager {
     /// keyed by (estate filter, raw snapshot bytes). The governor rewrites
     /// the snapshot only when estate content changes; the dashboard polls
     /// far more often — a hit skips the ~1MB JSONDecoder pass and every
-    /// FDC label lookup (see graphPayload).
+    /// FDC label lookup (see graphPayload). Cached `nodes` retain their
+    /// decoded `udcCode` field (V2-P1b) exactly like `createdTs`/`tombstonedTs`
+    /// — the `codes`/`codeIndex` dictionary is rebuilt from these cached nodes
+    /// on every call by `GraphPayload.init`, so a cache hit and a cache miss
+    /// always produce byte-identical `codes`/`codeIndex` output.
     private var topologyEnrichmentCache: (
         estateKey: String?, raw: Data,
         nodes: [GraphNodePayload], edges: [GraphEdgePayload],

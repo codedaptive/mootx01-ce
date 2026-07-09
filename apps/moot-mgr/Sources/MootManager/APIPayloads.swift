@@ -486,6 +486,15 @@ public struct CompactEdge: Encodable, Sendable, Equatable {
 ///   `createdTs`    — `[String?]` ISO-8601 ingest timestamp or null per node
 ///   `tombstoned`   — `{indexStr: ts}` SPARSE map (only tombstoned nodes)
 ///
+/// Per-node classification codes are dictionary-encoded (V2-P1b), matching
+/// the same rationale as the compact edges below — ~10^2 distinct codes vs
+/// up to 50k nodes:
+///
+///   `codes`        — `[String]` deduped code dictionary, first-seen order
+///                     over the node array
+///   `codeIndex`    — `[Int]` index into `codes` per node, parallel to `ids`;
+///                     `-1` means the node has no code
+///
 /// Edges are encoded as compact arrays-of-arrays:
 ///
 ///   `edges` — `[[si, ti, w, et], ...]` where si/ti are indices into `ids`,
@@ -527,6 +536,16 @@ public struct GraphPayload: Encodable, Sendable {
     /// Only live entries for tombstoned nodes; live nodes are absent.
     /// Saves ~50 bytes per live node vs a full parallel array (most nodes alive).
     private let tombstoned: [String: String]
+
+    // MARK: - Dictionary-encoded per-node classification codes (V2-P1b)
+
+    /// Deduped classification-code dictionary, first-seen order over the node
+    /// array. Sized to the distinct-code count (~10^2), not the node count
+    /// (up to 50k) — this is what keeps the payload inside the 5 MB ceiling.
+    private let codes: [String]
+    /// Index into `codes` per node, parallel to `ids`. `-1` means the node
+    /// carries no code (absent or empty `udcCode`).
+    private let codeIndex: [Int]
 
     // MARK: - Compact edges
 
@@ -593,6 +612,13 @@ public struct GraphPayload: Encodable, Sendable {
         var anomalyArr:     [Bool]     = []; anomalyArr.reserveCapacity(nodes.count)
         var createdTsArr:   [String?]  = []; createdTsArr.reserveCapacity(nodes.count)
         var tombstonedMap:  [String: String] = [:]
+        // Code dictionary: deduped, first-seen order. codeToIndex resolves a
+        // repeated code to its existing dictionary slot in O(1) instead of
+        // re-appending it — this is the mechanism that keeps `codes` sized to
+        // the distinct-code count rather than the node count.
+        var codesArr:      [String]    = []
+        var codeToIndex:   [String: Int] = [:]
+        var codeIndexArr:  [Int]       = []; codeIndexArr.reserveCapacity(nodes.count)
         for (i, n) in nodes.enumerated() {
             indexMap[n.id] = i
             idsArr.append(n.id)
@@ -601,6 +627,19 @@ public struct GraphPayload: Encodable, Sendable {
             anomalyArr.append(n.anomaly)
             createdTsArr.append(n.createdTs)
             if let ts = n.tombstonedTs { tombstonedMap["\(i)"] = ts }
+            // Absent/empty udcCode → -1 sentinel (no code), never a dictionary entry.
+            if let code = n.udcCode, !code.isEmpty {
+                if let existing = codeToIndex[code] {
+                    codeIndexArr.append(existing)
+                } else {
+                    let newIndex = codesArr.count
+                    codesArr.append(code)
+                    codeToIndex[code] = newIndex
+                    codeIndexArr.append(newIndex)
+                }
+            } else {
+                codeIndexArr.append(-1)
+            }
         }
         self.ids         = idsArr
         self.communityId = communityIdArr
@@ -608,6 +647,8 @@ public struct GraphPayload: Encodable, Sendable {
         self.anomaly     = anomalyArr
         self.createdTs   = createdTsArr
         self.tombstoned  = tombstonedMap
+        self.codes       = codesArr
+        self.codeIndex   = codeIndexArr
 
         // Build compact edges — drop edges whose endpoints are not in the node set.
         var compactEdges: [CompactEdge] = []; compactEdges.reserveCapacity(edges.count)
@@ -634,6 +675,7 @@ public struct GraphPayload: Encodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case ids, communityId, centrality, anomaly, createdTs, tombstoned, edges
+        case codes, codeIndex
         case communities, analytics, structurePending, pending, generatedTs, estate, snapshotTs
     }
 
@@ -649,6 +691,10 @@ public struct GraphPayload: Encodable, Sendable {
         var createdTsC = c.nestedUnkeyedContainer(forKey: .createdTs)
         for ts in createdTs { try createdTsC.encode(ts) }  // nil encodes as null
         try c.encode(tombstoned,  forKey: .tombstoned)
+        // Dictionary-encoded per-node classification codes (V2-P1b). Always
+        // present — `[]`/`[]` on the local-fallback path (no nodes), never null.
+        try c.encode(codes,      forKey: .codes)
+        try c.encode(codeIndex,  forKey: .codeIndex)
         // Compact edges: each encodes as [si, ti, w, et] via CompactEdge.encode(to:).
         try c.encode(edges,       forKey: .edges)
         // Unchanged envelope fields.
@@ -685,6 +731,14 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
     /// (no community) and centrality 0.0 — all graph math upstream runs over
     /// live entities only.
     public let tombstonedTs: String?
+    /// The node's FDC/UDC classification code (e.g. "657", "615.85"), or nil
+    /// when the emitting daemon supplied none (V2-P1b). Decoded tolerantly —
+    /// `decodeIfPresent` via synthesized Codable, so stored snapshots written
+    /// before this field existed still decode (absent key → nil). An empty
+    /// string is treated the same as absent at the `GraphPayload` dictionary-
+    /// encoding boundary (see `GraphPayload.init(nodes:edges:...)`), never as
+    /// a real code.
+    public let udcCode: String?
 
     // nounType and lastActiveTs removed from wire format (FIX 2 — payload
     // trim): nounType was redundant (all drawers are type 0, JS defaults to 0);
@@ -695,7 +749,8 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
     public init(
         id: String, communityId: Int,
         centrality: Double, anomaly: Bool,
-        createdTs: String?, tombstonedTs: String?
+        createdTs: String?, tombstonedTs: String?,
+        udcCode: String? = nil
     ) {
         self.id = id
         self.communityId = communityId
@@ -703,12 +758,17 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
         self.anomaly = anomaly
         self.createdTs = createdTs
         self.tombstonedTs = tombstonedTs
+        self.udcCode = udcCode
     }
 
-    /// Custom encode so the nullable timestamps are always present on the wire
-    /// as explicit JSON nulls (VIZ_V2 contract). Decoding stays synthesized,
-    /// so a daemon that omits `createdTs` or `tombstonedTs` still decodes (nil).
-    /// nounType and lastActiveTs are omitted from the encode path (payload trim).
+    /// Custom encode so the nullable timestamps (and `udcCode`) are always
+    /// present on the wire as explicit JSON nulls (VIZ_V2 contract). Decoding
+    /// stays synthesized, so a daemon that omits `createdTs`, `tombstonedTs`,
+    /// or `udcCode` still decodes (nil). nounType and lastActiveTs are omitted
+    /// from the encode path (payload trim). This per-object encode is exercised
+    /// by tests only — the live `/api/graph` wire never emits per-node objects;
+    /// `udcCode` crosses onto that wire via `GraphPayload`'s `codes`/`codeIndex`
+    /// dictionary encoding instead (V2-P1b).
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
@@ -717,6 +777,7 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
         try c.encode(anomaly, forKey: .anomaly)
         try c.encode(createdTs, forKey: .createdTs)          // nil → null
         try c.encode(tombstonedTs, forKey: .tombstonedTs)    // nil → null
+        try c.encode(udcCode, forKey: .udcCode)              // nil → null
     }
 }
 
