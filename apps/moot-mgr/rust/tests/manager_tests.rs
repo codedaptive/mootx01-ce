@@ -283,6 +283,10 @@ fn graph_payload_is_pending_without_snapshot() {
     assert!(p.ids.is_empty());
     assert_eq!(p.estate, "all");
     assert!(!p.pending.is_empty());
+    // V2-P1b: the local-fallback path always emits codes/codeIndex as empty
+    // arrays — never omitted, never null.
+    assert!(p.codes.is_empty());
+    assert!(p.code_index.is_empty());
     m.stop();
 }
 
@@ -301,6 +305,33 @@ fn graph_payload_serves_stored_snapshot() {
     assert_eq!(p.ids.len(), 1);
     assert_eq!(p.ids[0], "n1");
     assert_eq!(p.estate, "estate-a");
+    // V2-P1b: this fixture predates udcCode — decode tolerates the absent
+    // key and the node gets the -1 "no code" sentinel.
+    assert_eq!(p.code_index, vec![-1]);
+    assert!(p.codes.is_empty());
+    m.stop();
+}
+
+#[test]
+fn graph_payload_dictionary_encodes_per_node_codes() {
+    // V2-P1b: a stored snapshot whose nodes carry udcCode dictionary-encodes
+    // onto the wire — deduped, first-seen order, with a -1 sentinel for the
+    // node that has none.
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        let snapshot = r#"{"nodes":[
+            {"id":"n1","communityId":0,"centrality":0.1,"anomaly":false,"udcCode":"657"},
+            {"id":"n2","communityId":0,"centrality":0.2,"anomaly":false,"udcCode":"615.85"},
+            {"id":"n3","communityId":0,"centrality":0.3,"anomaly":false,"udcCode":"657"},
+            {"id":"n4","communityId":0,"centrality":0.4,"anomaly":false}
+        ],"edges":[],"structurePending":false}"#;
+        store.write_topology_snapshot("estate-codes", NOW, snapshot, None).unwrap();
+    }
+    let p = m.graph_payload(NOW, Some("estate-codes")).unwrap();
+    assert_eq!(p.ids, vec!["n1", "n2", "n3", "n4"]);
+    assert_eq!(p.codes, vec!["657".to_string(), "615.85".to_string()]);
+    assert_eq!(p.code_index, vec![0, 1, 0, -1]);
     m.stop();
 }
 

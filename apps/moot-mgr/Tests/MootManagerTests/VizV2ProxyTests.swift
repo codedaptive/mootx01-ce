@@ -286,6 +286,103 @@ struct GraphTombstonedTsTests {
     }
 }
 
+// MARK: - V2-P1b: per-node classification codes, dictionary-encoded on GraphPayload
+
+struct GraphNodeCodesTests {
+
+    @Test("codes dedupe in first-seen order; codeIndex is parallel to ids with -1 for no code")
+    func codesDedupeFirstSeenOrder() throws {
+        // n1="657", n2="615.85", n3="657" (repeat — must reuse n1's slot, not
+        // append a duplicate), n4 has no udcCode at all (absent → sentinel -1).
+        let nodes = [
+            GraphNodePayload(id: "n1", communityId: 0, centrality: 0.1, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil, udcCode: "657"),
+            GraphNodePayload(id: "n2", communityId: 0, centrality: 0.2, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil, udcCode: "615.85"),
+            GraphNodePayload(id: "n3", communityId: 0, centrality: 0.3, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil, udcCode: "657"),
+            GraphNodePayload(id: "n4", communityId: 0, centrality: 0.4, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil, udcCode: nil),
+        ]
+        let payload = GraphPayload(
+            nodes: nodes, edges: [], communities: [], analytics: [],
+            structurePending: false, pending: [], generatedTs: nil,
+            estate: "test", snapshotTs: "2026-07-09T00:00:00.000Z"
+        )
+        let obj = try jsonDict(payload)
+        #expect((obj["codes"] as? [String]) == ["657", "615.85"])
+        #expect((obj["codeIndex"] as? [Int]) == [0, 1, 0, -1])
+    }
+
+    @Test("Empty-string udcCode is the same sentinel as absent — never a dictionary entry")
+    func emptyCodeIsSentinelNotDictionaryEntry() throws {
+        let nodes = [
+            GraphNodePayload(id: "n1", communityId: 0, centrality: 0.1, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil, udcCode: ""),
+            GraphNodePayload(id: "n2", communityId: 0, centrality: 0.2, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil, udcCode: "540"),
+        ]
+        let payload = GraphPayload(
+            nodes: nodes, edges: [], communities: [], analytics: [],
+            structurePending: false, pending: [], generatedTs: nil,
+            estate: "test", snapshotTs: "2026-07-09T00:00:00.000Z"
+        )
+        let obj = try jsonDict(payload)
+        #expect((obj["codes"] as? [String]) == ["540"])
+        #expect((obj["codeIndex"] as? [Int]) == [-1, 0])
+    }
+
+    @Test("StoredGraphPayload tolerates a snapshot predating udcCode — every node gets -1")
+    func decodeToleratesSnapshotPredatingUdcCode() throws {
+        let wire = """
+        {"nodes":[{"id":"n1","communityId":0,"centrality":0.5,"anomaly":false},
+                  {"id":"n2","communityId":1,"centrality":0.6,"anomaly":false}],
+         "edges":[],
+         "structurePending":false}
+        """
+        let proxy = try JSONDecoder().decode(StoredGraphPayload.self, from: Data(wire.utf8))
+        #expect(proxy.nodes.map(\.udcCode) == [nil, nil])
+
+        let payload = GraphPayload(
+            nodes: proxy.nodes, edges: proxy.edges, communities: [], analytics: [],
+            structurePending: false, pending: [], generatedTs: nil,
+            estate: "test", snapshotTs: "2026-07-09T00:00:00.000Z"
+        )
+        let obj = try jsonDict(payload)
+        #expect((obj["codes"] as? [String]) == [])
+        #expect((obj["codeIndex"] as? [Int]) == [-1, -1])
+    }
+
+    @Test("Node payload re-encodes udcCode with an explicit null when absent")
+    func udcCodeExplicitNullWhenAbsent() throws {
+        let node = GraphNodePayload(id: "n1", communityId: 0, centrality: 0.5, anomaly: false,
+                                    createdTs: nil, tombstonedTs: nil, udcCode: nil)
+        let obj = try jsonDict(node)
+        #expect(obj.keys.contains("udcCode"), "udcCode key must be present")
+        #expect(obj["udcCode"] is NSNull, "nil udcCode must encode as JSON null")
+
+        let coded = GraphNodePayload(id: "n2", communityId: 0, centrality: 0.5, anomaly: false,
+                                     createdTs: nil, tombstonedTs: nil, udcCode: "657")
+        let codedObj = try jsonDict(coded)
+        #expect((codedObj["udcCode"] as? String) == "657")
+    }
+
+    @Test("Local-fallback GraphPayload (no nodes) emits codes/codeIndex as empty, never null")
+    func fallbackEmitsEmptyArraysNotNull() throws {
+        let payload = GraphPayload(
+            nodes: [], edges: [], communities: [], analytics: [],
+            structurePending: true,
+            pending: ["topology snapshot not yet available"],
+            generatedTs: nil, estate: "all", snapshotTs: "2026-07-09T00:00:00.000Z"
+        )
+        let obj = try jsonDict(payload)
+        #expect((obj["codes"] as? [Any])?.isEmpty == true)
+        #expect((obj["codeIndex"] as? [Any])?.isEmpty == true)
+        #expect(!(obj["codes"] is NSNull))
+        #expect(!(obj["codeIndex"] is NSNull))
+    }
+}
+
 // MARK: - L3: community enrichment at the proxy boundary
 
 struct CommunityEnrichmentTests {
@@ -436,14 +533,22 @@ struct GraphPayloadSizeTests {
     /// 3. **Size ceiling**: 50 k-node payload must encode to fewer than 5 MB.
     ///    The per-object format (before FIX 2b) would have been ~5.6 MB for the
     ///    same fixture; the compact format is ~1 MB (short IDs used in test).
+    /// 4. **Code dictionary (V2-P1b)**: ~135 distinct classification codes
+    ///    cycled across the 50k nodes dictionary-encode as `codes`/`codeIndex`
+    ///    without meaningfully moving the payload size — the dictionary is
+    ///    sized to the distinct-code count, not the node count.
     @Test("50k-node GraphPayload encodes in compact parallel format and within 5 MB ceiling")
     func fiftyKNodePayloadSizeAndFieldAbsence() throws {
         // Build 50,000 minimal nodes and a small edge set to exercise both types.
         // IDs are short strings to keep the fixture realistic but not bloated by UUIDs.
+        // ~135 distinct classification codes cycled across the nodes (V2-P1b) —
+        // exercises the dictionary encoder at a realistic distinct-code count.
+        let distinctCodeCount = 135
         let nodes = (0..<50_000).map { i in
             GraphNodePayload(id: "\(i)", communityId: i % 16,
                              centrality: 0.5, anomaly: false,
-                             createdTs: nil, tombstonedTs: nil)
+                             createdTs: nil, tombstonedTs: nil,
+                             udcCode: String(format: "%03d", i % distinctCodeCount))
         }
         let edges = (0..<100).map { i in
             GraphEdgePayload(source: "\(i)", target: "\(i + 1)",
@@ -465,11 +570,13 @@ struct GraphPayloadSizeTests {
         let data = try APIJSON.encode(payload)
         let text = String(data: data, encoding: .utf8) ?? ""
 
-        // --- Size gate: compact format must be under 5 MB ---
+        // --- Size gate: compact format + 135-code dictionary must be under 5 MB ---
         // Compact parallel arrays + [[si,ti,w,et]] edges: ~1 MB for this short-ID fixture.
-        // The per-object format (pre-FIX 2b) was ~5.6 MB — compact saves 4.6 MB.
+        // The per-object format (pre-FIX 2b) was ~5.6 MB — compact saves 4.6 MB. The
+        // 135-entry code dictionary adds well under 1 KB (dictionary sized to distinct
+        // codes, not the 50k node count) plus one Int per node for codeIndex.
         #expect(data.count < 5_000_000,
-                "50k-node compact payload must be < 5 MB; got \(data.count) bytes")
+                "50k-node compact payload with 135-code dictionary must be < 5 MB; got \(data.count) bytes")
 
         // --- Compact format presence gate ---
         // Top-level parallel-array keys must be present.
@@ -479,6 +586,10 @@ struct GraphPayloadSizeTests {
                 "compact format must emit \"communityId\" parallel array key")
         #expect(text.contains("\"centrality\""),
                 "compact format must emit \"centrality\" parallel array key")
+        #expect(text.contains("\"codes\""),
+                "compact format must emit \"codes\" dictionary key (V2-P1b)")
+        #expect(text.contains("\"codeIndex\""),
+                "compact format must emit \"codeIndex\" parallel array key (V2-P1b)")
         // Legacy per-object \"nodes\" key must NOT appear (replaced by parallel arrays).
         #expect(!text.contains("\"nodes\""),
                 "compact format must not emit old per-object \"nodes\" key")
@@ -499,5 +610,20 @@ struct GraphPayloadSizeTests {
         // createdTs appears once (as the parallel array key) not 50k times.
         let createdTsKeyCount = text.components(separatedBy: "\"createdTs\"").count - 1
         #expect(createdTsKeyCount == 1, "createdTs must appear once (parallel array key), got \(createdTsKeyCount)")
+
+        // --- Code dictionary gate (V2-P1b): sized to distinct codes, never per-node ---
+        // "udcCode" is a stored-node field, not a GraphPayload wire key — it must not
+        // leak onto the compact wire (codes/codeIndex are the only wire representation).
+        #expect(!text.contains("\"udcCode\""),
+                "udcCode must not appear on the GraphPayload wire (dictionary-encoded instead)")
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let codes = obj?["codes"] as? [String] ?? []
+        let codeIndex = obj?["codeIndex"] as? [Int] ?? []
+        #expect(codes.count == distinctCodeCount,
+                "codes dictionary must hold exactly \(distinctCodeCount) distinct entries, got \(codes.count)")
+        #expect(codeIndex.count == 50_000,
+                "codeIndex must be parallel to ids (50k entries), got \(codeIndex.count)")
+        #expect(codeIndex.allSatisfy { $0 >= 0 && $0 < distinctCodeCount },
+                "every codeIndex entry must be a valid index into codes (no -1s expected — every node has a code)")
     }
 }

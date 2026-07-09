@@ -755,6 +755,17 @@ impl MootManager {
         let mut tombstoned: HashMap<String, String> = HashMap::new();
         // Build the id→index map for edge endpoint resolution.
         let mut id_to_idx: HashMap<String, usize> = HashMap::with_capacity(node_count);
+        // Per-node classification-code dictionary (V2-P1b): deduped, first-
+        // seen order. code_to_index resolves a repeated code to its existing
+        // dictionary slot in O(1) instead of re-appending it — this is what
+        // keeps `codes` sized to the distinct-code count (~10^2) rather than
+        // the node count (up to 50k), inside the existing 5 MB wire ceiling.
+        // Codes cross this surface on the same basis as `/api/lattice`: a
+        // classification code is a pure function of the pinned public FDC/UDC
+        // frame, never memory content.
+        let mut codes: Vec<String> = Vec::new();
+        let mut code_to_index: HashMap<String, i64> = HashMap::new();
+        let mut code_index: Vec<i64> = Vec::with_capacity(node_count);
 
         for (idx, n) in live_nodes.iter().enumerate() {
             id_to_idx.insert(n.id.clone(), idx);
@@ -766,6 +777,21 @@ impl MootManager {
             if let Some(ts) = &n.tombstoned_ts {
                 tombstoned.insert(idx.to_string(), ts.clone());
             }
+            // Absent/empty udc_code → -1 sentinel (no code), never a dictionary entry.
+            let code_idx: i64 = match n.udc_code.as_deref().filter(|c| !c.is_empty()) {
+                Some(code) => {
+                    if let Some(&existing) = code_to_index.get(code) {
+                        existing
+                    } else {
+                        let new_idx = codes.len() as i64;
+                        codes.push(code.to_string());
+                        code_to_index.insert(code.to_string(), new_idx);
+                        new_idx
+                    }
+                }
+                None => -1,
+            };
+            code_index.push(code_idx);
         }
 
         // Map stored per-object edges → compact index-pair edges.
@@ -789,6 +815,8 @@ impl MootManager {
             anomaly,
             created_ts,
             tombstoned,
+            codes,
+            code_index,
             edges: compact_edges,
             communities,
             analytics,
@@ -1251,6 +1279,9 @@ mod tests {
         //  - "source" / "target" keys absent (edges are index-pair arrays now)
         //  - "createdTs" appears once (as the parallel-array key, not per-node)
         //  - dropped fields (nounType, lastActiveTs, decayedWeight) absent
+        //  - "codes"/"codeIndex" dictionary-encode ~135 distinct codes across
+        //    the 50k nodes and the payload STILL stays under the 5 MB ceiling
+        //    (V2-P1b)
         use crate::api_payloads::{CompactEdge, GraphPayload};
         use std::collections::HashMap;
 
@@ -1261,6 +1292,13 @@ mod tests {
         let anomaly: Vec<bool>     = vec![false; n];
         let created_ts: Vec<Option<String>> = vec![None; n];
         let tombstoned: HashMap<String, String> = HashMap::new();
+
+        // ~135 distinct classification codes cycled across the 50k nodes —
+        // the dictionary stays sized to the distinct-code count, not the
+        // node count, so this must not meaningfully move the payload size.
+        let distinct_code_count = 135usize;
+        let codes: Vec<String> = (0..distinct_code_count).map(|i| format!("{:03}", i)).collect();
+        let code_index: Vec<i64> = (0..n).map(|i| (i % distinct_code_count) as i64).collect();
 
         // 70k edges using sequential index pairs so endpoint indices are valid.
         let edges: Vec<CompactEdge> = (0u64..70_000)
@@ -1278,6 +1316,8 @@ mod tests {
             anomaly,
             created_ts,
             tombstoned,
+            codes,
+            code_index,
             edges,
             communities: vec![],
             analytics: vec![],
@@ -1290,16 +1330,18 @@ mod tests {
 
         let json = serde_json::to_string(&payload).expect("serialise must succeed");
 
-        // --- Size gate: compact format and within 5 MB ceiling ---
+        // --- Size gate: compact format + code dictionary and within 5 MB ceiling ---
         assert!(
             json.len() < 5_000_000,
-            "50k-node/70k-edge payload must be < 5 MB (compact format); got {} bytes",
+            "50k-node/70k-edge payload with 135-code dictionary must be < 5 MB (compact format); got {} bytes",
             json.len()
         );
 
         // --- Format gate: parallel-array keys present ---
         assert!(json.contains("\"ids\""),        "\"ids\" key must appear in compact format");
         assert!(json.contains("\"communityId\""),"\"communityId\" key must appear in compact format");
+        assert!(json.contains("\"codes\""),      "\"codes\" key must appear (V2-P1b dictionary)");
+        assert!(json.contains("\"codeIndex\""),  "\"codeIndex\" key must appear (V2-P1b dictionary)");
 
         // --- Format gate: old per-object keys absent ---
         assert!(!json.contains("\"nodes\""),  "\"nodes\" key must NOT appear (compact format)");
@@ -1318,6 +1360,81 @@ mod tests {
             "\"createdTs\" must appear exactly once (as the array key); got {}",
             created_ts_key_count
         );
+    }
+
+    // ── V2-P1b: per-node classification codes — dictionary encoding ──────────
+
+    #[test]
+    fn graph_payload_codes_dedupe_in_first_seen_order() {
+        // Four nodes: n1="657", n2="615.85", n3="657" (repeat — must reuse
+        // n1's dictionary slot, not append a duplicate), n4 has no udcCode
+        // key at all (absent — tolerant decode, sentinel -1).
+        let mgr = temp_manager();
+        let store = mgr.stats_store().unwrap();
+        let snapshot = r#"{"nodes":[
+            {"id":"n1","communityId":0,"centrality":0.1,"anomaly":false,"udcCode":"657"},
+            {"id":"n2","communityId":0,"centrality":0.2,"anomaly":false,"udcCode":"615.85"},
+            {"id":"n3","communityId":0,"centrality":0.3,"anomaly":false,"udcCode":"657"},
+            {"id":"n4","communityId":0,"centrality":0.4,"anomaly":false}
+        ],"edges":[],"structurePending":false}"#;
+        store.write_topology_snapshot("estate-codes", 100.0, snapshot, None).unwrap();
+        let payload = mgr.graph_payload(100.0, Some("estate-codes")).expect("graph_payload must succeed");
+
+        // Dictionary is deduped, first-seen order: "657" (n1) before "615.85" (n2).
+        assert_eq!(payload.codes, vec!["657".to_string(), "615.85".to_string()]);
+        // codeIndex is parallel to ids: n1→0, n2→1, n3→0 (reused slot), n4→-1 (absent).
+        assert_eq!(payload.ids, vec!["n1", "n2", "n3", "n4"]);
+        assert_eq!(payload.code_index, vec![0, 1, 0, -1]);
+    }
+
+    #[test]
+    fn graph_payload_empty_udc_code_is_sentinel_not_dictionary_entry() {
+        // An explicit empty-string udcCode is treated identically to an
+        // absent key — never a "" entry in the dictionary.
+        let mgr = temp_manager();
+        let store = mgr.stats_store().unwrap();
+        let snapshot = r#"{"nodes":[
+            {"id":"n1","communityId":0,"centrality":0.1,"anomaly":false,"udcCode":""},
+            {"id":"n2","communityId":0,"centrality":0.2,"anomaly":false,"udcCode":"540"}
+        ],"edges":[],"structurePending":false}"#;
+        store.write_topology_snapshot("estate-empty-code", 100.0, snapshot, None).unwrap();
+        let payload = mgr.graph_payload(100.0, Some("estate-empty-code")).expect("graph_payload must succeed");
+
+        assert_eq!(payload.codes, vec!["540".to_string()]);
+        assert_eq!(payload.code_index, vec![-1, 0]);
+    }
+
+    #[test]
+    fn graph_payload_tolerates_snapshot_predating_udc_code() {
+        // A snapshot written before V2-P1b — no node carries a udcCode key
+        // anywhere. Decode must not error; every node gets the -1 sentinel
+        // and the dictionary stays empty.
+        let mgr = temp_manager();
+        let store = mgr.stats_store().unwrap();
+        let snapshot = r#"{"nodes":[
+            {"id":"n1","communityId":0,"centrality":0.1,"anomaly":false},
+            {"id":"n2","communityId":1,"centrality":0.2,"anomaly":false}
+        ],"edges":[],"structurePending":false}"#;
+        store.write_topology_snapshot("estate-old", 100.0, snapshot, None).unwrap();
+        let payload = mgr.graph_payload(100.0, Some("estate-old")).expect("graph_payload must succeed");
+
+        assert!(payload.codes.is_empty(), "no udcCode anywhere → empty dictionary");
+        assert_eq!(payload.code_index, vec![-1, -1]);
+    }
+
+    #[test]
+    fn graph_payload_fallback_codes_are_empty_not_null() {
+        // No snapshot written yet (structurePending path) — codes/codeIndex
+        // must be present as empty arrays, never omitted or null.
+        let mgr = temp_manager();
+        let payload = mgr.graph_payload(100.0, None).expect("graph_payload must succeed");
+        assert!(payload.structure_pending);
+        assert!(payload.codes.is_empty());
+        assert!(payload.code_index.is_empty());
+        // Confirm the wire actually emits the keys (not an omitted Option).
+        let json = serde_json::to_string(&payload).expect("serialise must succeed");
+        assert!(json.contains("\"codes\":[]"));
+        assert!(json.contains("\"codeIndex\":[]"));
     }
 
     // ── retention prefs filename — stem-derived, not fixed ───────────────────

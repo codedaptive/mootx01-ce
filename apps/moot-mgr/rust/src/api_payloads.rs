@@ -199,6 +199,13 @@ pub struct GraphCommunityPayload {
 /// nounType was redundant (all drawers are type 0); lastActiveTs is not
 /// surfaced by the dashboard renderer.  The `#[serde(default)]` on absent
 /// fields means existing snapshots with these keys still decode without error.
+///
+/// `udc_code` (V2-P1b) is the node's FDC/UDC classification code, decoded
+/// tolerantly — `#[serde(default)]` means stored snapshots written before
+/// this field existed still decode (absent key → `None`). It is dictionary-
+/// encoded onto the compact `/api/graph` wire (`codes`/`code_index` on
+/// `GraphPayload`, built in `MootManager::graph_payload`), never re-emitted
+/// per-node.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GraphNodePayload {
     pub id: String,
@@ -212,6 +219,8 @@ pub struct GraphNodePayload {
     pub created_ts: Option<String>,
     #[serde(rename = "tombstonedTs", default)]
     pub tombstoned_ts: Option<String>,
+    #[serde(rename = "udcCode", default)]
+    pub udc_code: Option<String>,
 }
 
 /// Stored edge shape decoded from governor-written topology_snapshots.
@@ -291,6 +300,14 @@ impl Serialize for CompactEdge {
 ///   `createdTs`    — `[String?]` ISO-8601 ingest timestamp or null per node
 ///   `tombstoned`   — `{indexStr: ts}` SPARSE map (tombstoned nodes only)
 ///
+/// Per-node classification codes are dictionary-encoded (V2-P1b), same
+/// rationale as the compact edges below — ~10^2 distinct codes vs up to 50k
+/// nodes:
+///
+///   `codes`        — `[String]` deduped code dictionary, first-seen order
+///   `codeIndex`    — `[i64]` index into `codes` per node, parallel to `ids`;
+///                    `-1` means the node has no code
+///
 /// Edges are compact arrays-of-arrays:
 ///   `edges` — `[[si, ti, w, et], ...]`
 ///
@@ -313,6 +330,14 @@ pub struct GraphPayload {
     pub created_ts: Vec<Option<String>>,
     /// Sparse tombstone map: string(nodeIndex) → ISO-8601 ts.
     pub tombstoned: std::collections::HashMap<String, String>,
+    /// Deduped classification-code dictionary, first-seen order over the
+    /// node array (V2-P1b). Sized to the distinct-code count (~10^2), not
+    /// the node count (up to 50k) — keeps the payload inside the 5 MB ceiling.
+    pub codes: Vec<String>,
+    /// Index into `codes` per node, parallel to `ids`. `-1` means the node
+    /// carries no code (absent or empty `udcCode`).
+    #[serde(rename = "codeIndex")]
+    pub code_index: Vec<i64>,
     /// Compact edges: each element serializes as [si, ti, w, et].
     pub edges: Vec<CompactEdge>,
     pub communities: Vec<GraphCommunityPayload>,

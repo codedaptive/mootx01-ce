@@ -112,8 +112,10 @@ struct GraphAPITests {
         let obj = try await jsonObject(port: port, path: "/api/graph")
         // FIX 2b compact format: nodes are parallel arrays (ids, communityId, ...)
         // not a per-object "nodes" array. Edges are compact [[si,ti,w,et]].
+        // codes/codeIndex are the V2-P1b dictionary-encoded per-node classification
+        // codes — always present alongside the other parallel arrays.
         for key in ["ids", "communityId", "centrality", "anomaly", "createdTs",
-                    "tombstoned", "edges", "communities", "analytics",
+                    "tombstoned", "codes", "codeIndex", "edges", "communities", "analytics",
                     "structurePending", "pending", "generatedTs", "estate", "snapshotTs"] {
             #expect(obj[key] != nil, "missing /api/graph field: \(key)")
         }
@@ -129,6 +131,9 @@ struct GraphAPITests {
         // is true, all parallel arrays are empty (no nodes, no edges).
         #expect((obj["ids"] as? [Any])?.isEmpty == true, "ids must be empty when pending")
         #expect((obj["edges"] as? [Any])?.isEmpty == true, "edges must be empty when pending")
+        // V2-P1b: codes/codeIndex are always present, empty on the fallback path.
+        #expect((obj["codes"] as? [Any])?.isEmpty == true, "codes must be empty when pending")
+        #expect((obj["codeIndex"] as? [Any])?.isEmpty == true, "codeIndex must be empty when pending")
         // The gap is enumerated honestly, not silently empty.
         #expect((obj["pending"] as? [Any])?.isEmpty == false)
         // generatedTs is null when no snapshot has been written.
@@ -277,6 +282,43 @@ struct GraphAPITests {
         let ids = obj["ids"] as? [String] ?? []
         #expect(ids.count == 1, "compact ids array must have 1 entry")
         #expect(ids.first == "node-fixture-1", "first id must be node-fixture-1")
+    }
+
+    // V2-P1b end-to-end: governor writes a snapshot whose nodes carry udcCode →
+    // moot-mgr decodes and dictionary-encodes → HTTP response carries codes/codeIndex.
+    @Test("Graph endpoint dictionary-encodes per-node udcCode as codes/codeIndex")
+    func graphEndpointDictionaryEncodesNodeCodes() async throws {
+        let snapshotJSON = Data("""
+        {"nodes":[{"id":"node-a","communityId":0,"centrality":0.5,"anomaly":false,
+                   "createdTs":null,"tombstonedTs":null,"udcCode":"657"},
+                  {"id":"node-b","communityId":0,"centrality":0.6,"anomaly":false,
+                   "createdTs":null,"tombstonedTs":null,"udcCode":"615.85"},
+                  {"id":"node-c","communityId":0,"centrality":0.7,"anomaly":false,
+                   "createdTs":null,"tombstonedTs":null,"udcCode":"657"},
+                  {"id":"node-d","communityId":0,"centrality":0.8,"anomaly":false,
+                   "createdTs":null,"tombstonedTs":null}],
+         "edges":[],
+         "structurePending":false,
+         "generatedTs":"2020-01-01T00:00:00Z"}
+        """.utf8)
+        let (host, port) = try await makeStartedHost { store in
+            try await store.writeTopologySnapshot(
+                estate: "codes-estate",
+                generatedAt: Date(timeIntervalSince1970: 1_577_836_800),
+                payload: snapshotJSON
+            )
+        }
+        defer { Task { await host.stop() } }
+
+        let obj = try await jsonObject(port: port, path: "/api/graph?estate=codes-estate")
+        let ids = obj["ids"] as? [String] ?? []
+        #expect(ids == ["node-a", "node-b", "node-c", "node-d"])
+        let codes = obj["codes"] as? [String] ?? []
+        let codeIndex = obj["codeIndex"] as? [Int] ?? []
+        // Deduped, first-seen order: "657" (node-a) before "615.85" (node-b).
+        #expect(codes == ["657", "615.85"])
+        // node-a→0, node-b→1, node-c→0 (reused slot), node-d→-1 (no code).
+        #expect(codeIndex == [0, 1, 0, -1])
     }
 }
 
