@@ -214,8 +214,11 @@ try {
           <label class="topo-label" for="topoEstate">estate</label>
           <select class="topo-select" id="topoEstate" aria-label="Estate filter"></select>
           <button class="btn" id="topoReset">Reset layout</button>
-          <!-- L4 strata view: perspective projection with age-derived depth. Off = classic 2D. -->
+          <!-- L4 strata view: perspective projection with centrality-derived depth. Off = classic 2D. -->
           <button class="btn" id="topoDimToggle" aria-pressed="false">3D</button>
+          <!-- V2-P2b: nmf_bond (derived lattice/classification) edges are faint
+               tissue, hidden by default — this chip reveals them. -->
+          <button class="btn" id="topoLatticeToggle" aria-pressed="false">lattice</button>
           <span class="tag">structure <b id="topoStructure">—</b></span>
         </div>
       </div>
