@@ -98,6 +98,22 @@ public final class NovelTokenCache: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [PoolEntry] = []
 
+    // TEST-ONLY witness bookkeeping (WORDCLASS-CACHE-RACE mission,
+    // 2026-07-09). `count` alone cannot prove a SPECIFIC token was
+    // recorded when this instance is `sharedNovelCache` — a process-wide
+    // singleton other parallel test suites also record into and drain
+    // concurrently, so a before/after global-count delta is racy. These
+    // two sets let a test register interest in one token (`watch`) and
+    // later confirm, race-immune, whether THAT token was recorded
+    // (`wasRecorded`) — regardless of whether a concurrent drain (from
+    // another suite's record() calls hitting the 50-entry threshold)
+    // has since removed it from `pending`. Both sets are empty unless a
+    // test explicitly calls `watch(token:)`, so production behavior
+    // (buffering, threshold check, submission) is completely unchanged;
+    // `record()` only pays one `isEmpty` check per call when unused.
+    private var watchedTokens: Set<String> = []
+    private var confirmedTokens: Set<String> = []
+
     private let tableVersion: String
     private let platform: String
     private let taggerVersion: String
@@ -129,6 +145,14 @@ public final class NovelTokenCache: @unchecked Sendable {
     public func record(token: String, wordClass: WordClass) {
         lock.lock()
         pending.append(PoolEntry(token: token, tag: wordClass.poolTag))
+        // Witness bookkeeping (see `watchedTokens` docs above): cheap
+        // no-op for the overwhelmingly common case where no test is
+        // watching. Marking `confirmedTokens` inside this same lock
+        // acquisition — before any drain below can occur — is what
+        // makes `wasRecorded` race-immune to a concurrent drain.
+        if !watchedTokens.isEmpty, watchedTokens.remove(token) != nil {
+            confirmedTokens.insert(token)
+        }
         let submission: PoolSubmission?
         if pending.count >= Self.poolSubmitThreshold {
             submission = PoolSubmission(
@@ -155,5 +179,36 @@ public final class NovelTokenCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return pending.count
+    }
+
+    // MARK: - Test-only witness seam (WORDCLASS-CACHE-RACE, 2026-07-09)
+
+    /// Registers `token` for witness tracking ahead of a `record` call a
+    /// test expects (or expects NOT) to happen. Call this BEFORE
+    /// triggering the code path under test, then read back
+    /// `wasRecorded(token:)` after — never the reverse, or the
+    /// registration can race the `record` call it is meant to observe.
+    ///
+    /// Test-only: no production call site uses this. Safe to call on
+    /// `sharedNovelCache` from a parallel test suite because it only
+    /// ever affects observability of the exact token string given, not
+    /// buffering/threshold/submission behavior for any token.
+    public func watch(token: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        watchedTokens.insert(token)
+    }
+
+    /// True if `token` was passed to `record(token:wordClass:)` at any
+    /// point after `watch(token:)` registered it — regardless of
+    /// whether it is still in `pending` or has already been
+    /// drained/submitted by this or a concurrent call. Race-immune to
+    /// concurrent drains: the witness mark is written inside the same
+    /// lock acquisition `record` uses to append the entry, strictly
+    /// before that call's drain check.
+    public func wasRecorded(token: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return confirmedTokens.contains(token)
     }
 }
