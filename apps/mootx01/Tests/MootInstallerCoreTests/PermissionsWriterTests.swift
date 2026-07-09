@@ -7,7 +7,7 @@
 // namespaces). Tool names are injected (the real caller derives them from
 // the linked AriaMCP ToolProjection at runtime); most tests use a fixed
 // fixture list, but `classificationTableIsExhaustive` uses a PINNED copy of
-// the real 63-tool inventory (see its own doc comment for why it is pinned
+// the real 65-tool inventory (see its own doc comment for why it is pinned
 // rather than fetched live). All I/O uses sandbox directories.
 
 import Testing
@@ -72,6 +72,7 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_confirm_migration") == .ask)
         #expect(PermissionsWriter.classify("moot_run_migration") == .ask)
         #expect(PermissionsWriter.classify("moot_reindex") == .ask)
+        #expect(PermissionsWriter.classify("moot_reclassify_fdc") == .ask)
         #expect(PermissionsWriter.classify("moot_dream") == .ask)
         #expect(PermissionsWriter.classify("moot_consolidate") == .ask)
         #expect(PermissionsWriter.classify("moot_synthesize") == .ask)
@@ -112,7 +113,7 @@ struct PermissionsWriterTests {
     /// gains or removes a tool, update BOTH this pinned list and whichever
     /// of `readTools` / `additiveWriteTools` / `mutationTools` /
     /// `destructiveTools` the new tool belongs in.
-    @Test("classify's tier tables are exhaustive over the real 64-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 65-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
@@ -129,16 +130,16 @@ struct PermissionsWriterTests {
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
             "moot_memory_search", "moot_monitoring_status", "moot_move_memory", "moot_palace_import",
             "moot_read_journal", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped",
-            "moot_recollect", "moot_reindex", "moot_retire_fact", "moot_run_migration",
+            "moot_reclassify_fdc", "moot_recollect", "moot_reindex", "moot_retire_fact", "moot_run_migration",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
             "moot_write_journal",
         ]
-        // Count guard (see doc comment): 64 as of moot_monitoring_status (ADR-025 wave 8.2).
+        // Count guard (see doc comment): 65 as of moot_reclassify_fdc.
         // A mismatch here means THIS PINNED LIST is stale relative to
         // tool_list.rs / ToolProjection.swift — fix the pin first, then re-run
         // before trusting the set-difference below.
-        #expect(realTools.count == 64, "pinned tool inventory drifted from the real surface count")
+        #expect(realTools.count == 65, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)
@@ -276,6 +277,42 @@ struct PermissionsWriterTests {
         // Idempotent: running again moves nothing further.
         let second = try PermissionsWriter.migrateTiers(at: settingsURL, toolNames: toolNames)
         #expect(second == 0)
+    }
+
+    @Test("migrateTiers never loosens a user-set ask on a mutation or destructive tool")
+    func migrateTiersPreservesMutationAsk() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // Every mutation-class tool sits at ask (its shipped tier) and one
+        // destructive tool was user-moved from deny to ask. Convergence must
+        // not loosen ANY of them toward allow: mutation tools converge onto
+        // ask (no-op) and the destructive tool converges onto deny — a
+        // tightening, never a loosening. This pins the Rule 2 invariant that
+        // ask→allow movement exists ONLY for allow-class (read/additive)
+        // fossils.
+        let existing: [String: Any] = [
+            "permissions": [
+                "ask": [
+                    "mcp__mootx01__moot_withdraw_memory",
+                    "mcp__mootx01__moot_reclassify_fdc",
+                    "mcp__mootx01__moot_erase_memory",
+                ]
+            ]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.migrateTiers(at: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let ask = perms["ask"] as? [String] ?? []
+        #expect(!allow.contains("mcp__mootx01__moot_withdraw_memory"), "mutation ask must never loosen to allow")
+        #expect(!allow.contains("mcp__mootx01__moot_reclassify_fdc"), "mutation ask must never loosen to allow")
+        #expect(!allow.contains("mcp__mootx01__moot_erase_memory"), "destructive ask must never loosen to allow")
+        #expect(ask.contains("mcp__mootx01__moot_withdraw_memory"))
+        #expect(ask.contains("mcp__mootx01__moot_reclassify_fdc"))
     }
 
     @Test("migrateTiers never moves an entry the user placed in deny (deny is sacred)")

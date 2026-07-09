@@ -17,10 +17,10 @@ import SubstrateML
 // Unlike Keystones/Constellation (unit-weight per SPEC § 7.1), topology
 // assembles a weighted graph: tunnel 1.0 (explicit structural link),
 // kgFact 0.3 (derived shared-subject bond — weaker evidence class),
-// lattice 0.2 (derived classification bond — drawers sharing a non-empty
-// udcCode bonded in a star from the earliest-filed member). The weights
-// ride SubstrateML's existing weighted adjacency; nothing new descends to
-// the substrate layer.
+// lattice 0.2 (derived classification overlay — drawers sharing a real,
+// non-"000" udcCode bonded in a star from the earliest-filed member). Lattice
+// overlays are emitted on the wire but do not feed centrality or Louvain; the
+// default topology clusters on explicit/semantic structure, not storage address.
 
 // Module-scoped logger. Fleet standard: subsystem "com.mootx01.kit",
 // category = module name.
@@ -124,8 +124,8 @@ public struct GraphTopologyNode: Sendable, Equatable, Codable {
 /// A directed edge in the estate topology graph.
 /// edgeType "tunnel": explicit LocusKit Tunnel (sourceDrawerId → targetDrawerId).
 /// edgeType "kgFact": implicit bond between drawers sharing a KGFact subject.
-/// edgeType "lattice": derived classification bond — drawers sharing a non-empty
-/// udcCode, star topology from the earliest-filedAt hub. Feeds Louvain only.
+/// edgeType "lattice": derived classification overlay — drawers sharing a real,
+/// non-"000" udcCode, star topology from the earliest-filedAt hub. Not Louvain input.
 public struct GraphTopologyEdge: Sendable, Equatable, Codable {
     public let source: String
     public let target: String
@@ -154,9 +154,9 @@ public struct GraphTopologyCommunity: Sendable, Equatable, Codable {
     public let id: Int
     /// Number of live drawers assigned to this community.
     public let size: Int
-    /// Most frequent non-empty `udcCode` among the community's member drawers.
+    /// Most frequent classified `udcCode` among the community's member drawers.
     /// Frequency ties break lexicographically ascending for determinism;
-    /// "" when every member drawer has an empty code.
+    /// "" when every member drawer has an empty or "000" code.
     public let dominantUdcCode: String
 
     public init(id: Int, size: Int, dominantUdcCode: String) {
@@ -196,20 +196,9 @@ extension NeuronKit {
     public static let topologyMaxLevels = 10
 
     /// Louvain resolution (Reichardt-Bornholdt gamma) for the community
-    /// lenses. Chosen from the scale-invariant absorption bound: a supernode
-    /// with degree k and edge weight w into a target community merges
-    /// whenever gamma < w/k. A tunnel-bonded pair (k = 2·1.0 + 0.2 = 2.2)
-    /// with one lattice bond (w = 0.2) absorbs below 0.2/2.2 ≈ 0.0909;
-    /// 0.05 sits at ~55 % of that bound with headroom for pair members
-    /// carrying several distinct lattice bonds (bound stays above 0.05 up
-    /// to ~8 bonds). Large continents joined by weak bridges have merge
-    /// thresholds ≈ w_bridge/m — orders of magnitude smaller — so this
-    /// gamma collapses tunnel-pair fragments into their lattice stars
-    /// WITHOUT gluing real continents together. Value hand-derived from
-    /// the Reichardt-Bornholdt gain formula: ΔQ(γ) = (k_{i,B}−k_{i,A})/m
-    /// − γ·k_i·(σ_B−σ_A^excl+k_i)/(2m²), with γ=0.05 chosen so the
-    /// penalty is small enough to absorb pair fragments while leaving the
-    /// inter-continent bridge gain negative.
+    /// lenses. Chosen for the explicit/semantic graph (tunnels + KGFact).
+    /// Lattice/FDC address overlays are deliberately excluded from Louvain so
+    /// an address cluster cannot manufacture a fake topology continent.
     public static let topologyResolution = 0.05
 
     /// Maximum number of drawers per KGFact subject group bonded into the
@@ -234,14 +223,13 @@ extension NeuronKit {
     /// community structure.
     ///
     /// The graph is WEIGHTED: tunnel edges 1.0, kgFact shared-subject bonds
-    /// 0.3, lattice bonds 0.2. Lattice bonding groups live drawers sharing a
-    /// non-empty `udcCode` in a star topology — evidence hierarchy: tunnel
-    /// (explicit) > kgFact (derived semantic) > lattice (derived classification).
+    /// 0.3, lattice overlays 0.2. Lattice overlays group live drawers sharing
+    /// a real, non-"000" `udcCode` in a star topology — evidence hierarchy:
+    /// tunnel (explicit) > kgFact (derived semantic) > lattice (derived classification).
     ///
-    /// ADJACENCY SPLIT: eigenvalue centrality runs on the tunnel+kgFact
-    /// adjacency only. Lattice edges feed the Louvain adjacency only —
-    /// centrality means explicit structural prominence; lattice bonds are
-    /// derived classification and must not mint keystones.
+    /// ADJACENCY SPLIT: eigenvalue centrality and Louvain run on the tunnel+kgFact
+    /// adjacency only. Lattice overlays stay visible but cannot mint keystones
+    /// or continents by storage address alone.
     ///
     /// Performance: CommunityDetection is O(E·passes), EigenvalueCentrality
     /// O(N log N). Elapsed time above 500ms logs a warning — the signal that
@@ -326,14 +314,15 @@ extension NeuronKit {
             }
         }
 
-        // Lattice edges: group live drawers by non-empty udcCode; for each group ≥2,
+        // Lattice edges: group live drawers by classified udcCode; for each group ≥2,
         // star-bond from the hub (earliest filedAt; id ascending on tie — deterministic
         // regardless of input permutation). Weight 0.2 — evidence hierarchy:
         // tunnel 1.0 (explicit) > kgFact 0.3 (derived semantic) > lattice 0.2
-        // (derived classification).
+        // (derived classification). The "000" unclassified sentinel is not a
+        // classification and never produces topology force.
         var latticeEdges: [GraphTopologyEdge] = []
         var codeGroups: [String: [TopologyDrawerInput]] = [:]
-        for d in live where !d.udcCode.isEmpty {
+        for d in live where !d.udcCode.isEmpty && d.udcCode != "000" {
             codeGroups[d.udcCode, default: []].append(d)
         }
         for (_, group) in codeGroups where group.count > 1 {
@@ -353,12 +342,10 @@ extension NeuronKit {
             }
         }
 
-        // ADJACENCY SPLIT — centrality is computed BEFORE lattice edges are
-        // appended to the adjacency. A lattice star hub would otherwise become
-        // the estate's top keystone by topology artifact alone.
-        // "centrality means explicit structural prominence; lattice bonds are
-        // derived classification and must not mint keystones."
-        // Louvain adjacency receives all three classes: tunnel + kgFact + lattice.
+        // ADJACENCY SPLIT — centrality and Louvain both run on tunnel+kgFact.
+        // Lattice edges are visual overlays, not default clustering evidence.
+        // A lattice star would otherwise create fake keystones and continents by
+        // address alone.
         let startT = CFAbsoluteTimeGetCurrent()
         // Thread estate and ts from the caller so analytics rows carry the
         // correct estate identifier and timestamp.
@@ -367,17 +354,9 @@ extension NeuronKit {
             estate: estate,
             ts: now.timeIntervalSince1970)
 
-        // Append lattice edges to the Louvain adjacency only (after centrality).
-        for edge in latticeEdges {
-            if let i = indexOf[edge.source], let j = indexOf[edge.target], i != j {
-                adjacency[i].append((neighbor: j, weight: 0.2))
-                adjacency[j].append((neighbor: i, weight: 0.2))
-            }
-        }
-        // Full Louvain (phase 1 + aggregation) at the lens resolution:
-        // phase-1 alone locks tunnel-bonded pairs out of their lattice
-        // stars (the §7.3 pair-locking limitation), fragmenting the
-        // dashboard continents.
+        // Full Louvain (phase 1 + aggregation) at the lens resolution over
+        // explicit and semantic structure only. Lattice overlays remain visible
+        // edges but do not decide community membership.
         // Thread estate and ts from the caller so the community.assignment
         // analytics row carries the correct estate identifier and timestamp.
         let labels = SubstrateML.CommunityDetection.detectFull(
@@ -468,11 +447,12 @@ extension NeuronKit {
             membersByCommunity[communityMap[d.id] ?? 0, default: []].append(d)
         }
         let communities: [GraphTopologyCommunity] = membersByCommunity.map { (id, members) in
-            // Most frequent non-empty udcCode among member drawers. Frequency
+            // Most frequent classified udcCode among member drawers. Frequency
             // ties break lexicographically ascending so repeated snapshots of
-            // an unchanged estate agree byte-for-byte. "" when all codes empty.
+            // an unchanged estate agree byte-for-byte. "" when all codes are
+            // empty or "000" unclassified sentinels.
             var counts: [String: Int] = [:]
-            for m in members where !m.udcCode.isEmpty {
+            for m in members where !m.udcCode.isEmpty && m.udcCode != "000" {
                 counts[m.udcCode, default: 0] += 1
             }
             let dominant = counts.max { a, b in

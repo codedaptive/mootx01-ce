@@ -23,6 +23,19 @@ struct FDCMatcherTests {
         return FDCMatcher(lexicon: lexicon, frame: frame, signatures: signatures, stopThreshold: 1)
     }
 
+    private func matcherWithIncidentalQID() -> FDCMatcher {
+        let lexicon = CanonicalizationLexicon(
+            version: "t", language: "en", entries: ["cat": "Q146", "orphan": "Q999"]
+        )
+        let frame = FDCFrame(frameVersion: "t", codes: [
+            FDCEntry(code: "100", label: "cats")
+        ])
+        let signatures: [String: Set<String>] = [
+            "100": ["Q146"]
+        ]
+        return FDCMatcher(lexicon: lexicon, frame: frame, signatures: signatures, stopThreshold: 1)
+    }
+
     @Test("matches and descends to the most specific code")
     func descends() {
         // "cat" -> Q146; both 100 and 100.1 score; with Raw mode: argmax tie "100" vs "100.1"
@@ -73,5 +86,19 @@ struct FDCMatcherTests {
     func deterministic() {
         let m = matcher()
         #expect(m.encode("cat dog") == m.encode("cat dog"))
+    }
+
+    @Test("concept QID is supported by the winning code")
+    func qidMustSupportWinner() {
+        let anchor = matcherWithIncidentalQID().encodeAnchor("cat orphan orphan")
+        #expect(anchor.code == "100")
+        #expect(anchor.conceptQID == "Q146")
+    }
+
+    @Test("unresolved text returns no concept QID")
+    func unresolvedHasNoQID() {
+        let anchor = matcherWithIncidentalQID().encodeAnchor("orphan orphan")
+        #expect(anchor.code == nil)
+        #expect(anchor.conceptQID == nil)
     }
 }

@@ -6,9 +6,9 @@
 // the existing fdc_conformance_test.rs cross-language gate.
 //
 // Purpose: assert that (code: Option<String>, conceptQID: Option<String>) from
-// Fdc::encode_anchor is byte-identical before and after the interning refactor.
-// Any code divergence → scoring-order or tie-break regression.
-// Any QID divergence → dominant_qid regression (independent of interning).
+// Fdc::encode_anchor stays stable after the interning refactor. Any code
+// divergence means scoring-order/tie-break drift; any QID divergence means
+// winner-supported concept provenance changed.
 //
 // Matches Swift FDCMatcherInternedGoldenTests.swift. Both use the same 23
 // inputs and the same expected (code, qid) pairs.
@@ -62,7 +62,7 @@ static GOLDEN_ANCHORS: &[GoldenAnchor] = &[
     // Additional diverse inputs
     GoldenAnchor {
         input: "Biology is the scientific study of life and living organisms including their physical structure chemical processes molecular interactions physiological mechanisms and evolution",
-        code: Some("612.6"), qid: Some("Q9256"),
+        code: Some("612.6"), qid: Some("Q1053535"),
     },
     GoldenAnchor { input: "mathematics algebra calculus geometry topology number theory",
                    code: Some("513"), qid: Some("Q1093379") },
@@ -142,12 +142,14 @@ fn fdc_interning_record_novel_paths_agree() {
         let non_recording = Fdc::encode_anchor_no_record(anchor.input);
 
         assert_eq!(
-            recording.0, non_recording.0,
+            recording.0,
+            non_recording.0,
             "encode_anchor_no_record code diverged from encode_anchor on {:?}",
             &anchor.input[..anchor.input.len().min(40)]
         );
         assert_eq!(
-            recording.1, non_recording.1,
+            recording.1,
+            non_recording.1,
             "encode_anchor_no_record QID diverged from encode_anchor on {:?}",
             &anchor.input[..anchor.input.len().min(40)]
         );

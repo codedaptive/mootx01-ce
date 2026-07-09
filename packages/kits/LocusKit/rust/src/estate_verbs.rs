@@ -2150,6 +2150,44 @@ impl Estate {
         )
     }
 
+    /// Update a drawer's lattice anchor with an explicit audit identity and
+    /// reason, rather than the generic estate-owner attribution `reanchor`
+    /// (above) stamps. Mirrors `Estate.reanchorAnchor(rowID:toLattice:changedBy:reason:now:)`
+    /// in `EstateVerbs.swift` semantically (same purpose: let an automated
+    /// caller — e.g. an MCP tool applying a bulk repair — stamp its own
+    /// identity and reason into the audit trail instead of inheriting
+    /// `reanchor`'s generic "estate owner / reanchored via Estate.reanchor"
+    /// attribution). Unlike the Swift port, `now` is generated internally
+    /// via `Self::now_secs()` rather than threaded in as a parameter — this
+    /// mirrors `reanchor`'s own `now` handling exactly (same layer, same
+    /// convention) rather than introducing a second `now`-unit contract for
+    /// `reanchor_gated` in this file.
+    pub fn reanchor_anchor(
+        &self,
+        row_id: &str,
+        to_lattice: crate::estate_types::LatticeAnchor,
+        changed_by: &str,
+        reason: &str,
+    ) -> Result<(), LocusKitError> {
+        if self.store.get_drawer(row_id)?.is_none() {
+            return Err(LocusKitError::DrawerNotFound {
+                id: row_id.to_string(),
+            });
+        }
+        // Store expects epoch seconds (it multiplies by 1_000 before HLC) —
+        // same contract `reanchor` relies on via `Self::now_secs()`.
+        let now = Self::now_secs();
+        self.store.reanchor_gated(
+            row_id,
+            None,
+            None,
+            Some(to_lattice),
+            changed_by,
+            Some(reason),
+            now,
+        )
+    }
+
     // MARK: - propose
 
     /// Create a proposal targeting a row in the estate. Mirrors `Estate.propose` in Swift.

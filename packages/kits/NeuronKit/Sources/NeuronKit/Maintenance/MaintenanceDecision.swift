@@ -75,9 +75,18 @@ public enum MaintenanceDecision {
         /// supplied one. `nil` falls back to the `"unknown"` stable tag so
         /// a break is never lost and re-detects to the same key.
         public let firstBrokenAtMillis: Int64?
-        public init(valid: Bool, firstBrokenAtMillis: Int64?) {
+        /// Number of entries `UnifiedAuditLog` rejected at ingress
+        /// (content-hash mismatch) while building the snapshot this
+        /// verdict is derived from. AUDIT-ALERT-RESTORE (2026-07-09):
+        /// ingress rejection (secfix 5101e112) means a tampered entry
+        /// never reaches the chain walk, so `valid` alone can no longer
+        /// surface tampering — `decide` step 0 alerts on this count
+        /// independently of `valid`.
+        public let rejectedEntryCount: Int
+        public init(valid: Bool, firstBrokenAtMillis: Int64?, rejectedEntryCount: Int) {
             self.valid = valid
             self.firstBrokenAtMillis = firstBrokenAtMillis
+            self.rejectedEntryCount = rejectedEntryCount
         }
     }
 
@@ -179,12 +188,37 @@ public enum MaintenanceDecision {
         }
 
         // ── Step 0: audit-chain integrity ──────────────────────────────
-        if let audit, !audit.valid {
-            let tag = brokenTag(audit.firstBrokenAtMillis)
-            consider(
-                key: "audit_integrity|\(tag)",
-                target: "audit-break-\(tag)",
-                category: .auditIntegrity)
+        // Two independent alert conditions, checked separately so a cycle
+        // that somehow trips both (a broken chain AND ingress rejections)
+        // gets a proposal for each — they are different failure modes with
+        // different remediation targets.
+        if let audit {
+            // (a) The walked chain itself broke (HLC reversal, or a
+            // content-hash mismatch on an entry that somehow reached the
+            // walk — defence in depth; ingress rejection normally prevents
+            // this). Pre-existing behavior, unchanged.
+            if !audit.valid {
+                let tag = brokenTag(audit.firstBrokenAtMillis)
+                consider(
+                    key: "audit_integrity|\(tag)",
+                    target: "audit-break-\(tag)",
+                    category: .auditIntegrity)
+            }
+            // (b) AUDIT-ALERT-RESTORE (2026-07-09): entries were rejected at
+            // ingress before they ever reached the walk, so `valid` alone
+            // cannot surface this — content-hash-mismatched (tampered or
+            // corrupted) data is present even though the chain itself
+            // verifies clean. Keyed on the rejected count rather than a
+            // fixed tag: a steady/unchanged count is suppressed like any
+            // other B-4 duplicate (already alerted), but a NEW, larger
+            // count (more tampering since the last alert) gets its own key
+            // and proposes again.
+            if audit.rejectedEntryCount > 0 {
+                consider(
+                    key: "audit_integrity_rejected|\(audit.rejectedEntryCount)",
+                    target: "audit-rejected-\(audit.rejectedEntryCount)",
+                    category: .auditIntegrity)
+            }
         }
 
         // ── Step 1: forbidden-combination scan (invariant I-3) ─────────

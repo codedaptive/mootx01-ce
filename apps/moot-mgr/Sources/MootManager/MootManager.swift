@@ -60,15 +60,14 @@ struct StoredGraphPayload: Decodable {
 }
 
 /// One raw community descriptor on the ARIA_MCP graph wire (VIZ_V2 contract):
-/// `{id, size, dominantUdcCode}`. The dominant UDC code is enriched to an FDC
-/// heading label and dropped at this proxy — it never crosses to the browser
-/// (content boundary keeps labels only).
+/// `{id, size, dominantUdcCode}`. A classified dominant UDC code is enriched to
+/// an FDC heading label; empty and "000" unclassified sentinels become nulls.
 struct ARIACommunityDescriptor: Decodable {
     /// Louvain community id (matches `GraphNodePayload.communityId`).
     let id: Int
     /// Member-drawer count.
     let size: Int
-    /// Most frequent non-empty `udcCode` among the community's member drawers;
+    /// Most frequent classified `udcCode` among the community's member drawers;
     /// "" when none. Optional-tolerant decode for older daemons.
     let dominantUdcCode: String?
 
@@ -946,8 +945,9 @@ public actor MootManager {
         do {
             let (data, _) = try await Self.ariaSession.data(from: url)
             let proxy = try JSONDecoder().decode(ARIALatticePayload.self, from: data)
-            let addresses = proxy.addresses.map { entry in
-                LatticeAddressPayload(
+            let addresses = proxy.addresses.compactMap { entry -> LatticeAddressPayload? in
+                guard !entry.code.isEmpty, entry.code != "000" else { return nil }
+                return LatticeAddressPayload(
                     code: entry.code,
                     label: FDC.label(for: entry.code),
                     count: entry.count
@@ -970,16 +970,17 @@ public actor MootManager {
     /// brightness). The code crosses this surface on the same basis as
     /// `/api/lattice`, which already serves raw classification codes — a code
     /// is a pure function of a pinned public frame, never memory content. An
-    /// empty, MDCC, or unknown code yields a nil label (JSON null). ARIA's
-    /// size-descending order is preserved.
+    /// empty, "000" unclassified, MDCC, or unknown code yields a nil label
+    /// (JSON null). ARIA's size-descending order is preserved.
     static func enrichCommunities(_ raw: [ARIACommunityDescriptor]) -> [GraphCommunityPayload] {
         raw.map { descriptor in
-            let code = descriptor.dominantUdcCode.flatMap { $0.isEmpty ? nil : $0 }
+            let code = descriptor.dominantUdcCode.flatMap {
+                $0.isEmpty || $0 == "000" ? nil : $0
+            }
             return GraphCommunityPayload(
                 id: descriptor.id,
                 code: code,
-                // FDC.label(for:) returns nil for "" — no special-casing needed.
-                label: FDC.label(for: descriptor.dominantUdcCode ?? ""),
+                label: code.flatMap { FDC.label(for: $0) },
                 size: descriptor.size
             )
         }

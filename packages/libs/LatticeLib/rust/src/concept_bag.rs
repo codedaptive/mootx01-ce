@@ -4,15 +4,15 @@
 //
 // Steps:
 //   1  tag — keep Noun/Verb tokens via WordClassTableCache (table fast path;
-//            novel tokens classified via HMM), plus any token that resolves to
-//            a Wikidata Q-ID concept (§3.2 relaxation)
+//            novel tokens classified via HMM), plus trusted tokens that resolve
+//            to a Wikidata Q-ID concept (§3.2 relaxation)
 //   2  canonicalize — normalize + stem each kept token, then lexicon lookup:
 //            hit -> conceptID, miss -> stemmed surface form
 //   3  accumulate — count occurrences (Steps 2 and 3 are one pass)
 //
-// The §3.2 relaxation: `isQID = concept.starts_with("Q")`. When a token
-// resolves to a Q-ID via the lexicon, it is kept regardless of word class.
-// This recovers named entities the POS tagger may drop or mislabel.
+// The §3.2 relaxation keeps trusted Q-ID concepts regardless of word class.
+// Weak short/numeric/function-word/code aliases stay as surface terms when POS
+// admits them; they never carry Q-ID identity by themselves.
 //
 // WordClassTableCache::word_class is the Step-1 entry point. For table-resident
 // tokens it returns the table classification in constant time. For novel tokens
@@ -24,19 +24,50 @@
 //
 // Deterministic and pure given a fixed lexicon and word-class table.
 
-use std::collections::HashMap;
+use crate::lexicon::CanonicalizationLexicon;
 use crate::normalizer::normalize;
 use crate::stemmer::stem;
 use crate::tokenizer::tokenize;
-use crate::lexicon::CanonicalizationLexicon;
 use crate::word_class::WordClass;
 use crate::word_class_table::WordClassTableCache;
+use std::collections::HashMap;
 
 /// A weighted concept bag: conceptID | surfaceForm -> count.
 /// Keys are Q-IDs / wn: IDs when the token resolves in the lexicon, else the
 /// bare stemmed surface form (which scores only against a signature carrying
 /// the same string — cookbook §3.2 step 4).
 pub type ConceptBag = HashMap<String, usize>;
+
+const WEAK_QID_SURFACE_KEYS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "if", "in", "into",
+    "is", "it", "its", "of", "on", "or", "the", "to", "was", "we", "were", "with", "api", "app",
+    "bash", "bin", "cli", "cmd", "dev", "etc", "file", "get", "git", "index", "key", "local",
+    "lock", "prune", "put", "read", "run", "set", "signal", "src", "tmp", "usr", "valu", "value",
+    "var",
+];
+
+fn is_weak_qid_surface_key(key: &str) -> bool {
+    key.is_empty()
+        || key.chars().count() < 3
+        || key.chars().all(|c| c.is_ascii_digit())
+        || WEAK_QID_SURFACE_KEYS.contains(&key)
+}
+
+fn qid_concept_allowed(token: &str, key: &str, concept: Option<&str>) -> bool {
+    match concept {
+        Some(c) if c.starts_with('Q') => {
+            !is_weak_qid_surface_key(key) && !token.chars().any(|c| c.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+fn concept_for_bag<'a>(token: &str, key: &str, concept: Option<&'a str>) -> Option<&'a str> {
+    match concept {
+        Some(c) if c.starts_with('Q') && !qid_concept_allowed(token, key, concept) => None,
+        other => other,
+    }
+}
 
 /// Build the concept bag for `text` against the pinned lexicon and word-class table.
 /// Mirrors `BagBuilder.bag` in Swift. `keep_classes` is the set of word classes
@@ -56,20 +87,21 @@ pub fn build_bag(
             continue;
         }
         let concept: Option<&str> = lexicon.lookup(&key);
+        let bag_concept = concept_for_bag(&token, &key, concept);
 
-        // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR any token
-        // that resolves to a Wikidata Q-ID concept. The Q-ID path recovers
+        // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR trusted tokens
+        // that resolve to a Wikidata Q-ID concept. The Q-ID path recovers
         // named entities the POS tagger mislabels/drops, and it decides
         // membership from the PINNED lexicon (deterministic, identical
         // build+runtime) rather than fragile cross-platform proper-noun tagging.
-        let is_qid = concept.map(|c| c.starts_with('Q')).unwrap_or(false);
+        let is_qid = bag_concept.map(|c| c.starts_with('Q')).unwrap_or(false);
         let wc = table.word_class(&token);
         if !keep_classes.contains(&wc) && !is_qid {
             continue;
         }
 
         // Step 3: accumulate (hit -> conceptID; miss kept via POS -> surface).
-        let bag_key = concept.unwrap_or(&key).to_owned();
+        let bag_key = bag_concept.unwrap_or(&key).to_owned();
         *bag.entry(bag_key).or_insert(0) += 1;
     }
 
@@ -114,9 +146,10 @@ pub fn build_bag_no_record(
             continue;
         }
         let concept: Option<&str> = lexicon.lookup(&key);
+        let bag_concept = concept_for_bag(&token, &key, concept);
 
-        // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR Q-ID concepts.
-        let is_qid = concept.map(|c| c.starts_with('Q')).unwrap_or(false);
+        // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR trusted Q-ID concepts.
+        let is_qid = bag_concept.map(|c| c.starts_with('Q')).unwrap_or(false);
         // Non-recording classify: result is identical to word_class; only the
         // SHARED_NOVEL_CACHE.record side effect is omitted for novel tokens.
         let wc = table.word_class_no_record(&token);
@@ -125,7 +158,7 @@ pub fn build_bag_no_record(
         }
 
         // Step 3: accumulate (hit -> conceptID; miss kept via POS -> surface).
-        let bag_key = concept.unwrap_or(&key).to_owned();
+        let bag_key = bag_concept.unwrap_or(&key).to_owned();
         *bag.entry(bag_key).or_insert(0) += 1;
     }
 
@@ -169,13 +202,14 @@ pub fn build_bag_with_tagger(
             continue;
         }
         let concept: Option<&str> = lexicon.lookup(&key);
-        let is_qid = concept.map(|c| c.starts_with('Q')).unwrap_or(false);
+        let bag_concept = concept_for_bag(&token, &key, concept);
+        let is_qid = bag_concept.map(|c| c.starts_with('Q')).unwrap_or(false);
         // Dispatch novel-token classification via the specified tagger choice.
         let wc = table.word_class_with_tagger(&token, choice);
         if !keep_classes.contains(&wc) && !is_qid {
             continue;
         }
-        let bag_key = concept.unwrap_or(&key).to_owned();
+        let bag_key = bag_concept.unwrap_or(&key).to_owned();
         *bag.entry(bag_key).or_insert(0) += 1;
     }
     bag
@@ -189,5 +223,11 @@ pub fn build_encoder_bag_with_tagger(
     table: &WordClassTableCache,
     choice: crate::word_class::NovelTokenTaggerChoice,
 ) -> ConceptBag {
-    build_bag_with_tagger(text, lexicon, table, &[WordClass::Noun, WordClass::Verb], choice)
+    build_bag_with_tagger(
+        text,
+        lexicon,
+        table,
+        &[WordClass::Noun, WordClass::Verb],
+        choice,
+    )
 }

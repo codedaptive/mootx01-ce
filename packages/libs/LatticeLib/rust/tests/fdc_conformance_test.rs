@@ -37,11 +37,14 @@ struct ConformanceVector {
 fn fdc_conformance_all_vectors_match() {
     // Load the fixture.
     let fixture_bytes = include_bytes!("fixtures/fdc_conformance.json");
-    let vectors: Vec<ConformanceVector> = serde_json::from_slice(fixture_bytes)
-        .expect("conformance fixture must parse");
+    let vectors: Vec<ConformanceVector> =
+        serde_json::from_slice(fixture_bytes).expect("conformance fixture must parse");
 
     assert!(!vectors.is_empty(), "fixture must not be empty");
-    assert!(Fdc::is_available(), "Rust FDC runtime must have loaded all artifacts");
+    assert!(
+        Fdc::is_available(),
+        "Rust FDC runtime must have loaded all artifacts"
+    );
 
     let total = vectors.len();
     let mut pass = 0usize;
@@ -70,6 +73,30 @@ fn fdc_conformance_all_vectors_match() {
     println!("FDC conformance: {}/{} vectors pass (100%)", pass, total);
 }
 
+#[test]
+fn operational_fragments_are_unresolved() {
+    let shell = r#"
+git worktree prune
+rm -f .git/index.lock
+read_signal() {
+  sqlite3 estate.sqlite 'select 1;'
+}
+"#;
+    let markdown = r#"
+# Monthly Canon Audit
+
+```bash
+set -euo pipefail
+git status --short
+```
+"#;
+
+    assert_eq!(Fdc::encode(shell), None);
+    assert_eq!(Fdc::encode_anchor(shell).1, None);
+    assert_eq!(Fdc::encode(markdown), None);
+    assert_eq!(Fdc::encode_anchor(markdown).1, None);
+}
+
 /// Stemmer conformance against SnowballEnglish.json (the same corpus used by
 /// the Swift Stemmer test). Both the Swift hand-port and this Rust port MUST
 /// produce byte-identical stems for every input in that corpus.
@@ -78,9 +105,8 @@ fn stemmer_conformance_snowball_corpus() {
     use lattice_lib::stemmer::stem;
 
     // Load the bundled reference corpus.
-    const CORPUS_BYTES: &[u8] = include_bytes!(
-        "../../Sources/LatticeLib/Resources/SnowballEnglish.json"
-    );
+    const CORPUS_BYTES: &[u8] =
+        include_bytes!("../../Sources/LatticeLib/Resources/SnowballEnglish.json");
 
     #[derive(Deserialize)]
     struct Corpus {
@@ -93,8 +119,8 @@ fn stemmer_conformance_snowball_corpus() {
         expected_stem: String,
     }
 
-    let corpus: Corpus = serde_json::from_slice(CORPUS_BYTES)
-        .expect("SnowballEnglish.json must parse");
+    let corpus: Corpus =
+        serde_json::from_slice(CORPUS_BYTES).expect("SnowballEnglish.json must parse");
 
     let total = corpus.pairs.len();
     let mut pass = 0usize;
@@ -120,5 +146,8 @@ fn stemmer_conformance_snowball_corpus() {
         );
     }
 
-    println!("Stemmer conformance: {}/{} vectors pass (100%)", pass, total);
+    println!(
+        "Stemmer conformance: {}/{} vectors pass (100%)",
+        pass, total
+    );
 }

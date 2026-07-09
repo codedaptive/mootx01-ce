@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.5.0
+version: 1.6.0
 status: active
-date: 2026-06-26
+date: 2026-07-09
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -551,6 +551,27 @@ forked `mootx01 dream` process (`.event`). REM-THETA (24 h), REM-BETA
 timestamps; they run whenever their cadence is due, regardless of queue
 depth. § 12 is the normative v2 specification; § 9 C-1 is a summary.
 
+**C-4 (audit-chain integrity monitor alerts on tampering, AUDIT-ALERT-
+RESTORE 2026-07-09):** the maintenance daemon's audit-chain integrity
+monitor (step 0 of `MaintenanceDaemon.runCycle` / `run_cycle`) proposes an
+integrity remediation on EITHER of two independent conditions, checked on
+every audit-check cadence: (a) the chain walk itself finds an HLC
+reversal or a content-hash mismatch on an admitted entry — the
+pre-existing broken-chain path, keyed `audit_integrity|<brokenTag>`; or
+(b) `UnifiedAuditLog`'s ingress (`add`/`merge`/`Codable` decode) rejected
+one or more content-hash-mismatched entries while building the snapshot
+this cycle scanned — keyed `audit_integrity_rejected|<rejectedCount>`.
+Condition (b) exists because ingress rejection (codex a477800, secfix
+ce-audit-content-id 5101e112) makes a tampered entry structurally unable
+to reach the chain walk, so a tampered/corrupted estate audit trail
+verifies vacuously clean under condition (a) alone — this invariant is
+what restores daemon-level alerting at the ingress boundary. B-4
+idempotency dedup applies to each condition's key independently: a
+steady, unchanged rejected count is suppressed after its first alert
+(the human already knows); a NEW, larger count proposes again. This
+invariant does NOT weaken the ingress defence — rejected entries are
+never re-admitted, only observed.
+
 **C-6 (fitter error-name drift, sanctioned):** the Bradley-Terry fitter's
 two error cases are `MOOTx01Error.selfPairing` /
 `.disconnectedComparisonGraph` in Swift and `TournamentError::SelfPairing`
@@ -567,6 +588,20 @@ from the reranked sequence. Even an empty result emits one terminal page
 performs no estate write, invokes no estate verb, and consults no
 substrate state beyond the materialised `page.rows`. Its `estate`
 parameter is reserved and untouched.
+
+**C-12 (audit ingress rejects, never re-admits, and is observable):**
+`UnifiedAuditLog.add` (and every path that routes through it — `merge`,
+`add(contentsOf:)`, `init(entries:)`, `Codable` decode) recomputes an
+entry's SHA-256 content id on every ingress call; an entry whose stored
+id does not match is dropped, never inserted, and never overwrites an
+honest entry with the same id. This is unconditional — no configuration
+re-admits a rejected entry. The rejection is also COUNTED
+(`rejectedEntryCount` / `rejected_count()`) at the same choke point, so
+the count is exactly as trustworthy as the rejection itself: any future
+non-local audit ingress that bypasses `add`/`merge` bypasses both the
+defence and the observability in the same stroke, which is why the
+doc comment on `add` warns against adding alternative ingress paths.
+See C-4 for how the daemon consumes this count.
 
 **C-13 (zero silent migration loss):** the migration benchmark's
 `notFoundInBranch` is empty for a conforming migration; a non-empty set
@@ -1024,3 +1059,20 @@ last-run timestamps; driven by resident governor (`.timer`) or forked `mootx01
 dream` (`.event`). § 12 (ratified target, Phase 0) is the normative v2 contract
 and is unchanged; § 9 C-1 previously contradicted it. The v2 build (T1–T14) is
 shipped; ADR-021 status updated to decided.
+
+### 1.6.0 -- 2026-07-09
+AUDIT-ALERT-RESTORE (Bob's option-1 ruling). Added § 9 C-4 and C-12 — both
+were referenced pervasively across GLK/NeuronKit code and test comments
+("NEURONKIT_SPEC §3.5 / invariant C-4/C-12") but were never actually
+defined in this document's conformance list; this entry closes that gap
+while updating the invariant to the new behavior. secfix 5101e112 made
+`UnifiedAuditLog` ingress rejection silent (log-only), which made the
+audit-chain integrity monitor's alerting structurally unreachable — a
+rejected entry never reaches the chain walk, so the walk always reported
+vacuously valid and the daemon never proposed. C-4 now defines two
+independent alert conditions (broken-chain walk, and ingress rejection
+observed via the new `rejectedEntryCount`/`rejected_count()` counter);
+C-12 documents the ingress defence's unconditional-rejection guarantee
+and its counted observability. No change to the rejection defence itself
+— rejected entries are still never re-admitted; this is observability
+only.
