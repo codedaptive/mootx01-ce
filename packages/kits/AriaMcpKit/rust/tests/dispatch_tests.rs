@@ -147,6 +147,53 @@ fn seed_memory_with_anchor(
     drawer.id
 }
 
+/// Advisory 1 (FDC-RECLASSIFY-ADVISORIES) fixture: seed a drawer whose
+/// anchor carries populated `udcFacets` / `wikidataQidsSecondary`, so the
+/// reclassify-apply test can assert the repair carries them forward
+/// unchanged rather than defaulting them to `None`.
+fn seed_memory_with_full_anchor(
+    registry: &EstateRegistry,
+    content: &str,
+    code: &str,
+    qid: Option<&str>,
+    facets: Option<&str>,
+    secondary_qids: Option<&str>,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "fdc-reclassify",
+        LatticeAnchor::new(
+            code,
+            facets.map(ToOwned::to_owned),
+            qid.map(ToOwned::to_owned),
+            secondary_qids.map(ToOwned::to_owned),
+        ),
+        "aria-mcp-tests",
+        "default",
+    );
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("seed_memory_with_full_anchor capture must succeed");
+    drawer.id
+}
+
+fn stored_drawer(registry: &EstateRegistry, id: &str) -> locus_kit::drawer::Drawer {
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .all_drawers(&registry.default.handle)
+        .expect("all_drawers must succeed")
+        .into_iter()
+        .find(|d| d.id == id)
+        .expect("seeded drawer must exist")
+}
+
 fn stored_fdc_code(registry: &EstateRegistry, id: &str) -> String {
     let coord = registry.coord.lock().unwrap();
     coord
@@ -459,6 +506,97 @@ fn moot_reclassify_fdc_suspect_only_skips_broad_code_change_until_all_mode() {
     assert!(all_text.contains("mode: all"), "got: {all_text}");
     assert!(all_text.contains("candidates: 1"), "got: {all_text}");
     assert!(all_text.contains("would_update: 1"), "got: {all_text}");
+}
+
+// Advisory 1 (FDC-RECLASSIFY-ADVISORIES): apply must repair only the primary
+// udc_code/wikidata_qid and carry udc_facets + wikidata_qids_secondary
+// forward unchanged. Before the fix, run_reclassify_fdc's apply branch built
+// the replacement LatticeAnchor with only the two primary fields, silently
+// defaulting facets/secondary QIDs to None and wiping enrichment metadata.
+#[test]
+fn moot_reclassify_fdc_apply_retains_facets_and_secondary_qids() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_full_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+        Some("004, 621"),
+        Some("Q999, Q1000"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("fdc_reclassify: applied"), "got: {text}");
+    assert!(text.contains("updated: 1"), "got: {text}");
+
+    let drawer = stored_drawer(&registry, &id);
+    assert_eq!(drawer.udc_code, "000", "primary udc_code must be repaired");
+    assert_eq!(
+        drawer.udc_facets.as_deref(),
+        Some("004, 621"),
+        "udc_facets must be carried forward unchanged"
+    );
+    assert_eq!(
+        drawer.wikidata_qids_secondary.as_deref(),
+        Some("Q999, Q1000"),
+        "wikidata_qids_secondary must be carried forward unchanged"
+    );
+}
+
+// Advisory 2 (FDC-RECLASSIFY-ADVISORIES): apply must attribute the audit
+// event to the running server identity with the tool's own reason string,
+// not the generic `coord.reanchor` attribution ("reanchored via
+// Estate.reanchor", stamped with the estate owner). Before the fix,
+// run_reclassify_fdc's apply branch called the generic `coord.reanchor`,
+// which has no way to carry a caller-supplied changed_by/reason.
+#[test]
+fn moot_reclassify_fdc_apply_audit_event_carries_tool_reason() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+
+    let events = registry
+        .default
+        .store
+        .audit_events_for_row(&id)
+        .expect("audit_events_for_row must succeed");
+    let reanchor_event = events
+        .iter()
+        .find(|e| e.reason.as_deref() == Some("FDC reclassified via moot_reclassify_fdc"))
+        .expect("reclassify apply must append an audit event with the tool reason");
+    assert_eq!(
+        reanchor_event.actor, "mootx01",
+        "audit event must attribute the repair to the running server identity, got: {}",
+        reanchor_event.actor
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e.reason.as_deref() != Some("reanchored via Estate.reanchor")),
+        "reclassify apply must not fall back to the generic reanchor reason"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -2682,11 +2682,22 @@ extension ToolDispatcher {
             }
 
             if apply {
+                // Repair only the primary udcCode + wikidataQID that FDC
+                // re-lookup produced. udcFacets and wikidataQidsSecondary
+                // are carried forward unchanged from the existing drawer
+                // anchor — FDC re-lookup has no opinion on secondary
+                // classification, so a reclassify apply must not silently
+                // wipe facets/secondary QIDs a human or the enrichment
+                // daemon previously attached. Mirrors the anchor-assembly
+                // pattern in EstateVerbs.propose (all four fields sourced
+                // from the existing drawer).
                 try await estate.reanchorAnchor(
                     rowID: drawer.id,
                     toLattice: LatticeAnchor(
                         udcCode: newCode,
-                        wikidataQID: newQID),
+                        udcFacets: drawer.udcFacets,
+                        wikidataQID: newQID,
+                        wikidataQidsSecondary: drawer.wikidataQidsSecondary),
                     changedBy: serverIdentity,
                     reason: "FDC reclassified via moot_reclassify_fdc",
                     now: now)
