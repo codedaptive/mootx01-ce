@@ -645,6 +645,36 @@ body::before{
 .topo-legend .lswatches{display:flex; gap:4px; flex-wrap:wrap; margin-top:2px}
 .topo-legend .lsw{width:11px; height:11px; border-radius:3px}
 
+/* V2-P2c selection truth-lens panel (bottom-left, above .topo-feed). It sits
+   in the same corner as .topo-feed (left:14px, bottom:14px) but .topo-feed's
+   own lines are ephemeral (auto-fade, see feedfade) so there's no live DOM
+   height to anchor a flex stack against — bottom:104px is a fixed offset
+   clear of .topo-feed's worst case (3 lines × ~21px + 2×4px gaps ≈ 71px,
+   plus its own 14px base ≈ 85px), leaving .topo-feed's layout untouched.
+   Unlike .topo-feed/.topo-legend (ambient, no pointer-events rule needed
+   either way), this panel has a close button and a copy button, so
+   pointer-events:auto is explicit here rather than left to the default. */
+.topo-selpanel{
+  position:absolute; left:14px; bottom:104px; width:240px;
+  background:rgba(6,7,14,.82); border:1px solid var(--border2); border-radius:var(--rsm);
+  padding:10px 12px; pointer-events:auto;
+}
+.topo-selpanel[hidden]{display:none}
+.tsp-head{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px}
+.tsp-title{font-family:var(--font-m); font-weight:700; letter-spacing:.6px; text-transform:uppercase; font-size:9.5px; color:var(--hi)}
+.tsp-close{
+  background:transparent; border:none; color:var(--muted); font-size:15px; line-height:1;
+  cursor:pointer; padding:2px 4px; border-radius:var(--rsm);
+}
+.tsp-close:hover{color:var(--text); background:var(--surface2)}
+.tsp-close:focus-visible{outline:2px solid var(--ba2); outline-offset:1px}
+.tsp-body{display:flex; flex-direction:column; gap:6px; margin-bottom:10px}
+.tsp-row{display:flex; flex-direction:column; gap:1px}
+.tsp-label{font-family:var(--font-m); font-size:9px; text-transform:uppercase; letter-spacing:.5px; color:var(--hi)}
+.tsp-value{font-family:var(--font-m); font-size:11px; color:var(--text); word-break:break-word}
+.tsp-value.muted{color:var(--muted); font-style:italic}
+.tsp-copy{width:100%; text-align:center}
+
 /* Static legend sections (PoC-spec style: Node types / Activity / Edges) */
 .topo-lsect{
   font-size:9px; font-family:var(--font-m); color:var(--muted); text-transform:uppercase;
@@ -2541,6 +2571,12 @@ import { OrbitControls } from '/OrbitControls.js';
   let brainHop1 = Object.create(null);
   let brainHop2 = Object.create(null);
   let brainAdjacency = Object.create(null);
+  // V2-P2c selection truth-lens panel — DOM elements cached after first
+  // build (see ensureSelPanel), appended lazily to #topoStage so they
+  // survive startBrainAnimation rebuilds the same way topoToast's transient
+  // nodes do (append-on-demand rather than static index.html markup).
+  let topoSelPanelEl = null;
+  let topoSelBodyEl = null;
   // L4 strata (3D depth) — toggled by #topoDimToggle.
   let brain3D = false;
   // V2-P2b: nmf_bond (derived lattice/classification bond) edges are faint
@@ -2699,6 +2735,11 @@ import { OrbitControls } from '/OrbitControls.js';
   // read by the right-click query builder. Keyed by label, not Louvain id,
   // for the same reason as the picker: ids renumber every governor cycle.
   let brainCodeByKey = Object.create(null);
+  // Raw FDC code → community/frame label — set by buildRealBrainNodes (the
+  // same map confidenceLabelText resolves lobe labels through), also read
+  // by the V2-P2c selection panel's Drawer line to resolve a selected node's
+  // OWN code to a human label ("657 — <label>") when one is resolvable.
+  let brainCodeLabelMap = Object.create(null);
 
   // Node visual style by noun type — matches the substrate NounType enum:
   //   0=Drawer (gray matter), 1=Tunnel, 2=KGFact, 3=DiaryEntry (blue activation),
@@ -2861,9 +2902,12 @@ import { OrbitControls } from '/OrbitControls.js';
     // communities[] arrives size-desc from the proxy, a stable order.
     // Falls back to the raw code string when no community carries a
     // label for it (confidenceLabelText handles that fallback itself).
-    var codeLabelMap = Object.create(null);
+    // Module-level (brainCodeLabelMap) rather than a local var: the V2-P2c
+    // selection panel resolves an arbitrary selected node's own code through
+    // the same map, outside of this function's call stack.
+    brainCodeLabelMap = Object.create(null);
     (communities || []).forEach(function (c) {
-      if (c && c.code && c.label && codeLabelMap[c.code] === undefined) codeLabelMap[c.code] = c.label;
+      if (c && c.code && c.label && brainCodeLabelMap[c.code] === undefined) brainCodeLabelMap[c.code] = c.label;
     });
 
     // Content keys for the picker: the community's FDC label when present;
@@ -2910,7 +2954,7 @@ import { OrbitControls } from '/OrbitControls.js';
       var baseRgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
       var rgb = stats.dominant ? desaturateToward(fdcColor(stats.dominant), 1 - stats.purity) : baseRgb;
       brainLobeRGB[rank] = rgb;
-      brainLobeConfidence[rank] = confidenceLabelText(stats, codeLabelMap, meta && meta.label);
+      brainLobeConfidence[rank] = confidenceLabelText(stats, brainCodeLabelMap, meta && meta.label);
       if (!isSubset) addRow(key, members.length, cIdx, key === "(unlabeled)", rgb, brainLobeConfidence[rank]);
       // sqrt scaling keeps scatter proportional to canvas even for huge
       // communities (6k+ nodes); linear scaling scatters far outside the
@@ -3169,17 +3213,7 @@ import { OrbitControls } from '/OrbitControls.js';
       if (!node || brainHidden(node)) return;
       e.preventDefault();
       selectBrainNode(node);   // highlight what the query refers to
-      var query = buildNodeQuery(node);
-      copyText(query, function (ok) {
-        if (ok) {
-          topoToast("Query copied — paste it into your AI to explore this memory");
-        } else {
-          // Safari: contextmenu events carry no user activation, so BOTH
-          // clipboard paths are refused. Show the query pre-selected with a
-          // Copy button — that click is an activation and always works.
-          showQueryFallback(query);
-        }
-      });
+      copyNodeQuery(node);
     });
 
     // Escape clears selection.
@@ -3742,20 +3776,27 @@ import { OrbitControls } from '/OrbitControls.js';
     return null;
   }
 
-  // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from brainAdjacency.
+  // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from
+  // brainAdjacency, then refreshes the V2-P2c truth-lens panel — every
+  // selection-changing call site (click, right-click, Escape) funnels
+  // through here, so the panel is the single place that needs to stay in
+  // sync (stopBrainAnimation's own teardown reset calls renderSelectionPanel
+  // directly, since it bypasses this function — see its comment).
   function selectBrainNode(node) {
     brainSelectedNode = node;
     brainHop1 = Object.create(null);
     brainHop2 = Object.create(null);
-    if (!node) return;
-    var adj = brainAdjacency[node.id] || [];
-    adj.forEach(function (id) { brainHop1[id] = true; });
-    // 2-hop: neighbors of each hop-1 that aren't the selected node or already hop-1.
-    adj.forEach(function (id) {
-      (brainAdjacency[id] || []).forEach(function (id2) {
-        if (id2 !== node.id && !brainHop1[id2]) brainHop2[id2] = true;
+    if (node) {
+      var adj = brainAdjacency[node.id] || [];
+      adj.forEach(function (id) { brainHop1[id] = true; });
+      // 2-hop: neighbors of each hop-1 that aren't the selected node or already hop-1.
+      adj.forEach(function (id) {
+        (brainAdjacency[id] || []).forEach(function (id2) {
+          if (id2 !== node.id && !brainHop1[id2]) brainHop2[id2] = true;
+        });
       });
-    });
+    }
+    renderSelectionPanel();
   }
 
   // Paste-ready AI query for a node: "what is likely this node and its
@@ -3790,6 +3831,26 @@ import { OrbitControls } from '/OrbitControls.js';
                  "“" + domain + "”" + (code ? " (classification code " + code + ")" : "") + ".");
     }
     return lines.join("\n");
+  }
+
+  // Copy `node`'s AI query to the clipboard, with the Safari no-user-
+  // activation fallback (contextmenu events carry no user activation, so
+  // BOTH clipboard paths are refused there — the button click from the
+  // selection panel normally has activation, but browsers lacking the async
+  // Clipboard API still fall through the same path). Shared by the
+  // right-click context-menu handler and the V2-P2c selection panel's
+  // "Copy AI query" button — one copy flow, one success/failure UX either way.
+  function copyNodeQuery(node) {
+    var query = buildNodeQuery(node);
+    copyText(query, function (ok) {
+      if (ok) {
+        topoToast("Query copied — paste it into your AI to explore this memory");
+      } else {
+        // Pre-selected textarea + Copy button — that click IS an
+        // activation, so copying always works from there.
+        showQueryFallback(query);
+      }
+    });
   }
 
   // Copy text to the clipboard; cb(ok). The async Clipboard API needs a
@@ -3882,6 +3943,178 @@ import { OrbitControls } from '/OrbitControls.js';
     setTimeout(function () { t.remove(); }, 4200);
   }
 
+  // =========================================================================
+  // V2-P2c SELECTION TRUTH-LENS PANEL — "what is this memory really near?"
+  // selectBrainNode(node) calls renderSelectionPanel() on every selection
+  // change (click, right-click, Escape); stopBrainAnimation's own teardown
+  // reset calls it too, since that path sets brainSelectedNode directly
+  // rather than through selectBrainNode. Every field below is already
+  // client-side state built by buildRealBrainNodes/startBrainAnimation — no
+  // new endpoint, no new fetch.
+  // =========================================================================
+
+  // Lazily builds and appends the panel chrome to #topoStage, same
+  // append-on-demand pattern as topoToast — caches the result so repeated
+  // selections don't rebuild the head/copy-button chrome, only the body.
+  //
+  // Placement: bottom-left, stacked ABOVE .topo-feed (the activity feed
+  // overlay, also anchored bottom-left at 14px from the stage edge). Rather
+  // than restructure .topo-feed's absolute positioning to share a flex
+  // column with this panel, .topo-selpanel (app.css) uses a fixed bottom
+  // offset clear of .topo-feed's worst case (3 lines stacked) — simpler and
+  // leaves the feed's existing layout untouched.
+  function ensureSelPanel() {
+    if (topoSelPanelEl) return topoSelPanelEl;
+    var stage = $("#topoStage");
+    if (!stage) return null;
+
+    var panel = el("div", "topo-selpanel");
+    panel.id = "topoSelPanel";
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-label", "Selected memory");
+    panel.hidden = true;
+
+    var head = el("div", "tsp-head");
+    head.appendChild(el("span", "tsp-title", "Selected memory"));
+    var closeBtn = el("button", "tsp-close", "×");
+    closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", "Clear selection");
+    closeBtn.addEventListener("click", function () { selectBrainNode(null); });
+    head.appendChild(closeBtn);
+    panel.appendChild(head);
+
+    topoSelBodyEl = el("div", "tsp-body");
+    panel.appendChild(topoSelBodyEl);
+
+    var copyBtn = el("button", "btn tsp-copy", "Copy AI query");
+    copyBtn.type = "button";
+    copyBtn.addEventListener("click", function () {
+      if (brainSelectedNode) copyNodeQuery(brainSelectedNode);
+    });
+    panel.appendChild(copyBtn);
+
+    stage.appendChild(panel);
+    topoSelPanelEl = panel;
+    return panel;
+  }
+
+  // One label/value row. `muted` renders the value in --muted (the "no
+  // code" / "no neighbors" / periphery-fallback cases) instead of --text —
+  // an honest absence, never a fabricated placeholder.
+  function selRow(label, value, muted) {
+    var row = el("div", "tsp-row");
+    row.appendChild(el("span", "tsp-label", label));
+    row.appendChild(el("span", "tsp-value" + (muted ? " muted" : ""), value));
+    return row;
+  }
+
+  // Neighborhood topic distribution: tally hop-1 neighbors' OWN .code —
+  // lobeCodeStats-style counts-object + count-desc sort, adapted for a raw
+  // "what's touching this node" readout rather than a purity statistic:
+  // codeless neighbors are tallied under "none" instead of excluded from
+  // the denominator (lobeCodeStats excludes them because it's answering a
+  // different question — dominant-code share among CODED members only).
+  // Deterministic ordering: count desc, then code asc — ties would
+  // otherwise fall back to Object.keys iteration order, which V8 guarantees
+  // for integer-like keys but not for arbitrary code strings.
+  function hop1TopicStats(hop1Ids) {
+    var counts = Object.create(null);
+    hop1Ids.forEach(function (id) {
+      var n = brainNodeMap[id];
+      var code = (n && n.code) || "none";
+      counts[code] = (counts[code] || 0) + 1;
+    });
+    return Object.keys(counts)
+      .sort(function (a, b) { return counts[b] - counts[a] || (a < b ? -1 : (a > b ? 1 : 0)); })
+      .slice(0, 3)
+      .map(function (code) { return code + " ×" + counts[code]; });
+  }
+
+  // Wire edgeType → display label, mirroring brainEdgeVisual's vocabulary
+  // (nmf_bond renders/reads as "lattice" everywhere in the UI).
+  var EDGE_TYPE_DISPLAY = { tunnel: "tunnel", kgFact: "kgFact", association: "association", nmf_bond: "lattice" };
+  var EDGE_TYPE_ORDER = ["tunnel", "kgFact", "association", "nmf_bond"];
+
+  // Per-edge-type breakdown for edges directly touching `nodeId` (not the
+  // wider hop-1/hop-2 sets — a straight scan of brainEdges by src/tgt).
+  // Reports lattice (nmf_bond) counts regardless of brainShowLattice — the
+  // toggle governs rendering, not truth — and marks them "(hidden)" instead
+  // of omitting them, so the panel never implies a node has fewer
+  // connections than it actually does.
+  function connectionEdgeStats(nodeId) {
+    var counts = Object.create(null);
+    brainEdges.forEach(function (e) {
+      if (e.src !== nodeId && e.tgt !== nodeId) return;
+      counts[e.type] = (counts[e.type] || 0) + 1;
+    });
+    var parts = [];
+    EDGE_TYPE_ORDER.forEach(function (t) {
+      if (!counts[t]) return;
+      var label = EDGE_TYPE_DISPLAY[t] + " ×" + counts[t];
+      if (t === "nmf_bond" && !brainShowLattice) label += " (hidden)";
+      parts.push(label);
+    });
+    return parts;
+  }
+
+  // Rebuild the panel body for the current brainSelectedNode, or hide the
+  // panel on deselect. Idempotent and safe to call from any selection-
+  // changing path — see the section header comment for the call sites.
+  function renderSelectionPanel() {
+    var node = brainSelectedNode;
+    if (!node) {
+      if (topoSelPanelEl) topoSelPanelEl.hidden = true;
+      return;
+    }
+    var panel = ensureSelPanel();
+    if (!panel || !topoSelBodyEl) return;
+    clear(topoSelBodyEl);
+
+    // Drawer: shortened id (first 8 chars, matches estateDisplayName's
+    // shorten convention elsewhere in this file) + the node's OWN code with
+    // its resolved frame/community label when one exists.
+    var shortId = node.id && node.id.length > 8 ? node.id.slice(0, 8) + "…" : (node.id || "—");
+    topoSelBodyEl.appendChild(selRow("Drawer", shortId));
+    if (node.code) {
+      var frameLabel = brainCodeLabelMap[node.code];
+      topoSelBodyEl.appendChild(selRow("Code", frameLabel ? (node.code + " — " + frameLabel) : node.code));
+    } else {
+      topoSelBodyEl.appendChild(selRow("Code", "no code", true));
+    }
+
+    // Community: commKey (domain label) + the lobe's confidence text — only
+    // meaningful for lobe members (node.community is a real brainLobeConfidence
+    // rank there); a periphery node's `community` is a palette index instead
+    // (see buildRealBrainNodes' pushNode calls), so reading it as a rank
+    // would show an unrelated lobe's confidence. Fall back honestly instead.
+    topoSelBodyEl.appendChild(selRow("Community", node.commKey || "—"));
+    if (node.lobe && brainLobeConfidence[node.community] !== undefined) {
+      topoSelBodyEl.appendChild(selRow("Confidence", brainLobeConfidence[node.community]));
+    } else {
+      topoSelBodyEl.appendChild(selRow("Confidence", "periphery — no lobe confidence", true));
+    }
+
+    // Neighborhood topics: top 3 hop-1 codes by count.
+    var hop1Ids = Object.keys(brainHop1);
+    if (hop1Ids.length) {
+      topoSelBodyEl.appendChild(selRow("Neighborhood topics", hop1TopicStats(hop1Ids).join(" · ")));
+    } else {
+      topoSelBodyEl.appendChild(selRow("Neighborhood topics", "no neighbors", true));
+    }
+
+    // Connections: hop-1/hop-2 counts + per-edge-type breakdown.
+    topoSelBodyEl.appendChild(selRow("Connections",
+      hop1Ids.length + " hop-1 · " + Object.keys(brainHop2).length + " hop-2"));
+    var edgeParts = connectionEdgeStats(node.id);
+    if (edgeParts.length) {
+      topoSelBodyEl.appendChild(selRow("Edge types", edgeParts.join(" · ")));
+    } else {
+      topoSelBodyEl.appendChild(selRow("Edge types", "none", true));
+    }
+
+    panel.hidden = false;
+  }
+
   function stopBrainAnimation() {
     if (brainAnimId) { cancelAnimationFrame(brainAnimId); brainAnimId = null; }
     if (brainResizeObs) { brainResizeObs.disconnect(); brainResizeObs = null; }
@@ -3922,6 +4155,9 @@ import { OrbitControls } from '/OrbitControls.js';
     }
     brainLabelContainer = null; brainLabelEls = [];
     brainSelectedNode = null; brainHop1 = Object.create(null); brainHop2 = Object.create(null); brainAdjacency = Object.create(null);
+    // Bypasses selectBrainNode (this is a teardown reset, not a user
+    // selection change), so the V2-P2c panel needs its own explicit hide.
+    renderSelectionPanel();
     brainScene = null; brainCamera = null; brainContainer = null;
   }
 
