@@ -129,6 +129,10 @@ impl EnrichmentPipeline {
                 | UnifiedAuditVerb::Learn
                 | UnifiedAuditVerb::DreamCompact
                 | UnifiedAuditVerb::Migrate
+                // FUP-C / GLK-03 grant-lifecycle verbs: record grant
+                // issue/revoke events, not drawer state transitions.
+                | UnifiedAuditVerb::GrantIssued
+                | UnifiedAuditVerb::GrantRevoked
                 // ADR-025 sensitivity-unlock verbs: record grant/deny/
                 // revoke/read-under-grant events, not drawer state
                 // transitions.
