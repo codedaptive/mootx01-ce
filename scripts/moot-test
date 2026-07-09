@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+SWIFT_TEST_ARGS="${SWIFT_TEST_ARGS:-}"
+CARGO_TEST_ARGS="${CARGO_TEST_ARGS:-}"
+PYTEST_ARGS="${PYTEST_ARGS:-}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/moot-test unit|product|validation|full
+  scripts/moot-test unit-swift|unit-rust|unit-python
+  scripts/moot-test product-swift|product-rust|product-python
+  scripts/moot-test validation-swift|validation-rust|validation-python
+  scripts/moot-test path <file-or-directory>
+  scripts/moot-test changed [base-ref]
+  scripts/moot-test glk-latency
+  scripts/moot-test list-swift|list-rust|list-python [unit|product|validation|all]
+
+Environment:
+  SWIFT_TEST_ARGS="--filter Name"  extra args for swift test
+  CARGO_TEST_ARGS="test_name"      extra args for cargo test
+  PYTEST_ARGS="-k name"            extra args for python3 -m pytest
+  BASE=origin/develop/1.0.x        default base for changed
+USAGE
+}
+
+find_manifests() {
+  local manifest="$1"
+  shift
+  local root
+  for root in "$@"; do
+    [[ -d "$root" ]] || continue
+    find "$root" \
+      \( -path '*/.build' -o -path '*/.swiftpm' -o -path '*/target' \
+         -o -path '*/node_modules' -o -path '*/dist' \
+         -o -path '*/.codegraph' -o -path '*/.claude' \) -prune \
+      -o -name "$manifest" -print
+  done | sed "s#/$manifest\$##" | sort -u
+}
+
+swift_roots() {
+  local scope="${1:-unit}"
+  case "$scope" in
+    unit) find_manifests Package.swift packages ;;
+    product) find_manifests Package.swift apps examples | awk '$0 !~ /^apps\/moot-math-benchmark(\/|$)/' ;;
+    validation) find_manifests Package.swift docs/validation apps/moot-math-benchmark ;;
+    all) { swift_roots unit; swift_roots product; swift_roots validation; } | sort -u ;;
+    *) echo "unknown Swift scope: $scope" >&2; return 2 ;;
+  esac
+}
+
+rust_roots() {
+  local scope="${1:-unit}"
+  case "$scope" in
+    unit) find_manifests Cargo.toml packages | cargo_buildable_roots ;;
+    product) find_manifests Cargo.toml apps examples | awk '$0 !~ /^apps\/moot-math-benchmark(\/|$)/' | cargo_buildable_roots ;;
+    validation) find_manifests Cargo.toml docs/validation apps/moot-math-benchmark | cargo_buildable_roots ;;
+    all) { rust_roots unit; rust_roots product; rust_roots validation; } | sort -u ;;
+    *) echo "unknown Rust scope: $scope" >&2; return 2 ;;
+  esac
+}
+
+cargo_buildable_roots() {
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    # Maturin/PyO3 extension crates have their own Python build/test surface.
+    # Bare `cargo test` can fail because CPython symbols are resolved by
+    # maturin's linker flags, not by plain cargo.
+    [[ -f "$dir/pyproject.toml" ]] || echo "$dir"
+  done
+}
+
+python_roots() {
+  local scope="${1:-unit}"
+  case "$scope" in
+    unit) find_manifests pyproject.toml packages ;;
+    product) find_manifests pyproject.toml apps distribution | awk '$0 !~ /^apps\/moot-math-benchmark(\/|$)/' ;;
+    validation) find_manifests pyproject.toml docs/validation apps/moot-math-benchmark ;;
+    all) { python_roots unit; python_roots product; python_roots validation; } | sort -u ;;
+    *) echo "unknown Python scope: $scope" >&2; return 2 ;;
+  esac
+}
+
+run_swift() {
+  local dir="$1"
+  if [[ ! -d "$dir/Tests" ]]; then
+    echo "-- skip swift (no Tests/): $dir"
+    return 0
+  fi
+  echo "-- swift test: $dir"
+  (cd "$dir" && swift test ${SWIFT_TEST_ARGS})
+}
+
+run_rust() {
+  local dir="$1"
+  echo "-- cargo test: $dir"
+  (cd "$dir" && cargo test ${CARGO_TEST_ARGS})
+}
+
+run_python() {
+  local dir="$1"
+  if [[ ! -d "$dir/tests" ]]; then
+    echo "-- skip python (no tests/): $dir"
+    return 0
+  fi
+  echo "-- python pytest: $dir"
+  (cd "$dir" && python3 -m pytest ${PYTEST_ARGS})
+}
+
+run_roots() {
+  local kind="$1"
+  local roots
+  roots="$(cat)"
+  if [[ -z "$roots" ]]; then
+    echo "-- no $kind roots"
+    return 0
+  fi
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    case "$kind" in
+      swift) run_swift "$dir" ;;
+      rust) run_rust "$dir" ;;
+      python) run_python "$dir" ;;
+      *) echo "unknown test kind: $kind" >&2; return 2 ;;
+    esac
+  done <<< "$roots"
+}
+
+run_scope() {
+  local scope="$1"
+  local kind="$2"
+  case "$kind" in
+    swift) swift_roots "$scope" | run_roots swift ;;
+    rust) rust_roots "$scope" | run_roots rust ;;
+    python) python_roots "$scope" | run_roots python ;;
+    all)
+      run_scope "$scope" swift
+      run_scope "$scope" rust
+      run_scope "$scope" python
+      ;;
+    *) echo "unknown test kind: $kind" >&2; return 2 ;;
+  esac
+}
+
+run_glk_latency() {
+  local dir="packages/kits/GeniusLocusKit"
+  if [[ ! -d "$dir" ]]; then
+    echo "-- skip GLK latency suites (missing $dir)"
+    return 0
+  fi
+  echo "-- swift test (GLK latency suites, isolated): $dir"
+  (cd "$dir" && GLK_LATENCY_TESTS=1 swift test --no-parallel \
+    --filter EncodeDrainNearRealtimeTests --filter EncodeIntakeTests)
+}
+
+find_owner() {
+  local path="$1"
+  local dir="$path"
+  [[ -d "$dir" ]] || dir="$(dirname "$dir")"
+  while [[ "$dir" != "." && "$dir" != "/" && -n "$dir" ]]; do
+    if [[ -f "$dir/Cargo.toml" || -f "$dir/Package.swift" || -f "$dir/pyproject.toml" ]]; then
+      echo "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+run_owner() {
+  local dir="$1"
+  if [[ -f "$dir/Cargo.toml" && -f "$dir/pyproject.toml" ]]; then
+    run_python "$dir"
+  elif [[ -f "$dir/Cargo.toml" ]]; then
+    run_rust "$dir"
+  elif [[ -f "$dir/Package.swift" ]]; then
+    run_swift "$dir"
+  elif [[ -f "$dir/pyproject.toml" ]]; then
+    run_python "$dir"
+  else
+    echo "no test owner for: $dir" >&2
+    return 2
+  fi
+}
+
+run_path() {
+  local path="${1:-}"
+  if [[ -z "$path" ]]; then
+    echo "usage: scripts/moot-test path <file-or-directory>" >&2
+    return 2
+  fi
+  local owner
+  if ! owner="$(find_owner "$path")"; then
+    echo "no Package.swift, Cargo.toml, or pyproject.toml owns: $path" >&2
+    return 2
+  fi
+  run_owner "$owner"
+}
+
+changed_files() {
+  local base="$1"
+  git diff --name-only --diff-filter=ACMRTUXB "$base"...HEAD
+  git diff --name-only --diff-filter=ACMRTUXB
+  git diff --cached --name-only --diff-filter=ACMRTUXB
+  git ls-files --others --exclude-standard
+}
+
+run_changed() {
+  local base="${1:-${BASE:-origin/develop/1.0.x}}"
+  if ! git rev-parse --verify --quiet "$base" >/dev/null; then
+    echo "base ref not found: $base" >&2
+    return 2
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' RETURN
+  changed_files "$base" \
+    | sort -u \
+    | while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        find_owner "$file" || true
+      done \
+    | sort -u > "$tmp"
+  if [[ ! -s "$tmp" ]]; then
+    echo "-- no changed package/crate/python roots relative to $base"
+    return 0
+  fi
+  while IFS= read -r owner; do
+    run_owner "$owner"
+  done < "$tmp"
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  help|-h|--help) usage ;;
+  list-swift) swift_roots "${1:-unit}" ;;
+  list-rust) rust_roots "${1:-unit}" ;;
+  list-python) python_roots "${1:-unit}" ;;
+  unit) run_scope unit all ;;
+  unit-swift) run_scope unit swift ;;
+  unit-rust) run_scope unit rust ;;
+  unit-python) run_scope unit python ;;
+  product) run_scope product all ;;
+  product-swift) run_scope product swift ;;
+  product-rust) run_scope product rust ;;
+  product-python) run_scope product python ;;
+  validation) run_scope validation all ;;
+  validation-swift) run_scope validation swift ;;
+  validation-rust) run_scope validation rust ;;
+  validation-python) run_scope validation python ;;
+  full)
+    run_scope unit all
+    run_scope product all
+    run_scope validation all
+    run_glk_latency
+    ;;
+  path) run_path "${1:-}" ;;
+  changed) run_changed "${1:-}" ;;
+  glk-latency) run_glk_latency ;;
+  *) usage >&2; exit 2 ;;
+esac

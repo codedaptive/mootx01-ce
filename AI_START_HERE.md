@@ -85,6 +85,19 @@ If the user is a developer, explain both paths:
 - Product path: install `mootx01`, run the resident service, wire AI clients.
 - SDK path: use the packages/kits and examples as integration references.
 
+## Source Test Lanes
+
+When modifying code, do not start with a whole-product regression sweep. Use the
+smallest lane that proves the change:
+
+- `make test-one DIR=packages/libs/LatticeLib` runs the nearest owning Swift
+  package, Rust crate, or Python package.
+- `make test-changed BASE=origin/develop/1.0.x` runs only changed owning roots.
+- `make test` runs the fast core unit lane under `packages/`.
+- `make test-product`, `make test-validation`, and `make test-full` are explicit
+  broader lanes. Use `make test-full` for the full regression backstop, not for
+  first-pass TDD.
+
 ## Known Default Local Addresses
 
 Use these defaults unless current code or explicit user configuration says otherwise.
