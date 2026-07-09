@@ -27,7 +27,7 @@ jobs:
     outputs:
       moved: ${{ steps.check.outputs.moved }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: develop/1.0.x
           fetch-depth: 0
@@ -48,7 +48,7 @@ jobs:
     if: ${{ needs.gate.outputs.moved == 'true' }}
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: develop/1.0.x
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1

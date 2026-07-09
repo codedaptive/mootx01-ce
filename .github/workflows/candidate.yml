@@ -49,7 +49,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -87,7 +87,7 @@ jobs:
         arch: [arm64, x86_64]
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -272,7 +272,7 @@ jobs:
             rm -f "$KEYFILE"
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: macos-${{ matrix.arch }}
           path: |
@@ -292,7 +292,7 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -308,7 +308,7 @@ jobs:
           echo "ASSET=$asset" >> "$GITHUB_ENV"
           # Smoke: both arches are native on their runners.
           ./mootx01 --version
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: linux-${{ matrix.arch }}
           path: ${{ env.ASSET }}
@@ -328,7 +328,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -363,7 +363,7 @@ jobs:
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           "SETUP=mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}-setup.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ matrix.arch }}
           path: |
@@ -377,11 +377,11 @@ jobs:
       contents: write   # create the pre-release + prune old ones
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: artifacts
       - name: Assemble checksums (+ best-effort minisign)
@@ -454,7 +454,7 @@ jobs:
             runner: macos-26
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
