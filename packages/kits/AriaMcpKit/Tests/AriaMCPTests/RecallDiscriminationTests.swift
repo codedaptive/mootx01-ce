@@ -158,7 +158,7 @@ struct RecallDiscriminationTests {
             estateID: UUID(), backend: .inMemory))
         let owner = OwnerCredentials(ownerIdentifier: "recall-disc-test")
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // File several near-identical memories so recall scores cluster.
         for i in 1...5 {

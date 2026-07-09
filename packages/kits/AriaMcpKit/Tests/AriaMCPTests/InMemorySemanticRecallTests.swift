@@ -71,7 +71,7 @@ private func openInMemoryEstateWithSemanticRecall()
 
     // Idempotent estate create + open — mirrors AriaMCPMain's create/open pattern.
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-    let handle = try await kit.open(storage: storage, owner: owner)
+    let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
     // Wire Corpus + VectorStore on the same storage instance — the production
     // path for in-memory. InMemoryStorage holds all table namespaces in one
@@ -233,7 +233,7 @@ struct InMemorySemanticRecallTests {
 
         do {
             _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-            let handle = try await kit.open(storage: storage, owner: owner)
+            let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
             defer { Task { try? await kit.close(handle) } }
 
             // Wire Corpus + VectorStore on the same PG storage handle.

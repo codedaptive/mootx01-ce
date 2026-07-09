@@ -9,10 +9,12 @@
 // (`issueGrant`/`revokeGrant`/`appendGrantAuditEntry`) — same
 // non-drawer-scoped audit entry shape (a synthetic id in `rowID`, a
 // descriptive token in `fieldPath`), same HLC derivation from `now`.
-// Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): the former in-memory
-// `auditLogs[handle, default:].add(entry)` append is now a no-op; entries
-// are persisted by LocusKit's audit machinery and visible via the new
-// `auditLog(for:)` SQL-backed reader.
+// Entries are durably appended through `storage.auditLog` (LocusKit's
+// audit machinery) and are visible via `auditLog(for:)`, which reads
+// back through `AuditBridge`'s synthetic-verb path (AuditBridge.swift).
+// The four public methods below are `async throws` and await that
+// append directly, so a failed write surfaces to the caller instead of
+// being dropped (AUDIT-TRAIL-RESTORE-GRANTS, 2026-07-09).
 // Applies sensitivity-unlock's four NEW verbs
 // (`sensitivityGrantIssued`/`Denied`/`Revoked`/`sensitivityReadUnderGrant`)
 // instead of reusing the federation-reserved `grantIssued`/`grantRevoked`
@@ -68,9 +70,9 @@ extension GeniusLocusKit {
         grantID: UUID,
         expiresAt: Date,
         now: Date
-    ) throws {
+    ) async throws {
         _ = try estate(for: handle)
-        appendSensitivityAuditEntry(
+        try await appendSensitivityAuditEntry(
             verb: .sensitivityGrantIssued,
             rowID: grantID,
             fieldPath: tier.auditToken,
@@ -90,9 +92,9 @@ extension GeniusLocusKit {
         _ handle: EstateHandle,
         tier: AdjectiveSensitivity,
         now: Date
-    ) throws {
+    ) async throws {
         _ = try estate(for: handle)
-        appendSensitivityAuditEntry(
+        try await appendSensitivityAuditEntry(
             verb: .sensitivityGrantDenied,
             rowID: UUID(),
             fieldPath: tier.auditToken,
@@ -113,9 +115,9 @@ extension GeniusLocusKit {
         tier: AdjectiveSensitivity,
         grantID: UUID,
         now: Date
-    ) throws {
+    ) async throws {
         _ = try estate(for: handle)
-        appendSensitivityAuditEntry(
+        try await appendSensitivityAuditEntry(
             verb: .sensitivityGrantRevoked,
             rowID: grantID,
             fieldPath: tier.auditToken,
@@ -141,7 +143,7 @@ extension GeniusLocusKit {
         tier: AdjectiveSensitivity,
         drawerID: String,
         now: Date
-    ) throws {
+    ) async throws {
         _ = try estate(for: handle)
         guard let rowUUID = UUID(uuidString: drawerID) else {
             // Malformed drawer id: should not happen (every drawer id in
@@ -151,7 +153,7 @@ extension GeniusLocusKit {
             // gate" posture the rest of this file's callers rely on.
             return
         }
-        appendSensitivityAuditEntry(
+        try await appendSensitivityAuditEntry(
             verb: .sensitivityReadUnderGrant,
             rowID: rowUUID,
             fieldPath: tier.auditToken,
@@ -164,14 +166,25 @@ extension GeniusLocusKit {
 
     /// Shared append helper for the four methods above.
     ///
-    /// Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no-op. The in-memory `auditLogs`
-    /// dict is removed; sensitivity audit entries are persisted by LocusKit's
-    /// audit machinery when the underlying verb fires. They are visible via
-    /// `auditLog(for:)` which reads directly from `_storagekit_audit`.
     /// Write a sensitivity audit entry to the durable audit log (#10).
-    /// These are synthetic events (not drawer mutations) — beforeBitmaps
-    /// is nil, afterBitmaps is all-zero. The `reason` field carries the
+    /// These are synthetic events (not drawer mutations) — `before` /
+    /// `after` are encoded into the event's bitmap slots via
+    /// `SyntheticAuditValueCodec` (AuditBridge.swift) rather than real
+    /// per-column bitmap state, and `AuditBridge`'s synthetic-verb path
+    /// decodes them back on read. The `reason` field carries the
     /// fieldPath (tier token) so the entry is self-describing.
+    ///
+    /// Awaited, not fire-and-forget: this is a security-relevant write
+    /// path (ADR-025 §4 requires every grant, denial, revocation, and
+    /// read-under-grant to land in the audit log), so a failed durable
+    /// append must surface to the caller as a thrown error rather than
+    /// being silently dropped by an unstructured `Task { try? … }`. The
+    /// four public methods above are `async throws` so the error
+    /// propagates with no further signature change. Callers that treat
+    /// audit recording as best-effort (e.g. AriaMcpKit's read-path
+    /// callers) still get that posture explicitly, via `try?` at their
+    /// own call site — the throw is real, but swallowing it is the
+    /// caller's choice, not this method's.
     private func appendSensitivityAuditEntry(
         verb: UnifiedAuditVerb,
         rowID: UUID,
@@ -180,28 +193,28 @@ extension GeniusLocusKit {
         after: UnifiedAuditValue,
         handle: EstateHandle,
         now: Date
-    ) {
+    ) async throws {
         guard let storage = storages[handle] else { return }
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         // Synthetic HLC: physical time from `now`, logical 0, node 0.
         // These entries are not order-critical relative to drawer mutations
         // (they don't feed bitmap fold), so a standalone HLC is acceptable.
         let hlc = HLC(physicalTime: nowMs, logicalCount: 0, nodeID: 0)
+        let (beforeKind, beforePayload) = SyntheticAuditValueCodec.encode(before)
+        let (afterKind, afterPayload) = SyntheticAuditValueCodec.encode(after)
         let event = AuditEvent(
             estateUuid: handle.estateUUID,
             rowId: rowID,
             hlc: hlc,
             verb: verb.rawValue,
-            beforeBitmaps: nil,
-            afterBitmaps: (adjective: 0, operational: 0, provenance: 0),
+            beforeBitmaps: (adjective: beforePayload, operational: 0, provenance: beforeKind),
+            afterBitmaps: (adjective: afterPayload, operational: 0, provenance: afterKind),
             beforeLatticeAnchor: nil,
             afterLatticeAnchor: SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0),
             actor: "sensitivity-audit",
             reason: fieldPath
         )
-        Task {
-            try? await storage.auditLog.append(event)
-        }
+        try await storage.auditLog.append(event)
     }
 
     private static func epochMilliseconds(_ date: Date) -> Int64 {
