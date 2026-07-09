@@ -112,6 +112,14 @@ impl TrainingThresholdGate {
                 | UnifiedAuditVerb::Learn
                 | UnifiedAuditVerb::DreamCompact
                 | UnifiedAuditVerb::Migrate
+                // FUP-C / GLK-03 grant-lifecycle verbs record grant issue/
+                // revoke events, not drawer state-transitions, so they do
+                // not count toward the training threshold.
+                | UnifiedAuditVerb::GrantIssued
+                | UnifiedAuditVerb::GrantRevoked
+                // ADR-025 sensitivity-unlock verbs: record grant/deny/
+                // revoke/read-under-grant events, not drawer state
+                // transitions, so they do not count either.
                 | UnifiedAuditVerb::SensitivityGrantIssued
                 | UnifiedAuditVerb::SensitivityGrantDenied
                 | UnifiedAuditVerb::SensitivityGrantRevoked

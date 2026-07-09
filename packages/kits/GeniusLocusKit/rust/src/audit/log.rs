@@ -84,16 +84,22 @@ impl UnifiedAuditValue {
 
 // MARK: - Verb
 
-// NOTE (pre-existing divergence, not introduced or fixed by ADR-025):
-// Swift's `UnifiedAuditVerb` also carries `grantIssued`/`grantRevoked`/
-// `keyDecayed`/`physicalKeyDecayed` — federation grant-lifecycle / key-
-// custody placeholders (GLK-03, DECISION_FEDERATION_SHARING_MODEL
-// Appendix B) added ahead of the federation mechanics themselves
-// shipping. Rust has never carried those 4 cases. Bringing Rust to
-// parity with Swift's federation placeholders is unrelated to ADR-025
-// (sensitivity unlock is a different feature entirely) and is out of
-// scope for this mission — see the ADR-025 Blast Radius Report addendum
-// for the explicit INTENTIONALLY_LEFT classification.
+// NOTE (RUST-AUDIT-DURABILITY, 2026-07-09): Swift's `UnifiedAuditVerb`
+// also carries `keyDecayed`/`physicalKeyDecayed` — key-custody
+// placeholders (GLK-03, DECISION_FEDERATION_SHARING_MODEL Appendix B)
+// added ahead of the federation mechanics themselves shipping. Rust
+// still does not carry those 2 cases; bringing Rust to parity with
+// those two placeholders remains out of scope (no writer emits them on
+// either port yet). `GrantIssued`/`GrantRevoked`, however, are now
+// carried below: the FUP-C / GLK-03 grant-lifecycle seam
+// (`EstateCoordinator::issue_grant` / `revoke_grant`) durably appends
+// these two verbs, mirroring Swift's `appendGrantAuditEntry`
+// (VerbSurface.swift). Previously (through AUDIT-TRAIL-RESTORE-GRANTS,
+// 2026-07-09) Rust carried neither grantIssued nor grantRevoked and
+// `sensitivity_audit_verbs.rs` documented their absence as "nothing to
+// accidentally reuse" — see that test file's
+// `grant_verbs_never_collide_with_sensitivity_verbs` for the now-live
+// parity check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum UnifiedAuditVerb {
     Capture,
@@ -107,6 +113,14 @@ pub enum UnifiedAuditVerb {
     Associate,
     Migrate,
     DreamCompact,
+
+    // FUP-C / GLK-03 grant-lifecycle verbs. Federation-reserved — see the
+    // Swift `UnifiedAuditLog.swift` doc comment. Deliberately distinct
+    // from the ADR-025 sensitivity-unlock verbs below even though both
+    // are "synthetic" (non-drawer-scoped) entries sharing the same
+    // encode/decode convention (`SyntheticAuditValueCodec`, hydration.rs).
+    GrantIssued,
+    GrantRevoked,
 
     // ADR-025 sensitivity-unlock verbs (2026-07-04, amended 2026-07-04).
     // Deliberately NOT the federation grantIssued/grantRevoked — see the
@@ -136,6 +150,8 @@ impl UnifiedAuditVerb {
             UnifiedAuditVerb::DreamCompact => "dreamCompact",
             // Raw strings match Swift's `String` rawValue exactly —
             // camelCase, same spelling as the Swift enum case names.
+            UnifiedAuditVerb::GrantIssued => "grantIssued",
+            UnifiedAuditVerb::GrantRevoked => "grantRevoked",
             UnifiedAuditVerb::SensitivityGrantIssued => "sensitivityGrantIssued",
             UnifiedAuditVerb::SensitivityGrantDenied => "sensitivityGrantDenied",
             UnifiedAuditVerb::SensitivityGrantRevoked => "sensitivityGrantRevoked",
