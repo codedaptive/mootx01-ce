@@ -252,6 +252,36 @@ body::before{
 .topo-legend .lswatches{display:flex; gap:4px; flex-wrap:wrap; margin-top:2px}
 .topo-legend .lsw{width:11px; height:11px; border-radius:3px}
 
+/* V2-P2c selection truth-lens panel (bottom-left, above .topo-feed). It sits
+   in the same corner as .topo-feed (left:14px, bottom:14px) but .topo-feed's
+   own lines are ephemeral (auto-fade, see feedfade) so there's no live DOM
+   height to anchor a flex stack against — bottom:104px is a fixed offset
+   clear of .topo-feed's worst case (3 lines × ~21px + 2×4px gaps ≈ 71px,
+   plus its own 14px base ≈ 85px), leaving .topo-feed's layout untouched.
+   Unlike .topo-feed/.topo-legend (ambient, no pointer-events rule needed
+   either way), this panel has a close button and a copy button, so
+   pointer-events:auto is explicit here rather than left to the default. */
+.topo-selpanel{
+  position:absolute; left:14px; bottom:104px; width:240px;
+  background:rgba(6,7,14,.82); border:1px solid var(--border2); border-radius:var(--rsm);
+  padding:10px 12px; pointer-events:auto;
+}
+.topo-selpanel[hidden]{display:none}
+.tsp-head{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px}
+.tsp-title{font-family:var(--font-m); font-weight:700; letter-spacing:.6px; text-transform:uppercase; font-size:9.5px; color:var(--hi)}
+.tsp-close{
+  background:transparent; border:none; color:var(--muted); font-size:15px; line-height:1;
+  cursor:pointer; padding:2px 4px; border-radius:var(--rsm);
+}
+.tsp-close:hover{color:var(--text); background:var(--surface2)}
+.tsp-close:focus-visible{outline:2px solid var(--ba2); outline-offset:1px}
+.tsp-body{display:flex; flex-direction:column; gap:6px; margin-bottom:10px}
+.tsp-row{display:flex; flex-direction:column; gap:1px}
+.tsp-label{font-family:var(--font-m); font-size:9px; text-transform:uppercase; letter-spacing:.5px; color:var(--hi)}
+.tsp-value{font-family:var(--font-m); font-size:11px; color:var(--text); word-break:break-word}
+.tsp-value.muted{color:var(--muted); font-style:italic}
+.tsp-copy{width:100%; text-align:center}
+
 /* Static legend sections (PoC-spec style: Node types / Activity / Edges) */
 .topo-lsect{
   font-size:9px; font-family:var(--font-m); color:var(--muted); text-transform:uppercase;
