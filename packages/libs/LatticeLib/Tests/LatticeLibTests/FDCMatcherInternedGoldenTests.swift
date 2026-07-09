@@ -5,11 +5,9 @@
 // implementation on 2026-07-01 and hardcoded here to serve as a regression gate.
 //
 // Purpose: assert that inlining (code: String?, conceptQID: String?) from
-// FDCMatcher.encodeAnchor is byte-identical before and after the interning
-// refactor. Because dominantQID uses the original String bag (independent of
-// the interning structures), any QID divergence would indicate a bag-building
-// regression. Any code divergence would indicate a scoring-order or tie-break
-// regression.
+// FDCMatcher.encodeAnchor stays stable after the interning refactor. The QID is
+// the strongest Q-ID term that supports the winning code, so divergence means
+// either bag-building or winner-supported provenance changed.
 //
 // Both Swift and Rust run the same inputs; Swift↔Rust parity is enforced by
 // the existing FDCConformanceTests.swift (which checks code only). This file
@@ -88,7 +86,7 @@ private let goldenAnchors: [GoldenAnchor] = [
     // Additional diverse inputs (biology, math, astronomy, etc.)
     GoldenAnchor(
         input: "Biology is the scientific study of life and living organisms including their physical structure chemical processes molecular interactions physiological mechanisms and evolution",
-        code: "612.6", qid: "Q9256"),
+        code: "612.6", qid: "Q1053535"),
     GoldenAnchor(
         input: "mathematics algebra calculus geometry topology number theory",
         code: "513", qid: "Q1093379"),
@@ -117,7 +115,7 @@ struct FDCMatcherInternedGoldenTests {
     /// (ID assignment not in ascending String order), dropped a term that should
     /// score, or introduced a computation path divergence. Code and QID must
     /// both match — code because it's the primary output and QID because it
-    /// verifies the independent dominantQID scan is untouched.
+    /// verifies winner-supported concept provenance is stable.
     @Test("all 23 golden anchors are byte-identical after interning")
     func allGoldenAnchorsMatch() throws {
         #expect(FDC.isAvailable, "bundled FDC artifacts must be available for this test")

@@ -267,6 +267,67 @@ public struct FDCMatcher: Sendable {
     /// code. Mirrors Rust `FdcMatcher::MAX_TIED_WINNERS_FOR_CLASSIFICATION`.
     public static let maximumTiedWinnersForClassification: Int = 4
 
+    private static let shellCommandStarts: Set<String> = [
+        "awk", "bash", "cargo", "chmod", "cp", "git", "grep", "jq", "mkdir",
+        "mv", "node", "npm", "python", "python3", "rg", "rm", "sed", "set",
+        "sh", "sqlite3", "swift", "xcodebuild", "yarn"
+    ]
+
+    private static let codeLikeSignals: [String] = [
+        "```", "#!/", ".git/", "index.lock", "read_signal", " set -",
+        "$(", "&&", "||", "==", "!=", "=>", "->", "{", "}", ";",
+        "func ", "let ", "var ", "class ", "struct ", "enum ", "import ",
+        "return ", "const ", "function "
+    ]
+
+    private static let codeSymbolCharacters: Set<Character> =
+        Set("{}[]();=$|/\\<>")
+
+    /// Operational/code fragments are not FDC knowledge-domain prose. Returning
+    /// UNRESOLVED here prevents shell/git snippets from being forced into an
+    /// unrelated public taxonomy heading by incidental lexical overlap.
+    private static func shouldSkipClassification(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lowered = trimmed.lowercased()
+
+        if lowered.contains("```") ||
+            lowered.contains("#!/") ||
+            lowered.contains(".git/") ||
+            lowered.contains("index.lock") ||
+            lowered.contains("read_signal") {
+            return true
+        }
+
+        let lines = trimmed
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var commandLineCount = 0
+        for line in lines {
+            let commandText = line.drop(while: { "$#>%".contains($0) || $0.isWhitespace })
+            guard let first = commandText.split(whereSeparator: \.isWhitespace).first else { continue }
+            let command = String(first)
+                .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+                .lowercased()
+            if shellCommandStarts.contains(command) { commandLineCount += 1 }
+        }
+        if commandLineCount >= 2 || (commandLineCount == 1 && lines.count <= 6) {
+            return true
+        }
+
+        let signalCount = codeLikeSignals.reduce(0) { count, signal in
+            lowered.contains(signal) ? count + 1 : count
+        }
+        if signalCount >= 3 { return true }
+
+        let nonWhitespaceCount = trimmed.reduce(0) { $1.isWhitespace ? $0 : $0 + 1 }
+        guard nonWhitespaceCount > 0 else { return false }
+        let symbolCount = trimmed.reduce(0) { codeSymbolCharacters.contains($1) ? $0 + 1 : $0 }
+        return lines.count >= 2 && signalCount >= 2 && Double(symbolCount) / Double(nonWhitespaceCount) > 0.08
+    }
+
 
     /// Encode `text` to an FDC code, or `nil` for UNRESOLVED. Never guesses.
     public func encode(_ text: String) -> String? {
@@ -279,6 +340,7 @@ public struct FDCMatcher: Sendable {
     /// most about" — or `nil` if the bag carries no Q-ID concept. One pass,
     /// so EideticLib fills an Anchor's code + wikidataQID without re-bagging.
     public func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?) {
+        guard !Self.shouldSkipClassification(text) else { return (nil, nil) }
         let bag = BagBuilder.bag(text, lexicon: lexicon)
         return encodeFromBag(bag)
     }
@@ -300,6 +362,7 @@ public struct FDCMatcher: Sendable {
             // Delegate to the recording path — identical behaviour, no duplication.
             return encodeAnchor(text)
         }
+        guard !Self.shouldSkipClassification(text) else { return (nil, nil) }
         // Non-recording: build bag via the non-recording BagBuilder overload so
         // novel user-memory tokens never accumulate in sharedNovelCache.
         let bag = BagBuilder.bag(text, lexicon: lexicon, recordNovel: false)
@@ -321,11 +384,7 @@ public struct FDCMatcher: Sendable {
     /// interned bag — they cannot match any signature, identical to the
     /// pre-interning `index[term] == nil` skip.
     private func encodeFromBag(_ bag: ConceptBag) -> (code: String?, conceptQID: String?) {
-        // dominantQID scans for "Q"-prefixed keys in the String bag and is
-        // independent of the interning structures — compute it first from the
-        // original bag before building the interned projection.
-        let qid = dominantQID(bag)
-        guard !bag.isEmpty else { return (nil, qid) }
+        guard !bag.isEmpty else { return (nil, nil) }
 
         // Convert the String-keyed concept bag to an Int-keyed interned bag.
         // Terms absent from the codebook have no TermID and are silently
@@ -335,7 +394,7 @@ public struct FDCMatcher: Sendable {
         for (term, count) in bag {
             if let id = termToID[term] { internedBag[id, default: 0] += count }
         }
-        guard !internedBag.isEmpty else { return (nil, qid) }
+        guard !internedBag.isEmpty else { return (nil, nil) }
 
         // Step 4 — match + score (§5.2/§5.3). The Int-keyed inverted index
         // gives the set of candidate codes (any code sharing ≥1 bag term); each
@@ -347,7 +406,7 @@ public struct FDCMatcher: Sendable {
             guard let codes = indexByID[termID] else { continue }
             for code in codes { candidateSet.insert(code) }
         }
-        guard !candidateSet.isEmpty else { return (nil, qid) }   // §5.2.3 — UNRESOLVED, no guess
+        guard !candidateSet.isEmpty else { return (nil, nil) }   // §5.2.3 — UNRESOLVED, no guess
 
         // Sorted so the scan order is deterministic regardless of Set hashing.
         // This matters for the normalized modes: two codes can carry equal (or
@@ -375,7 +434,7 @@ public struct FDCMatcher: Sendable {
         // exceed the allowed maximum.
         let tiedCount = candidates.filter { score(code: $0, bag: internedBag) == nodeScore }.count
         guard tiedCount <= Self.maximumTiedWinnersForClassification else {
-            return (nil, qid)   // too many tied winners — no discriminating signal
+            return (nil, nil)   // too many tied winners — no discriminating signal
         }
 
         // Step 5 — frame descent (§6.1). A child must clear the (raw) overlap
@@ -396,19 +455,29 @@ public struct FDCMatcher: Sendable {
             guard let next = best else { break }
             node = next
         }
-        return (node, qid)
+        return (node, dominantQID(bag, supporting: node, internedBag: internedBag))
     }
 
-    /// The highest-count Wikidata Q-ID in `bag` (ties broken by lowest Q-ID
-    /// lexicographically, so the result is deterministic regardless of the
-    /// bag's dictionary iteration order). `nil` if the bag holds no Q-ID key.
+    /// The highest-count Wikidata Q-ID in `bag` that also supports the winning
+    /// code (ties broken by lowest Q-ID lexicographically, so the result is
+    /// deterministic regardless of the bag's dictionary iteration order). `nil`
+    /// if the winner was not supported by a Q-ID term.
     ///
-    /// Uses the original String-keyed ConceptBag — Q-ID extraction is
-    /// independent of the term interning structures.
-    private func dominantQID(_ bag: ConceptBag) -> String? {
+    /// This keeps concept provenance aligned with classification evidence:
+    /// unresolved text returns no Q-ID, and a code never borrows an incidental
+    /// Q-ID from another part of the bag.
+    private func dominantQID(
+        _ bag: ConceptBag,
+        supporting code: String,
+        internedBag: InternedBag
+    ) -> String? {
+        guard let supportingIDs = sigTermIDs[code] else { return nil }
         var best: String?
         var bestN = 0
         for (k, n) in bag where k.hasPrefix("Q") {
+            guard let id = termToID[k],
+                  supportingIDs.contains(id),
+                  internedBag[id] != nil else { continue }
             if n > bestN || (n == bestN && (best == nil || k < best!)) {
                 best = k; bestN = n
             }

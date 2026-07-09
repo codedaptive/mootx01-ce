@@ -1084,8 +1084,8 @@ public struct HTTPServer: Sendable {
 
     /// Return all active lattice addresses (udcCode) with drawer counts.
     ///
-    /// Groups non-tombstoned drawers by their `udcCode`, omits the empty-string
-    /// sentinel (unanchored drawers), and returns the result sorted by count
+    /// Groups non-tombstoned drawers by their `udcCode`, omits empty-string and
+    /// "000" unclassified sentinels, and returns the result sorted by count
     /// descending. On an estate read failure, returns HTTP 503 with an error
     /// field — NOT a fabricated empty-200. A `200 {"addresses":[]}` on a read
     /// fault is indistinguishable from a genuinely empty estate and would tell
@@ -1103,9 +1103,9 @@ public struct HTTPServer: Sendable {
 
             let drawers = try await locus.allDrawers().filter { $0.tombstonedAt == nil }
 
-            // Group by udcCode; omit empty-string sentinel (unanchored drawers).
+            // Group by udcCode; omit empty-string and "000" unclassified sentinels.
             var counts: [String: Int] = [:]
-            for d in drawers where !d.udcCode.isEmpty {
+            for d in drawers where !d.udcCode.isEmpty && d.udcCode != "000" {
                 counts[d.udcCode, default: 0] += 1
             }
 

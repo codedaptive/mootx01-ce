@@ -123,7 +123,7 @@ public enum PermissionsWriter {
     private static let mutationTools: Set<String> = [
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-        "moot_reindex", "moot_dream", "moot_consolidate", "moot_synthesize",
+        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_consolidate", "moot_synthesize",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
         // Monitoring flag mutation (ADR-025 wave 8.2): sets daemon telemetry state
         // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
@@ -302,7 +302,6 @@ public enum PermissionsWriter {
                 let entry = "\(prefix)\(tool)"
                 guard let existingTier = currentTier[entry] else { continue } // absent — mergeTiered's job
                 guard existingTier != .deny else { continue }                 // Rule 1: deny is sacred
-                guard existingTier != .ask else { continue }                  // Rule 2 (#9): ask is sacred — may be user-intentional
                 guard existingTier != targetTier else { continue }            // already correct
                 lists[existingTier]?.removeAll { $0 == entry }
                 lists[targetTier, default: []].append(entry)

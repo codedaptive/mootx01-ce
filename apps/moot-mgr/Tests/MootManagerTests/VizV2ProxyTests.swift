@@ -389,28 +389,32 @@ struct CommunityEnrichmentTests {
 
     @Test("A known FDC code enriches to its bundled-taxonomy label")
     func knownCodeGetsLabel() throws {
-        // "000" carries a label in the bundled FDC frame (FDCRuntimeTests pins
+        // "006" carries a label in the bundled FDC frame (FDCRuntimeTests pins
         // this). Compare against the runtime lookup rather than hardcoding the
         // heading text, so a frame-data refresh does not break this test.
-        let expected = try #require(FDC.label(for: "000"))
+        let expected = try #require(FDC.label(for: "006"))
         let enriched = MootManager.enrichCommunities([
-            ARIACommunityDescriptor(id: 0, size: 9, dominantUdcCode: "000")
+            ARIACommunityDescriptor(id: 0, size: 9, dominantUdcCode: "006")
         ])
         #expect(enriched.count == 1)
         #expect(enriched.first?.id == 0)
         #expect(enriched.first?.size == 9)
+        #expect(enriched.first?.code == "006")
         #expect(enriched.first?.label == expected)
     }
 
-    @Test("Unknown and empty codes enrich to a nil label (JSON null)")
+    @Test("Unknown, empty, and 000 codes enrich to nil code/label (JSON null)")
     func unknownCodeNullLabel() throws {
         let enriched = MootManager.enrichCommunities([
             ARIACommunityDescriptor(id: 0, size: 5, dominantUdcCode: "999.99999"),
             ARIACommunityDescriptor(id: 1, size: 2, dominantUdcCode: ""),
+            ARIACommunityDescriptor(id: 2, size: 7, dominantUdcCode: "000"),
         ])
-        #expect(enriched.count == 2)
+        #expect(enriched.count == 3)
         #expect(enriched[0].label == nil)
         #expect(enriched[1].label == nil)
+        #expect(enriched[2].code == nil)
+        #expect(enriched[2].label == nil)
 
         // On the wire the label key is present with an explicit null.
         let obj = try jsonDict(enriched[0])
@@ -425,23 +429,26 @@ struct CommunityEnrichmentTests {
         // never memory content); the dashboard derives community colors from
         // its digits. Only the wire key changes: dominantUdcCode → code.
         let enriched = MootManager.enrichCommunities([
-            ARIACommunityDescriptor(id: 3, size: 7, dominantUdcCode: "000")
+            ARIACommunityDescriptor(id: 3, size: 7, dominantUdcCode: "006")
         ])
         let obj = try jsonDict(try #require(enriched.first))
         #expect(Set(obj.keys) == ["id", "code", "label", "size"])
         #expect((obj["id"] as? Int) == 3)
-        #expect((obj["code"] as? String) == "000")
+        #expect((obj["code"] as? String) == "006")
         #expect((obj["size"] as? Int) == 7)
 
-        // The ARIA-side key never leaks; an empty code becomes an explicit null.
+        // The ARIA-side key never leaks; empty and 000 codes become explicit nulls.
         let data = try APIJSON.encode(enriched)
         let text = String(data: data, encoding: .utf8) ?? ""
         #expect(!text.contains("dominantUdcCode"))
         let emptied = MootManager.enrichCommunities([
-            ARIACommunityDescriptor(id: 4, size: 1, dominantUdcCode: "")
+            ARIACommunityDescriptor(id: 4, size: 1, dominantUdcCode: ""),
+            ARIACommunityDescriptor(id: 5, size: 1, dominantUdcCode: "000"),
         ])
         let emptyObj = try jsonDict(try #require(emptied.first))
         #expect(emptyObj["code"] is NSNull)
+        let rootObj = try jsonDict(try #require(emptied.last))
+        #expect(rootObj["code"] is NSNull)
     }
 
     @Test("StoredGraphPayload descriptors with a missing dominantUdcCode enrich to nil label")

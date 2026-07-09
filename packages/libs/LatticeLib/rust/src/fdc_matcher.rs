@@ -46,11 +46,11 @@
 // - No HashMap iteration order dependencies: ties are resolved by explicit
 //   comparison, not by iteration order.
 
-use std::collections::HashMap;
-use crate::concept_bag::{ConceptBag, build_encoder_bag};
+use crate::concept_bag::{build_encoder_bag, ConceptBag};
 use crate::fdc_frame::FdcFrame;
-use crate::lexicon::CanonicalizationLexicon;
 use crate::fdc_signatures::FdcSignatures;
+use crate::lexicon::CanonicalizationLexicon;
+use std::collections::HashMap;
 
 /// Scoring mode applied to both the Step-4 argmax and the Step-5 descent
 /// ranking. Mirrors `FDCMatcher.ScoreMode` in Swift exactly.
@@ -95,6 +95,125 @@ pub enum ScoreMode {
 /// Mirrors Swift `FDCMatcher.maximumTiedWinnersForClassification`.
 pub const MAX_TIED_WINNERS_FOR_CLASSIFICATION: usize = 4;
 
+const SHELL_COMMAND_STARTS: &[&str] = &[
+    "awk",
+    "bash",
+    "cargo",
+    "chmod",
+    "cp",
+    "git",
+    "grep",
+    "jq",
+    "mkdir",
+    "mv",
+    "node",
+    "npm",
+    "python",
+    "python3",
+    "rg",
+    "rm",
+    "sed",
+    "set",
+    "sh",
+    "sqlite3",
+    "swift",
+    "xcodebuild",
+    "yarn",
+];
+
+const CODE_LIKE_SIGNALS: &[&str] = &[
+    "```",
+    "#!/",
+    ".git/",
+    "index.lock",
+    "read_signal",
+    " set -",
+    "$(",
+    "&&",
+    "||",
+    "==",
+    "!=",
+    "=>",
+    "->",
+    "{",
+    "}",
+    ";",
+    "func ",
+    "let ",
+    "var ",
+    "class ",
+    "struct ",
+    "enum ",
+    "import ",
+    "return ",
+    "const ",
+    "function ",
+];
+
+fn should_skip_classification(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if lowered.contains("```")
+        || lowered.contains("#!/")
+        || lowered.contains(".git/")
+        || lowered.contains("index.lock")
+        || lowered.contains("read_signal")
+    {
+        return true;
+    }
+
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut command_line_count = 0usize;
+    for line in &lines {
+        let mut command_text = line.trim_start();
+        while let Some(first) = command_text.chars().next() {
+            if "$#>%".contains(first) || first.is_whitespace() {
+                command_text = command_text[first.len_utf8()..].trim_start();
+            } else {
+                break;
+            }
+        }
+        let first = command_text.split_whitespace().next().unwrap_or("");
+        let command = first
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
+        if SHELL_COMMAND_STARTS.contains(&command.as_str()) {
+            command_line_count += 1;
+        }
+    }
+    if command_line_count >= 2 || (command_line_count == 1 && lines.len() <= 6) {
+        return true;
+    }
+
+    let signal_count = CODE_LIKE_SIGNALS
+        .iter()
+        .filter(|signal| lowered.contains(**signal))
+        .count();
+    if signal_count >= 3 {
+        return true;
+    }
+
+    let non_whitespace_count = trimmed.chars().filter(|c| !c.is_whitespace()).count();
+    if non_whitespace_count == 0 {
+        return false;
+    }
+    let symbol_count = trimmed
+        .chars()
+        .filter(|c| "{}[]();=$|/\\<>".contains(*c))
+        .count();
+    lines.len() >= 2
+        && signal_count >= 2
+        && (symbol_count as f64 / non_whitespace_count as f64) > 0.08
+}
+
 /// An intern-keyed bag: TermID → count. Used internally for all scoring
 /// operations. Built from a ConceptBag in `encode_from_bag` by looking up
 /// each term's dense integer id. Terms absent from the codebook have no id
@@ -114,13 +233,11 @@ pub struct FdcMatcher {
     // Terms are interned to dense usize ids once at init so encode_from_bag
     // runs Int-keyed lookups instead of String-keyed ones. IDs are assigned in
     // ascending String order → usize-sort == String-sort.
-
     /// term → dense usize id. IDs are 0-based, contiguous, assigned in
     /// ascending String order. Mirrors Swift `termToID`.
     term_to_id: HashMap<String, usize>,
 
     // MARK: — Int-keyed internal structures (hot path)
-
     /// code → sorted Vec<TermID>. Replaces the old HashMap<String, HashSet<String>>.
     /// The Vec is sorted in ascending TermID order (== ascending String order)
     /// so iteration in TermID order == iteration in String order — required for
@@ -138,7 +255,6 @@ pub struct FdcMatcher {
     idf_by_id: Vec<f64>,
 
     // MARK: — Code-keyed norm tables (unchanged from pre-interning)
-
     /// code → sqrt(|sig|) — precomputed for ScoreMode::Cosine.
     sig_norm: HashMap<String, f64>,
     /// code → sqrt(Σ_{t∈sig} idf(t)²) — precomputed for ScoreMode::IdfCosine.
@@ -245,12 +361,15 @@ impl FdcMatcher {
         //    it directly — no additional sort. This produces bit-identical f64
         //    results to the pre-interning impl that did `terms.sorted()`.
         let mut sig_norm: HashMap<String, f64> = HashMap::with_capacity(sig_terms_orig.len());
-        let mut sig_idf_norm: HashMap<String, f64> =
-            HashMap::with_capacity(sig_terms_orig.len());
+        let mut sig_idf_norm: HashMap<String, f64> = HashMap::with_capacity(sig_terms_orig.len());
         for (code, ids) in &sig_term_ids {
             sig_norm.insert(
                 code.clone(),
-                if ids.is_empty() { 0.0 } else { (ids.len() as f64).sqrt() },
+                if ids.is_empty() {
+                    0.0
+                } else {
+                    (ids.len() as f64).sqrt()
+                },
             );
             // ids is sorted → iterating gives ascending String order of terms,
             // identical to the pre-interning `sorted_terms` summation order.
@@ -320,11 +439,19 @@ impl FdcMatcher {
             ScoreMode::Raw | ScoreMode::Idf => num,
             ScoreMode::Cosine => {
                 let d = self.sig_norm.get(code).copied().unwrap_or(0.0);
-                if d > 0.0 { num / d } else { num }
+                if d > 0.0 {
+                    num / d
+                } else {
+                    num
+                }
             }
             ScoreMode::IdfCosine => {
                 let d = self.sig_idf_norm.get(code).copied().unwrap_or(0.0);
-                if d > 0.0 { num / d } else { num }
+                if d > 0.0 {
+                    num / d
+                } else {
+                    num
+                }
             }
         }
     }
@@ -358,6 +485,9 @@ impl FdcMatcher {
     /// `code` is None for UNRESOLVED.
     /// `conceptQID` is the highest-weighted Wikidata Q-ID in the bag, or None.
     pub fn encode_anchor(&self, text: &str) -> (Option<String>, Option<String>) {
+        if should_skip_classification(text) {
+            return (None, None);
+        }
         // Read the LIVE process-global word-class table (cookbook §1.3/§2.2):
         // a post-reduce live swap is observed here in-session, exactly as the
         // Swift `BagBuilder.bag` path reads the live `LatticeLib.wordClass`
@@ -379,6 +509,9 @@ impl FdcMatcher {
     /// GeniusLocusKit `intake.rs`. Mirrors Swift
     /// `FDCMatcher.encodeAnchor(_:recordNovel: false)`.
     pub fn encode_anchor_no_record(&self, text: &str) -> (Option<String>, Option<String>) {
+        if should_skip_classification(text) {
+            return (None, None);
+        }
         let table = crate::word_class_table::global_table();
         // Non-recording bag build: SHARED_NOVEL_CACHE.record is not called for
         // novel tokens, so no user-memory content leaks to the pool pipeline.
@@ -397,12 +530,8 @@ impl FdcMatcher {
     ///
     /// Mirrors Swift `FDCMatcher.encodeFromBag(_:)`.
     fn encode_from_bag(&self, bag: ConceptBag) -> (Option<String>, Option<String>) {
-        // dominant_qid scans for "Q"-prefixed keys in the String bag and is
-        // independent of the interning structures — compute from original bag.
-        let qid = dominant_qid(&bag);
-
         if bag.is_empty() {
-            return (None, qid);
+            return (None, None);
         }
 
         // Convert the String-keyed ConceptBag to an Int-keyed InternedBag.
@@ -417,7 +546,7 @@ impl FdcMatcher {
         }
 
         if interned_bag.is_empty() {
-            return (None, qid); // §5.2.3 — UNRESOLVED, no guess
+            return (None, None); // §5.2.3 — UNRESOLVED, no guess
         }
 
         // Step 4 — match + score (§5.2/§5.3). The Int-keyed inverted index
@@ -425,8 +554,7 @@ impl FdcMatcher {
         // candidate is then scored under the active mode. For Raw the score is
         // exactly Σ bag[t] (integers held in f64 — comparisons exact),
         // reproducing the original ship behavior.
-        let mut candidate_set: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut candidate_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (&term_id, _) in &interned_bag {
             // term_id is guaranteed in-range: it came from term_to_id which
             // was built over the same domain as index_by_id.
@@ -438,7 +566,7 @@ impl FdcMatcher {
         }
 
         if candidate_set.is_empty() {
-            return (None, qid); // §5.2.3 — UNRESOLVED, no guess
+            return (None, None); // §5.2.3 — UNRESOLVED, no guess
         }
 
         // Sorted so the scan order is deterministic regardless of HashSet
@@ -471,7 +599,7 @@ impl FdcMatcher {
             .filter(|c| self.score(c, &interned_bag) == node_score)
             .count();
         if tied_count > MAX_TIED_WINNERS_FOR_CLASSIFICATION {
-            return (None, qid); // too many tied winners — no discriminating signal
+            return (None, None); // too many tied winners — no discriminating signal
         }
 
         // Step 5 — frame descent (§6.1). A child must clear the RAW overlap
@@ -507,25 +635,37 @@ impl FdcMatcher {
             }
         }
 
+        let qid = self.dominant_qid(&bag, &node, &interned_bag);
         (Some(node), qid)
     }
-}
 
-/// The highest-count Wikidata Q-ID in `bag`, ties broken by lowest Q-ID
-/// lexicographically. None if the bag holds no Q-ID key.
-///
-/// Uses the original String-keyed ConceptBag — Q-ID extraction is independent
-/// of the term interning structures. Mirrors `FDCMatcher.dominantQID` in Swift.
-fn dominant_qid(bag: &ConceptBag) -> Option<String> {
-    let mut best: Option<String> = None;
-    let mut best_n = 0usize;
-    for (k, &n) in bag {
-        if k.starts_with('Q') {
+    /// Highest-count Q-ID in `bag` that also supports the winning code.
+    /// Unresolved text returns no Q-ID, and a code never borrows an incidental
+    /// Q-ID from another part of the bag. Mirrors Swift `dominantQID`.
+    fn dominant_qid(
+        &self,
+        bag: &ConceptBag,
+        code: &str,
+        interned_bag: &InternedBag,
+    ) -> Option<String> {
+        let supporting_ids = self.sig_term_ids.get(code)?;
+        let mut best: Option<String> = None;
+        let mut best_n = 0usize;
+        for (k, &n) in bag {
+            if !k.starts_with('Q') {
+                continue;
+            }
+            let Some(&id) = self.term_to_id.get(k.as_str()) else {
+                continue;
+            };
+            if !supporting_ids.contains(&id) || !interned_bag.contains_key(&id) {
+                continue;
+            }
             if n > best_n || (n == best_n && (best.is_none() || k < best.as_ref().unwrap())) {
                 best = Some(k.clone());
                 best_n = n;
             }
         }
+        best
     }
-    best
 }

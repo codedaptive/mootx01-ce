@@ -84,8 +84,8 @@ const DEFAULT_LATTICE_CODE: &str = "000";
 // Tool surface declaration
 // ---------------------------------------------------------------------------
 
-/// The 19 interface tool names (Tier 1–5) plus 2 Maintenance tools (21 total),
-/// in the order they appear in the tool list. Mirrors Swift `InterfaceTools`.
+/// The interface tool names (Tier 1–5) plus maintenance tools, in the order
+/// they appear in the tool list. Mirrors Swift `InterfaceTools`.
 pub const INTERFACE_TOOLS: &[&str] = &[
     // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
     "memory",
@@ -118,13 +118,14 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     // Monitoring control (1) — ADR-025 wave 8.2: read/write daemon telemetry flag.
     // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
     "moot_monitoring_status",
-    // Maintenance (3)
+    // Maintenance (4)
     "moot_reindex",
     "moot_drain_status",
+    "moot_reclassify_fdc",
     "moot_palace_import",
 ];
 
-/// True when `name` is one of the 20 Tier 1–5 interface tools or the 3
+/// True when `name` is one of the 20 Tier 1–5 interface tools or the 4
 /// Maintenance tools. Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
@@ -380,6 +381,7 @@ pub fn dispatch(
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
         "moot_drain_status" => run_drain_status(args, registry),
+        "moot_reclassify_fdc" => run_reclassify_fdc(args, registry),
         "moot_palace_import" => run_palace_import(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
@@ -2574,6 +2576,231 @@ fn run_drain_status(
             line.push_str(&format!(", {detail}"));
         }
         lines.push(line);
+    }
+    Ok(text_result(&lines.join("\n")))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FdcReclassifyMode {
+    SuspectOnly,
+    All,
+}
+
+impl FdcReclassifyMode {
+    fn parse(raw: Option<&str>) -> Result<Self, JSONRPCError> {
+        match raw.map(|s| s.trim().to_ascii_lowercase()) {
+            None => Ok(Self::SuspectOnly),
+            Some(s) if s.is_empty()
+                || s == "suspectonly"
+                || s == "suspect_only"
+                || s == "suspect-only" => Ok(Self::SuspectOnly),
+            Some(s) if s == "all" => Ok(Self::All),
+            Some(s) => Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("mode must be \"suspectOnly\" or \"all\"; received {s}"),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SuspectOnly => "suspectOnly",
+            Self::All => "all",
+        }
+    }
+}
+
+struct FdcReclassifyChange {
+    id: String,
+    old_code: String,
+    old_qid: Option<String>,
+    new_code: String,
+    new_qid: Option<String>,
+}
+
+impl FdcReclassifyChange {
+    fn label(code: &str, qid: Option<&str>) -> String {
+        match qid {
+            Some(qid) => format!("{code} [{qid}]"),
+            None => code.to_string(),
+        }
+    }
+
+    fn old_label(&self) -> String {
+        Self::label(&self.old_code, self.old_qid.as_deref())
+    }
+
+    fn new_label(&self) -> String {
+        Self::label(&self.new_code, self.new_qid.as_deref())
+    }
+}
+
+fn normalized_fdc_code(code: &str) -> String {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        DEFAULT_LATTICE_CODE.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalized_qid(qid: Option<&str>) -> Option<String> {
+    qid.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn should_repair_fdc_anchor(
+    mode: FdcReclassifyMode,
+    old_code: &str,
+    old_qid: Option<&str>,
+    new_code: &str,
+    new_qid: Option<&str>,
+) -> bool {
+    match mode {
+        FdcReclassifyMode::All => true,
+        FdcReclassifyMode::SuspectOnly => {
+            new_code == DEFAULT_LATTICE_CODE
+                || old_code == DEFAULT_LATTICE_CODE
+                || (old_qid.is_some() && old_qid != new_qid)
+        }
+    }
+}
+
+/// `moot_reclassify_fdc` — audit or repair stored FDC anchors.
+///
+/// Mirrors Swift `runReclassifyFDC`: recompute each active drawer's content
+/// anchor with the current deterministic classifier, dry-run by default, and
+/// optionally write candidate changes through the audited reanchor path.
+fn run_reclassify_fdc(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let apply = optional_bool(args, "apply")?.unwrap_or(false);
+    let mode = FdcReclassifyMode::parse(optional_string(args, "mode")?)?;
+    let limit = match optional_integer(args, "limit")? {
+        Some(raw) => Some(crate::dispatch::clamp_limit(Some(raw), "limit", 1, 50_000)?),
+        None => None,
+    };
+
+    let drawers = {
+        let coord = estate.coord.lock().unwrap();
+        coord
+            .all_drawers(&estate.handle)
+            .map_err(|e| JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                describe_verb_dispatch_error(&e),
+            ))?
+    };
+    let mut active: Vec<_> = drawers
+        .into_iter()
+        .filter(|d| d.tombstoned_at.is_none() && d.is_currently_believed())
+        .collect();
+    if let Some(limit) = limit {
+        active.truncate(limit);
+    }
+
+    let mut scanned = 0usize;
+    let mut empty_content = 0usize;
+    let mut unchanged = 0usize;
+    let mut candidate_count = 0usize;
+    let mut applied = 0usize;
+    let mut skipped_non_candidate_changes = 0usize;
+    let mut unclassified_after = 0usize;
+    let mut examples: Vec<FdcReclassifyChange> = Vec::new();
+
+    for drawer in active.iter() {
+        scanned += 1;
+        if drawer.content.trim().is_empty() {
+            empty_content += 1;
+            continue;
+        }
+
+        let old_code = normalized_fdc_code(&drawer.udc_code);
+        let old_qid = normalized_qid(drawer.wikidata_qid.as_deref());
+        let anchor = eidetic_lib::lookup_no_record(&drawer.content);
+        let new_code = normalized_fdc_code(&anchor.code);
+        let new_qid = normalized_qid(anchor.wikidata_qid.as_deref());
+        if old_code == new_code && old_qid == new_qid {
+            unchanged += 1;
+            continue;
+        }
+
+        let candidate = should_repair_fdc_anchor(
+            mode,
+            &old_code,
+            old_qid.as_deref(),
+            &new_code,
+            new_qid.as_deref(),
+        );
+        if !candidate {
+            skipped_non_candidate_changes += 1;
+            continue;
+        }
+
+        candidate_count += 1;
+        if new_code == DEFAULT_LATTICE_CODE {
+            unclassified_after += 1;
+        }
+        if examples.len() < 25 {
+            examples.push(FdcReclassifyChange {
+                id: drawer.id.clone(),
+                old_code: old_code.clone(),
+                old_qid: old_qid.clone(),
+                new_code: new_code.clone(),
+                new_qid: new_qid.clone(),
+            });
+        }
+
+        if apply {
+            let new_anchor = LatticeAnchor::new(new_code, None, new_qid, None);
+            let coord = estate.coord.lock().unwrap();
+            if let Err(e) = coord.reanchor(&estate.handle, &drawer.id, None, None, Some(new_anchor)) {
+                return Ok(error_result(&describe_verb_dispatch_error(&e)));
+            }
+            applied += 1;
+        }
+    }
+
+    let limit_suffix = limit.map(|n| format!(" (limit {n})")).unwrap_or_default();
+    let mut lines = vec![
+        format!("fdc_reclassify: {}", if apply { "applied" } else { "dry-run" }),
+        format!("mode: {}", mode.as_str()),
+        format!("estate: [{}]", Uuid::from_bytes(estate.handle.estate_uuid)),
+        format!("scanned: {scanned} active drawer(s){limit_suffix}"),
+        format!("unchanged: {unchanged}"),
+        format!("empty_content: {empty_content}"),
+        format!("candidates: {candidate_count}"),
+        if apply {
+            format!("updated: {applied}")
+        } else {
+            format!("would_update: {candidate_count}")
+        },
+        format!("unclassified_after: {unclassified_after}"),
+        format!("skipped_non_candidate_changes: {skipped_non_candidate_changes}"),
+    ];
+    if !apply {
+        lines.push("dry_run: pass apply=true to write candidate anchor changes".to_string());
+    }
+    if mode == FdcReclassifyMode::SuspectOnly && skipped_non_candidate_changes > 0 {
+        lines.push(format!(
+            "note: mode=suspectOnly left {skipped_non_candidate_changes} changed non-suspect anchor(s) untouched; rerun with mode=all to reset every changed active drawer from content"
+        ));
+    }
+    if !examples.is_empty() {
+        lines.push("changes:".to_string());
+        for example in &examples {
+            lines.push(format!(
+                "  {}: {} -> {}",
+                example.id,
+                example.old_label(),
+                example.new_label()
+            ));
+        }
+        if candidate_count > examples.len() {
+            lines.push(format!("  ... {} more", candidate_count - examples.len()));
+        }
     }
     Ok(text_result(&lines.join("\n")))
 }

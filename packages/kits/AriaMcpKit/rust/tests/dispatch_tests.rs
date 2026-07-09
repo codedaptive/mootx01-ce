@@ -1,9 +1,10 @@
 //! Dispatch-surface integration tests — 5-tier AI-client interface (MCP-RUST-ALIGN-01).
 //!
-//! Tests the 64-tool surface: 21 interface tools (Tier 1–5 + moot_monitoring_status,
+//! Tests the 66-tool surface: 22 interface tools (Tier 1–5 + moot_monitoring_status,
 //! including moot_memory_get), 1 federation tool, 11 recipe tools, 23 lens tools
 //! (including moot_lens_cohesion and moot_lens_contradiction), 5 vault tools,
-//! and 3 maintenance tools (moot_reindex, moot_drain_status, moot_palace_import).
+//! and 4 maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
+//! moot_palace_import).
 //! Exercises dispatch routing, argument validation, and result shapes through
 //! the full stack using an in-memory estate. One success path + one
 //! error/validation path per tool group.
@@ -120,12 +121,49 @@ fn file_one_memory_with_provenance_sensitivity(
     drawer.id.clone()
 }
 
+fn seed_memory_with_anchor(
+    registry: &EstateRegistry,
+    content: &str,
+    code: &str,
+    qid: Option<&str>,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "fdc-reclassify",
+        LatticeAnchor::new(code, None, qid.map(ToOwned::to_owned), None),
+        "aria-mcp-tests",
+        "default",
+    );
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("seed_memory_with_anchor capture must succeed");
+    drawer.id
+}
+
+fn stored_fdc_code(registry: &EstateRegistry, id: &str) -> String {
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .all_drawers(&registry.default.handle)
+        .expect("all_drawers must succeed")
+        .into_iter()
+        .find(|d| d.id == id)
+        .expect("seeded drawer must exist")
+        .udc_code
+}
+
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 64 tools exact
+// 1. tools/list surface assertions — 66 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_64() {
+fn tools_list_count_is_66() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -135,7 +173,7 @@ fn tools_list_count_is_64() {
     // moot_palace_import (direct palace import, PAR-PB-1) +
     // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling) +
     // moot_monitoring_status (ADR-025 wave 8.2, daemon telemetry monitoring control):
-    //   21  interface tools (Tier 1–5 + monitoring_status)
+    //   22  interface tools (Tier 1–5 + monitoring_status)
     //    1  federation tool (moot_federated_search)
     //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped, dream,
@@ -144,16 +182,16 @@ fn tools_list_count_is_64() {
     //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
-    //    3  maintenance tools (moot_reindex, moot_drain_status, moot_palace_import)
-    //   64  total
+    //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
+    //   66  total
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 64, "expected 64 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 66, "expected 66 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_64_names() {
-    // Gate: all 64 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_66_names() {
+    // Gate: all 66 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -165,9 +203,10 @@ fn tools_list_name_set_matches_expected_64_names() {
     // moot_memory_get fetches a full drawer by id (fetch-drawer-by-ID gap,
     // shipped in the 1.0.x train per Bob's build-now ruling).
     let expected: std::collections::HashSet<&str> = [
-        // Tier 1 — Core memory (8)
+        // Tier 1 — Core memory (9)
         "moot_file_memory",
         "moot_memory_search",
+        "moot_memory_list",
         "moot_memory_get",
         "moot_update_memory",
         "moot_withdraw_memory",
@@ -210,6 +249,7 @@ fn tools_list_name_set_matches_expected_64_names() {
         "moot_recollect",
         "moot_reindex",
         "moot_drain_status",
+        "moot_reclassify_fdc",
         "moot_palace_import",
         // Lens tools (23) — names from lens_tools.rs LENS_TOOLS constant
         "moot_lens_keystones",
@@ -280,6 +320,14 @@ fn moot_reindex_passes_membership_gate() {
 }
 
 #[test]
+fn moot_reclassify_fdc_passes_membership_gate() {
+    assert!(
+        aria_mcp::interface_tools::is_interface_tool("moot_reclassify_fdc"),
+        "moot_reclassify_fdc must pass is_interface_tool — omitting it causes -32601 Unknown tool"
+    );
+}
+
+#[test]
 fn all_interface_dispatch_cases_pass_membership_gate() {
     // Every tool name in the Rust `interface_tools::dispatch` match arms must
     // also be in `INTERFACE_TOOLS` (the gate checked before dispatch is called).
@@ -288,8 +336,9 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
     //
     // Mirrors the Swift `testMembershipGateCoversAllDispatchCases` test.
     let dispatch_cases = [
-        // Tier 1 — Core memory (8)
-        "moot_file_memory", "moot_memory_search", "moot_memory_get", "moot_update_memory",
+        // Anthropic memory adapter + Tier 1 — Core memory (9)
+        "memory", "moot_file_memory", "moot_memory_search", "moot_memory_list",
+        "moot_memory_get", "moot_update_memory",
         "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
         "moot_move_memory",
         // Tier 2 — Connections (3)
@@ -301,8 +350,9 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate (3)
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
-        // Maintenance / admin (3)
-        "moot_reindex", "moot_drain_status", "moot_palace_import",
+        // Monitoring + Maintenance / admin (4)
+        "moot_monitoring_status", "moot_reindex", "moot_drain_status",
+        "moot_reclassify_fdc", "moot_palace_import",
     ];
     for name in &dispatch_cases {
         assert!(
@@ -310,6 +360,105 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
             "{name} is in the dispatch switch but missing from the membership gate"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 1c. FDC maintenance repair/reset tool
+// ---------------------------------------------------------------------------
+
+#[test]
+fn moot_reclassify_fdc_dry_run_reports_suspect_without_mutating() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_anchor(
+        &registry,
+        "```swift\nlet read_signal = try store.readSignal()\n```",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc dry-run must dispatch");
+
+    assert!(is_success(&result), "dry-run should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("fdc_reclassify: dry-run"), "got: {text}");
+    assert!(text.contains("candidates: 1"), "got: {text}");
+    assert!(text.contains("would_update: 1"), "got: {text}");
+    assert!(
+        text.contains(&format!("{id}: 362.4 [Q12131] -> 000")),
+        "got: {text}"
+    );
+    assert_eq!(stored_fdc_code(&registry, &id), "362.4");
+}
+
+#[test]
+fn moot_reclassify_fdc_apply_repairs_false_positive_to_unclassified() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("fdc_reclassify: applied"), "got: {text}");
+    assert!(text.contains("updated: 1"), "got: {text}");
+    assert_eq!(stored_fdc_code(&registry, &id), "000");
+}
+
+#[test]
+fn moot_reclassify_fdc_suspect_only_skips_broad_code_change_until_all_mode() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_with_anchor(
+        &registry,
+        "Biology is the scientific study of life and living organisms \
+         including their physical structure chemical processes molecular \
+         interactions physiological mechanisms and evolution",
+        "362.4",
+        None,
+    );
+
+    let conservative = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc conservative dry-run must dispatch");
+    let conservative_text = content_text(&conservative);
+    assert!(conservative_text.contains("candidates: 0"), "got: {conservative_text}");
+    assert!(
+        conservative_text.contains("skipped_non_candidate_changes: 1"),
+        "got: {conservative_text}"
+    );
+    assert!(conservative_text.contains("mode=all"), "got: {conservative_text}");
+
+    let all_mode = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["mode" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc all-mode dry-run must dispatch");
+    let all_text = content_text(&all_mode);
+    assert!(all_text.contains("mode: all"), "got: {all_text}");
+    assert!(all_text.contains("candidates: 1"), "got: {all_text}");
+    assert!(all_text.contains("would_update: 1"), "got: {all_text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -4567,7 +4716,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 64, "vault-on must produce 64 tools");
+    assert_eq!(arr.len(), 66, "vault-on must produce 66 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -4582,7 +4731,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 58, "vault-off must produce 58 tools (64 − 5 vault − palace import)");
+    assert_eq!(arr.len(), 60, "vault-off must produce 60 tools (66 - 5 vault - palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",

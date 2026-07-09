@@ -9,7 +9,9 @@
 //! `EideticLib.lookup` delegates to `LatticeLib.FDC.encodeAnchor`;
 //! the Rust `lookup` here mirrors that exactly: it delegates to
 //! `lattice_lib::Fdc::encode_anchor` using the same pinned artifacts
-//! embedded in the `lattice_lib` crate.
+//! embedded in the `lattice_lib` crate. For audit/maintenance paths that
+//! must not add novel tokens to the learning pool, `lookup_no_record`
+//! delegates to `Fdc::encode_anchor_no_record`.
 
 pub mod anchor;
 pub mod segmenter;
@@ -40,6 +42,22 @@ pub const VERSION: &str = "0.1.0";
 /// that persists IS a fabricated identity" (Bob's board item 7).
 /// Panics loud; fix the build. Mirrors Swift `EideticLib.lookup(_:)`.
 pub fn lookup(term: &str) -> Anchor {
+    lookup_with_encoder(term, Fdc::encode_anchor)
+}
+
+/// Looks up the lattice anchor for a term without recording novel tokens.
+///
+/// This returns the same code/Q-ID pair as `lookup` for a fixed artifact
+/// bundle, but uses `Fdc::encode_anchor_no_record` so estate maintenance scans
+/// over memory content do not mutate the plaintext novel-token pool.
+pub fn lookup_no_record(term: &str) -> Anchor {
+    lookup_with_encoder(term, Fdc::encode_anchor_no_record)
+}
+
+fn lookup_with_encoder(
+    term: &str,
+    encode: fn(&str) -> (Option<String>, Option<String>),
+) -> Anchor {
     if !Fdc::is_available() {
         panic!(
             "eidetic_lib: FDC artifacts failed to load — \
@@ -48,7 +66,7 @@ pub fn lookup(term: &str) -> Anchor {
         );
     }
 
-    let (code, qid) = Fdc::encode_anchor(term);
+    let (code, qid) = encode(term);
     match code {
         None => {
             // UNRESOLVED: empty anchor, never a fallback code.
@@ -182,6 +200,15 @@ mod tests {
         let a = lookup("computer software programming and information science");
         let b = lookup("computer software programming and information science");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn lookup_no_record_matches_lookup_result() {
+        // The no-record path changes side effects only, not classification.
+        let term = "Biology is the scientific study of life and living organisms, \
+             including their physical structure, chemical processes, molecular \
+             interactions, physiological mechanisms, and evolution.";
+        assert_eq!(lookup_no_record(term), lookup(term));
     }
 
     #[test]
