@@ -1327,11 +1327,12 @@ fn other_structure_projection(
         }
         let mut ranked_codes: Vec<(String, i64)> = code_weights.into_iter().collect();
         ranked_codes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let code = ranked_codes.first().map(|entry| entry.0.clone());
         folds.push(GraphFoldPayload {
             stable_key,
             community_key: "__other__".into(),
-            code: ranked_codes.first().map(|entry| entry.0.clone()),
-            label: Some(format!("Other structure region {}", folds.len() + 1)),
+            code,
+            label: Some(format!("Engram Field {}", bucket_index + 1)),
             size: members.iter().map(|community| community.size).sum(),
             x: weighted(|community| community.x),
             y: weighted(|community| community.y),
@@ -1383,7 +1384,7 @@ fn other_structure_projection(
     let community = GraphCommunityPayload {
         id: -2,
         code: None,
-        label: Some("Other structure".into()),
+        label: Some("Engram Fields".into()),
         size: omitted_size,
         stable_key: Some("__other__".into()),
         x: Some(summary_weighted(|community| community.x)),

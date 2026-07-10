@@ -224,9 +224,9 @@ try {
       </div>
     </section>
 
-    <!-- TOPOLOGY — budgeted semantic-zoom renderer over /api/graph.
-         Estate and community views use persisted aggregate structure; local
-         views fetch bounded node/edge geometry. When no structure exists, the
+    <!-- TOPOLOGY — continuous accumulated-detail renderer over /api/graph.
+         The camera zooms one stable scene; explicit aggregate selection adds
+         bounded child geometry without replacing its parents. When no structure exists, the
          canvas shows an honest pending overlay and only the VizGraph signals
          the observer can prove — never fabricated nodes. -->
     <section class="view" data-view="topology">
@@ -242,6 +242,13 @@ try {
           <!-- V2-P2b: nmf_bond (derived lattice/classification) edges are faint
                tissue, hidden by default — this chip reveals them. -->
           <button class="btn" id="topoLatticeToggle" aria-pressed="false">lattice</button>
+          <button class="btn" id="topoFieldDetailsToggle" aria-pressed="false">field details</button>
+          <label class="topo-dot-size" for="topoDotSize">
+            <span>dot size</span>
+            <input id="topoDotSize" type="range" min="0.75" max="3" step="0.25" value="1.5"
+                   aria-label="Topology dot size">
+            <output id="topoDotSizeValue" for="topoDotSize">1.5x</output>
+          </label>
           <span class="tag">structure <b id="topoStructure">—</b></span>
         </div>
       </div>
@@ -251,6 +258,7 @@ try {
         <div class="topo-stage" id="topoStage">
           <!-- Three.js brain renderer mounts here (full remaining height). -->
           <div class="topo-canvas" id="topoCanvas"></div>
+          <div class="topo-interaction-hint">Double-click a dot to explore</div>
           <!-- Pending overlay: shown whenever real structure is absent — the
                analytics grid when VizGraph analytics exist, a monitoring-aware
                message otherwise. The canvas never shows invented data. -->
@@ -385,7 +393,7 @@ try {
 
   </main>
 </div>
-<script type="module" src="/app.js?v=26"></script>
+<script type="module" src="/app.js?v=27"></script>
 </body>
 </html>
 
@@ -600,6 +608,13 @@ body::before{
   font-family:var(--font-m); font-size:12px; padding:6px 10px; border-radius:var(--rsm);
 }
 .topo-select:focus-visible{outline:2px solid var(--ba2); outline-offset:0}
+.topo-dot-size{
+  display:inline-flex; align-items:center; gap:7px; height:30px;
+  color:var(--muted); font-family:var(--font-m); font-size:10px;
+  text-transform:uppercase; letter-spacing:0; white-space:nowrap;
+}
+.topo-dot-size input{width:88px; accent-color:var(--accent); cursor:pointer}
+.topo-dot-size output{min-width:30px; color:var(--hi); text-align:right; text-transform:none; letter-spacing:0}
 .topo-stage{
   /* -252px (was -200px) leaves room for the L5 playback bar below the canvas */
   position:relative; width:100%; height:calc(100vh - 252px); min-height:380px;
@@ -609,6 +624,20 @@ body::before{
 .topo-canvas{position:absolute; inset:0}
 .topo-canvas canvas{cursor:grab}
 .topo-canvas canvas:active{cursor:grabbing}
+.topo-interaction-hint{
+  position:absolute; top:12px; left:14px; z-index:4; pointer-events:none;
+  color:rgba(232,234,240,.42); font-family:var(--font-m); font-size:10px;
+  letter-spacing:0;
+}
+.topo-lobe-label{
+  position:absolute; display:flex; align-items:center;
+  font:11px ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:rgba(232,234,240,.5); letter-spacing:0; white-space:nowrap;
+}
+.topo-lobe-swatch{display:inline-block; width:5px; height:5px; border-radius:50%; margin-right:6px; flex:none; opacity:.65}
+.topo-lobe-copy{display:inline-flex; flex-direction:column; line-height:1.25}
+.topo-lobe-primary{text-transform:uppercase}
+.topo-lobe-detail{margin-top:2px; color:rgba(232,234,240,.38); font-size:9px; text-transform:none}
 /* honest pending overlay (centered) — only shown on analytics-grid path */
 .topo-pending{
   position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
@@ -674,7 +703,6 @@ body::before{
 .tsp-label{font-family:var(--font-m); font-size:9px; text-transform:uppercase; letter-spacing:.5px; color:var(--hi)}
 .tsp-value{font-family:var(--font-m); font-size:11px; color:var(--text); word-break:break-word}
 .tsp-value.muted{color:var(--muted); font-style:italic}
-.tsp-copy{width:100%; text-align:center}
 
 /* Static legend sections (PoC-spec style: Node types / Activity / Edges) */
 .topo-lsect{
@@ -1119,6 +1147,8 @@ details.panel[open] summary::before{content:"▼ "}
 .topo-commpicker .cp-dot{width:9px; height:9px; border-radius:50%; flex:none}
 .topo-commpicker .cp-label{flex:1; white-space:nowrap; color:var(--hi)}
 .topo-commpicker .cp-size{color:var(--muted); flex:none; margin-left:8px}
+.topo-commpicker .cp-field-copy{display:flex; flex:1; flex-direction:column; white-space:nowrap; color:var(--hi); line-height:1.25}
+.topo-commpicker .cp-field-detail{margin-top:2px; color:var(--muted); font-size:10.5px}
 
 /* Theme toggle — compact icon button in the topbar right cluster. */
 .btn-theme{font-size:15px; line-height:1; padding:4px 10px; margin-right:10px}
@@ -1166,24 +1196,6 @@ details.panel[open] summary::before{content:"▼ "}
 }
 @media (prefers-reduced-motion:reduce){ .topo-toast{animation:none} }
 
-/* Semantic zoom keeps the previous frame visible while the next bounded LOD
-   becomes ready. Both layers are pointer-transparent except the live canvas. */
-.topo-transition-ghost{
-  position:absolute; inset:0; z-index:4; overflow:hidden; pointer-events:none;
-  opacity:1; transform:scale(1); filter:blur(0);
-  transition:opacity 220ms ease, transform 220ms cubic-bezier(.2,.75,.2,1), filter 220ms ease;
-}
-.topo-transition-ghost canvas{position:absolute; inset:0; display:block}
-.topo-transition-ghost.leaving{opacity:0; filter:blur(.7px)}
-.topo-transition-ghost.zoom-in.leaving{transform:scale(1.08)}
-.topo-transition-ghost.zoom-out.leaving{transform:scale(.9)}
-.topo-semantic-new{opacity:0; transition:opacity 180ms ease}
-.topo-semantic-new.ready{opacity:1}
-@media (prefers-reduced-motion:reduce){
-  .topo-transition-ghost,.topo-semantic-new{transition-duration:1ms}
-  .topo-transition-ghost.leaving{transform:none; filter:none}
-}
-
 /* Compact console shell. Keep the complete read surface reachable on a narrow
    display, then stack the topology instrument above its content filter. */
 @media (max-width:700px){
@@ -1217,6 +1229,8 @@ details.panel[open] summary::before{content:"▼ "}
   .topo-bar .title{width:100%}
   .topo-controls{gap:8px; width:100%}
   .topo-controls .tag{flex:1 0 100%}
+  .topo-dot-size{flex:1 1 auto}
+  .topo-dot-size input{flex:1 1 auto; min-width:72px; max-width:140px}
   .topo-row{height:auto; min-height:0; flex-direction:column}
   .topo-row .topo-stage{
     flex:none; width:100%; height:54vh; min-height:340px;
@@ -1235,10 +1249,15 @@ details.panel[open] summary::before{content:"▼ "}
 import * as THREE from 'three';
 import { OrbitControls } from '/OrbitControls.js';
 import {
+  aggregateVisualStyle,
   BoundedTTLCache,
-  SemanticZoomController,
-  SEMANTIC_ZOOM_DEFAULTS,
-} from '/semantic-zoom.mjs?v=1';
+  brainFieldCenters,
+  engramFieldPresentation,
+  EXPANSION_DEFAULTS,
+  remapDetailCommunities,
+  SemanticExpansionController,
+  stableUnit,
+} from '/semantic-zoom.mjs?v=2';
 
 /*
   moot-mgr read-plane dashboard logic.
@@ -2631,6 +2650,8 @@ import {
   // Three.js WebGL renderer state — replaces Canvas2D brain renderer.
   let brainScene = null, brainCamera = null, brainGLRenderer = null;
   let brainControls = null;          // OrbitControls instance
+  let brainHierarchyMesh = null;     // parent-child arcs; not estate tunnels
+  let brainHierarchyLinks = [];
   let brainPointsMesh = null;        // THREE.Points for all nodes
   let brainEdgesMesh = null;         // THREE.LineSegments for all edges
   let brainLabelEls = [];            // HTML overlay label elements
@@ -2657,6 +2678,7 @@ import {
   let topoSelBodyEl = null;
   // L4 strata (3D depth) — toggled by #topoDimToggle.
   let brain3D = true;
+  let brainPointScale = 1.5;
   let brainUsePersistedLayout = false;
   // V2-P2b: nmf_bond (derived lattice/classification bond) edges are faint
   // tissue, not primary structure — hidden by default, toggled on by
@@ -2664,6 +2686,7 @@ import {
   // so flipping it needs no geometry rebuild — but the edge loop is skipped
   // while TOPO-SETTLE is settled, so the toggle handler re-arms a full frame.
   let brainShowLattice = false;
+  let brainShowFieldDetails = false;
   // L3 lobe labels — community rank → FDC label string.
   let brainLobeLabels = Object.create(null);
   // V2-P2a meaning channel — community rank → confidence label text
@@ -2671,6 +2694,7 @@ import {
   // buildRealBrainNodes. Read by updateBrainLabels (canvas overlay) and
   // renderCommPicker (picker rows) in place of the bare label when present.
   let brainLobeConfidence = Object.create(null);
+  let brainLobeFieldMeta = Object.create(null);
   let topoCommFilter = null;
   let topoCommRows = [];
   let brainLobeKey = Object.create(null);
@@ -2680,7 +2704,7 @@ import {
   let topoViewLevel = "estate";
   let topoFocusKey = null;
   let topoParentKey = null;
-  const topoZoom = new SemanticZoomController();
+  const topoExpansion = new SemanticExpansionController();
   const TOPO_CACHE_LIMIT = 6;
   const TOPO_CACHE_TTL_MS = 60000;
   let topoGraphCache = new BoundedTTLCache({ limit: TOPO_CACHE_LIMIT, ttlMs: TOPO_CACHE_TTL_MS });
@@ -2688,17 +2712,15 @@ import {
   let topoActiveRenderAbort = null;
   let topoActiveRenderKey = null;
   let topoRenderGeneration = 0;
-  let topoLevelFitDistance = 1;
-  let topoPointer = { x: null, y: null };
-  let topoZoomFrame = null;
   let topoPendingTransition = null;
-  let topoSemanticMorph = null;
+  let topoDetailMorph = null;
   let topoFirstFrameStartedAt = 0;
   const topoMetrics = {
     cacheHits: 0, cacheMisses: 0, staleResponses: 0,
     fetchMs: 0, firstFrameMs: 0, transitionMs: 0,
     initialGeometryBytes: 0, bufferUploadBytes: 0,
     frameTimes: [], frameTotal: 0, lastLevel: "estate", lastFocusKey: null,
+    pivotNodeID: null, pivotActive: false,
   };
   // Read-only diagnostics for performance/browser acceptance tests.
   window.__mootTopologyMetrics = topoMetrics;
@@ -2707,6 +2729,10 @@ import {
   // Raycaster for click-to-select.
   let brainRaycaster = null;
   let brainPointer = new THREE.Vector2();
+  let brainPivotTween = null;
+  const BRAIN_PIVOT_DURATION_MS = 320;
+  let brainSelectTimer = null;
+  const BRAIN_SELECTION_DELAY_MS = 420;
   // L5 radar-loop playback state. active = a playback session holds the playhead
   // (playing or paused mid-loop); playing = the step timer is running.
   let topoPlay = { active: false, playing: false, idx: 0, timer: null, playheadMs: 0 };
@@ -2760,6 +2786,8 @@ import {
       p99FrameMs: Math.round(topoMetricPercentile(topoMetrics.frameTimes, 0.99) * 10) / 10,
       level: topoMetrics.lastLevel,
       focusKey: topoMetrics.lastFocusKey,
+      pivotNodeID: topoMetrics.pivotNodeID,
+      pivotActive: topoMetrics.pivotActive,
     });
   }
 
@@ -2803,17 +2831,6 @@ import {
       });
     topoGraphInflight.set(key, request);
     return request;
-  }
-
-  function topoPrefetch(intent) {
-    if (!intent || !intent.level) return;
-    var estate = $("#topoEstate").value || "";
-    topoZoom.markPrefetched(intent.level, intent.focusKey);
-    topoLoadGraph(estate, intent.level, intent.focusKey).catch(function () {
-      // A failed speculative request is harmless; a committed transition retries.
-      topoGraphCache.delete(topoGraphCacheKey(estate, intent.level, intent.focusKey));
-      topoZoom.forgetPrefetched(intent.level, intent.focusKey);
-    });
   }
 
   // Twelve fallback community colors — used only when a community carries no
@@ -2951,27 +2968,49 @@ import {
     return S[t] || S[0];
   }
 
-  // Gaussian scatter helper — box-muller approximation via triple uniform sum.
-  function brainGauss() { return (Math.random() + Math.random() + Math.random() - 1.5) * 1.2; }
+  function brainNodeSizePx(node, style) {
+    if (node.aggregateLevel) return node.coreSizePx;
+    var centrality = Math.max(0, Math.min(1, node.centrality || 0));
+    return Math.max(2.5, style.r * 1.6 * (1 + centrality * 0.45));
+  }
 
-  // Place numComm community centers in a two-hemisphere oval.
-  // Each hemisphere holds half the communities, arranged in lobe arcs.
-  // Place community centers in an organic ring around the canvas center.
-  // Random phase offset prevents community 0 (the largest lobe) from always landing
-  // at angle=0 (right side), which would create a persistent rightward bias.
-  function brainCenters(numComm, W, H) {
-    var centers = [];
-    var minDim = Math.min(W, H);
-    var phase = Math.random() * Math.PI * 2;   // random start so no fixed heavy-side bias
-    for (var c = 0; c < numComm; c++) {
-      var angle = phase + (c / numComm) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
-      var radius = (0.26 + Math.random() * 0.16) * minDim;
-      centers.push({
-        x: W / 2 + Math.cos(angle) * radius * (0.75 + Math.random() * 0.35),
-        y: H / 2 + Math.sin(angle) * radius * (0.65 + Math.random() * 0.35),
-      });
+  function applyBrainPointScale(value, persist) {
+    var parsed = Number(value);
+    if (!Number.isFinite(parsed)) parsed = 1.5;
+    brainPointScale = Math.max(0.75, Math.min(3, parsed));
+    var slider = $("#topoDotSize");
+    var output = $("#topoDotSizeValue");
+    if (slider) slider.value = String(brainPointScale);
+    if (output) output.value = String(brainPointScale).replace(/\.0$/, "") + "x";
+    if (brainPointsMesh) {
+      brainPointsMesh.material.uniforms.uPointScale.value = brainPointScale;
     }
-    return centers;
+    if (persist) {
+      try { localStorage.setItem("mootmgr-topology-dot-scale", String(brainPointScale)); } catch (_) {}
+    }
+  }
+
+  function applyBrainFieldDetails(show, persist) {
+    brainShowFieldDetails = !!show;
+    var toggle = $("#topoFieldDetailsToggle");
+    if (toggle) toggle.setAttribute("aria-pressed", brainShowFieldDetails ? "true" : "false");
+    if (persist) {
+      try {
+        localStorage.setItem("mootmgr-topology-field-details", brainShowFieldDetails ? "true" : "false");
+      } catch (_) {}
+    }
+    updateBrainLabels();
+    renderCommPicker();
+  }
+
+  // Stable Gaussian-like scatter helper via three deterministic unit samples.
+  function brainGauss(id, salt) {
+    return (stableUnit(id, salt + ':a') + stableUnit(id, salt + ':b') +
+      stableUnit(id, salt + ':c') - 1.5) * 1.2;
+  }
+
+  function brainCenters(numComm, W, H) {
+    return brainFieldCenters(numComm, W, H);
   }
 
   // Map real /api/graph nodes into brain-hemisphere layout using community IDs.
@@ -3015,6 +3054,9 @@ import {
     });
     var centers = brainCenters(Math.max(1, lobeIds.length), W, H);
     var nodes = [];
+    var maxAggregateSize = rawNodes.reduce(function (maxSize, n) {
+      return Math.max(maxSize, n.aggregateSize || 0);
+    }, 1);
 
     function pushNode(n, x, y, cIdx, isLobe, commKey, rgb) {
       var hasPosition = n.position && isFinite(n.position.x) &&
@@ -3033,6 +3075,9 @@ import {
       var lastMs = topologyTimestampMs(n.lastActiveTs);
       var createdMs = topologyTimestampMs(n.createdTs);
       var deadMs = topologyTimestampMs(n.tombstonedTs);
+      var aggregateStyle = n.aggregateLevel
+        ? aggregateVisualStyle(n.aggregateSize || 1, maxAggregateSize, n.aggregateLevel)
+        : null;
       var node = {
         id: n.id,
         x: Math.max(20, Math.min(W - 20, x)),
@@ -3064,7 +3109,7 @@ import {
         // are type 0 — the rendering path is unchanged (defaults to 0).
         nounType: n.nounType || 0,
         centrality: n.centrality || 0,
-        breathPhase: Math.random() * Math.PI * 2,
+        breathPhase: stableUnit(n.id, 'breath') * Math.PI * 2,
         pulseOrange: 0,   // capture pulse magnitude 0..1 — decays over ~1s
         pulseBlue: 0,     // think pulse magnitude 0..1 — same decay, visible ring
         glowBlue: 0,      // think ambient glow magnitude 0..1 — decays over ~10s
@@ -3080,6 +3125,7 @@ import {
         aggregateSize: n.aggregateSize || 0,
         aggregateLabel: n.aggregateLabel || null,
         representativeIds: n.representativeIds || [],
+        coreSizePx: aggregateStyle ? aggregateStyle.coreSizePx : 0,
       };
       node.ax = node.x; node.ay = node.y;
       nodes.push(node);
@@ -3093,12 +3139,21 @@ import {
     brainLobeLabels = Object.create(null);
     brainLobeRGB = Object.create(null);
     brainLobeConfidence = Object.create(null);
+    brainLobeFieldMeta = Object.create(null);
     function commMeta(cid) {
       return (communities || []).find(function (c) { return String(c.id) === String(cid); });
     }
     lobeIds.forEach(function (cid, rank) {
       var meta = commMeta(cid);
-      if (meta && meta.label) brainLobeLabels[rank] = meta.label;
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      if (field) {
+        brainLobeLabels[rank] = field.primary;
+        brainLobeFieldMeta[rank] = field;
+      } else if (meta && meta.label) {
+        brainLobeLabels[rank] = meta.label;
+      }
     });
 
     // Code → label reverse lookup for confidenceLabelText: multiple
@@ -3120,6 +3175,10 @@ import {
     // (Louvain ids renumber every governor cycle).
     function contentKey(cid, members) {
       var meta = commMeta(cid);
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      if (field) return field.key;
       if (meta && meta.label) return meta.label;
       return members.length >= MIN_LOBE_SIZE ? "(unlabeled)" : "fragments";
     }
@@ -3127,7 +3186,7 @@ import {
     // Picker rows: one per labeled lobe (size desc), then the two buckets.
     brainLobeKey = Object.create(null);
     var rowByKey = Object.create(null);
-    function addRow(key, size, cIdx, isBucket, rgb, confidence) {
+    function addRow(key, size, cIdx, isBucket, rgb, confidence, field) {
       if (!rowByKey[key]) {
         rowByKey[key] = {
           key: key, size: 0, cIdx: cIdx, bucket: !!isBucket, rgb: rgb || null,
@@ -3135,6 +3194,7 @@ import {
           // only lobes compute this (see lobeCodeStats) — periphery/bucket
           // rows pass undefined and fall back to the bare key in the picker.
           confidence: confidence || null,
+          field: field || null,
         };
       }
       rowByKey[key].size += size;
@@ -3168,9 +3228,17 @@ import {
       var baseRgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
       var rgb = stats.dominant ? desaturateToward(fdcColor(stats.dominant), 1 - stats.purity) : baseRgb;
       brainLobeRGB[rank] = rgb;
-      brainLobeConfidence[rank] = confidenceLabelText(stats, brainCodeLabelMap, meta && meta.label);
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      brainLobeConfidence[rank] = field
+        ? field.primary
+        : confidenceLabelText(stats, brainCodeLabelMap, meta && meta.label);
+      if (field) brainLobeFieldMeta[rank] = field;
       var rowSize = aggregateMode && meta ? (meta.size || 0) : members.length;
-      if (!isSubset) addRow(key, rowSize, cIdx, key === "(unlabeled)", rgb, brainLobeConfidence[rank]);
+      if (!isSubset) {
+        addRow(key, rowSize, cIdx, key === "(unlabeled)", rgb, brainLobeConfidence[rank], field);
+      }
       // sqrt scaling keeps scatter proportional to canvas even for huge
       // communities (6k+ nodes); linear scaling scatters far outside the
       // canvas, clamping all nodes to edges and collapsing via physics.
@@ -3178,8 +3246,8 @@ import {
                             Math.min(W, H) * 0.16);
       var center = centers[rank];
       members.forEach(function (n) {
-        var angle = Math.random() * Math.PI * 2;
-        var dist = Math.abs(brainGauss()) * spread;
+        var angle = stableUnit(n.id, 'lobe-angle') * Math.PI * 2;
+        var dist = Math.abs(brainGauss(n.id, 'lobe-radius')) * spread;
         pushNode(n, center.x + Math.cos(angle) * dist,
                     center.y + Math.sin(angle) * dist, rank, true, key, rgb);
       });
@@ -3198,12 +3266,19 @@ import {
       var meta = commMeta(cid);
       var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
       var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
-      if (!isSubset) addRow(key, members.length, -1, true, rgb);
-      var ax = 20 + Math.random() * (W - 40);
-      var ay = 20 + Math.random() * (H - 40);
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      var rowSize = aggregateMode && meta ? (meta.size || 0) : members.length;
+      if (!isSubset) {
+        addRow(key, rowSize, -1, !field, rgb, field ? field.primary : null, field);
+      }
+      var anchorID = members.map(function (n) { return n.id; }).sort()[0] || cid;
+      var ax = 20 + stableUnit(anchorID, 'fragment-x') * (W - 40);
+      var ay = 20 + stableUnit(anchorID, 'fragment-y') * (H - 40);
       members.forEach(function (n, mi) {
-        var angle = (mi / members.length) * Math.PI * 2 + Math.random() * 0.8;
-        var dist = members.length > 1 ? 6 + Math.random() * 8 : 0;
+        var angle = (mi / members.length) * Math.PI * 2 + stableUnit(n.id, 'fragment-angle') * 0.8;
+        var dist = members.length > 1 ? 6 + stableUnit(n.id, 'fragment-radius') * 8 : 0;
         pushNode(n, ax + Math.cos(angle) * dist, ay + Math.sin(angle) * dist, cIdx, false, key, rgb);
       });
     });
@@ -3213,6 +3288,12 @@ import {
     // everything available to re-check).
     if (!isSubset) {
       topoCommRows = Object.values(rowByKey).sort(function (a, b) {
+        if (a.key === "Engram Fields" && b.key !== "Engram Fields") return -1;
+        if (b.key === "Engram Fields" && a.key !== "Engram Fields") return 1;
+        if (!!a.field !== !!b.field) return a.field ? -1 : 1;
+        if (a.field && b.field) {
+          return Number(a.field.key.split(":").pop()) - Number(b.field.key.split(":").pop());
+        }
         if (a.bucket !== b.bucket) return a.bucket ? 1 : -1;
         return b.size - a.size;
       });
@@ -3327,15 +3408,12 @@ import {
     return Math.sqrt(maxMove2);  // px moved by the fastest node this frame
   }
 
-  // Point shader: each node is a screen-space circle with per-point size,
-  // color, and alpha. The fragment shader draws a soft-edged disc and applies
-  // per-point alpha for breathing, recency, selection dimming, and depth fog.
-  // Point vertex shader: size is in world-space units; the projection
-  // converts to screen pixels via the viewport height (resolution.y)
-  // so points remain a consistent angular size as you orbit.
+  // Point shader: each node is a screen-space circle with a CSS-pixel diameter.
+  // Camera movement changes projected separation, not glyph size. The fragment
+  // shader applies breathing, recency, selection dimming, and depth fog.
   var POINT_VS = [
     'uniform float uPixelRatio;',
-    'uniform float uViewportH;',
+    'uniform float uPointScale;',
     'uniform float uTime;',
     'uniform float uBreathAmount;',
     'attribute float size;',
@@ -3343,12 +3421,14 @@ import {
     'attribute float breathPhase;',
     'varying vec3 vColor;',
     'varying float vAlpha;',
+    'varying float vPhase;',
     'void main() {',
     '  vColor = color;',
+    '  vPhase = breathPhase;',
     '  float breath = 0.82 + 0.18 * sin(uTime * 0.72 + breathPhase);',
     '  vAlpha = alpha * mix(1.0, breath, uBreathAmount);',
     '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
-    '  gl_PointSize = size * uViewportH * uPixelRatio / -mv.z;',
+    '  gl_PointSize = max(1.0, size * uPointScale * uPixelRatio);',
     '  gl_Position = projectionMatrix * mv;',
     '}',
   ].join('\n');
@@ -3363,9 +3443,25 @@ import {
     '}',
   ].join('\n');
 
+  // Replay ripples intentionally grow in world-space, independently of the
+  // fixed-size node glyphs.
+  var RIPPLE_VS = [
+    'uniform float uPixelRatio;',
+    'uniform float uViewportH;',
+    'attribute float size;',
+    'attribute float alpha;',
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  vColor = color;',
+    '  vAlpha = alpha;',
+    '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+    '  gl_PointSize = size * uViewportH * uPixelRatio / -mv.z;',
+    '  gl_Position = projectionMatrix * mv;',
+    '}',
+  ].join('\n');
+
   // Ripple ring shader: hollow expanding circle that fades as it grows.
-  // The `alpha` attribute carries (1 - age/duration) so the ring fades
-  // out over its lifecycle. The `size` attribute grows with age.
   var RIPPLE_FS = [
     'varying vec3 vColor;',
     'varying float vAlpha;',
@@ -3395,7 +3491,75 @@ import {
     );
   }
 
-  function topoAggregateCandidate(clientX, clientY) {
+  function cancelBrainPivot(runCompletion) {
+    var pivot = brainPivotTween;
+    brainPivotTween = null;
+    topoMetrics.pivotActive = false;
+    if (runCompletion && pivot && pivot.onComplete) pivot.onComplete();
+  }
+
+  function cancelPendingBrainSelection() {
+    if (!brainSelectTimer) return;
+    clearTimeout(brainSelectTimer);
+    brainSelectTimer = null;
+  }
+
+  function completeBrainPivot(pivot, destination) {
+    var delta = destination.clone().sub(pivot.startTarget);
+    brainControls.target.copy(destination);
+    brainCamera.position.copy(pivot.startCamera).add(delta);
+    brainControls.update();
+    brainPivotTween = null;
+    topoMetrics.pivotNodeID = pivot.node.id || pivot.node.aggregateKey || null;
+    topoMetrics.pivotActive = false;
+    if (pivot.onComplete) pivot.onComplete();
+  }
+
+  function focusBrainNode(node, onComplete) {
+    if (!node || !brainCamera || !brainControls) {
+      if (onComplete) onComplete();
+      return;
+    }
+    if (brainPivotTween && brainPivotTween.node.id === node.id) {
+      if (onComplete) brainPivotTween.onComplete = onComplete;
+      return;
+    }
+    cancelBrainPivot(false);
+    var pivot = {
+      node: node,
+      startCamera: brainCamera.position.clone(),
+      startTarget: brainControls.target.clone(),
+      startedAt: 0,
+      duration: BRAIN_PIVOT_DURATION_MS,
+      onComplete: onComplete || null,
+    };
+    var destination = topoNodeWorld(node);
+    var reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion || destination.distanceToSquared(pivot.startTarget) < 1e-10) {
+      completeBrainPivot(pivot, destination);
+      return;
+    }
+    brainPivotTween = pivot;
+    topoMetrics.pivotNodeID = null;
+    topoMetrics.pivotActive = true;
+    brainRearm(brainSettle, performance.now());
+  }
+
+  function topoTickBrainPivot(ts) {
+    var pivot = brainPivotTween;
+    if (!pivot || !brainCamera || !brainControls) return false;
+    if (!pivot.startedAt) pivot.startedAt = ts;
+    var raw = Math.min(1, (ts - pivot.startedAt) / pivot.duration);
+    var eased = raw < 0.5 ? 4 * raw * raw * raw : 1 - Math.pow(-2 * raw + 2, 3) / 2;
+    var destination = topoNodeWorld(pivot.node);
+    var delta = destination.clone().sub(pivot.startTarget).multiplyScalar(eased);
+    brainControls.target.copy(pivot.startTarget).add(delta);
+    brainCamera.position.copy(pivot.startCamera).add(delta);
+    if (raw >= 1) completeBrainPivot(pivot, destination);
+    return true;
+  }
+
+  function topoAggregateCandidate(clientX, clientY, expandableOnly, maxDistance) {
     if (!brainCamera || !brainGLRenderer) return null;
     var rect = brainGLRenderer.domElement.getBoundingClientRect();
     var px = Number.isFinite(clientX) ? clientX - rect.left : rect.width / 2;
@@ -3403,6 +3567,7 @@ import {
     var best = null, bestDistance = Infinity;
     brainNodes.forEach(function (node) {
       if (!node.aggregateLevel || brainHidden(node)) return;
+      if (expandableOnly && !topoExpansion.canExpand(node)) return;
       var projected = topoNodeWorld(node).project(brainCamera);
       if (projected.z >= 1) return;
       var sx = (projected.x * 0.5 + 0.5) * rect.width;
@@ -3410,14 +3575,7 @@ import {
       var distance = Math.hypot(sx - px, sy - py);
       if (distance < bestDistance) { best = node; bestDistance = distance; }
     });
-    return bestDistance <= 110 ? best : null;
-  }
-
-  function topoProjectedDiameter(node) {
-    if (!node || !brainCamera) return 0;
-    var cameraSpace = topoNodeWorld(node).applyMatrix4(brainCamera.matrixWorldInverse);
-    var size = 0.05 + (node.centrality || 0) * 0.03;
-    return size * brainH / Math.max(0.03, -cameraSpace.z);
+    return bestDistance <= (Number.isFinite(maxDistance) ? maxDistance : 110) ? best : null;
   }
 
   function topoTransitionAnchor(node) {
@@ -3425,120 +3583,78 @@ import {
     return { nx: node.x / brainW, ny: node.y / brainH, z3: node.z3 || 0 };
   }
 
-  function topoCommitZoomIntent(intent, candidate, preserveCamera) {
+  function topoCommitExpansionIntent(intent, candidate) {
     if (!intent) return;
-    if (intent.type === "prefetch") {
-      topoPrefetch(intent);
-      return;
-    }
-    if (intent.type !== "transition" || !topoZoom.begin()) return;
+    if (intent.type !== "transition" || !topoExpansion.begin(intent)) return;
     topoPendingTransition = {
-      direction: intent.direction,
+      intent: intent,
       anchor: topoTransitionAnchor(candidate),
-      camera: preserveCamera ? topoCaptureCameraState() : null,
+      camera: topoCaptureCameraState(),
       parentKey: intent.parentKey || null,
+      // Preserve the exact visible layout. Some local nodes have no persisted
+      // projection and would otherwise receive new random coordinates when the
+      // accumulated GPU buffers are rebuilt for another expansion.
+      existingLayout: brainNodes.map(function (node) {
+        return {
+          id: node.id,
+          nx: brainW ? node.x / brainW : 0.5,
+          ny: brainH ? node.y / brainH : 0.5,
+          nax: brainW ? node.ax / brainW : 0.5,
+          nay: brainH ? node.ay / brainH : 0.5,
+          z3: node.z3 || 0,
+        };
+      }),
       startedAt: performance.now(),
     };
     renderTopology(intent.level, intent.focusKey, {
-      semantic: true,
+      expansion: true,
       preserveReplay: true,
       parentKey: intent.parentKey || null,
     }).catch(function () {
       topoPendingTransition = null;
-      topoZoom.cancel();
+      topoExpansion.cancel();
     });
   }
 
-  function topoScheduleSemanticZoom(direction) {
-    if (topoZoomFrame !== null || topoPendingTransition) return;
-    topoZoomFrame = requestAnimationFrame(function () {
-      topoZoomFrame = null;
-      if (!brainControls || !brainCamera) return;
-      var candidate = direction === "in"
-        ? topoAggregateCandidate(topoPointer.x, topoPointer.y)
-        : null;
-      var distance = brainCamera.position.distanceTo(brainControls.target);
-      var intent = topoZoom.observe({
-        direction: direction,
-        candidate: candidate,
-        projectedPx: topoProjectedDiameter(candidate),
-        distanceRatio: distance / Math.max(0.01, topoLevelFitDistance),
-      });
-      topoCommitZoomIntent(intent, candidate, true);
-    });
-  }
-
-  function topoCaptureTransitionGhost(transition) {
-    if (!transition || !brainGLRenderer || !brainContainer) return null;
-    var ghost = document.createElement("div");
-    ghost.className = "topo-transition-ghost " +
-      (transition.direction === "in" ? "zoom-in" : "zoom-out");
-    var source = brainGLRenderer.domElement;
-    try {
-      brainGLRenderer.render(brainScene, brainCamera);
-      var copy = document.createElement("canvas");
-      copy.width = source.width;
-      copy.height = source.height;
-      copy.style.width = brainW + "px";
-      copy.style.height = brainH + "px";
-      var context = copy.getContext("2d");
-      if (context) context.drawImage(source, 0, 0, copy.width, copy.height);
-      ghost.appendChild(copy);
-    } catch (_) {
-      // A browser may decline a WebGL readback; the live canvas still remains
-      // visible until the replacement scene is ready, so no blank frame occurs.
-    }
-    if (brainLabelContainer) ghost.appendChild(brainLabelContainer.cloneNode(true));
-    var anchor = transition.anchor;
-    if (anchor) ghost.style.transformOrigin = (anchor.nx * 100) + "% " + (anchor.ny * 100) + "%";
-    brainContainer.appendChild(ghost);
-    return ghost;
-  }
-
-  function topoRunTransitionVisual(ghost, transition) {
-    if (!transition) { if (ghost) ghost.remove(); return; }
-    var canvas = brainGLRenderer && brainGLRenderer.domElement;
-    if (canvas) canvas.classList.add("topo-semantic-new");
-    if (brainLabelContainer) brainLabelContainer.classList.add("topo-semantic-new");
-    requestAnimationFrame(function () {
-      requestAnimationFrame(function () {
-        if (canvas) canvas.classList.add("ready");
-        if (brainLabelContainer) brainLabelContainer.classList.add("ready");
-        if (ghost) ghost.classList.add("leaving");
-      });
-    });
-    setTimeout(function () {
-      topoMetrics.transitionMs = performance.now() - transition.startedAt;
-      topoPublishMetrics();
-    }, SEMANTIC_ZOOM_DEFAULTS.transitionMs);
-    setTimeout(function () {
-      if (ghost) ghost.remove();
-      if (canvas) canvas.classList.remove("topo-semantic-new", "ready");
-      if (brainLabelContainer) brainLabelContainer.classList.remove("topo-semantic-new", "ready");
-    }, SEMANTIC_ZOOM_DEFAULTS.transitionMs + 80);
-  }
-
-  function topoPrepareSemanticMorph(transition, W, H) {
-    topoSemanticMorph = null;
-    if (!transition || transition.direction !== "in" || !transition.anchor || !brainNodes.length) return;
+  function topoPrepareDetailMorph(transition, W, H) {
+    topoDetailMorph = null;
+    if (!transition || !transition.anchor || !brainNodes.length) return;
     var sx = transition.anchor.nx * W;
     var sy = transition.anchor.ny * H;
     var sz = transition.anchor.z3 || 0;
-    var records = brainNodes.map(function (node) {
+    var existing = new Map((transition.existingLayout || []).map(function (record) {
+      return [record.id, record];
+    }));
+    brainNodes.forEach(function (node) {
+      var previous = existing.get(node.id);
+      if (!previous) return;
+      node.x = previous.nx * W;
+      node.y = previous.ny * H;
+      node.ax = previous.nax * W;
+      node.ay = previous.nay * H;
+      node.z3 = previous.z3;
+      node.vx = 0;
+      node.vy = 0;
+    });
+    var records = brainNodes.filter(function (node) {
+      return !existing.has(node.id);
+    }).map(function (node) {
       var record = { node: node, tx: node.x, ty: node.y, tz: node.z3 || 0 };
       node.x = sx; node.y = sy; node.z3 = sz;
       node.ax = record.tx; node.ay = record.ty;
       return record;
     });
-    topoSemanticMorph = {
+    if (!records.length) return;
+    topoDetailMorph = {
       records: records, sx: sx, sy: sy, sz: sz,
-      startedAt: 0, duration: SEMANTIC_ZOOM_DEFAULTS.transitionMs,
+      targetByID: new Map(records.map(function (record) { return [record.node.id, record]; })),
+      startedAt: 0, duration: EXPANSION_DEFAULTS.transitionMs,
     };
     brainUsePersistedLayout = true;
   }
 
-  function topoTickSemanticMorph(ts) {
-    var morph = topoSemanticMorph;
+  function topoTickDetailMorph(ts) {
+    var morph = topoDetailMorph;
     if (!morph) return false;
     if (!morph.startedAt) morph.startedAt = ts;
     var raw = Math.min(1, (ts - morph.startedAt) / morph.duration);
@@ -3548,7 +3664,7 @@ import {
       record.node.y = morph.sy + (record.ty - morph.sy) * eased;
       record.node.z3 = morph.sz + (record.tz - morph.sz) * eased;
     });
-    if (raw >= 1) topoSemanticMorph = null;
+    if (raw >= 1) topoDetailMorph = null;
     return true;
   }
 
@@ -3569,18 +3685,17 @@ import {
     brainWorldCX = W / 2;                   // pixel center X
     brainWorldCY = H / 2;                   // pixel center Y
 
-    // Fit the camera to the persisted frame represented by this level. Local
-    // folds occupy a small region of the estate frame and therefore zoom in;
-    // Estate aggregates retain the full mental map.
+    // Fit the initial camera to the accumulated persisted frame. Detail
+    // expansion preserves the live camera exactly; this fit is used only for
+    // a fresh scene or explicit reset.
     var aspect = W / H;
     brainCamera = new THREE.PerspectiveCamera(50, aspect, 0.01, 100);
     var fit = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity,
                 minZ: Infinity, maxZ: -Infinity };
-    brainNodes.forEach(function (n, index) {
-      // A semantic morph temporarily collapses live node coordinates to the
-      // parent anchor. Camera fit and reverse hysteresis must use the final
-      // child frame, not that transient start pose.
-      var target = topoSemanticMorph && topoSemanticMorph.records[index];
+    brainNodes.forEach(function (n) {
+      // Newly added children temporarily start at their parent anchor. A fresh
+      // fit must use their final persisted positions, not that start pose.
+      var target = topoDetailMorph && topoDetailMorph.targetByID.get(n.id);
       var nx = target ? target.tx : n.x;
       var ny = target ? target.ty : n.y;
       var nz = target ? target.tz : (n.z3 || 0);
@@ -3603,13 +3718,9 @@ import {
       (fit.maxX - fit.minX) / (2 * tanHalfFov * Math.max(0.5, aspect))
     ) * 1.28 + (fit.maxZ - fit.minZ) * 0.45;
     fitDistance = Math.max(0.35, Math.min(3.2, fitDistance));
-    topoLevelFitDistance = fitDistance;
-    // Preserve the user's orbit while moving into detail. On the way out, fit
-    // the parent level to its own frame; a child-level camera can be far beyond
-    // the parent's useful range and would collapse the estate into the center.
-    var cameraState = topoPendingTransition &&
-      topoPendingTransition.direction === "in" &&
-      topoPendingTransition.camera;
+    // In-place expansion preserves the user's exact orbit and distance. The
+    // camera itself never participates in data navigation.
+    var cameraState = topoPendingTransition && topoPendingTransition.camera;
     if (cameraState) {
       targetX = cameraState.target.x;
       targetY = cameraState.target.y;
@@ -3635,6 +3746,26 @@ import {
     glCanvas.style.left = '0';
     container.appendChild(glCanvas);
 
+    // Browser click events can still fire after a pointer drag. Treat motion
+    // beyond this tolerance as camera manipulation, never node selection.
+    var pointerDownX = 0, pointerDownY = 0, pointerIsDown = false, pointerDragged = false;
+    var clickDragThresholdSquared = 25;
+    glCanvas.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      pointerDownX = e.clientX;
+      pointerDownY = e.clientY;
+      pointerIsDown = true;
+      pointerDragged = false;
+    });
+    glCanvas.addEventListener('pointermove', function (e) {
+      if (!pointerIsDown || pointerDragged) return;
+      var dx = e.clientX - pointerDownX;
+      var dy = e.clientY - pointerDownY;
+      if (dx * dx + dy * dy > clickDragThresholdSquared) pointerDragged = true;
+    });
+    glCanvas.addEventListener('pointerup', function () { pointerIsDown = false; });
+    glCanvas.addEventListener('pointercancel', function () { pointerIsDown = false; });
+
     // OrbitControls — scroll-wheel zoom, drag to orbit, right-drag to pan.
     brainControls = new OrbitControls(brainCamera, glCanvas);
     // Orbit target at the midpoint of the z-range so rotation reveals depth.
@@ -3653,47 +3784,14 @@ import {
     // orbit fully coasts to rest, then settles. (OrbitControls.update() only
     // dispatches 'change' when the camera actually moved, so a static settled
     // frame never spuriously re-arms.)
-    brainControls.addEventListener('start', function () { brainRearm(brainSettle, performance.now()); });
+    brainControls.addEventListener('start', function () {
+      cancelPendingBrainSelection();
+      cancelBrainPivot(true);
+      brainRearm(brainSettle, performance.now());
+    });
     brainControls.addEventListener('change', function () {
       brainRearm(brainSettle, performance.now());
     });
-    // Semantic levels respond only to explicit zoom input. OrbitControls also
-    // moves the camera while rotation damping settles; treating every camera
-    // change as zoom intent made a gentle rotation cross data levels.
-    glCanvas.addEventListener('wheel', function (e) {
-      topoScheduleSemanticZoom(e.deltaY < 0 ? "in" : "out");
-    }, { passive: true });
-    var topoPinchDistance = null;
-    glCanvas.addEventListener('touchstart', function (e) {
-      if (e.touches.length !== 2) { topoPinchDistance = null; return; }
-      topoPinchDistance = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY,
-      );
-    }, { passive: true });
-    glCanvas.addEventListener('touchmove', function (e) {
-      if (e.touches.length !== 2) { topoPinchDistance = null; return; }
-      var distance = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY,
-      );
-      if (topoPinchDistance !== null && Math.abs(distance - topoPinchDistance) >= 2) {
-        topoScheduleSemanticZoom(distance > topoPinchDistance ? "in" : "out");
-      }
-      topoPinchDistance = distance;
-    }, { passive: true });
-    function clearTopoPinch() { topoPinchDistance = null; }
-    glCanvas.addEventListener('touchend', clearTopoPinch, { passive: true });
-    glCanvas.addEventListener('touchcancel', clearTopoPinch, { passive: true });
-    glCanvas.addEventListener('pointermove', function (e) {
-      topoPointer.x = e.clientX;
-      topoPointer.y = e.clientY;
-    }, { passive: true });
-    glCanvas.addEventListener('pointerleave', function () {
-      topoPointer.x = null;
-      topoPointer.y = null;
-    }, { passive: true });
-
     // Pre-build node lookup + community pools.
     brainNodeMap = Object.create(null);
     brainCommPools = Object.create(null);
@@ -3708,7 +3806,7 @@ import {
       });
       Object.keys(topoRealData.activityTargets).forEach(function (id) {
         var target = aggregateByKey[topoRealData.activityTargets[id]];
-        if (target) brainNodeMap[id] = target;
+        if (target && !brainNodeMap[id]) brainNodeMap[id] = target;
       });
     }
 
@@ -3723,12 +3821,16 @@ import {
     // Threshold in world-space units — ~8px at default zoom.
     brainRaycaster.params.Points.threshold = 8 * brainWorldScale;
 
-    // Build Three.js geometry for nodes and edges.
-    buildBrainPoints();
+    // Build real relationships and hierarchy fibers behind fixed-size nodes.
     buildBrainLines();
+    buildBrainHierarchyLines();
+    buildBrainPoints();
     buildRippleMesh();
     buildTrailMesh();
-    topoMetrics.initialGeometryBytes = [brainPointsMesh, brainEdgesMesh, brainRippleMesh, brainTrailMesh]
+    topoMetrics.initialGeometryBytes = [
+      brainEdgesMesh, brainHierarchyMesh, brainPointsMesh,
+      brainRippleMesh, brainTrailMesh,
+    ]
       .filter(Boolean)
       .reduce(function (total, mesh) {
         return total + Object.values(mesh.geometry.attributes).reduce(function (bytes, attr) {
@@ -3746,30 +3848,52 @@ import {
     brainLabelContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden;';
     container.appendChild(brainLabelContainer);
 
-    // Click: raycaster hit → select node.
+    // A click pivots immediately, but selection waits just long enough to
+    // distinguish it from a double-click. Expansion never selects the node.
     glCanvas.addEventListener('click', function (e) {
+      if (pointerDragged) {
+        pointerDragged = false;
+        cancelPendingBrainSelection();
+        return;
+      }
+      if (e.detail > 1) return;
+      cancelPendingBrainSelection();
       var rect = glCanvas.getBoundingClientRect();
       brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       brainRaycaster.setFromCamera(brainPointer, brainCamera);
       var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
-      if (hits.length > 0) {
-        var idx = hits[0].index;
-        var node = brainNodes[idx];
+      var node = hits.length > 0
+        ? brainNodes[hits[0].index]
+        : topoAggregateCandidate(e.clientX, e.clientY, true, 48);
+      if (node) {
         if (node && !brainHidden(node)) {
-          if (node.aggregateLevel) {
-            topoDrill(node);
-            return;
-          }
-          if (node === brainSelectedNode) {
-            selectBrainNode(null);
-          } else {
+          focusBrainNode(node);
+          brainSelectTimer = setTimeout(function () {
+            brainSelectTimer = null;
             selectBrainNode(node);
-          }
+          }, BRAIN_SELECTION_DELAY_MS);
         }
       } else {
         selectBrainNode(null);
       }
+    });
+
+    glCanvas.addEventListener('dblclick', function (e) {
+      cancelPendingBrainSelection();
+      var rect = glCanvas.getBoundingClientRect();
+      brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      brainRaycaster.setFromCamera(brainPointer, brainCamera);
+      var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
+      var node = hits.length > 0 ? brainNodes[hits[0].index] : null;
+      if (!node || !node.aggregateLevel) {
+        node = topoAggregateCandidate(e.clientX, e.clientY, true, 48);
+      }
+      if (!node || !node.aggregateLevel || brainHidden(node)) return;
+      e.preventDefault();
+      selectBrainNode(null);
+      focusBrainNode(node, function () { topoExpand(node); });
     });
 
     // Right-click: raycaster hit → copy a paste-ready AI query about the node.
@@ -3779,32 +3903,41 @@ import {
     // crosses this surface that isn't already on the wire. A miss falls
     // through to the browser's own context menu.
     glCanvas.addEventListener('contextmenu', function (e) {
+      cancelPendingBrainSelection();
       var rect = glCanvas.getBoundingClientRect();
       brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       brainRaycaster.setFromCamera(brainPointer, brainCamera);
       var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
       // Aggregate points are rendered much larger than raw memories. Use the
-      // same nearest-visible-cluster targeting as semantic zoom so a right-click
+      // same nearest-visible-cluster targeting as explicit expansion so a right-click
       // anywhere on the visible glow is not rejected by the raw 8px ray radius.
       var node = hits.length ? brainNodes[hits[0].index]
         : topoAggregateCandidate(e.clientX, e.clientY);
       if (!node || brainHidden(node)) return;
       e.preventDefault();
-      if (!node.aggregateLevel) selectBrainNode(node); // highlight a real memory
       copyNodeQuery(node);
     });
 
     // Keyboard parity: +/- follows the same continuous camera path as wheel
-    // and pinch; Enter drills the aggregate nearest the viewport center.
+    // and pinch; Enter expands the aggregate nearest the viewport center.
     if (brainKeyHandler) document.removeEventListener('keydown', brainKeyHandler);
     brainKeyHandler = function (e) {
       var tag = e.target && e.target.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "BUTTON") return;
-      if (e.key === 'Escape' && brainSelectedNode) { selectBrainNode(null); return; }
+      if (e.key === 'Escape') {
+        cancelPendingBrainSelection();
+        if (brainSelectedNode) selectBrainNode(null);
+        return;
+      }
       if (e.key === 'Enter') {
-        var candidate = topoAggregateCandidate(null, null);
-        if (candidate) { e.preventDefault(); topoDrill(candidate); }
+        var candidate = topoAggregateCandidate(null, null, true);
+        if (candidate) {
+          e.preventDefault();
+          cancelPendingBrainSelection();
+          selectBrainNode(null);
+          focusBrainNode(candidate, function () { topoExpand(candidate); });
+        }
         return;
       }
       var scale = (e.key === '+' || e.key === '=') ? 0.8
@@ -3817,7 +3950,6 @@ import {
       offset.setLength(distance);
       brainCamera.position.copy(brainControls.target).add(offset);
       brainControls.update();
-      topoScheduleSemanticZoom(scale < 1 ? "in" : "out");
     };
     document.addEventListener('keydown', brainKeyHandler);
 
@@ -3841,10 +3973,7 @@ import {
         brainCamera.aspect = newW / newH;
         brainCamera.updateProjectionMatrix();
         brainGLRenderer.setSize(newW, newH);
-        // Update shader uniform for point sizing.
-        if (brainPointsMesh) {
-          brainPointsMesh.material.uniforms.uViewportH.value = newH;
-        }
+        if (brainRippleMesh) brainRippleMesh.material.uniforms.uViewportH.value = newH;
         // TOPO-SETTLE: node positions were just rescaled and the viewport moved,
         // so a settled graph must redraw — re-arm a full frame.
         brainRearm(brainSettle, performance.now());
@@ -3871,7 +4000,7 @@ import {
       // topoPlayStep re-arms one structural frame whenever playheadMs changes;
       // ripple/trail meshes and active pulse colors animate independently.
       var playing = false;
-      var morphActive = topoTickSemanticMorph(ts);
+      var morphActive = topoTickDetailMorph(ts);
       var full = morphActive || brainFrameIsFull(brainSettle, playing);
       if (full) {
         var maxMove = (brainUsePersistedLayout || morphActive) ? 0 : brainPhysicsStep(dt);
@@ -3879,6 +4008,7 @@ import {
       }
       // Always update controls so orbit damping keeps coasting; a real camera
       // move dispatches 'change' → brainRearm, which is what re-arms an orbit.
+      topoTickBrainPivot(ts);
       brainControls.update();
       if (brainPointsMesh) brainPointsMesh.material.uniforms.uTime.value = brainT;
       var recencyDue = Date.now() >= brainNextRecencyRefreshMs;
@@ -3930,10 +4060,7 @@ import {
       colors[i * 3]     = lum + (rgb[0] / 255 - lum) * sat;
       colors[i * 3 + 1] = lum + (rgb[1] / 255 - lum) * sat;
       colors[i * 3 + 2] = lum + (rgb[2] / 255 - lum) * sat;
-      // Aggregate clusters are first-class objects; drawers remain compact.
-      sizes[i] = n.aggregateLevel
-        ? 0.05 + n.centrality * 0.03
-        : (style.r * (1 + n.centrality * 1.2)) * 0.005;
+      sizes[i] = brainNodeSizePx(n, style);
       alphas[i] = style.a;
       breathPhases[i] = n.breathPhase;
     }
@@ -3946,7 +4073,7 @@ import {
     var mat = new THREE.ShaderMaterial({
       uniforms: {
         uPixelRatio: { value: window.devicePixelRatio || 1 },
-        uViewportH:  { value: brainH },
+        uPointScale: { value: brainPointScale },
         uTime:       { value: brainT },
         uBreathAmount: { value: 1.0 },
       },
@@ -3957,6 +4084,7 @@ import {
       depthWrite: false,
     });
     brainPointsMesh = new THREE.Points(geom, mat);
+    brainPointsMesh.renderOrder = 3;
     brainScene.add(brainPointsMesh);
   }
 
@@ -4050,7 +4178,92 @@ import {
     var edgeOpacity = Math.min(0.15, 30 / Math.max(1, E));
     var mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: edgeOpacity, depthWrite: false });
     brainEdgesMesh = new THREE.LineSegments(geom, mat);
+    brainEdgesMesh.renderOrder = 1;
     brainScene.add(brainEdgesMesh);
+  }
+
+  // Hierarchy arcs connect an expanded aggregate to the child aggregates it
+  // revealed. They are deliberately separate from brainEdges: these fibers
+  // encode containment, never an estate tunnel or inferred relationship.
+  function buildBrainHierarchyLines() {
+    if (brainHierarchyMesh) {
+      brainScene.remove(brainHierarchyMesh);
+      brainHierarchyMesh.geometry.dispose();
+      brainHierarchyMesh.material.dispose();
+    }
+    var parentByKey = Object.create(null);
+    brainNodes.forEach(function (n) {
+      if (n.aggregateKey) parentByKey[n.aggregateKey] = n;
+    });
+    brainHierarchyLinks = brainNodes.map(function (child) {
+      var parent = child.parentKey ? parentByKey[child.parentKey] : null;
+      return parent && parent !== child ? { parent: parent, child: child } : null;
+    }).filter(Boolean);
+    if (!brainHierarchyLinks.length) { brainHierarchyMesh = null; return; }
+    var segments = 6;
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(
+      new Float32Array(brainHierarchyLinks.length * segments * 6), 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(
+      new Float32Array(brainHierarchyLinks.length * segments * 6), 3));
+    var mat = new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.24, depthWrite: false,
+    });
+    brainHierarchyMesh = new THREE.LineSegments(geom, mat);
+    brainHierarchyMesh.renderOrder = 2;
+    brainScene.add(brainHierarchyMesh);
+    updateBrainHierarchyGeometry();
+  }
+
+  function updateBrainHierarchyGeometry() {
+    if (!brainHierarchyMesh) return;
+    var positions = brainHierarchyMesh.geometry.attributes.position.array;
+    var colors = brainHierarchyMesh.geometry.attributes.color.array;
+    var segments = 6;
+    var zDepth = brain3D ? 1.4 : 0;
+    function world(node) {
+      return {
+        x: (node.x - brainWorldCX) * brainWorldScale,
+        y: (brainWorldCY - node.y) * brainWorldScale,
+        z: -(node.z3 || 0) * zDepth,
+      };
+    }
+    function bezier(a, c, b, t) {
+      var u = 1 - t;
+      return u * u * a + 2 * u * t * c + t * t * b;
+    }
+    brainHierarchyLinks.forEach(function (link, linkIndex) {
+      var a = world(link.parent), b = world(link.child);
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var length = Math.hypot(dx, dy) || 1;
+      var bend = 0.035 + stableUnit(link.child.id, 'hierarchy-bend') * 0.035;
+      var sign = stableUnit(link.child.id, 'hierarchy-side') < 0.5 ? -1 : 1;
+      var c = {
+        x: (a.x + b.x) / 2 - dy / length * bend * sign,
+        y: (a.y + b.y) / 2 + dx / length * bend * sign,
+        z: (a.z + b.z) / 2 + 0.055,
+      };
+      var rgb = link.child.rgb || [232, 234, 240];
+      for (var s = 0; s < segments; s++) {
+        var t0 = s / segments, t1 = (s + 1) / segments;
+        var offset = (linkIndex * segments + s) * 6;
+        positions[offset] = bezier(a.x, c.x, b.x, t0);
+        positions[offset + 1] = bezier(a.y, c.y, b.y, t0);
+        positions[offset + 2] = bezier(a.z, c.z, b.z, t0);
+        positions[offset + 3] = bezier(a.x, c.x, b.x, t1);
+        positions[offset + 4] = bezier(a.y, c.y, b.y, t1);
+        positions[offset + 5] = bezier(a.z, c.z, b.z, t1);
+        var fade0 = 0.36 + 0.64 * t0, fade1 = 0.36 + 0.64 * t1;
+        colors[offset] = rgb[0] / 255 * fade0;
+        colors[offset + 1] = rgb[1] / 255 * fade0;
+        colors[offset + 2] = rgb[2] / 255 * fade0;
+        colors[offset + 3] = rgb[0] / 255 * fade1;
+        colors[offset + 4] = rgb[1] / 255 * fade1;
+        colors[offset + 5] = rgb[2] / 255 * fade1;
+      }
+    });
+    brainHierarchyMesh.geometry.attributes.position.needsUpdate = true;
+    brainHierarchyMesh.geometry.attributes.color.needsUpdate = true;
   }
 
   // Build the ripple ring mesh — fixed-size buffer for RIPPLE_MAX concurrent
@@ -4074,16 +4287,15 @@ import {
       uniforms: {
         uPixelRatio: { value: window.devicePixelRatio || 1 },
         uViewportH:  { value: brainH },
-        uTime:       { value: 0 },
-        uBreathAmount: { value: 0 },
       },
-      vertexShader: POINT_VS,
+      vertexShader: RIPPLE_VS,
       fragmentShader: RIPPLE_FS,
       vertexColors: true,
       transparent: true,
       depthWrite: false,
     });
     brainRippleMesh = new THREE.Points(geom, mat);
+    brainRippleMesh.renderOrder = 4;
     brainScene.add(brainRippleMesh);
   }
 
@@ -4101,6 +4313,7 @@ import {
       vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false,
     });
     brainTrailMesh = new THREE.LineSegments(geom, mat);
+    brainTrailMesh.renderOrder = 3;
     brainScene.add(brainTrailMesh);
   }
 
@@ -4259,10 +4472,8 @@ import {
       var pr = lum + (rgb[0] / 255 - lum) * sat;
       var pg = lum + (rgb[1] / 255 - lum) * sat;
       var pb = lum + (rgb[2] / 255 - lum) * sat;
-      var baseSize = n.aggregateLevel
-        ? 0.05 + n.centrality * 0.03
-        : (style.r * (1 + n.centrality * 1.2)) * 0.005;
-      var pulseSize = n.aggregateLevel ? 0.035 : 0.03;
+      var baseSize = brainNodeSizePx(n, style);
+      var pulseSize = n.aggregateLevel ? 3 : 2;
       if (n.pulseOrange > 0.01) {
         var t2 = n.pulseOrange;
         pr = pr + (1 - pr) * t2 * 0.6;
@@ -4294,6 +4505,8 @@ import {
       geom.attributes.alpha.array.byteLength +
       (full ? geom.attributes.position.array.byteLength : 0) +
       ((full || anyPulse) ? geom.attributes.size.array.byteLength : 0);
+
+    if (full) updateBrainHierarchyGeometry();
 
     // Update edge positions from current node positions. Skipped entirely while
     // settled — edges only move when nodes move (frozen) or when selection /
@@ -4405,8 +4618,7 @@ import {
       brainLabelEls = [];
       ranks.forEach(function () {
         var lbl = document.createElement('div');
-        lbl.style.cssText = 'position:absolute;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;'
-          + 'color:rgba(232,234,240,0.5);letter-spacing:1.5px;text-transform:uppercase;white-space:nowrap;';
+        lbl.className = 'topo-lobe-label';
         brainLabelContainer.appendChild(lbl);
         brainLabelEls.push(lbl);
       });
@@ -4431,23 +4643,35 @@ import {
       var spread = members.reduce(function (s, n) {
         return s + Math.hypot(n.x - lCx, n.y - lCy);
       }, 0) / members.length;
-      // Convert pixel centroid to world-space for projection, placing
-      // the label above the lobe centroid.
+      // Project the lobe centroid, then lift the label in screen pixels so its
+      // offset remains stable under camera zoom just like the node glyphs.
       var wx = (lCx - lWcx) * lWs;
       var wy = (lWcy - lCy) * lWs + spread * lWs * 1.2;
       var sp = worldToScreen(wx, wy, lCz);
       if (!sp.visible) { lbl.style.display = 'none'; return; }
+      var coreLiftPx = members.reduce(function (largest, n) {
+        return Math.max(largest, n.coreSizePx || 0);
+      }, 0) * 0.5 + 7;
+      sp.y -= coreLiftPx;
       lbl.style.display = '';
       // V2-P2a: the label swatch/text use the LOBE's resolved aura color
       // (brainLobeRGB — purity-desaturated dominant code), not an
       // individual member's own node color, since members in a mixed lobe
       // carry different colors now (see pushNode's per-node fallback chain).
       var col = brainLobeRGB[rank] || BRAIN_COMM_COLORS[parseInt(rank, 10) % BRAIN_COMM_COLORS.length];
-      var labelText = String(brainLobeConfidence[rank] || brainLobeLabels[rank]).toUpperCase();
+      var field = brainLobeFieldMeta[rank] || null;
+      var labelText = String(field ? field.primary : (brainLobeConfidence[rank] || brainLobeLabels[rank])).toUpperCase();
       if (brainW < 520 && labelText.length > 20) labelText = labelText.slice(0, 19) + '...';
-      lbl.innerHTML = '<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:rgb('
-        + col[0] + ',' + col[1] + ',' + col[2] + ');margin-right:6px;vertical-align:middle;opacity:0.65"></span>'
-        + labelText;
+      clear(lbl);
+      var swatch = el('span', 'topo-lobe-swatch');
+      swatch.style.background = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')';
+      var copy = el('span', 'topo-lobe-copy');
+      copy.appendChild(el('span', 'topo-lobe-primary', labelText));
+      if (field && brainShowFieldDetails) {
+        copy.appendChild(el('span', 'topo-lobe-detail', field.detail));
+      }
+      lbl.appendChild(swatch);
+      lbl.appendChild(copy);
       var halfWidth = lbl.offsetWidth / 2;
       var labelHeight = lbl.offsetHeight;
       lbl.style.left = Math.max(halfWidth + 6, Math.min(brainW - halfWidth - 6, sp.x)) + 'px';
@@ -4485,13 +4709,11 @@ import {
     return null;
   }
 
-  // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from
-  // brainAdjacency, then refreshes the V2-P2c truth-lens panel — every
-  // selection-changing call site (click, right-click, Escape) funnels
-  // through here, so the panel is the single place that needs to stay in
-  // sync (stopBrainAnimation's own teardown reset calls renderSelectionPanel
-  // directly, since it bypasses this function — see its comment).
+  // Set or clear the visual pivot selection and its hop highlights. Graph
+  // gestures never open the details panel: click owns camera pivoting,
+  // double-click owns expansion, and right-click owns AI-query copy.
   function selectBrainNode(node) {
+    if (!node) cancelBrainPivot(false);
     brainSelectedNode = node;
     brainHop1 = Object.create(null);
     brainHop2 = Object.create(null);
@@ -4509,7 +4731,7 @@ import {
     // and the selection-dimming `ea` on every edge, so it must force a full edge
     // pass — re-arm guarantees at least one full frame that reruns the edge loop.
     brainRearm(brainSettle, performance.now());
-    renderSelectionPanel();
+    if (topoSelPanelEl) topoSelPanelEl.hidden = true;
   }
 
   // Per-edge-type neighbor ids touching `nodeId`, deduped within each type
@@ -4629,13 +4851,10 @@ import {
     return lines.join("\n");
   }
 
-  // Copy `node`'s AI query to the clipboard, with the Safari no-user-
-  // activation fallback (contextmenu events carry no user activation, so
-  // BOTH clipboard paths are refused there — the button click from the
-  // selection panel normally has activation, but browsers lacking the async
-  // Clipboard API still fall through the same path). Shared by the
-  // right-click context-menu handler and the V2-P2c selection panel's
-  // "Copy AI query" button — one copy flow, one success/failure UX either way.
+  // Copy `node`'s AI query to the clipboard. Some browsers refuse clipboard
+  // writes from a contextmenu event, so showQueryFallback supplies a normal
+  // activation-bearing Copy button when needed. This remains a right-click
+  // graph action, separate from single-click pivot selection.
   function copyNodeQuery(node) {
     var query = node.aggregateLevel ? buildAggregateQuery(node) : buildNodeQuery(node);
     copyText(query, function (ok) {
@@ -4740,18 +4959,14 @@ import {
   }
 
   // =========================================================================
-  // V2-P2c SELECTION TRUTH-LENS PANEL — "what is this memory really near?"
-  // selectBrainNode(node) calls renderSelectionPanel() on every selection
-  // change (click, right-click, Escape); stopBrainAnimation's own teardown
-  // reset calls it too, since that path sets brainSelectedNode directly
-  // rather than through selectBrainNode. Every field below is already
-  // client-side state built by buildRealBrainNodes/startBrainAnimation — no
-  // new endpoint, no new fetch.
+  // Legacy V2-P2c truth-lens renderer. No active topology gesture creates this
+  // panel; selection and teardown hide any stale instance from an older view.
   // =========================================================================
 
   // Lazily builds and appends the panel chrome to #topoStage, same
   // append-on-demand pattern as topoToast — caches the result so repeated
-  // selections don't rebuild the head/copy-button chrome, only the body.
+  // selections don't rebuild the panel chrome, only the body. AI-query copy
+  // remains a right-click action on the graph itself.
   //
   // Placement: bottom-left, stacked ABOVE .topo-feed (the activity feed
   // overlay, also anchored bottom-left at 14px from the stage edge). Rather
@@ -4767,11 +4982,11 @@ import {
     var panel = el("div", "topo-selpanel");
     panel.id = "topoSelPanel";
     panel.setAttribute("role", "region");
-    panel.setAttribute("aria-label", "Selected memory");
+    panel.setAttribute("aria-label", "Selected pivot");
     panel.hidden = true;
 
     var head = el("div", "tsp-head");
-    head.appendChild(el("span", "tsp-title", "Selected memory"));
+    head.appendChild(el("span", "tsp-title", "Selected pivot"));
     var closeBtn = el("button", "tsp-close", "×");
     closeBtn.type = "button";
     closeBtn.setAttribute("aria-label", "Clear selection");
@@ -4781,13 +4996,6 @@ import {
 
     topoSelBodyEl = el("div", "tsp-body");
     panel.appendChild(topoSelBodyEl);
-
-    var copyBtn = el("button", "btn tsp-copy", "Copy AI query");
-    copyBtn.type = "button";
-    copyBtn.addEventListener("click", function () {
-      if (brainSelectedNode) copyNodeQuery(brainSelectedNode);
-    });
-    panel.appendChild(copyBtn);
 
     stage.appendChild(panel);
     topoSelPanelEl = panel;
@@ -4924,6 +5132,13 @@ import {
       brainScene.remove(brainPointsMesh);
       brainPointsMesh = null;
     }
+    if (brainHierarchyMesh) {
+      brainHierarchyMesh.geometry.dispose();
+      brainHierarchyMesh.material.dispose();
+      brainScene.remove(brainHierarchyMesh);
+      brainHierarchyMesh = null;
+    }
+    brainHierarchyLinks = [];
     if (brainEdgesMesh) {
       brainEdgesMesh.geometry.dispose();
       brainEdgesMesh.material.dispose();
@@ -4944,6 +5159,10 @@ import {
     }
     brainRipples = []; brainTrails = []; brainLastPulseNode = null;
     brainActivePulseNodes.clear();
+    cancelPendingBrainSelection();
+    brainPivotTween = null;
+    topoMetrics.pivotNodeID = null;
+    topoMetrics.pivotActive = false;
     if (brainControls) { brainControls.dispose(); brainControls = null; }
     if (brainGLRenderer) {
       brainGLRenderer.dispose();
@@ -5204,16 +5423,22 @@ import {
         ? "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")"
         : "rgba(232,234,240,0.35)";
 
-      // V2-P2a: show the confidence label ("Label · 82%" / "Mixed · top:
-      // …") when the row is a coded lobe; row.key (the filter identity —
-      // untouched) stays the fallback for buckets and code-less lobes.
-      var label = el("span", "cp-label", row.confidence || row.key);
-      var size = el("span", "cp-size", String(row.size));
-
       line.appendChild(box);
       line.appendChild(dot);
-      line.appendChild(label);
-      line.appendChild(size);
+      if (row.field) {
+        var fieldCopy = el("span", "cp-field-copy");
+        fieldCopy.appendChild(el("span", "cp-field-name", row.field.primary));
+        if (brainShowFieldDetails) {
+          fieldCopy.appendChild(el("span", "cp-field-detail", row.field.detail));
+        }
+        line.appendChild(fieldCopy);
+      } else {
+        // V2-P2a: show the confidence label ("Label · 82%" / "Mixed · top:
+        // …") when the row is a coded lobe; row.key (the filter identity —
+        // untouched) stays the fallback for buckets and code-less lobes.
+        line.appendChild(el("span", "cp-label", row.confidence || row.key));
+        line.appendChild(el("span", "cp-size", String(row.size)));
+      }
       // Click anywhere on the row toggles the domain (checkbox semantics).
       line.addEventListener("click", function () { commToggle(row.key); });
       list.appendChild(line);
@@ -5229,34 +5454,57 @@ import {
       topoActiveRenderKey = null;
       topoRenderGeneration++;
     }
-    if (topoZoomFrame !== null) { cancelAnimationFrame(topoZoomFrame); topoZoomFrame = null; }
-    document.querySelectorAll(".topo-transition-ghost").forEach(function (node) { node.remove(); });
     topoPendingTransition = null;
-    topoZoom.cancel();
+    topoExpansion.reset();
     stopBrainAnimation();
     topoPlayReset();
     if (sse) sse.removeEventListener("message", topoSSEHandler);
   }
 
-  function topoDrill(node) {
-    var intent = topoZoom.drill(node);
-    topoCommitZoomIntent(intent, node, false);
+  function topoExpand(node) {
+    var intent = topoExpansion.intent(node);
+    topoCommitExpansionIntent(intent, node);
   }
 
-  function topoNavigateUp() {
-    var intent = null;
-    if (topoViewLevel === "local" && topoParentKey) {
-      intent = {
-        type: "transition", direction: "out", level: "community",
-        focusKey: topoParentKey, parentKey: topoParentKey,
-      };
-    } else if (topoViewLevel === "community") {
-      intent = {
-        type: "transition", direction: "out", level: "estate",
-        focusKey: null, parentKey: null,
-      };
+  // Add one bounded detail response to the current scene without replacing
+  // anything already visible. New aggregate community ids are namespaced;
+  // local memories reuse their visible fold's community before nodes, labels,
+  // filters, and colors are merged.
+  function topoMergeSceneLayer(
+    previous, rawNodes, rawEdges, communities, activityTargets, transition
+  ) {
+    if (!previous) {
+      return { rawNodes: rawNodes, rawEdges: rawEdges, communities: communities,
+               activityTargets: activityTargets };
     }
-    topoCommitZoomIntent(intent, null, false);
+    // A local response describes the memories represented by an existing fold.
+    // Reuse that fold's community instead of adding the response's parent
+    // community metadata again. Otherwise the content picker double-counts the
+    // parent and makes a stable ancestor row appear to change or disappear.
+    var remapped = remapDetailCommunities(
+      previous, rawNodes, communities, transition && transition.intent);
+    var remappedNodes = remapped.rawNodes;
+    var mergedCommunities = remapped.communities;
+    var seenNodes = new Set(previous.rawNodes.map(function (node) { return node.id; }));
+    var mergedNodes = previous.rawNodes.slice();
+    remappedNodes.forEach(function (node) {
+      if (!seenNodes.has(node.id)) { seenNodes.add(node.id); mergedNodes.push(node); }
+    });
+    var edgeKey = function (edge) {
+      return edge.source + "\u0000" + edge.target + "\u0000" + (edge.edgeType || "tunnel");
+    };
+    var seenEdges = new Set(previous.rawEdges.map(edgeKey));
+    var mergedEdges = previous.rawEdges.slice();
+    rawEdges.forEach(function (edge) {
+      var key = edgeKey(edge);
+      if (!seenEdges.has(key)) { seenEdges.add(key); mergedEdges.push(edge); }
+    });
+    return {
+      rawNodes: mergedNodes,
+      rawEdges: mergedEdges,
+      communities: mergedCommunities,
+      activityTargets: Object.assign({}, previous.activityTargets || {}, activityTargets || {}),
+    };
   }
 
   async function renderTopology(level, focus, options) {
@@ -5265,6 +5513,7 @@ import {
     var requestedLevel = typeof level === "string" ? level : topoViewLevel;
     var requestedFocus = focus !== undefined ? (focus || null) : topoFocusKey;
     if (requestedLevel === "estate") requestedFocus = null;
+    var previousSceneData = options.expansion && topoRealData ? topoRealData : null;
     var generation = ++topoRenderGeneration;
     if (topoActiveRenderAbort) {
       topoActiveRenderAbort.abort();
@@ -5293,21 +5542,27 @@ import {
       topoActiveRenderAbort = null;
       topoActiveRenderKey = null;
     }
-    if (graphLoadFailed && options.semantic && brainGLRenderer) {
+    if (graphLoadFailed && options.expansion && brainGLRenderer) {
       topoPendingTransition = null;
-      topoZoom.cancel();
+      topoExpansion.cancel();
       topoToast("Detail unavailable — current map preserved");
       return;
     }
 
-    var transition = options.semantic ? topoPendingTransition : null;
-    var ghost = transition ? topoCaptureTransitionGhost(transition) : null;
-    if (options.semantic) {
+    if (options.expansion && g.structurePending && brainGLRenderer) {
+      topoPendingTransition = null;
+      topoExpansion.cancel();
+      topoToast("Detail is still being prepared — current map preserved");
+      return;
+    }
+
+    var transition = options.expansion ? topoPendingTransition : null;
+    if (options.expansion) {
       stopBrainAnimation();
       if (sse) sse.removeEventListener("message", topoSSEHandler);
     } else {
       topoPendingTransition = null;
-      topoZoom.cancel();
+      topoExpansion.cancel();
       topoTeardown();
     }
 
@@ -5328,10 +5583,10 @@ import {
     } else if (options.parentKey) {
       topoParentKey = options.parentKey;
     }
-    var structureText = g.structurePending ? "pending" : topoViewLevel;
+    var structureText = g.structurePending ? "pending" : "continuous";
     if (!g.structurePending && g.lodTruncated) structureText += " budgeted";
     $("#topoStructure").textContent = structureText;
-    $("#topoUp").hidden = topoViewLevel === "estate" || topoViewLevel === "full";
+    $("#topoUp").hidden = true;
 
     // Populate estate selector from analytics (once — avoids jump on re-render).
     const sel = $("#topoEstate");
@@ -5456,6 +5711,7 @@ import {
         keyToID[key] = id;
         displayCommunities.push({
           id: i, code: a.code || null, label: a.label || null, size: a.size || 0,
+          stableKey: a.stableKey || null,
           classificationPurity: typeof a.classificationPurity === "number" ? a.classificationPurity : null,
         });
         return {
@@ -5481,7 +5737,7 @@ import {
       }).filter(function (e) { return e.source && e.target; });
     }
     const nodeCount = rawNodes.length;
-    const hasRealStructure = !g.structurePending && nodeCount > 0;
+    const hasRealStructure = !g.structurePending && (nodeCount > 0 || !!previousSceneData);
     if (hasRealStructure) {
       // Retain the full dataset + community→content-key map so the content
       // picker can re-layout a SUBSET without refetching.
@@ -5489,6 +5745,12 @@ import {
       (g.activityIds || []).forEach(function (id, i) {
         if (g.activityKeys && g.activityKeys[i]) activityTargets[id] = g.activityKeys[i];
       });
+      var mergedLayer = topoMergeSceneLayer(
+        previousSceneData, rawNodes, rawEdges, displayCommunities, activityTargets, transition);
+      rawNodes = mergedLayer.rawNodes;
+      rawEdges = mergedLayer.rawEdges;
+      displayCommunities = mergedLayer.communities;
+      activityTargets = mergedLayer.activityTargets;
       topoRealData = { rawNodes: rawNodes, rawEdges: rawEdges,
                        communities: displayCommunities, W: W, H: H,
                        container: container, activityTargets: activityTargets };
@@ -5498,8 +5760,9 @@ import {
         if (n.communityId >= 0) sizeById[n.communityId] = (sizeById[n.communityId] || 0) + 1;
       });
       displayCommunities.forEach(function (c) {
-        topoCommKeyById[c.id] = c.label ||
-          ((sizeById[c.id] || c.size || 0) >= 4 ? "(unlabeled)" : "fragments");
+        var field = engramFieldPresentation(c.stableKey, c.size, c.code);
+        topoCommKeyById[c.id] = field ? field.key : (c.label ||
+          ((sizeById[c.id] || c.size || 0) >= 4 ? "(unlabeled)" : "fragments"));
       });
       buildBrainFromRealData(false);
     } else {
@@ -5510,12 +5773,13 @@ import {
       brainLobeLabels = Object.create(null);
       brainLobeRGB = Object.create(null);
       brainLobeConfidence = Object.create(null);
+      brainLobeFieldMeta = Object.create(null);
       topoCommRows = [];     // no content picker without real communities
     }
     renderCommPicker();
     // L4: assign per-node depth from age now that the node set is final.
     brainAssignDepth(Date.now());
-    topoPrepareSemanticMorph(transition, W, H);
+    topoPrepareDetailMorph(transition, W, H);
 
     // Overlay visibility: real structure renders with the corner legend; any
     // no-structure state shows the honest pending overlay (with the analytics
@@ -5547,10 +5811,16 @@ import {
 
     topoFirstFrameStartedAt = renderStartedAt;
     startBrainAnimation(container, W, H);
-    topoZoom.complete(topoViewLevel, topoFocusKey, topoParentKey);
     topoMetrics.lastLevel = topoViewLevel;
     topoMetrics.lastFocusKey = topoFocusKey;
-    topoRunTransitionVisual(ghost, transition);
+    if (transition) {
+      setTimeout(function () {
+        if (generation !== topoRenderGeneration) return;
+        topoExpansion.complete(transition.intent);
+        topoMetrics.transitionMs = performance.now() - transition.startedAt;
+        topoPublishMetrics();
+      }, EXPANSION_DEFAULTS.transitionMs);
+    }
     topoPendingTransition = null;
     topoStartSSE();
   }
@@ -6009,15 +6279,30 @@ import {
       if (ssePaused) stopSSE(); else startSSE();
     });
     $("#pipelineEstate").addEventListener("change", renderPipeline);
+    const topoDotSlider = $("#topoDotSize");
+    var savedPointScale = null;
+    try { savedPointScale = localStorage.getItem("mootmgr-topology-dot-scale"); } catch (_) {}
+    applyBrainPointScale(savedPointScale === null ? topoDotSlider.value : savedPointScale, false);
+    topoDotSlider.addEventListener("input", function () {
+      applyBrainPointScale(this.value, false);
+    });
+    topoDotSlider.addEventListener("change", function () {
+      applyBrainPointScale(this.value, true);
+    });
+    var savedFieldDetails = null;
+    try { savedFieldDetails = localStorage.getItem("mootmgr-topology-field-details"); } catch (_) {}
+    applyBrainFieldDetails(savedFieldDetails === "true", false);
+    $("#topoFieldDetailsToggle").addEventListener("click", function () {
+      applyBrainFieldDetails(!brainShowFieldDetails, true);
+    });
     $("#topoEstate").addEventListener("change", function () {
       topoGraphCache.clear();
       renderTopology("estate", null);
     });
     $("#topoReset").addEventListener("click", function () {
-      topoGraphCache.delete(topoGraphCacheKey($("#topoEstate").value || "", topoViewLevel, topoFocusKey));
-      renderTopology(topoViewLevel, topoFocusKey);
+      topoGraphCache.clear();
+      renderTopology("estate", null);
     });
-    $("#topoUp").addEventListener("click", topoNavigateUp);
     // L4 strata toggle — flips 3D depth on/off; Three.js geometry is
     // rebuilt to update z-coordinates. The running rAF loop renders
     // the new positions on its next frame.
@@ -6061,22 +6346,139 @@ import {
 """##
 
     static let semanticZoomJS = ##"""
-// Pure semantic-zoom policy for the Topology renderer. This module deliberately
-// owns no DOM or Three.js state so the intent rules stay deterministic and can
-// be tested with Node's built-in test runner.
+// Pure detail-expansion policy for the Topology renderer. The historical file
+// name remains part of the dashboard asset URL, but camera zoom is deliberately
+// absent from this policy. It owns no DOM or Three.js state, so an aggregate can
+// gain children without any camera gesture becoming data navigation.
 
-export const SEMANTIC_ZOOM_DEFAULTS = Object.freeze({
-  prefetchPx: 42,
-  enterPx: 72,
-  exitDistanceRatio: 1.7,
-  transitionMs: 260,
+export const EXPANSION_DEFAULTS = Object.freeze({
+  transitionMs: 420,
 });
 
-const NEXT_LEVEL = Object.freeze({ estate: "community", community: "local" });
-const PREVIOUS_LEVEL = Object.freeze({ local: "community", community: "estate" });
+// Logarithmic mass keeps a very large estate aggregate legible without
+// reducing one-memory regions to sub-pixel dust.
+export function aggregateVisualWeight(size, maximumSize) {
+  const mass = Math.max(1, Number.isFinite(size) ? size : 1);
+  const ceiling = Math.max(mass, Number.isFinite(maximumSize) ? maximumSize : mass);
+  const ratio = Math.log1p(mass) / Math.log1p(ceiling);
+  return Math.max(0, Math.min(1, ratio ** 1.2));
+}
 
-function finiteOr(value, fallback) {
-  return Number.isFinite(value) ? value : fallback;
+export function aggregateVisualStyle(size, maximumSize, level = "community") {
+  const weight = aggregateVisualWeight(size, maximumSize);
+  const levelScale = level === "fold" ? 0.82 : 1;
+  return Object.freeze({
+    weight,
+    // CSS-pixel diameter. Camera zoom changes projected separation, never the
+    // size of the glyph itself. Mass remains a restrained secondary signal.
+    coreSizePx: (5.5 + 7.5 * weight) * levelScale,
+  });
+}
+
+export function engramFieldPresentation(aggregateKey, size, code) {
+  const match = typeof aggregateKey === "string"
+    ? aggregateKey.match(/^__other__:slice:(\d+)$/)
+    : null;
+  if (!match) return null;
+  const fieldName = `Engram Field ${Number(match[1]) + 1}`;
+  const numericSize = Number(size);
+  const memoryCount = Number.isFinite(numericSize) ? Math.max(0, Math.round(numericSize)) : 0;
+  const formattedCount = String(memoryCount).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fdcCode = typeof code === "string" && code.trim() ? code.trim() : "unclassified";
+  return Object.freeze({
+    key: aggregateKey,
+    name: fieldName,
+    primary: fieldName,
+    detail: `${formattedCount} memories · dominant FDC ${fdcCode}`,
+  });
+}
+
+// A stable unit sample for fallback-only layout details. Prefixing the salt
+// makes the full key pass through FNV after the axes diverge, avoiding the
+// correlated-last-byte defect that affected the persisted coordinate frame.
+export function stableUnit(value, salt = "") {
+  const text = `${salt}\u0000${value}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash / 0xffffffff;
+}
+
+// Deterministic two-hemisphere fallback used only when the persisted projector
+// has not supplied positions. Phyllotaxis avoids rings and keeps refreshes from
+// reshuffling the user's mental map.
+export function brainFieldCenters(count, width, height) {
+  const total = Math.max(0, Math.floor(count));
+  if (!total) return [];
+  const perHemisphere = Math.ceil(total / 2);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const scale = Math.min(width, height * 1.35);
+  return Array.from({ length: total }, (_, index) => {
+    const side = index % 2 === 0 ? -1 : 1;
+    const rank = Math.floor(index / 2);
+    const radius = Math.sqrt((rank + 0.65) / perHemisphere);
+    const angle = rank * goldenAngle + (side > 0 ? 0.7 : 0);
+    const x = side * (0.075 + Math.abs(Math.cos(angle)) * radius * 0.31);
+    const y = Math.sin(angle) * radius * 0.34;
+    return { x: width / 2 + x * scale, y: height / 2 + y * scale };
+  });
+}
+
+const EXPANSION_LEVEL = Object.freeze({ community: "community", fold: "local" });
+
+export function remapDetailCommunities(previous, rawNodes, communities, intent) {
+  const previousCommunities = previous?.communities || [];
+  const previousNodes = previous?.rawNodes || [];
+  const localTarget = intent?.level === "local"
+    ? previousNodes.find((node) => node.aggregateKey === intent.focusKey)
+    : null;
+  if (localTarget && localTarget.communityId >= 0) {
+    return {
+      rawNodes: rawNodes.map((node) => ({ ...node, communityId: localTarget.communityId })),
+      communities: previousCommunities.slice(),
+    };
+  }
+
+  const maxCommunityID = previousCommunities.reduce(
+    (maxID, community) => Math.max(
+      maxID,
+      typeof community.id === "number" ? community.id : -1,
+    ),
+    -1,
+  );
+  let nextCommunityID = maxCommunityID + 1;
+  const communityIDMap = new Map();
+  const mergedCommunities = previousCommunities.slice();
+  communities.forEach((community) => {
+    const newID = nextCommunityID++;
+    communityIDMap.set(String(community.id), newID);
+    mergedCommunities.push({ ...community, id: newID });
+  });
+  const singleCommunityID = communities.length === 1
+    ? communityIDMap.get(String(communities[0].id))
+    : undefined;
+  const remappedNodes = rawNodes.map((node) => {
+    const oldID = node.communityId;
+    let mapped = oldID >= 0 ? communityIDMap.get(String(oldID)) : oldID;
+    if (oldID >= 0 && mapped === undefined && singleCommunityID !== undefined) {
+      mapped = singleCommunityID;
+    }
+    if (oldID >= 0 && mapped === undefined) {
+      mapped = nextCommunityID++;
+      communityIDMap.set(String(oldID), mapped);
+      mergedCommunities.push({
+        id: mapped,
+        code: node.code || null,
+        label: node.aggregateLabel || null,
+        size: 0,
+        classificationPurity: null,
+      });
+    }
+    return { ...node, communityId: mapped };
+  });
+  return { rawNodes: remappedNodes, communities: mergedCommunities };
 }
 
 export class BoundedTTLCache {
@@ -6116,49 +6518,25 @@ export class BoundedTTLCache {
   }
 }
 
-export class SemanticZoomController {
-  constructor(options = {}) {
-    this.config = Object.freeze({
-      prefetchPx: finiteOr(options.prefetchPx, SEMANTIC_ZOOM_DEFAULTS.prefetchPx),
-      enterPx: finiteOr(options.enterPx, SEMANTIC_ZOOM_DEFAULTS.enterPx),
-      exitDistanceRatio: finiteOr(
-        options.exitDistanceRatio,
-        SEMANTIC_ZOOM_DEFAULTS.exitDistanceRatio,
-      ),
-      transitionMs: finiteOr(options.transitionMs, SEMANTIC_ZOOM_DEFAULTS.transitionMs),
-    });
-    if (this.config.prefetchPx >= this.config.enterPx) {
-      throw new Error("semantic zoom prefetch threshold must be below enter threshold");
-    }
-    this.level = "estate";
-    this.focusKey = null;
-    this.parentKey = null;
+// Detail policy for a continuous scene. It can request children for an
+// aggregate, but it never removes geometry or treats camera zoom as navigation.
+export class SemanticExpansionController {
+  constructor() {
     this.locked = false;
-    this.prefetched = new Set();
+    this.expanded = new Set();
   }
 
-  sync(level, focusKey = null, parentKey = null) {
-    this.level = level || "estate";
-    this.focusKey = focusKey || null;
-    this.parentKey = parentKey || null;
+  reset() {
     this.locked = false;
-    this.prefetched.clear();
+    this.expanded.clear();
   }
 
   cacheKey(level, focusKey) {
-    return `${level || "estate"}:${focusKey || ""}`;
+    return `${level}:${focusKey}`;
   }
 
-  markPrefetched(level, focusKey) {
-    this.prefetched.add(this.cacheKey(level, focusKey));
-  }
-
-  forgetPrefetched(level, focusKey) {
-    this.prefetched.delete(this.cacheKey(level, focusKey));
-  }
-
-  begin() {
-    if (this.locked) return false;
+  begin(intent) {
+    if (this.locked || !intent || intent.type !== "transition") return false;
     this.locked = true;
     return true;
   }
@@ -6167,54 +6545,32 @@ export class SemanticZoomController {
     this.locked = false;
   }
 
-  complete(level, focusKey = null, parentKey = null) {
-    this.sync(level, focusKey, parentKey);
+  complete(intent) {
+    if (intent && intent.level && intent.focusKey) {
+      this.expanded.add(this.cacheKey(intent.level, intent.focusKey));
+    }
+    this.locked = false;
   }
 
-  drill(candidate) {
-    if (this.locked || !candidate || !candidate.aggregateKey) return null;
-    const targetLevel = NEXT_LEVEL[this.level];
+  canExpand(candidate) {
+    if (!candidate || !candidate.aggregateKey) return false;
+    const targetLevel = EXPANSION_LEVEL[candidate.aggregateLevel];
+    return !!targetLevel && !this.expanded.has(this.cacheKey(targetLevel, candidate.aggregateKey));
+  }
+
+  intent(candidate) {
+    if (this.locked || !this.canExpand(candidate)) return null;
+    const targetLevel = EXPANSION_LEVEL[candidate.aggregateLevel];
     if (!targetLevel) return null;
+    const key = this.cacheKey(targetLevel, candidate.aggregateKey);
+    if (this.expanded.has(key)) return null;
     return {
       type: "transition",
-      direction: "in",
       level: targetLevel,
       focusKey: candidate.aggregateKey,
       parentKey: candidate.parentKey || candidate.aggregateKey,
+      expansionKey: key,
     };
-  }
-
-  observe({ direction, candidate, projectedPx = 0, distanceRatio = 1 } = {}) {
-    if (this.locked) return null;
-    if (direction === "out") {
-      const targetLevel = PREVIOUS_LEVEL[this.level];
-      if (!targetLevel || distanceRatio < this.config.exitDistanceRatio) return null;
-      return {
-        type: "transition",
-        direction: "out",
-        level: targetLevel,
-        focusKey: targetLevel === "community" ? this.parentKey : null,
-        parentKey: targetLevel === "community" ? this.parentKey : null,
-      };
-    }
-
-    if (direction !== "in" || !candidate || !candidate.aggregateKey) return null;
-    const targetLevel = NEXT_LEVEL[this.level];
-    if (!targetLevel) return null;
-    const intent = {
-      direction: "in",
-      level: targetLevel,
-      focusKey: candidate.aggregateKey,
-      parentKey: candidate.parentKey || candidate.aggregateKey,
-    };
-    if (projectedPx >= this.config.enterPx) {
-      return { ...intent, type: "transition" };
-    }
-    const key = this.cacheKey(targetLevel, candidate.aggregateKey);
-    if (projectedPx >= this.config.prefetchPx && !this.prefetched.has(key)) {
-      return { ...intent, type: "prefetch" };
-    }
-    return null;
   }
 }
 

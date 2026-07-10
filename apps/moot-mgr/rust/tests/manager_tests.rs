@@ -370,18 +370,21 @@ fn graph_payload_other_structure_drills_into_real_slices() {
     let estate = m.graph_payload_view(NOW, Some("estate-other"), Some("estate"), None).unwrap();
     let other = estate.communities.iter()
         .find(|community| community.stable_key.as_deref() == Some("__other__"))
-        .expect("estate budget must include Other structure");
+        .expect("estate budget must include Engram Fields");
     assert_eq!(other.size, 5);
+    assert_eq!(other.label.as_deref(), Some("Engram Fields"));
 
     let community = m.graph_payload_view(
         NOW, Some("estate-other"), Some("community"), Some("__other__")).unwrap();
     assert!(!community.folds.is_empty());
     assert_eq!(community.folds.iter().map(|fold| fold.size).sum::<i64>(), 5);
+    assert_eq!(community.folds[0].label.as_deref(), Some("Engram Field 1"));
+    assert_eq!(community.folds[0].code.as_deref(), Some("005"));
     let slice_key = community.folds[0].stable_key.clone();
 
     let local = m.graph_payload_view(
         NOW, Some("estate-other"), Some("local"), Some(&slice_key)).unwrap();
-    assert!(!local.ids.is_empty(), "every visible Other slice must open into real bounded nodes");
+    assert!(!local.ids.is_empty(), "every visible Engram Field must open into real bounded nodes");
     m.stop();
 }
 

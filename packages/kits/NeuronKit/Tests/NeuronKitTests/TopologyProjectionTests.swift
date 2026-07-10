@@ -61,10 +61,10 @@ struct TopologyProjectionTests {
                           communityCount: 1, communities: communities),
             previousSnapshot: nil)
 
-        #expect(first.nodesByID["a"]?.x == -0.4473993965904576)
-        #expect(first.nodesByID["a"]?.y == -0.2903365191220521)
-        #expect(first.nodesByID["b"]?.x == -0.44710111746239545)
-        #expect(first.nodesByID["b"]?.y == -0.2904329670558848)
+        #expect(first.nodesByID["a"]?.x == -0.34372757293757106)
+        #expect(first.nodesByID["a"]?.y == -0.44612174568373836)
+        #expect(first.nodesByID["b"]?.x == -0.3630845216131912)
+        #expect(first.nodesByID["b"]?.y == -0.45488673264244267)
         #expect(first.nodesByID["a"]?.x != second.nodesByID["a"]?.x)
         #expect(first.nodesByID["b"]?.y != second.nodesByID["b"]?.y)
     }
@@ -81,6 +81,7 @@ struct TopologyProjectionTests {
         #expect(community.stableKey == "c-e5d6bb19042a894f")
         #expect(fold.stableKey == "f-e5d6bb19042a894f")
         let previous = try JSONSerialization.data(withJSONObject: [
+            "coordinateFrameVersion": TopologyProjector.coordinateFrameVersion,
             "nodes": first.nodesByID.map { id, value in [
                 "id": id, "communityKey": value.communityKey ?? "",
                 "foldKey": value.foldKey ?? "", "x": value.x, "y": value.y, "z": value.z,
@@ -111,6 +112,7 @@ struct TopologyProjectionTests {
             communities: [GraphTopologyCommunity(id: 0, size: 3, dominantUdcCode: "")])
         let first = TopologyProjector.project(original, previousSnapshot: nil)
         let previous = try JSONSerialization.data(withJSONObject: [
+            "coordinateFrameVersion": TopologyProjector.coordinateFrameVersion,
             "nodes": first.nodesByID.map { id, value in [
                 "id": id, "communityKey": value.communityKey ?? "",
                 "foldKey": value.foldKey ?? "", "x": value.x, "y": value.y, "z": value.z,
@@ -149,6 +151,66 @@ struct TopologyProjectionTests {
         #expect(projection.folds.reduce(0) { $0 + $1.size } == nodes.count)
         #expect(Set(projection.nodesByID.values.compactMap(\.foldKey)).count == 3)
     }
+
+    @Test("coordinate frame upgrade preserves identities and replaces stale positions")
+    func coordinateFrameUpgrade() throws {
+        let topology = GraphTopology(
+            nodes: [node("a", community: 0), node("b", community: 0)],
+            edges: [edge("a", "b")], communityCount: 1,
+            communities: [GraphTopologyCommunity(id: 0, size: 2, dominantUdcCode: "")])
+        let first = TopologyProjector.project(topology, previousSnapshot: nil)
+        let community = first.communities[0]
+        let fold = first.folds[0]
+        func snapshot(version: Int) throws -> Data {
+            try JSONSerialization.data(withJSONObject: [
+                "coordinateFrameVersion": version,
+                "nodes": first.nodesByID.map { id, value in [
+                    "id": id, "communityKey": value.communityKey ?? "",
+                    "foldKey": value.foldKey ?? "", "x": 0.21, "y": 0.22, "z": 0.23,
+                ] },
+                "communities": [["stableKey": community.stableKey, "x": 0.31, "y": 0.32, "z": 0.33]],
+                "folds": [["stableKey": fold.stableKey, "x": 0.41, "y": 0.42, "z": 0.43]],
+            ])
+        }
+
+        let upgraded = TopologyProjector.project(topology, previousSnapshot: try snapshot(version: 1))
+        #expect(upgraded.communities[0].stableKey == community.stableKey)
+        #expect(upgraded.folds[0].stableKey == fold.stableKey)
+        #expect(upgraded.communities[0].x != 0.31)
+        #expect(upgraded.nodesByID["a"]?.x != 0.21)
+
+        let currentData = try snapshot(version: TopologyProjector.coordinateFrameVersion)
+        let current = TopologyProjector.project(topology, previousSnapshot: currentData)
+        #expect(current.communities[0].x == 0.31)
+        #expect(current.nodesByID["a"]?.x == 0.21)
+    }
+
+    @Test("coordinate axes remain decorrelated across an estate")
+    func coordinateAxesAreDecorrelated() {
+        let count = 512
+        let nodes = (0..<count).map { node("axis-\($0)", community: $0) }
+        let communities = (0..<count).map {
+            GraphTopologyCommunity(id: $0, size: 1, dominantUdcCode: "")
+        }
+        let projection = TopologyProjector.project(
+            GraphTopology(nodes: nodes, edges: [], communityCount: count, communities: communities),
+            previousSnapshot: nil)
+        func correlation(_ lhs: [Double], _ rhs: [Double]) -> Double {
+            let n = Double(lhs.count)
+            let lMean = lhs.reduce(0, +) / n
+            let rMean = rhs.reduce(0, +) / n
+            let covariance = zip(lhs, rhs).reduce(0) { $0 + ($1.0 - lMean) * ($1.1 - rMean) }
+            let lVariance = lhs.reduce(0) { $0 + ($1 - lMean) * ($1 - lMean) }
+            let rVariance = rhs.reduce(0) { $0 + ($1 - rMean) * ($1 - rMean) }
+            return covariance / sqrt(lVariance * rVariance)
+        }
+        let x = projection.communities.map(\.x)
+        let y = projection.communities.map(\.y)
+        let z = projection.communities.map(\.z)
+        #expect(abs(correlation(x, y)) < 0.12)
+        #expect(abs(correlation(x, z)) < 0.12)
+        #expect(abs(correlation(y, z)) < 0.12)
+    }
 }
 
 @Suite("Topology V3 dirty fingerprint")
@@ -167,5 +229,12 @@ struct TopologyInputsTokenTests {
 
         #expect(firstToken.factCount == replacementToken.factCount)
         #expect(firstToken.fingerprint != replacementToken.fingerprint)
+    }
+
+    @Test("fingerprint carries the coordinate-frame recalculation floor")
+    func fingerprintCarriesCoordinateFloor() {
+        let token = TopologyInputsToken(drawers: [], tunnels: [], facts: [])
+        #expect(token.fingerprint.hasPrefix("cf\(TopologyProjector.coordinateFrameVersion):"))
+        #expect(!token.fingerprint.hasPrefix("cf1:"))
     }
 }

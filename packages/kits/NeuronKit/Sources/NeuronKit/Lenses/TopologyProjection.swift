@@ -53,6 +53,7 @@ struct PersistentTopologyProjection: Sendable {
 }
 
 enum TopologyProjector {
+    static let coordinateFrameVersion = 2
     private static let targetFoldSize = 192
     private static let maximumFoldsPerCommunity = 64
 
@@ -82,6 +83,7 @@ enum TopologyProjector {
         let nodes: [PreviousNode]?
         let communities: [PreviousAggregate]?
         let folds: [PreviousAggregate]?
+        let coordinateFrameVersion: Int?
     }
 
     private struct PreviousNode: Decodable {
@@ -122,6 +124,7 @@ enum TopologyProjector {
     static func project(_ topology: GraphTopology, previousSnapshot: Data?) -> PersistentTopologyProjection {
         let previous = previousSnapshot.flatMap { try? JSONDecoder().decode(PreviousSnapshot.self, from: $0) }
         let previousNodes = Dictionary(uniqueKeysWithValues: (previous?.nodes ?? []).map { ($0.id, $0) })
+        let reuseCoordinates = previous?.coordinateFrameVersion == coordinateFrameVersion
 
         let liveNodes = topology.nodes.filter { $0.communityId >= 0 && $0.tombstonedTs == nil }
         let liveByID = Dictionary(uniqueKeysWithValues: liveNodes.map { ($0.id, $0) })
@@ -203,8 +206,12 @@ enum TopologyProjector {
             }
         }
 
-        let previousCommunityPositions = positions(previous?.communities)
-        let previousFoldPositions = positions(previous?.folds)
+        // Stable keys survive a frame upgrade, but coordinates do not. Version 1
+        // derived X/Y/Z from correlated FNV suffixes and collapsed most estates
+        // near one diagonal. A version mismatch therefore resets only the spatial
+        // frame while overlap matching above preserves the user's mental identity.
+        let previousCommunityPositions = reuseCoordinates ? positions(previous?.communities) : [:]
+        let previousFoldPositions = reuseCoordinates ? positions(previous?.folds) : [:]
         let communityPositions = aggregatePositions(
             keys: communityGroups.compactMap { communityKeys[$0.rawKey] },
             previous: previousCommunityPositions,
@@ -292,7 +299,7 @@ enum TopologyProjector {
             var positions: [String: Point] = [:]
             var fixed = Set<String>()
             for id in members {
-                if let prior = previousNodes[id].flatMap(point) {
+                if reuseCoordinates, let prior = previousNodes[id].flatMap(point) {
                     positions[id] = prior
                     fixed.insert(id)
                 } else {
@@ -333,7 +340,8 @@ enum TopologyProjector {
                 // Dead/historical-only nodes retain their last known coordinates.
                 // Legacy snapshots without them receive a deterministic outer-shell
                 // position; no current community is fabricated.
-                let position = previousNodes[node.id].flatMap(point) ?? (hashDirection(node.id) * 0.9).bounded()
+                let prior = reuseCoordinates ? previousNodes[node.id].flatMap(point) : nil
+                let position = prior ?? (hashDirection(node.id) * 0.9).bounded()
                 projectedNodes[node.id] = .init(
                     communityKey: nil, foldKey: nil,
                     x: position.x, y: position.y, z: position.z,
@@ -562,10 +570,20 @@ enum TopologyProjector {
     }
 
     private static func hashDirection(_ value: String) -> Point {
-        func unit(_ salt: String) -> Double {
-            Double(fnv1a(value + salt) & 0xffff) / 32_767.5 - 1
+        let base = fnv1a(value)
+        func mixed(_ input: UInt64) -> UInt64 {
+            var z = input &+ 0x9e37_79b9_7f4a_7c15
+            z = (z ^ (z >> 30)) &* 0xbf58_476d_1ce4_e5b9
+            z = (z ^ (z >> 27)) &* 0x94d0_49bb_1331_11eb
+            return z ^ (z >> 31)
         }
-        var x = unit("x"), y = unit("y"), z = unit("z")
+        func unit(_ salt: UInt64) -> Double {
+            let mantissa = mixed(base ^ salt) >> 11
+            return Double(mantissa) / 9_007_199_254_740_991.0 * 2 - 1
+        }
+        var x = unit(0x243f_6a88_85a3_08d3)
+        var y = unit(0x1319_8a2e_0370_7344)
+        var z = unit(0xa409_3822_299f_31d0)
         let length = sqrt(x * x + y * y + z * z)
         if length < 0.000_001 { x = 1; y = 0; z = 0 }
         else { x /= length; y /= length; z /= length }

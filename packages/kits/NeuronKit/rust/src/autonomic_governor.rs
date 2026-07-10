@@ -1949,12 +1949,13 @@ impl TopologyInputsToken {
     /// missing case as "-" and present values via `String(Date.timeIntervalSince1970)`;
     /// the Rust leg never cross-compares fingerprint strings with Swift (separate
     /// estates), so the exact present-value formatting need only be stable within
-    /// this port.
+    /// this port. The `cfN` prefix is the coordinate-frame recalculation floor.
     pub fn fingerprint(&self) -> String {
         let filed = self.max_filed_at.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
         let event = self.max_event_time.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
         format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}",
+            "cf{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            crate::topology_projection::COORDINATE_FRAME_VERSION,
             self.drawer_count, self.tunnel_count, self.fact_count,
             self.dead_drawer_count, self.dead_tunnel_count, filed, event, self.inputs_digest
         )
@@ -1968,9 +1969,11 @@ impl TopologyInputsToken {
 /// (Louvain + centrality, full analysis) → wire-shape JSON → snapshot write.
 ///
 /// Dirty check: the inputs are reduced to a STABLE fingerprint BEFORE the math;
-/// a fingerprint matching `previous_fingerprint` returns without projecting,
-/// encoding, or writing a snapshot, so `generatedTs` keeps meaning "when the
-/// content last changed". The
+/// a matching fingerprint returns without projecting. The coordinate-frame
+/// version is embedded in that fingerprint, so a frame bump becomes an automatic,
+/// one-time estate-wide recalculation floor without loading the stored snapshot
+/// on ordinary unchanged cadences. This keeps `generatedTs` meaning "when the
+/// content or coordinate frame last changed". The
 /// fingerprint persists beside the snapshot (F5), so the skip also holds across
 /// a restart when `previous_fingerprint` was loaded from disk. Returns the
 /// fingerprint to hold as governor state (`previous_fingerprint` is passed back
@@ -2140,7 +2143,7 @@ fn topology_snapshot_duty(
         "structurePending": false,
         "communities": communities,
         "topologyVersion": 3,
-        "coordinateFrameVersion": 1,
+        "coordinateFrameVersion": crate::topology_projection::COORDINATE_FRAME_VERSION,
         "folds": folds,
         "bridges": bridges,
         "generatedTs": generated_ts
@@ -2254,5 +2257,9 @@ mod tests {
         let replacement_token = TopologyInputsToken::new(&[], &[], &[replacement]);
         assert_eq!(first_token.fact_count, replacement_token.fact_count);
         assert_ne!(first_token.fingerprint(), replacement_token.fingerprint());
+        assert!(first_token.fingerprint().starts_with(&format!(
+            "cf{}:", crate::topology_projection::COORDINATE_FRAME_VERSION
+        )));
+        assert!(!first_token.fingerprint().starts_with("cf1:"));
     }
 }
