@@ -56,6 +56,13 @@ impl GovernorTopologySink for StatsStoreTopologySink {
         self.store.load_topology_fingerprint(estate_id).unwrap_or(None)
     }
 
+    fn load_topology_snapshot(&self, estate_id: &str) -> Option<String> {
+        self.store
+            .latest_topology_snapshot(Some(estate_id))
+            .ok()
+            .flatten()
+    }
+
     fn is_monitoring_enabled(&self) -> bool {
         // Fail open: a transient read failure must not silently freeze the
         // topology duty. The governor logs the outcome; we just say "run it".

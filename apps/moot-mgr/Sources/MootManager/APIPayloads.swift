@@ -407,7 +407,14 @@ public struct ConfigPayload: Codable, Sendable, Equatable {
 
 /// Compact wire-format edge for the `/api/graph` response (FIX 2b).
 ///
-/// Each edge encodes as a JSON array `[sourceIndex, targetIndex, weight, edgeTypeOrdinal]`
+/// Each edge encodes as a JSON array with a four-field structural prefix:
+/// `[sourceIndex, targetIndex, weight, edgeTypeOrdinal]`.
+///
+/// Explicit edges with a factual lifespan append second offsets from the
+/// payload's shared `edgeTimeOrigin`:
+/// `[sourceIndex, targetIndex, weight, edgeTypeOrdinal, bornOffset]` or
+/// `[sourceIndex, targetIndex, weight, edgeTypeOrdinal, bornOffset, deadOffset]`.
+/// Derived edges have no honest single birth instant and remain four fields.
 /// to eliminate per-edge key overhead. UUID strings are replaced with integer indices into
 /// the parallel `ids` array, and the edge-type string is replaced with a small integer.
 ///
@@ -429,9 +436,16 @@ public struct CompactEdge: Encodable, Sendable, Equatable {
     public let w: Double
     /// Edge-type ordinal: 0=tunnel, 1=kgFact, 2=association, 3=nmf_bond.
     public let et: Int
+    /// Seconds after GraphPayload.edgeTimeOrigin when an explicit edge was
+    /// created. Nil for derived present-day inference edges.
+    public let born: Int64?
+    /// Seconds after GraphPayload.edgeTimeOrigin when tombstoned. Nil while live.
+    public let dead: Int64?
 
-    public init(si: Int, ti: Int, w: Double, et: Int) {
+    public init(si: Int, ti: Int, w: Double, et: Int,
+                born: Int64? = nil, dead: Int64? = nil) {
         self.si = si; self.ti = ti; self.w = w; self.et = et
+        self.born = born; self.dead = dead
     }
 
     /// Map an ARIA edge-type string to its compact ordinal.
@@ -444,13 +458,18 @@ public struct CompactEdge: Encodable, Sendable, Equatable {
         }
     }
 
-    /// Encodes as a flat JSON array `[si, ti, w, et]` — no keys, no brackets overhead.
+    /// Encodes a variable-length flat array. Derived edges remain the original
+    /// four-field shape; explicit edges append only the temporal values they own.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.unkeyedContainer()
         try c.encode(si)
         try c.encode(ti)
         try c.encode(w)
         try c.encode(et)
+        if born != nil || dead != nil {
+            try c.encode(born)
+        }
+        if let dead { try c.encode(dead) }
     }
 }
 
@@ -497,8 +516,11 @@ public struct CompactEdge: Encodable, Sendable, Equatable {
 ///
 /// Edges are encoded as compact arrays-of-arrays:
 ///
-///   `edges` — `[[si, ti, w, et], ...]` where si/ti are indices into `ids`,
-///   w is the raw weight, et is the edge-type ordinal (see `CompactEdge`).
+///   `edges` — `[[si, ti, w, et, born?, dead?], ...]` where si/ti are
+///   indices into `ids`, w is the raw weight, et is the edge-type ordinal,
+///   and factual explicit-edge timestamps are offsets from `edgeTimeOrigin`.
+///   Derived
+///   present-day inference edges retain the original four-field shape.
 ///
 /// For 51k nodes / 70k edges the per-object format produced ~18 MB (UUID strings
 /// dominate: 70k × 2 × 36-char UUIDs ≈ 5 MB in edges alone). The compact format
@@ -546,6 +568,11 @@ public struct GraphPayload: Encodable, Sendable {
     /// Index into `codes` per node, parallel to `ids`. `-1` means the node
     /// carries no code (absent or empty `udcCode`).
     private let codeIndex: [Int]
+    /// Base64 of little-endian interleaved signed-16 normalized coordinates:
+    /// x0,y0,z0,x1,y1,z1,... . Binary Q16 avoids JSON-number overhead.
+    private let positionQ16: String
+    /// Sparse indices of nodes selected for the representative skeleton.
+    private let representatives: [Int]
 
     // MARK: - Compact edges
 
@@ -553,6 +580,9 @@ public struct GraphPayload: Encodable, Sendable {
     /// `si`/`ti` are indices into `ids`; `et` is the edge-type ordinal.
     /// See `CompactEdge` for edge-type ordinal mapping.
     private let edges: [CompactEdge]
+    /// Shared Unix epoch-second origin for CompactEdge temporal suffixes.
+    /// Nil when the payload contains no factual edge timestamps.
+    private let edgeTimeOrigin: Int64?
 
     // MARK: - Unchanged fields
 
@@ -564,6 +594,19 @@ public struct GraphPayload: Encodable, Sendable {
     /// fallback they are count-only placeholders from the
     /// `community.assignment` VizGraph signal.
     public let communities: [GraphCommunityPayload]
+    public let folds: [GraphFoldPayload]
+    public let bridges: [GraphBridgePayload]
+    public let topologyVersion: Int
+    public let coordinateFrameVersion: Int
+    public let viewLevel: String
+    public let focusKey: String?
+    /// Recent event drawer ids and the aggregate key they pulse in overview
+    /// modes. Parallel arrays keep replay exact without shipping every node.
+    public let activityIds: [String]
+    public let activityKeys: [String]
+    public let totalNodeCount: Int
+    public let totalEdgeCount: Int
+    public let lodTruncated: Bool
     /// The VizGraph analytic-signal summary sourced from the stats store —
     /// one row per (estate, signal) with the latest value + freshness.
     public let analytics: [GraphAnalyticPayload]
@@ -596,6 +639,17 @@ public struct GraphPayload: Encodable, Sendable {
         nodes: [GraphNodePayload],
         edges: [GraphEdgePayload],
         communities: [GraphCommunityPayload],
+        folds: [GraphFoldPayload] = [],
+        bridges: [GraphBridgePayload] = [],
+        topologyVersion: Int = 2,
+        coordinateFrameVersion: Int = 0,
+        viewLevel: String = "full",
+        focusKey: String? = nil,
+        activityIds: [String] = [],
+        activityKeys: [String] = [],
+        totalNodeCount: Int? = nil,
+        totalEdgeCount: Int? = nil,
+        lodTruncated: Bool = false,
         analytics: [GraphAnalyticPayload],
         structurePending: Bool,
         pending: [String],
@@ -619,6 +673,11 @@ public struct GraphPayload: Encodable, Sendable {
         var codesArr:      [String]    = []
         var codeToIndex:   [String: Int] = [:]
         var codeIndexArr:  [Int]       = []; codeIndexArr.reserveCapacity(nodes.count)
+        var positionArr: [Int16] = []; positionArr.reserveCapacity(nodes.count * 3)
+        var representativeArr: [Int] = []
+        let hasCompletePositions = !nodes.isEmpty && nodes.allSatisfy {
+            $0.x?.isFinite == true && $0.y?.isFinite == true && $0.z?.isFinite == true
+        }
         for (i, n) in nodes.enumerated() {
             indexMap[n.id] = i
             idsArr.append(n.id)
@@ -640,6 +699,16 @@ public struct GraphPayload: Encodable, Sendable {
             } else {
                 codeIndexArr.append(-1)
             }
+            func quantize(_ value: Double?) -> Int16 {
+                let bounded = min(1.0, max(-1.0, value ?? 0))
+                return Int16((bounded * 32_767).rounded())
+            }
+            if hasCompletePositions {
+                positionArr.append(quantize(n.x))
+                positionArr.append(quantize(n.y))
+                positionArr.append(quantize(n.z))
+            }
+            if n.representative { representativeArr.append(i) }
         }
         self.ids         = idsArr
         self.communityId = communityIdArr
@@ -649,6 +718,20 @@ public struct GraphPayload: Encodable, Sendable {
         self.tombstoned  = tombstonedMap
         self.codes       = codesArr
         self.codeIndex   = codeIndexArr
+        var positionData = Data(capacity: positionArr.count * 2)
+        for value in positionArr {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { positionData.append(contentsOf: $0) }
+        }
+        self.positionQ16 = positionData.base64EncodedString()
+        self.representatives = representativeArr
+
+        // One shared origin turns 10-digit epochs into small offsets. This is
+        // what keeps truthful 70k-edge replay inside the 5 MB wire ceiling.
+        let timeOrigin = edges.flatMap { edge in
+            [edge.createdEpochSeconds, edge.tombstonedEpochSeconds].compactMap { $0 }
+        }.min()
+        self.edgeTimeOrigin = timeOrigin
 
         // Build compact edges — drop edges whose endpoints are not in the node set.
         var compactEdges: [CompactEdge] = []; compactEdges.reserveCapacity(edges.count)
@@ -657,12 +740,25 @@ public struct GraphPayload: Encodable, Sendable {
             compactEdges.append(CompactEdge(
                 si: si, ti: ti,
                 w: e.weight,
-                et: CompactEdge.edgeTypeOrdinal(e.edgeType)
+                et: CompactEdge.edgeTypeOrdinal(e.edgeType),
+                born: e.createdEpochSeconds.flatMap { t in timeOrigin.map { t - $0 } },
+                dead: e.tombstonedEpochSeconds.flatMap { t in timeOrigin.map { t - $0 } }
             ))
         }
         self.edges = compactEdges
 
         self.communities     = communities
+        self.folds           = folds
+        self.bridges         = bridges
+        self.topologyVersion = topologyVersion
+        self.coordinateFrameVersion = coordinateFrameVersion
+        self.viewLevel       = viewLevel
+        self.focusKey        = focusKey
+        self.activityIds     = activityIds
+        self.activityKeys    = activityKeys
+        self.totalNodeCount  = totalNodeCount ?? nodes.count
+        self.totalEdgeCount  = totalEdgeCount ?? edges.count
+        self.lodTruncated    = lodTruncated
         self.analytics       = analytics
         self.structurePending = structurePending
         self.pending         = pending
@@ -674,9 +770,13 @@ public struct GraphPayload: Encodable, Sendable {
     // MARK: - Encoding
 
     private enum CodingKeys: String, CodingKey {
-        case ids, communityId, centrality, anomaly, createdTs, tombstoned, edges
+        case ids, communityId, centrality, anomaly, createdTs, tombstoned, edges, edgeTimeOrigin
         case codes, codeIndex
-        case communities, analytics, structurePending, pending, generatedTs, estate, snapshotTs
+        case positionQ16, representatives
+        case communities, folds, bridges, topologyVersion, coordinateFrameVersion, viewLevel, focusKey
+        case activityIds, activityKeys
+        case totalNodeCount, totalEdgeCount, lodTruncated
+        case analytics, structurePending, pending, generatedTs, estate, snapshotTs
     }
 
     /// Custom encode — parallel node arrays + compact edges + `generatedTs` as explicit null.
@@ -695,10 +795,25 @@ public struct GraphPayload: Encodable, Sendable {
         // present — `[]`/`[]` on the local-fallback path (no nodes), never null.
         try c.encode(codes,      forKey: .codes)
         try c.encode(codeIndex,  forKey: .codeIndex)
-        // Compact edges: each encodes as [si, ti, w, et] via CompactEdge.encode(to:).
+        try c.encode(positionQ16, forKey: .positionQ16)
+        try c.encode(representatives, forKey: .representatives)
+        // Compact edges: four-field structural prefix plus factual explicit-edge
+        // epoch seconds when available. See CompactEdge.encode(to:).
         try c.encode(edges,       forKey: .edges)
+        try c.encode(edgeTimeOrigin, forKey: .edgeTimeOrigin)
         // Unchanged envelope fields.
         try c.encode(communities,      forKey: .communities)
+        try c.encode(folds,            forKey: .folds)
+        try c.encode(bridges,          forKey: .bridges)
+        try c.encode(topologyVersion,  forKey: .topologyVersion)
+        try c.encode(coordinateFrameVersion, forKey: .coordinateFrameVersion)
+        try c.encode(viewLevel,        forKey: .viewLevel)
+        try c.encode(focusKey,         forKey: .focusKey)
+        try c.encode(activityIds,      forKey: .activityIds)
+        try c.encode(activityKeys,     forKey: .activityKeys)
+        try c.encode(totalNodeCount,   forKey: .totalNodeCount)
+        try c.encode(totalEdgeCount,   forKey: .totalEdgeCount)
+        try c.encode(lodTruncated,     forKey: .lodTruncated)
         try c.encode(analytics,        forKey: .analytics)
         try c.encode(structurePending, forKey: .structurePending)
         try c.encode(pending,          forKey: .pending)
@@ -739,6 +854,17 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
     /// encoding boundary (see `GraphPayload.init(nodes:edges:...)`), never as
     /// a real code.
     public let udcCode: String?
+    public let communityKey: String?
+    public let foldKey: String?
+    public let x: Double?
+    public let y: Double?
+    public let z: Double?
+    public let representative: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, communityId, centrality, anomaly, createdTs, tombstonedTs, udcCode
+        case communityKey, foldKey, x, y, z, representative
+    }
 
     // nounType and lastActiveTs removed from wire format (FIX 2 — payload
     // trim): nounType was redundant (all drawers are type 0, JS defaults to 0);
@@ -750,7 +876,10 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
         id: String, communityId: Int,
         centrality: Double, anomaly: Bool,
         createdTs: String?, tombstonedTs: String?,
-        udcCode: String? = nil
+        udcCode: String? = nil,
+        communityKey: String? = nil, foldKey: String? = nil,
+        x: Double? = nil, y: Double? = nil, z: Double? = nil,
+        representative: Bool = false
     ) {
         self.id = id
         self.communityId = communityId
@@ -759,6 +888,27 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
         self.createdTs = createdTs
         self.tombstonedTs = tombstonedTs
         self.udcCode = udcCode
+        self.communityKey = communityKey
+        self.foldKey = foldKey
+        self.x = x; self.y = y; self.z = z
+        self.representative = representative
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        communityId = try c.decodeIfPresent(Int.self, forKey: .communityId) ?? -1
+        centrality = try c.decodeIfPresent(Double.self, forKey: .centrality) ?? 0
+        anomaly = try c.decodeIfPresent(Bool.self, forKey: .anomaly) ?? false
+        createdTs = try c.decodeIfPresent(String.self, forKey: .createdTs)
+        tombstonedTs = try c.decodeIfPresent(String.self, forKey: .tombstonedTs)
+        udcCode = try c.decodeIfPresent(String.self, forKey: .udcCode)
+        communityKey = try c.decodeIfPresent(String.self, forKey: .communityKey)
+        foldKey = try c.decodeIfPresent(String.self, forKey: .foldKey)
+        x = try c.decodeIfPresent(Double.self, forKey: .x)
+        y = try c.decodeIfPresent(Double.self, forKey: .y)
+        z = try c.decodeIfPresent(Double.self, forKey: .z)
+        representative = try c.decodeIfPresent(Bool.self, forKey: .representative) ?? false
     }
 
     /// Custom encode so the nullable timestamps (and `udcCode`) are always
@@ -778,6 +928,12 @@ public struct GraphNodePayload: Codable, Sendable, Equatable {
         try c.encode(createdTs, forKey: .createdTs)          // nil → null
         try c.encode(tombstonedTs, forKey: .tombstonedTs)    // nil → null
         try c.encode(udcCode, forKey: .udcCode)              // nil → null
+        try c.encodeIfPresent(communityKey, forKey: .communityKey)
+        try c.encodeIfPresent(foldKey, forKey: .foldKey)
+        try c.encodeIfPresent(x, forKey: .x)
+        try c.encodeIfPresent(y, forKey: .y)
+        try c.encodeIfPresent(z, forKey: .z)
+        try c.encode(representative, forKey: .representative)
     }
 }
 
@@ -792,6 +948,8 @@ public struct GraphEdgePayload: Codable, Sendable, Equatable {
     public let edgeType: String
     /// Raw edge weight in [0, 1].
     public let weight: Double
+    /// ISO-8601 ingest timestamp for explicit tunnels. Nil for derived bonds.
+    public let createdTs: String?
     /// ISO-8601 UTC tombstone timestamp (VIZ_V2 dissolution), or nil when the
     /// edge is alive now. Tombstoned tunnels ARE included in the graph payload
     /// with their real source/target so playback can render them within
@@ -799,33 +957,84 @@ public struct GraphEdgePayload: Codable, Sendable, Equatable {
     /// they never shift community structure. kgFact derived edges remain
     /// live-facts-only: always nil here.
     public let tombstonedTs: String?
-
-    // decayedWeight and createdTs removed from wire format (FIX 2 — payload
-    // trim): decayedWeight is not consumed by the dashboard renderer;
-    // createdTs added per-edge costs significant JSON bytes and the dashboard
-    // does not display individual edge ages.  Keys present in existing
-    // snapshots are silently ignored by the synthesised decoder.
+    /// Parsed once when the stored snapshot is decoded, then reused on every
+    /// `/api/graph` poll. Kept off the wire by CodingKeys.
+    let createdEpochSeconds: Int64?
+    /// Parsed tombstone epoch, likewise cached and not encoded by this shape.
+    let tombstonedEpochSeconds: Int64?
 
     public init(source: String, target: String, edgeType: String, weight: Double,
-                tombstonedTs: String?) {
+                createdTs: String? = nil, tombstonedTs: String?) {
         self.source = source
         self.target = target
         self.edgeType = edgeType
         self.weight = weight
+        self.createdTs = createdTs
         self.tombstonedTs = tombstonedTs
+        self.createdEpochSeconds = Self.epochSeconds(createdTs)
+        self.tombstonedEpochSeconds = Self.epochSeconds(tombstonedTs)
     }
 
-    /// Custom encode so `tombstonedTs` is always present on the wire as an
-    /// explicit JSON null when nil (VIZ_V2 contract). Decoding stays
-    /// synthesized, so a daemon that omits the key still decodes (nil).
-    /// decayedWeight and createdTs are omitted from the encode path (payload trim).
+    private enum CodingKeys: String, CodingKey {
+        case source, target, edgeType, weight, createdTs, tombstonedTs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        source = try c.decode(String.self, forKey: .source)
+        target = try c.decode(String.self, forKey: .target)
+        edgeType = try c.decodeIfPresent(String.self, forKey: .edgeType) ?? "tunnel"
+        weight = try c.decodeIfPresent(Double.self, forKey: .weight) ?? 0.5
+        createdTs = try c.decodeIfPresent(String.self, forKey: .createdTs)
+        tombstonedTs = try c.decodeIfPresent(String.self, forKey: .tombstonedTs)
+        createdEpochSeconds = Self.epochSeconds(createdTs)
+        tombstonedEpochSeconds = Self.epochSeconds(tombstonedTs)
+    }
+
+    /// Stored-snapshot compatibility shape. The compact public graph payload
+    /// converts these strings to trailing epoch-second fields on CompactEdge.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(source, forKey: .source)
         try c.encode(target, forKey: .target)
         try c.encode(edgeType, forKey: .edgeType)
         try c.encode(weight, forKey: .weight)
+        try c.encodeIfPresent(createdTs, forKey: .createdTs)
         try c.encode(tombstonedTs, forKey: .tombstonedTs)  // nil → null
+    }
+
+    /// Fast parser for the governor's canonical UTC ISO-8601 timestamps. It
+    /// intentionally ignores fractional seconds because the compact replay
+    /// contract uses epoch-second resolution. Non-UTC/non-canonical input
+    /// degrades to nil rather than inventing a time.
+    private static func epochSeconds(_ value: String?) -> Int64? {
+        guard let value else { return nil }
+        let b = Array(value.utf8)
+        guard b.count >= 20, b.last == 90, // Z
+              b[4] == 45, b[7] == 45, b[10] == 84,
+              b[13] == 58, b[16] == 58 else { return nil }
+        func digits(_ start: Int, _ count: Int) -> Int64? {
+            var n: Int64 = 0
+            for i in start..<(start + count) {
+                let d = b[i]
+                guard d >= 48 && d <= 57 else { return nil }
+                n = n * 10 + Int64(d - 48)
+            }
+            return n
+        }
+        guard var year = digits(0, 4), let month = digits(5, 2),
+              let day = digits(8, 2), let hour = digits(11, 2),
+              let minute = digits(14, 2), let second = digits(17, 2),
+              (1...12).contains(month), (1...31).contains(day),
+              hour < 24, minute < 60, second < 61 else { return nil }
+        year -= month <= 2 ? 1 : 0
+        let era = (year >= 0 ? year : year - 399) / 400
+        let yoe = year - era * 400
+        let adjustedMonth = month + (month > 2 ? -3 : 9)
+        let doy = (153 * adjustedMonth + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146_097 + doe - 719_468
+        return days * 86_400 + hour * 3_600 + minute * 60 + second
     }
 }
 
@@ -859,12 +1068,27 @@ public struct GraphCommunityPayload: Codable, Sendable, Equatable {
     /// Member-drawer count, or 0 in the local fallback (count unknown without
     /// ARIA structure).
     public let size: Int
+    public let stableKey: String?
+    public let x: Double?
+    public let y: Double?
+    public let z: Double?
+    public let foldCount: Int?
+    public let representativeIds: [String]?
+    public let classificationPurity: Double?
 
-    public init(id: Int, code: String?, label: String?, size: Int) {
+    public init(id: Int, code: String?, label: String?, size: Int,
+                stableKey: String? = nil, x: Double? = nil, y: Double? = nil, z: Double? = nil,
+                foldCount: Int? = nil, representativeIds: [String]? = nil,
+                classificationPurity: Double? = nil) {
         self.id = id
         self.code = code
         self.label = label
         self.size = size
+        self.stableKey = stableKey
+        self.x = x; self.y = y; self.z = z
+        self.foldCount = foldCount
+        self.representativeIds = representativeIds
+        self.classificationPurity = classificationPurity
     }
 
     /// Custom encode so `code` and `label` are always present on the wire — an
@@ -875,7 +1099,35 @@ public struct GraphCommunityPayload: Codable, Sendable, Equatable {
         try c.encode(code, forKey: .code)    // nil → null
         try c.encode(label, forKey: .label)  // nil → null
         try c.encode(size, forKey: .size)
+        try c.encodeIfPresent(stableKey, forKey: .stableKey)
+        try c.encodeIfPresent(x, forKey: .x)
+        try c.encodeIfPresent(y, forKey: .y)
+        try c.encodeIfPresent(z, forKey: .z)
+        try c.encodeIfPresent(foldCount, forKey: .foldCount)
+        try c.encodeIfPresent(representativeIds, forKey: .representativeIds)
+        try c.encodeIfPresent(classificationPurity, forKey: .classificationPurity)
     }
+}
+
+public struct GraphFoldPayload: Codable, Sendable, Equatable {
+    public let stableKey: String
+    public let communityKey: String
+    public let code: String?
+    public let label: String?
+    public let size: Int
+    public let x: Double
+    public let y: Double
+    public let z: Double
+    public let representativeIds: [String]
+}
+
+public struct GraphBridgePayload: Codable, Sendable, Equatable {
+    public let level: String
+    public let sourceKey: String
+    public let targetKey: String
+    public let edgeType: String
+    public let weight: Double
+    public let edgeCount: Int
 }
 
 /// One VizGraph analytic-signal summary row: the latest value the resident host

@@ -769,7 +769,9 @@ fn ag14_monitoring_off_gates_topology_duty() {
     let mut governor = AutonomicGovernor::new_for_testing_with_pool(
         coord, handle, drawer_store, 0, Some(sink), 0, pool_dir, artifact);
 
-    // Monitoring defaults OFF on a fresh store — the duty must not write.
+    // Fresh stores default ON since Wave 8.1. Exercise the authoritative
+    // operator-off state explicitly: the duty must not write.
+    stats_store_arc.set_monitoring_enabled(false).expect("disable monitoring");
     let _ = governor.tick(UNIX_EPOCH + Duration::from_secs(11_000_000));
     let absent = stats_store_arc
         .latest_topology_snapshot(Some(&estate_id))

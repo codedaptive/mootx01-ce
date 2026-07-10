@@ -10,7 +10,8 @@
 // into a Rust string (which would immediately drift from the Swift source of
 // truth), the Rust host embeds the SAME editable source files the Swift
 // `StaticAssets.swift` is generated from, via `include_str!`:
-//   apps/moot-mgr/Sources/MootManager/DashboardAssets/{index.html,app.css,app.js}
+//   apps/moot-mgr/Sources/MootManager/DashboardAssets/
+//     {index.html,app.css,app.js,semantic-zoom.mjs}
 // Both ports therefore serve byte-identical assets from one source of truth.
 // Only the SERVING is ported; the asset bytes are shared content.
 //
@@ -33,6 +34,9 @@ const INDEX_HTML: &str =
 const APP_CSS: &str = include_str!("../../Sources/MootManager/DashboardAssets/app.css");
 /// The dashboard logic (shared source of truth).
 const APP_JS: &str = include_str!("../../Sources/MootManager/DashboardAssets/app.js");
+/// Pure semantic-zoom policy shared by the browser and Node unit tests.
+const SEMANTIC_ZOOM_JS: &str =
+    include_str!("../../Sources/MootManager/DashboardAssets/semantic-zoom.mjs");
 /// Three.js r170 — vendored WebGL rendering library (MIT, mrdoob/three.js).
 const THREE_JS: &str = include_str!("../../Sources/MootManager/DashboardAssets/three.min.js");
 /// OrbitControls addon from Three.js — pan/zoom/orbit camera interaction.
@@ -58,6 +62,10 @@ pub fn asset_for(path: &str) -> Option<Asset> {
         }),
         "/app.js" => Some(Asset {
             body: APP_JS.to_string(),
+            content_type: "text/javascript; charset=utf-8",
+        }),
+        "/semantic-zoom.mjs" => Some(Asset {
+            body: SEMANTIC_ZOOM_JS.to_string(),
             content_type: "text/javascript; charset=utf-8",
         }),
         "/three.min.js" => Some(Asset {

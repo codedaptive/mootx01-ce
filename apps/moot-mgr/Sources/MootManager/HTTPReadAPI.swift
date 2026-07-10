@@ -438,7 +438,12 @@ public actor HTTPReadAPI {
             // snapshot has been written (governor startup pass not yet complete)
             // the response is structurePending:true with an empty graph.
             let estate = Self.queryValue("estate", in: request.query)
-            return await jsonResponse { try await self.manager.graphPayload(now: self.clock(), estate: estate) }
+            let level = Self.queryValue("level", in: request.query)
+            let focus = Self.queryValue("focus", in: request.query)
+            return await jsonResponse {
+                try await self.manager.graphPayload(
+                    now: self.clock(), estate: estate, level: level, focus: focus)
+            }
         case ("GET", "/api/events"):
             // SSE live-tail (Accept: text/event-stream or ?stream=1) is handled
             // in serve(_:) before routing; here we serve the one-shot JSON

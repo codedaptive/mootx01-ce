@@ -119,16 +119,15 @@ struct EventDrawerIdTests {
     }
 }
 
-// MARK: - L0: createdTs on graph nodes (edges no longer carry createdTs)
+// MARK: - L0: createdTs on graph nodes and explicit edges
 
 struct GraphCreatedTsTests {
 
-    @Test("Stored graph snapshot decodes createdTs on nodes — extra edge keys tolerated")
+    @Test("Stored graph snapshot decodes createdTs on nodes and explicit edges")
     func proxyDecodesCreatedTs() throws {
         // The stored snapshot (written by the governor) may still carry nounType,
-        // lastActiveTs, decayedWeight, and createdTs on edges — keys that were
-        // removed from the wire format in FIX 2.  The synthesised decoder ignores
-        // unknown keys, so existing snapshots decode without error.
+        // lastActiveTs and decayedWeight are legacy extras. Edge createdTs is
+        // intentionally retained so the compact projection can restore replay.
         let wire = """
         {"nodes":[{"id":"n1","nounType":1,"communityId":0,"centrality":0.5,
                    "anomaly":false,"lastActiveTs":null,
@@ -145,10 +144,12 @@ struct GraphCreatedTsTests {
                                              from: Data(wire.utf8))
         // Node createdTs is still in the wire format — decoded correctly.
         #expect(proxy.nodes.first?.createdTs == "2026-06-09T20:13:05Z")
-        // Edge createdTs was removed; extra key is silently ignored on decode.
-        // Verify edges were decoded (not dropped) and have the expected weight.
+        // Explicit edge birth is retained; derived kgFact has no single birth.
         #expect(proxy.edges.count == 2)
         #expect(proxy.edges.first?.weight == 0.9)
+        #expect(proxy.edges.first?.createdTs == "2026-06-09T20:13:05Z")
+        #expect(proxy.edges.first?.createdEpochSeconds == 1_781_035_985)
+        #expect(proxy.edges.last?.createdTs == nil)
     }
 
     @Test("StoredGraphPayload decode tolerates a snapshot that omits createdTs entirely")
@@ -168,7 +169,7 @@ struct GraphCreatedTsTests {
         #expect(proxy.communities == nil)
     }
 
-    @Test("Node payload re-encodes createdTs with an explicit null; edge payload omits it")
+    @Test("Stored node and explicit-edge shapes preserve createdTs")
     func createdTsExplicitNull() throws {
         // Node: createdTs still on wire format — encodes as explicit null.
         let node = GraphNodePayload(id: "n1", communityId: 0,
@@ -180,12 +181,18 @@ struct GraphCreatedTsTests {
         #expect(!nodeObj.keys.contains("nounType"), "nounType must not be in wire output")
         #expect(!nodeObj.keys.contains("lastActiveTs"), "lastActiveTs must not be in wire output")
 
-        // Edge: createdTs removed from wire format — must not appear in encoded output.
+        // Derived edge: no factual birth, so the optional key stays absent.
         let edge = GraphEdgePayload(source: "a", target: "b", edgeType: "kgFact",
                                     weight: 0.4, tombstonedTs: nil)
         let edgeObj = try jsonDict(edge)
         #expect(!edgeObj.keys.contains("createdTs"), "createdTs must not be in edge wire output")
         #expect(!edgeObj.keys.contains("decayedWeight"), "decayedWeight must not be in edge wire output")
+
+        let tunnel = GraphEdgePayload(source: "a", target: "b", edgeType: "tunnel",
+                                      weight: 1.0, createdTs: "2026-06-09T20:13:05Z",
+                                      tombstonedTs: nil)
+        let tunnelObj = try jsonDict(tunnel)
+        #expect((tunnelObj["createdTs"] as? String) == "2026-06-09T20:13:05Z")
 
         let stamped = GraphNodePayload(id: "n2", communityId: 1,
                                        centrality: 0.9, anomaly: true,
@@ -229,8 +236,37 @@ struct GraphTombstonedTsTests {
         #expect(proxy.nodes.last?.communityId == -1)
         #expect(proxy.nodes.last?.centrality == 0.0)
         #expect(proxy.edges.first?.tombstonedTs == "2026-06-09T20:13:05Z")
+        #expect(proxy.edges.first?.createdEpochSeconds == 1_780_300_800)
+        #expect(proxy.edges.first?.tombstonedEpochSeconds == 1_781_035_985)
         // kgFact derived edges remain live-facts-only: tombstonedTs null.
         #expect(proxy.edges.last?.tombstonedTs == nil)
+    }
+
+    @Test("Compact edges append factual epoch seconds and leave derived edges four fields")
+    func compactEdgeTemporalShape() throws {
+        let nodes = [
+            GraphNodePayload(id: "a", communityId: 0, centrality: 1, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil),
+            GraphNodePayload(id: "b", communityId: 0, centrality: 0.5, anomaly: false,
+                             createdTs: nil, tombstonedTs: nil),
+        ]
+        let edges = [
+            GraphEdgePayload(source: "a", target: "b", edgeType: "tunnel", weight: 1,
+                             createdTs: "2026-06-01T08:00:00Z",
+                             tombstonedTs: "2026-06-09T20:13:05Z"),
+            GraphEdgePayload(source: "a", target: "b", edgeType: "kgFact", weight: 0.3,
+                             createdTs: nil, tombstonedTs: nil),
+        ]
+        let payload = GraphPayload(nodes: nodes, edges: edges, communities: [], analytics: [],
+                                   structurePending: false, pending: [], generatedTs: nil,
+                                   estate: "test", snapshotTs: "2026-06-10T00:00:00Z")
+        let obj = try #require(JSONSerialization.jsonObject(with: APIJSON.encode(payload)) as? [String: Any])
+        let compact = try #require(obj["edges"] as? [[Any]])
+        #expect((obj["edgeTimeOrigin"] as? NSNumber)?.int64Value == 1_780_300_800)
+        #expect(compact[0].count == 6)
+        #expect((compact[0][4] as? NSNumber)?.int64Value == 0)
+        #expect((compact[0][5] as? NSNumber)?.int64Value == 735_185)
+        #expect(compact[1].count == 4)
     }
 
     @Test("StoredGraphPayload decode tolerates a snapshot that omits tombstonedTs entirely")
