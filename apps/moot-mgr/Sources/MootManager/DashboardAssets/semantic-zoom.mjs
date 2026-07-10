@@ -27,6 +27,24 @@ export function aggregateVisualStyle(size, maximumSize, level = "community") {
   });
 }
 
+export function engramFieldPresentation(aggregateKey, size, code) {
+  const match = typeof aggregateKey === "string"
+    ? aggregateKey.match(/^__other__:slice:(\d+)$/)
+    : null;
+  if (!match) return null;
+  const fieldName = `Engram Field ${Number(match[1]) + 1}`;
+  const numericSize = Number(size);
+  const memoryCount = Number.isFinite(numericSize) ? Math.max(0, Math.round(numericSize)) : 0;
+  const formattedCount = String(memoryCount).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fdcCode = typeof code === "string" && code.trim() ? code.trim() : "unclassified";
+  return Object.freeze({
+    key: aggregateKey,
+    name: fieldName,
+    primary: fieldName,
+    detail: `${formattedCount} memories · dominant FDC ${fdcCode}`,
+  });
+}
+
 // A stable unit sample for fallback-only layout details. Prefixing the salt
 // makes the full key pass through FNV after the axes diverge, avoiding the
 // correlated-last-byte defect that affected the persisted coordinate frame.

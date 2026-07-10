@@ -179,7 +179,7 @@ struct GraphAPITests {
                 "a malformed drill request must retain the aggregate budget")
     }
 
-    @Test("Topology V3 Other structure drills into accounting-preserving slices")
+    @Test("Topology V3 Engram Fields drill into accounting-preserving slices")
     func topologyV3OtherStructureDrill() async throws {
         let nodes: [[String: Any]] = (0..<100).map { index in
             var node: [String: Any] = [:]
@@ -226,18 +226,21 @@ struct GraphAPITests {
         let estateCommunities = try #require(estate["communities"] as? [[String: Any]])
         let other = try #require(estateCommunities.first { ($0["stableKey"] as? String) == "__other__" })
         #expect((other["size"] as? Int) == 5)
+        #expect((other["label"] as? String) == "Engram Fields")
 
         let community = try await jsonObject(
             port: port, path: "/api/graph?estate=estate-other&level=community&focus=__other__")
         let slices = try #require(community["folds"] as? [[String: Any]])
         #expect(!slices.isEmpty)
         #expect(slices.reduce(0) { $0 + ($1["size"] as? Int ?? 0) } == 5)
+        #expect((slices.first?["label"] as? String) == "Engram Field 1")
+        #expect((slices.first?["code"] as? String) == "005")
         let sliceKey = try #require(slices.first?["stableKey"] as? String)
 
         let local = try await jsonObject(
             port: port, path: "/api/graph?estate=estate-other&level=local&focus=\(sliceKey)")
         #expect((local["ids"] as? [String])?.isEmpty == false,
-                "every visible Other slice must open into real bounded nodes")
+                "every visible Engram Field must open into real bounded nodes")
     }
 
     @Test("GET /api/graph returns the topology snapshot envelope shape")
@@ -491,12 +494,14 @@ struct TopologyRendererAssetTests {
         let (_, _, html) = try await httpGET(port: port, path: "/")
         #expect(html.contains("/app.js"))
         #expect(html.contains("id=\"topoDotSize\""))
+        #expect(html.contains("id=\"topoFieldDetailsToggle\""))
         #expect(html.contains("Double-click a dot to explore"))
         let (_, _, js) = try await httpGET(port: port, path: "/app.js")
         let (zoomStatus, _, zoom) = try await httpGET(port: port, path: "/semantic-zoom.mjs")
         #expect(zoomStatus == 200)
         #expect(zoom.contains("SemanticExpansionController"))
         #expect(zoom.contains("EXPANSION_DEFAULTS"))
+        #expect(zoom.contains("engramFieldPresentation"))
         #expect(zoom.contains("remapDetailCommunities"))
         #expect(js.contains("/api/graph"))
         #expect(js.contains("new THREE.WebGLRenderer"))
@@ -512,6 +517,7 @@ struct TopologyRendererAssetTests {
         #expect(js.contains("gl_PointSize = max(1.0, size * uPointScale * uPixelRatio);"))
         #expect(js.contains("addEventListener('dblclick'"))
         #expect(js.contains("mootmgr-topology-dot-scale"))
+        #expect(js.contains("mootmgr-topology-field-details"))
         #expect(js.contains("function focusBrainNode"))
         #expect(js.contains("function topoTickBrainPivot"))
         #expect(js.contains("function cancelPendingBrainSelection"))

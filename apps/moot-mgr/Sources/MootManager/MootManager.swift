@@ -1198,7 +1198,7 @@ public actor MootManager {
             }.first?.key
             folds.append(GraphFoldPayload(
                 stableKey: stableKey, communityKey: "__other__", code: code,
-                label: "Other structure region \(folds.count + 1)",
+                label: "Engram Field \(bucketIndex + 1)",
                 size: members.reduce(0) { $0 + $1.size },
                 x: weighted(\.x), y: weighted(\.y), z: weighted(\.z),
                 representativeIds: representativeIds))
@@ -1236,7 +1236,7 @@ public actor MootManager {
             }
         }
         let summary = GraphCommunityPayload(
-            id: -2, code: nil, label: "Other structure", size: omittedSize,
+            id: -2, code: nil, label: "Engram Fields", size: omittedSize,
             stableKey: "__other__", x: summaryWeighted(\.x), y: summaryWeighted(\.y),
             z: summaryWeighted(\.z), foldCount: folds.count,
             representativeIds: summaryRepresentatives)

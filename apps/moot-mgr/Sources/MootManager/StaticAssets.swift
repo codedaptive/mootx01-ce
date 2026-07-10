@@ -242,6 +242,7 @@ try {
           <!-- V2-P2b: nmf_bond (derived lattice/classification) edges are faint
                tissue, hidden by default — this chip reveals them. -->
           <button class="btn" id="topoLatticeToggle" aria-pressed="false">lattice</button>
+          <button class="btn" id="topoFieldDetailsToggle" aria-pressed="false">field details</button>
           <label class="topo-dot-size" for="topoDotSize">
             <span>dot size</span>
             <input id="topoDotSize" type="range" min="0.75" max="3" step="0.25" value="1.5"
@@ -628,6 +629,15 @@ body::before{
   color:rgba(232,234,240,.42); font-family:var(--font-m); font-size:10px;
   letter-spacing:0;
 }
+.topo-lobe-label{
+  position:absolute; display:flex; align-items:center;
+  font:11px ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:rgba(232,234,240,.5); letter-spacing:0; white-space:nowrap;
+}
+.topo-lobe-swatch{display:inline-block; width:5px; height:5px; border-radius:50%; margin-right:6px; flex:none; opacity:.65}
+.topo-lobe-copy{display:inline-flex; flex-direction:column; line-height:1.25}
+.topo-lobe-primary{text-transform:uppercase}
+.topo-lobe-detail{margin-top:2px; color:rgba(232,234,240,.38); font-size:9px; text-transform:none}
 /* honest pending overlay (centered) — only shown on analytics-grid path */
 .topo-pending{
   position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
@@ -1137,6 +1147,8 @@ details.panel[open] summary::before{content:"▼ "}
 .topo-commpicker .cp-dot{width:9px; height:9px; border-radius:50%; flex:none}
 .topo-commpicker .cp-label{flex:1; white-space:nowrap; color:var(--hi)}
 .topo-commpicker .cp-size{color:var(--muted); flex:none; margin-left:8px}
+.topo-commpicker .cp-field-copy{display:flex; flex:1; flex-direction:column; white-space:nowrap; color:var(--hi); line-height:1.25}
+.topo-commpicker .cp-field-detail{margin-top:2px; color:var(--muted); font-size:10.5px}
 
 /* Theme toggle — compact icon button in the topbar right cluster. */
 .btn-theme{font-size:15px; line-height:1; padding:4px 10px; margin-right:10px}
@@ -1240,6 +1252,7 @@ import {
   aggregateVisualStyle,
   BoundedTTLCache,
   brainFieldCenters,
+  engramFieldPresentation,
   EXPANSION_DEFAULTS,
   remapDetailCommunities,
   SemanticExpansionController,
@@ -2673,6 +2686,7 @@ import {
   // so flipping it needs no geometry rebuild — but the edge loop is skipped
   // while TOPO-SETTLE is settled, so the toggle handler re-arms a full frame.
   let brainShowLattice = false;
+  let brainShowFieldDetails = false;
   // L3 lobe labels — community rank → FDC label string.
   let brainLobeLabels = Object.create(null);
   // V2-P2a meaning channel — community rank → confidence label text
@@ -2680,6 +2694,7 @@ import {
   // buildRealBrainNodes. Read by updateBrainLabels (canvas overlay) and
   // renderCommPicker (picker rows) in place of the bare label when present.
   let brainLobeConfidence = Object.create(null);
+  let brainLobeFieldMeta = Object.create(null);
   let topoCommFilter = null;
   let topoCommRows = [];
   let brainLobeKey = Object.create(null);
@@ -2975,6 +2990,19 @@ import {
     }
   }
 
+  function applyBrainFieldDetails(show, persist) {
+    brainShowFieldDetails = !!show;
+    var toggle = $("#topoFieldDetailsToggle");
+    if (toggle) toggle.setAttribute("aria-pressed", brainShowFieldDetails ? "true" : "false");
+    if (persist) {
+      try {
+        localStorage.setItem("mootmgr-topology-field-details", brainShowFieldDetails ? "true" : "false");
+      } catch (_) {}
+    }
+    updateBrainLabels();
+    renderCommPicker();
+  }
+
   // Stable Gaussian-like scatter helper via three deterministic unit samples.
   function brainGauss(id, salt) {
     return (stableUnit(id, salt + ':a') + stableUnit(id, salt + ':b') +
@@ -3111,12 +3139,21 @@ import {
     brainLobeLabels = Object.create(null);
     brainLobeRGB = Object.create(null);
     brainLobeConfidence = Object.create(null);
+    brainLobeFieldMeta = Object.create(null);
     function commMeta(cid) {
       return (communities || []).find(function (c) { return String(c.id) === String(cid); });
     }
     lobeIds.forEach(function (cid, rank) {
       var meta = commMeta(cid);
-      if (meta && meta.label) brainLobeLabels[rank] = meta.label;
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      if (field) {
+        brainLobeLabels[rank] = field.primary;
+        brainLobeFieldMeta[rank] = field;
+      } else if (meta && meta.label) {
+        brainLobeLabels[rank] = meta.label;
+      }
     });
 
     // Code → label reverse lookup for confidenceLabelText: multiple
@@ -3138,6 +3175,10 @@ import {
     // (Louvain ids renumber every governor cycle).
     function contentKey(cid, members) {
       var meta = commMeta(cid);
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      if (field) return field.key;
       if (meta && meta.label) return meta.label;
       return members.length >= MIN_LOBE_SIZE ? "(unlabeled)" : "fragments";
     }
@@ -3145,7 +3186,7 @@ import {
     // Picker rows: one per labeled lobe (size desc), then the two buckets.
     brainLobeKey = Object.create(null);
     var rowByKey = Object.create(null);
-    function addRow(key, size, cIdx, isBucket, rgb, confidence) {
+    function addRow(key, size, cIdx, isBucket, rgb, confidence, field) {
       if (!rowByKey[key]) {
         rowByKey[key] = {
           key: key, size: 0, cIdx: cIdx, bucket: !!isBucket, rgb: rgb || null,
@@ -3153,6 +3194,7 @@ import {
           // only lobes compute this (see lobeCodeStats) — periphery/bucket
           // rows pass undefined and fall back to the bare key in the picker.
           confidence: confidence || null,
+          field: field || null,
         };
       }
       rowByKey[key].size += size;
@@ -3186,9 +3228,17 @@ import {
       var baseRgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
       var rgb = stats.dominant ? desaturateToward(fdcColor(stats.dominant), 1 - stats.purity) : baseRgb;
       brainLobeRGB[rank] = rgb;
-      brainLobeConfidence[rank] = confidenceLabelText(stats, brainCodeLabelMap, meta && meta.label);
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      brainLobeConfidence[rank] = field
+        ? field.primary
+        : confidenceLabelText(stats, brainCodeLabelMap, meta && meta.label);
+      if (field) brainLobeFieldMeta[rank] = field;
       var rowSize = aggregateMode && meta ? (meta.size || 0) : members.length;
-      if (!isSubset) addRow(key, rowSize, cIdx, key === "(unlabeled)", rgb, brainLobeConfidence[rank]);
+      if (!isSubset) {
+        addRow(key, rowSize, cIdx, key === "(unlabeled)", rgb, brainLobeConfidence[rank], field);
+      }
       // sqrt scaling keeps scatter proportional to canvas even for huge
       // communities (6k+ nodes); linear scaling scatters far outside the
       // canvas, clamping all nodes to edges and collapsing via physics.
@@ -3216,7 +3266,13 @@ import {
       var meta = commMeta(cid);
       var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
       var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
-      if (!isSubset) addRow(key, members.length, -1, true, rgb);
+      var field = meta
+        ? engramFieldPresentation(meta.stableKey, meta.size, meta.code)
+        : null;
+      var rowSize = aggregateMode && meta ? (meta.size || 0) : members.length;
+      if (!isSubset) {
+        addRow(key, rowSize, -1, !field, rgb, field ? field.primary : null, field);
+      }
       var anchorID = members.map(function (n) { return n.id; }).sort()[0] || cid;
       var ax = 20 + stableUnit(anchorID, 'fragment-x') * (W - 40);
       var ay = 20 + stableUnit(anchorID, 'fragment-y') * (H - 40);
@@ -3232,6 +3288,12 @@ import {
     // everything available to re-check).
     if (!isSubset) {
       topoCommRows = Object.values(rowByKey).sort(function (a, b) {
+        if (a.key === "Engram Fields" && b.key !== "Engram Fields") return -1;
+        if (b.key === "Engram Fields" && a.key !== "Engram Fields") return 1;
+        if (!!a.field !== !!b.field) return a.field ? -1 : 1;
+        if (a.field && b.field) {
+          return Number(a.field.key.split(":").pop()) - Number(b.field.key.split(":").pop());
+        }
         if (a.bucket !== b.bucket) return a.bucket ? 1 : -1;
         return b.size - a.size;
       });
@@ -4556,8 +4618,7 @@ import {
       brainLabelEls = [];
       ranks.forEach(function () {
         var lbl = document.createElement('div');
-        lbl.style.cssText = 'position:absolute;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;'
-          + 'color:rgba(232,234,240,0.5);letter-spacing:1.5px;text-transform:uppercase;white-space:nowrap;';
+        lbl.className = 'topo-lobe-label';
         brainLabelContainer.appendChild(lbl);
         brainLabelEls.push(lbl);
       });
@@ -4598,11 +4659,19 @@ import {
       // individual member's own node color, since members in a mixed lobe
       // carry different colors now (see pushNode's per-node fallback chain).
       var col = brainLobeRGB[rank] || BRAIN_COMM_COLORS[parseInt(rank, 10) % BRAIN_COMM_COLORS.length];
-      var labelText = String(brainLobeConfidence[rank] || brainLobeLabels[rank]).toUpperCase();
+      var field = brainLobeFieldMeta[rank] || null;
+      var labelText = String(field ? field.primary : (brainLobeConfidence[rank] || brainLobeLabels[rank])).toUpperCase();
       if (brainW < 520 && labelText.length > 20) labelText = labelText.slice(0, 19) + '...';
-      lbl.innerHTML = '<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:rgb('
-        + col[0] + ',' + col[1] + ',' + col[2] + ');margin-right:6px;vertical-align:middle;opacity:0.65"></span>'
-        + labelText;
+      clear(lbl);
+      var swatch = el('span', 'topo-lobe-swatch');
+      swatch.style.background = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')';
+      var copy = el('span', 'topo-lobe-copy');
+      copy.appendChild(el('span', 'topo-lobe-primary', labelText));
+      if (field && brainShowFieldDetails) {
+        copy.appendChild(el('span', 'topo-lobe-detail', field.detail));
+      }
+      lbl.appendChild(swatch);
+      lbl.appendChild(copy);
       var halfWidth = lbl.offsetWidth / 2;
       var labelHeight = lbl.offsetHeight;
       lbl.style.left = Math.max(halfWidth + 6, Math.min(brainW - halfWidth - 6, sp.x)) + 'px';
@@ -5354,16 +5423,22 @@ import {
         ? "rgb(" + col[0] + "," + col[1] + "," + col[2] + ")"
         : "rgba(232,234,240,0.35)";
 
-      // V2-P2a: show the confidence label ("Label · 82%" / "Mixed · top:
-      // …") when the row is a coded lobe; row.key (the filter identity —
-      // untouched) stays the fallback for buckets and code-less lobes.
-      var label = el("span", "cp-label", row.confidence || row.key);
-      var size = el("span", "cp-size", String(row.size));
-
       line.appendChild(box);
       line.appendChild(dot);
-      line.appendChild(label);
-      line.appendChild(size);
+      if (row.field) {
+        var fieldCopy = el("span", "cp-field-copy");
+        fieldCopy.appendChild(el("span", "cp-field-name", row.field.primary));
+        if (brainShowFieldDetails) {
+          fieldCopy.appendChild(el("span", "cp-field-detail", row.field.detail));
+        }
+        line.appendChild(fieldCopy);
+      } else {
+        // V2-P2a: show the confidence label ("Label · 82%" / "Mixed · top:
+        // …") when the row is a coded lobe; row.key (the filter identity —
+        // untouched) stays the fallback for buckets and code-less lobes.
+        line.appendChild(el("span", "cp-label", row.confidence || row.key));
+        line.appendChild(el("span", "cp-size", String(row.size)));
+      }
       // Click anywhere on the row toggles the domain (checkbox semantics).
       line.addEventListener("click", function () { commToggle(row.key); });
       list.appendChild(line);
@@ -5636,6 +5711,7 @@ import {
         keyToID[key] = id;
         displayCommunities.push({
           id: i, code: a.code || null, label: a.label || null, size: a.size || 0,
+          stableKey: a.stableKey || null,
           classificationPurity: typeof a.classificationPurity === "number" ? a.classificationPurity : null,
         });
         return {
@@ -5684,8 +5760,9 @@ import {
         if (n.communityId >= 0) sizeById[n.communityId] = (sizeById[n.communityId] || 0) + 1;
       });
       displayCommunities.forEach(function (c) {
-        topoCommKeyById[c.id] = c.label ||
-          ((sizeById[c.id] || c.size || 0) >= 4 ? "(unlabeled)" : "fragments");
+        var field = engramFieldPresentation(c.stableKey, c.size, c.code);
+        topoCommKeyById[c.id] = field ? field.key : (c.label ||
+          ((sizeById[c.id] || c.size || 0) >= 4 ? "(unlabeled)" : "fragments"));
       });
       buildBrainFromRealData(false);
     } else {
@@ -5696,6 +5773,7 @@ import {
       brainLobeLabels = Object.create(null);
       brainLobeRGB = Object.create(null);
       brainLobeConfidence = Object.create(null);
+      brainLobeFieldMeta = Object.create(null);
       topoCommRows = [];     // no content picker without real communities
     }
     renderCommPicker();
@@ -6211,6 +6289,12 @@ import {
     topoDotSlider.addEventListener("change", function () {
       applyBrainPointScale(this.value, true);
     });
+    var savedFieldDetails = null;
+    try { savedFieldDetails = localStorage.getItem("mootmgr-topology-field-details"); } catch (_) {}
+    applyBrainFieldDetails(savedFieldDetails === "true", false);
+    $("#topoFieldDetailsToggle").addEventListener("click", function () {
+      applyBrainFieldDetails(!brainShowFieldDetails, true);
+    });
     $("#topoEstate").addEventListener("change", function () {
       topoGraphCache.clear();
       renderTopology("estate", null);
@@ -6288,6 +6372,24 @@ export function aggregateVisualStyle(size, maximumSize, level = "community") {
     // CSS-pixel diameter. Camera zoom changes projected separation, never the
     // size of the glyph itself. Mass remains a restrained secondary signal.
     coreSizePx: (5.5 + 7.5 * weight) * levelScale,
+  });
+}
+
+export function engramFieldPresentation(aggregateKey, size, code) {
+  const match = typeof aggregateKey === "string"
+    ? aggregateKey.match(/^__other__:slice:(\d+)$/)
+    : null;
+  if (!match) return null;
+  const fieldName = `Engram Field ${Number(match[1]) + 1}`;
+  const numericSize = Number(size);
+  const memoryCount = Number.isFinite(numericSize) ? Math.max(0, Math.round(numericSize)) : 0;
+  const formattedCount = String(memoryCount).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fdcCode = typeof code === "string" && code.trim() ? code.trim() : "unclassified";
+  return Object.freeze({
+    key: aggregateKey,
+    name: fieldName,
+    primary: fieldName,
+    detail: `${formattedCount} memories · dominant FDC ${fdcCode}`,
   });
 }
 

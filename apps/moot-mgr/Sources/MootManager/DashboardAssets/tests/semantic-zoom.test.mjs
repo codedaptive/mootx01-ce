@@ -6,6 +6,7 @@ import {
   aggregateVisualWeight,
   BoundedTTLCache,
   brainFieldCenters,
+  engramFieldPresentation,
   EXPANSION_DEFAULTS,
   remapDetailCommunities,
   SemanticExpansionController,
@@ -18,6 +19,19 @@ const fold = { aggregateLevel: "fold", aggregateKey: "f-alpha", parentKey: "c-al
 
 test("detail expansion has a bounded visual morph", () => {
   assert.deepEqual(EXPANSION_DEFAULTS, { transitionMs: 420 });
+});
+
+test("Engram Fields have a stable name and optional factual detail", () => {
+  assert.deepEqual(
+    engramFieldPresentation("__other__:slice:7", 811, "620"),
+    {
+      key: "__other__:slice:7",
+      name: "Engram Field 8",
+      primary: "Engram Field 8",
+      detail: "811 memories · dominant FDC 620",
+    },
+  );
+  assert.equal(engramFieldPresentation("community:7", 811, "620"), null);
 });
 
 test("aggregate mass is monotonic, bounded, and visibly differentiated", () => {
