@@ -2448,6 +2448,26 @@ import {
     glCanvas.style.left = '0';
     container.appendChild(glCanvas);
 
+    // Browser click events can still fire after a pointer drag. Treat motion
+    // beyond this tolerance as camera manipulation, never node selection.
+    var pointerDownX = 0, pointerDownY = 0, pointerIsDown = false, pointerDragged = false;
+    var clickDragThresholdSquared = 25;
+    glCanvas.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      pointerDownX = e.clientX;
+      pointerDownY = e.clientY;
+      pointerIsDown = true;
+      pointerDragged = false;
+    });
+    glCanvas.addEventListener('pointermove', function (e) {
+      if (!pointerIsDown || pointerDragged) return;
+      var dx = e.clientX - pointerDownX;
+      var dy = e.clientY - pointerDownY;
+      if (dx * dx + dy * dy > clickDragThresholdSquared) pointerDragged = true;
+    });
+    glCanvas.addEventListener('pointerup', function () { pointerIsDown = false; });
+    glCanvas.addEventListener('pointercancel', function () { pointerIsDown = false; });
+
     // OrbitControls — scroll-wheel zoom, drag to orbit, right-drag to pan.
     brainControls = new OrbitControls(brainCamera, glCanvas);
     // Orbit target at the midpoint of the z-range so rotation reveals depth.
@@ -2467,6 +2487,7 @@ import {
     // dispatches 'change' when the camera actually moved, so a static settled
     // frame never spuriously re-arms.)
     brainControls.addEventListener('start', function () {
+      cancelPendingBrainSelection();
       cancelBrainPivot(true);
       brainRearm(brainSettle, performance.now());
     });
@@ -2532,6 +2553,11 @@ import {
     // A click pivots immediately, but selection waits just long enough to
     // distinguish it from a double-click. Expansion never selects the node.
     glCanvas.addEventListener('click', function (e) {
+      if (pointerDragged) {
+        pointerDragged = false;
+        cancelPendingBrainSelection();
+        return;
+      }
       if (e.detail > 1) return;
       cancelPendingBrainSelection();
       var rect = glCanvas.getBoundingClientRect();

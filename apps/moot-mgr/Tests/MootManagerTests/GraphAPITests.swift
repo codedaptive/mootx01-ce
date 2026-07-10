@@ -516,6 +516,8 @@ struct TopologyRendererAssetTests {
         #expect(js.contains("function topoTickBrainPivot"))
         #expect(js.contains("function cancelPendingBrainSelection"))
         #expect(js.contains("Expansion never selects the node"))
+        #expect(js.contains("clickDragThresholdSquared = 25"))
+        #expect(js.contains("if (pointerDragged)"))
         #expect(js.contains("brainCamera.position.copy(pivot.startCamera).add(delta)"))
         #expect(js.contains("addEventListener('contextmenu'"))
         #expect(js.contains("copyNodeQuery(node)"))
