@@ -52,6 +52,15 @@ fn path_to_room(path: &str) -> String {
 
 fn vpath(room: &str) -> String { format!("{MEMORIES_ROOT}/{room}") }
 
+fn drawer_visible_to_adapter(drawer: &Drawer) -> bool {
+    if drawer.tombstoned_at.is_some() || (drawer.adjective_bitmap & 0x3F) >= 4 { return false; }
+    if !drawer.adjective_sensitivity().is_bulk_exportable() { return false; }
+    matches!(
+        drawer.sensitivity(),
+        locus_kit::provenance::Sensitivity::Normal | locus_kit::provenance::Sensitivity::Elevated
+    )
+}
+
 fn find_drawer(path: &str, args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry)
     -> Result<Option<Drawer>, JSONRPCError>
 {
@@ -63,7 +72,7 @@ fn find_drawer(path: &str, args: &BTreeMap<String, JsonValue>, registry: &Estate
     let names = coord.resolve_drawer_node_names(&estate.handle,
         &all.iter().map(|d| d.parent_node_id.clone()).collect::<Vec<_>>());
     Ok(all.into_iter().find(|d| {
-        d.tombstoned_at.is_none() && (d.adjective_bitmap & 0x3F) < 4
+        drawer_visible_to_adapter(d)
             && names.get(&d.parent_node_id).map_or(false, |(w, r)| w == ADAPTER_WING && r == &room)
     }))
 }
@@ -78,7 +87,7 @@ fn list_drawers(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry)
     let names = coord.resolve_drawer_node_names(&estate.handle,
         &all.iter().map(|d| d.parent_node_id.clone()).collect::<Vec<_>>());
     Ok(all.into_iter().filter_map(|d| {
-        if d.tombstoned_at.is_some() || (d.adjective_bitmap & 0x3F) >= 4 { return None; }
+        if !drawer_visible_to_adapter(&d) { return None; }
         let (w, r) = names.get(&d.parent_node_id)?;
         if w != ADAPTER_WING { return None; }
         Some((d, r.clone()))
