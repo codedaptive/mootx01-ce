@@ -3404,12 +3404,9 @@ import {
     return null;
   }
 
-  // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from
-  // brainAdjacency, then refreshes the V2-P2c truth-lens panel — every
-  // selection-changing call site (settled single-click and Escape) funnels
-  // through here, so the panel is the single place that needs to stay in
-  // sync (stopBrainAnimation's own teardown reset calls renderSelectionPanel
-  // directly, since it bypasses this function — see its comment).
+  // Set or clear the visual pivot selection and its hop highlights. Graph
+  // gestures never open the details panel: click owns camera pivoting,
+  // double-click owns expansion, and right-click owns AI-query copy.
   function selectBrainNode(node) {
     if (!node) cancelBrainPivot(false);
     brainSelectedNode = node;
@@ -3429,7 +3426,7 @@ import {
     // and the selection-dimming `ea` on every edge, so it must force a full edge
     // pass — re-arm guarantees at least one full frame that reruns the edge loop.
     brainRearm(brainSettle, performance.now());
-    renderSelectionPanel();
+    if (topoSelPanelEl) topoSelPanelEl.hidden = true;
   }
 
   // Per-edge-type neighbor ids touching `nodeId`, deduped within each type
@@ -3657,13 +3654,8 @@ import {
   }
 
   // =========================================================================
-  // V2-P2c SELECTION TRUTH-LENS PANEL — "what is this memory really near?"
-  // selectBrainNode(node) calls renderSelectionPanel() on every selection
-  // change (settled single-click and Escape); stopBrainAnimation's own teardown
-  // reset calls it too, since that path sets brainSelectedNode directly
-  // rather than through selectBrainNode. Every field below is already
-  // client-side state built by buildRealBrainNodes/startBrainAnimation — no
-  // new endpoint, no new fetch.
+  // Legacy V2-P2c truth-lens renderer. No active topology gesture creates this
+  // panel; selection and teardown hide any stale instance from an older view.
   // =========================================================================
 
   // Lazily builds and appends the panel chrome to #topoStage, same

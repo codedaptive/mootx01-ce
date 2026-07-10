@@ -518,6 +518,8 @@ struct TopologyRendererAssetTests {
         #expect(js.contains("Expansion never selects the node"))
         #expect(js.contains("clickDragThresholdSquared = 25"))
         #expect(js.contains("if (pointerDragged)"))
+        #expect(js.contains("gestures never open the details panel"))
+        #expect(js.contains("if (topoSelPanelEl) topoSelPanelEl.hidden = true"))
         #expect(js.contains("brainCamera.position.copy(pivot.startCamera).add(delta)"))
         #expect(js.contains("addEventListener('contextmenu'"))
         #expect(js.contains("copyNodeQuery(node)"))
