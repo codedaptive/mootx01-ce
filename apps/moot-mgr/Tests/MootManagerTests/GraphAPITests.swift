@@ -470,7 +470,7 @@ struct GraphAPITests {
 // MARK: - Topology renderer asset wiring
 
 // The Topology renderer is the Three.js brain renderer inside app.js — no
-// separate renderer asset is shipped. These tests pin the semantic-zoom and
+// separate renderer asset is shipped. These tests pin explicit expansion and
 // compact-position wiring, while the retired /sigma.js path stays off the
 // allow-list.
 struct TopologyRendererAssetTests {
@@ -493,19 +493,23 @@ struct TopologyRendererAssetTests {
         let (_, _, js) = try await httpGET(port: port, path: "/app.js")
         let (zoomStatus, _, zoom) = try await httpGET(port: port, path: "/semantic-zoom.mjs")
         #expect(zoomStatus == 200)
-        #expect(zoom.contains("SemanticZoomController"))
+        #expect(zoom.contains("SemanticExpansionController"))
+        #expect(zoom.contains("EXPANSION_DEFAULTS"))
+        #expect(zoom.contains("remapDetailCommunities"))
         #expect(js.contains("/api/graph"))
         #expect(js.contains("new THREE.WebGLRenderer"))
-        #expect(js.contains("function topoDrill"))
-        #expect(js.contains("topoScheduleSemanticZoom"))
-        #expect(js.contains("topoCaptureTransitionGhost"))
-        #expect(js.contains("topoPrepareSemanticMorph"))
+        #expect(js.contains("function topoExpand"))
+        #expect(js.contains("function topoMergeSceneLayer"))
+        #expect(!js.contains("topoScheduleSemanticZoom"))
+        #expect(!js.contains("addEventListener('wheel'"))
+        #expect(!js.contains("topoCaptureTransitionGhost"))
+        #expect(js.contains("topoPrepareDetailMorph"))
         #expect(js.contains("brainControls.zoomToCursor = true"))
         #expect(js.contains("brainControls.zoomSpeed = 0.65"))
         #expect(js.contains("brainControls.rotateSpeed = 0.55"))
         #expect(js.contains("function buildAggregateQuery"))
         #expect(js.contains("topoAggregateCandidate(e.clientX, e.clientY)"))
-        #expect(js.contains("topoScheduleSemanticZoom(e.deltaY < 0 ? \"in\" : \"out\")"))
+        #expect(js.contains("topoCommitExpansionIntent"))
         #expect(js.contains("var playing = false"))
         #expect(js.contains("g.positionQ16"))
         #expect(js.contains("selectBrainNode"))

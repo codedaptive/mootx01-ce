@@ -1,19 +1,65 @@
-// Pure semantic-zoom policy for the Topology renderer. This module deliberately
-// owns no DOM or Three.js state so the intent rules stay deterministic and can
-// be tested with Node's built-in test runner.
+// Pure detail-expansion policy for the Topology renderer. The historical file
+// name remains part of the dashboard asset URL, but camera zoom is deliberately
+// absent from this policy. It owns no DOM or Three.js state, so an aggregate can
+// gain children without any camera gesture becoming data navigation.
 
-export const SEMANTIC_ZOOM_DEFAULTS = Object.freeze({
-  prefetchPx: 42,
-  enterPx: 72,
-  exitDistanceRatio: 1.7,
-  transitionMs: 260,
+export const EXPANSION_DEFAULTS = Object.freeze({
+  transitionMs: 420,
 });
 
-const NEXT_LEVEL = Object.freeze({ estate: "community", community: "local" });
-const PREVIOUS_LEVEL = Object.freeze({ local: "community", community: "estate" });
+const EXPANSION_LEVEL = Object.freeze({ community: "community", fold: "local" });
 
-function finiteOr(value, fallback) {
-  return Number.isFinite(value) ? value : fallback;
+export function remapDetailCommunities(previous, rawNodes, communities, intent) {
+  const previousCommunities = previous?.communities || [];
+  const previousNodes = previous?.rawNodes || [];
+  const localTarget = intent?.level === "local"
+    ? previousNodes.find((node) => node.aggregateKey === intent.focusKey)
+    : null;
+  if (localTarget && localTarget.communityId >= 0) {
+    return {
+      rawNodes: rawNodes.map((node) => ({ ...node, communityId: localTarget.communityId })),
+      communities: previousCommunities.slice(),
+    };
+  }
+
+  const maxCommunityID = previousCommunities.reduce(
+    (maxID, community) => Math.max(
+      maxID,
+      typeof community.id === "number" ? community.id : -1,
+    ),
+    -1,
+  );
+  let nextCommunityID = maxCommunityID + 1;
+  const communityIDMap = new Map();
+  const mergedCommunities = previousCommunities.slice();
+  communities.forEach((community) => {
+    const newID = nextCommunityID++;
+    communityIDMap.set(String(community.id), newID);
+    mergedCommunities.push({ ...community, id: newID });
+  });
+  const singleCommunityID = communities.length === 1
+    ? communityIDMap.get(String(communities[0].id))
+    : undefined;
+  const remappedNodes = rawNodes.map((node) => {
+    const oldID = node.communityId;
+    let mapped = oldID >= 0 ? communityIDMap.get(String(oldID)) : oldID;
+    if (oldID >= 0 && mapped === undefined && singleCommunityID !== undefined) {
+      mapped = singleCommunityID;
+    }
+    if (oldID >= 0 && mapped === undefined) {
+      mapped = nextCommunityID++;
+      communityIDMap.set(String(oldID), mapped);
+      mergedCommunities.push({
+        id: mapped,
+        code: node.code || null,
+        label: node.aggregateLabel || null,
+        size: 0,
+        classificationPurity: null,
+      });
+    }
+    return { ...node, communityId: mapped };
+  });
+  return { rawNodes: remappedNodes, communities: mergedCommunities };
 }
 
 export class BoundedTTLCache {
@@ -53,49 +99,25 @@ export class BoundedTTLCache {
   }
 }
 
-export class SemanticZoomController {
-  constructor(options = {}) {
-    this.config = Object.freeze({
-      prefetchPx: finiteOr(options.prefetchPx, SEMANTIC_ZOOM_DEFAULTS.prefetchPx),
-      enterPx: finiteOr(options.enterPx, SEMANTIC_ZOOM_DEFAULTS.enterPx),
-      exitDistanceRatio: finiteOr(
-        options.exitDistanceRatio,
-        SEMANTIC_ZOOM_DEFAULTS.exitDistanceRatio,
-      ),
-      transitionMs: finiteOr(options.transitionMs, SEMANTIC_ZOOM_DEFAULTS.transitionMs),
-    });
-    if (this.config.prefetchPx >= this.config.enterPx) {
-      throw new Error("semantic zoom prefetch threshold must be below enter threshold");
-    }
-    this.level = "estate";
-    this.focusKey = null;
-    this.parentKey = null;
+// Detail policy for a continuous scene. It can request children for an
+// aggregate, but it never removes geometry or treats camera zoom as navigation.
+export class SemanticExpansionController {
+  constructor() {
     this.locked = false;
-    this.prefetched = new Set();
+    this.expanded = new Set();
   }
 
-  sync(level, focusKey = null, parentKey = null) {
-    this.level = level || "estate";
-    this.focusKey = focusKey || null;
-    this.parentKey = parentKey || null;
+  reset() {
     this.locked = false;
-    this.prefetched.clear();
+    this.expanded.clear();
   }
 
   cacheKey(level, focusKey) {
-    return `${level || "estate"}:${focusKey || ""}`;
+    return `${level}:${focusKey}`;
   }
 
-  markPrefetched(level, focusKey) {
-    this.prefetched.add(this.cacheKey(level, focusKey));
-  }
-
-  forgetPrefetched(level, focusKey) {
-    this.prefetched.delete(this.cacheKey(level, focusKey));
-  }
-
-  begin() {
-    if (this.locked) return false;
+  begin(intent) {
+    if (this.locked || !intent || intent.type !== "transition") return false;
     this.locked = true;
     return true;
   }
@@ -104,53 +126,31 @@ export class SemanticZoomController {
     this.locked = false;
   }
 
-  complete(level, focusKey = null, parentKey = null) {
-    this.sync(level, focusKey, parentKey);
+  complete(intent) {
+    if (intent && intent.level && intent.focusKey) {
+      this.expanded.add(this.cacheKey(intent.level, intent.focusKey));
+    }
+    this.locked = false;
   }
 
-  drill(candidate) {
-    if (this.locked || !candidate || !candidate.aggregateKey) return null;
-    const targetLevel = NEXT_LEVEL[this.level];
+  canExpand(candidate) {
+    if (!candidate || !candidate.aggregateKey) return false;
+    const targetLevel = EXPANSION_LEVEL[candidate.aggregateLevel];
+    return !!targetLevel && !this.expanded.has(this.cacheKey(targetLevel, candidate.aggregateKey));
+  }
+
+  intent(candidate) {
+    if (this.locked || !this.canExpand(candidate)) return null;
+    const targetLevel = EXPANSION_LEVEL[candidate.aggregateLevel];
     if (!targetLevel) return null;
+    const key = this.cacheKey(targetLevel, candidate.aggregateKey);
+    if (this.expanded.has(key)) return null;
     return {
       type: "transition",
-      direction: "in",
       level: targetLevel,
       focusKey: candidate.aggregateKey,
       parentKey: candidate.parentKey || candidate.aggregateKey,
+      expansionKey: key,
     };
-  }
-
-  observe({ direction, candidate, projectedPx = 0, distanceRatio = 1 } = {}) {
-    if (this.locked) return null;
-    if (direction === "out") {
-      const targetLevel = PREVIOUS_LEVEL[this.level];
-      if (!targetLevel || distanceRatio < this.config.exitDistanceRatio) return null;
-      return {
-        type: "transition",
-        direction: "out",
-        level: targetLevel,
-        focusKey: targetLevel === "community" ? this.parentKey : null,
-        parentKey: targetLevel === "community" ? this.parentKey : null,
-      };
-    }
-
-    if (direction !== "in" || !candidate || !candidate.aggregateKey) return null;
-    const targetLevel = NEXT_LEVEL[this.level];
-    if (!targetLevel) return null;
-    const intent = {
-      direction: "in",
-      level: targetLevel,
-      focusKey: candidate.aggregateKey,
-      parentKey: candidate.parentKey || candidate.aggregateKey,
-    };
-    if (projectedPx >= this.config.enterPx) {
-      return { ...intent, type: "transition" };
-    }
-    const key = this.cacheKey(targetLevel, candidate.aggregateKey);
-    if (projectedPx >= this.config.prefetchPx && !this.prefetched.has(key)) {
-      return { ...intent, type: "prefetch" };
-    }
-    return null;
   }
 }

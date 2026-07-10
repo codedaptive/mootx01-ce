@@ -200,9 +200,9 @@ try {
       </div>
     </section>
 
-    <!-- TOPOLOGY — budgeted semantic-zoom renderer over /api/graph.
-         Estate and community views use persisted aggregate structure; local
-         views fetch bounded node/edge geometry. When no structure exists, the
+    <!-- TOPOLOGY — continuous accumulated-detail renderer over /api/graph.
+         The camera zooms one stable scene; explicit aggregate selection adds
+         bounded child geometry without replacing its parents. When no structure exists, the
          canvas shows an honest pending overlay and only the VizGraph signals
          the observer can prove — never fabricated nodes. -->
     <section class="view" data-view="topology">

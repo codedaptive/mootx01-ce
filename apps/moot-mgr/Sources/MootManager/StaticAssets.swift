@@ -224,9 +224,9 @@ try {
       </div>
     </section>
 
-    <!-- TOPOLOGY — budgeted semantic-zoom renderer over /api/graph.
-         Estate and community views use persisted aggregate structure; local
-         views fetch bounded node/edge geometry. When no structure exists, the
+    <!-- TOPOLOGY — continuous accumulated-detail renderer over /api/graph.
+         The camera zooms one stable scene; explicit aggregate selection adds
+         bounded child geometry without replacing its parents. When no structure exists, the
          canvas shows an honest pending overlay and only the VizGraph signals
          the observer can prove — never fabricated nodes. -->
     <section class="view" data-view="topology">
@@ -1166,24 +1166,6 @@ details.panel[open] summary::before{content:"▼ "}
 }
 @media (prefers-reduced-motion:reduce){ .topo-toast{animation:none} }
 
-/* Semantic zoom keeps the previous frame visible while the next bounded LOD
-   becomes ready. Both layers are pointer-transparent except the live canvas. */
-.topo-transition-ghost{
-  position:absolute; inset:0; z-index:4; overflow:hidden; pointer-events:none;
-  opacity:1; transform:scale(1); filter:blur(0);
-  transition:opacity 220ms ease, transform 220ms cubic-bezier(.2,.75,.2,1), filter 220ms ease;
-}
-.topo-transition-ghost canvas{position:absolute; inset:0; display:block}
-.topo-transition-ghost.leaving{opacity:0; filter:blur(.7px)}
-.topo-transition-ghost.zoom-in.leaving{transform:scale(1.08)}
-.topo-transition-ghost.zoom-out.leaving{transform:scale(.9)}
-.topo-semantic-new{opacity:0; transition:opacity 180ms ease}
-.topo-semantic-new.ready{opacity:1}
-@media (prefers-reduced-motion:reduce){
-  .topo-transition-ghost,.topo-semantic-new{transition-duration:1ms}
-  .topo-transition-ghost.leaving{transform:none; filter:none}
-}
-
 /* Compact console shell. Keep the complete read surface reachable on a narrow
    display, then stack the topology instrument above its content filter. */
 @media (max-width:700px){
@@ -1236,8 +1218,9 @@ import * as THREE from 'three';
 import { OrbitControls } from '/OrbitControls.js';
 import {
   BoundedTTLCache,
-  SemanticZoomController,
-  SEMANTIC_ZOOM_DEFAULTS,
+  EXPANSION_DEFAULTS,
+  remapDetailCommunities,
+  SemanticExpansionController,
 } from '/semantic-zoom.mjs?v=1';
 
 /*
@@ -2680,7 +2663,7 @@ import {
   let topoViewLevel = "estate";
   let topoFocusKey = null;
   let topoParentKey = null;
-  const topoZoom = new SemanticZoomController();
+  const topoExpansion = new SemanticExpansionController();
   const TOPO_CACHE_LIMIT = 6;
   const TOPO_CACHE_TTL_MS = 60000;
   let topoGraphCache = new BoundedTTLCache({ limit: TOPO_CACHE_LIMIT, ttlMs: TOPO_CACHE_TTL_MS });
@@ -2688,11 +2671,8 @@ import {
   let topoActiveRenderAbort = null;
   let topoActiveRenderKey = null;
   let topoRenderGeneration = 0;
-  let topoLevelFitDistance = 1;
-  let topoPointer = { x: null, y: null };
-  let topoZoomFrame = null;
   let topoPendingTransition = null;
-  let topoSemanticMorph = null;
+  let topoDetailMorph = null;
   let topoFirstFrameStartedAt = 0;
   const topoMetrics = {
     cacheHits: 0, cacheMisses: 0, staleResponses: 0,
@@ -2803,17 +2783,6 @@ import {
       });
     topoGraphInflight.set(key, request);
     return request;
-  }
-
-  function topoPrefetch(intent) {
-    if (!intent || !intent.level) return;
-    var estate = $("#topoEstate").value || "";
-    topoZoom.markPrefetched(intent.level, intent.focusKey);
-    topoLoadGraph(estate, intent.level, intent.focusKey).catch(function () {
-      // A failed speculative request is harmless; a committed transition retries.
-      topoGraphCache.delete(topoGraphCacheKey(estate, intent.level, intent.focusKey));
-      topoZoom.forgetPrefetched(intent.level, intent.focusKey);
-    });
   }
 
   // Twelve fallback community colors — used only when a community carries no
@@ -3395,7 +3364,7 @@ import {
     );
   }
 
-  function topoAggregateCandidate(clientX, clientY) {
+  function topoAggregateCandidate(clientX, clientY, expandableOnly, maxDistance) {
     if (!brainCamera || !brainGLRenderer) return null;
     var rect = brainGLRenderer.domElement.getBoundingClientRect();
     var px = Number.isFinite(clientX) ? clientX - rect.left : rect.width / 2;
@@ -3403,6 +3372,7 @@ import {
     var best = null, bestDistance = Infinity;
     brainNodes.forEach(function (node) {
       if (!node.aggregateLevel || brainHidden(node)) return;
+      if (expandableOnly && !topoExpansion.canExpand(node)) return;
       var projected = topoNodeWorld(node).project(brainCamera);
       if (projected.z >= 1) return;
       var sx = (projected.x * 0.5 + 0.5) * rect.width;
@@ -3410,14 +3380,7 @@ import {
       var distance = Math.hypot(sx - px, sy - py);
       if (distance < bestDistance) { best = node; bestDistance = distance; }
     });
-    return bestDistance <= 110 ? best : null;
-  }
-
-  function topoProjectedDiameter(node) {
-    if (!node || !brainCamera) return 0;
-    var cameraSpace = topoNodeWorld(node).applyMatrix4(brainCamera.matrixWorldInverse);
-    var size = 0.05 + (node.centrality || 0) * 0.03;
-    return size * brainH / Math.max(0.03, -cameraSpace.z);
+    return bestDistance <= (Number.isFinite(maxDistance) ? maxDistance : 110) ? best : null;
   }
 
   function topoTransitionAnchor(node) {
@@ -3425,120 +3388,78 @@ import {
     return { nx: node.x / brainW, ny: node.y / brainH, z3: node.z3 || 0 };
   }
 
-  function topoCommitZoomIntent(intent, candidate, preserveCamera) {
+  function topoCommitExpansionIntent(intent, candidate) {
     if (!intent) return;
-    if (intent.type === "prefetch") {
-      topoPrefetch(intent);
-      return;
-    }
-    if (intent.type !== "transition" || !topoZoom.begin()) return;
+    if (intent.type !== "transition" || !topoExpansion.begin(intent)) return;
     topoPendingTransition = {
-      direction: intent.direction,
+      intent: intent,
       anchor: topoTransitionAnchor(candidate),
-      camera: preserveCamera ? topoCaptureCameraState() : null,
+      camera: topoCaptureCameraState(),
       parentKey: intent.parentKey || null,
+      // Preserve the exact visible layout. Some local nodes have no persisted
+      // projection and would otherwise receive new random coordinates when the
+      // accumulated GPU buffers are rebuilt for another expansion.
+      existingLayout: brainNodes.map(function (node) {
+        return {
+          id: node.id,
+          nx: brainW ? node.x / brainW : 0.5,
+          ny: brainH ? node.y / brainH : 0.5,
+          nax: brainW ? node.ax / brainW : 0.5,
+          nay: brainH ? node.ay / brainH : 0.5,
+          z3: node.z3 || 0,
+        };
+      }),
       startedAt: performance.now(),
     };
     renderTopology(intent.level, intent.focusKey, {
-      semantic: true,
+      expansion: true,
       preserveReplay: true,
       parentKey: intent.parentKey || null,
     }).catch(function () {
       topoPendingTransition = null;
-      topoZoom.cancel();
+      topoExpansion.cancel();
     });
   }
 
-  function topoScheduleSemanticZoom(direction) {
-    if (topoZoomFrame !== null || topoPendingTransition) return;
-    topoZoomFrame = requestAnimationFrame(function () {
-      topoZoomFrame = null;
-      if (!brainControls || !brainCamera) return;
-      var candidate = direction === "in"
-        ? topoAggregateCandidate(topoPointer.x, topoPointer.y)
-        : null;
-      var distance = brainCamera.position.distanceTo(brainControls.target);
-      var intent = topoZoom.observe({
-        direction: direction,
-        candidate: candidate,
-        projectedPx: topoProjectedDiameter(candidate),
-        distanceRatio: distance / Math.max(0.01, topoLevelFitDistance),
-      });
-      topoCommitZoomIntent(intent, candidate, true);
-    });
-  }
-
-  function topoCaptureTransitionGhost(transition) {
-    if (!transition || !brainGLRenderer || !brainContainer) return null;
-    var ghost = document.createElement("div");
-    ghost.className = "topo-transition-ghost " +
-      (transition.direction === "in" ? "zoom-in" : "zoom-out");
-    var source = brainGLRenderer.domElement;
-    try {
-      brainGLRenderer.render(brainScene, brainCamera);
-      var copy = document.createElement("canvas");
-      copy.width = source.width;
-      copy.height = source.height;
-      copy.style.width = brainW + "px";
-      copy.style.height = brainH + "px";
-      var context = copy.getContext("2d");
-      if (context) context.drawImage(source, 0, 0, copy.width, copy.height);
-      ghost.appendChild(copy);
-    } catch (_) {
-      // A browser may decline a WebGL readback; the live canvas still remains
-      // visible until the replacement scene is ready, so no blank frame occurs.
-    }
-    if (brainLabelContainer) ghost.appendChild(brainLabelContainer.cloneNode(true));
-    var anchor = transition.anchor;
-    if (anchor) ghost.style.transformOrigin = (anchor.nx * 100) + "% " + (anchor.ny * 100) + "%";
-    brainContainer.appendChild(ghost);
-    return ghost;
-  }
-
-  function topoRunTransitionVisual(ghost, transition) {
-    if (!transition) { if (ghost) ghost.remove(); return; }
-    var canvas = brainGLRenderer && brainGLRenderer.domElement;
-    if (canvas) canvas.classList.add("topo-semantic-new");
-    if (brainLabelContainer) brainLabelContainer.classList.add("topo-semantic-new");
-    requestAnimationFrame(function () {
-      requestAnimationFrame(function () {
-        if (canvas) canvas.classList.add("ready");
-        if (brainLabelContainer) brainLabelContainer.classList.add("ready");
-        if (ghost) ghost.classList.add("leaving");
-      });
-    });
-    setTimeout(function () {
-      topoMetrics.transitionMs = performance.now() - transition.startedAt;
-      topoPublishMetrics();
-    }, SEMANTIC_ZOOM_DEFAULTS.transitionMs);
-    setTimeout(function () {
-      if (ghost) ghost.remove();
-      if (canvas) canvas.classList.remove("topo-semantic-new", "ready");
-      if (brainLabelContainer) brainLabelContainer.classList.remove("topo-semantic-new", "ready");
-    }, SEMANTIC_ZOOM_DEFAULTS.transitionMs + 80);
-  }
-
-  function topoPrepareSemanticMorph(transition, W, H) {
-    topoSemanticMorph = null;
-    if (!transition || transition.direction !== "in" || !transition.anchor || !brainNodes.length) return;
+  function topoPrepareDetailMorph(transition, W, H) {
+    topoDetailMorph = null;
+    if (!transition || !transition.anchor || !brainNodes.length) return;
     var sx = transition.anchor.nx * W;
     var sy = transition.anchor.ny * H;
     var sz = transition.anchor.z3 || 0;
-    var records = brainNodes.map(function (node) {
+    var existing = new Map((transition.existingLayout || []).map(function (record) {
+      return [record.id, record];
+    }));
+    brainNodes.forEach(function (node) {
+      var previous = existing.get(node.id);
+      if (!previous) return;
+      node.x = previous.nx * W;
+      node.y = previous.ny * H;
+      node.ax = previous.nax * W;
+      node.ay = previous.nay * H;
+      node.z3 = previous.z3;
+      node.vx = 0;
+      node.vy = 0;
+    });
+    var records = brainNodes.filter(function (node) {
+      return !existing.has(node.id);
+    }).map(function (node) {
       var record = { node: node, tx: node.x, ty: node.y, tz: node.z3 || 0 };
       node.x = sx; node.y = sy; node.z3 = sz;
       node.ax = record.tx; node.ay = record.ty;
       return record;
     });
-    topoSemanticMorph = {
+    if (!records.length) return;
+    topoDetailMorph = {
       records: records, sx: sx, sy: sy, sz: sz,
-      startedAt: 0, duration: SEMANTIC_ZOOM_DEFAULTS.transitionMs,
+      targetByID: new Map(records.map(function (record) { return [record.node.id, record]; })),
+      startedAt: 0, duration: EXPANSION_DEFAULTS.transitionMs,
     };
     brainUsePersistedLayout = true;
   }
 
-  function topoTickSemanticMorph(ts) {
-    var morph = topoSemanticMorph;
+  function topoTickDetailMorph(ts) {
+    var morph = topoDetailMorph;
     if (!morph) return false;
     if (!morph.startedAt) morph.startedAt = ts;
     var raw = Math.min(1, (ts - morph.startedAt) / morph.duration);
@@ -3548,7 +3469,7 @@ import {
       record.node.y = morph.sy + (record.ty - morph.sy) * eased;
       record.node.z3 = morph.sz + (record.tz - morph.sz) * eased;
     });
-    if (raw >= 1) topoSemanticMorph = null;
+    if (raw >= 1) topoDetailMorph = null;
     return true;
   }
 
@@ -3569,18 +3490,17 @@ import {
     brainWorldCX = W / 2;                   // pixel center X
     brainWorldCY = H / 2;                   // pixel center Y
 
-    // Fit the camera to the persisted frame represented by this level. Local
-    // folds occupy a small region of the estate frame and therefore zoom in;
-    // Estate aggregates retain the full mental map.
+    // Fit the initial camera to the accumulated persisted frame. Detail
+    // expansion preserves the live camera exactly; this fit is used only for
+    // a fresh scene or explicit reset.
     var aspect = W / H;
     brainCamera = new THREE.PerspectiveCamera(50, aspect, 0.01, 100);
     var fit = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity,
                 minZ: Infinity, maxZ: -Infinity };
-    brainNodes.forEach(function (n, index) {
-      // A semantic morph temporarily collapses live node coordinates to the
-      // parent anchor. Camera fit and reverse hysteresis must use the final
-      // child frame, not that transient start pose.
-      var target = topoSemanticMorph && topoSemanticMorph.records[index];
+    brainNodes.forEach(function (n) {
+      // Newly added children temporarily start at their parent anchor. A fresh
+      // fit must use their final persisted positions, not that start pose.
+      var target = topoDetailMorph && topoDetailMorph.targetByID.get(n.id);
       var nx = target ? target.tx : n.x;
       var ny = target ? target.ty : n.y;
       var nz = target ? target.tz : (n.z3 || 0);
@@ -3603,13 +3523,9 @@ import {
       (fit.maxX - fit.minX) / (2 * tanHalfFov * Math.max(0.5, aspect))
     ) * 1.28 + (fit.maxZ - fit.minZ) * 0.45;
     fitDistance = Math.max(0.35, Math.min(3.2, fitDistance));
-    topoLevelFitDistance = fitDistance;
-    // Preserve the user's orbit while moving into detail. On the way out, fit
-    // the parent level to its own frame; a child-level camera can be far beyond
-    // the parent's useful range and would collapse the estate into the center.
-    var cameraState = topoPendingTransition &&
-      topoPendingTransition.direction === "in" &&
-      topoPendingTransition.camera;
+    // In-place expansion preserves the user's exact orbit and distance. The
+    // camera itself never participates in data navigation.
+    var cameraState = topoPendingTransition && topoPendingTransition.camera;
     if (cameraState) {
       targetX = cameraState.target.x;
       targetY = cameraState.target.y;
@@ -3657,43 +3573,6 @@ import {
     brainControls.addEventListener('change', function () {
       brainRearm(brainSettle, performance.now());
     });
-    // Semantic levels respond only to explicit zoom input. OrbitControls also
-    // moves the camera while rotation damping settles; treating every camera
-    // change as zoom intent made a gentle rotation cross data levels.
-    glCanvas.addEventListener('wheel', function (e) {
-      topoScheduleSemanticZoom(e.deltaY < 0 ? "in" : "out");
-    }, { passive: true });
-    var topoPinchDistance = null;
-    glCanvas.addEventListener('touchstart', function (e) {
-      if (e.touches.length !== 2) { topoPinchDistance = null; return; }
-      topoPinchDistance = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY,
-      );
-    }, { passive: true });
-    glCanvas.addEventListener('touchmove', function (e) {
-      if (e.touches.length !== 2) { topoPinchDistance = null; return; }
-      var distance = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY,
-      );
-      if (topoPinchDistance !== null && Math.abs(distance - topoPinchDistance) >= 2) {
-        topoScheduleSemanticZoom(distance > topoPinchDistance ? "in" : "out");
-      }
-      topoPinchDistance = distance;
-    }, { passive: true });
-    function clearTopoPinch() { topoPinchDistance = null; }
-    glCanvas.addEventListener('touchend', clearTopoPinch, { passive: true });
-    glCanvas.addEventListener('touchcancel', clearTopoPinch, { passive: true });
-    glCanvas.addEventListener('pointermove', function (e) {
-      topoPointer.x = e.clientX;
-      topoPointer.y = e.clientY;
-    }, { passive: true });
-    glCanvas.addEventListener('pointerleave', function () {
-      topoPointer.x = null;
-      topoPointer.y = null;
-    }, { passive: true });
-
     // Pre-build node lookup + community pools.
     brainNodeMap = Object.create(null);
     brainCommPools = Object.create(null);
@@ -3708,7 +3587,7 @@ import {
       });
       Object.keys(topoRealData.activityTargets).forEach(function (id) {
         var target = aggregateByKey[topoRealData.activityTargets[id]];
-        if (target) brainNodeMap[id] = target;
+        if (target && !brainNodeMap[id]) brainNodeMap[id] = target;
       });
     }
 
@@ -3753,12 +3632,13 @@ import {
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       brainRaycaster.setFromCamera(brainPointer, brainCamera);
       var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
-      if (hits.length > 0) {
-        var idx = hits[0].index;
-        var node = brainNodes[idx];
+      var node = hits.length > 0
+        ? brainNodes[hits[0].index]
+        : topoAggregateCandidate(e.clientX, e.clientY, true, 48);
+      if (node) {
         if (node && !brainHidden(node)) {
           if (node.aggregateLevel) {
-            topoDrill(node);
+            topoExpand(node);
             return;
           }
           if (node === brainSelectedNode) {
@@ -3785,7 +3665,7 @@ import {
       brainRaycaster.setFromCamera(brainPointer, brainCamera);
       var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
       // Aggregate points are rendered much larger than raw memories. Use the
-      // same nearest-visible-cluster targeting as semantic zoom so a right-click
+      // same nearest-visible-cluster targeting as explicit expansion so a right-click
       // anywhere on the visible glow is not rejected by the raw 8px ray radius.
       var node = hits.length ? brainNodes[hits[0].index]
         : topoAggregateCandidate(e.clientX, e.clientY);
@@ -3796,15 +3676,15 @@ import {
     });
 
     // Keyboard parity: +/- follows the same continuous camera path as wheel
-    // and pinch; Enter drills the aggregate nearest the viewport center.
+    // and pinch; Enter expands the aggregate nearest the viewport center.
     if (brainKeyHandler) document.removeEventListener('keydown', brainKeyHandler);
     brainKeyHandler = function (e) {
       var tag = e.target && e.target.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "BUTTON") return;
       if (e.key === 'Escape' && brainSelectedNode) { selectBrainNode(null); return; }
       if (e.key === 'Enter') {
-        var candidate = topoAggregateCandidate(null, null);
-        if (candidate) { e.preventDefault(); topoDrill(candidate); }
+        var candidate = topoAggregateCandidate(null, null, true);
+        if (candidate) { e.preventDefault(); topoExpand(candidate); }
         return;
       }
       var scale = (e.key === '+' || e.key === '=') ? 0.8
@@ -3817,7 +3697,6 @@ import {
       offset.setLength(distance);
       brainCamera.position.copy(brainControls.target).add(offset);
       brainControls.update();
-      topoScheduleSemanticZoom(scale < 1 ? "in" : "out");
     };
     document.addEventListener('keydown', brainKeyHandler);
 
@@ -3871,7 +3750,7 @@ import {
       // topoPlayStep re-arms one structural frame whenever playheadMs changes;
       // ripple/trail meshes and active pulse colors animate independently.
       var playing = false;
-      var morphActive = topoTickSemanticMorph(ts);
+      var morphActive = topoTickDetailMorph(ts);
       var full = morphActive || brainFrameIsFull(brainSettle, playing);
       if (full) {
         var maxMove = (brainUsePersistedLayout || morphActive) ? 0 : brainPhysicsStep(dt);
@@ -5229,34 +5108,57 @@ import {
       topoActiveRenderKey = null;
       topoRenderGeneration++;
     }
-    if (topoZoomFrame !== null) { cancelAnimationFrame(topoZoomFrame); topoZoomFrame = null; }
-    document.querySelectorAll(".topo-transition-ghost").forEach(function (node) { node.remove(); });
     topoPendingTransition = null;
-    topoZoom.cancel();
+    topoExpansion.reset();
     stopBrainAnimation();
     topoPlayReset();
     if (sse) sse.removeEventListener("message", topoSSEHandler);
   }
 
-  function topoDrill(node) {
-    var intent = topoZoom.drill(node);
-    topoCommitZoomIntent(intent, node, false);
+  function topoExpand(node) {
+    var intent = topoExpansion.intent(node);
+    topoCommitExpansionIntent(intent, node);
   }
 
-  function topoNavigateUp() {
-    var intent = null;
-    if (topoViewLevel === "local" && topoParentKey) {
-      intent = {
-        type: "transition", direction: "out", level: "community",
-        focusKey: topoParentKey, parentKey: topoParentKey,
-      };
-    } else if (topoViewLevel === "community") {
-      intent = {
-        type: "transition", direction: "out", level: "estate",
-        focusKey: null, parentKey: null,
-      };
+  // Add one bounded detail response to the current scene without replacing
+  // anything already visible. New aggregate community ids are namespaced;
+  // local memories reuse their visible fold's community before nodes, labels,
+  // filters, and colors are merged.
+  function topoMergeSceneLayer(
+    previous, rawNodes, rawEdges, communities, activityTargets, transition
+  ) {
+    if (!previous) {
+      return { rawNodes: rawNodes, rawEdges: rawEdges, communities: communities,
+               activityTargets: activityTargets };
     }
-    topoCommitZoomIntent(intent, null, false);
+    // A local response describes the memories represented by an existing fold.
+    // Reuse that fold's community instead of adding the response's parent
+    // community metadata again. Otherwise the content picker double-counts the
+    // parent and makes a stable ancestor row appear to change or disappear.
+    var remapped = remapDetailCommunities(
+      previous, rawNodes, communities, transition && transition.intent);
+    var remappedNodes = remapped.rawNodes;
+    var mergedCommunities = remapped.communities;
+    var seenNodes = new Set(previous.rawNodes.map(function (node) { return node.id; }));
+    var mergedNodes = previous.rawNodes.slice();
+    remappedNodes.forEach(function (node) {
+      if (!seenNodes.has(node.id)) { seenNodes.add(node.id); mergedNodes.push(node); }
+    });
+    var edgeKey = function (edge) {
+      return edge.source + "\u0000" + edge.target + "\u0000" + (edge.edgeType || "tunnel");
+    };
+    var seenEdges = new Set(previous.rawEdges.map(edgeKey));
+    var mergedEdges = previous.rawEdges.slice();
+    rawEdges.forEach(function (edge) {
+      var key = edgeKey(edge);
+      if (!seenEdges.has(key)) { seenEdges.add(key); mergedEdges.push(edge); }
+    });
+    return {
+      rawNodes: mergedNodes,
+      rawEdges: mergedEdges,
+      communities: mergedCommunities,
+      activityTargets: Object.assign({}, previous.activityTargets || {}, activityTargets || {}),
+    };
   }
 
   async function renderTopology(level, focus, options) {
@@ -5265,6 +5167,7 @@ import {
     var requestedLevel = typeof level === "string" ? level : topoViewLevel;
     var requestedFocus = focus !== undefined ? (focus || null) : topoFocusKey;
     if (requestedLevel === "estate") requestedFocus = null;
+    var previousSceneData = options.expansion && topoRealData ? topoRealData : null;
     var generation = ++topoRenderGeneration;
     if (topoActiveRenderAbort) {
       topoActiveRenderAbort.abort();
@@ -5293,21 +5196,27 @@ import {
       topoActiveRenderAbort = null;
       topoActiveRenderKey = null;
     }
-    if (graphLoadFailed && options.semantic && brainGLRenderer) {
+    if (graphLoadFailed && options.expansion && brainGLRenderer) {
       topoPendingTransition = null;
-      topoZoom.cancel();
+      topoExpansion.cancel();
       topoToast("Detail unavailable — current map preserved");
       return;
     }
 
-    var transition = options.semantic ? topoPendingTransition : null;
-    var ghost = transition ? topoCaptureTransitionGhost(transition) : null;
-    if (options.semantic) {
+    if (options.expansion && g.structurePending && brainGLRenderer) {
+      topoPendingTransition = null;
+      topoExpansion.cancel();
+      topoToast("Detail is still being prepared — current map preserved");
+      return;
+    }
+
+    var transition = options.expansion ? topoPendingTransition : null;
+    if (options.expansion) {
       stopBrainAnimation();
       if (sse) sse.removeEventListener("message", topoSSEHandler);
     } else {
       topoPendingTransition = null;
-      topoZoom.cancel();
+      topoExpansion.cancel();
       topoTeardown();
     }
 
@@ -5328,10 +5237,10 @@ import {
     } else if (options.parentKey) {
       topoParentKey = options.parentKey;
     }
-    var structureText = g.structurePending ? "pending" : topoViewLevel;
+    var structureText = g.structurePending ? "pending" : "continuous";
     if (!g.structurePending && g.lodTruncated) structureText += " budgeted";
     $("#topoStructure").textContent = structureText;
-    $("#topoUp").hidden = topoViewLevel === "estate" || topoViewLevel === "full";
+    $("#topoUp").hidden = true;
 
     // Populate estate selector from analytics (once — avoids jump on re-render).
     const sel = $("#topoEstate");
@@ -5481,7 +5390,7 @@ import {
       }).filter(function (e) { return e.source && e.target; });
     }
     const nodeCount = rawNodes.length;
-    const hasRealStructure = !g.structurePending && nodeCount > 0;
+    const hasRealStructure = !g.structurePending && (nodeCount > 0 || !!previousSceneData);
     if (hasRealStructure) {
       // Retain the full dataset + community→content-key map so the content
       // picker can re-layout a SUBSET without refetching.
@@ -5489,6 +5398,12 @@ import {
       (g.activityIds || []).forEach(function (id, i) {
         if (g.activityKeys && g.activityKeys[i]) activityTargets[id] = g.activityKeys[i];
       });
+      var mergedLayer = topoMergeSceneLayer(
+        previousSceneData, rawNodes, rawEdges, displayCommunities, activityTargets, transition);
+      rawNodes = mergedLayer.rawNodes;
+      rawEdges = mergedLayer.rawEdges;
+      displayCommunities = mergedLayer.communities;
+      activityTargets = mergedLayer.activityTargets;
       topoRealData = { rawNodes: rawNodes, rawEdges: rawEdges,
                        communities: displayCommunities, W: W, H: H,
                        container: container, activityTargets: activityTargets };
@@ -5515,7 +5430,7 @@ import {
     renderCommPicker();
     // L4: assign per-node depth from age now that the node set is final.
     brainAssignDepth(Date.now());
-    topoPrepareSemanticMorph(transition, W, H);
+    topoPrepareDetailMorph(transition, W, H);
 
     // Overlay visibility: real structure renders with the corner legend; any
     // no-structure state shows the honest pending overlay (with the analytics
@@ -5547,10 +5462,16 @@ import {
 
     topoFirstFrameStartedAt = renderStartedAt;
     startBrainAnimation(container, W, H);
-    topoZoom.complete(topoViewLevel, topoFocusKey, topoParentKey);
     topoMetrics.lastLevel = topoViewLevel;
     topoMetrics.lastFocusKey = topoFocusKey;
-    topoRunTransitionVisual(ghost, transition);
+    if (transition) {
+      setTimeout(function () {
+        if (generation !== topoRenderGeneration) return;
+        topoExpansion.complete(transition.intent);
+        topoMetrics.transitionMs = performance.now() - transition.startedAt;
+        topoPublishMetrics();
+      }, EXPANSION_DEFAULTS.transitionMs);
+    }
     topoPendingTransition = null;
     topoStartSSE();
   }
@@ -6014,10 +5935,9 @@ import {
       renderTopology("estate", null);
     });
     $("#topoReset").addEventListener("click", function () {
-      topoGraphCache.delete(topoGraphCacheKey($("#topoEstate").value || "", topoViewLevel, topoFocusKey));
-      renderTopology(topoViewLevel, topoFocusKey);
+      topoGraphCache.clear();
+      renderTopology("estate", null);
     });
-    $("#topoUp").addEventListener("click", topoNavigateUp);
     // L4 strata toggle — flips 3D depth on/off; Three.js geometry is
     // rebuilt to update z-coordinates. The running rAF loop renders
     // the new positions on its next frame.
@@ -6061,22 +5981,68 @@ import {
 """##
 
     static let semanticZoomJS = ##"""
-// Pure semantic-zoom policy for the Topology renderer. This module deliberately
-// owns no DOM or Three.js state so the intent rules stay deterministic and can
-// be tested with Node's built-in test runner.
+// Pure detail-expansion policy for the Topology renderer. The historical file
+// name remains part of the dashboard asset URL, but camera zoom is deliberately
+// absent from this policy. It owns no DOM or Three.js state, so an aggregate can
+// gain children without any camera gesture becoming data navigation.
 
-export const SEMANTIC_ZOOM_DEFAULTS = Object.freeze({
-  prefetchPx: 42,
-  enterPx: 72,
-  exitDistanceRatio: 1.7,
-  transitionMs: 260,
+export const EXPANSION_DEFAULTS = Object.freeze({
+  transitionMs: 420,
 });
 
-const NEXT_LEVEL = Object.freeze({ estate: "community", community: "local" });
-const PREVIOUS_LEVEL = Object.freeze({ local: "community", community: "estate" });
+const EXPANSION_LEVEL = Object.freeze({ community: "community", fold: "local" });
 
-function finiteOr(value, fallback) {
-  return Number.isFinite(value) ? value : fallback;
+export function remapDetailCommunities(previous, rawNodes, communities, intent) {
+  const previousCommunities = previous?.communities || [];
+  const previousNodes = previous?.rawNodes || [];
+  const localTarget = intent?.level === "local"
+    ? previousNodes.find((node) => node.aggregateKey === intent.focusKey)
+    : null;
+  if (localTarget && localTarget.communityId >= 0) {
+    return {
+      rawNodes: rawNodes.map((node) => ({ ...node, communityId: localTarget.communityId })),
+      communities: previousCommunities.slice(),
+    };
+  }
+
+  const maxCommunityID = previousCommunities.reduce(
+    (maxID, community) => Math.max(
+      maxID,
+      typeof community.id === "number" ? community.id : -1,
+    ),
+    -1,
+  );
+  let nextCommunityID = maxCommunityID + 1;
+  const communityIDMap = new Map();
+  const mergedCommunities = previousCommunities.slice();
+  communities.forEach((community) => {
+    const newID = nextCommunityID++;
+    communityIDMap.set(String(community.id), newID);
+    mergedCommunities.push({ ...community, id: newID });
+  });
+  const singleCommunityID = communities.length === 1
+    ? communityIDMap.get(String(communities[0].id))
+    : undefined;
+  const remappedNodes = rawNodes.map((node) => {
+    const oldID = node.communityId;
+    let mapped = oldID >= 0 ? communityIDMap.get(String(oldID)) : oldID;
+    if (oldID >= 0 && mapped === undefined && singleCommunityID !== undefined) {
+      mapped = singleCommunityID;
+    }
+    if (oldID >= 0 && mapped === undefined) {
+      mapped = nextCommunityID++;
+      communityIDMap.set(String(oldID), mapped);
+      mergedCommunities.push({
+        id: mapped,
+        code: node.code || null,
+        label: node.aggregateLabel || null,
+        size: 0,
+        classificationPurity: null,
+      });
+    }
+    return { ...node, communityId: mapped };
+  });
+  return { rawNodes: remappedNodes, communities: mergedCommunities };
 }
 
 export class BoundedTTLCache {
@@ -6116,49 +6082,25 @@ export class BoundedTTLCache {
   }
 }
 
-export class SemanticZoomController {
-  constructor(options = {}) {
-    this.config = Object.freeze({
-      prefetchPx: finiteOr(options.prefetchPx, SEMANTIC_ZOOM_DEFAULTS.prefetchPx),
-      enterPx: finiteOr(options.enterPx, SEMANTIC_ZOOM_DEFAULTS.enterPx),
-      exitDistanceRatio: finiteOr(
-        options.exitDistanceRatio,
-        SEMANTIC_ZOOM_DEFAULTS.exitDistanceRatio,
-      ),
-      transitionMs: finiteOr(options.transitionMs, SEMANTIC_ZOOM_DEFAULTS.transitionMs),
-    });
-    if (this.config.prefetchPx >= this.config.enterPx) {
-      throw new Error("semantic zoom prefetch threshold must be below enter threshold");
-    }
-    this.level = "estate";
-    this.focusKey = null;
-    this.parentKey = null;
+// Detail policy for a continuous scene. It can request children for an
+// aggregate, but it never removes geometry or treats camera zoom as navigation.
+export class SemanticExpansionController {
+  constructor() {
     this.locked = false;
-    this.prefetched = new Set();
+    this.expanded = new Set();
   }
 
-  sync(level, focusKey = null, parentKey = null) {
-    this.level = level || "estate";
-    this.focusKey = focusKey || null;
-    this.parentKey = parentKey || null;
+  reset() {
     this.locked = false;
-    this.prefetched.clear();
+    this.expanded.clear();
   }
 
   cacheKey(level, focusKey) {
-    return `${level || "estate"}:${focusKey || ""}`;
+    return `${level}:${focusKey}`;
   }
 
-  markPrefetched(level, focusKey) {
-    this.prefetched.add(this.cacheKey(level, focusKey));
-  }
-
-  forgetPrefetched(level, focusKey) {
-    this.prefetched.delete(this.cacheKey(level, focusKey));
-  }
-
-  begin() {
-    if (this.locked) return false;
+  begin(intent) {
+    if (this.locked || !intent || intent.type !== "transition") return false;
     this.locked = true;
     return true;
   }
@@ -6167,54 +6109,32 @@ export class SemanticZoomController {
     this.locked = false;
   }
 
-  complete(level, focusKey = null, parentKey = null) {
-    this.sync(level, focusKey, parentKey);
+  complete(intent) {
+    if (intent && intent.level && intent.focusKey) {
+      this.expanded.add(this.cacheKey(intent.level, intent.focusKey));
+    }
+    this.locked = false;
   }
 
-  drill(candidate) {
-    if (this.locked || !candidate || !candidate.aggregateKey) return null;
-    const targetLevel = NEXT_LEVEL[this.level];
+  canExpand(candidate) {
+    if (!candidate || !candidate.aggregateKey) return false;
+    const targetLevel = EXPANSION_LEVEL[candidate.aggregateLevel];
+    return !!targetLevel && !this.expanded.has(this.cacheKey(targetLevel, candidate.aggregateKey));
+  }
+
+  intent(candidate) {
+    if (this.locked || !this.canExpand(candidate)) return null;
+    const targetLevel = EXPANSION_LEVEL[candidate.aggregateLevel];
     if (!targetLevel) return null;
+    const key = this.cacheKey(targetLevel, candidate.aggregateKey);
+    if (this.expanded.has(key)) return null;
     return {
       type: "transition",
-      direction: "in",
       level: targetLevel,
       focusKey: candidate.aggregateKey,
       parentKey: candidate.parentKey || candidate.aggregateKey,
+      expansionKey: key,
     };
-  }
-
-  observe({ direction, candidate, projectedPx = 0, distanceRatio = 1 } = {}) {
-    if (this.locked) return null;
-    if (direction === "out") {
-      const targetLevel = PREVIOUS_LEVEL[this.level];
-      if (!targetLevel || distanceRatio < this.config.exitDistanceRatio) return null;
-      return {
-        type: "transition",
-        direction: "out",
-        level: targetLevel,
-        focusKey: targetLevel === "community" ? this.parentKey : null,
-        parentKey: targetLevel === "community" ? this.parentKey : null,
-      };
-    }
-
-    if (direction !== "in" || !candidate || !candidate.aggregateKey) return null;
-    const targetLevel = NEXT_LEVEL[this.level];
-    if (!targetLevel) return null;
-    const intent = {
-      direction: "in",
-      level: targetLevel,
-      focusKey: candidate.aggregateKey,
-      parentKey: candidate.parentKey || candidate.aggregateKey,
-    };
-    if (projectedPx >= this.config.enterPx) {
-      return { ...intent, type: "transition" };
-    }
-    const key = this.cacheKey(targetLevel, candidate.aggregateKey);
-    if (projectedPx >= this.config.prefetchPx && !this.prefetched.has(key)) {
-      return { ...intent, type: "prefetch" };
-    }
-    return null;
   }
 }
 
