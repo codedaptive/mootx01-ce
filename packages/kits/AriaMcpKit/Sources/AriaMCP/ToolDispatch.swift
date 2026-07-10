@@ -2656,7 +2656,27 @@ extension ToolDispatcher {
         var examples: [FDCReclassifyChange] = []
         let now = Date()
 
-        for drawer in scannedDrawers {
+        // Phase A — PARALLEL classify. Each drawer's content anchor is a pure
+        // function of its content over the pinned FDC artifacts: the
+        // `recordNovel: false` seam skips the only shared-mutable write (the
+        // novel-token pool cache), and every other artifact on the path is
+        // read-only after init or a lock-guarded pure-function memo. So the
+        // classify is embarrassingly parallel and its result is independent of
+        // scheduling order. This is the single expensive step (it runs content
+        // through the v4 classifier incl. the semantic ranker), so lifting it
+        // off the serial path is where the core-saturation win comes from.
+        // Results are indexed parallel to `scannedDrawers` to preserve scan
+        // order for the serial audited write in Phase B below.
+        let anchors = await Self.classifyContentsInParallel(
+            scannedDrawers.map { $0.content })
+
+        // Phase B — SERIAL, ORDERED apply. Identical to the pre-parallel loop
+        // except the inline classify call is replaced by the precomputed
+        // `anchors[index]`. All counting, candidate selection, example capture,
+        // and the audited `reanchorAnchor` write run in scan order exactly as
+        // before, so the output (counters, ordered `changes:` list, audit
+        // sequence, error/throw point) is byte-identical to the serial version.
+        for (index, drawer) in scannedDrawers.enumerated() {
             scanned += 1
             if drawer.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 emptyContent += 1
@@ -2664,7 +2684,7 @@ extension ToolDispatcher {
 
             let oldCode = Self.normalizedFDCCode(drawer.udcCode)
             let oldQID = Self.normalizedQID(drawer.wikidataQID)
-            let anchor = EideticLib.lookup(drawer.content, recordNovel: false)
+            let anchor = anchors[index]
             let newCode = Self.normalizedFDCCode(anchor.code)
             let newQID = Self.normalizedQID(anchor.wikidataQID)
             if oldCode == newCode && oldQID == newQID {
@@ -2772,6 +2792,57 @@ extension ToolDispatcher {
             }
         }
         return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// Classify each content string to its FDC anchor across a bounded worker
+    /// pool, returning anchors in the SAME order as `contents`.
+    ///
+    /// Used by `runReclassifyFDC` to parallelize the one expensive step of a
+    /// reclassify scan (running content through the v4 classifier + semantic
+    /// ranker). `EideticLib.lookup(_:recordNovel: false)` is a pure function of
+    /// its argument over the pinned artifacts and is thread-safe for concurrent
+    /// calls — the no-record seam skips the shared novel-token cache write, and
+    /// the reference tables / ranker / Q-ID-closure memo it reads are read-only
+    /// after init or lock-guarded — so classifying in parallel yields the exact
+    /// anchor each content would produce serially, regardless of scheduling.
+    ///
+    /// Concurrency is bounded to the active core count via a sliding TaskGroup
+    /// window so a large estate (tens of thousands of drawers) saturates the
+    /// cores without spawning one task per drawer. Order is preserved by
+    /// scattering results into an index-keyed buffer, so the caller's serial
+    /// audited-write phase sees the identical scan order.
+    static func classifyContentsInParallel(
+        _ contents: [String]
+    ) async -> [Anchor] {
+        let count = contents.count
+        if count == 0 { return [] }
+        let maxConcurrency = max(1, ProcessInfo.processInfo.activeProcessorCount)
+
+        var results = [Anchor?](repeating: nil, count: count)
+        await withTaskGroup(of: (Int, Anchor).self) { group in
+            var next = 0
+            // Prime the window with at most `maxConcurrency` in-flight classifies.
+            let window = min(maxConcurrency, count)
+            while next < window {
+                let i = next
+                let content = contents[i]
+                group.addTask { (i, EideticLib.lookup(content, recordNovel: false)) }
+                next += 1
+            }
+            // As each classify completes, admit the next one — keeping at most
+            // `maxConcurrency` running at any moment.
+            while let (i, anchor) = await group.next() {
+                results[i] = anchor
+                if next < count {
+                    let j = next
+                    let content = contents[j]
+                    group.addTask { (j, EideticLib.lookup(content, recordNovel: false)) }
+                    next += 1
+                }
+            }
+        }
+        // Every slot was filled exactly once (one task per index).
+        return results.map { $0! }
     }
 
     /// `moot_palace_import` — import a MemPalace directly into the estate,

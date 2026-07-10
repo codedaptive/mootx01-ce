@@ -2737,7 +2737,26 @@ fn run_reclassify_fdc(
     let mut unclassified_after = 0usize;
     let mut examples: Vec<FdcReclassifyChange> = Vec::new();
 
-    for drawer in active.iter() {
+    // Phase A — PARALLEL classify. Each drawer's content anchor is a pure
+    // function of its content over the pinned FDC artifacts:
+    // `eidetic_lib::lookup_no_record` skips the only shared-mutable write (the
+    // novel-token pool cache), and every other artifact on the path is
+    // read-only after init or a lock-guarded pure-function memo. So the classify
+    // is embarrassingly parallel and its result is independent of scheduling.
+    // This is the single expensive step (content through the v4 classifier incl.
+    // the semantic ranker), so lifting it off the serial path is the
+    // core-saturation win. Anchors are returned in the SAME order as `active`,
+    // preserving scan order for the serial audited write in Phase B.
+    let contents: Vec<&str> = active.iter().map(|d| d.content.as_str()).collect();
+    let anchors = classify_contents_in_parallel(&contents);
+
+    // Phase B — SERIAL, ORDERED apply. Identical to the pre-parallel loop
+    // except the inline classify call is replaced by the precomputed
+    // `anchors[index]`. All counting, candidate selection, example capture, and
+    // the audited `reanchor_anchor` write run in scan order exactly as before,
+    // so the output (counters, ordered change list, audit sequence, and the
+    // early return on a write error) is byte-identical to the serial version.
+    for (index, drawer) in active.iter().enumerate() {
         scanned += 1;
         if drawer.content.trim().is_empty() {
             empty_content += 1;
@@ -2745,7 +2764,7 @@ fn run_reclassify_fdc(
 
         let old_code = normalized_fdc_code(&drawer.udc_code);
         let old_qid = normalized_qid(drawer.wikidata_qid.as_deref());
-        let anchor = eidetic_lib::lookup_no_record(&drawer.content);
+        let anchor = &anchors[index];
         let new_code = normalized_fdc_code(&anchor.code);
         let new_qid = normalized_qid(anchor.wikidata_qid.as_deref());
         if old_code == new_code && old_qid == new_qid {
@@ -2887,6 +2906,59 @@ fn run_reclassify_fdc(
         }
     }
     Ok(text_result(&lines.join("\n")))
+}
+
+/// Classify each content string to its FDC anchor across a bounded worker
+/// pool, returning anchors in the SAME order as `contents`.
+///
+/// Used by `run_reclassify_fdc` to parallelize the one expensive step of a
+/// reclassify scan (running content through the v4 classifier + semantic
+/// ranker). `eidetic_lib::lookup_no_record` is a pure function of its argument
+/// over the pinned artifacts and is thread-safe for concurrent calls — the
+/// no-record seam skips the shared novel-token cache write, and the reference
+/// tables / ranker / Q-ID-closure memo it reads are read-only after init or
+/// lock-guarded — so classifying in parallel yields the exact anchor each
+/// content would produce serially, regardless of scheduling.
+///
+/// Bounded to the available core count via `std::thread::scope` over contiguous
+/// chunks (no external dependency, so the `--offline` / `--locked` app builds
+/// are unaffected). Each worker owns a disjoint output slice; contiguous
+/// chunking of the input and output in lockstep preserves index order, so the
+/// caller's serial audited-write phase sees the identical scan order.
+fn classify_contents_in_parallel(contents: &[&str]) -> Vec<eidetic_lib::Anchor> {
+    let n = contents.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(1)
+        .min(n);
+    if workers <= 1 {
+        return contents
+            .iter()
+            .map(|c| eidetic_lib::lookup_no_record(c))
+            .collect();
+    }
+
+    // Pre-size the output so workers write disjoint index ranges. The classify
+    // is order-independent, so contiguous chunking preserves order: out[i] is
+    // the anchor for contents[i].
+    let mut results: Vec<Option<eidetic_lib::Anchor>> = (0..n).map(|_| None).collect();
+    let chunk = n.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (out_chunk, in_chunk) in results.chunks_mut(chunk).zip(contents.chunks(chunk)) {
+            scope.spawn(move || {
+                for (slot, content) in out_chunk.iter_mut().zip(in_chunk.iter()) {
+                    *slot = Some(eidetic_lib::lookup_no_record(content));
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .map(|a| a.expect("every slot classified exactly once"))
+        .collect()
 }
 
 /// `moot_palace_import` — import a MemPalace directly into the estate,

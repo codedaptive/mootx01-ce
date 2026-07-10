@@ -708,6 +708,94 @@ fn moot_reclassify_fdc_apply_audit_event_carries_tool_reason() {
     );
 }
 
+// RECLASSIFY-PARALLEL: the classify pass now runs across all cores while the
+// audited write stays serial and in scan order. Byte-identical proof for
+// "parallelize a deterministic pure classify + apply in a fixed order":
+//
+//  (1) Invariance — repeated dry-runs over the same estate must produce
+//      byte-identical output. The batch is heterogeneous (two distinct
+//      classify outcomes) and large enough to OVERFLOW the 25-entry change
+//      list, so the ORDER of the emitted list is observable; a racing write or
+//      an order-dependent classify would perturb the list order or the counters
+//      across runs. Dry-run does not mutate, so identical inputs must give
+//      identical output every time.
+//
+//  (2) Golden values — a fresh estate applied through the parallel path must
+//      store the same anchor each content classifies to serially: the
+//      git-command drawers resolve to the `000` sentinel and the biology-prose
+//      drawers resolve to a real subject code (neither the sentinel nor the
+//      stale `362.4`).
+#[test]
+fn moot_reclassify_fdc_parallel_classify_is_deterministic_and_matches_serial_anchors() {
+    let registry = EstateRegistry::new_inmemory_bare();
+
+    // 20 drawers that classify to the `000` sentinel and 10 that classify to a
+    // real subject code — a heterogeneous classify workload that saturates the
+    // worker pool. All carry a stale `362.4` anchor, so mode=all makes every one
+    // a candidate change (30 candidates > the 25-example cap ⇒ list order is
+    // exercised).
+    let mut sentinel_ids = Vec::new();
+    let mut subject_ids = Vec::new();
+    for _ in 0..20 {
+        sentinel_ids.push(seed_memory_with_anchor(
+            &registry,
+            "git update-index --refresh && rm .git/index.lock",
+            "362.4",
+            Some("Q12131"),
+        ));
+    }
+    for _ in 0..10 {
+        subject_ids.push(seed_memory_with_anchor(
+            &registry,
+            "Biology is the scientific study of life and living organisms \
+             including their physical structure chemical processes molecular \
+             interactions physiological mechanisms and evolution",
+            "362.4",
+            None,
+        ));
+    }
+
+    let dry_run_all = || {
+        let result = dispatch_tool(
+            "moot_reclassify_fdc",
+            &args!["mode" => "all"],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("moot_reclassify_fdc dry-run must dispatch");
+        assert!(is_success(&result), "dry-run should succeed; got: {result:?}");
+        content_text(&result).to_owned()
+    };
+
+    // (1) Invariance across repeated parallel runs.
+    let first = dry_run_all();
+    assert!(first.contains("scanned: 30 active drawer(s)"), "got: {first}");
+    assert!(first.contains("candidates: 30"), "got: {first}");
+    assert!(first.contains("would_update: 30"), "got: {first}");
+    assert!(first.contains("... 5 more"), "got: {first}"); // 30 − 25 examples
+    for _ in 0..4 {
+        assert_eq!(dry_run_all(), first, "repeated parallel dry-runs must be byte-identical");
+    }
+
+    // (2) Golden values — apply through the parallel path, then read back.
+    let applied = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true, "mode" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+    assert!(content_text(&applied).contains("updated: 30"), "got: {}", content_text(&applied));
+    for id in &sentinel_ids {
+        assert_eq!(stored_fdc_code(&registry, id), "000");
+    }
+    for id in &subject_ids {
+        let code = stored_fdc_code(&registry, id);
+        assert_ne!(code, "000", "biology prose must classify to a real subject code");
+        assert_ne!(code, "362.4", "the stale anchor must have been replaced");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 1d. Lens tool name set — 23 canonical names, sorted literal list
 // ---------------------------------------------------------------------------
