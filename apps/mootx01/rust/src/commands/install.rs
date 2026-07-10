@@ -14,7 +14,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::cli::{InstallDepthArg, Location};
+use crate::cli::{ExistingDbArg, InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::depth::{self, DepthOutcome, InstallDepth, ProcessClaudeCliRunner};
 use crate::core::desktop_ext;
@@ -31,6 +31,7 @@ pub fn run(
     no_daemon: bool,
     vault_on: bool,
     depth_arg: Option<InstallDepthArg>,
+    db_arg: Option<ExistingDbArg>,
 ) -> ExitCode {
     let home = home_dir();
     let registry = clients::supported();
@@ -45,6 +46,13 @@ pub fn run(
     if selected.is_empty() {
         println!("Nothing selected.");
         return ExitCode::from(exit::OK);
+    }
+
+    // Existing-database disposition (reinstall contract): resolved BEFORE any
+    // wiring so a 'replace' that cannot proceed (daemon running, trash
+    // failure) aborts the install with nothing half-done.
+    if let Err(code) = handle_existing_database(db_arg, yes) {
+        return code;
     }
 
     // Resolve the global integration depth (§4.4). Precedence:
@@ -600,6 +608,221 @@ pub(crate) fn home_dir() -> PathBuf {
     }
 }
 
+// ── existing-database disposition (reinstall contract) ─────────────────────
+//
+// A reinstall over live data must never silently adopt OR silently destroy
+// it. The contract (mirrored by the Swift InstallCommand):
+//   Reuse   → the existing database stays THE default estate; the moot-mgr
+//             history store is moved to the platform trash so the dashboard
+//             re-registers only what the daemon actually serves.
+//   Replace → the default estate files AND the moot-mgr store move to the
+//             platform trash (recoverable); a fresh database is created on
+//             first serve and is then the only estate moot-mgr knows.
+// Named estates under databases/<name>/ are untouched by both branches —
+// they are addressed by `mootx01 db`, not by the install flow.
+
+/// What the reinstall phase decided. Factored out so the flag/prompt matrix
+/// is unit-testable without a TTY.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DbDecision {
+    /// No existing database — nothing to decide.
+    Fresh,
+    /// Proceed without touching anything (with the printed reason).
+    Untouched(&'static str),
+    /// Adopt the existing database; reset the moot-mgr store.
+    Reuse,
+    /// Trash the default estate + moot-mgr store for a fresh start.
+    Replace,
+    /// The user was asked to confirm destruction and did not type 'yes'.
+    Aborted,
+}
+
+/// Resolve the flag/prompt matrix for an existing database.
+///
+/// - `flag`        — explicit `--reuse-db` / `--replace-db`.
+/// - `yes`         — `--yes` skips the typed destruction confirmation, but
+///                   only when the choice itself was explicit (`--replace-db`).
+/// - `interactive` — stdin is a terminal.
+/// - `choose`      — interactive reuse-or-replace prompt; true = replace.
+/// - `confirm`     — the typed-'yes' destruction gate for replace.
+pub(crate) fn decide_existing_db(
+    flag: Option<ExistingDbArg>,
+    yes: bool,
+    interactive: bool,
+    choose: impl FnOnce() -> bool,
+    confirm: impl FnOnce() -> bool,
+) -> DbDecision {
+    let replace = match flag {
+        Some(ExistingDbArg::Reuse) => false,
+        Some(ExistingDbArg::Replace) => true,
+        None if !interactive => {
+            // No explicit choice and nobody to ask: leave everything as it
+            // is. Existing automation (CI harnesses, scripted installs)
+            // keeps its historical no-data-surprises contract.
+            return DbDecision::Untouched(
+                "existing database left untouched (non-interactive; pass --reuse-db or --replace-db to choose)",
+            );
+        }
+        None => choose(),
+    };
+    if !replace {
+        return DbDecision::Reuse;
+    }
+    if yes {
+        return DbDecision::Replace;
+    }
+    if !interactive {
+        return DbDecision::Untouched(
+            "existing database left untouched (--replace-db needs --yes when non-interactive)",
+        );
+    }
+    if confirm() {
+        DbDecision::Replace
+    } else {
+        DbDecision::Aborted
+    }
+}
+
+/// True when a default estate database already exists in `data`, in either
+/// layout: the Rust `databases/default/estate.sqlite` or the Swift legacy
+/// flat `<data>/estate.sqlite` (a migrated data directory).
+pub(crate) fn default_estate_exists(data: &Path) -> bool {
+    paths::estate_sqlite_path(data, "default").exists() || data.join("estate.sqlite").exists()
+}
+
+/// Adopt the existing database: it stays the active default estate; the
+/// moot-mgr history store is trashed so the dashboard's estate registry
+/// rebuilds from what the daemon actually serves.
+pub(crate) fn apply_reuse(data: &Path) -> Result<(), String> {
+    paths::set_active_estate(data, "default")
+        .map_err(|e| format!("cannot set active estate: {e}"))?;
+    trash_mgr_store(data)
+}
+
+/// Fresh start: move the default estate files (both layouts) and the
+/// moot-mgr store to the platform trash. Named estates are untouched.
+pub(crate) fn apply_replace(data: &Path) -> Result<(), String> {
+    // Flat legacy layout: the SQLite file, its WAL/SHM sidecars, and the
+    // derived vector / dreaming-queue siblings that carry estate content
+    // (`estate.sqlite` → `estate.vectors.vec` / `estate.queue.sqlite`,
+    //  see VectorStore.vectorsURL and EstateConfiguration.queueSibling).
+    for name in [
+        "estate.sqlite",
+        "estate.sqlite-wal",
+        "estate.sqlite-shm",
+        "estate.vectors.vec",
+        "estate.queue.sqlite",
+        "estate.queue.sqlite-wal",
+        "estate.queue.sqlite-shm",
+    ] {
+        let p = data.join(name);
+        if p.exists() {
+            trash::delete(&p).map_err(|e| format!("cannot trash {}: {e}", p.display()))?;
+        }
+    }
+    // Rust layout: the whole databases/default/ directory (SQLite, sidecars,
+    // and the whole-file encryption key live together).
+    let default_dir = data.join("databases").join("default");
+    if default_dir.exists() {
+        trash::delete(&default_dir)
+            .map_err(|e| format!("cannot trash {}: {e}", default_dir.display()))?;
+    }
+    paths::set_active_estate(data, "default")
+        .map_err(|e| format!("cannot set active estate: {e}"))?;
+    trash_mgr_store(data)
+}
+
+/// Move the moot-mgr history store (<data>/moot-mgr/) to the platform trash
+/// if present. The manager recreates an empty store on next start, so this
+/// is the "reset registration" primitive both branches share.
+fn trash_mgr_store(data: &Path) -> Result<(), String> {
+    let mgr = data.join("moot-mgr");
+    if mgr.exists() {
+        trash::delete(&mgr).map_err(|e| format!("cannot trash {}: {e}", mgr.display()))?;
+    }
+    Ok(())
+}
+
+/// Interactive/flag front-end for the reinstall contract. Returns Err(code)
+/// when the install must stop (user abort, daemon still running, trash
+/// failure); Ok(()) to continue installing.
+fn handle_existing_database(flag: Option<ExistingDbArg>, yes: bool) -> Result<(), ExitCode> {
+    use std::io::IsTerminal;
+    let data = paths::data_dir();
+    if !default_estate_exists(&data) {
+        return Ok(());
+    }
+    let interactive = io::stdin().is_terminal();
+    let decision = decide_existing_db(
+        flag,
+        yes,
+        interactive,
+        || {
+            println!("\nAn existing MOOTx01 database was found at {}.", data.display());
+            print!("Reuse it, or replace it with a fresh one? [reuse/replace] (reuse): ");
+            let _ = io::stdout().flush();
+            let mut line = String::new();
+            let _ = io::stdin().lock().read_line(&mut line);
+            line.trim().eq_ignore_ascii_case("replace")
+        },
+        || {
+            println!("WARNING: replacing DESTROYS the current default estate and moot-mgr history.");
+            println!("They will be moved to {} (recoverable until you empty it).", super::uninstall::trash_name());
+            print!("Type 'yes' to confirm: ");
+            let _ = io::stdout().flush();
+            let mut line = String::new();
+            let _ = io::stdin().lock().read_line(&mut line);
+            line.trim() == "yes"
+        },
+    );
+    match decision {
+        DbDecision::Fresh => Ok(()),
+        DbDecision::Untouched(reason) => {
+            println!("  ⓘ {reason}");
+            Ok(())
+        }
+        DbDecision::Aborted => {
+            println!("Aborted — nothing was installed or removed.");
+            Err(ExitCode::from(exit::FAILURE))
+        }
+        DbDecision::Reuse => {
+            reject_if_daemon_alive("reusing the database resets the moot-mgr history store")?;
+            apply_reuse(&data).map_err(|e| {
+                eprintln!("  ✗ {e}");
+                ExitCode::from(exit::FAILURE)
+            })?;
+            println!("  ✓ Existing database adopted as the default estate; moot-mgr history reset.");
+            Ok(())
+        }
+        DbDecision::Replace => {
+            reject_if_daemon_alive("replacing the database")?;
+            apply_replace(&data).map_err(|e| {
+                eprintln!("  ✗ {e}");
+                ExitCode::from(exit::FAILURE)
+            })?;
+            println!(
+                "  ✓ Previous database moved to {}; a fresh estate will be created on first serve.",
+                super::uninstall::trash_name()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// A live daemon holds the estate and stats stores open (on Windows, open
+/// handles also make the move fail). Refuse the data operation and tell the
+/// user to stop it first, rather than yanking files out from under it.
+fn reject_if_daemon_alive(action: &str) -> Result<(), ExitCode> {
+    let port = crate::core::daemon_client::resolved_port();
+    if crate::core::daemon_client::alive(port) {
+        eprintln!(
+            "  ✗ The mootx01 daemon is running on port {port}; {action} needs it stopped.\n    Stop it (or uninstall) and re-run install."
+        );
+        return Err(ExitCode::from(exit::FAILURE));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1011,5 +1234,85 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ── existing-database decision matrix ───────────────────────────────
+    // Every destructive branch must require an explicit human 'yes' or the
+    // --replace-db --yes automation pair; the implicit non-interactive
+    // default must change nothing.
+
+    fn never() -> bool {
+        panic!("prompt must not be reached in this branch")
+    }
+
+    #[test]
+    fn no_flag_non_interactive_is_untouched() {
+        let d = decide_existing_db(None, false, false, never, never);
+        assert!(matches!(d, DbDecision::Untouched(_)));
+    }
+
+    #[test]
+    fn no_flag_yes_non_interactive_is_still_untouched() {
+        // --yes alone must not pick a disposition for existing data.
+        let d = decide_existing_db(None, true, false, never, never);
+        assert!(matches!(d, DbDecision::Untouched(_)));
+    }
+
+    #[test]
+    fn reuse_flag_needs_no_confirmation() {
+        let d = decide_existing_db(Some(ExistingDbArg::Reuse), false, false, never, never);
+        assert_eq!(d, DbDecision::Reuse);
+    }
+
+    #[test]
+    fn replace_flag_with_yes_replaces() {
+        let d = decide_existing_db(Some(ExistingDbArg::Replace), true, false, never, never);
+        assert_eq!(d, DbDecision::Replace);
+    }
+
+    #[test]
+    fn replace_flag_non_interactive_without_yes_is_untouched() {
+        let d = decide_existing_db(Some(ExistingDbArg::Replace), false, false, never, never);
+        assert!(matches!(d, DbDecision::Untouched(_)));
+    }
+
+    #[test]
+    fn replace_flag_interactive_requires_typed_yes() {
+        let d = decide_existing_db(Some(ExistingDbArg::Replace), false, true, never, || false);
+        assert_eq!(d, DbDecision::Aborted);
+        let d = decide_existing_db(Some(ExistingDbArg::Replace), false, true, never, || true);
+        assert_eq!(d, DbDecision::Replace);
+    }
+
+    #[test]
+    fn interactive_prompt_reuse_and_replace_paths() {
+        let d = decide_existing_db(None, false, true, || false, never);
+        assert_eq!(d, DbDecision::Reuse);
+        let d = decide_existing_db(None, false, true, || true, || true);
+        assert_eq!(d, DbDecision::Replace);
+        let d = decide_existing_db(None, false, true, || true, || false);
+        assert_eq!(d, DbDecision::Aborted);
+    }
+
+    #[test]
+    fn default_estate_detection_covers_both_layouts() {
+        let data = std::env::temp_dir()
+            .join(format!("mootx01-dbdetect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        assert!(!default_estate_exists(&data));
+        // Swift legacy flat layout.
+        std::fs::write(data.join("estate.sqlite"), b"x").unwrap();
+        assert!(default_estate_exists(&data));
+        let _ = std::fs::remove_file(data.join("estate.sqlite"));
+        // Rust databases/default layout.
+        std::fs::create_dir_all(data.join("databases").join("default")).unwrap();
+        std::fs::write(
+            data.join("databases").join("default").join("estate.sqlite"),
+            b"x",
+        )
+        .unwrap();
+        assert!(default_estate_exists(&data));
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

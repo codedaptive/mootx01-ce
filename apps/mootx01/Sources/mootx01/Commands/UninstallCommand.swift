@@ -3,7 +3,13 @@
 // Reverse of InstallCommand: removes mootx01 config entries, permission
 // grants, and optionally estate databases from all configured clients.
 //
-// Default: never touches user data. Requires --purge to delete estates.
+// A FULL uninstall (no --target) then offers to remove the user's data —
+// the estate databases (default + named) and the moot-mgr history store —
+// behind an explicit typed-'yes' confirmation, and moves it to the Trash
+// rather than hard-deleting, so the user has a recovery window. `--purge`
+// pre-selects removal for automation; `--purge --yes` skips the prompt
+// entirely. A targeted uninstall never touches data. Mirrors
+// commands/uninstall.rs in the Rust vertical.
 
 import ArgumentParser
 import Foundation
@@ -21,7 +27,7 @@ struct UninstallCommand: AsyncParsableCommand {
     @Flag(name: .shortAndLong, help: "Skip prompts; uninstall from all detected clients.")
     var yes: Bool = false
 
-    @Flag(name: .long, help: "Also delete all estate databases. Irreversible.")
+    @Flag(name: .long, help: "Also remove all estate databases and the moot-mgr history (moved to the Trash after a typed confirmation; --yes skips the prompt).")
     var purge: Bool = false
 
     func run() async throws {
@@ -34,15 +40,11 @@ struct UninstallCommand: AsyncParsableCommand {
             return
         }
 
-        if purge {
-            print("WARNING: --purge will permanently delete all estate databases.")
-            if !yes {
-                print("Type 'yes' to confirm: ", terminator: "")
-                guard readLine()?.trimmingCharacters(in: .whitespaces).lowercased() == "yes" else {
-                    print("Aborted.")
-                    return
-                }
-            }
+        if purge, target != nil {
+            // --purge with --target is contradictory: purge destroys the
+            // data the untargeted clients still depend on. Refuse loudly.
+            print("--purge requires a full uninstall (drop --target).")
+            throw ExitCode.failure
         }
 
         print("\nUninstalling mootx01 from \(clients.count) client(s)...")
@@ -109,22 +111,60 @@ struct UninstallCommand: AsyncParsableCommand {
             }
         }
 
-        // Purge estate databases if requested.
-        if purge {
-            let environment = ProcessInfo.processInfo.environment
-            let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
-            do {
-                try DatabaseManager.purgeDefaultEstate(in: dataDir)
-                // Also remove all named estates.
-                for name in DatabaseManager.listEstates(in: dataDir) where name != "default" {
-                    try? DatabaseManager.deleteEstate(name: name, in: dataDir)
-                }
-                print("  ✓ Estate databases purged.")
-            } catch {
-                print("  ✗ Could not purge estates: \(error)")
-            }
+        // Data-retention phase: only a FULL uninstall may touch user data
+        // (the --purge/--target contradiction was already rejected above).
+        // Runs AFTER the launchd teardown so nothing is holding the stores
+        // open when they move to the Trash.
+        if target == nil {
+            try removeUserData()
         }
 
         print("\nDone. Restart your MCP client to apply changes.")
+    }
+
+    /// Offer/confirm/trash the data directory. The decision matrix lives in
+    /// `DataRetention.decideDataRemoval` (unit-tested); this wrapper owns
+    /// the prompts and the exit codes.
+    private func removeUserData() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
+        guard let inventory = DataRetention.dataInventory(in: dataDir) else { return }
+
+        let decision = DataRetention.decideDataRemoval(
+            purge: purge,
+            yes: yes,
+            interactive: isatty(STDIN_FILENO) != 0,
+            offer: {
+                print("\nYour data is still in place at \(dataDir.path):")
+                print("  \(inventory)")
+                print("Remove it too? [y/N]: ", terminator: "")
+                let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+                return answer == "y" || answer == "yes"
+            },
+            confirm: {
+                print("WARNING: this DESTROYS all MOOTx01 memory data (\(inventory)).")
+                print("It will be moved to \(DataRetention.trashName) (recoverable until you empty it).")
+                print("Type 'yes' to confirm: ", terminator: "")
+                return readLine()?.trimmingCharacters(in: .whitespaces) == "yes"
+            }
+        )
+
+        switch decision {
+        case let .leave(reason):
+            print("  ⓘ \(reason): \(dataDir.path)")
+        case .aborted:
+            print("Aborted — data left in place: \(dataDir.path)")
+            throw ExitCode.failure
+        case .trash:
+            do {
+                try DataRetention.trashDataDirectory(dataDir)
+                print("  ✓ Data moved to \(DataRetention.trashName): \(dataDir.path)")
+            } catch {
+                print("  ✗ Could not move \(dataDir.path) to \(DataRetention.trashName): \(error)")
+                print("    Data left in place.")
+                throw ExitCode.failure
+            }
+        }
     }
 }

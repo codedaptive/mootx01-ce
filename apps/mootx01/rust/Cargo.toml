@@ -53,6 +53,11 @@ queuekit = { path = "../../../packages/kits/QueueKit/rust", features = ["persist
 # uuid: per-process instance token for the dreaming DrainLease — prevents
 # a reused PID after a crash from impersonating the prior lease holder.
 uuid = { version = "1", features = ["v4"] }
+# trash: data-retention on uninstall/reinstall — estate + moot-mgr databases
+# move to the platform trash (macOS Trash / Recycle Bin / XDG trash) instead
+# of hard deletion, so a destructive confirmation still leaves a recovery
+# window. Swift's macOS leg uses FileManager.trashItem for the same contract.
+trash = "5.2.3"
 
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.

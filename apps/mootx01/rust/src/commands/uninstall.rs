@@ -2,8 +2,13 @@
 //!
 //! Reverse of install: backup each config before touching it (§4.2 backups
 //! apply to uninstall too), remove the entry per format, revoke Claude Code
-//! permissions, and with `--purge` delete the estate databases. Default
-//! never touches user data.
+//! permissions. A FULL uninstall (no --target) then offers to remove the
+//! user's data — the estate databases (default + named) and the moot-mgr
+//! history store — behind an explicit typed-'yes' confirmation, and moves
+//! it to the platform trash (macOS Trash / Recycle Bin / XDG trash) rather
+//! than hard-deleting, so the user has a recovery window. `--purge`
+//! pre-selects removal for automation; `--purge --yes` skips the prompt
+//! entirely. A targeted uninstall never touches data.
 
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -129,10 +134,186 @@ pub fn run(
         }
     }
 
+    // Data-retention phase: only a FULL uninstall may touch user data. A
+    // targeted uninstall unwires the named clients and must leave the
+    // resident data alone (other clients may still be using it).
+    if full_uninstall {
+        return remove_user_data(purge, yes);
+    }
     if purge {
-        return purge_data(yes);
+        // `--purge --target …` is contradictory: purge destroys the data
+        // that the untargeted clients still depend on. Refuse loudly rather
+        // than guessing.
+        eprintln!("--purge requires a full uninstall (drop --target).");
+        return ExitCode::from(exit::FAILURE);
     }
     ExitCode::from(exit::OK)
+}
+
+/// What the data-retention phase decided to do. Factored out of
+/// `remove_user_data` so the prompt/flag matrix is unit-testable without a
+/// TTY or a real trash directory.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DataDecision {
+    /// Move the data directory to the platform trash.
+    Trash,
+    /// Leave the data in place; the &str is the printed reason.
+    Leave(&'static str),
+    /// The user was asked and did not type 'yes'.
+    Aborted,
+}
+
+/// Resolve the prompt/flag matrix for data removal.
+///
+/// - `purge`      — the user passed `--purge` (pre-selects removal).
+/// - `yes`        — the user passed `--yes` (skips the typed confirmation,
+///                  but ONLY when combined with `--purge`; `--yes` alone
+///                  keeps the historical "never touches data" contract so
+///                  existing automation is not surprised by data loss).
+/// - `interactive`— stdin is a terminal.
+/// - `offer`      — asks "remove data too?"; only called interactively
+///                  when `--purge` was not given.
+/// - `confirm`    — the typed-'yes' destruction gate.
+pub(crate) fn decide_data_removal(
+    purge: bool,
+    yes: bool,
+    interactive: bool,
+    offer: impl FnOnce() -> bool,
+    confirm: impl FnOnce() -> bool,
+) -> DataDecision {
+    if !purge && !interactive {
+        return DataDecision::Leave(
+            "estate data left in place (non-interactive; pass --purge to remove)",
+        );
+    }
+    if !purge && !offer() {
+        return DataDecision::Leave("estate data left in place");
+    }
+    if purge && yes {
+        return DataDecision::Trash;
+    }
+    if !interactive {
+        // --purge without --yes on a non-TTY: nobody can type the
+        // confirmation. Refuse rather than destroy unconfirmed.
+        return DataDecision::Leave(
+            "estate data left in place (--purge needs --yes when non-interactive)",
+        );
+    }
+    if confirm() {
+        DataDecision::Trash
+    } else {
+        DataDecision::Aborted
+    }
+}
+
+/// Human name of the platform trash destination, for prompts and reports.
+pub(crate) fn trash_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "the macOS Trash"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "the Recycle Bin"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "the system trash"
+    }
+}
+
+/// One-line inventory of what lives under the data directory, so the user
+/// knows what the confirmation destroys. Pure over the filesystem.
+pub(crate) fn data_inventory(data: &Path) -> Option<String> {
+    if !data.exists() {
+        return None;
+    }
+    // Default estate: the Rust layout keeps it under databases/default/,
+    // but a flat <data>/estate.sqlite (the Swift legacy layout) is also
+    // recognized so a migrated data directory is still reported honestly.
+    let default_estate = paths::estate_sqlite_path(data, "default").exists()
+        || data.join("estate.sqlite").exists();
+    let named: usize = std::fs::read_dir(data.join("databases"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().is_dir() && e.file_name() != "default")
+                .count()
+        })
+        .unwrap_or(0);
+    let mgr = data.join("moot-mgr").join("stats.sqlite").exists();
+    if !default_estate && named == 0 && !mgr {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if default_estate {
+        parts.push("the default estate database".into());
+    }
+    if named > 0 {
+        parts.push(format!("{named} named estate(s)"));
+    }
+    if mgr {
+        parts.push("the moot-mgr history database".into());
+    }
+    Some(parts.join(", "))
+}
+
+/// Offer/confirm/trash the data directory. See the module doc for the
+/// policy; `decide_data_removal` holds the testable matrix.
+fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
+    use std::io::IsTerminal;
+    let data = paths::data_dir();
+    let Some(inventory) = data_inventory(&data) else {
+        return ExitCode::from(exit::OK);
+    };
+    let interactive = io::stdin().is_terminal();
+    let decision = decide_data_removal(
+        purge,
+        yes,
+        interactive,
+        || {
+            println!("\nYour data is still in place at {}:", data.display());
+            println!("  {inventory}");
+            print!("Remove it too? [y/N]: ");
+            let _ = io::stdout().flush();
+            let mut line = String::new();
+            let _ = io::stdin().lock().read_line(&mut line);
+            matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+        },
+        || {
+            println!("WARNING: this DESTROYS all MOOTx01 memory data ({inventory}).");
+            println!("It will be moved to {} (recoverable until you empty it).", trash_name());
+            print!("Type 'yes' to confirm: ");
+            let _ = io::stdout().flush();
+            let mut line = String::new();
+            let _ = io::stdin().lock().read_line(&mut line);
+            line.trim() == "yes"
+        },
+    );
+    match decision {
+        DataDecision::Leave(reason) => {
+            println!("  ⓘ {reason}: {}", data.display());
+            ExitCode::from(exit::OK)
+        }
+        DataDecision::Aborted => {
+            println!("Aborted — data left in place: {}", data.display());
+            ExitCode::from(exit::FAILURE)
+        }
+        DataDecision::Trash => match trash::delete(&data) {
+            Ok(()) => {
+                println!("  ✓ Data moved to {}: {}", trash_name(), data.display());
+                ExitCode::from(exit::OK)
+            }
+            Err(e) => {
+                eprintln!(
+                    "  ✗ Could not move {} to {}: {e}\n    Data left in place.",
+                    data.display(),
+                    trash_name()
+                );
+                ExitCode::from(exit::FAILURE)
+            }
+        },
+    }
 }
 
 fn remove_one(
@@ -250,35 +431,6 @@ fn location_allows_global(location: Option<Location>) -> bool {
 
 fn location_allows_local(location: Option<Location>) -> bool {
     !matches!(location, Some(Location::Global))
-}
-
-/// `--purge`: delete the estate databases and config.json. Irreversible.
-fn purge_data(yes: bool) -> ExitCode {
-    let data = paths::data_dir();
-    if !yes {
-        println!(
-            "Delete ALL estate databases under {}? This is irreversible.",
-            data.display()
-        );
-        print!("Type 'yes' to confirm: ");
-        let _ = io::stdout().flush();
-        let mut line = String::new();
-        let _ = io::stdin().lock().read_line(&mut line);
-        if line.trim() != "yes" {
-            println!("Aborted.");
-            return ExitCode::from(exit::FAILURE);
-        }
-    }
-    let databases = data.join("databases");
-    if databases.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&databases) {
-            eprintln!("Cannot delete {}: {e}", databases.display());
-            return ExitCode::from(exit::FAILURE);
-        }
-    }
-    let _ = std::fs::remove_file(paths::config_json_path(&data));
-    println!("Estate databases deleted.");
-    ExitCode::from(exit::OK)
 }
 
 #[cfg(test)]
@@ -417,5 +569,89 @@ mod tests {
         assert!(both.contains(&PathBuf::from(".mcp.json")));
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ── data-retention decision matrix ──────────────────────────────────
+    // The prompt/flag matrix is the safety contract: every branch that can
+    // destroy data must be reachable only through an explicit human 'yes'
+    // or the --purge --yes automation pair.
+
+    fn never_called() -> bool {
+        panic!("prompt must not be reached in this branch")
+    }
+
+    fn tmp_home(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("mootx01-retention-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn non_interactive_without_purge_leaves_data() {
+        let d = decide_data_removal(false, false, false, never_called, never_called);
+        assert!(matches!(d, DataDecision::Leave(_)));
+    }
+
+    #[test]
+    fn non_interactive_yes_alone_still_leaves_data() {
+        // --yes alone historically never touches data; automation relying on
+        // that contract must not start losing estates.
+        let d = decide_data_removal(false, true, false, never_called, never_called);
+        assert!(matches!(d, DataDecision::Leave(_)));
+    }
+
+    #[test]
+    fn purge_yes_trashes_without_prompting() {
+        let d = decide_data_removal(true, true, false, never_called, never_called);
+        assert_eq!(d, DataDecision::Trash);
+    }
+
+    #[test]
+    fn purge_without_yes_non_interactive_leaves_data() {
+        let d = decide_data_removal(true, false, false, never_called, never_called);
+        assert!(matches!(d, DataDecision::Leave(_)));
+    }
+
+    #[test]
+    fn interactive_offer_declined_leaves_data() {
+        let d = decide_data_removal(false, false, true, || false, never_called);
+        assert!(matches!(d, DataDecision::Leave(_)));
+    }
+
+    #[test]
+    fn interactive_offer_accepted_still_requires_typed_yes() {
+        let d = decide_data_removal(false, false, true, || true, || false);
+        assert_eq!(d, DataDecision::Aborted);
+    }
+
+    #[test]
+    fn interactive_offer_and_confirm_trashes() {
+        let d = decide_data_removal(false, false, true, || true, || true);
+        assert_eq!(d, DataDecision::Trash);
+    }
+
+    #[test]
+    fn purge_interactive_skips_offer_but_confirms() {
+        let d = decide_data_removal(true, false, true, never_called, || true);
+        assert_eq!(d, DataDecision::Trash);
+    }
+
+    #[test]
+    fn inventory_reports_default_named_and_mgr() {
+        let data = tmp_home("inventory");
+        assert_eq!(data_inventory(&data.join("missing")), None);
+        // Empty dir → nothing worth prompting about.
+        assert_eq!(data_inventory(&data), None);
+        std::fs::write(data.join("estate.sqlite"), b"x").unwrap();
+        std::fs::create_dir_all(data.join("databases").join("work")).unwrap();
+        std::fs::create_dir_all(data.join("moot-mgr")).unwrap();
+        std::fs::write(data.join("moot-mgr").join("stats.sqlite"), b"x").unwrap();
+        let inv = data_inventory(&data).unwrap();
+        assert!(inv.contains("default estate database"), "{inv}");
+        assert!(inv.contains("1 named estate(s)"), "{inv}");
+        assert!(inv.contains("moot-mgr history database"), "{inv}");
+        let _ = std::fs::remove_dir_all(&data);
     }
 }
