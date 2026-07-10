@@ -133,7 +133,7 @@ struct StaticServingTests {
         #expect(StaticAssets.asset(for: "/index.html") != nil)
         #expect(StaticAssets.asset(for: "/app.css") != nil)
         #expect(StaticAssets.asset(for: "/app.js") != nil)
-        // The Topology renderer lives in app.js (Canvas2D); the retired
+        // The Topology renderer lives in app.js (Three.js); the retired
         // /sigma.js path must stay off the list.
         #expect(StaticAssets.asset(for: "/sigma.js") == nil)
         // Anything off the list — including traversal attempts — resolves to nil.

@@ -200,22 +200,21 @@ try {
       </div>
     </section>
 
-    <!-- TOPOLOGY (P5) — Sigma-style node-link renderer over /api/graph.
-         The renderer is fed by GET /api/graph. moot-mgr is a pure observer, so
-         per-node/per-edge STRUCTURE is not reachable here; when the snapshot
-         reports structurePending the canvas shows an honest pending overlay and
-         the panel surfaces the VizGraph analytic signals that ARE available
-         (community count, centrality/anomaly/NMF/decay completion) — never
-         fabricated nodes (PoC spec §4.1 content boundary). -->
+    <!-- TOPOLOGY — budgeted semantic-zoom renderer over /api/graph.
+         Estate and community views use persisted aggregate structure; local
+         views fetch bounded node/edge geometry. When no structure exists, the
+         canvas shows an honest pending overlay and only the VizGraph signals
+         the observer can prove — never fabricated nodes. -->
     <section class="view" data-view="topology">
       <div class="topo-bar">
         <h1 class="title">Topology</h1>
         <div class="topo-controls">
           <label class="topo-label" for="topoEstate">estate</label>
           <select class="topo-select" id="topoEstate" aria-label="Estate filter"></select>
-          <button class="btn" id="topoReset">Reset layout</button>
+          <button class="btn" id="topoUp" hidden>Up</button>
+          <button class="btn" id="topoReset">Refresh</button>
           <!-- L4 strata view: perspective projection with centrality-derived depth. Off = classic 2D. -->
-          <button class="btn" id="topoDimToggle" aria-pressed="false">3D</button>
+          <button class="btn" id="topoDimToggle" aria-pressed="true">3D</button>
           <!-- V2-P2b: nmf_bond (derived lattice/classification) edges are faint
                tissue, hidden by default — this chip reveals them. -->
           <button class="btn" id="topoLatticeToggle" aria-pressed="false">lattice</button>
@@ -226,7 +225,7 @@ try {
            (not an overlay) so it never floats over the graphic. -->
       <div class="topo-row">
         <div class="topo-stage" id="topoStage">
-          <!-- Canvas2D brain renderer mounts here (full remaining height). -->
+          <!-- Three.js brain renderer mounts here (full remaining height). -->
           <div class="topo-canvas" id="topoCanvas"></div>
           <!-- Pending overlay: shown whenever real structure is absent — the
                analytics grid when VizGraph analytics exist, a monitoring-aware
@@ -265,6 +264,8 @@ try {
         </select>
         <span class="tag" id="topoPlaySpan">—</span>
         <span class="tag" id="topoPlayClock">—</span>
+        <span class="tag" id="topoPlayMode">activity over current map</span>
+        <span class="tag topo-unmapped" id="topoUnmapped" hidden>unmapped 0</span>
       </div>
     </section>
 

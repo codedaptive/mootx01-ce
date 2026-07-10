@@ -234,6 +234,33 @@ analytic metric and `structurePending: true` with empty `nodes`/`edges`.
 Full node/edge contract (createdTs, tombstonedTs, Louvain communityId, normalised
 centrality): ARIA_MCP_SPEC.md § response shapes.
 
+### `GET /api/graph` — Topology V3 levels and compact positions
+
+V3 snapshots add stable `communityKey`/`foldKey` identities, normalized
+coordinates, folds, aggregate bridges, representative ids, and classification
+purity. The read API accepts `level=estate|community|local|full` plus an
+optional stable `focus` key:
+
+- `estate` returns community aggregates and community bridges; it does not
+  allocate or serialize individual node/edge geometry. The level is capped at
+  96 aggregates. Overflow reconciles into the neutral `__other__` aggregate.
+- `community&focus=<communityKey>` returns that community's fold aggregates
+  and fold bridges. Fold production is capped at 64 per community.
+- `local&focus=<foldKey|communityKey>` returns real nodes and edges for the
+  focused structure, capped at 2,000 nodes and 12,000 edges. Edge truncation
+  retains a deterministic non-classification spanning forest before ranked
+  detail edges.
+- `full` is the compatibility view. Omitting `level` preserves this behavior.
+
+`totalNodeCount`, `totalEdgeCount`, and `lodTruncated` make every budget
+explicit. `activityIds`/`activityKeys` map up to 2,000 recent exact drawer ids
+to visible aggregates so activity replay never guesses a substitute node.
+
+Per-node coordinates use `positionQ16`: RFC 4648 base64 over interleaved
+little-endian signed 16-bit normalized values (`x0,y0,z0,...`). This is a
+fixed 6 bytes per node before base64 and keeps the 50k-node/70k-edge full-view
+fixture below 5 MB in both ports. `representatives` is a sparse node-index list.
+
 ### `GET /api/graph` — per-node classification codes (`codes`/`codeIndex`)
 
 Stored topology snapshots carry an optional per-node `udcCode` (the node's
@@ -283,9 +310,10 @@ the estate's knowledge domains — community FDC labels plus the
 Facet-filter multiselect: clicking a row toggles that domain (the first
 click starts a selection containing just it); emptying the selection or
 re-checking everything resets to All. Filtering HIDES deselected content
-entirely and RE-LAYS-OUT the selection to fill the canvas. Selections are
-keyed by label (content identity), not Louvain community id — ids renumber
-on every governor recompute while labels are stable. Community colors are
+entirely while preserving the persisted coordinate frame. Aggregate clicks
+drill Estate → Community → Local and the Up control reverses the path.
+Structural identity is the stable community/fold key, never the FDC label;
+classification is only the color/label overlay. Community colors are
 digit-derived from each community's FDC code (hundreds → hue, tens → shade,
 ones → brightness), so a code renders the same color on every host and
 refresh; code-less communities fall back to a static palette pinned per

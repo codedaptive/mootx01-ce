@@ -197,7 +197,7 @@ body::before{
 .kind-capture{color:var(--accent)}
 .kind-think{color:var(--accent2)}
 
-/* topology (P5) — Canvas2D neural-brain renderer + controls + overlays */
+/* topology — Three.js neural-brain renderer + controls + overlays */
 .topo-bar{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px}
 .topo-controls{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
 .topo-label{font-size:10px; text-transform:uppercase; letter-spacing:1.1px; color:var(--muted)}
@@ -357,6 +357,7 @@ body::before{
 /* mono timestamp chip — fixed-ish width prevents jitter as the playhead advances */
 #topoPlayClock{ font-family:var(--font-m); min-width:150px; text-align:center }
 #topoPlaySpan{ font-family:var(--font-m) }
+.topo-unmapped{ color:#ffd08a; border-color:rgba(255,176,72,.45) }
 
 /* loading / empty */
 .empty{color:var(--muted); font-size:13px; font-style:italic; padding:18px 0}
@@ -770,3 +771,48 @@ details.panel[open] summary::before{content:"▼ "}
   pointer-events:none; white-space:nowrap; animation:feedfade 4.2s ease forwards;
 }
 @media (prefers-reduced-motion:reduce){ .topo-toast{animation:none} }
+
+/* Compact console shell. Keep the complete read surface reachable on a narrow
+   display, then stack the topology instrument above its content filter. */
+@media (max-width:700px){
+  .app{
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto auto minmax(0,1fr);
+  }
+  .topbar{
+    height:56px; padding:6px 12px; gap:10px; min-width:0;
+  }
+  .topbar .sep,
+  .meta-strip .tag,
+  .right #lastUpdated{display:none}
+  .brand{gap:8px; min-width:0}
+  .chip{width:25px; height:25px}
+  .wordmark b{font-size:17px}
+  .wordmark span{font-size:8px; letter-spacing:1.5px}
+  .meta-strip{margin-left:auto; min-width:0}
+  .pill{font-size:10px; padding:4px 8px}
+  .right{margin-left:0; gap:0}
+  .btn-theme{margin-right:0}
+
+  .sidenav{
+    flex-direction:row; gap:4px; padding:6px 8px; overflow-x:auto;
+    border-right:0; border-bottom:1px solid var(--border);
+  }
+  .navitem{flex:0 0 auto; padding:7px 10px; font-size:12px}
+  .main{padding:18px 14px 28px; min-width:0}
+
+  .topo-bar{align-items:flex-start; gap:10px; margin-bottom:10px}
+  .topo-bar .title{width:100%}
+  .topo-controls{gap:8px; width:100%}
+  .topo-controls .tag{flex:1 0 100%}
+  .topo-row{height:auto; min-height:0; flex-direction:column}
+  .topo-row .topo-stage{
+    flex:none; width:100%; height:54vh; min-height:340px;
+  }
+  .topo-commpicker{
+    flex:none; width:100%; height:220px; max-height:220px;
+  }
+  .topo-playbar{gap:8px; padding-bottom:8px}
+  #topoPlayClock{min-width:0; text-align:left}
+  .topo-legend{right:8px; bottom:8px; max-width:180px}
+}

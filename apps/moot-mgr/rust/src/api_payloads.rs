@@ -189,6 +189,50 @@ pub struct GraphCommunityPayload {
     pub code: Option<String>,
     pub label: Option<String>,
     pub size: i64,
+    #[serde(rename = "stableKey", skip_serializing_if = "Option::is_none", default)]
+    pub stable_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub z: Option<f64>,
+    #[serde(rename = "foldCount", skip_serializing_if = "Option::is_none", default)]
+    pub fold_count: Option<i64>,
+    #[serde(rename = "representativeIds", skip_serializing_if = "Option::is_none", default)]
+    pub representative_ids: Option<Vec<String>>,
+    #[serde(rename = "classificationPurity", skip_serializing_if = "Option::is_none", default)]
+    pub classification_purity: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphFoldPayload {
+    #[serde(rename = "stableKey")]
+    pub stable_key: String,
+    #[serde(rename = "communityKey")]
+    pub community_key: String,
+    pub code: Option<String>,
+    pub label: Option<String>,
+    pub size: i64,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    #[serde(rename = "representativeIds")]
+    pub representative_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphBridgePayload {
+    pub level: String,
+    #[serde(rename = "sourceKey")]
+    pub source_key: String,
+    #[serde(rename = "targetKey")]
+    pub target_key: String,
+    #[serde(rename = "edgeType")]
+    pub edge_type: String,
+    pub weight: f64,
+    #[serde(rename = "edgeCount")]
+    pub edge_count: i64,
 }
 
 /// One graph node (GET /api/graph, from the stored topology snapshot). Mirrors
@@ -221,12 +265,25 @@ pub struct GraphNodePayload {
     pub tombstoned_ts: Option<String>,
     #[serde(rename = "udcCode", default)]
     pub udc_code: Option<String>,
+    #[serde(rename = "communityKey", default)]
+    pub community_key: Option<String>,
+    #[serde(rename = "foldKey", default)]
+    pub fold_key: Option<String>,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub z: Option<f64>,
+    #[serde(default)]
+    pub representative: bool,
 }
 
 /// Stored edge shape decoded from governor-written topology_snapshots.
 /// Mirrors Swift `GraphEdgePayload`. Absent-key-tolerant; decode-only.
 ///
-/// decayedWeight and createdTs removed from wire format (FIX 2 — payload trim).
+/// `created_ts` is retained from governor snapshots so the compact public wire
+/// can restore truthful explicit-edge replay. Derived bonds carry `None`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct GraphEdgePayload {
     pub source: String,
@@ -235,6 +292,8 @@ pub struct GraphEdgePayload {
     pub edge_type: String,
     #[serde(default = "default_weight")]
     pub weight: f64,
+    #[serde(rename = "createdTs", default)]
+    pub created_ts: Option<String>,
     #[serde(rename = "tombstonedTs", default)]
     pub tombstoned_ts: Option<String>,
 }
@@ -243,8 +302,9 @@ fn default_weight() -> f64 { 0.5 }
 
 /// Compact wire-format edge for the `/api/graph` response (FIX 2b).
 ///
-/// Serializes as a JSON array `[si, ti, w, et]` to eliminate per-edge key
-/// overhead. Mirrors Swift `CompactEdge`.
+/// Serializes with a four-field structural prefix `[si, ti, w, et]`.
+/// Explicit edges append factual second offsets from GraphPayload's shared
+/// `edge_time_origin`; derived present-day inference edges remain four fields.
 ///
 /// Edge-type ordinal mapping (matches app.js `edgeTypeNames` constant):
 /// - 0 = "tunnel"      (default)
@@ -261,6 +321,10 @@ pub struct CompactEdge {
     pub w: f64,
     /// Edge-type ordinal: 0=tunnel, 1=kgFact, 2=association, 3=nmf_bond.
     pub et: u8,
+    /// Factual explicit-edge creation offset from GraphPayload.edge_time_origin.
+    pub born: Option<i64>,
+    /// Factual tombstone offset from GraphPayload.edge_time_origin.
+    pub dead: Option<i64>,
 }
 
 impl CompactEdge {
@@ -276,14 +340,89 @@ impl CompactEdge {
 }
 
 impl Serialize for CompactEdge {
-    /// Serialize as a flat JSON array `[si, ti, w, et]` — no keys.
+    /// Serialize a variable-length flat array. This keeps derived edges at the
+    /// original four fields and charges timestamp bytes only to explicit edges.
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut seq = s.serialize_seq(Some(4))?;
+        let len = if self.dead.is_some() { 6 } else if self.born.is_some() { 5 } else { 4 };
+        let mut seq = s.serialize_seq(Some(len))?;
         seq.serialize_element(&self.si)?;
         seq.serialize_element(&self.ti)?;
         seq.serialize_element(&self.w)?;
         seq.serialize_element(&self.et)?;
+        if self.born.is_some() || self.dead.is_some() {
+            seq.serialize_element(&self.born)?;
+        }
+        if let Some(dead) = self.dead {
+            seq.serialize_element(&dead)?;
+        }
         seq.end()
+    }
+}
+
+/// Parse the governor's canonical UTC ISO-8601 timestamps into epoch seconds.
+/// Fractional seconds are intentionally ignored: compact replay uses second
+/// resolution. Non-canonical/non-UTC values degrade to `None`.
+pub(crate) fn topology_epoch_seconds(value: Option<&str>) -> Option<i64> {
+    let b = value?.as_bytes();
+    if b.len() < 20 || *b.last()? != b'Z'
+        || b[4] != b'-' || b[7] != b'-' || b[10] != b'T'
+        || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    fn digits(b: &[u8], start: usize, count: usize) -> Option<i64> {
+        let mut n = 0_i64;
+        for &v in b.get(start..start + count)? {
+            if !v.is_ascii_digit() { return None; }
+            n = n * 10 + i64::from(v - b'0');
+        }
+        Some(n)
+    }
+    let mut year = digits(b, 0, 4)?;
+    let month = digits(b, 5, 2)?;
+    let day = digits(b, 8, 2)?;
+    let hour = digits(b, 11, 2)?;
+    let minute = digits(b, 14, 2)?;
+    let second = digits(b, 17, 2)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day)
+        || hour >= 24 || minute >= 60 || second >= 61 {
+        return None;
+    }
+    if month <= 2 { year -= 1; }
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * adjusted_month + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+#[cfg(test)]
+mod compact_time_tests {
+    use super::{topology_epoch_seconds, CompactEdge};
+
+    #[test]
+    fn canonical_iso_parses_to_epoch_seconds() {
+        assert_eq!(topology_epoch_seconds(Some("1970-01-01T00:00:00Z")), Some(0));
+        assert_eq!(topology_epoch_seconds(Some("2026-06-09T20:13:05Z")), Some(1_781_035_985));
+        assert_eq!(topology_epoch_seconds(Some("2026-06-09T20:13:05.999Z")), Some(1_781_035_985));
+        assert_eq!(topology_epoch_seconds(Some("2026-06-09T20:13:05+00:00")), None);
+    }
+
+    #[test]
+    fn compact_edge_temporal_suffix_is_variable_length() {
+        let derived = serde_json::to_string(&CompactEdge {
+            si: 0, ti: 1, w: 0.3, et: 1, born: None, dead: None,
+        }).unwrap();
+        let live = serde_json::to_string(&CompactEdge {
+            si: 0, ti: 1, w: 1.0, et: 0, born: Some(100), dead: None,
+        }).unwrap();
+        let dead = serde_json::to_string(&CompactEdge {
+            si: 0, ti: 1, w: 1.0, et: 0, born: Some(100), dead: Some(200),
+        }).unwrap();
+        assert_eq!(derived, "[0,1,0.3,1]");
+        assert_eq!(live, "[0,1,1.0,0,100]");
+        assert_eq!(dead, "[0,1,1.0,0,100,200]");
     }
 }
 
@@ -309,7 +448,7 @@ impl Serialize for CompactEdge {
 ///                    `-1` means the node has no code
 ///
 /// Edges are compact arrays-of-arrays:
-///   `edges` — `[[si, ti, w, et], ...]`
+///   `edges` — `[[si, ti, w, et, born?, dead?], ...]`
 ///
 /// Old per-object `"nodes"` key is absent from the wire. See `StoredGraphPayload`
 /// for the decode-only shape used to read governor-written snapshots.
@@ -338,9 +477,35 @@ pub struct GraphPayload {
     /// carries no code (absent or empty `udcCode`).
     #[serde(rename = "codeIndex")]
     pub code_index: Vec<i64>,
+    #[serde(rename = "positionQ16")]
+    pub position_q16: String,
+    pub representatives: Vec<usize>,
     /// Compact edges: each element serializes as [si, ti, w, et].
     pub edges: Vec<CompactEdge>,
+    /// Shared epoch-second origin for factual CompactEdge time suffixes.
+    #[serde(rename = "edgeTimeOrigin")]
+    pub edge_time_origin: Option<i64>,
     pub communities: Vec<GraphCommunityPayload>,
+    pub folds: Vec<GraphFoldPayload>,
+    pub bridges: Vec<GraphBridgePayload>,
+    #[serde(rename = "topologyVersion")]
+    pub topology_version: i64,
+    #[serde(rename = "coordinateFrameVersion")]
+    pub coordinate_frame_version: i64,
+    #[serde(rename = "viewLevel")]
+    pub view_level: String,
+    #[serde(rename = "focusKey")]
+    pub focus_key: Option<String>,
+    #[serde(rename = "activityIds")]
+    pub activity_ids: Vec<String>,
+    #[serde(rename = "activityKeys")]
+    pub activity_keys: Vec<String>,
+    #[serde(rename = "totalNodeCount")]
+    pub total_node_count: usize,
+    #[serde(rename = "totalEdgeCount")]
+    pub total_edge_count: usize,
+    #[serde(rename = "lodTruncated")]
+    pub lod_truncated: bool,
     pub analytics: Vec<GraphAnalyticPayload>,
     #[serde(rename = "structurePending")]
     pub structure_pending: bool,
@@ -366,13 +531,43 @@ where S: Serializer {
 /// snapshot: `{id, size, dominantUdcCode}`. Mirrors Swift
 /// `ARIACommunityDescriptor`. `dominantUdcCode` decodes tolerantly (absent on
 /// older daemons → None).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct AriaCommunityDescriptor {
     pub id: i64,
     #[serde(default)]
     pub size: i64,
     #[serde(rename = "dominantUdcCode", default)]
     pub dominant_udc_code: Option<String>,
+    #[serde(rename = "stableKey", default)]
+    pub stable_key: Option<String>,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub z: Option<f64>,
+    #[serde(rename = "foldCount", default)]
+    pub fold_count: Option<i64>,
+    #[serde(rename = "representativeIds", default)]
+    pub representative_ids: Option<Vec<String>>,
+    #[serde(rename = "classificationPurity", default)]
+    pub classification_purity: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AriaFoldDescriptor {
+    #[serde(rename = "stableKey")]
+    pub stable_key: String,
+    #[serde(rename = "communityKey")]
+    pub community_key: String,
+    pub size: i64,
+    #[serde(rename = "dominantUdcCode", default)]
+    pub dominant_udc_code: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    #[serde(rename = "representativeIds", default)]
+    pub representative_ids: Vec<String>,
 }
 
 /// The decodable envelope for a stored topology snapshot (what the governor
@@ -393,6 +588,14 @@ pub struct StoredGraphPayload {
     /// stays in effect.
     #[serde(default)]
     pub communities: Option<Vec<AriaCommunityDescriptor>>,
+    #[serde(rename = "topologyVersion", default)]
+    pub topology_version: Option<i64>,
+    #[serde(rename = "coordinateFrameVersion", default)]
+    pub coordinate_frame_version: Option<i64>,
+    #[serde(default)]
+    pub folds: Vec<AriaFoldDescriptor>,
+    #[serde(default)]
+    pub bridges: Vec<GraphBridgePayload>,
 }
 
 /// Result of a gated control verb (POST /api/control/* and UDS responses).

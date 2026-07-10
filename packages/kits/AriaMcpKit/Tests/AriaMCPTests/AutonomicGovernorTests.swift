@@ -211,7 +211,7 @@ struct AutonomicGovernorTests {
         let now = Date(timeIntervalSince1970: 10_000_000)
 
         let capture = DataCapture()
-        try await AutonomicGovernor.topologySnapshotDuty(
+        _ = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit,
             handle: handle,
             now: now
@@ -224,6 +224,28 @@ struct AutonomicGovernorTests {
         #expect(!decoded.generatedTs.isEmpty)
     }
 
+    @Test func topologySnapshotMapsClassificationEdgesToPublicWireType() async throws {
+        let (kit, handle) = try await makeEstate()
+        for content in ["classification-edge-alpha", "classification-edge-beta"] {
+            _ = try await kit.capture(handle, CaptureFrame(
+                content: content, channel: .typed, room: "gov-test",
+                latticeAnchor: .udc("362.4"),
+                addedBy: "test", embeddingModelID: "test-model-v1"))
+        }
+        let capture = DataCapture()
+        _ = try await AutonomicGovernor.topologySnapshotDuty(
+            kit: kit, handle: handle,
+            now: Date(timeIntervalSince1970: 10_000_100)
+        ) { _, _, data, _ in await capture.set(data) }
+
+        let data = try #require(await capture.value)
+        let body = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let edges = try #require(body["edges"] as? [[String: Any]])
+        let edgeTypes = edges.compactMap { $0["edgeType"] as? String }
+        #expect(edgeTypes.contains("nmf_bond"))
+        #expect(!edgeTypes.contains("lattice"))
+    }
+
     @Test func topologySnapshotDutyIsPayloadDeterministic() async throws {
         // Same estate + same now must produce byte-identical JSON payloads.
         // This verifies that no internal clock or UUID is embedded in the encoding.
@@ -233,10 +255,10 @@ struct AutonomicGovernorTests {
         let capture1 = DataCapture()
         let capture2 = DataCapture()
 
-        try await AutonomicGovernor.topologySnapshotDuty(kit: kit, handle: handle, now: now) {
+        _ = try await AutonomicGovernor.topologySnapshotDuty(kit: kit, handle: handle, now: now) {
             _, _, d, _ in await capture1.set(d)
         }
-        try await AutonomicGovernor.topologySnapshotDuty(kit: kit, handle: handle, now: now) {
+        _ = try await AutonomicGovernor.topologySnapshotDuty(kit: kit, handle: handle, now: now) {
             _, _, d, _ in await capture2.set(d)
         }
 
@@ -251,17 +273,23 @@ struct AutonomicGovernorTests {
         // second call returns a token equal to the first.
         let (kit, handle) = try await makeEstate()
         let counter = CallCounter()
+        let snapshotLoads = CallCounter()
 
         let token1 = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit, handle: handle, now: Date(timeIntervalSince1970: 12_000_000)
         ) { _, _, _, _ in await counter.increment() }
         let token2 = try await AutonomicGovernor.topologySnapshotDuty(
             kit: kit, handle: handle, now: Date(timeIntervalSince1970: 12_000_300),
-            previousFingerprint: token1.fingerprint
+            previousFingerprint: token1.fingerprint,
+            previousSnapshotLoader: {
+                await snapshotLoads.increment()
+                return nil
+            }
         ) { _, _, _, _ in await counter.increment() }
 
         #expect(token1 == token2, "Unchanged estate must yield an identical dirty token")
         #expect(await counter.count == 1, "Handler must not fire on the skipped cadence")
+        #expect(await snapshotLoads.count == 0, "Skipped cadence must not load the prior snapshot")
     }
 
     @Test func topologySnapshotDutyRecomputesWhenEstateChanges() async throws {

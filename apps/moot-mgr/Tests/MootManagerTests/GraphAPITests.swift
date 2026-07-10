@@ -1,7 +1,7 @@
 // GraphAPITests.swift
 //
 // P5 verify line: the resident host serves the Topology read endpoint
-// (GET /api/graph); the renderer is the Canvas2D brain renderer in app.js.
+// (GET /api/graph); the renderer is the Three.js brain renderer in app.js.
 //
 // /api/graph projects the VizGraph analytic overlay the resident host CAN read
 // from the ObserverSink stats store (per-estate community count, centrality /
@@ -100,6 +100,85 @@ private func seedVizGraph(_ store: StatsStore, estate: String) async throws {
 
 struct GraphAPITests {
 
+    @Test("Local edge budget preserves a structural spanning forest before overlays")
+    func localEdgeBudgetPreservesStructure() {
+        let nodes = ["a", "b", "c", "d"].enumerated().map { index, id in
+            GraphNodePayload(
+                id: id, communityId: 0, centrality: index == 0 ? 1 : 0.5,
+                anomaly: false, createdTs: nil, tombstonedTs: nil,
+                representative: index == 0)
+        }
+        var edges = [
+            GraphEdgePayload(source: "a", target: "b", edgeType: "tunnel", weight: 1,
+                             tombstonedTs: nil),
+            GraphEdgePayload(source: "b", target: "c", edgeType: "tunnel", weight: 0.8,
+                             tombstonedTs: nil),
+            GraphEdgePayload(source: "c", target: "d", edgeType: "kgFact", weight: 0.3,
+                             tombstonedTs: nil),
+        ]
+        edges += (0..<20).map { index in
+            GraphEdgePayload(source: index.isMultiple(of: 2) ? "a" : "b",
+                             target: index.isMultiple(of: 2) ? "d" : "c",
+                             edgeType: "nmf_bond", weight: 0.2, tombstonedTs: nil)
+        }
+        let bounded = MootManager.boundedLocalEdges(edges, nodes: nodes, limit: 3)
+        #expect(bounded.count == 3)
+        #expect(bounded.allSatisfy { $0.edgeType != "nmf_bond" })
+        #expect(Set(bounded.flatMap { [$0.source, $0.target] }) == Set(["a", "b", "c", "d"]))
+    }
+
+    @Test("Topology V3 serves aggregate estate/community views and bounded local nodes")
+    func topologyV3Levels() async throws {
+        let snapshot = Data("""
+        {"nodes":[
+          {"id":"n1","communityId":0,"centrality":1,"anomaly":false,"createdTs":null,
+           "tombstonedTs":null,"communityKey":"c-alpha","foldKey":"f-one",
+           "x":0.1,"y":0.2,"z":0.3,"representative":true},
+          {"id":"n2","communityId":0,"centrality":0.5,"anomaly":false,"createdTs":null,
+           "tombstonedTs":null,"communityKey":"c-alpha","foldKey":"f-one",
+           "x":0.2,"y":0.3,"z":0.4,"representative":false}],
+         "edges":[{"source":"n1","target":"n2","edgeType":"tunnel","weight":1,
+                   "createdTs":null,"tombstonedTs":null}],
+         "structurePending":false,"topologyVersion":3,"coordinateFrameVersion":1,
+         "communities":[{"id":0,"size":2,"dominantUdcCode":"006","stableKey":"c-alpha",
+                         "x":0.1,"y":0.2,"z":0.3,"foldCount":1,
+                         "representativeIds":["n1"],"classificationPurity":1}],
+         "folds":[{"stableKey":"f-one","communityKey":"c-alpha","size":2,
+                   "dominantUdcCode":"006","x":0.12,"y":0.22,"z":0.32,
+                   "representativeIds":["n1"]}],
+         "bridges":[],"generatedTs":"2026-07-09T00:00:00Z"}
+        """.utf8)
+        let (host, port) = try await makeStartedHost { store in
+            try await store.writeTopologySnapshot(
+                estate: "estate-v3", generatedAt: Date(timeIntervalSince1970: 1_000),
+                payload: snapshot)
+        }
+        defer { Task { await host.stop() } }
+
+        let estate = try await jsonObject(port: port, path: "/api/graph?estate=estate-v3&level=estate")
+        #expect((estate["viewLevel"] as? String) == "estate")
+        #expect((estate["ids"] as? [Any])?.isEmpty == true)
+        #expect((estate["communities"] as? [Any])?.count == 1)
+
+        let community = try await jsonObject(
+            port: port, path: "/api/graph?estate=estate-v3&level=community&focus=c-alpha")
+        #expect((community["viewLevel"] as? String) == "community")
+        #expect((community["folds"] as? [Any])?.count == 1)
+        #expect((community["ids"] as? [Any])?.isEmpty == true,
+                "community view renders persisted fold aggregates, not raw nodes")
+
+        let local = try await jsonObject(
+            port: port, path: "/api/graph?estate=estate-v3&level=local&focus=f-one")
+        #expect((local["ids"] as? [Any])?.count == 2)
+        #expect((local["positionQ16"] as? String)?.isEmpty == false)
+
+        let missingFocus = try await jsonObject(
+            port: port, path: "/api/graph?estate=estate-v3&level=local")
+        #expect((missingFocus["viewLevel"] as? String) == "estate")
+        #expect((missingFocus["ids"] as? [Any])?.isEmpty == true,
+                "a malformed drill request must retain the aggregate budget")
+    }
+
     @Test("GET /api/graph returns the topology snapshot envelope shape")
     func graphEnvelopeShape() async throws {
         let (host, port) = try await makeStartedHost { try await seedVizGraph($0, estate: "home") }
@@ -115,7 +194,10 @@ struct GraphAPITests {
         // codes/codeIndex are the V2-P1b dictionary-encoded per-node classification
         // codes — always present alongside the other parallel arrays.
         for key in ["ids", "communityId", "centrality", "anomaly", "createdTs",
-                    "tombstoned", "codes", "codeIndex", "edges", "communities", "analytics",
+                    "tombstoned", "codes", "codeIndex", "edges", "edgeTimeOrigin", "communities", "analytics",
+                    "positionQ16", "representatives", "folds", "bridges", "topologyVersion",
+                    "coordinateFrameVersion", "viewLevel", "focusKey", "activityIds", "activityKeys",
+                    "totalNodeCount", "totalEdgeCount", "lodTruncated",
                     "structurePending", "pending", "generatedTs", "estate", "snapshotTs"] {
             #expect(obj[key] != nil, "missing /api/graph field: \(key)")
         }
@@ -282,6 +364,8 @@ struct GraphAPITests {
         let ids = obj["ids"] as? [String] ?? []
         #expect(ids.count == 1, "compact ids array must have 1 entry")
         #expect(ids.first == "node-fixture-1", "first id must be node-fixture-1")
+        #expect((obj["positionQ16"] as? String)?.isEmpty == true,
+                "legacy snapshots without coordinates must retain layout fallback")
     }
 
     // V2-P1b end-to-end: governor writes a snapshot whose nodes carry udcCode →
@@ -324,11 +408,10 @@ struct GraphAPITests {
 
 // MARK: - Topology renderer asset wiring
 
-// The Topology renderer is the Canvas2D brain renderer inside app.js — no
-// separate renderer asset is shipped. These tests pin the wiring: the
-// dashboard HTML loads app.js, app.js binds /api/graph and contains the
-// Canvas2D renderer entry points, and the retired /sigma.js path stays off
-// the allow-list.
+// The Topology renderer is the Three.js brain renderer inside app.js — no
+// separate renderer asset is shipped. These tests pin the semantic-zoom and
+// compact-position wiring, while the retired /sigma.js path stays off the
+// allow-list.
 struct TopologyRendererAssetTests {
 
     @Test("Retired /sigma.js path is off the allow-list and serves 404")
@@ -348,8 +431,10 @@ struct TopologyRendererAssetTests {
         #expect(html.contains("/app.js"))
         let (_, _, js) = try await httpGET(port: port, path: "/app.js")
         #expect(js.contains("/api/graph"))
-        // Canvas2D brain renderer entry points live in app.js itself.
-        #expect(js.contains("drawBrainFrame"))
+        #expect(js.contains("new THREE.WebGLRenderer"))
+        #expect(js.contains("function topoDrill"))
+        #expect(js.contains("params.set(\"level\", topoViewLevel)"))
+        #expect(js.contains("g.positionQ16"))
         #expect(js.contains("selectBrainNode"))
     }
 }

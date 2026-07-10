@@ -709,6 +709,20 @@ library and does not depend on NeuronKit or any substrate kit.
 centrality per live drawer, tunnel and KGFact-bond edges, dissolution
 metadata, and per-community summaries for constellation labelling.
 
+Topology V3 then projects that structural result through
+`TopologyProjector.project` / `topology_projection::project`. It overlap-matches
+current communities and folds against the previous persisted snapshot, keeps
+matched coordinates unchanged, partitions large communities with deterministic
+farthest-seed multi-source graph distances, places new structure near connected
+existing structure, and emits aggregate bridges plus balanced representatives.
+Lattice/FDC edges are excluded from every key, fold, bridge, and coordinate
+decision. FDC is summarized afterward as dominant code and purity metadata.
+
+The shared golden key rule is FNV-1a 64 over sorted member ids joined by byte
+`0x01`, prefixed with `c-` or `f-`. Previous overlap wins over a new hash. This
+keeps raw Louvain-label renumbering from rotating the user's mental map and is
+implemented identically in Swift and Rust.
+
 The function is pure over plain descriptors — no store access, no clocks
 (I-17/I-18). Analysis is NeuronKit's lane; GeniusLocusKit is composition.
 The orchestration is arranged so the caller (aria-mcp, which depends on
