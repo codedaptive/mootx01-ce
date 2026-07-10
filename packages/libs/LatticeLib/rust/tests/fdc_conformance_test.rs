@@ -110,8 +110,8 @@ public let createdAt: Date
 public var updatedAt: Date
 "#;
     assert_eq!(Fdc::encode(swift_source), Some("005".to_owned()));
-    assert_eq!(Fdc::encode_anchor(swift_source).1, None);
-    assert_eq!(Fdc::CLASSIFIER_VERSION, "4.1.0");
+    assert_eq!(Fdc::encode_anchor(swift_source).1.as_deref(), Some("Q17118377"));
+    assert_eq!(Fdc::CLASSIFIER_VERSION, "4.2.0");
     assert_ne!(
         Fdc::encode("Let us remember the meeting.\nLet everyone review the notes."),
         Some("005".to_owned())
@@ -192,7 +192,7 @@ fn query_repetition_cannot_manufacture_precision() {
 #[test]
 fn recalculation_version_covers_algorithm_and_artifacts() {
     let version = Fdc::recalculation_version();
-    assert!(version.contains("classifier:4.1.0"));
+    assert!(version.contains("classifier:4.2.0"));
     assert!(version.contains("frame:1.1.0"));
     assert!(version.contains("lexicon:1.1.0"));
     assert!(version.contains("signatures:2.0.0"));

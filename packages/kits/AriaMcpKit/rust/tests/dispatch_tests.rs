@@ -149,6 +149,30 @@ fn seed_memory_with_anchor(
     drawer.id
 }
 
+fn seed_code_memory_with_anchor(
+    registry: &EstateRegistry,
+    content: &str,
+    code: &str,
+) -> String {
+    use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "fdc-reclassify",
+        LatticeAnchor::new(code, None, None, None),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.kind = ContentKind::Code;
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    coord.capture(&registry.default.handle, frame, now)
+        .expect("seed code capture must succeed").id
+}
+
 /// Advisory 1 (FDC-RECLASSIFY-ADVISORIES) fixture: seed a drawer whose
 /// anchor carries populated `udcFacets` / `wikidataQidsSecondary`, so the
 /// reclassify-apply test can assert the repair carries them forward
@@ -428,7 +452,7 @@ fn moot_reclassify_fdc_dry_run_reports_suspect_without_mutating() {
     let registry = EstateRegistry::new_inmemory_bare();
     let id = seed_memory_with_anchor(
         &registry,
-        "```swift\nlet read_signal = try store.readSignal()\n```",
+        "```bash\nread_signal && git status --short\n```",
         "362.4",
         Some("Q12131"),
     );
@@ -452,6 +476,58 @@ fn moot_reclassify_fdc_dry_run_reports_suspect_without_mutating() {
     );
     assert_eq!(stored_fdc_code(&registry, &id), "362.4");
     assert_eq!(fdc_floor(&registry), None, "dry-run must not stamp estate FDC floor");
+}
+
+#[test]
+fn moot_reclassify_fdc_all_mode_uses_content_kind_and_adds_language_qid() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let short_id = seed_code_memory_with_anchor(&registry, "x += 1", "362.4");
+    let swift_id = seed_code_memory_with_anchor(
+        &registry,
+        "import Foundation\npublic struct User { public let name: String }",
+        "005",
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true, "mode" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("moot_reclassify_fdc must dispatch");
+    let text = content_text(&result);
+    assert!(text.contains("updated: 2"), "got: {text}");
+
+    let short = stored_drawer(&registry, &short_id);
+    assert_eq!(short.udc_code, "005");
+    assert_eq!(short.wikidata_qid, None);
+    let swift = stored_drawer(&registry, &swift_id);
+    assert_eq!(swift.udc_code, "005");
+    assert_eq!(swift.wikidata_qid.as_deref(), Some("Q17118377"));
+}
+
+#[test]
+fn moot_reclassify_fdc_suspect_only_adds_qid_when_code_is_unchanged() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_code_memory_with_anchor(
+        &registry,
+        "import Foundation\npublic struct User { public let name: String }",
+        "005",
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("moot_reclassify_fdc must dispatch");
+    let text = content_text(&result);
+    assert!(text.contains("mode: suspectOnly"), "got: {text}");
+    assert!(text.contains("updated: 1"), "got: {text}");
+    assert_eq!(
+        stored_drawer(&registry, &id).wikidata_qid.as_deref(),
+        Some("Q17118377")
+    );
+    assert_eq!(fdc_floor(&registry), None);
 }
 
 #[test]

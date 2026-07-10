@@ -115,7 +115,9 @@ public extension GeniusLocusKit {
             // that fails validation after this point) leaks nothing because
             // classification runs before the write and recording is suppressed here.
             // Rust parity: capture_with_mode calls Fdc::encode_anchor_no_record.
-            let anchor = EideticLib.lookup(frame.content, recordNovel: false)
+            let contentKind: EideticContentKind = frame.kind == .code ? .code : .text
+            let anchor = EideticLib.lookup(
+                frame.content, contentKind: contentKind, recordNovel: false)
             guard !anchor.code.isEmpty else {
                 // UNRESOLVED: content could not be classified. Leave sentinel.
                 return frame
@@ -123,7 +125,9 @@ public extension GeniusLocusKit {
             var classified = frame
             classified.latticeAnchor = LatticeAnchor(
                 udcCode: anchor.code,
-                wikidataQID: anchor.wikidataQID
+                udcFacets: frame.latticeAnchor.udcFacets,
+                wikidataQID: anchor.wikidataQID,
+                wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary
             )
             return classified
         }()
@@ -242,7 +246,9 @@ public extension GeniusLocusKit {
             // recordNovel: false — batch import content must not leak novel tokens
             // into the plaintext pool pipeline (secfix/fdc-pool, same rationale as
             // the single-frame capture path above).
-            let anchor = EideticLib.lookup(frame.content, recordNovel: false)
+            let contentKind: EideticContentKind = frame.kind == .code ? .code : .text
+            let anchor = EideticLib.lookup(
+                frame.content, contentKind: contentKind, recordNovel: false)
             guard !anchor.code.isEmpty else {
                 // UNRESOLVED: content could not be classified. Leave sentinel.
                 return frame
@@ -250,7 +256,9 @@ public extension GeniusLocusKit {
             var classified = frame
             classified.latticeAnchor = LatticeAnchor(
                 udcCode: anchor.code,
-                wikidataQID: anchor.wikidataQID
+                udcFacets: frame.latticeAnchor.udcFacets,
+                wikidataQID: anchor.wikidataQID,
+                wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary
             )
             return classified
         }

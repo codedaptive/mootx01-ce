@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 const TARGET_FOLD_SIZE: usize = 192;
 const MAX_FOLDS_PER_COMMUNITY: usize = 64;
+pub(crate) const COORDINATE_FRAME_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectedNode {
@@ -105,6 +106,8 @@ struct PreviousSnapshot {
     communities: Vec<PreviousAggregate>,
     #[serde(default)]
     folds: Vec<PreviousAggregate>,
+    #[serde(default, rename = "coordinateFrameVersion")]
+    coordinate_frame_version: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +169,7 @@ pub(crate) fn project(topology: &GraphTopology, previous_json: Option<&str>) -> 
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect();
+    let reuse_coordinates = previous.coordinate_frame_version == Some(COORDINATE_FRAME_VERSION);
 
     let live: Vec<&GraphTopologyNode> = topology
         .nodes
@@ -324,8 +328,19 @@ pub(crate) fn project(topology: &GraphTopology, previous_json: Option<&str>) -> 
         }
     }
 
-    let previous_community_positions = previous_positions(&previous.communities);
-    let previous_fold_positions = previous_positions(&previous.folds);
+    // Stable keys survive a frame upgrade, but coordinates do not. Version 1
+    // derived X/Y/Z from correlated FNV suffixes and collapsed most estates
+    // near one diagonal. Reset only the spatial frame on a version mismatch.
+    let previous_community_positions = if reuse_coordinates {
+        previous_positions(&previous.communities)
+    } else {
+        HashMap::new()
+    };
+    let previous_fold_positions = if reuse_coordinates {
+        previous_positions(&previous.folds)
+    } else {
+        HashMap::new()
+    };
     let community_bridge_values: BTreeMap<BridgeKey, BridgeValue> = bridge_values
         .iter()
         .filter(|(key, _)| key.level == "community")
@@ -482,9 +497,9 @@ pub(crate) fn project(topology: &GraphTopology, previous_json: Option<&str>) -> 
         let mut positions = HashMap::new();
         let mut fixed = HashSet::new();
         for id in &members {
-            if let Some(prior) = previous_nodes
-                .get(id.as_str())
-                .and_then(|node| previous_point(node))
+            if let Some(prior) = reuse_coordinates
+                .then(|| previous_nodes.get(id.as_str()).and_then(|node| previous_point(node)))
+                .flatten()
             {
                 positions.insert(id.clone(), prior);
                 fixed.insert(id.clone());
@@ -552,9 +567,9 @@ pub(crate) fn project(topology: &GraphTopology, previous_json: Option<&str>) -> 
                 },
             );
         } else {
-            let point = previous_nodes
-                .get(node.id.as_str())
-                .and_then(|node| previous_point(node))
+            let point = reuse_coordinates
+                .then(|| previous_nodes.get(node.id.as_str()).and_then(|node| previous_point(node)))
+                .flatten()
                 .unwrap_or_else(|| hash_direction(&node.id).scale(0.9).bounded());
             nodes_by_id.insert(
                 node.id.clone(),
@@ -947,8 +962,21 @@ fn dominant_code(codes: &[String]) -> String {
 }
 
 fn hash_direction(value: &str) -> Point {
-    let unit = |salt: &str| (fnv1a(&format!("{value}{salt}")) & 0xffff) as f64 / 32_767.5 - 1.0;
-    let (mut x, mut y, mut z) = (unit("x"), unit("y"), unit("z"));
+    fn mixed(input: u64) -> u64 {
+        let mut z = input.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    let base = fnv1a(value);
+    let unit = |salt: u64| {
+        ((mixed(base ^ salt) >> 11) as f64 / 9_007_199_254_740_991.0) * 2.0 - 1.0
+    };
+    let (mut x, mut y, mut z) = (
+        unit(0x243f_6a88_85a3_08d3),
+        unit(0x1319_8a2e_0370_7344),
+        unit(0xa409_3822_299f_31d0),
+    );
     let length = (x * x + y * y + z * z).sqrt();
     if length < 0.000_001 {
         x = 1.0;
@@ -1065,10 +1093,10 @@ mod tests {
         };
         let first = project(&make(vec![edge("a", "b", "tunnel")]), None);
         let second = project(&make(vec![edge("b", "c", "tunnel")]), None);
-        assert_eq!(first.nodes_by_id["a"].x, -0.4473993965904576);
-        assert_eq!(first.nodes_by_id["a"].y, -0.2903365191220521);
-        assert_eq!(first.nodes_by_id["b"].x, -0.44710111746239545);
-        assert_eq!(first.nodes_by_id["b"].y, -0.2904329670558848);
+        assert_eq!(first.nodes_by_id["a"].x, -0.34372757293757106);
+        assert_eq!(first.nodes_by_id["a"].y, -0.44612174568373836);
+        assert_eq!(first.nodes_by_id["b"].x, -0.3630845216131912);
+        assert_eq!(first.nodes_by_id["b"].y, -0.45488673264244267);
         assert_ne!(first.nodes_by_id["a"].x, second.nodes_by_id["a"].x);
         assert_ne!(first.nodes_by_id["b"].y, second.nodes_by_id["b"].y);
     }
@@ -1101,6 +1129,7 @@ mod tests {
             })
             .collect();
         let previous = serde_json::json!({
+            "coordinateFrameVersion": COORDINATE_FRAME_VERSION,
             "nodes": previous_nodes,
             "communities": [{"stableKey": community.stable_key, "x": community.point.x,
                                "y": community.point.y, "z": community.point.z}],
@@ -1121,7 +1150,73 @@ mod tests {
         let second = project(&grown, Some(&previous));
         assert_eq!(second.communities[0].stable_key, community.stable_key);
         assert_eq!(second.folds[0].stable_key, fold.stable_key);
-        assert_eq!(second.nodes_by_id["a"].x, first.nodes_by_id["a"].x);
+        assert!((second.nodes_by_id["a"].x - first.nodes_by_id["a"].x).abs() < 1e-15);
+    }
+
+    #[test]
+    fn coordinate_frame_upgrade_preserves_keys_but_resets_positions() {
+        let topology = GraphTopology {
+            nodes: vec![node("a", 0, None), node("b", 0, None)],
+            edges: vec![edge("a", "b", "tunnel")],
+            community_count: 1,
+            communities: vec![GraphTopologyCommunity {
+                id: 0, size: 2, dominant_udc_code: String::new(),
+            }],
+        };
+        let first = project(&topology, None);
+        let community = &first.communities[0];
+        let fold = &first.folds[0];
+        let snapshot = |version| serde_json::json!({
+            "coordinateFrameVersion": version,
+            "nodes": first.nodes_by_id.iter().map(|(id, value)| serde_json::json!({
+                "id": id, "communityKey": value.community_key, "foldKey": value.fold_key,
+                "x": 0.21, "y": 0.22, "z": 0.23
+            })).collect::<Vec<_>>(),
+            "communities": [{"stableKey": community.stable_key, "x": 0.31, "y": 0.32, "z": 0.33}],
+            "folds": [{"stableKey": fold.stable_key, "x": 0.41, "y": 0.42, "z": 0.43}]
+        }).to_string();
+
+        let old = snapshot(1);
+        let upgraded = project(&topology, Some(&old));
+        assert_eq!(upgraded.communities[0].stable_key, community.stable_key);
+        assert_eq!(upgraded.folds[0].stable_key, fold.stable_key);
+        assert_ne!(upgraded.communities[0].point.x, 0.31);
+        assert_ne!(upgraded.nodes_by_id["a"].x, 0.21);
+
+        let current = snapshot(COORDINATE_FRAME_VERSION);
+        let continued = project(&topology, Some(&current));
+        assert_eq!(continued.communities[0].point.x, 0.31);
+        assert_eq!(continued.nodes_by_id["a"].x, 0.21);
+    }
+
+    #[test]
+    fn coordinate_axes_are_decorrelated() {
+        let count = 512;
+        let topology = GraphTopology {
+            nodes: (0..count).map(|index| node(&format!("axis-{index}"), index, None)).collect(),
+            edges: vec![],
+            community_count: count as usize,
+            communities: (0..count).map(|id| GraphTopologyCommunity {
+                id, size: 1, dominant_udc_code: String::new(),
+            }).collect(),
+        };
+        let projection = project(&topology, None);
+        let correlation = |lhs: Vec<f64>, rhs: Vec<f64>| {
+            let n = lhs.len() as f64;
+            let l_mean = lhs.iter().sum::<f64>() / n;
+            let r_mean = rhs.iter().sum::<f64>() / n;
+            let covariance = lhs.iter().zip(&rhs)
+                .map(|(l, r)| (l - l_mean) * (r - r_mean)).sum::<f64>();
+            let l_variance = lhs.iter().map(|v| (v - l_mean).powi(2)).sum::<f64>();
+            let r_variance = rhs.iter().map(|v| (v - r_mean).powi(2)).sum::<f64>();
+            covariance / (l_variance * r_variance).sqrt()
+        };
+        let x = projection.communities.iter().map(|c| c.point.x).collect::<Vec<_>>();
+        let y = projection.communities.iter().map(|c| c.point.y).collect::<Vec<_>>();
+        let z = projection.communities.iter().map(|c| c.point.z).collect::<Vec<_>>();
+        assert!(correlation(x.clone(), y.clone()).abs() < 0.12);
+        assert!(correlation(x, z.clone()).abs() < 0.12);
+        assert!(correlation(y, z).abs() < 0.12);
     }
 
     #[test]

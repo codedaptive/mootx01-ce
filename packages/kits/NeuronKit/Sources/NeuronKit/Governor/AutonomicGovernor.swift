@@ -155,9 +155,10 @@ public actor AutonomicGovernor {
     /// nil = no persistence (the first duty always recomputes). Symmetric to
     /// `topologyHandler`.
     private let topologyFingerprintLoader: (@Sendable () async -> String?)?
-    /// Loads the previous persisted snapshot when a changed estate must be
-    /// reprojected. V3 uses it to preserve stable aggregate identities and
-    /// coordinates across growth, splits, and merges.
+    /// Loads the previous persisted snapshot when an estate must be reprojected.
+    /// V3 uses it to preserve stable aggregate identities and coordinates across
+    /// growth, splits, and merges. The versioned fingerprint can also force this
+    /// path for a coordinate-frame upgrade with otherwise unchanged inputs.
     private let topologySnapshotLoader: (@Sendable () async -> Data?)?
     /// Whether the persisted fingerprint has been loaded into
     /// `lastTopologyFingerprint` yet (one-shot, on the first topology duty).
@@ -171,10 +172,11 @@ public actor AutonomicGovernor {
     /// Stable `fingerprint` of the most recent COMPUTED topology snapshot inputs.
     /// When the next due cadence yields the same fingerprint, the duty skips the
     /// Louvain/centrality math, the encode, and the store write — the stored
-    /// snapshot is still current (generatedTs therefore means "when the content
-    /// last changed", not "when the duty last ran"). Seeded on the first duty from
-    /// the persisted fingerprint (F5, via `topologyFingerprintLoader`) so the skip
-    /// holds across process restarts, then updated after every recompute.
+    /// snapshot is still current (generatedTs therefore means "when the content or
+    /// coordinate frame last changed", not "when the duty last ran"). Seeded on
+    /// the first duty from the persisted fingerprint (F5, via
+    /// `topologyFingerprintLoader`) so the skip holds across process restarts,
+    /// then updated after every recompute.
     private var lastTopologyFingerprint: String? = nil
     /// Minimum spacing between PoolReducer (novel-token merge-back) passes, in
     /// milliseconds. Default 0 — NEAR-REALTIME: considered every tick, gated by
@@ -944,20 +946,18 @@ public actor AutonomicGovernor {
         let kgFacts = try await locus.allKGFacts()
 
         // Dirty check: compute the stable inputs fingerprint BEFORE the expensive
-        // work. An unchanged fingerprint means the stored snapshot is still current,
-        // so the duty skips graph projection, encoding, and the snapshot write. The
-        // fingerprint is stable across process launches, so this skip holds across a
-        // restart too (F5).
+        // work. The fingerprint embeds the coordinate-frame version, so a frame
+        // bump invalidates every old snapshot once without loading that large snapshot
+        // on ordinary unchanged cadences. It remains stable across process launches,
+        // so normal skips still hold across a restart (F5).
         let token = TopologyInputsToken(drawers: allDrawerRows,
                                         tunnels: allTunnelRows,
                                         facts: kgFacts)
         if let previousFingerprint, token.fingerprint == previousFingerprint {
             return token
         }
-        let projectionBaseline: Data?
-        if let previousSnapshot {
-            projectionBaseline = previousSnapshot
-        } else {
+        var projectionBaseline = previousSnapshot
+        if projectionBaseline == nil {
             projectionBaseline = await previousSnapshotLoader?()
         }
 
@@ -1060,7 +1060,7 @@ public actor AutonomicGovernor {
             structurePending: false,
             communities: communities,
             topologyVersion: 3,
-            coordinateFrameVersion: 1,
+            coordinateFrameVersion: TopologyProjector.coordinateFrameVersion,
             folds: folds,
             bridges: bridges,
             generatedTs: generatedTs)
@@ -1208,11 +1208,18 @@ public struct TopologyInputsToken: Sendable, Equatable {
     /// Stable, persistable fingerprint of these inputs. Two tokens are equal iff
     /// their fingerprints are equal, so the duty's dirty-check compares
     /// fingerprints — and the same comparison holds across process restarts when
-    /// one side is loaded from disk.
+    /// one side is loaded from disk. The `cfN` prefix is the coordinate-frame
+    /// recalculation floor: bumping the frame changes the fingerprint even when
+    /// every estate input is unchanged.
     public var fingerprint: String {
         let filed = maxFiledAt.map { String($0.timeIntervalSince1970) } ?? "-"
         let event = maxEventTime.map { String($0.timeIntervalSince1970) } ?? "-"
-        return "\(drawerCount):\(tunnelCount):\(factCount):\(deadDrawerCount):\(deadTunnelCount):\(filed):\(event):\(inputsDigest)"
+        return [
+            "cf\(TopologyProjector.coordinateFrameVersion)",
+            String(drawerCount), String(tunnelCount), String(factCount),
+            String(deadDrawerCount), String(deadTunnelCount), filed, event,
+            String(inputsDigest),
+        ].joined(separator: ":")
     }
 }
 

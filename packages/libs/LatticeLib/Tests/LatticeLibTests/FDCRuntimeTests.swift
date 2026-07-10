@@ -130,8 +130,8 @@ struct FDCRuntimeTests {
         public var updatedAt: Date
         """
         #expect(FDC.encode(swiftSource) == "005")
-        #expect(FDC.encodeAnchor(swiftSource).conceptQID == nil)
-        #expect(FDC.classifierVersion == "4.1.0")
+        #expect(FDC.encodeAnchor(swiftSource).conceptQID == "Q17118377")
+        #expect(FDC.classifierVersion == "4.2.0")
         #expect(FDC.encode("Let us remember the meeting.\nLet everyone review the notes.") != "005")
     }
 
@@ -188,7 +188,7 @@ struct FDCRuntimeTests {
 
     @Test("recalculation version covers algorithm and artifacts")
     func recalculationVersionIsComposite() {
-        #expect(FDC.recalculationVersion.contains("classifier:4.1.0"))
+        #expect(FDC.recalculationVersion.contains("classifier:4.2.0"))
         #expect(FDC.recalculationVersion.contains("frame:1.1.0"))
         #expect(FDC.recalculationVersion.contains("lexicon:1.1.0"))
         #expect(FDC.recalculationVersion.contains("signatures:2.0.0"))

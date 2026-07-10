@@ -20,7 +20,7 @@ pub mod lattice_code_state;
 pub use anchor::Anchor;
 pub use lattice_code_state::{LatticeCodeGrammar, LatticeCodeState, classify_lattice_code};
 
-use lattice_lib::Fdc;
+use lattice_lib::{Fdc, FdcContentKind};
 use std::collections::HashSet;
 
 /// The EideticLib crate version.
@@ -54,6 +54,22 @@ pub fn lookup_no_record(term: &str) -> Anchor {
     lookup_with_encoder(term, Fdc::encode_anchor_no_record)
 }
 
+/// Content-aware non-recording lookup used by capture and recalculation.
+/// `Code` is authoritative shape metadata and anchors nonempty content at
+/// FDC `005`, with a language Q-ID when detection is decisive.
+pub fn lookup_no_record_with_kind(term: &str, content_kind: FdcContentKind) -> Anchor {
+    if !Fdc::is_available() {
+        panic!(
+            "eidetic_lib: FDC artifacts failed to load — \
+             build/configuration error. The bundled canon is missing \
+             from this binary. No anchor can be produced. Fix the build."
+        );
+    }
+    anchor_from_encoded(
+        Fdc::encode_anchor_for_content_no_record(term, content_kind),
+    )
+}
+
 fn lookup_with_encoder(
     term: &str,
     encode: fn(&str) -> (Option<String>, Option<String>),
@@ -66,7 +82,12 @@ fn lookup_with_encoder(
         );
     }
 
-    let (code, qid) = encode(term);
+    anchor_from_encoded(encode(term))
+}
+
+fn anchor_from_encoded(
+    (code, qid): (Option<String>, Option<String>),
+) -> Anchor {
     match code {
         None => {
             // UNRESOLVED: empty anchor, never a fallback code.

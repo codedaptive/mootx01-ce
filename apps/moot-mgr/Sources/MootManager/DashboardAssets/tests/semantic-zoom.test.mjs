@@ -2,111 +2,151 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  aggregateVisualStyle,
+  aggregateVisualWeight,
   BoundedTTLCache,
-  SemanticZoomController,
-  SEMANTIC_ZOOM_DEFAULTS,
+  brainFieldCenters,
+  engramFieldPresentation,
+  EXPANSION_DEFAULTS,
+  remapDetailCommunities,
+  SemanticExpansionController,
+  stableUnit,
 } from "../semantic-zoom.mjs";
 
-const community = { aggregateKey: "c-alpha", parentKey: null };
-const fold = { aggregateKey: "f-alpha", parentKey: "c-alpha" };
+const community = { aggregateLevel: "community", aggregateKey: "c-alpha", parentKey: null };
+const otherCommunity = { aggregateLevel: "community", aggregateKey: "c-beta", parentKey: null };
+const fold = { aggregateLevel: "fold", aggregateKey: "f-alpha", parentKey: "c-alpha" };
 
-test("default thresholds require a deliberate gesture and stable reverse zoom", () => {
-  assert.deepEqual(SEMANTIC_ZOOM_DEFAULTS, {
-    prefetchPx: 42,
-    enterPx: 72,
-    exitDistanceRatio: 1.7,
-    transitionMs: 260,
-  });
+test("detail expansion has a bounded visual morph", () => {
+  assert.deepEqual(EXPANSION_DEFAULTS, { transitionMs: 420 });
 });
 
-test("prefetches once before the enter threshold", () => {
-  const zoom = new SemanticZoomController({ prefetchPx: 20, enterPx: 40 });
-  assert.equal(zoom.observe({ direction: "in", candidate: community, projectedPx: 19 }), null);
-  const intent = zoom.observe({ direction: "in", candidate: community, projectedPx: 20 });
-  assert.deepEqual(intent, {
-    type: "prefetch", direction: "in", level: "community",
-    focusKey: "c-alpha", parentKey: "c-alpha",
-  });
-  zoom.markPrefetched(intent.level, intent.focusKey);
-  assert.equal(zoom.observe({ direction: "in", candidate: community, projectedPx: 30 }), null);
-});
-
-test("crossing the enter threshold produces a locked forward transition", () => {
-  const zoom = new SemanticZoomController({ prefetchPx: 20, enterPx: 40 });
-  const intent = zoom.observe({ direction: "in", candidate: community, projectedPx: 40 });
-  assert.equal(intent.type, "transition");
-  assert.equal(intent.level, "community");
-  assert.equal(zoom.begin(), true);
-  assert.equal(zoom.observe({ direction: "in", candidate: community, projectedPx: 80 }), null);
-  assert.equal(zoom.begin(), false);
-});
-
-test("community to local preserves the community parent for reverse zoom", () => {
-  const zoom = new SemanticZoomController({ prefetchPx: 20, enterPx: 40 });
-  zoom.sync("community", "c-alpha", "c-alpha");
-  const intent = zoom.observe({ direction: "in", candidate: fold, projectedPx: 45 });
-  assert.deepEqual(intent, {
-    type: "transition", direction: "in", level: "local",
-    focusKey: "f-alpha", parentKey: "c-alpha",
-  });
-  zoom.complete("local", "f-alpha", "c-alpha");
-  assert.equal(zoom.level, "local");
-  assert.equal(zoom.parentKey, "c-alpha");
-});
-
-test("reverse transition uses a wider distance threshold as hysteresis", () => {
-  const zoom = new SemanticZoomController({
-    prefetchPx: 20, enterPx: 40, exitDistanceRatio: 1.5,
-  });
-  zoom.sync("local", "f-alpha", "c-alpha");
-  assert.equal(zoom.observe({ direction: "out", distanceRatio: 1.49 }), null);
-  assert.deepEqual(zoom.observe({ direction: "out", distanceRatio: 1.5 }), {
-    type: "transition", direction: "out", level: "community",
-    focusKey: "c-alpha", parentKey: "c-alpha",
-  });
-  zoom.complete("community", "c-alpha", "c-alpha");
-  assert.deepEqual(zoom.observe({ direction: "out", distanceRatio: 1.5 }), {
-    type: "transition", direction: "out", level: "estate",
-    focusKey: null, parentKey: null,
-  });
-});
-
-test("repeated threshold crossings produce one transition per completed level change", () => {
-  const zoom = new SemanticZoomController({
-    prefetchPx: 39.95, enterPx: 40, exitDistanceRatio: 1.5,
-  });
-  for (let cycle = 0; cycle < 20; cycle++) {
-    assert.equal(
-      zoom.observe({ direction: "in", candidate: community, projectedPx: 39.9 }),
-      null,
-    );
-    const inward = zoom.observe({ direction: "in", candidate: community, projectedPx: 40 });
-    assert.equal(inward.level, "community");
-    assert.equal(zoom.begin(), true);
-    assert.equal(zoom.observe({ direction: "out", distanceRatio: 2 }), null);
-    zoom.complete("community", "c-alpha", "c-alpha");
-
-    assert.equal(zoom.observe({ direction: "out", distanceRatio: 1.49 }), null);
-    const outward = zoom.observe({ direction: "out", distanceRatio: 1.5 });
-    assert.equal(outward.level, "estate");
-    assert.equal(zoom.begin(), true);
-    assert.equal(zoom.observe({ direction: "in", candidate: community, projectedPx: 80 }), null);
-    zoom.complete("estate");
-  }
-});
-
-test("click drill is immediate but cannot move beyond local", () => {
-  const zoom = new SemanticZoomController();
-  assert.equal(zoom.drill(community).level, "community");
-  zoom.sync("local", "f-alpha", "c-alpha");
-  assert.equal(zoom.drill(fold), null);
-});
-
-test("rejects an invalid threshold order", () => {
-  assert.throws(
-    () => new SemanticZoomController({ prefetchPx: 40, enterPx: 40 }),
-    /prefetch threshold/,
+test("Engram Fields have a stable name and optional factual detail", () => {
+  assert.deepEqual(
+    engramFieldPresentation("__other__:slice:7", 811, "620"),
+    {
+      key: "__other__:slice:7",
+      name: "Engram Field 8",
+      primary: "Engram Field 8",
+      detail: "811 memories · dominant FDC 620",
+    },
   );
+  assert.equal(engramFieldPresentation("community:7", 811, "620"), null);
+});
+
+test("aggregate mass is monotonic, bounded, and visibly differentiated", () => {
+  const tiny = aggregateVisualStyle(1, 50_000, "community");
+  const medium = aggregateVisualStyle(500, 50_000, "community");
+  const large = aggregateVisualStyle(50_000, 50_000, "community");
+  assert.ok(aggregateVisualWeight(1, 50_000) >= 0);
+  assert.ok(large.weight <= 1);
+  assert.ok(tiny.coreSizePx < medium.coreSizePx);
+  assert.ok(medium.coreSizePx < large.coreSizePx);
+  assert.ok(tiny.coreSizePx >= 4, "one-memory aggregates remain visible and clickable");
+  assert.ok(large.coreSizePx <= 13, "aggregate dots stay compact at every camera distance");
+  assert.ok(aggregateVisualStyle(500, 50_000, "fold").coreSizePx < medium.coreSizePx);
+});
+
+test("fallback brain field is deterministic and uses both hemispheres", () => {
+  const first = brainFieldCenters(20, 900, 600);
+  const second = brainFieldCenters(20, 900, 600);
+  assert.deepEqual(first, second);
+  assert.equal(first.length, 20);
+  assert.ok(first.some((point) => point.x < 450));
+  assert.ok(first.some((point) => point.x > 450));
+  assert.ok(new Set(first.map((point) => `${point.x}:${point.y}`)).size > 18);
+});
+
+test("salted fallback samples do not collapse axes together", () => {
+  const samples = Array.from({ length: 256 }, (_, index) => ({
+    x: stableUnit(`node-${index}`, "x"),
+    y: stableUnit(`node-${index}`, "y"),
+    z: stableUnit(`node-${index}`, "z"),
+  }));
+  assert.ok(samples.some((sample) => Math.abs(sample.x - sample.y) > 0.25));
+  assert.ok(samples.some((sample) => Math.abs(sample.y - sample.z) > 0.25));
+});
+
+test("explicit community expansion requests its children", () => {
+  const expansion = new SemanticExpansionController();
+  assert.deepEqual(expansion.intent(community), {
+    type: "transition", level: "community", focusKey: "c-alpha",
+    parentKey: "c-alpha", expansionKey: "community:c-alpha",
+  });
+});
+
+test("aggregate kind chooses the detail endpoint independently", () => {
+  const expansion = new SemanticExpansionController();
+  const intent = expansion.intent(fold);
+  assert.deepEqual(intent, {
+    type: "transition", level: "local", focusKey: "f-alpha",
+    parentKey: "c-alpha", expansionKey: "local:f-alpha",
+  });
+});
+
+test("completed expansion stays visible and another aggregate can expand", () => {
+  const expansion = new SemanticExpansionController();
+  const first = expansion.intent(community);
+  assert.equal(expansion.begin(first), true);
+  assert.equal(expansion.intent(otherCommunity), null);
+  assert.equal(expansion.begin(first), false);
+  expansion.complete(first);
+  assert.equal(expansion.intent(community), null);
+  assert.equal(expansion.intent(otherCommunity).focusKey, "c-beta");
+});
+
+test("real memories have no child endpoint", () => {
+  const expansion = new SemanticExpansionController();
+  assert.equal(expansion.intent({ id: "memory" }), null);
+});
+
+test("reset clears accumulated expansion state", () => {
+  const expansion = new SemanticExpansionController();
+  const first = expansion.intent(community);
+  expansion.begin(first);
+  expansion.complete(first);
+  assert.equal(expansion.intent(community), null);
+  expansion.reset();
+  assert.equal(expansion.intent(community).focusKey, "c-alpha");
+});
+
+test("community detail receives fresh community ids without changing ancestors", () => {
+  const previous = {
+    rawNodes: [{ id: "parent", communityId: 4, aggregateKey: "c-alpha" }],
+    communities: [{ id: 4, label: "Parent", size: 100 }],
+  };
+  const result = remapDetailCommunities(
+    previous,
+    [{ id: "fold", communityId: 0, aggregateKey: "f-alpha" }],
+    [{ id: 0, label: "Fold", size: 25 }],
+    { level: "community", focusKey: "c-alpha" },
+  );
+  assert.deepEqual(result.communities, [
+    { id: 4, label: "Parent", size: 100 },
+    { id: 5, label: "Fold", size: 25 },
+  ]);
+  assert.equal(result.rawNodes[0].communityId, 5);
+});
+
+test("local detail reuses its visible fold community without double-counting metadata", () => {
+  const previous = {
+    rawNodes: [
+      { id: "parent", communityId: 4, aggregateKey: "c-alpha" },
+      { id: "fold", communityId: 5, aggregateKey: "f-alpha" },
+    ],
+    communities: [
+      { id: 4, label: "Parent", size: 100 },
+      { id: 5, label: "Fold", size: 25 },
+    ],
+  };
+  const result = remapDetailCommunities(
+    previous,
+    [{ id: "memory", communityId: 0 }],
+    [{ id: 0, label: "Parent", size: 100 }],
+    { level: "local", focusKey: "f-alpha" },
+  );
+  assert.deepEqual(result.communities, previous.communities);
+  assert.equal(result.rawNodes[0].communityId, 5);
 });
 
 test("bounded cache expires entries and refreshes LRU order", () => {
@@ -128,16 +168,4 @@ test("bounded cache expires entries and refreshes LRU order", () => {
 test("bounded cache validates its resource limits", () => {
   assert.throws(() => new BoundedTTLCache({ limit: 0 }), /limit/);
   assert.throws(() => new BoundedTTLCache({ ttlMs: 0 }), /ttl/);
-});
-
-test("failed prefetches can be retried", () => {
-  const zoom = new SemanticZoomController({ prefetchPx: 20, enterPx: 40 });
-  const first = zoom.observe({ direction: "in", candidate: community, projectedPx: 20 });
-  zoom.markPrefetched(first.level, first.focusKey);
-  assert.equal(zoom.observe({ direction: "in", candidate: community, projectedPx: 25 }), null);
-  zoom.forgetPrefetched(first.level, first.focusKey);
-  assert.equal(
-    zoom.observe({ direction: "in", candidate: community, projectedPx: 25 }).type,
-    "prefetch",
-  );
 });

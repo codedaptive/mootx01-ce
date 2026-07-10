@@ -41,13 +41,15 @@ pub mod fdc_semantic_ranker;
 pub mod concept_bag;
 pub mod fdc_matcher;
 pub mod fdc_runtime;
+pub mod fdc_code_language;
 pub mod code;
 pub mod novel_token_cache;
 pub mod novel_pool_submitter;
 pub mod pool_reducer;
 pub mod qid_closure;
 
-pub use fdc_runtime::Fdc;
+pub use fdc_runtime::{Fdc, FdcContentKind};
+pub use fdc_code_language::{detect_code_language, FdcCodeLanguage};
 pub use fdc_matcher::FdcMatcher;
 pub use fdc_semantic_ranker::{FdcSemanticCandidate, FdcSemanticDecision, FdcSemanticRanker};
 pub use concept_bag::{build_bag, build_bag_with_tagger, build_encoder_bag_with_tagger, build_bag_no_record, build_encoder_bag_no_record};

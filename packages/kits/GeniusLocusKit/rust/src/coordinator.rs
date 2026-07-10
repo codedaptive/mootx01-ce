@@ -73,6 +73,7 @@ use std::path::Path;
 use locus_kit::default_wings::DEFAULT_WINGS;
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::ContentKind;
 use uuid::Uuid;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::error::LocusKitError;
@@ -1761,16 +1762,21 @@ impl EstateCoordinator {
                 // tokens into the plaintext pool pipeline (secfix/fdc-pool, same
                 // rationale as capture_with_mode in intake.rs). Result is
                 // byte-identical to encode_anchor.
-                let (code_opt, qid_opt) =
-                    lattice_lib::fdc_runtime::Fdc::encode_anchor_no_record(&frame.content);
+                let content_kind = if frame.kind == ContentKind::Code {
+                    lattice_lib::FdcContentKind::Code
+                } else {
+                    lattice_lib::FdcContentKind::Text
+                };
+                let (code_opt, qid_opt) = lattice_lib::Fdc::encode_anchor_for_content_no_record(
+                    &frame.content, content_kind);
                 match code_opt {
                     Some(code) if !code.is_empty() => {
                         let mut f = frame;
                         f.lattice_anchor = LatticeAnchor {
                             udc_code: code,
-                            udc_facets: None,
+                            udc_facets: f.lattice_anchor.udc_facets.clone(),
                             wikidata_qid: qid_opt,
-                            wikidata_qids_secondary: None,
+                            wikidata_qids_secondary: f.lattice_anchor.wikidata_qids_secondary.clone(),
                         };
                         f
                     }

@@ -2657,7 +2657,7 @@ extension ToolDispatcher {
         let now = Date()
 
         // Phase A — PARALLEL classify. Each drawer's content anchor is a pure
-        // function of its content over the pinned FDC artifacts: the
+        // function of its content and stored kind over the pinned FDC artifacts: the
         // `recordNovel: false` seam skips the only shared-mutable write (the
         // novel-token pool cache), and every other artifact on the path is
         // read-only after init or a lock-guarded pure-function memo. So the
@@ -2668,7 +2668,11 @@ extension ToolDispatcher {
         // Results are indexed parallel to `scannedDrawers` to preserve scan
         // order for the serial audited write in Phase B below.
         let anchors = await Self.classifyContentsInParallel(
-            scannedDrawers.map { $0.content })
+            scannedDrawers.map {
+                FDCReclassifyInput(
+                    content: $0.content,
+                    contentKind: $0.contentKind == .code ? .code : .text)
+            })
 
         // Phase B — SERIAL, ORDERED apply. Identical to the pre-parallel loop
         // except the inline classify call is replaced by the precomputed
@@ -2794,8 +2798,8 @@ extension ToolDispatcher {
         return Self.textResult(lines.joined(separator: "\n"))
     }
 
-    /// Classify each content string to its FDC anchor across a bounded worker
-    /// pool, returning anchors in the SAME order as `contents`.
+    /// Classify each content/kind pair to its FDC anchor across a bounded worker
+    /// pool, returning anchors in the SAME order as `inputs`.
     ///
     /// Used by `runReclassifyFDC` to parallelize the one expensive step of a
     /// reclassify scan (running content through the v4 classifier + semantic
@@ -2811,10 +2815,10 @@ extension ToolDispatcher {
     /// cores without spawning one task per drawer. Order is preserved by
     /// scattering results into an index-keyed buffer, so the caller's serial
     /// audited-write phase sees the identical scan order.
-    static func classifyContentsInParallel(
-        _ contents: [String]
+    fileprivate static func classifyContentsInParallel(
+        _ inputs: [FDCReclassifyInput]
     ) async -> [Anchor] {
-        let count = contents.count
+        let count = inputs.count
         if count == 0 { return [] }
         let maxConcurrency = max(1, ProcessInfo.processInfo.activeProcessorCount)
 
@@ -2825,8 +2829,11 @@ extension ToolDispatcher {
             let window = min(maxConcurrency, count)
             while next < window {
                 let i = next
-                let content = contents[i]
-                group.addTask { (i, EideticLib.lookup(content, recordNovel: false)) }
+                let input = inputs[i]
+                group.addTask {
+                    (i, EideticLib.lookup(
+                        input.content, contentKind: input.contentKind, recordNovel: false))
+                }
                 next += 1
             }
             // As each classify completes, admit the next one — keeping at most
@@ -2835,8 +2842,11 @@ extension ToolDispatcher {
                 results[i] = anchor
                 if next < count {
                     let j = next
-                    let content = contents[j]
-                    group.addTask { (j, EideticLib.lookup(content, recordNovel: false)) }
+                    let input = inputs[j]
+                    group.addTask {
+                        (j, EideticLib.lookup(
+                            input.content, contentKind: input.contentKind, recordNovel: false))
+                    }
                     next += 1
                 }
             }
@@ -2969,6 +2979,11 @@ private struct FDCReclassifyChange {
     }
 }
 
+fileprivate struct FDCReclassifyInput: Sendable {
+    let content: String
+    let contentKind: EideticContentKind
+}
+
 // MARK: - Server defaults (private)
 
 private extension ToolDispatcher {
@@ -3006,7 +3021,7 @@ private extension ToolDispatcher {
         case .suspectOnly:
             return newCode == defaultLatticeAnchor.udcCode
                 || oldCode == defaultLatticeAnchor.udcCode
-                || (oldQID != nil && oldQID != newQID)
+                || (oldCode == newCode && oldQID != newQID)
         }
     }
 

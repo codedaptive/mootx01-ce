@@ -11,6 +11,11 @@
 
 import Foundation
 
+public enum FDCContentKind: Equatable, Sendable {
+    case text
+    case code
+}
+
 public enum FDC {
 
     /// Pinned descent cutoff (cookbook §6.1), value `1`. Tuned empirically: a
@@ -24,7 +29,9 @@ public enum FDC {
     /// Encode `text` to an FDC code. Nonempty text without defensible subject
     /// evidence returns `000`; `nil` is reserved for empty input or unavailable
     /// bundled artifacts. Pure over the pinned artifacts.
-    public static func encode(_ text: String) -> String? { bundle?.matcher.encode(text) }
+    public static func encode(_ text: String) -> String? {
+        encodeAnchor(text).code
+    }
 
     /// Explicit-tagger variant used by cross-runtime conformance tests and
     /// estates that pin novel-token classification policy.
@@ -39,7 +46,7 @@ public enum FDC {
     /// `FDCMatcher.encodeAnchor`). Returns `(nil, nil)` if the artifacts are
     /// unavailable. This is the entry point EideticLib uses to fill an Anchor.
     public static func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?) {
-        bundle?.matcher.encodeAnchor(text) ?? (nil, nil)
+        classifyAnchor(text, contentKind: .text, recordNovel: true)
     }
 
     /// Non-recording variant of `encodeAnchor` (secfix/fdc-pool).
@@ -53,7 +60,19 @@ public enum FDC {
     ///
     /// Mirrors Rust `Fdc::encode_anchor_no_record` in fdc_runtime.rs.
     public static func encodeAnchor(_ text: String, recordNovel: Bool) -> (code: String?, conceptQID: String?) {
-        bundle?.matcher.encodeAnchor(text, recordNovel: recordNovel) ?? (nil, nil)
+        classifyAnchor(text, contentKind: .text, recordNovel: recordNovel)
+    }
+
+    /// Content-aware classification used by capture and estate recalculation.
+    /// Explicit code content deterministically anchors at FDC `005`; when a
+    /// language is defensibly recognizable its pinned Wikidata Q-ID refines the
+    /// anchor without inventing a private FDC decimal extension.
+    public static func encodeAnchor(
+        _ text: String,
+        contentKind: FDCContentKind,
+        recordNovel: Bool
+    ) -> (code: String?, conceptQID: String?) {
+        classifyAnchor(text, contentKind: contentKind, recordNovel: recordNovel)
     }
 
     /// True when the bundled artifacts loaded and the engine is ready.
@@ -88,7 +107,7 @@ public enum FDC {
     }
 
     /// Version of the deterministic classifier algorithm itself.
-    public static let classifierVersion = "4.1.0"
+    public static let classifierVersion = "4.2.0"
 
     /// Estate-wide recalculation floor. This covers every input that can change
     /// an assigned code: algorithm, frame, lexicon, and signatures.
@@ -134,6 +153,26 @@ public enum FDC {
     public static func label(for code: String) -> String? {
         guard !code.isEmpty, let frame = bundle?.frame else { return nil }
         return frame.codes.first(where: { $0.code == code })?.label
+    }
+
+    private static func classifyAnchor(
+        _ text: String,
+        contentKind: FDCContentKind,
+        recordNovel: Bool
+    ) -> (code: String?, conceptQID: String?) {
+        guard let bundle,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, nil)
+        }
+        if contentKind == .code {
+            return ("005", FDCCodeLanguageDetector.detect(in: text)?.wikidataQID)
+        }
+        let anchor = bundle.matcher.encodeAnchor(text, recordNovel: recordNovel)
+        guard anchor.code == "005",
+              let language = FDCCodeLanguageDetector.detect(in: text) else {
+            return anchor
+        }
+        return (anchor.code, language.wikidataQID)
     }
 
     // MARK: - artifact loading (once per process)
