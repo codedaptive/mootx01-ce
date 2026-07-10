@@ -2,10 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  aggregateVisualStyle,
+  aggregateVisualWeight,
   BoundedTTLCache,
+  brainFieldCenters,
   EXPANSION_DEFAULTS,
   remapDetailCommunities,
   SemanticExpansionController,
+  stableUnit,
 } from "../semantic-zoom.mjs";
 
 const community = { aggregateLevel: "community", aggregateKey: "c-alpha", parentKey: null };
@@ -14,6 +18,39 @@ const fold = { aggregateLevel: "fold", aggregateKey: "f-alpha", parentKey: "c-al
 
 test("detail expansion has a bounded visual morph", () => {
   assert.deepEqual(EXPANSION_DEFAULTS, { transitionMs: 420 });
+});
+
+test("aggregate mass is monotonic, bounded, and visibly differentiated", () => {
+  const tiny = aggregateVisualStyle(1, 50_000, "community");
+  const medium = aggregateVisualStyle(500, 50_000, "community");
+  const large = aggregateVisualStyle(50_000, 50_000, "community");
+  assert.ok(aggregateVisualWeight(1, 50_000) >= 0);
+  assert.ok(large.weight <= 1);
+  assert.ok(tiny.tissueSize < medium.tissueSize);
+  assert.ok(medium.tissueSize < large.tissueSize);
+  assert.ok(large.tissueSize / medium.tissueSize > 1.5);
+  assert.ok(tiny.coreSize > 0, "one-memory aggregates remain visible and clickable");
+  assert.ok(aggregateVisualStyle(500, 50_000, "fold").tissueSize < medium.tissueSize);
+});
+
+test("fallback brain field is deterministic and uses both hemispheres", () => {
+  const first = brainFieldCenters(20, 900, 600);
+  const second = brainFieldCenters(20, 900, 600);
+  assert.deepEqual(first, second);
+  assert.equal(first.length, 20);
+  assert.ok(first.some((point) => point.x < 450));
+  assert.ok(first.some((point) => point.x > 450));
+  assert.ok(new Set(first.map((point) => `${point.x}:${point.y}`)).size > 18);
+});
+
+test("salted fallback samples do not collapse axes together", () => {
+  const samples = Array.from({ length: 256 }, (_, index) => ({
+    x: stableUnit(`node-${index}`, "x"),
+    y: stableUnit(`node-${index}`, "y"),
+    z: stableUnit(`node-${index}`, "z"),
+  }));
+  assert.ok(samples.some((sample) => Math.abs(sample.x - sample.y) > 0.25));
+  assert.ok(samples.some((sample) => Math.abs(sample.y - sample.z) > 0.25));
 });
 
 test("explicit community expansion requests its children", () => {

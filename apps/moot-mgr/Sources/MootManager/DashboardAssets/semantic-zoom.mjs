@@ -7,6 +7,61 @@ export const EXPANSION_DEFAULTS = Object.freeze({
   transitionMs: 420,
 });
 
+// Logarithmic mass keeps a very large estate aggregate dominant without
+// reducing one-memory regions to sub-pixel dust. The exponent restores useful
+// area contrast after log compression: size 50k reads materially larger than
+// size 500, while both remain clickable in the same camera frame.
+export function aggregateVisualWeight(size, maximumSize) {
+  const mass = Math.max(1, Number.isFinite(size) ? size : 1);
+  const ceiling = Math.max(mass, Number.isFinite(maximumSize) ? maximumSize : mass);
+  const ratio = Math.log1p(mass) / Math.log1p(ceiling);
+  return Math.max(0, Math.min(1, ratio ** 1.2));
+}
+
+export function aggregateVisualStyle(size, maximumSize, level = "community") {
+  const weight = aggregateVisualWeight(size, maximumSize);
+  const levelScale = level === "fold" ? 0.78 : 1;
+  return Object.freeze({
+    weight,
+    tissueSize: (0.065 + 0.275 * weight) * levelScale,
+    coreSize: (0.024 + 0.052 * weight) * levelScale,
+    tissueAlpha: 0.10 + 0.14 * weight,
+  });
+}
+
+// A stable unit sample for fallback-only layout details. Prefixing the salt
+// makes the full key pass through FNV after the axes diverge, avoiding the
+// correlated-last-byte defect that affected the persisted coordinate frame.
+export function stableUnit(value, salt = "") {
+  const text = `${salt}\u0000${value}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash / 0xffffffff;
+}
+
+// Deterministic two-hemisphere fallback used only when the persisted projector
+// has not supplied positions. Phyllotaxis avoids rings and keeps refreshes from
+// reshuffling the user's mental map.
+export function brainFieldCenters(count, width, height) {
+  const total = Math.max(0, Math.floor(count));
+  if (!total) return [];
+  const perHemisphere = Math.ceil(total / 2);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const scale = Math.min(width, height * 1.35);
+  return Array.from({ length: total }, (_, index) => {
+    const side = index % 2 === 0 ? -1 : 1;
+    const rank = Math.floor(index / 2);
+    const radius = Math.sqrt((rank + 0.65) / perHemisphere);
+    const angle = rank * goldenAngle + (side > 0 ? 0.7 : 0);
+    const x = side * (0.075 + Math.abs(Math.cos(angle)) * radius * 0.31);
+    const y = Math.sin(angle) * radius * 0.34;
+    return { x: width / 2 + x * scale, y: height / 2 + y * scale };
+  });
+}
+
 const EXPANSION_LEVEL = Object.freeze({ community: "community", fold: "local" });
 
 export function remapDetailCommunities(previous, rawNodes, communities, intent) {

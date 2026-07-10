@@ -1,11 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from '/OrbitControls.js';
 import {
+  aggregateVisualStyle,
   BoundedTTLCache,
+  brainFieldCenters,
   EXPANSION_DEFAULTS,
   remapDetailCommunities,
   SemanticExpansionController,
-} from '/semantic-zoom.mjs?v=1';
+  stableUnit,
+} from '/semantic-zoom.mjs?v=2';
 
 /*
   moot-mgr read-plane dashboard logic.
@@ -1398,6 +1401,10 @@ import {
   // Three.js WebGL renderer state — replaces Canvas2D brain renderer.
   let brainScene = null, brainCamera = null, brainGLRenderer = null;
   let brainControls = null;          // OrbitControls instance
+  let brainTissueMesh = null;        // aggregate lobe volumes behind the cores
+  let brainTissueNodes = [];
+  let brainHierarchyMesh = null;     // parent-child arcs; not estate tunnels
+  let brainHierarchyLinks = [];
   let brainPointsMesh = null;        // THREE.Points for all nodes
   let brainEdgesMesh = null;         // THREE.LineSegments for all edges
   let brainLabelEls = [];            // HTML overlay label elements
@@ -1704,27 +1711,14 @@ import {
     return S[t] || S[0];
   }
 
-  // Gaussian scatter helper — box-muller approximation via triple uniform sum.
-  function brainGauss() { return (Math.random() + Math.random() + Math.random() - 1.5) * 1.2; }
+  // Stable Gaussian-like scatter helper via three deterministic unit samples.
+  function brainGauss(id, salt) {
+    return (stableUnit(id, salt + ':a') + stableUnit(id, salt + ':b') +
+      stableUnit(id, salt + ':c') - 1.5) * 1.2;
+  }
 
-  // Place numComm community centers in a two-hemisphere oval.
-  // Each hemisphere holds half the communities, arranged in lobe arcs.
-  // Place community centers in an organic ring around the canvas center.
-  // Random phase offset prevents community 0 (the largest lobe) from always landing
-  // at angle=0 (right side), which would create a persistent rightward bias.
   function brainCenters(numComm, W, H) {
-    var centers = [];
-    var minDim = Math.min(W, H);
-    var phase = Math.random() * Math.PI * 2;   // random start so no fixed heavy-side bias
-    for (var c = 0; c < numComm; c++) {
-      var angle = phase + (c / numComm) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
-      var radius = (0.26 + Math.random() * 0.16) * minDim;
-      centers.push({
-        x: W / 2 + Math.cos(angle) * radius * (0.75 + Math.random() * 0.35),
-        y: H / 2 + Math.sin(angle) * radius * (0.65 + Math.random() * 0.35),
-      });
-    }
-    return centers;
+    return brainFieldCenters(numComm, W, H);
   }
 
   // Map real /api/graph nodes into brain-hemisphere layout using community IDs.
@@ -1768,6 +1762,9 @@ import {
     });
     var centers = brainCenters(Math.max(1, lobeIds.length), W, H);
     var nodes = [];
+    var maxAggregateSize = rawNodes.reduce(function (maxSize, n) {
+      return Math.max(maxSize, n.aggregateSize || 0);
+    }, 1);
 
     function pushNode(n, x, y, cIdx, isLobe, commKey, rgb) {
       var hasPosition = n.position && isFinite(n.position.x) &&
@@ -1786,6 +1783,9 @@ import {
       var lastMs = topologyTimestampMs(n.lastActiveTs);
       var createdMs = topologyTimestampMs(n.createdTs);
       var deadMs = topologyTimestampMs(n.tombstonedTs);
+      var aggregateStyle = n.aggregateLevel
+        ? aggregateVisualStyle(n.aggregateSize || 1, maxAggregateSize, n.aggregateLevel)
+        : null;
       var node = {
         id: n.id,
         x: Math.max(20, Math.min(W - 20, x)),
@@ -1817,7 +1817,7 @@ import {
         // are type 0 — the rendering path is unchanged (defaults to 0).
         nounType: n.nounType || 0,
         centrality: n.centrality || 0,
-        breathPhase: Math.random() * Math.PI * 2,
+        breathPhase: stableUnit(n.id, 'breath') * Math.PI * 2,
         pulseOrange: 0,   // capture pulse magnitude 0..1 — decays over ~1s
         pulseBlue: 0,     // think pulse magnitude 0..1 — same decay, visible ring
         glowBlue: 0,      // think ambient glow magnitude 0..1 — decays over ~10s
@@ -1833,6 +1833,9 @@ import {
         aggregateSize: n.aggregateSize || 0,
         aggregateLabel: n.aggregateLabel || null,
         representativeIds: n.representativeIds || [],
+        tissueSize: aggregateStyle ? aggregateStyle.tissueSize : 0,
+        coreSize: aggregateStyle ? aggregateStyle.coreSize : 0,
+        tissueAlpha: aggregateStyle ? aggregateStyle.tissueAlpha : 0,
       };
       node.ax = node.x; node.ay = node.y;
       nodes.push(node);
@@ -1931,8 +1934,8 @@ import {
                             Math.min(W, H) * 0.16);
       var center = centers[rank];
       members.forEach(function (n) {
-        var angle = Math.random() * Math.PI * 2;
-        var dist = Math.abs(brainGauss()) * spread;
+        var angle = stableUnit(n.id, 'lobe-angle') * Math.PI * 2;
+        var dist = Math.abs(brainGauss(n.id, 'lobe-radius')) * spread;
         pushNode(n, center.x + Math.cos(angle) * dist,
                     center.y + Math.sin(angle) * dist, rank, true, key, rgb);
       });
@@ -1952,11 +1955,12 @@ import {
       var cIdx = paletteFor(key, rank % BRAIN_COMM_COLORS.length);
       var rgb = fdcColor(meta && meta.code) || BRAIN_COMM_COLORS[cIdx % BRAIN_COMM_COLORS.length];
       if (!isSubset) addRow(key, members.length, -1, true, rgb);
-      var ax = 20 + Math.random() * (W - 40);
-      var ay = 20 + Math.random() * (H - 40);
+      var anchorID = members.map(function (n) { return n.id; }).sort()[0] || cid;
+      var ax = 20 + stableUnit(anchorID, 'fragment-x') * (W - 40);
+      var ay = 20 + stableUnit(anchorID, 'fragment-y') * (H - 40);
       members.forEach(function (n, mi) {
-        var angle = (mi / members.length) * Math.PI * 2 + Math.random() * 0.8;
-        var dist = members.length > 1 ? 6 + Math.random() * 8 : 0;
+        var angle = (mi / members.length) * Math.PI * 2 + stableUnit(n.id, 'fragment-angle') * 0.8;
+        var dist = members.length > 1 ? 6 + stableUnit(n.id, 'fragment-radius') * 8 : 0;
         pushNode(n, ax + Math.cos(angle) * dist, ay + Math.sin(angle) * dist, cIdx, false, key, rgb);
       });
     });
@@ -2096,13 +2100,40 @@ import {
     'attribute float breathPhase;',
     'varying vec3 vColor;',
     'varying float vAlpha;',
+    'varying float vPhase;',
     'void main() {',
     '  vColor = color;',
+    '  vPhase = breathPhase;',
     '  float breath = 0.82 + 0.18 * sin(uTime * 0.72 + breathPhase);',
     '  vAlpha = alpha * mix(1.0, breath, uBreathAmount);',
     '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
     '  gl_PointSize = size * uViewportH * uPixelRatio / -mv.z;',
     '  gl_Position = projectionMatrix * mv;',
+    '}',
+  ].join('\n');
+
+  // Aggregate tissue is one GPU point per real aggregate. Its softly folded
+  // interior communicates mass and lobe identity without fabricating memories
+  // or links. The node core remains a separate point above this layer.
+  var TISSUE_FS = [
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'varying float vPhase;',
+    'void main() {',
+    '  vec2 p = gl_PointCoord - vec2(0.5);',
+    '  float d = length(p);',
+    '  if (d > 0.5) discard;',
+    '  float angle = atan(p.y, p.x);',
+    '  float edgeWarp = sin(angle * 5.0 + vPhase) * 0.018 + sin(angle * 9.0 - vPhase) * 0.012;',
+    '  float waveA = sin(p.x * 42.0 + sin(p.y * 17.0 + vPhase) * 2.8);',
+    '  float waveB = sin(p.y * 39.0 + sin(p.x * 14.0 - vPhase) * 2.5);',
+    '  float folds = smoothstep(0.28, 1.52, abs(waveA + waveB));',
+    '  float body = 1.0 - smoothstep(0.32 + edgeWarp, 0.5 + edgeWarp, d);',
+    '  float rim = smoothstep(0.34, 0.41, d) * (1.0 - smoothstep(0.45, 0.5, d));',
+    '  float center = 1.0 - smoothstep(0.0, 0.38, d);',
+    '  vec3 tissue = vColor * (0.30 + folds * 0.52) + vec3(center * 0.08);',
+    '  float alpha = vAlpha * body * (0.38 + folds * 0.62) + vAlpha * rim * 0.62;',
+    '  gl_FragColor = vec4(tissue, alpha);',
     '}',
   ].join('\n');
   var POINT_FS = [
@@ -2386,12 +2417,18 @@ import {
     // Threshold in world-space units — ~8px at default zoom.
     brainRaycaster.params.Points.threshold = 8 * brainWorldScale;
 
-    // Build Three.js geometry for nodes and edges.
-    buildBrainPoints();
+    // Build Three.js geometry from back to front: aggregate tissue, real
+    // relationship lines, hierarchy fibers, then the crisp node cores.
+    buildBrainTissue();
     buildBrainLines();
+    buildBrainHierarchyLines();
+    buildBrainPoints();
     buildRippleMesh();
     buildTrailMesh();
-    topoMetrics.initialGeometryBytes = [brainPointsMesh, brainEdgesMesh, brainRippleMesh, brainTrailMesh]
+    topoMetrics.initialGeometryBytes = [
+      brainTissueMesh, brainEdgesMesh, brainHierarchyMesh,
+      brainPointsMesh, brainRippleMesh, brainTrailMesh,
+    ]
       .filter(Boolean)
       .reduce(function (total, mesh) {
         return total + Object.values(mesh.geometry.attributes).reduce(function (bytes, attr) {
@@ -2508,6 +2545,9 @@ import {
         if (brainPointsMesh) {
           brainPointsMesh.material.uniforms.uViewportH.value = newH;
         }
+        if (brainTissueMesh) {
+          brainTissueMesh.material.uniforms.uViewportH.value = newH;
+        }
         // TOPO-SETTLE: node positions were just rescaled and the viewport moved,
         // so a settled graph must redraw — re-arm a full frame.
         brainRearm(brainSettle, performance.now());
@@ -2544,6 +2584,7 @@ import {
       // move dispatches 'change' → brainRearm, which is what re-arms an orbit.
       brainControls.update();
       if (brainPointsMesh) brainPointsMesh.material.uniforms.uTime.value = brainT;
+      if (brainTissueMesh) brainTissueMesh.material.uniforms.uTime.value = brainT;
       var recencyDue = Date.now() >= brainNextRecencyRefreshMs;
       if (full || pulseActive || recencyDue) {
         updateBrainFrame(full);
@@ -2595,7 +2636,7 @@ import {
       colors[i * 3 + 2] = lum + (rgb[2] / 255 - lum) * sat;
       // Aggregate clusters are first-class objects; drawers remain compact.
       sizes[i] = n.aggregateLevel
-        ? 0.05 + n.centrality * 0.03
+        ? n.coreSize
         : (style.r * (1 + n.centrality * 1.2)) * 0.005;
       alphas[i] = style.a;
       breathPhases[i] = n.breathPhase;
@@ -2620,7 +2661,61 @@ import {
       depthWrite: false,
     });
     brainPointsMesh = new THREE.Points(geom, mat);
+    brainPointsMesh.renderOrder = 3;
     brainScene.add(brainPointsMesh);
+  }
+
+  function buildBrainTissue() {
+    if (brainTissueMesh) {
+      brainScene.remove(brainTissueMesh);
+      brainTissueMesh.geometry.dispose();
+      brainTissueMesh.material.dispose();
+    }
+    brainTissueNodes = brainNodes.filter(function (n) { return !!n.aggregateLevel; });
+    if (!brainTissueNodes.length) { brainTissueMesh = null; return; }
+    var N = brainTissueNodes.length;
+    var positions = new Float32Array(N * 3);
+    var colors = new Float32Array(N * 3);
+    var sizes = new Float32Array(N);
+    var alphas = new Float32Array(N);
+    var phases = new Float32Array(N);
+    var zDepth = brain3D ? 1.4 : 0;
+    for (var i = 0; i < N; i++) {
+      var n = brainTissueNodes[i];
+      positions[i * 3] = (n.x - brainWorldCX) * brainWorldScale;
+      positions[i * 3 + 1] = (brainWorldCY - n.y) * brainWorldScale;
+      positions[i * 3 + 2] = -(n.z3 || 0) * zDepth;
+      var rgb = n.rgb || [232, 234, 240];
+      var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
+      colors[i * 3] = lum + (rgb[0] / 255 - lum) * 0.72;
+      colors[i * 3 + 1] = lum + (rgb[1] / 255 - lum) * 0.72;
+      colors[i * 3 + 2] = lum + (rgb[2] / 255 - lum) * 0.72;
+      sizes[i] = n.tissueSize;
+      alphas[i] = n.tissueAlpha;
+      phases[i] = n.breathPhase;
+    }
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+    geom.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+    geom.setAttribute('breathPhase', new THREE.BufferAttribute(phases, 1));
+    var mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uPixelRatio: { value: window.devicePixelRatio || 1 },
+        uViewportH: { value: brainH },
+        uTime: { value: brainT },
+        uBreathAmount: { value: 0.12 },
+      },
+      vertexShader: POINT_VS,
+      fragmentShader: TISSUE_FS,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+    });
+    brainTissueMesh = new THREE.Points(geom, mat);
+    brainTissueMesh.renderOrder = 0;
+    brainScene.add(brainTissueMesh);
   }
 
   // V2-P2b edge-type render channels — the single source of truth for what
@@ -2713,7 +2808,92 @@ import {
     var edgeOpacity = Math.min(0.15, 30 / Math.max(1, E));
     var mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: edgeOpacity, depthWrite: false });
     brainEdgesMesh = new THREE.LineSegments(geom, mat);
+    brainEdgesMesh.renderOrder = 1;
     brainScene.add(brainEdgesMesh);
+  }
+
+  // Hierarchy arcs connect an expanded aggregate to the child aggregates it
+  // revealed. They are deliberately separate from brainEdges: these fibers
+  // encode containment, never an estate tunnel or inferred relationship.
+  function buildBrainHierarchyLines() {
+    if (brainHierarchyMesh) {
+      brainScene.remove(brainHierarchyMesh);
+      brainHierarchyMesh.geometry.dispose();
+      brainHierarchyMesh.material.dispose();
+    }
+    var parentByKey = Object.create(null);
+    brainNodes.forEach(function (n) {
+      if (n.aggregateKey) parentByKey[n.aggregateKey] = n;
+    });
+    brainHierarchyLinks = brainNodes.map(function (child) {
+      var parent = child.parentKey ? parentByKey[child.parentKey] : null;
+      return parent && parent !== child ? { parent: parent, child: child } : null;
+    }).filter(Boolean);
+    if (!brainHierarchyLinks.length) { brainHierarchyMesh = null; return; }
+    var segments = 6;
+    var geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(
+      new Float32Array(brainHierarchyLinks.length * segments * 6), 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(
+      new Float32Array(brainHierarchyLinks.length * segments * 6), 3));
+    var mat = new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.24, depthWrite: false,
+    });
+    brainHierarchyMesh = new THREE.LineSegments(geom, mat);
+    brainHierarchyMesh.renderOrder = 2;
+    brainScene.add(brainHierarchyMesh);
+    updateBrainHierarchyGeometry();
+  }
+
+  function updateBrainHierarchyGeometry() {
+    if (!brainHierarchyMesh) return;
+    var positions = brainHierarchyMesh.geometry.attributes.position.array;
+    var colors = brainHierarchyMesh.geometry.attributes.color.array;
+    var segments = 6;
+    var zDepth = brain3D ? 1.4 : 0;
+    function world(node) {
+      return {
+        x: (node.x - brainWorldCX) * brainWorldScale,
+        y: (brainWorldCY - node.y) * brainWorldScale,
+        z: -(node.z3 || 0) * zDepth,
+      };
+    }
+    function bezier(a, c, b, t) {
+      var u = 1 - t;
+      return u * u * a + 2 * u * t * c + t * t * b;
+    }
+    brainHierarchyLinks.forEach(function (link, linkIndex) {
+      var a = world(link.parent), b = world(link.child);
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var length = Math.hypot(dx, dy) || 1;
+      var bend = 0.035 + stableUnit(link.child.id, 'hierarchy-bend') * 0.035;
+      var sign = stableUnit(link.child.id, 'hierarchy-side') < 0.5 ? -1 : 1;
+      var c = {
+        x: (a.x + b.x) / 2 - dy / length * bend * sign,
+        y: (a.y + b.y) / 2 + dx / length * bend * sign,
+        z: (a.z + b.z) / 2 + 0.055,
+      };
+      var rgb = link.child.rgb || [232, 234, 240];
+      for (var s = 0; s < segments; s++) {
+        var t0 = s / segments, t1 = (s + 1) / segments;
+        var offset = (linkIndex * segments + s) * 6;
+        positions[offset] = bezier(a.x, c.x, b.x, t0);
+        positions[offset + 1] = bezier(a.y, c.y, b.y, t0);
+        positions[offset + 2] = bezier(a.z, c.z, b.z, t0);
+        positions[offset + 3] = bezier(a.x, c.x, b.x, t1);
+        positions[offset + 4] = bezier(a.y, c.y, b.y, t1);
+        positions[offset + 5] = bezier(a.z, c.z, b.z, t1);
+        var fade0 = 0.36 + 0.64 * t0, fade1 = 0.36 + 0.64 * t1;
+        colors[offset] = rgb[0] / 255 * fade0;
+        colors[offset + 1] = rgb[1] / 255 * fade0;
+        colors[offset + 2] = rgb[2] / 255 * fade0;
+        colors[offset + 3] = rgb[0] / 255 * fade1;
+        colors[offset + 4] = rgb[1] / 255 * fade1;
+        colors[offset + 5] = rgb[2] / 255 * fade1;
+      }
+    });
+    brainHierarchyMesh.geometry.attributes.position.needsUpdate = true;
+    brainHierarchyMesh.geometry.attributes.color.needsUpdate = true;
   }
 
   // Build the ripple ring mesh — fixed-size buffer for RIPPLE_MAX concurrent
@@ -2747,6 +2927,7 @@ import {
       depthWrite: false,
     });
     brainRippleMesh = new THREE.Points(geom, mat);
+    brainRippleMesh.renderOrder = 4;
     brainScene.add(brainRippleMesh);
   }
 
@@ -2764,6 +2945,7 @@ import {
       vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false,
     });
     brainTrailMesh = new THREE.LineSegments(geom, mat);
+    brainTrailMesh.renderOrder = 3;
     brainScene.add(brainTrailMesh);
   }
 
@@ -2923,7 +3105,7 @@ import {
       var pg = lum + (rgb[1] / 255 - lum) * sat;
       var pb = lum + (rgb[2] / 255 - lum) * sat;
       var baseSize = n.aggregateLevel
-        ? 0.05 + n.centrality * 0.03
+        ? n.coreSize
         : (style.r * (1 + n.centrality * 1.2)) * 0.005;
       var pulseSize = n.aggregateLevel ? 0.035 : 0.03;
       if (n.pulseOrange > 0.01) {
@@ -2957,6 +3139,29 @@ import {
       geom.attributes.alpha.array.byteLength +
       (full ? geom.attributes.position.array.byteLength : 0) +
       ((full || anyPulse) ? geom.attributes.size.array.byteLength : 0);
+
+    // Aggregate tissue follows detail morphs and camera-facing depth, but its
+    // folded texture and breathing remain shader-side. This loop is bounded by
+    // the aggregate LOD (not the estate's memory count) and runs only on a full
+    // structural frame.
+    if (full && brainTissueMesh) {
+      var tissueGeom = brainTissueMesh.geometry;
+      var tissuePos = tissueGeom.attributes.position.array;
+      var tissueAlpha = tissueGeom.attributes.alpha.array;
+      for (var ti = 0; ti < brainTissueNodes.length; ti++) {
+        var tn = brainTissueNodes[ti];
+        tissuePos[ti * 3] = (tn.x - cx) * ws;
+        tissuePos[ti * 3 + 1] = (cy - tn.y) * ws;
+        tissuePos[ti * 3 + 2] = -(tn.z3 || 0) * zDepth;
+        var tissueMod = hasSel ? 0.32 : 1;
+        if (brain3D) tissueMod *= 1 - 0.24 * (tn.z3 || 0);
+        tissueAlpha[ti] = tn.tissueAlpha * tissueMod;
+      }
+      tissueGeom.attributes.position.needsUpdate = true;
+      tissueGeom.attributes.alpha.needsUpdate = true;
+      topoMetrics.bufferUploadBytes += tissuePos.byteLength + tissueAlpha.byteLength;
+    }
+    if (full) updateBrainHierarchyGeometry();
 
     // Update edge positions from current node positions. Skipped entirely while
     // settled — edges only move when nodes move (frozen) or when selection /
@@ -3097,7 +3302,10 @@ import {
       // Convert pixel centroid to world-space for projection, placing
       // the label above the lobe centroid.
       var wx = (lCx - lWcx) * lWs;
-      var wy = (lWcy - lCy) * lWs + spread * lWs * 1.2;
+      var tissueLift = members.reduce(function (largest, n) {
+        return Math.max(largest, n.tissueSize || 0);
+      }, 0) * 0.58;
+      var wy = (lWcy - lCy) * lWs + Math.max(spread * lWs * 1.2, tissueLift);
       var sp = worldToScreen(wx, wy, lCz);
       if (!sp.visible) { lbl.style.display = 'none'; return; }
       lbl.style.display = '';
@@ -3587,6 +3795,20 @@ import {
       brainScene.remove(brainPointsMesh);
       brainPointsMesh = null;
     }
+    if (brainTissueMesh) {
+      brainTissueMesh.geometry.dispose();
+      brainTissueMesh.material.dispose();
+      brainScene.remove(brainTissueMesh);
+      brainTissueMesh = null;
+    }
+    brainTissueNodes = [];
+    if (brainHierarchyMesh) {
+      brainHierarchyMesh.geometry.dispose();
+      brainHierarchyMesh.material.dispose();
+      brainScene.remove(brainHierarchyMesh);
+      brainHierarchyMesh = null;
+    }
+    brainHierarchyLinks = [];
     if (brainEdgesMesh) {
       brainEdgesMesh.geometry.dispose();
       brainEdgesMesh.material.dispose();
