@@ -1412,8 +1412,9 @@ import { OrbitControls } from '/OrbitControls.js';
   let brain3D = false;
   // V2-P2b: nmf_bond (derived lattice/classification bond) edges are faint
   // tissue, not primary structure — hidden by default, toggled on by
-  // #topoLatticeToggle. Read every frame in updateBrainFrame's edge loop
-  // (brainEdgeVisual), so flipping it needs no geometry rebuild.
+  // #topoLatticeToggle. Read in updateBrainFrame's edge loop (brainEdgeVisual),
+  // so flipping it needs no geometry rebuild — but the edge loop is skipped
+  // while TOPO-SETTLE is settled, so the toggle handler re-arms a full frame.
   let brainShowLattice = false;
   // L3 lobe labels — community rank → FDC label string.
   let brainLobeLabels = Object.create(null);
@@ -1829,6 +1830,65 @@ import { OrbitControls } from '/OrbitControls.js';
     return nodes;
   }
 
+  // TOPO-SETTLE — the anchor-spring + damping layout converges and then the
+  // picture is static ~99% of the time, yet the pre-settle frame loop rebuilt
+  // and re-uploaded every node + edge buffer (~4.47 MB) on EVERY rAF tick,
+  // forever, burning a core on a frozen image. This little state machine stops
+  // that: once the fastest node's per-frame move stays under an epsilon for a
+  // short debounce (or a hard timeout fires for a layout that never calms), we
+  // enter SETTLED — physics, node POSITION writes, and the entire edge loop +
+  // edge upload all stop. The alpha/color loop keeps running so breathing,
+  // recency, and in-flight pulses stay alive; steady-state upload is just
+  // alpha+color (~0.84 MB). Any interaction re-arms (exit SETTLED, force at
+  // least one full frame): drag/orbit, selection change, lattice/3D toggle,
+  // an SSE/playback pulse, a playback tick, or a canvas resize.
+  //
+  // The decision logic is deliberately factored into pure functions on a plain
+  // state object (no THREE/DOM refs) so it is unit-testable without a WebGL
+  // context — the frame loop owns the one live `brainSettle` instance.
+  var BRAIN_SETTLE_EPSILON = 0.05;     // px: fastest-node per-frame move below which a frame is "calm"
+  var BRAIN_SETTLE_DEBOUNCE = 20;      // consecutive calm frames before entering SETTLED (~0.33s @ 60fps)
+  var BRAIN_SETTLE_TIMEOUT_MS = 8000;  // hard fallback: settle after 8s even if the layout never calms
+  function makeBrainSettleState() {
+    // settled:   currently frozen (color-only frames)
+    // calm:      consecutive calm frames observed on the current run
+    // runStartMs: when the current full-sim run began (hard-timeout clock)
+    // forceFull: number of full frames still owed to a re-arm (>=1 ⇒ next frame is full)
+    return { settled: false, calm: 0, runStartMs: 0, forceFull: 0 };
+  }
+  var brainSettle = makeBrainSettleState();
+  // Re-arm: leave SETTLED and owe at least one full frame. Resets the hard
+  // timeout clock so the 8s fallback is measured from the LAST interaction —
+  // continuous dragging keeps redrawing, and settle fires once input stops.
+  function brainRearm(st, nowMs) {
+    st.settled = false;
+    st.calm = 0;
+    st.runStartMs = nowMs;
+    st.forceFull = Math.max(st.forceFull, 1);
+  }
+  // Post-physics convergence tracking. Called only on full frames, AFTER
+  // brainPhysicsStep, with that frame's fastest-node px move. May flip the
+  // state to SETTLED for the next frame. Active playback never settles and
+  // keeps the timeout clock fresh so settle can fire the instant playback
+  // stops. An owed forced frame (forceFull) never settles and is not counted
+  // as calm, so every re-arm gets its guaranteed full redraw first.
+  function brainSettleTrack(st, maxMove, nowMs, playing) {
+    if (playing) { st.settled = false; st.calm = 0; st.runStartMs = nowMs; return; }
+    if (st.forceFull > 0) { st.forceFull--; st.calm = 0; return; }
+    if (maxMove < BRAIN_SETTLE_EPSILON) st.calm++; else st.calm = 0;
+    if (st.calm >= BRAIN_SETTLE_DEBOUNCE || (nowMs - st.runStartMs) >= BRAIN_SETTLE_TIMEOUT_MS) {
+      st.settled = true;
+    }
+  }
+  // Whether this frame must run the FULL pipeline (physics + position + edge
+  // redraw). Playback is inherently non-settling; a pending re-arm forces it;
+  // otherwise a SETTLED graph runs color-only. Kept separate from the tracking
+  // above so the same two-line decision the frame loop makes is reproducible
+  // in a test harness.
+  function brainFrameIsFull(st, playing) {
+    return playing || !st.settled || st.forceFull > 0;
+  }
+
   // L2 community-aware force micro-sim. Anchor springs hold the lobe /
   // periphery layout; edge springs pull tunnel-linked nodes toward a short
   // rest length so connected memory visibly drifts together and settles;
@@ -1860,14 +1920,21 @@ import { OrbitControls } from '/OrbitControls.js';
       t.vx -= dx * f; t.vy -= dy * f;
     }
     var damp = Math.pow(DAMP, dt * 60);
+    // Track the largest per-frame position delta so the caller can tell when
+    // the layout has converged (TOPO-SETTLE). Squared while looping; rooted once.
+    var maxMove2 = 0;
     for (i = 0; i < brainNodes.length; i++) {
       var n = brainNodes[i];
       n.vx += (n.ax - n.x) * K_ANCHOR * dt;
       n.vy += (n.ay - n.y) * K_ANCHOR * dt;
       n.vx *= damp; n.vy *= damp;
-      n.x += n.vx * dt * 60;
-      n.y += n.vy * dt * 60;
+      var mvx = n.vx * dt * 60, mvy = n.vy * dt * 60;
+      n.x += mvx;
+      n.y += mvy;
+      var m2 = mvx * mvx + mvy * mvy;
+      if (m2 > maxMove2) maxMove2 = m2;
     }
+    return Math.sqrt(maxMove2);  // px moved by the fastest node this frame
   }
 
   // Point shader: each node is a screen-space circle with per-point size,
@@ -1964,6 +2031,14 @@ import { OrbitControls } from '/OrbitControls.js';
     brainControls.maxDistance = 8;
     brainControls.zoomSpeed = 1.2;
     brainControls.update();
+    // TOPO-SETTLE re-arm on drag/orbit/zoom. 'start' catches the first frame of
+    // an interaction; 'change' fires for every camera move including the damping
+    // tail after the pointer is released, so the graph stays redrawn until the
+    // orbit fully coasts to rest, then settles. (OrbitControls.update() only
+    // dispatches 'change' when the camera actually moved, so a static settled
+    // frame never spuriously re-arms.)
+    brainControls.addEventListener('start', function () { brainRearm(brainSettle, performance.now()); });
+    brainControls.addEventListener('change', function () { brainRearm(brainSettle, performance.now()); });
 
     // Pre-build node lookup + community pools.
     brainNodeMap = Object.create(null);
@@ -2069,20 +2144,40 @@ import { OrbitControls } from '/OrbitControls.js';
         if (brainPointsMesh) {
           brainPointsMesh.material.uniforms.uViewportH.value = newH;
         }
+        // TOPO-SETTLE: node positions were just rescaled and the viewport moved,
+        // so a settled graph must redraw — re-arm a full frame.
+        brainRearm(brainSettle, performance.now());
       });
       brainResizeObs.observe(container);
     }
 
     brainT = 0;
     var prev = 0;
+    // Fresh settle state per animation run; arm one full frame and start the
+    // hard-timeout clock now (a zero runStartMs would read as an 8s-old run on
+    // frame 1 and settle instantly).
+    brainSettle = makeBrainSettleState();
+    brainRearm(brainSettle, performance.now());
     function frame(ts) {
       var dt = prev ? Math.min(0.05, (ts - prev) / 1000) : 0.016;
       prev = ts;
       brainT += dt;
+      // Pulse/glow envelopes decay every frame regardless of settle — they feed
+      // the alpha/color channel that keeps breathing/pulses alive while settled.
       tickBrainDecay(dt);
-      brainPhysicsStep(dt);
+      // Playback (active playhead, incl. paused-mid-loop) never settles: node
+      // positions, tombstone dissolve, and the birth/alive filter all move per
+      // tick. Otherwise run the full pipeline only until the layout converges.
+      var playing = topoPlay.active;
+      var full = brainFrameIsFull(brainSettle, playing);
+      if (full) {
+        var maxMove = brainPhysicsStep(dt);
+        brainSettleTrack(brainSettle, maxMove, ts, playing);
+      }
+      // Always update controls so orbit damping keeps coasting; a real camera
+      // move dispatches 'change' → brainRearm, which is what re-arms an orbit.
       brainControls.update();
-      updateBrainFrame();
+      updateBrainFrame(full);
       updateRipplesAndTrails(dt);
       brainGLRenderer.render(brainScene, brainCamera);
       brainAnimId = requestAnimationFrame(frame);
@@ -2367,7 +2462,14 @@ import { OrbitControls } from '/OrbitControls.js';
 
   // Per-frame update: sync node positions, colors, and alphas into the GPU
   // buffers, update edge positions, and reposition HTML labels.
-  function updateBrainFrame() {
+  //
+  // `full` (TOPO-SETTLE): a full frame writes+uploads positions and runs the
+  // whole edge loop; a settled frame (full === false) skips both — the layout
+  // is frozen — and only recomputes the alpha/color/size channel so breathing,
+  // recency, and in-flight pulses stay alive. Size is re-uploaded only when a
+  // pulse is actually animating a dot, so the true steady state uploads just
+  // alpha+color (~0.84 MB) rather than the full ~4.47 MB.
+  function updateBrainFrame(full) {
     brainNowMs = topoPlay.active ? topoPlay.playheadMs : Date.now();
     if (!brainPointsMesh) return;
     var geom = brainPointsMesh.geometry;
@@ -2379,11 +2481,14 @@ import { OrbitControls } from '/OrbitControls.js';
     var N = brainNodes.length;
     var zDepth = brain3D ? 1.4 : 0;
     var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
+    var anyPulse = false;  // did any dot's size change from a live pulse this frame?
     for (var i = 0; i < N; i++) {
       var n = brainNodes[i];
-      pos[i * 3]     = (n.x - cx) * ws;
-      pos[i * 3 + 1] = (cy - n.y) * ws;
-      pos[i * 3 + 2] = -(n.z3 || 0) * zDepth;
+      if (full) {
+        pos[i * 3]     = (n.x - cx) * ws;
+        pos[i * 3 + 1] = (cy - n.y) * ws;
+        pos[i * 3 + 2] = -(n.z3 || 0) * zDepth;
+      }
       var style = nounStyle(n.nounType);
       var rgb = n.rgb || style.rgb;
       var breath = 0.82 + 0.18 * Math.sin(brainT * 0.72 + n.breathPhase);
@@ -2431,24 +2536,31 @@ import { OrbitControls } from '/OrbitControls.js';
         pg = pg + (0.55 - pg) * t2 * 0.6;
         pb = pb * (1 - t2 * 0.4);
         siz[i] = (style.r * (1 + n.centrality * 1.2) + n.pulseOrange * 6) * 0.005;
+        anyPulse = true;
       } else if (n.pulseBlue > 0.01) {
         pr = pr + (0.23 - pr) * n.pulseBlue * 0.5;
         pg = pg + (0.71 - pg) * n.pulseBlue * 0.5;
         pb = pb + (1.0 - pb) * n.pulseBlue * 0.5;
         siz[i] = (style.r * (1 + n.centrality * 1.2) + n.pulseBlue * 6) * 0.005;
+        anyPulse = true;
       } else {
         siz[i] = (style.r * (1 + n.centrality * 1.2)) * 0.005;
       }
       col[i * 3] = pr; col[i * 3 + 1] = pg; col[i * 3 + 2] = pb;
       alp[i] = alpha;
     }
-    geom.attributes.position.needsUpdate = true;
+    // Dirty-flag uploads: alpha+color always (breathing/recency/pulse tint);
+    // position only when the layout moved this frame; size only when a pulse is
+    // resizing a dot. In the settled steady state this uploads alpha+color only.
+    if (full) geom.attributes.position.needsUpdate = true;
     geom.attributes.color.needsUpdate = true;
-    geom.attributes.size.needsUpdate = true;
+    if (full || anyPulse) geom.attributes.size.needsUpdate = true;
     geom.attributes.alpha.needsUpdate = true;
 
-    // Update edge positions from current node positions.
-    if (brainEdgesMesh) {
+    // Update edge positions from current node positions. Skipped entirely while
+    // settled — edges only move when nodes move (frozen) or when selection /
+    // lattice visibility changes, and every such change re-arms a full frame.
+    if (full && brainEdgesMesh) {
       var epos = brainEdgesMesh.geometry.attributes.position.array;
       var ecol = brainEdgesMesh.geometry.attributes.color.array;
       var E = brainEdges.length;
@@ -2511,8 +2623,10 @@ import { OrbitControls } from '/OrbitControls.js';
       brainEdgesMesh.geometry.attributes.color.needsUpdate = true;
     }
 
-    // Update HTML label overlays for community lobes.
-    updateBrainLabels();
+    // Update HTML label overlays for community lobes. Label positions derive
+    // from node positions + the camera, both frozen while settled, so this is
+    // skipped too — an orbit or resize re-arms and repositions them.
+    if (full) updateBrainLabels();
   }
 
   // Project a world-space point to screen-space for HTML label positioning.
@@ -2620,6 +2734,10 @@ import { OrbitControls } from '/OrbitControls.js';
         });
       });
     }
+    // TOPO-SETTLE: a selection change alters edge visibility (association edges)
+    // and the selection-dimming `ea` on every edge, so it must force a full edge
+    // pass — re-arm guarantees at least one full frame that reruns the edge loop.
+    brainRearm(brainSettle, performance.now());
     renderSelectionPanel();
   }
 
@@ -3722,6 +3840,11 @@ import { OrbitControls } from '/OrbitControls.js';
       });
     }
     brainLastPulseNode = node;
+    // TOPO-SETTLE: a pulse just lit a node (live SSE fire or a playback tick) —
+    // its color/size animate over the decay, so re-arm to force redraw. (During
+    // active playback the frame loop already forces full frames; this also
+    // covers a live SSE pulse arriving on an otherwise-settled live graph.)
+    brainRearm(brainSettle, performance.now());
     return true;
   }
 
@@ -3920,15 +4043,24 @@ import { OrbitControls } from '/OrbitControls.js';
       this.setAttribute("aria-pressed", brain3D ? "true" : "false");
       buildBrainPoints();
       buildBrainLines();
+      // TOPO-SETTLE: z-coordinates and depth dimming just changed for every node
+      // and edge — re-arm so the per-frame loop keeps them in sync, not just the
+      // one-shot rebuild above.
+      brainRearm(brainSettle, performance.now());
     });
     // V2-P2b: nmf_bond lattice edges are hidden by default (faint derived
-    // tissue, not primary structure). brainShowLattice is read fresh every
-    // frame by brainEdgeVisual inside the existing rAF loop, so flipping it
-    // needs no geometry rebuild — same reason buildBrainLines is NOT called
-    // here, unlike the 3D toggle above which changes z-coordinates.
+    // tissue, not primary structure). brainShowLattice is read by brainEdgeVisual
+    // inside the rAF edge loop, so flipping it needs no geometry rebuild — same
+    // reason buildBrainLines is NOT called here, unlike the 3D toggle above which
+    // changes z-coordinates. The brainRearm below forces the (otherwise
+    // settle-skipped) edge loop to run so the flip is reflected immediately.
     $("#topoLatticeToggle").addEventListener("click", function () {
       brainShowLattice = !brainShowLattice;
       this.setAttribute("aria-pressed", brainShowLattice ? "true" : "false");
+      // TOPO-SETTLE: nmf_bond edge visibility flips for the whole graph and is
+      // evaluated inside the edge loop, which is skipped while settled — re-arm
+      // a full frame so the toggle takes visible effect immediately.
+      brainRearm(brainSettle, performance.now());
     });
     // L5 playback controls.
     $("#topoPlayBtn").addEventListener("click", topoPlayToggle);
