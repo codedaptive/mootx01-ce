@@ -19,10 +19,10 @@
 
 use std::sync::Arc;
 
-use genius_locus_kit::{EstateCoordinator, EstateHandle, VerbDispatchError};
+use genius_locus_kit::{EstateCoordinator, EstateHandle, VerbDispatchError, WriteMode};
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
-use locus_kit::drawer_operational::CaptureChannel;
+use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::frames::CaptureFrame;
 
@@ -140,6 +140,29 @@ fn capture_batch_classifies_sentinel_anchors_before_storage() {
         drawers[0].udc_code, "004",
         "classifiable batch content must not remain under the unclassified sentinel"
     );
+}
+
+#[test]
+fn code_kind_reaches_fdc_005_through_single_and_batch_capture() {
+    let (mut coord, handle) = open_one();
+
+    let mut short_code = frame("x += 1");
+    short_code.kind = ContentKind::Code;
+    short_code.lattice_anchor = LatticeAnchor::new(
+        "000", Some("004".to_string()), None, Some("Q1".to_string()));
+    let single = coord.capture_with_mode(
+        &handle, short_code, NOW, WriteMode::Regular).expect("single capture");
+    assert_eq!(single.udc_code, "005");
+    assert_eq!(single.wikidata_qid, None);
+    assert_eq!(single.udc_facets.as_deref(), Some("004"));
+    assert_eq!(single.wikidata_qids_secondary.as_deref(), Some("Q1"));
+
+    let mut swift_code = frame(
+        "import Foundation\npublic struct User { public let name: String }");
+    swift_code.kind = ContentKind::Code;
+    let batch = coord.capture_batch(&handle, vec![swift_code], NOW).expect("batch capture");
+    assert_eq!(batch[0].udc_code, "005");
+    assert_eq!(batch[0].wikidata_qid.as_deref(), Some("Q17118377"));
 }
 
 /// An unregistered handle returns `EstateNotOpen`.

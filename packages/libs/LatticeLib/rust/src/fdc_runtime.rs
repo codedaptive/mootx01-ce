@@ -35,7 +35,13 @@ use crate::word_class_table;
 // here. `1` is the pinned ship value; classification accuracy is governed by
 // within-region scoring (§5), not this cutoff. Mirrors Swift FDCRuntime.swift.
 const STOP_THRESHOLD: usize = 1;
-const CLASSIFIER_VERSION: &str = "4.1.0";
+const CLASSIFIER_VERSION: &str = "4.2.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdcContentKind {
+    Text,
+    Code,
+}
 
 /// The bundled artifacts and the assembled matcher — loaded once per process.
 struct Bundle {
@@ -152,10 +158,7 @@ impl Fdc {
     /// Encode `text` and surface the dominant concept Q-ID.
     /// Returns (code, conceptQID). Returns (None, None) if artifacts unavailable.
     pub fn encode_anchor(text: &str) -> (Option<String>, Option<String>) {
-        match get_bundle() {
-            Some(b) => b.matcher.encode_anchor(text),
-            None => (None, None),
-        }
+        Self::classify_anchor(text, FdcContentKind::Text, true)
     }
 
     /// Non-recording variant of `encode_anchor` (secfix/fdc-pool).
@@ -177,10 +180,17 @@ impl Fdc {
     ///
     /// Mirrors Swift `FDC.encodeAnchor(_:recordNovel:)` in FDCRuntime.swift.
     pub fn encode_anchor_no_record(text: &str) -> (Option<String>, Option<String>) {
-        match get_bundle() {
-            Some(b) => b.matcher.encode_anchor_no_record(text),
-            None => (None, None),
-        }
+        Self::classify_anchor(text, FdcContentKind::Text, false)
+    }
+
+    /// Content-aware non-recording classification for capture and estate
+    /// recalculation. Explicit code content anchors at FDC `005`; a recognized
+    /// programming language supplies its pinned Wikidata Q-ID refinement.
+    pub fn encode_anchor_for_content_no_record(
+        text: &str,
+        content_kind: FdcContentKind,
+    ) -> (Option<String>, Option<String>) {
+        Self::classify_anchor(text, content_kind, false)
     }
 
     /// True when the bundled artifacts loaded and the engine is ready.
@@ -221,6 +231,32 @@ impl Fdc {
         get_bundle()
             .map(|bundle| bundle.semantic_ranker.metadata.model_sha256.as_str())
             .unwrap_or("unavailable")
+    }
+
+    fn classify_anchor(
+        text: &str,
+        content_kind: FdcContentKind,
+        record_novel: bool,
+    ) -> (Option<String>, Option<String>) {
+        let Some(bundle) = get_bundle() else { return (None, None) };
+        if text.trim().is_empty() { return (None, None) }
+        if content_kind == FdcContentKind::Code {
+            let qid = crate::fdc_code_language::detect_code_language(text)
+                .map(|language| language.wikidata_qid.to_string());
+            return (Some("005".to_string()), qid);
+        }
+        let (code, qid) = if record_novel {
+            bundle.matcher.encode_anchor(text)
+        } else {
+            bundle.matcher.encode_anchor_no_record(text)
+        };
+        if code.as_deref() != Some("005") {
+            return (code, qid);
+        }
+        let refined_qid = crate::fdc_code_language::detect_code_language(text)
+            .map(|language| language.wikidata_qid.to_string())
+            .or(qid);
+        (code, refined_qid)
     }
 
     /// Composite estate recalculation floor covering algorithm and all pinned

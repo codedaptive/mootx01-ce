@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "vectors": [
+    {"name":"swift-fence","input":"```swift\nimport Foundation\nfunc greet() { print(\"hello\") }\n```","identifier":"swift","qid":"Q17118377"},
+    {"name":"rust-fence","input":"```rust\nuse std::collections::HashMap;\nfn main() { let mut values = HashMap::new(); }\n```","identifier":"rust","qid":"Q575650"},
+    {"name":"python-fence","input":"```python\ndef greet(name):\n    print(name)\n```","identifier":"python","qid":"Q28865"},
+    {"name":"javascript-fence","input":"```javascript\nconst greet = (name) => console.log(name);\n```","identifier":"javascript","qid":"Q2005"},
+    {"name":"typescript-fence","input":"```typescript\ninterface User { name: string }\nconst user: User = { name: \"Ada\" };\n```","identifier":"typescript","qid":"Q978185"},
+    {"name":"java-fence","input":"```java\npublic class Main { public static void main(String[] args) { System.out.println(\"hi\"); } }\n```","identifier":"java","qid":"Q251"},
+    {"name":"kotlin-fence","input":"```kotlin\ndata class User(val name: String)\nfun main() { println(User(\"Ada\")) }\n```","identifier":"kotlin","qid":"Q3816639"},
+    {"name":"go-fence","input":"```go\npackage main\nfunc main() { value := 1; fmt.Println(value) }\n```","identifier":"go","qid":"Q37227"},
+    {"name":"ruby-fence","input":"```ruby\ndef greet(name)\n  puts name\nend\n```","identifier":"ruby","qid":"Q161053"},
+    {"name":"csharp-fence","input":"```csharp\nusing System;\npublic class Main { static void Main() { Console.WriteLine(\"hi\"); } }\n```","identifier":"csharp","qid":"Q2370"},
+    {"name":"cpp-fence","input":"```cpp\n#include <iostream>\nint main() { std::cout << \"hi\"; }\n```","identifier":"cpp","qid":"Q2407"},
+    {"name":"c-fence","input":"```c\n#include <stdio.h>\nint main() { printf(\"hi\"); }\n```","identifier":"c","qid":"Q15777"},
+    {"name":"objective-c-fence","input":"```objective-c\n#import <Foundation/Foundation.h>\n@interface Greeter : NSObject\n@end\n```","identifier":"objective-c","qid":"Q188531"},
+    {"name":"raw-swift","input":"import Foundation\npublic struct User {\n  public let name: String\n  public var active: Bool\n}","identifier":"swift","qid":"Q17118377"},
+    {"name":"raw-rust","input":"use std::collections::HashMap;\npub struct Store { values: HashMap<String, String> }\nimpl Store { fn new() -> Self { todo!() } }","identifier":"rust","qid":"Q575650"}
+  ]
+}

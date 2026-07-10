@@ -139,6 +139,29 @@ struct CaptureBatchTests {
                 "classifiable batch content must not remain under the unclassified sentinel")
     }
 
+    @Test("code kind reaches FDC 005 through single and batch capture")
+    func codeKindClassifiesThroughEveryCapturePath() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        var shortCode = captureFrame("x += 1")
+        shortCode.kind = .code
+        shortCode.latticeAnchor = LatticeAnchor(
+            udcCode: "000", udcFacets: "004", wikidataQidsSecondary: "Q1")
+        let single = try await kit.capture(handle, shortCode, mode: .regular)
+        #expect(single.udcCode == "005")
+        #expect(single.wikidataQID == nil)
+        #expect(single.udcFacets == "004")
+        #expect(single.wikidataQidsSecondary == "Q1")
+
+        var swiftCode = captureFrame(
+            "import Foundation\npublic struct User { public let name: String }")
+        swiftCode.kind = .code
+        let batch = try await kit.captureBatch(handle, [swiftCode])
+        #expect(batch[0].udcCode == "005")
+        #expect(batch[0].wikidataQID == "Q17118377")
+    }
+
     /// A closed (stale) handle throws `GeniusLocusKitError.estateNotOpen`.
     @Test
     func closedHandleThrowsEstateNotOpen() async throws {

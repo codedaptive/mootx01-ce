@@ -128,15 +128,21 @@ impl EstateCoordinator {
             // EideticLib.lookup(_:recordNovel:false). Even rejected captures (empty room,
             // unresolved content) spill nothing because classification runs here, before
             // the capture write, and accumulation is suppressed.
-            let (code_opt, qid_opt) = lattice_lib::fdc_runtime::Fdc::encode_anchor_no_record(&frame.content);
+            let content_kind = if frame.kind == locus_kit::drawer_operational::ContentKind::Code {
+                lattice_lib::FdcContentKind::Code
+            } else {
+                lattice_lib::FdcContentKind::Text
+            };
+            let (code_opt, qid_opt) =
+                lattice_lib::Fdc::encode_anchor_for_content_no_record(&frame.content, content_kind);
             match code_opt {
                 Some(code) if !code.is_empty() => {
                     let mut f = frame;
                     f.lattice_anchor = locus_kit::estate_types::LatticeAnchor {
                         udc_code: code,
-                        udc_facets: None,
+                        udc_facets: f.lattice_anchor.udc_facets.clone(),
                         wikidata_qid: qid_opt,
-                        wikidata_qids_secondary: None,
+                        wikidata_qids_secondary: f.lattice_anchor.wikidata_qids_secondary.clone(),
                     };
                     f
                 }

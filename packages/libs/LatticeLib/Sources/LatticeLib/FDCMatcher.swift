@@ -558,8 +558,14 @@ public struct FDCMatcher: Sendable {
         guard !trimmed.isEmpty else { return nil }
         let lowered = trimmed.lowercased()
 
-        if lowered.contains("```") ||
-            lowered.contains("#!/") ||
+        if FDCCodeLanguageDetector.detect(in: trimmed) != nil {
+            return "005"
+        }
+        if case .operational? = FDCCodeLanguageDetector.fencedHint(in: trimmed) {
+            return "000"
+        }
+
+        if lowered.contains("#!/") ||
             lowered.contains(".git/") ||
             lowered.contains("index.lock") ||
             lowered.contains("read_signal") {
@@ -582,6 +588,9 @@ public struct FDCMatcher: Sendable {
         }
         if commandLineCount >= 2 || (commandLineCount == 1 && lines.count <= 6) {
             return "000"
+        }
+        if FDCCodeLanguageDetector.fencedHint(in: trimmed) != nil {
+            return "005"
         }
 
         let declarationLineCount = lines.reduce(0) { count, line in
@@ -608,14 +617,14 @@ public struct FDCMatcher: Sendable {
         let signalCount = codeLikeSignals.reduce(0) { count, signal in
             lowered.contains(signal) ? count + 1 : count
         }
-        if signalCount >= 3 { return "000" }
+        if signalCount >= 3 { return "005" }
 
         let nonWhitespaceCount = trimmed.reduce(0) { $1.isWhitespace ? $0 : $0 + 1 }
         guard nonWhitespaceCount > 0 else { return nil }
         let symbolCount = trimmed.reduce(0) { codeSymbolCharacters.contains($1) ? $0 + 1 : $0 }
         let codeLike = lines.count >= 2 && signalCount >= 2 &&
             Double(symbolCount) / Double(nonWhitespaceCount) > 0.08
-        return codeLike ? "000" : nil
+        return codeLike ? "005" : nil
     }
 
 
