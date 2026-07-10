@@ -89,52 +89,55 @@ struct WordClassRecordNovelPoolTests {
     ///
     /// Using unique per-test tokens via a UUID suffix prevents interference
     /// from other tests that may have already recorded the same token.
-    @Test("sequential delta: nonRecording adds 0, recording adds ≥1")
-    func sequentialDelta() {
+    @Test("nonRecording does not record the token; recording does")
+    func sequentialRecord() {
         // Unique suffix prevents re-use across test runs in the same process.
         let uid = UUID().uuidString.prefix(8)
         let nonRecordingToken = "nrtest_\(uid)_a"
         let recordingToken    = "nrtest_\(uid)_b"
 
-        // Snapshot before non-recording call.
-        let beforeNR = LatticeLib.sharedNovelCache.count
-        _ = LatticeLib.wordClass(nonRecordingToken, tagger: .hmm, recordNovel: false)
-        let afterNR = LatticeLib.sharedNovelCache.count
+        // Race-immune witness (WORDCLASS-CACHE-RACE): `sharedNovelCache` is a
+        // process-global other parallel suites record into and drain
+        // concurrently, so a before/after global-count delta is racy. Assert
+        // on whether each SPECIFIC token was recorded. `wordClass` lowercases
+        // before `record`, so watch/check the lowercased form.
+        let nrKey = nonRecordingToken.lowercased()
+        let rKey  = recordingToken.lowercased()
+        LatticeLib.sharedNovelCache.watch(token: nrKey)
+        LatticeLib.sharedNovelCache.watch(token: rKey)
 
-        // Non-recording call must NOT have incremented the count.
+        // Non-recording call must NOT record this token.
+        _ = LatticeLib.wordClass(nonRecordingToken, tagger: .hmm, recordNovel: false)
         #expect(
-            afterNR == beforeNR,
-            "recordNovel:false must not increment sharedNovelCache; before=\(beforeNR) after=\(afterNR)"
+            !LatticeLib.sharedNovelCache.wasRecorded(token: nrKey),
+            "recordNovel:false must not record into sharedNovelCache"
         )
 
-        // Recording call immediately after must increment (or drain).
-        let beforeR = LatticeLib.sharedNovelCache.count
+        // Recording call must record this token.
         _ = LatticeLib.wordClass(recordingToken, tagger: .hmm, recordNovel: true)
-        let afterR = LatticeLib.sharedNovelCache.count
-
-        let increased   = afterR == beforeR + 1
-        let drainedToZero = afterR == 0 && beforeR >= 1
         #expect(
-            increased || drainedToZero,
-            "recordNovel:true must increment or drain sharedNovelCache; before=\(beforeR) after=\(afterR)"
+            LatticeLib.sharedNovelCache.wasRecorded(token: rKey),
+            "recordNovel:true must record into sharedNovelCache"
         )
     }
 
     /// Internal dispatch path: `tagNovelToken(_:tagger:recordNovel:false)` must
     /// not change `sharedNovelCache.count`. Tests the internal method directly
     /// via @testable import so we're not relying on public API dispatch.
-    @Test("tagNovelToken internal: recordNovel:false does not change sharedNovelCache.count")
+    @Test("tagNovelToken internal: recordNovel:false does not record the token")
     func tagNovelTokenInternalNonRecording() {
         let uid = UUID().uuidString.prefix(8)
         let token = "nrint_\(uid)"
 
-        let before = LatticeLib.sharedNovelCache.count
+        // Race-immune: assert this specific token was not recorded, not a
+        // global-count delta (WORDCLASS-CACHE-RACE). record() receives the
+        // lowercased form.
+        let key = token.lowercased()
+        LatticeLib.sharedNovelCache.watch(token: key)
         _ = LatticeLib.tagNovelToken(token, tagger: .hmm, recordNovel: false)
-        let after = LatticeLib.sharedNovelCache.count
-
         #expect(
-            after == before,
-            "tagNovelToken(recordNovel:false) must not touch sharedNovelCache; before=\(before) after=\(after)"
+            !LatticeLib.sharedNovelCache.wasRecorded(token: key),
+            "tagNovelToken(recordNovel:false) must not record into sharedNovelCache"
         )
     }
 }

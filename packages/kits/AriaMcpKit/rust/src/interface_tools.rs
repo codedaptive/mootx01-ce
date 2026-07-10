@@ -79,13 +79,17 @@ const DEFAULT_EMBEDDING_MODEL: &str = "default";
 /// (a child node); corrected to "000" (the UDC root, per the LatticeLib
 /// Code grammar — the three-digit root is the correct unresolved sentinel).
 const DEFAULT_LATTICE_CODE: &str = "000";
+/// Estate-wide floor: after a successful full FDC reclassification apply,
+/// this key records the composite classifier/artifact version against which
+/// every active stored anchor has been checked.
+const FDC_RECALCED_DATA_VERSION_META_KEY: &str = "aria.fdc.recalced_data_version";
 
 // ---------------------------------------------------------------------------
 // Tool surface declaration
 // ---------------------------------------------------------------------------
 
-/// The 19 interface tool names (Tier 1–5) plus 2 Maintenance tools (21 total),
-/// in the order they appear in the tool list. Mirrors Swift `InterfaceTools`.
+/// The interface tool names (Tier 1–5) plus maintenance tools, in the order
+/// they appear in the tool list. Mirrors Swift `InterfaceTools`.
 pub const INTERFACE_TOOLS: &[&str] = &[
     // Anthropic memory_20250818 adapter (M-MEMTOOL-1)
     "memory",
@@ -118,13 +122,14 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     // Monitoring control (1) — ADR-025 wave 8.2: read/write daemon telemetry flag.
     // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
     "moot_monitoring_status",
-    // Maintenance (3)
+    // Maintenance (4)
     "moot_reindex",
     "moot_drain_status",
+    "moot_reclassify_fdc",
     "moot_palace_import",
 ];
 
-/// True when `name` is one of the 20 Tier 1–5 interface tools or the 3
+/// True when `name` is one of the 20 Tier 1–5 interface tools or the 4
 /// Maintenance tools. Mirrors Swift `InterfaceTools.isInterfaceTool`.
 pub fn is_interface_tool(name: &str) -> bool {
     INTERFACE_TOOLS.contains(&name)
@@ -380,6 +385,7 @@ pub fn dispatch(
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
         "moot_drain_status" => run_drain_status(args, registry),
+        "moot_reclassify_fdc" => run_reclassify_fdc(args, registry),
         "moot_palace_import" => run_palace_import(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
@@ -2036,18 +2042,33 @@ fn run_estate_status(
     let sync_token = coord
         .sync_state_token(&estate.handle)
         .unwrap_or_else(|_| "local-only".to_string());
+    let fdc_floor = estate.store.get_meta(FDC_RECALCED_DATA_VERSION_META_KEY).map_err(|e| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+            format!("estate_status: failed to read estate FDC floor: {e}"),
+        )
+    })?;
+    let current_fdc_recalculation_version = lattice_lib::Fdc::recalculation_version();
+    let fdc_recalculation_state = if fdc_floor.as_deref() == Some(current_fdc_recalculation_version.as_str()) {
+        "current"
+    } else if fdc_floor.is_none() {
+        "missing"
+    } else {
+        "stale"
+    };
 
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
     //   [/ version_skew — ADR-024 §5, appended only when the host detected one]
     let mut body = format!(
-        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}",
+        "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
         active.len(),
         total.len(),
         wings_list,
         kg_facts.len(),
         trace_rows,
         sync_token,
+        fdc_floor.as_deref().unwrap_or("none"),
     );
     if !version_skew.is_empty() {
         body.push_str(&format!("\nversion_skew: {version_skew}"));
@@ -2576,6 +2597,377 @@ fn run_drain_status(
         lines.push(line);
     }
     Ok(text_result(&lines.join("\n")))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FdcReclassifyMode {
+    SuspectOnly,
+    All,
+}
+
+impl FdcReclassifyMode {
+    fn parse(raw: Option<&str>) -> Result<Self, JSONRPCError> {
+        match raw.map(|s| s.trim().to_ascii_lowercase()) {
+            None => Ok(Self::SuspectOnly),
+            Some(s) if s.is_empty()
+                || s == "suspectonly"
+                || s == "suspect_only"
+                || s == "suspect-only" => Ok(Self::SuspectOnly),
+            Some(s) if s == "all" => Ok(Self::All),
+            Some(s) => Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("mode must be \"suspectOnly\" or \"all\"; received {s}"),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SuspectOnly => "suspectOnly",
+            Self::All => "all",
+        }
+    }
+}
+
+struct FdcReclassifyChange {
+    id: String,
+    old_code: String,
+    old_qid: Option<String>,
+    new_code: String,
+    new_qid: Option<String>,
+}
+
+impl FdcReclassifyChange {
+    fn label(code: &str, qid: Option<&str>) -> String {
+        match qid {
+            Some(qid) => format!("{code} [{qid}]"),
+            None => code.to_string(),
+        }
+    }
+
+    fn old_label(&self) -> String {
+        Self::label(&self.old_code, self.old_qid.as_deref())
+    }
+
+    fn new_label(&self) -> String {
+        Self::label(&self.new_code, self.new_qid.as_deref())
+    }
+}
+
+fn normalized_fdc_code(code: &str) -> String {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        DEFAULT_LATTICE_CODE.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalized_qid(qid: Option<&str>) -> Option<String> {
+    qid.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn should_repair_fdc_anchor(
+    mode: FdcReclassifyMode,
+    old_code: &str,
+    old_qid: Option<&str>,
+    new_code: &str,
+    new_qid: Option<&str>,
+) -> bool {
+    match mode {
+        FdcReclassifyMode::All => true,
+        FdcReclassifyMode::SuspectOnly => {
+            new_code == DEFAULT_LATTICE_CODE
+                || old_code == DEFAULT_LATTICE_CODE
+                || (old_code == new_code && old_qid != new_qid)
+        }
+    }
+}
+
+/// `moot_reclassify_fdc` — audit or repair stored FDC anchors.
+///
+/// Mirrors Swift `runReclassifyFDC`: recompute each active drawer's content
+/// anchor with the current deterministic classifier, dry-run by default, and
+/// optionally write candidate changes through the audited reanchor path.
+fn run_reclassify_fdc(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let apply = optional_bool(args, "apply")?.unwrap_or(false);
+    let mode = FdcReclassifyMode::parse(optional_string(args, "mode")?)?;
+    let current_fdc_data_version = lattice_lib::Fdc::data_version();
+    let current_fdc_recalculation_version = lattice_lib::Fdc::recalculation_version();
+    let limit = match optional_integer(args, "limit")? {
+        Some(raw) => Some(crate::dispatch::clamp_limit(Some(raw), "limit", 1, 50_000)?),
+        None => None,
+    };
+    let prior_floor = estate.store.get_meta(FDC_RECALCED_DATA_VERSION_META_KEY).map_err(|e| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+            format!("fdc_reclassify: failed to read estate FDC floor: {e}"),
+        )
+    })?;
+
+    let drawers = {
+        let coord = estate.coord.lock().unwrap();
+        coord
+            .all_drawers(&estate.handle)
+            .map_err(|e| JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                describe_verb_dispatch_error(&e),
+            ))?
+    };
+    let mut active: Vec<_> = drawers
+        .into_iter()
+        .filter(|d| d.tombstoned_at.is_none() && d.is_currently_believed())
+        .collect();
+    if let Some(limit) = limit {
+        active.truncate(limit);
+    }
+
+    let mut scanned = 0usize;
+    let mut empty_content = 0usize;
+    let mut unchanged = 0usize;
+    let mut candidate_count = 0usize;
+    let mut applied = 0usize;
+    let mut skipped_non_candidate_changes = 0usize;
+    let mut unclassified_after = 0usize;
+    let mut examples: Vec<FdcReclassifyChange> = Vec::new();
+
+    // Phase A — PARALLEL classify. Each drawer's content anchor is a pure
+    // function of its content and stored kind over the pinned FDC artifacts:
+    // `eidetic_lib::lookup_no_record` skips the only shared-mutable write (the
+    // novel-token pool cache), and every other artifact on the path is
+    // read-only after init or a lock-guarded pure-function memo. So the classify
+    // is embarrassingly parallel and its result is independent of scheduling.
+    // This is the single expensive step (content through the v4 classifier incl.
+    // the semantic ranker), so lifting it off the serial path is the
+    // core-saturation win. Anchors are returned in the SAME order as `active`,
+    // preserving scan order for the serial audited write in Phase B.
+    let inputs: Vec<(&str, lattice_lib::FdcContentKind)> = active.iter().map(|drawer| {
+        let kind = if drawer.content_kind() == ContentKind::Code {
+            lattice_lib::FdcContentKind::Code
+        } else {
+            lattice_lib::FdcContentKind::Text
+        };
+        (drawer.content.as_str(), kind)
+    }).collect();
+    let anchors = classify_contents_in_parallel(&inputs);
+
+    // Phase B — SERIAL, ORDERED apply. Identical to the pre-parallel loop
+    // except the inline classify call is replaced by the precomputed
+    // `anchors[index]`. All counting, candidate selection, example capture, and
+    // the audited `reanchor_anchor` write run in scan order exactly as before,
+    // so the output (counters, ordered change list, audit sequence, and the
+    // early return on a write error) is byte-identical to the serial version.
+    for (index, drawer) in active.iter().enumerate() {
+        scanned += 1;
+        if drawer.content.trim().is_empty() {
+            empty_content += 1;
+        }
+
+        let old_code = normalized_fdc_code(&drawer.udc_code);
+        let old_qid = normalized_qid(drawer.wikidata_qid.as_deref());
+        let anchor = &anchors[index];
+        let new_code = normalized_fdc_code(&anchor.code);
+        let new_qid = normalized_qid(anchor.wikidata_qid.as_deref());
+        if old_code == new_code && old_qid == new_qid {
+            unchanged += 1;
+            continue;
+        }
+
+        let candidate = should_repair_fdc_anchor(
+            mode,
+            &old_code,
+            old_qid.as_deref(),
+            &new_code,
+            new_qid.as_deref(),
+        );
+        if !candidate {
+            skipped_non_candidate_changes += 1;
+            continue;
+        }
+
+        candidate_count += 1;
+        if new_code == DEFAULT_LATTICE_CODE {
+            unclassified_after += 1;
+        }
+        if examples.len() < 25 {
+            examples.push(FdcReclassifyChange {
+                id: drawer.id.clone(),
+                old_code: old_code.clone(),
+                old_qid: old_qid.clone(),
+                new_code: new_code.clone(),
+                new_qid: new_qid.clone(),
+            });
+        }
+
+        if apply {
+            // Repair only the primary udc_code + wikidata_qid that FDC
+            // re-lookup produced. udc_facets and wikidata_qids_secondary are
+            // carried forward unchanged from the existing drawer anchor —
+            // FDC re-lookup has no opinion on secondary classification, so a
+            // reclassify apply must not silently wipe facets/secondary QIDs
+            // a human or the enrichment daemon previously attached. Parity
+            // with Swift `runReclassifyFDC`.
+            let new_anchor = LatticeAnchor::new(
+                new_code,
+                drawer.udc_facets.clone(),
+                new_qid,
+                drawer.wikidata_qids_secondary.clone(),
+            );
+            let coord = estate.coord.lock().unwrap();
+            // reanchor_anchor (not the generic reanchor) so the audit event
+            // attributes this repair to the running server identity with a
+            // tool-specific reason, matching Swift's
+            // `estate.reanchorAnchor(rowID:toLattice:changedBy: serverIdentity,
+            // reason: "FDC reclassified via moot_reclassify_fdc", now:)` —
+            // the generic `coord.reanchor` path stamps the estate owner and
+            // a generic "reanchored via Estate.reanchor" reason, which
+            // misattributes an automated repair in the audit trail.
+            if let Err(e) = coord.reanchor_anchor(
+                &estate.handle,
+                &drawer.id,
+                new_anchor,
+                registry.server_identity.as_str(),
+                "FDC reclassified via moot_reclassify_fdc",
+            ) {
+                return Ok(error_result(&describe_verb_dispatch_error(&e)));
+            }
+            applied += 1;
+        }
+    }
+
+    let mut floor_after = prior_floor.clone();
+    let floor_stamp_status = if apply
+        && mode == FdcReclassifyMode::All
+        && limit.is_none()
+        && skipped_non_candidate_changes == 0
+    {
+        estate
+            .store
+            .set_meta(FDC_RECALCED_DATA_VERSION_META_KEY, &current_fdc_recalculation_version)
+            .map_err(|e| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                    format!("fdc_reclassify: failed to stamp estate FDC floor: {e}"),
+                )
+            })?;
+        floor_after = Some(current_fdc_recalculation_version.clone());
+        "stamped".to_string()
+    } else if !apply {
+        "dry-run".to_string()
+    } else if limit.is_some() {
+        "skipped: limited run cannot update estate-wide floor".to_string()
+    } else if mode != FdcReclassifyMode::All {
+        "skipped: mode=all is required for an estate-wide floor".to_string()
+    } else {
+        "skipped: changed non-suspect anchors remain".to_string()
+    };
+
+    let limit_suffix = limit.map(|n| format!(" (limit {n})")).unwrap_or_default();
+    let mut lines = vec![
+        format!("fdc_reclassify: {}", if apply { "applied" } else { "dry-run" }),
+        format!("mode: {}", mode.as_str()),
+        format!("estate: [{}]", Uuid::from_bytes(estate.handle.estate_uuid)),
+        format!("fdc_data_version: {current_fdc_data_version}"),
+        format!("fdc_recalculation_version: {current_fdc_recalculation_version}"),
+        format!("estate_recalced_data_version_before: {}", prior_floor.as_deref().unwrap_or("none")),
+        format!("scanned: {scanned} active drawer(s){limit_suffix}"),
+        format!("unchanged: {unchanged}"),
+        format!("empty_content: {empty_content}"),
+        format!("candidates: {candidate_count}"),
+        if apply {
+            format!("updated: {applied}")
+        } else {
+            format!("would_update: {candidate_count}")
+        },
+        format!("unclassified_after: {unclassified_after}"),
+        format!("skipped_non_candidate_changes: {skipped_non_candidate_changes}"),
+        format!("estate_recalced_data_version_after: {}", floor_after.as_deref().unwrap_or("none")),
+        format!("floor_stamp: {floor_stamp_status}"),
+    ];
+    if !apply {
+        lines.push("dry_run: pass apply=true to write candidate anchor changes".to_string());
+    }
+    if mode == FdcReclassifyMode::SuspectOnly && skipped_non_candidate_changes > 0 {
+        lines.push(format!(
+            "note: mode=suspectOnly left {skipped_non_candidate_changes} changed non-suspect anchor(s) untouched; rerun with mode=all to reset every changed active drawer from content"
+        ));
+    }
+    if !examples.is_empty() {
+        lines.push("changes:".to_string());
+        for example in &examples {
+            lines.push(format!(
+                "  {}: {} -> {}",
+                example.id,
+                example.old_label(),
+                example.new_label()
+            ));
+        }
+        if candidate_count > examples.len() {
+            lines.push(format!("  ... {} more", candidate_count - examples.len()));
+        }
+    }
+    Ok(text_result(&lines.join("\n")))
+}
+
+/// Classify each content/kind pair to its FDC anchor across a bounded worker
+/// pool, returning anchors in the SAME order as `inputs`.
+///
+/// Used by `run_reclassify_fdc` to parallelize the one expensive step of a
+/// reclassify scan (running content through the v4 classifier + semantic
+/// ranker). `eidetic_lib::lookup_no_record_with_kind` is a pure function of its arguments
+/// over the pinned artifacts and is thread-safe for concurrent calls — the
+/// no-record seam skips the shared novel-token cache write, and the reference
+/// tables / ranker / Q-ID-closure memo it reads are read-only after init or
+/// lock-guarded — so classifying in parallel yields the exact anchor each
+/// content would produce serially, regardless of scheduling.
+///
+/// Bounded to the available core count via `std::thread::scope` over contiguous
+/// chunks (no external dependency, so the `--offline` / `--locked` app builds
+/// are unaffected). Each worker owns a disjoint output slice; contiguous
+/// chunking of the input and output in lockstep preserves index order, so the
+/// caller's serial audited-write phase sees the identical scan order.
+fn classify_contents_in_parallel(
+    inputs: &[(&str, lattice_lib::FdcContentKind)],
+) -> Vec<eidetic_lib::Anchor> {
+    let n = inputs.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(1)
+        .min(n);
+    if workers <= 1 {
+        return inputs
+            .iter()
+            .map(|(content, kind)| eidetic_lib::lookup_no_record_with_kind(content, *kind))
+            .collect();
+    }
+
+    // Pre-size the output so workers write disjoint index ranges. The classify
+    // is order-independent, so contiguous chunking preserves order: out[i] is
+    // the anchor for contents[i].
+    let mut results: Vec<Option<eidetic_lib::Anchor>> = (0..n).map(|_| None).collect();
+    let chunk = n.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (out_chunk, in_chunk) in results.chunks_mut(chunk).zip(inputs.chunks(chunk)) {
+            scope.spawn(move || {
+                for (slot, (content, kind)) in out_chunk.iter_mut().zip(in_chunk.iter()) {
+                    *slot = Some(eidetic_lib::lookup_no_record_with_kind(content, *kind));
+                }
+            });
+        }
+    });
+    results
+        .into_iter()
+        .map(|a| a.expect("every slot classified exactly once"))
+        .collect()
 }
 
 /// `moot_palace_import` — import a MemPalace directly into the estate,

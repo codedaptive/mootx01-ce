@@ -36,7 +36,7 @@ struct EstateStatusSyncTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         return ToolDispatcher(kit: kit, handle: handle)
     }
 
@@ -101,7 +101,7 @@ struct EstateStatusSyncTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // Register a NoSyncEngine (disabled — never had enable() called).
         try await kit.registerSyncEngine(NoSyncEngine(), backendName: "none", for: handle)
@@ -127,7 +127,7 @@ struct EstateStatusSyncTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // Build a NoSyncEngine and enable it with a test manifest.
         let engine = NoSyncEngine()

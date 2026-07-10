@@ -69,7 +69,7 @@ private func openAndWireEstate(
         backend: .sqlite(url: url, busyTimeout: 5.0)
     ))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-    let handle = try await kit.open(storage: storage, owner: owner)
+    let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
     return (kit, handle, storage)
 }

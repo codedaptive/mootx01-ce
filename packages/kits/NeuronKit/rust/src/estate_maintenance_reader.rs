@@ -163,13 +163,16 @@ impl<'a> MaintenanceSubstrateReader for EstateMaintenanceReader<'a> {
 
 // ── Fingerprint-drift v1 metric ──────────────────────────────────────
 
-/// Map an `AuditChainReport` to the daemon's `AuditVerdict`. The report's
-/// `valid` / `first_broken_at_millis` carry directly; the maintenance
-/// decision core needs nothing else from the chain check.
-fn audit_verdict_from_report(report: &AuditChainReport) -> AuditVerdict {
+/// Map an `AuditChainReport` plus its ingress-rejected-entry count to the
+/// daemon's `AuditVerdict`. The report's `valid` / `first_broken_at_millis`
+/// carry directly; `rejected_entry_count` is AUDIT-ALERT-RESTORE
+/// (2026-07-09) — see `coordinator::verify_audit_chain_with_rejections`,
+/// which supplies both from the SAME log replay.
+fn audit_verdict_from_report(report: &AuditChainReport, rejected_entry_count: usize) -> AuditVerdict {
     AuditVerdict {
         valid: report.valid,
         first_broken_at_millis: report.first_broken_at_millis,
+        rejected_entry_count,
     }
 }
 
@@ -296,12 +299,15 @@ fn build_scan(
     };
 
     // ── Audit integrity (real verify) ─────────────────────────────────
-    // Replay the estate's audit trail and verify the chain (read-only). The
-    // verdict feeds the daemon's audit-integrity monitor; a clean chain emits
-    // no proposal.
+    // Replay the estate's audit trail, verify the chain, and surface the
+    // ingress-rejected-entry count — all from the SAME replay (read-only).
+    // AUDIT-ALERT-RESTORE (2026-07-09): a clean chain with zero rejections
+    // emits no proposal; a clean chain WITH rejections (content-hash-
+    // mismatched entries dropped before the walk ever saw them) now does.
     let audit = {
-        let report = coordinator.verify_audit_chain(handle)?;
-        Some(audit_verdict_from_report(&report))
+        let (report, rejected_entry_count) =
+            coordinator.verify_audit_chain_with_rejections(handle)?;
+        Some(audit_verdict_from_report(&report, rejected_entry_count))
     };
 
     // ── QID-pending enrichment retry batch (Board item 14) ───────────

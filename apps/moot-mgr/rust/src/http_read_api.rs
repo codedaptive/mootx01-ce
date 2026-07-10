@@ -526,8 +526,12 @@ impl HttpReadApi {
             }
             ("GET", "/api/graph") => {
                 let estate = query_value("estate", &request.query);
+                let level = query_value("level", &request.query);
+                let focus = query_value("focus", &request.query);
                 self.json_response(|m| {
-                    m.graph_payload(wall_now, estate.as_deref()).map_err(err_string)
+                    m.graph_payload_view(
+                        wall_now, estate.as_deref(), level.as_deref(), focus.as_deref())
+                        .map_err(err_string)
                 })
             }
             ("GET", "/api/events") => {

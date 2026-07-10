@@ -190,10 +190,13 @@ public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
     /// The current unified audit log, fed from the estate's LocusKit audit
     /// trail and returned as a value-type snapshot.
     ///
-    /// Delegates to `GeniusLocusKit.currentAuditLog(in:)`, which calls
-    /// `feedAuditLog(for:)` to pull latest audit rows into the in-memory
-    /// G-Set and then returns a snapshot. `AuditChainVerifier.verify`
-    /// consumes the snapshot in the daemon's audit-integrity monitor (§ 3.5).
+    /// Delegates to `GeniusLocusKit.currentAuditLog(in:)`, which delegates to
+    /// `auditLog(for:)` — a single bounded SQL query against
+    /// `_storagekit_audit`, replacing the removed N+1 per-drawer
+    /// `feedAuditLog` walk (ADR025-AUDITLOG-GOVERNOR). `AuditChainVerifier.verify`
+    /// consumes the returned snapshot in the daemon's audit-integrity monitor
+    /// (§ 3.5); the snapshot's `rejectedEntryCount` (AUDIT-ALERT-RESTORE,
+    /// 2026-07-09) feeds the same monitor's ingress-rejection alert.
     public func currentAuditLog() async throws -> UnifiedAuditLog {
         try await kit.currentAuditLog(in: handle)
     }

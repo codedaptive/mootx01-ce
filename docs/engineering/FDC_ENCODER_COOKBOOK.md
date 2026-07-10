@@ -1,10 +1,10 @@
 ---
 title: FDC Encoder Engineering Cookbook
-version: 1.0.0
+version: 1.1.0
 description: Implementation cookbook for the FDC encoder, the substrate's shipped content classifier.
 status: active
 author: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-07-09
 relates_to:
   - docs/reference/FDC_ENCODER_CANONICAL.md (canonical spec; the contract)
   - docs/decisions/DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md (kit ownership)
@@ -34,7 +34,8 @@ surfaces the dominant concept Q-ID — the highest-weighted Wikidata Q-ID in the
 concept bag (ties → lowest Q-ID), or `nil` — which `EideticLib.lookup` carries
 as the Anchor's `wikidataQID`. There is no "trail" return.
 
-Pure function. No I/O. No clock. No RNG. No network. No learned model.
+Pure function. No I/O. No clock. No RNG. No network or platform ML runtime.
+Classifier v4 includes a pinned build-time-trained sparse semantic artifact.
 Same input and same pinned artifacts yield bit-identical output on every
 platform and in both the Swift and Rust ports.
 
@@ -42,9 +43,10 @@ platform and in both the Swift and Rust ports.
 
 ## §1. Pinned Artifacts
 
-The pinned JSON artifacts ship in `Sources/LatticeLib/Resources/`:
-`FDCFrame.json`, `FDCSignatures.json`, `WordClassTable.json`, and the
-canonicalization `Lexicon.json` (§3.1). All are produced by the Seed
+The pinned artifacts ship in `Sources/LatticeLib/Resources/`:
+`FDCFrame.json`, `FDCSignatures.json`, `WordClassTable.json`, the
+canonicalization `Lexicon.json` (§3.1), and `FDCSemanticRanker.json` + `.bin`.
+All are produced by the Seed
 Generator (a maintainer-only tool) and committed to the repository.
 LatticeLib's FDC runtime (`FDC`, `WordClassTableCache`) parses them once on
 first use and caches the parsed result for the process lifetime.
@@ -95,7 +97,18 @@ form (`{ "signatures": { code: { term: weight } } }`); `Data/_compact.sh`
 reduces it to the bundled membership form above. The SimHash fingerprint
 (§5.1) is not yet produced and is absent from both forms.
 
-### §1.3. WordClassTable.json
+### §1.3. FDCSemanticRanker.json + .bin
+
+The JSON metadata pins model version, feature schema, ordered FDC code table,
+integer norms, source hashes, and binary SHA-256. The binary is a feature-major
+sparse CSR table with magic `FDCSMR1\0`, little-endian dimensions and offsets,
+`UInt16` code indices, and nonzero `UInt8` weights. The feature contract is
+`ascii-word-bigram-affix-fnv1a-v1`: lowercase ASCII words, word bigrams, and
+3-5 byte prefixes/suffixes hashed by FNV-1a into 16,384 features. Query features
+are presence-only, repeated adjacent tokens collapse, and runtime scoring is
+integer-only. The EE builder and strict audit are the only artifact producers.
+
+### §1.4. WordClassTable.json
 
 The static noun/verb lookup table. Schema:
 
@@ -187,7 +200,7 @@ resident Autonomic Governor drives the PoolReducer
 reducer's own no-op-safe scan (an absent/empty pool directory is a
 single enumerate that returns a no-op, so an idle tick costs nothing).
 When a novel-token submission lands, the next tick folds it into the
-writable table and **live-swaps** the running tagger (§1.3) — so the
+writable table and **live-swaps** the running tagger (§1.4) — so the
 reduce-to-learn latency floor is the base tick (`MOOTX01_BRAIN_TICK_MS`),
 not a fixed hour. A positive `MOOTX01_POOL_REDUCE_CADENCE_SECONDS`
 reinstates a minimum spacing (test determinism / load throttling). This
@@ -464,6 +477,21 @@ Examples: children of `"006"` include `"006.6"` but not `"006.6.1"`.
 Children of `"000"` include `"001"`, `"002"`, `"003"` etc. but not
 `"006.6"`.
 
+### §6.3. Classifier v4 Semantic Fusion
+
+The semantic ranker is evidence for hierarchy selection, not independent leaf
+authority. Require at least 8 matched hashed features. A top candidate may pick
+its main class at a 3:2 lead; otherwise sum the five strongest candidates per
+main class and require a 6:5 lead. At most one child below the main class may be
+selected, requiring a 4:3 child lead plus agreement among the leading candidates
+or an 8:5 strong lead. Ties use lowest code.
+
+Reviewed aliases bypass semantic correction. Matching lexical and semantic main
+classes preserve the hierarchy-first lexical code. On disagreement, retain a
+lexical code whose semantic score is at least two-thirds of the semantic winner;
+otherwise return the semantic safe ancestor and clear the Q-ID. Any change to
+these thresholds requires classifier-version and conformance-vector updates.
+
 ---
 
 ## §7. Build-Time: Producing the Signatures
@@ -580,7 +608,7 @@ determinism concern is float-summation order in the IDF scoring (§5.3), which
 both ports pin by summing in sorted term order.
 
 Conformance is enforced by a committed fixture
-(`rust/tests/fixtures/fdc_conformance.json`, **52/52 passing**), each entry an
+(`rust/tests/fixtures/fdc_conformance.json`, **65/65 passing**), each entry an
 input with its expected code:
 
 ```json
@@ -591,6 +619,8 @@ input with its expected code:
 ```
 
 Any divergence between ports is a hard conformance failure and blocks release.
+`fdc_semantic_conformance.json` adds 12 exact top-k, hierarchy-decision, and
+final-code vectors plus the semantic artifact version and hash.
 
 The cross-platform-*guaranteed* surface is the static word-class table plus the
 pinned lexicon and signatures: any token resolved through them is bit-identical
@@ -619,6 +649,11 @@ are retained.
 | `LEXRANK_SENTENCE_COUNT` | 10 | Sentences retained per article |
 | `POOL_SUBMIT_THRESHOLD` | 50 entries | Novel-token cache flush trigger |
 | `STOP_THRESHOLD` | 1 | Pinned; empirically inert on the v1.0 frame (§6.1) |
+| semantic feature dimension | 16384 | Power-of-two FNV-1a feature space |
+| semantic minimum matches | 8 | Reject sparse collision evidence |
+| semantic main dominance | 6:5 | Aggregate main-class decision |
+| semantic top dominance | 3:2 | Dominant top-candidate shortcut |
+| semantic child dominance | 4:3 / 8:5 | Consensus / strong child descent |
 
 `STOP_THRESHOLD` is resolved (pinned at `1`, §6.1). The three SimHash constants
 back a deferred pre-filter (§5.1) and are not yet load-bearing. All values are
@@ -635,6 +670,7 @@ and a full conformance vector regeneration.
 | Static word-class table | LatticeLib (resource) | Yes |
 | FDC frame | LatticeLib (resource) | Yes |
 | Code signatures | LatticeLib (resource) | Yes |
+| Semantic ranker metadata + CSR model | LatticeLib (resource) | Yes |
 | Match index (inverted-index, §5.2) | LatticeLib (built at init) | Yes |
 | Canonicalization lexicon | LatticeLib (resource) | Yes |
 | Platform tagger fallback | LatticeLib (`NLTagger`, Apple) | Yes (Apple) |
@@ -649,6 +685,10 @@ Full rationale for each assignment is in
 `DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md`.
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-09
+Added classifier v4 semantic artifact format, deterministic inference contract,
+hierarchy fusion thresholds, conformance fixture, and recalculation inputs.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0. Revised to shipped reality: IDF scoring, `encode`/`encodeAnchor` entry points, inert `STOP_THRESHOLD`, and Swift↔Rust scalar conformance.

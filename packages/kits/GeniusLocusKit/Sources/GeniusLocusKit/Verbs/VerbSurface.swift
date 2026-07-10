@@ -1657,7 +1657,7 @@ public extension GeniusLocusKit {
         // Emit the grant-issued audit entry now that the grant is
         // persisted and the scope key is in custody, so the estate's
         // unified chain records the grant lifecycle (FUP-C / GLK-03 seam).
-        appendGrantAuditEntry(
+        try await appendGrantAuditEntry(
             verb: .grantIssued,
             grantID: grant.id,
             custodyToken: grant.custodyMode.columnToken,
@@ -1696,7 +1696,7 @@ public extension GeniusLocusKit {
         // Emit the grant-revoked audit entry after the revocation record
         // is written and the mode-1 key is dropped from the vault, so the
         // chain records the lifecycle close (FUP-C / GLK-03 seam).
-        appendGrantAuditEntry(
+        try await appendGrantAuditEntry(
             verb: .grantRevoked,
             grantID: grantID,
             custodyToken: stored.grant.custodyMode.columnToken,
@@ -1761,9 +1761,21 @@ extension GeniusLocusKit {
     /// is milliseconds since the Unix epoch derived from `now`, matching
     /// `AuditBridge` so a grant entry orders on the same clock as the
     /// LocusKit-tier entries; `verifyAuditChain` sorts by HLC, so the
-    /// appended entry cannot break the chain. The append uses the same
-    /// default-insert idiom as `feedAuditLog`, and the G-Set dedupes a
-    /// re-emitted entry by content hash.
+    /// appended entry cannot break the chain.
+    ///
+    /// Durable append through the same substrate `AuditEvent` pipeline
+    /// `appendSensitivityAuditEntry` uses (SensitivityAuditVerbs.swift):
+    /// a synthetic (non-drawer) event whose bitmap slots carry the
+    /// `before`/`after` values via `SyntheticAuditValueCodec`
+    /// (AuditBridge.swift) rather than real bitmap-column state, decoded
+    /// back into a `UnifiedAuditEntry` by `AuditBridge`'s synthetic-verb
+    /// path. `storage.auditLog` is the estate's durable, O(N)-bounded
+    /// audit store (764b370e) — this append adds one row, not an
+    /// in-memory G-Set entry, so the O(N)-RAM goal that migration set
+    /// holds. Awaited (not fire-and-forget): a failed durable append on
+    /// this security-relevant write path must surface to the caller, not
+    /// be silently dropped (issueGrant / revokeGrant are already `async
+    /// throws`, so the throw propagates with no signature change there).
     private func appendGrantAuditEntry(
         verb: UnifiedAuditVerb,
         grantID: UUID,
@@ -1772,13 +1784,30 @@ extension GeniusLocusKit {
         after: UnifiedAuditValue,
         handle: EstateHandle,
         now: Date
-    ) {
-        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no-op. The in-memory `auditLogs`
-        // dict is removed; grant audit entries are persisted by LocusKit's audit
-        // machinery when the underlying grant verb fires. They are visible via
-        // `auditLog(for:)` which reads directly from `_storagekit_audit`.
-        // The docstring above is preserved for history; this method will be removed
-        // in a follow-up cleanup once all callers are verified.
+    ) async throws {
+        guard let storage = storages[handle] else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        // Synthetic HLC: physical time from `now`, logical 0, node 0 —
+        // matches the sensitivity-unlock seam's derivation exactly so a
+        // grant entry and a sensitivity entry order on the same clock.
+        let hlc = HLC(physicalTime: nowMs, logicalCount: 0, nodeID: 0)
+        let (beforeKind, beforePayload) = SyntheticAuditValueCodec.encode(before)
+        let (afterKind, afterPayload) = SyntheticAuditValueCodec.encode(after)
+        let event = AuditEvent(
+            estateUuid: handle.estateUUID,
+            rowId: grantID,
+            hlc: hlc,
+            verb: verb.rawValue,
+            beforeBitmaps: (adjective: beforePayload, operational: 0, provenance: beforeKind),
+            afterBitmaps: (adjective: afterPayload, operational: 0, provenance: afterKind),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0),
+            actor: "grant-audit",
+            reason: custodyToken
+        )
+        try await storage.auditLog.append(event)
     }
 
     /// Drop the grant surface for a handle on close. The vault is

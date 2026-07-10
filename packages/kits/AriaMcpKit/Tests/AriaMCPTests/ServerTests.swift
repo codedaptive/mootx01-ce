@@ -26,7 +26,7 @@ struct ServerTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
         let tooling = ToolDispatcher(kit: kit, handle: handle)
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
@@ -424,7 +424,7 @@ struct ServerTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // Inject a known serial to simulate MOOTX01_BUILD_SERIAL=ABC123.
         let knownSerial = "ABC123"
@@ -466,7 +466,7 @@ struct ServerTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         let advisory = "plugin 1.0.15 expects binary ≥ 1.0.15; binary is 1.0.11 — run `mootx01 upgrade`"
         let tooling = ToolDispatcher(kit: kit, handle: handle, versionSkewAdvisory: advisory)

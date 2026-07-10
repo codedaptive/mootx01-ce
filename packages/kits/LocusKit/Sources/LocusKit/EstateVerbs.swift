@@ -1591,12 +1591,14 @@ public extension Estate {
     ///   - rowID: the drawer whose anchor to update.
     ///   - toLattice: the new lattice anchor (with the resolved Q-ID).
     ///   - changedBy: audit provenance — the agent driving the update.
+    ///   - reason: audit reason recorded with the anchor mutation.
     ///   - now: deterministic write timestamp.
     /// - Throws: `LocusKitError.drawerNotFound` if the row is absent.
     func reanchorAnchor(
         rowID: RowID,
         toLattice: LatticeAnchor,
         changedBy: String,
+        reason: String = "anchor Q-ID resolved via enrichment-proposal acceptance",
         now: Date
     ) async throws {
         guard try await store.getDrawer(id: rowID) != nil else {
@@ -1607,7 +1609,7 @@ public extension Estate {
             toRoom: nil,
             toLattice: toLattice,
             changedBy: changedBy,
-            reason: "anchor Q-ID resolved via enrichment-proposal acceptance",
+            reason: reason,
             now: now
         )
     }

@@ -38,6 +38,10 @@ struct LexiconBuilderTests {
         <http://www.wikidata.org/entity/Q144>\t"02086723-n"\t"dog"@en\t"hound"@en
         <http://www.wikidata.org/entity/Q181055>\t"07697100-n"\t"hot dog"@en\t"dog"@en
         <http://www.wikidata.org/entity/Q76>\t""\t"Barack Obama"@en\t"Obama"@en
+        <http://www.wikidata.org/entity/Q417934>\t""\t"f"@en\t""@en
+        <http://www.wikidata.org/entity/Q18596004>\t""\t"git"@en\t""@en
+        <http://www.wikidata.org/entity/Q8913>\t""\t"for"@en\t""@en
+        <http://www.wikidata.org/entity/Q420439>\t""\t"1"@en\t""@en
         """
         let tsvPath = (base as NSString).appendingPathComponent("wd.tsv")
         try tsv.write(toFile: tsvPath, atomically: true, encoding: .utf8)
@@ -75,6 +79,16 @@ struct LexiconBuilderTests {
         // "hot dog" / "Barack Obama" are multi-word; they produce no single key.
         #expect(lex.entries["hot dog"] == nil)
         #expect(lex.entries["barack obama"] == nil)
+    }
+
+    @Test("weak single-token QID aliases are not indexed")
+    func weakAliasesSkipped() throws {
+        let (dict, tsv) = try fixtures()
+        let lex = try LexiconBuilder.build(.init(wordNetDictDir: dict, wikidataTSV: tsv, version: "t"))
+        #expect(lex.entries["f"] == nil)
+        #expect(lex.entries["git"] == nil)
+        #expect(lex.entries["for"] == nil)
+        #expect(lex.entries["1"] == nil)
     }
 
     @Test("build is deterministic")

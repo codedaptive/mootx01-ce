@@ -1,12 +1,14 @@
 [
   {
+    "code" : "004",
     "input" : "computer software programming and information science"
   },
   {
+    "code" : "004",
     "input" : "database management system SQL"
   },
   {
-    "code" : "615.892",
+    "code" : "004",
     "input" : "machine learning neural networks artificial intelligence"
   },
   {
@@ -14,9 +16,11 @@
     "input" : "computer graphics rendering visualization"
   },
   {
+    "code" : "004",
     "input" : "operating systems kernel processes"
   },
   {
+    "code" : "004",
     "input" : "network protocols internet communication"
   },
   {
@@ -24,106 +28,127 @@
     "input" : "software engineering algorithms data structures"
   },
   {
-    "code" : "942",
+    "code" : "005",
     "input" : "web development HTML programming"
   },
   {
-    "code" : "959",
+    "code" : "004",
     "input" : "distributed systems cloud computing"
   },
   {
+    "code" : "541",
     "input" : "chemistry and physics"
   },
   {
+    "code" : "547",
     "input" : "organic chemistry reactions molecules"
   },
   {
+    "code" : "530",
     "input" : "physics mechanics quantum theory"
   },
   {
+    "code" : "575",
     "input" : "biology genetics evolution organisms"
   },
   {
+    "code" : "520",
     "input" : "astronomy stars planets solar system"
   },
   {
-    "code" : "549",
+    "code" : "552",
     "input" : "geology rocks minerals earth science"
   },
   {
+    "code" : "510",
     "input" : "mathematics calculus algebra geometry"
   },
   {
+    "code" : "519",
     "input" : "statistics probability data analysis"
   },
   {
-    "code" : "336",
+    "code" : "330",
     "input" : "economics markets trade finance"
   },
   {
+    "code" : "321",
     "input" : "political science government democracy"
   },
   {
+    "code" : "306",
     "input" : "sociology society culture community"
   },
   {
+    "code" : "900",
     "input" : "history ancient civilizations war"
   },
   {
+    "code" : "171",
     "input" : "philosophy ethics morality reasoning"
   },
   {
+    "code" : "400",
     "input" : "language linguistics grammar syntax"
   },
   {
-    "code" : "823",
+    "code" : "800",
     "input" : "literature poetry novels writing"
   },
   {
+    "code" : "700",
     "input" : "art painting sculpture museum"
   },
   {
+    "code" : "780",
     "input" : "music theory instruments composition"
   },
   {
-    "code" : "617",
+    "code" : "610",
     "input" : "medicine surgery treatment disease"
   },
   {
-    "code" : "615.85",
+    "code" : "615",
     "input" : "pharmacology drugs clinical trials"
   },
   {
+    "code" : "611",
     "input" : "anatomy physiology human body organs"
   },
   {
-    "code" : "131",
+    "code" : "610",
     "input" : "nursing patient care hospital"
   },
   {
+    "code" : "340",
     "input" : "law legal rights court justice"
   },
   {
-    "code" : "297",
+    "code" : "200",
     "input" : "religion theology Christianity Islam"
   },
   {
+    "code" : "370",
     "input" : "education teaching learning school"
   },
   {
+    "code" : "010",
     "input" : "library classification books cataloging"
   },
   {
+    "code" : "624",
     "input" : "engineering civil construction bridges"
   },
   {
-    "code" : "636",
+    "code" : "590",
     "input" : "animal behavior mammals dogs cats"
   },
   {
+    "code" : "796",
     "input" : "sports athletics competition games"
   },
   {
+    "code" : "380",
     "input" : "transportation automobile travel vehicles"
   },
   {
@@ -131,78 +156,99 @@
     "input" : "agriculture farming crops soil"
   },
   {
-    "code" : "385",
+    "code" : "363.73",
     "input" : "environment climate change pollution"
   },
   {
+    "code" : "621.3",
     "input" : "energy electricity power generation"
   },
   {
+    "code" : "720",
     "input" : "architecture buildings design construction"
   },
   {
+    "code" : "621.7",
     "input" : "manufacturing production industry factory"
   },
   {
+    "code" : "330",
     "input" : "economics business trade markets"
   },
   {
+    "code" : "004",
     "input" : "theoretical computer science complexity"
   },
   {
+    "code" : "005",
     "input" : "programming languages compilers interpreters"
   },
   {
-    "code" : "533",
+    "code" : "621",
     "input" : "robotics automation mechanical engineering"
   },
   {
-    "code" : "667",
+    "code" : "668",
     "input" : "materials science metals polymers"
   },
   {
+    "code" : "540",
     "input" : "chemistry"
   },
   {
+    "code" : "004",
     "input" : "computer"
   },
   {
+    "code" : "510",
     "input" : "mathematics"
   },
   {
+    "code" : "530",
     "input" : "physics"
   },
   {
+    "code" : "780",
     "input" : "music"
   },
   {
+    "code" : "100",
     "input" : "philosophy"
   },
   {
+    "code" : "900",
     "input" : "history"
   },
   {
+    "code" : "910",
     "input" : "geography"
   },
   {
+    "code" : "600",
     "input" : "engineering"
   },
   {
+    "code" : "610",
     "input" : "medicine"
   },
   {
+    "code" : "340",
     "input" : "law"
   },
   {
+    "code" : "330",
     "input" : "economics"
   },
   {
+    "code" : "700",
     "input" : "art"
   },
   {
+    "code" : "000",
     "input" : "zzqqxv wwkkjj plldfg"
   },
   {
+    "code" : "000",
     "input" : "xyzzy frobozz zork"
   },
   {

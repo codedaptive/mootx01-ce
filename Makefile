@@ -1,32 +1,40 @@
 # Makefile — mootx01 build orchestration (Swift + Rust polyglot monorepo).
 #
-# There is no single native build system spanning both languages, so this
-# Makefile is the one place that builds, tests, packages, and cleans the
-# whole tree. Package/crate lists are discovered dynamically (find), so new
-# kits and crates are picked up automatically — nothing to register here.
+# There is no single native build system spanning Swift, Rust, and Python, so
+# this Makefile provides the repo-level lanes. Unit tests are the default lane;
+# product, validation, and full-regression sweeps are explicit targets.
 #
 # Common targets:
 #   make build        build every Swift package + Rust crate (debug)
-#   make test         test every Swift package + Rust crate
+#   make test         run the fast core unit lane
+#   make test-one     run the package/crate owning DIR=...
+#   make test-changed run only package/crate/python roots changed from BASE
+#   make test-full    run unit + product + validation + lint/check gates
 #   make conformance  run the cross-language shared-vector gate
 #   make release      build the host-arch release archive (mootx01 + moot-mgr)
 #   make list         show the discovered packages/crates
 #   make clean        strip all build artifacts (clean-dry to preview)
 #   make help         this list
 #
-# build/test are fail-fast: the first failing package stops the run and
-# prints which one failed.
+# Test lanes are fail-fast: the first failing package stops the run and prints
+# which one failed.
 
 SHELL := /bin/bash
 
 # ── Discovery ─────────────────────────────────────────────────────────────
-SWIFT_PKGS  := $(shell find . -name Package.swift  -not -path '*/.build/*' -print0 | xargs -0 -n1 dirname | sort)
-RUST_CRATES := $(shell find . -name Cargo.toml -not -path '*/target/*' -not -path '*/.build/*' -print0 | xargs -0 -n1 dirname | sort)
+TEST_RUNNER := bash scripts/moot-test
+SWIFT_PKGS  := $(shell $(TEST_RUNNER) list-swift all)
+RUST_CRATES := $(shell $(TEST_RUNNER) list-rust all)
+PYTHON_PKGS := $(shell $(TEST_RUNNER) list-python all)
 
 HARNESS := docs/validation/substrate_math_performance/test-harness
 DIST    ?= dist
+BASE    ?= origin/develop/1.0.x
 
-.PHONY: help build build-swift build-rust test test-swift test-rust \
+.PHONY: help build build-swift build-rust test test-unit test-swift test-rust test-python \
+        test-product test-product-swift test-product-rust test-product-python \
+        test-validation test-validation-swift test-validation-rust test-validation-python \
+        test-one test-changed test-full test-all test-checks test-glk-latency test-topology-zoom \
         conformance release pkg list clean clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
@@ -34,9 +42,16 @@ help:
 	@echo "  build        — build all Swift packages + Rust crates (debug)"
 	@echo "  build-swift  — swift build each Swift package"
 	@echo "  build-rust   — cargo build each Rust crate"
-	@echo "  test         — test all Swift packages + Rust crates"
-	@echo "  test-swift   — swift test each Swift package (skips ones with no Tests/)"
-	@echo "  test-rust    — cargo test each Rust crate"
+	@echo "  test         — fast core unit lane (packages/ Swift + Rust + Python only)"
+	@echo "  test-swift   — fast core Swift unit lane"
+	@echo "  test-rust    — fast core Rust unit lane"
+	@echo "  test-python  — fast core Python unit lane"
+	@echo "  test-one DIR=path — run nearest owning Package.swift/Cargo.toml/pyproject.toml"
+	@echo "  test-changed BASE=$(BASE) — run changed package/crate/python roots"
+	@echo "  test-product — app/example tests (explicit product lane)"
+	@echo "  test-validation — validation and benchmark harness tests"
+	@echo "  test-full    — unit + product + validation + check gates"
+	@echo "  test-topology-zoom — run the pure semantic-zoom controller tests"
 	@echo "  check-static-assets — verify StaticAssets.swift matches DashboardAssets/ source"
 	@echo "  check-edition-boundary — verify no SHARED file references an EE-only path"
 	@echo "  conformance  — cross-language shared-vector conformance gate"
@@ -63,7 +78,67 @@ build-rust:
 	@echo "✓ all Rust crates built"
 
 # ── Test ────────────────────────────────────────────────────────────────
-test: test-swift test-rust check-static-assets check-edition-boundary
+# Default TDD lane: core packages only. Product apps, validation harnesses,
+# benchmarks, GLK latency suites, and repo lint/check gates are explicit so
+# coding agents can iterate on the local unit of work without accidentally
+# launching a whole-product regression sweep.
+test: test-unit
+
+test-unit:
+	@$(TEST_RUNNER) unit
+
+test-swift:
+	@$(TEST_RUNNER) unit-swift
+
+test-rust:
+	@$(TEST_RUNNER) unit-rust
+
+test-python:
+	@$(TEST_RUNNER) unit-python
+
+test-product:
+	@$(TEST_RUNNER) product
+
+test-product-swift:
+	@$(TEST_RUNNER) product-swift
+
+test-product-rust:
+	@$(TEST_RUNNER) product-rust
+
+test-product-python:
+	@$(TEST_RUNNER) product-python
+
+test-validation:
+	@$(TEST_RUNNER) validation
+
+test-validation-swift:
+	@$(TEST_RUNNER) validation-swift
+
+test-validation-rust:
+	@$(TEST_RUNNER) validation-rust
+
+test-validation-python:
+	@$(TEST_RUNNER) validation-python
+
+test-one:
+	@$(TEST_RUNNER) path "$(DIR)"
+
+test-changed:
+	@$(TEST_RUNNER) changed "$(BASE)"
+
+test-checks: check-static-assets check-edition-boundary test-topology-zoom
+
+test-topology-zoom:
+	@node --test apps/moot-mgr/Sources/MootManager/DashboardAssets/tests/semantic-zoom.test.mjs
+	@node --check apps/moot-mgr/Sources/MootManager/DashboardAssets/app.js
+	@node --check apps/moot-mgr/Sources/MootManager/DashboardAssets/semantic-zoom.mjs
+	@node --check apps/moot-mgr/Tests/BrowserFixtures/topology_v3_server.mjs
+
+test-full:
+	@$(MAKE) test-checks
+	@$(TEST_RUNNER) full
+
+test-all: test-full
 
 # GLK latency suites: gated behind GLK_LATENCY_TESTS=1 (self-skip on a bare
 # `swift test`) because their near-realtime assertions are CPU-bound embed
@@ -72,29 +147,8 @@ test: test-swift test-rust check-static-assets check-edition-boundary
 # a quiet machine — where a latency number means what it claims. See the
 # file headers in Tests/GeniusLocusKitTests/EncodeDrainNearRealtimeTests.swift
 # and EncodeIntakeTests.swift.
-GLK_PKG := ./packages/kits/GeniusLocusKit
-GLK_LATENCY_FILTERS := --filter EncodeDrainNearRealtimeTests --filter EncodeIntakeTests
-
-test-swift:
-	@for d in $(SWIFT_PKGS); do \
-		if [ -d "$$d/Tests" ]; then \
-			echo "── swift test: $$d"; \
-			( cd "$$d" && swift test ) || { echo "FAILED (swift test): $$d"; exit 1; }; \
-		else \
-			echo "── skip (no Tests/): $$d"; \
-		fi; \
-	done
-	@echo "── swift test (GLK latency suites, isolated): $(GLK_PKG)"
-	@( cd "$(GLK_PKG)" && GLK_LATENCY_TESTS=1 swift test --no-parallel $(GLK_LATENCY_FILTERS) ) \
-		|| { echo "FAILED (GLK latency suites, isolated): $(GLK_PKG)"; exit 1; }
-	@echo "✓ all Swift tests passed"
-
-test-rust:
-	@for d in $(RUST_CRATES); do \
-		echo "── cargo test: $$d"; \
-		( cd "$$d" && cargo test ) || { echo "FAILED (cargo test): $$d"; exit 1; }; \
-	done
-	@echo "✓ all Rust tests passed"
+test-glk-latency:
+	@$(TEST_RUNNER) glk-latency
 
 # ── Static-asset lint gate ─────────────────────────────────────────────────────
 # Verifies that apps/moot-mgr/Sources/MootManager/StaticAssets.swift is in sync
@@ -113,6 +167,9 @@ check-static-assets:
 	cp apps/moot-mgr/Sources/MootManager/DashboardAssets/index.html \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.css \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.js \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/semantic-zoom.mjs \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/three.min.js \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/OrbitControls.js \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/gen_static_assets.sh \
 	   "$$TMPDIR/" && \
 	bash "$$TMPDIR/gen_static_assets.sh" "$$TMPDIR/StaticAssets.swift.new" && \
@@ -212,6 +269,7 @@ pkg:
 list:
 	@echo "Swift packages ($(words $(SWIFT_PKGS))):"; for d in $(SWIFT_PKGS); do echo "  $$d"; done
 	@echo "Rust crates ($(words $(RUST_CRATES))):"; for d in $(RUST_CRATES); do echo "  $$d"; done
+	@echo "Python packages ($(words $(PYTHON_PKGS))):"; for d in $(PYTHON_PKGS); do echo "  $$d"; done
 
 # ── Clean ─────────────────────────────────────────────────────────────────
 # `make clean` strips all build artifacts from the entire tree so the checkout

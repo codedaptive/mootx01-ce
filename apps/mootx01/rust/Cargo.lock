@@ -72,6 +72,7 @@ dependencies = [
  "corpus-kit",
  "corpus-kit-providers",
  "digest 0.10.7",
+ "eidetic-lib",
  "genius-locus-kit",
  "intellectus-lib",
  "lattice-lib",
@@ -863,6 +864,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "substrate-kernel",
  "unicode-segmentation",
 ]
 
@@ -979,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "mootx01-cli"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "aria-mcp",
  "libc",

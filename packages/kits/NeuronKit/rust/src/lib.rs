@@ -76,6 +76,7 @@ pub mod spreading_activation;
 pub mod structure_graph;
 pub mod theme_weather;
 pub mod topology_analysis;
+mod topology_projection;
 pub mod tournament;
 pub mod tournament_live;
 
@@ -219,17 +220,30 @@ mod tests {
     }
 
     #[test]
-    fn nonsense_term_produces_enrichment_status_none() {
+    fn nonsense_term_produces_qid_pending_via_000_sentinel() {
         // Pure gibberish only — a single real dictionary word resolves
         // through the FDC encoder, so the fixture must contain no real
         // words. Mirrors the Swift NeuronKit fixture
         // (LatticeAnchorInferenceTests.swift) exactly.
+        //
+        // The v3/v4 FDC classifier's hierarchy mode never returns an empty
+        // code for nonempty input: `FDCMatcher::encode_anchor` (LatticeLib)
+        // falls back to the "000" Generalities/unclassified sentinel instead
+        // of `None` whenever no signature overlap resolves a specific code.
+        // Empty code is now reserved for genuinely empty/whitespace-only
+        // input (see `encode_anchor`'s `text.trim().is_empty()` guard) —
+        // NOT for unresolved-but-nonempty text. A "000" code never carries a
+        // Q-ID (every code path that yields "000" returns `None` for the
+        // concept Q-ID), so `infer_lattice_anchor`'s status derivation — which
+        // branches on `code.is_empty()` before `wikidata_qid.is_none()` —
+        // takes the non-empty-code branch and reports `QidPending`, not
+        // `None`. `None` is reserved for the empty-code case only.
         let inference = infer_lattice_anchor("zxcvqwertyasdfgh qwertyzxcvb");
-        assert_eq!(inference.code, "");
+        assert_eq!(inference.code, "000");
         assert!(inference.wikidata_qid.is_none());
         assert_eq!(
             inference.enrichment_status_bits,
-            EnrichmentStatus::None.raw()
+            EnrichmentStatus::QidPending.raw()
         );
     }
 

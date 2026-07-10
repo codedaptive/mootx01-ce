@@ -3,6 +3,9 @@
 // Port of FDCRuntime.swift. Loads the bundled pinned artifacts (Lexicon.json,
 // FDCFrame.json, FDCSignatures.json, WordClassTable.json) once per process
 // via `include_bytes!` and exposes `Fdc::encode(text) -> Option<String>`.
+// Compact v2 signatures retain code-owned label, alias, title, and article
+// terms separately from inherited ancestor terms. Classifier v4 fuses that
+// hierarchy-first policy with portable integer semantic evidence.
 //
 // The Swift runtime loads via `Bundle.module.url(forResource:...)`. The Rust
 // equivalent is `include_bytes!` at compile time — same pinning guarantee,
@@ -15,9 +18,11 @@
 // which is correct for the position of this file at
 //   packages/libs/LatticeLib/rust/src/fdc_runtime.rs
 
+use std::sync::Arc;
 use std::sync::OnceLock;
 use crate::fdc_frame::FdcFrame;
 use crate::fdc_matcher::{FdcMatcher, ScoreMode};
+use crate::fdc_semantic_ranker::{FdcSemanticCandidate, FdcSemanticDecision, FdcSemanticRanker};
 use crate::fdc_signatures::FdcSignatures;
 use crate::lexicon::CanonicalizationLexicon;
 use crate::novel_pool_submitter::default_table_artifact;
@@ -30,11 +35,20 @@ use crate::word_class_table;
 // here. `1` is the pinned ship value; classification accuracy is governed by
 // within-region scoring (§5), not this cutoff. Mirrors Swift FDCRuntime.swift.
 const STOP_THRESHOLD: usize = 1;
+const CLASSIFIER_VERSION: &str = "4.2.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdcContentKind {
+    Text,
+    Code,
+}
 
 /// The bundled artifacts and the assembled matcher — loaded once per process.
 struct Bundle {
     matcher: FdcMatcher,
+    semantic_ranker: Arc<FdcSemanticRanker>,
     version: String,
+    lexicon_version: String,
     // Retained for label lookups. FdcFrame derives Clone so we clone before moving
     // into FdcMatcher, which takes ownership. This matches Swift's bundle tuple
     // which stores (matcher, frame, version) together.
@@ -56,6 +70,12 @@ fn get_bundle() -> Option<&'static Bundle> {
         const SIGS_JSON: &[u8] = include_bytes!(
             "../../Sources/LatticeLib/Resources/FDCSignatures.json"
         );
+        const SEMANTIC_METADATA_JSON: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/FDCSemanticRanker.json"
+        );
+        const SEMANTIC_MODEL: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/FDCSemanticRanker.bin"
+        );
         const TABLE_JSON: &[u8] = include_bytes!(
             "../../Sources/LatticeLib/Resources/WordClassTable.json"
         );
@@ -63,6 +83,10 @@ fn get_bundle() -> Option<&'static Bundle> {
         let lexicon = CanonicalizationLexicon::from_json(LEXICON_JSON)?;
         let frame = FdcFrame::from_json(FRAME_JSON)?;
         let signatures = FdcSignatures::from_json(SIGS_JSON)?;
+        let semantic_ranker = Arc::new(FdcSemanticRanker::from_artifacts(
+            SEMANTIC_METADATA_JSON,
+            SEMANTIC_MODEL,
+        )?);
 
         // Parse the bundled table first to extract the version string. The version
         // is pinned and does not change with the writable artifact — it is the
@@ -95,6 +119,7 @@ fn get_bundle() -> Option<&'static Bundle> {
         init_shared_cache(&table_version_str);
 
         let version = signatures.version.clone();
+        let lexicon_version = lexicon.version.clone();
         // The runtime ships ScoreMode::Idf (Mission #4 Phase B.2): IDF-weighting
         // the overlap — penalizing concept terms common across many signatures,
         // rewarding distinctive ones — improved within-region code selection
@@ -102,15 +127,17 @@ fn get_bundle() -> Option<&'static Bundle> {
         // which passes `.idf` to FDCMatcher at construction time. The matcher
         // default stays Raw; the runtime opts in here. The matcher reads the
         // live global word-class table at encode time (it no longer owns one).
-        let matcher = FdcMatcher::new_with_mode(
+        let matcher = FdcMatcher::new_with_mode_hierarchy_and_semantic(
             lexicon,
             frame.clone(),   // matcher takes ownership; clone is retained below for label lookups
             &signatures,
             STOP_THRESHOLD,
             ScoreMode::Idf,
+            true,
+            Some(Arc::clone(&semantic_ranker)),
         );
 
-        Some(Bundle { matcher, version, frame })
+        Some(Bundle { matcher, semantic_ranker, version, lexicon_version, frame })
     }).as_ref()
 }
 
@@ -119,8 +146,11 @@ fn get_bundle() -> Option<&'static Bundle> {
 pub struct Fdc;
 
 impl Fdc {
-    /// Encode `text` to an FDC code, or None for UNRESOLVED (or if the bundled
-    /// artifacts are unavailable). Pure over the pinned artifacts.
+    pub const CLASSIFIER_VERSION: &'static str = CLASSIFIER_VERSION;
+
+    /// Encode `text` to an FDC code. Nonempty text without defensible subject
+    /// evidence returns `000`; None is reserved for empty input or unavailable
+    /// bundled artifacts. Pure over the pinned artifacts.
     pub fn encode(text: &str) -> Option<String> {
         get_bundle().and_then(|b| b.matcher.encode(text))
     }
@@ -128,10 +158,7 @@ impl Fdc {
     /// Encode `text` and surface the dominant concept Q-ID.
     /// Returns (code, conceptQID). Returns (None, None) if artifacts unavailable.
     pub fn encode_anchor(text: &str) -> (Option<String>, Option<String>) {
-        match get_bundle() {
-            Some(b) => b.matcher.encode_anchor(text),
-            None => (None, None),
-        }
+        Self::classify_anchor(text, FdcContentKind::Text, true)
     }
 
     /// Non-recording variant of `encode_anchor` (secfix/fdc-pool).
@@ -153,10 +180,17 @@ impl Fdc {
     ///
     /// Mirrors Swift `FDC.encodeAnchor(_:recordNovel:)` in FDCRuntime.swift.
     pub fn encode_anchor_no_record(text: &str) -> (Option<String>, Option<String>) {
-        match get_bundle() {
-            Some(b) => b.matcher.encode_anchor_no_record(text),
-            None => (None, None),
-        }
+        Self::classify_anchor(text, FdcContentKind::Text, false)
+    }
+
+    /// Content-aware non-recording classification for capture and estate
+    /// recalculation. Explicit code content anchors at FDC `005`; a recognized
+    /// programming language supplies its pinned Wikidata Q-ID refinement.
+    pub fn encode_anchor_for_content_no_record(
+        text: &str,
+        content_kind: FdcContentKind,
+    ) -> (Option<String>, Option<String>) {
+        Self::classify_anchor(text, content_kind, false)
     }
 
     /// True when the bundled artifacts loaded and the engine is ready.
@@ -170,6 +204,75 @@ impl Fdc {
         get_bundle()
             .map(|b| b.version.as_str())
             .unwrap_or("0.0.0-unavailable")
+    }
+
+    /// Deterministic semantic candidates from the bundled integer model.
+    pub fn semantic_candidates(text: &str, limit: usize) -> Vec<FdcSemanticCandidate> {
+        get_bundle()
+            .map(|bundle| bundle.semantic_ranker.rank(text, limit))
+            .unwrap_or_default()
+    }
+
+    /// Confidence-gated semantic hierarchy evidence used by classifier v4.
+    pub fn semantic_decision(text: &str) -> Option<FdcSemanticDecision> {
+        let bundle = get_bundle()?;
+        bundle
+            .semantic_ranker
+            .hierarchy_decision(text, &bundle.frame)
+    }
+
+    pub fn semantic_model_version() -> &'static str {
+        get_bundle()
+            .map(|bundle| bundle.semantic_ranker.metadata.version.as_str())
+            .unwrap_or("0.0.0-unavailable")
+    }
+
+    pub fn semantic_model_sha256() -> &'static str {
+        get_bundle()
+            .map(|bundle| bundle.semantic_ranker.metadata.model_sha256.as_str())
+            .unwrap_or("unavailable")
+    }
+
+    fn classify_anchor(
+        text: &str,
+        content_kind: FdcContentKind,
+        record_novel: bool,
+    ) -> (Option<String>, Option<String>) {
+        let Some(bundle) = get_bundle() else { return (None, None) };
+        if text.trim().is_empty() { return (None, None) }
+        if content_kind == FdcContentKind::Code {
+            let qid = crate::fdc_code_language::detect_code_language(text)
+                .map(|language| language.wikidata_qid.to_string());
+            return (Some("005".to_string()), qid);
+        }
+        let (code, qid) = if record_novel {
+            bundle.matcher.encode_anchor(text)
+        } else {
+            bundle.matcher.encode_anchor_no_record(text)
+        };
+        if code.as_deref() != Some("005") {
+            return (code, qid);
+        }
+        let refined_qid = crate::fdc_code_language::detect_code_language(text)
+            .map(|language| language.wikidata_qid.to_string())
+            .or(qid);
+        (code, refined_qid)
+    }
+
+    /// Composite estate recalculation floor covering algorithm and all pinned
+    /// classifier artifacts. Mirrors Swift `FDC.recalculationVersion`.
+    pub fn recalculation_version() -> String {
+        match get_bundle() {
+            Some(bundle) => format!(
+                "classifier:{CLASSIFIER_VERSION}|frame:{}|lexicon:{}|signatures:{}|semantic:{}:{}",
+                bundle.frame.frame_version,
+                bundle.lexicon_version,
+                bundle.version,
+                bundle.semantic_ranker.metadata.version,
+                bundle.semantic_ranker.metadata.model_sha256
+            ),
+            None => "fdc-unavailable".to_owned(),
+        }
     }
 
     /// The LatticeLib library version string — mirrors Swift `LatticeLib.version`
@@ -207,11 +310,12 @@ impl Fdc {
     /// Return the human-readable heading for an FDC code, or None when
     /// the code is absent from the frame or the artifacts are unavailable.
     ///
-    /// 3-digit integer codes (no decimal point) walk up one parent level so
-    /// the dashboard shows a single-topic heading rather than a raw compound
-    /// cluster label (e.g. "683" → parent "680" → "Handicraft", not the
-    /// raw "Firearms + Locksmithing" leaf label).
-    /// Decimal codes return their own label unchanged.
+    /// Every code resolves to its OWN frame label — never an ancestor's.
+    /// Sibling codes must stay distinguishable when listed together: the
+    /// lattice address table shows runs of active siblings (651, 652, 657 …),
+    /// and coarsening to a shared parent heading renders them as identical
+    /// rows that read as duplicated data. Multi-term compound leaf labels
+    /// (e.g. "683" → "Firearms + Locksmithing") are shown as-is.
     ///
     /// Mirrors Swift `FDC.label(for:)` in FDCRuntime.swift.
     pub fn label(code: &str) -> Option<String> {
@@ -219,14 +323,8 @@ impl Fdc {
         if code.is_empty() {
             return None;
         }
-        // Walk up one level for plain 3-digit codes; keep decimal codes as-is.
-        let lookup = if !code.contains('.') {
-            FdcFrame::decimal_parent(code).unwrap_or_else(|| code.to_owned())
-        } else {
-            code.to_owned()
-        };
         bundle.frame.codes.iter()
-            .find(|e| e.code == lookup)
+            .find(|e| e.code == code)
             .map(|e| e.label.clone())
     }
 }
@@ -256,17 +354,18 @@ mod tests {
     }
 
     #[test]
-    fn label_integer_code_walks_to_parent() {
+    fn label_integer_code_returns_own_label() {
         if !Fdc::is_available() {
             return;
         }
-        // For a 3-digit integer code, label() walks up one level via decimal_parent().
-        // "006" has parent "000"; label("006") and label("000") must both look up
-        // code "000" in the frame, so they return the same value.
-        let via_child = Fdc::label("006");
-        let direct_root = Fdc::label("000");
-        assert!(via_child.is_some(), "label(\"006\") should resolve via parent \"000\"");
-        assert_eq!(via_child, direct_root, "label(\"006\") must equal label(\"000\") — both look up the parent");
+        // Integer codes resolve to their OWN frame label, never an ancestor's —
+        // sibling codes listed together must stay distinguishable. "006" and its
+        // parent "000" carry distinct labels in the frame, so the lookups differ.
+        let leaf = Fdc::label("006");
+        let root = Fdc::label("000");
+        assert!(leaf.is_some(), "label(\"006\") should resolve to its own frame label");
+        assert!(root.is_some(), "label(\"000\") should resolve to its own frame label");
+        assert_ne!(leaf, root, "label(\"006\") must be \"006\"'s own label, not the parent's");
     }
 
     #[test]
@@ -274,15 +373,24 @@ mod tests {
         if !Fdc::is_available() {
             return;
         }
-        // A decimal code (contains '.') returns its own label, not the parent's.
-        // "006.6" must NOT equal label("006") (which is the "000" root label).
+        // A decimal code (contains '.') returns its own label, distinct from
+        // its integer parent's label.
         let decimal_label = Fdc::label("006.6");
         let parent_label = Fdc::label("006");
         if decimal_label.is_some() && parent_label.is_some() {
             assert_ne!(
                 decimal_label, parent_label,
-                "label(\"006.6\") must return its own label, not the parent-walked \"000\" label"
+                "label(\"006.6\") must return its own label, not \"006\"'s"
             );
         }
+    }
+
+    #[test]
+    fn bundled_labels_are_clean_and_corrected() {
+        assert_eq!(Fdc::label("002").as_deref(), Some("History of the book"));
+        assert_eq!(Fdc::label("004").as_deref(), Some("Computers + Computer science"));
+        assert_eq!(Fdc::label("615.88").as_deref(), Some("Patent medicines"));
+        assert_eq!(Fdc::label("615.89").as_deref(), Some("Traditional medicine"));
+        assert_eq!(Fdc::label("971.4").as_deref(), Some("Quebec (Province)"));
     }
 }

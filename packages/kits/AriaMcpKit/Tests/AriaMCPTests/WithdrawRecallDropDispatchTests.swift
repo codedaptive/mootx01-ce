@@ -49,7 +49,7 @@ struct WithdrawRecallDropDispatchTests {
         let storage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         let corpus = try await Corpus(storage: storage, model: .deterministic)
         await kit.registerCorpus(corpus, for: handle)
         let vectorStore = VectorStore(storage: storage)

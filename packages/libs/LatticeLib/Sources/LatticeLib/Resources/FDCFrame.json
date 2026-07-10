@@ -354,7 +354,7 @@
     },
     {
       "code": "103",
-      "label": "Philosophy --  Dictionaries + Philosophy encyclopedias"
+      "label": "Philosophy -- Dictionaries + Philosophy encyclopedias"
     },
     {
       "code": "105",
@@ -1750,7 +1750,7 @@
     },
     {
       "code": "449",
-      "label": "Catalan language + Proven&ccedil;al language"
+      "label": "Catalan language + Provencal language"
     },
     {
       "code": "450",
@@ -2426,6 +2426,10 @@
     },
     {
       "code": "615.88",
+      "label": "Patent medicines"
+    },
+    {
+      "code": "615.89",
       "label": "Traditional medicine"
     },
     {
@@ -3358,7 +3362,7 @@
     },
     {
       "code": "849",
-      "label": "Proven&ccedil;al literature  + Catalan literature"
+      "label": "Provencal literature + Catalan literature"
     },
     {
       "code": "850",
@@ -3574,7 +3578,7 @@
     },
     {
       "code": "903",
-      "label": "History --  Dictionaries + Historical encyclopedias"
+      "label": "History -- Dictionaries + Historical encyclopedias"
     },
     {
       "code": "904",
@@ -3890,7 +3894,7 @@
     },
     {
       "code": "971.4",
-      "label": "Qu&eacute;bec (Province)"
+      "label": "Quebec (Province)"
     },
     {
       "code": "971.5",
@@ -4297,5 +4301,5 @@
       "label": "Outer space"
     }
   ],
-  "frame_version": "1.0.0"
+  "frame_version": "1.1.0"
 }

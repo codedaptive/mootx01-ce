@@ -7,22 +7,34 @@
 // Maintenance/MaintenancePolicy.swift, Maintenance/MaintenanceSeams.swift
 // — the decision core, policy, and seams are exercised through the
 // daemon over the shared seam fakes below. Covers C-3 (all five scan
-// categories detected and proposed), C-4 / C-12 (audit-chain break →
-// integrity proposal; clean chain → none), C-6 (exactly one diary entry
-// per cycle), B-2 (every detected issue is a proposal, never an action),
-// B-4 (idempotency across cycles), the policy-store round-trip, the pump
-// tick cadence, and Board item 14 (QID-pending enrichment retry batch:
-// success path flips provenance bits, failure path stays pending, counters
-// move, B-10a zero trace-rows).
+// categories detected and proposed), C-4 / C-12 (content-tampered entry
+// rejected at ingress; the rejection is COUNTED and the daemon alerts via
+// an integrity proposal keyed on the rejected count — AUDIT-ALERT-RESTORE,
+// 2026-07-09; clean chain with zero rejections → no integrity proposal),
+// C-6 (exactly one diary entry per cycle), B-2 (every detected issue is a
+// proposal, never an action), B-4 (idempotency across cycles), the
+// policy-store round-trip, the pump tick cadence, and Board item 14
+// (QID-pending enrichment retry batch: success path flips provenance
+// bits, failure path stays pending, counters move, B-10a zero trace-rows).
 //
 // All substrate interaction is through NeuronKit-owned seams; these
 // tests inject in-memory fakes. They import GeniusLocusKit and LocusKit
 // only for the value types (ProposeFrame, Drawer, DiaryEntry,
 // UnifiedAuditLog) — never for a write path (B-1). The clock is injected
 // by passing `now` into every cycle/pump; there are no wall-clock sleeps.
-// The audit-break test exercises the REAL `AuditChainVerifier`, building
-// a tampered `UnifiedAuditLog` via the explicit-id entry initializer so
-// the stored id no longer matches the recomputed content hash.
+// The audit-break tests exercise the REAL `UnifiedAuditLog` ingress and
+// the REAL `AuditChainVerifier`: as of codex a477800 / secfix
+// ce-audit-content-id (5101e112), `UnifiedAuditLog` rejects content-hash-
+// mismatched entries at the add / init(entries:) ingress boundary — a
+// tampered entry never reaches the verifier's walk, so the chain itself
+// always reports vacuously valid. AUDIT-ALERT-RESTORE (2026-07-09, Bob's
+// option-1 ruling) closes the gap that left: the log's real
+// `rejectedEntryCount` (incremented by the real `add()` on every rejected
+// entry) rides along in the `MaintenanceSubstrateReader.currentAuditLog()`
+// snapshot the daemon reads, and `MaintenanceDecision.decide` step 0 now
+// alerts on that count independently of `valid` — restoring C-4/C-12
+// daemon-level alerting at the ingress boundary rather than the (now
+// unreachable) chain-walk boundary.
 
 import Testing
 import Foundation
@@ -151,11 +163,13 @@ private func cleanAuditLog() -> UnifiedAuditLog {
 }
 
 /// A tampered audit log: one entry built through the explicit-id
-/// initializer with an all-zero id. The verifier recomputes the id from
-/// the entry's fields and finds it does not match the stored (zero) id,
-/// so the chain reports `valid == false`. firstBrokenAt is the entry's
-/// HLC physical time (2000 ms → 2.0s epoch). This drives the REAL
-/// AuditChainVerifier — no mock.
+/// initializer with an all-zero id, so its stored id does not match the
+/// SHA-256 of its wire encoding. `UnifiedAuditLog.init(entries:)` routes
+/// every entry through `add`, which recomputes the content id and
+/// rejects the entry when it does not match (codex a477800 / secfix
+/// ce-audit-content-id, 5101e112) — the returned log is empty. This
+/// fixture therefore exercises the ingress defence, not the chain
+/// verifier: the tampered entry never reaches `AuditChainVerifier`.
 private func tamperedAuditLog() -> UnifiedAuditLog {
     let zeroID = [UInt8](repeating: 0, count: 32)
     let e = UnifiedAuditEntry(
@@ -231,23 +245,55 @@ struct MaintenanceDaemonTests {
         #expect(kinds.contains(.byReferenceDrift))
     }
 
-    // MARK: - C-4 / C-12: audit-chain break → integrity proposal
+    // MARK: - C-4 / C-12: content-tampered entry is rejected at ingress; the rejection is alerted
 
-    @Test("C-4/C-12: tampered audit log emits an integrity proposal")
-    func c4TamperedAuditLogEmitsIntegrityProposal() async throws {
-        let reader = FakeReader(auditLog: tamperedAuditLog())
+    @Test("C-4/C-12: content-tampered entry is rejected at ingress; the walked chain is vacuously valid but the daemon still alerts on the rejection")
+    func c4TamperedEntryRejectedAtIngressDaemonAlertsOnRejection() async throws {
+        // Pin the ingress defence first: the tampered fixture yields an
+        // empty log before it ever reaches the daemon (codex a477800 /
+        // secfix ce-audit-content-id, 5101e112) — and the REAL `add()`
+        // that rejected it incremented the REAL `rejectedEntryCount`.
+        let tampered = tamperedAuditLog()
+        #expect(tampered.count == 0, "content-hash-mismatched entry rejected at add / init(entries:) boundary")
+        #expect(tampered.rejectedEntryCount == 1, "the real ingress path counts the rejection (AUDIT-ALERT-RESTORE)")
+
+        let reader = FakeReader(auditLog: tampered)
         let sink = RecordingSink()
         let d = daemon(reader: reader, sink: sink)
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
 
         #expect(report.auditChecked == true)
-        #expect(report.auditReport?.valid == false, "real AuditChainVerifier flags the tampered entry")
-        #expect(report.proposalsEmitted.count == 1, "exactly the audit-integrity proposal")
-        let frame = try #require(report.proposalsEmitted.first)
-        #expect(frame.kind == .other("audit_integrity"))
-        // firstBrokenAt is 2000ms epoch → "2000" tag in the target RowID.
-        #expect(frame.target == "audit-break-2000")
+        #expect(report.auditReport?.valid == true, "the walked chain is vacuously valid — the tampered entry never reached it")
+        #expect(report.auditReport?.entryCount == 0)
+        // AUDIT-ALERT-RESTORE: even though the chain walk itself is clean,
+        // the ingress-rejection count surfaces as exactly one integrity
+        // proposal — restoring the C-4/C-12 alert at the ingress boundary.
+        #expect(report.proposalsEmitted.count == 1, "the ingress rejection is alerted via exactly one integrity proposal")
+        let proposal = try #require(report.proposalsEmitted.first)
+        #expect(proposal.kind == .other("audit_integrity"))
+        #expect(proposal.target == "audit-rejected-1")
+        #expect(proposal.justification?.contains("1") == true, "the proposal names the rejected count")
+    }
+
+    @Test("C-4/C-12: a second cycle over the same rejected-count snapshot suppresses the duplicate (B-4)")
+    func c4SameRejectedCountAcrossCyclesSuppressesDuplicate() async throws {
+        // The seam is a snapshot fixture, so both cycles see the identical
+        // already-rejected log (rejectedEntryCount == 1 both times) — this
+        // is the steady-state "known, unresolved corruption" case, which
+        // B-4 correctly suppresses after the first alert rather than
+        // re-proposing every cycle.
+        let tampered = tamperedAuditLog()
+        let reader = FakeReader(auditLog: tampered)
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+
+        let first = try await d.triggerMaintenanceCycle(now: t0)
+        #expect(first.proposalsEmitted.count == 1)
+
+        let second = try await d.triggerMaintenanceCycle(now: t0.addingTimeInterval(600))
+        #expect(second.proposalsEmitted.count == 0, "identical rejected count already alerted — suppressed as a B-4 duplicate")
+        #expect(second.suppressedDuplicates == 1)
     }
 
     @Test("C-4: clean audit log emits no integrity proposal")

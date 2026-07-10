@@ -28,9 +28,9 @@ struct FDCRuntimeTests {
         if let c = code { #expect(!c.isEmpty) }
     }
 
-    @Test("gibberish is UNRESOLVED (never guesses)")
-    func gibberishUnresolved() {
-        #expect(FDC.encode("zzqqxv wwkkjj plldfg") == nil)
+    @Test("nonempty text without subject evidence falls back to Generalities")
+    func gibberishFallsBackToGeneralities() {
+        #expect(FDC.encode("zzqqxv wwkkjj plldfg") == "000")
     }
 
     // MARK: - Honest-classification guard
@@ -60,8 +60,8 @@ struct FDCRuntimeTests {
     // Tests here prove the guard works for its intended class of inputs,
     // not that every software phrase returns UNRESOLVED.
 
-    @Test("high-frequency cross-domain jargon returns UNRESOLVED (tie-count guard)")
-    func highFrequencyJargonIsUnresolved() {
+    @Test("trusted relative-index aliases classify modern computing topics")
+    func modernComputingTopicsResolve() {
         // These phrases consist entirely of high-frequency Q-IDs shared across
         // hundreds of UDC signatures: "software", "programming", "computer",
         // "information", "science" all map to Q-IDs present in 100–400+
@@ -73,28 +73,127 @@ struct FDCRuntimeTests {
         //   "network protocol internet" → UDC 621.2 (hydraulic engineering)
         // Those were arbitrary tie-break winners from a degenerate bag.
         #expect(
-            FDC.encode("computer software programming and information science") == nil,
-            "generic tech phrase with only high-frequency cross-domain Q-IDs must return UNRESOLVED"
+            FDC.encode("computer software programming and information science") == "004"
         )
         #expect(
-            FDC.encode("internet network protocol server client communication") == nil,
-            "networking jargon with only high-frequency cross-domain Q-IDs must return UNRESOLVED"
+            FDC.encode("internet network protocol server client communication") == "004"
         )
         #expect(
-            FDC.encode("software engineering process management systems") == nil,
-            "generic software process phrase must return UNRESOLVED"
+            FDC.encode("software engineering process management systems") == "004"
         )
     }
 
-    @Test("generic short phrases return UNRESOLVED without distinctive domain terms")
-    func genericPhraseIsUnresolved() {
+    @Test("generic computing phrases stop at the broad supported code")
+    func genericPhraseUsesBroadCode() {
         // Short technology phrases share zero-IDF Q-IDs across hundreds of codes;
         // the honest result is UNRESOLVED rather than whatever code sorts first
         // in a sea of tied candidates.
         #expect(
-            FDC.encode("computer software programming and information science") == nil,
-            "generic technology phrase with only common cross-domain Q-IDs must return UNRESOLVED"
+            FDC.encode("computer software programming and information science") == "004"
         )
+    }
+
+    @Test("operational fragments receive Generalities without fabricated QIDs")
+    func operationalFragmentsUseGeneralities() {
+        let shell = """
+        git worktree prune
+        rm -f .git/index.lock
+        read_signal() {
+          sqlite3 estate.sqlite 'select 1;'
+        }
+        """
+        let markdown = """
+        # Monthly Canon Audit
+
+        ```bash
+        set -euo pipefail
+        git status --short
+        ```
+        """
+
+        #expect(FDC.encode(shell) == "000")
+        #expect(FDC.encodeAnchor(shell).conceptQID == nil)
+        #expect(FDC.encode(markdown) == "000")
+        #expect(FDC.encodeAnchor(markdown).conceptQID == nil)
+    }
+
+    @Test("source-code memories classify as computer programming")
+    func sourceCodeUsesProgrammingSubject() {
+        let swiftSource = """
+        et nodeId: String
+        public let indexType: IndexType
+        public var semanticVector: [Double]
+        public var graphVector: GraphVector
+        public var behavioralVector: BehavioralVector
+        public var temporalVector: TemporalVector
+        public let createdAt: Date
+        public var updatedAt: Date
+        """
+        #expect(FDC.encode(swiftSource) == "005")
+        #expect(FDC.encodeAnchor(swiftSource).conceptQID == "Q17118377")
+        #expect(FDC.classifierVersion == "4.2.0")
+        #expect(FDC.encode("Let us remember the meeting.\nLet everyone review the notes.") != "005")
+    }
+
+    @Test("incidental inherited signature terms do not certify narrow headings")
+    func incidentalInheritedSignatureTermsUseTrustedAliases() {
+        // These were bad v1/v2 confidence failures caused by the compact
+        // signature artifact flattening label/title/article/ancestor terms into
+        // one membership set. The runtime may use that broad set for recall, but
+        // it must not return a narrow user-facing code unless the winning code's
+        // own heading is supported by the query.
+        #expect(
+            FDC.encode("machine learning neural networks artificial intelligence") == "004",
+            "machine-learning terms must classify as computer science, not acupuncture"
+        )
+        #expect(
+            FDC.encode("web development HTML programming") == "005",
+            "web-development terms must classify as programming, not Great Britain"
+        )
+        #expect(
+            FDC.encode("distributed systems cloud computing") == "004",
+            "distributed-systems terms must classify as computer science, not Southeast Asia"
+        )
+    }
+
+    @Test("partial qualified heading matches do not overdescend")
+    func partialQualifiedHeadingMatchesDoNotOverdescend() {
+        #expect(
+            FDC.encode("art painting sculpture museum") != "755",
+            "generic art/painting text must not descend into religious painting without religious evidence"
+        )
+        #expect(
+            FDC.encode("transportation automobile travel vehicles") != "699",
+            "generic transportation text must not descend into railroad cars without railroad evidence"
+        )
+    }
+
+    @Test("own heading evidence still resolves accessible disability topics")
+    func ownHeadingEvidenceStillResolvesDisabilityTopic() {
+        #expect(FDC.encode("People with disabilities Blind Deaf") == "362.4")
+        #expect(FDC.encode("screen reader accessibility braille deaf blind disability") == "362.4")
+    }
+
+    @Test("specific own heading evidence still resolves supported topics")
+    func specificOwnHeadingEvidenceStillResolvesSupportedTopics() {
+        #expect(FDC.encode("computer graphics rendering visualization") == "006.6")
+        #expect(FDC.encode("chemistry organic reactions molecules") == "547")
+    }
+
+    @Test("query repetition cannot manufacture precision")
+    func repetitionDoesNotChangeClassification() {
+        #expect(FDC.encode("railroad chemistry") == FDC.encode("railroad railroad railroad chemistry"))
+        #expect(FDC.encode("blind chemistry") != "362.4")
+    }
+
+    @Test("recalculation version covers algorithm and artifacts")
+    func recalculationVersionIsComposite() {
+        #expect(FDC.recalculationVersion.contains("classifier:4.2.0"))
+        #expect(FDC.recalculationVersion.contains("frame:1.1.0"))
+        #expect(FDC.recalculationVersion.contains("lexicon:1.1.0"))
+        #expect(FDC.recalculationVersion.contains("signatures:2.0.0"))
+        #expect(FDC.recalculationVersion.contains("semantic:1.0.0:"))
+        #expect(FDC.recalculationVersion.contains(FDC.semanticModelSHA256))
     }
 
 
@@ -114,15 +213,17 @@ struct FDCRuntimeTests {
         #expect(FDC.label(for: "999.99999") == nil)
     }
 
-    @Test("label integer code walks to parent")
-    func labelIntegerWalksToParent() {
-        // 3-digit integer codes walk up one level for a cleaner heading.
-        // "006" (a leaf integer code) should walk to parent "000" and return
-        // the same label as querying "000" directly — verifying the walk path.
+    @Test("label integer code returns own label")
+    func labelIntegerReturnsSelf() {
+        // Integer codes resolve to their OWN frame label, never an ancestor's —
+        // sibling codes listed together must stay distinguishable. "006" and its
+        // parent "000" carry distinct labels in the frame, so the two lookups
+        // must differ.
         let leafLabel = FDC.label(for: "006")
         let parentLabel = FDC.label(for: "000")
         #expect(leafLabel != nil)
-        #expect(leafLabel == parentLabel)
+        #expect(parentLabel != nil)
+        #expect(leafLabel != parentLabel)
     }
 
     @Test("label decimal code returns own label")
@@ -134,5 +235,14 @@ struct FDCRuntimeTests {
         if let label = FDC.label(for: "006.6") {
             #expect(!label.isEmpty)
         }
+    }
+
+    @Test("bundled labels are clean and corrected")
+    func bundledLabelsAreCleanAndCorrected() {
+        #expect(FDC.label(for: "002") == "History of the book")
+        #expect(FDC.label(for: "004") == "Computers + Computer science")
+        #expect(FDC.label(for: "615.88") == "Patent medicines")
+        #expect(FDC.label(for: "615.89") == "Traditional medicine")
+        #expect(FDC.label(for: "971.4") == "Quebec (Province)")
     }
 }

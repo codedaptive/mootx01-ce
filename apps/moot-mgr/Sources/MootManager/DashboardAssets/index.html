@@ -200,54 +200,65 @@ try {
       </div>
     </section>
 
-    <!-- TOPOLOGY (P5) — Sigma-style node-link renderer over /api/graph.
-         The renderer is fed by GET /api/graph. moot-mgr is a pure observer, so
-         per-node/per-edge STRUCTURE is not reachable here; when the snapshot
-         reports structurePending the canvas shows an honest pending overlay and
-         the panel surfaces the VizGraph analytic signals that ARE available
-         (community count, centrality/anomaly/NMF/decay completion) — never
-         fabricated nodes (PoC spec §4.1 content boundary). -->
+    <!-- TOPOLOGY — continuous accumulated-detail renderer over /api/graph.
+         The camera zooms one stable scene; explicit aggregate selection adds
+         bounded child geometry without replacing its parents. When no structure exists, the
+         canvas shows an honest pending overlay and only the VizGraph signals
+         the observer can prove — never fabricated nodes. -->
     <section class="view" data-view="topology">
       <div class="topo-bar">
         <h1 class="title">Topology</h1>
         <div class="topo-controls">
           <label class="topo-label" for="topoEstate">estate</label>
           <select class="topo-select" id="topoEstate" aria-label="Estate filter"></select>
-          <button class="btn" id="topoReset">Reset layout</button>
-          <!-- L4 strata view: perspective projection with age-derived depth. Off = classic 2D. -->
-          <button class="btn" id="topoDimToggle" aria-pressed="false">3D</button>
+          <button class="btn" id="topoUp" hidden>Up</button>
+          <button class="btn" id="topoReset">Refresh</button>
+          <!-- L4 strata view: perspective projection with centrality-derived depth. Off = classic 2D. -->
+          <button class="btn" id="topoDimToggle" aria-pressed="true">3D</button>
+          <!-- V2-P2b: nmf_bond (derived lattice/classification) edges are faint
+               tissue, hidden by default — this chip reveals them. -->
+          <button class="btn" id="topoLatticeToggle" aria-pressed="false">lattice</button>
+          <button class="btn" id="topoFieldDetailsToggle" aria-pressed="false">field details</button>
+          <label class="topo-dot-size" for="topoDotSize">
+            <span>dot size</span>
+            <input id="topoDotSize" type="range" min="0.75" max="3" step="0.25" value="1.5"
+                   aria-label="Topology dot size">
+            <output id="topoDotSizeValue" for="topoDotSize">1.5x</output>
+          </label>
           <span class="tag">structure <b id="topoStructure">—</b></span>
         </div>
       </div>
-      <div class="topo-stage" id="topoStage">
-        <!-- Canvas2D brain renderer mounts here (full remaining height). -->
-        <div class="topo-canvas" id="topoCanvas"></div>
-        <!-- Node count (top-left) and watermark (top-right): shown on synthetic path.
-             Overlay (#topoPending) is only shown when VizGraph analytics are present. -->
-        <div class="topo-nodecnt" id="topoNodeCnt" hidden></div>
-        <div class="topo-watermark" id="topoWatermark" hidden></div>
-        <!-- Pending overlay: shown only when analytics are present (analytics-grid mode).
-             Hidden on the no-analytics synthetic path so the brain canvas is the hero. -->
-        <div class="topo-pending" id="topoPending" hidden>
-          <div class="topo-pending-header" id="topoPendingHeader">
-            <span class="stubmark-sm" aria-hidden="true">◊</span>
-            <div>
-              <h2 id="topoPendingTitle">Topology structure</h2>
-              <p id="topoPendingText"></p>
+      <!-- Stage + content-filter column. The picker is a proper sibling column
+           (not an overlay) so it never floats over the graphic. -->
+      <div class="topo-row">
+        <div class="topo-stage" id="topoStage">
+          <!-- Three.js brain renderer mounts here (full remaining height). -->
+          <div class="topo-canvas" id="topoCanvas"></div>
+          <div class="topo-interaction-hint">Double-click a dot to explore</div>
+          <!-- Pending overlay: shown whenever real structure is absent — the
+               analytics grid when VizGraph analytics exist, a monitoring-aware
+               message otherwise. The canvas never shows invented data. -->
+          <div class="topo-pending" id="topoPending" hidden>
+            <div class="topo-pending-header" id="topoPendingHeader">
+              <span class="stubmark-sm" aria-hidden="true">◊</span>
+              <div>
+                <h2 id="topoPendingTitle">Topology structure</h2>
+                <p id="topoPendingText"></p>
+              </div>
             </div>
+            <!-- aria-live="polite": announces analytics updates when the estate filter changes
+                 while the overlay is already visible (WCAG 4.1.3). aria-atomic="false"
+                 lets AT announce additions rather than the full container. -->
+            <div class="topo-analytics" id="topoAnalytics" aria-live="polite" aria-atomic="false"></div>
           </div>
-          <!-- aria-live="polite": announces analytics updates when the estate filter changes
-               while the overlay is already visible (WCAG 4.1.3). aria-atomic="false"
-               lets AT announce additions rather than the full container. -->
-          <div class="topo-analytics" id="topoAnalytics" aria-live="polite" aria-atomic="false"></div>
+          <!-- Activity feed overlay (3 lines, auto-fade) — PoC spec §6.4. -->
+          <div class="topo-feed" id="topoFeed" aria-live="polite"></div>
+          <!-- Legend: VizGraph analytic signals available from the observer host. -->
+          <div class="topo-legend" id="topoLegend"></div>
         </div>
-        <!-- Content picker: check/uncheck the estate's knowledge domains
-             (community labels). Real-data path only; hidden on synthetic. -->
-        <div class="topo-commpicker" id="topoCommPicker" hidden aria-label="Content filter"></div>
-        <!-- Activity feed overlay (3 lines, auto-fade) — PoC spec §6.4. -->
-        <div class="topo-feed" id="topoFeed" aria-live="polite"></div>
-        <!-- Legend: VizGraph analytic signals available from the observer host. -->
-        <div class="topo-legend" id="topoLegend"></div>
+        <!-- Content picker column: check/uncheck the estate's knowledge domains
+             (community labels). Real-data path only; hidden while pending. -->
+        <aside class="topo-commpicker" id="topoCommPicker" hidden aria-label="Content filter"></aside>
       </div>
       <!-- L5 radar-loop playback bar — event-indexed playhead over the recorded
            /api/events history. Default state is NOT playing (live view). -->
@@ -261,6 +272,8 @@ try {
         </select>
         <span class="tag" id="topoPlaySpan">—</span>
         <span class="tag" id="topoPlayClock">—</span>
+        <span class="tag" id="topoPlayMode">activity over current map</span>
+        <span class="tag topo-unmapped" id="topoUnmapped" hidden>unmapped 0</span>
       </div>
     </section>
 
@@ -356,6 +369,6 @@ try {
 
   </main>
 </div>
-<script type="module" src="/app.js?v=25"></script>
+<script type="module" src="/app.js?v=27"></script>
 </body>
 </html>

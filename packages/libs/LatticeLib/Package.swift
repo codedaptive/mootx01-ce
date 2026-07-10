@@ -26,12 +26,16 @@ let package = Package(
         // SubstrateML provides EigenvalueCentrality (LexRank) and FloatSimHash
         // (signature fingerprint). Substrate math is the right home for these.
         .package(path: "../SubstrateML"),
+        // The semantic artifact loader verifies its pinned SHA-256 through the
+        // shared substrate primitive before accepting model bytes.
+        .package(path: "../SubstrateKernel"),
     ],
     targets: [
         .target(
             name: "LatticeLib",
             dependencies: [
                 .product(name: "SubstrateML", package: "SubstrateML"),
+                .product(name: "SubstrateKernel", package: "SubstrateKernel"),
             ],
             resources: [
                 .process("Resources"),

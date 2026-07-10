@@ -333,12 +333,37 @@ public struct UnifiedAuditEntry: Hashable, Sendable, Codable {
 /// The log is a value type (struct) so callers may store it inside an
 /// actor or hand snapshots across actor boundaries cheaply. Mutation
 /// goes through `add` / `merge` only; reads are pure projections.
-public struct UnifiedAuditLog: Sendable, Equatable {
+public struct UnifiedAuditLog: Sendable {
 
     /// Backing store keyed by entry content hash for O(1) dedupe.
     /// `[UInt8]` keys are wrapped through `HashKey` for use in a
     /// dictionary; the dictionary is the canonical G-Set.
     public private(set) var entries: [UnifiedAuditEntryKey: UnifiedAuditEntry]
+
+    /// Count of entries rejected on THIS log's ingress (`add` calls that
+    /// failed the content-id check) since the log was constructed.
+    ///
+    /// AUDIT-ALERT-RESTORE (2026-07-09, Bob's option-1 ruling): secfix
+    /// 5101e112 made ingress rejection silent (log-only), which made
+    /// NEURONKIT_SPEC C-4/C-12 (the maintenance daemon alerts on
+    /// tampering) structurally unreachable — a rejected entry never
+    /// reaches `AuditChainVerifier`, so the daemon's chain walk always
+    /// saw a clean log and never proposed. This counter restores
+    /// observability at the ingress boundary itself: every `add` call
+    /// that rejects an entry increments it, regardless of which caller
+    /// invoked `add` (directly, via `add(contentsOf:)`, via `merge`, or
+    /// via `Codable` decode). `MaintenanceDaemon.runCycle` reads this
+    /// count off the log snapshot `currentAuditLog(in:)` returns and
+    /// emits an integrity proposal when it is greater than zero — see
+    /// `MaintenanceDecision.decide` step 0.
+    ///
+    /// Monotonic for the lifetime of this value: it only increases, is
+    /// NOT part of the CRDT state (see the custom `==` below, which
+    /// compares `entries` only), and is not carried across `merge` —
+    /// merging only re-adds entries that already survived the SOURCE
+    /// log's own ingress, so a source log's rejections are not
+    /// double-counted into the destination log.
+    public private(set) var rejectedEntryCount: Int = 0
 
     /// Initialise from an array of entries. Each entry is validated via
     /// `add`; forged entries (id does not match SHA-256 of wire encoding)
@@ -357,7 +382,8 @@ public struct UnifiedAuditLog: Sendable, Equatable {
     /// Security (codex a477800): the entry's content id is recomputed
     /// from its wire encoding on every call. If the recomputed id does
     /// not match `entry.id`, the entry is rejected with an error-level
-    /// log and not inserted. This prevents a peer supplying a forged
+    /// log, `rejectedEntryCount` is incremented, and the entry is not
+    /// inserted. This prevents a peer supplying a forged
     /// (same-id, different-content) entry from overwriting an honest
     /// one in the G-Set, which would break CRDT convergence and
     /// constitute audit forgery. Federation peer-log merge relies on
@@ -368,6 +394,7 @@ public struct UnifiedAuditLog: Sendable, Equatable {
             Self.logger.error(
                 "audit entry rejected on add: id does not match SHA-256 of wire encoding (codex a477800)"
             )
+            rejectedEntryCount += 1
             return
         }
         entries[UnifiedAuditEntryKey(id: entry.id)] = entry
@@ -446,6 +473,20 @@ public struct UnifiedAuditLog: Sendable, Equatable {
             if lhs[i] != rhs[i] { return lhs[i] < rhs[i] }
         }
         return lhs.count < rhs.count
+    }
+}
+
+// MARK: - Equatable
+
+extension UnifiedAuditLog: Equatable {
+    /// Structural equality over the G-Set only. `rejectedEntryCount` is
+    /// deliberately excluded: it is per-ingress-operation telemetry, not
+    /// CRDT state, and including it would break the convergence property
+    /// tests rely on (two logs holding the same entries must compare
+    /// equal regardless of how many rejected-entry `add` calls either one
+    /// happened to observe on the way there).
+    public static func == (lhs: UnifiedAuditLog, rhs: UnifiedAuditLog) -> Bool {
+        lhs.entries == rhs.entries
     }
 }
 

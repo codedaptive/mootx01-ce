@@ -14,6 +14,11 @@
 import Foundation
 import LatticeLib
 
+public enum EideticContentKind: Equatable, Sendable {
+    case text
+    case code
+}
+
 /// The EideticLib module surface. Stateless from the caller's
 /// perspective; internally caches the parsed reference data
 /// on first lookup so subsequent calls don't re-parse JSON.
@@ -140,6 +145,35 @@ public enum EideticLib {
             confidence: 32,
             dataVersion: FDC.dataVersion
         )
+    }
+
+    /// Content-aware non-recording lookup used by capture and recalculation.
+    /// `.code` is authoritative shape metadata and therefore anchors nonempty
+    /// content at FDC `005`, with a language Q-ID when detection is decisive.
+    public static func lookup(
+        _ term: String,
+        contentKind: EideticContentKind,
+        recordNovel: Bool
+    ) -> Anchor {
+        guard FDC.isAvailable else {
+            fatalError(
+                "EideticLib: FDC artifacts failed to load — " +
+                "build/configuration error. The bundled canon is missing " +
+                "from this binary. No anchor can be produced. Fix the build."
+            )
+        }
+
+        let fdcKind: FDCContentKind = contentKind == .code ? .code : .text
+        let (code, qid) = FDC.encodeAnchor(
+            term, contentKind: fdcKind, recordNovel: recordNovel)
+        guard let code else {
+            return Anchor(
+                code: "", wikidataQID: nil, confidence: 0,
+                dataVersion: FDC.dataVersion)
+        }
+        return Anchor(
+            code: code, wikidataQID: qid, confidence: 32,
+            dataVersion: FDC.dataVersion)
     }
 }
 

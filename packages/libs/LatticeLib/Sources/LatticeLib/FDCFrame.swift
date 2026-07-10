@@ -17,10 +17,9 @@ import Foundation
 public struct FDCEntry: Codable, Equatable, Sendable {
     /// The decimal classification code, e.g. "000", "006", "006.6".
     public let code: String
-    /// The heading text exactly as it appears in `fdc.txt`, including
-    /// any LCSH quotation marks and `+` / `|` subject markers. Preserved
-    /// verbatim because later missions (signatures) consume the raw
-    /// heading text; stripping markers here would be lossy.
+    /// The heading text carried by this artifact. Maintainer build frames keep
+    /// the lossless `fdc.txt` syntax for signature construction; bundled runtime
+    /// frames use the corresponding clean user-facing display label.
     public let label: String
 
     public init(code: String, label: String) {

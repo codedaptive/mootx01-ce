@@ -48,17 +48,23 @@ struct LatticeAnchorInferenceTests {
 @Suite("inferLatticeAnchor")
 struct InferLatticeAnchorTests {
 
-    @Test("nonsense term produces enrichmentStatus none")
-    func nonsenseTermProducesEnrichmentStatusNone() {
+    @Test("nonsense term produces qidPending via the 000 sentinel")
+    func nonsenseTermProducesQidPendingViaThe000Sentinel() {
         // An UNRESOLVED term (pure gibberish — no real tokens, so the
-        // concept bag is empty) yields an empty FDC code, which means
-        // enrichment_status = none (the substrate has not yet produced
-        // an anchor for this content). The term must contain no real
-        // words: any dictionary word (e.g. "nonsense") would resolve.
+        // concept bag is empty) no longer yields an empty FDC code. The
+        // v3/v4 FDC classifier's hierarchy mode falls back to the "000"
+        // Generalities/unclassified sentinel for any nonempty text that
+        // fails to resolve a specific code — empty code is reserved for
+        // genuinely empty/whitespace-only input. A "000" code never
+        // carries a Q-ID, so `inferLatticeAnchor`'s status derivation
+        // (branches on `code.isEmpty` before `wikidataQID == nil`) takes
+        // the non-empty-code branch and reports `.qidPending`, not
+        // `.none`. The term must contain no real words: any dictionary
+        // word (e.g. "nonsense") would resolve.
         let inference = NeuronKit.inferLatticeAnchor("zxcvqwertyasdfgh qwertyzxcvb")
-        #expect(inference.code == "")
+        #expect(inference.code == "000")
         #expect(inference.wikidataQID == nil)
-        #expect(inference.enrichmentStatusBits == EnrichmentStatus.none.rawValue)
+        #expect(inference.enrichmentStatusBits == EnrichmentStatus.qidPending.rawValue)
     }
 
     @Test("realistic multi-token content produces qidCompleted status")

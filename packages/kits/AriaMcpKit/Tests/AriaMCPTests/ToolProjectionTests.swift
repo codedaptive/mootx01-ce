@@ -39,8 +39,9 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 63.
-    /// 20 interface + 1 federation + 11 recipe + 23 lens + 5 vault + 3 maintenance.
+    /// Hard contract gate: the total tool count must be exactly 66.
+    /// Snapshot includes the interface, federation, recipe, lens, vault, and
+    /// maintenance surfaces exposed by ToolProjection.
     /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory
     /// drawer by id, in full; closes the fetch-drawer-by-ID gap,
     /// build-now per Bob's ruling).
@@ -49,12 +50,13 @@ struct ToolProjectionTests {
     /// The 11th recipe tool is moot_recollect (DA1 — three distillation tools:
     /// moot_consolidate, moot_recall_distilled, moot_recollect). The three
     /// maintenance tools are moot_reindex (corpus/vector backfill),
-    /// moot_drain_status (background drain progress), and moot_palace_import
-    /// (PAR-PB-1, direct palace import).
+    /// moot_drain_status (background drain progress), moot_reclassify_fdc
+    /// (FDC anchor repair/reset), and moot_palace_import (PAR-PB-1,
+    /// direct palace import).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools().count == 63,
-                "tools() must return exactly 63 tools; got \(ToolProjection.tools().count)")
+        #expect(ToolProjection.tools().count == 66,
+                "tools() must return exactly 66 tools; got \(ToolProjection.tools().count)")
     }
 
     /// All 20 interface tools must be present.
@@ -205,6 +207,16 @@ struct ToolProjectionTests {
         )
     }
 
+    /// `moot_reclassify_fdc` must pass the `InterfaceTools.isInterfaceTool`
+    /// membership gate so the serve host routes it to `runReclassifyFDC`
+    /// instead of throwing "Unknown tool" (-32601).
+    @Test func testMootReclassifyFDCPassesMembershipGate() {
+        #expect(
+            InterfaceTools.isInterfaceTool("moot_reclassify_fdc"),
+            "moot_reclassify_fdc must be in the InterfaceTools membership gate"
+        )
+    }
+
     /// `moot_palace_import` must pass the `InterfaceTools.isInterfaceTool` membership
     /// gate so the serve host routes it to `runPalaceImport` instead of throwing
     /// "Unknown tool" (-32601). Regression gate matching `testMootReindexPassesMembershipGate`.
@@ -220,8 +232,8 @@ struct ToolProjectionTests {
     /// of bug where a case is added to the switch but omitted from `names`.
     ///
     /// The expected set is the canonical 20 Tier 1–5 tools plus maintenance
-    /// tools (`moot_reindex`, `moot_drain_status`, `moot_palace_import`). If a
-    /// new tool is added to the switch, add it here too.
+    /// tools (`moot_reindex`, `moot_drain_status`, `moot_reclassify_fdc`,
+    /// `moot_palace_import`). If a new tool is added to the switch, add it here too.
     @Test func testMembershipGateCoversAllDispatchCases() {
         // All tools that appear in the InterfaceTools dispatch switch.
         let dispatchCases: [String] = [
@@ -239,7 +251,7 @@ struct ToolProjectionTests {
             // Tier 5
             "moot_estate_status", "moot_estate_map", "moot_estate_ping",
             // Maintenance / admin
-            "moot_reindex", "moot_drain_status", "moot_palace_import",
+            "moot_reindex", "moot_drain_status", "moot_reclassify_fdc", "moot_palace_import",
         ]
         for name in dispatchCases {
             #expect(

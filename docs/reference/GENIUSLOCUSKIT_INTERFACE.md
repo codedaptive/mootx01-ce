@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-28
-version: 1.15.0
+date: 2026-07-09
+version: 1.16.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -647,6 +647,11 @@ The per-estate G-Set CRDT and its verifier (SPEC § 2, B-9/B-10; I-11/I-12).
 ```swift
 public struct UnifiedAuditLog: Sendable, Codable, Equatable {
     public private(set) var entries: [UnifiedAuditEntryKey: UnifiedAuditEntry]
+    // Count of entries rejected on THIS log's ingress (content-hash
+    // mismatch) since construction. AUDIT-ALERT-RESTORE (2026-07-09):
+    // monotonic, excluded from `==` (structural equality compares
+    // `entries` only — see SPEC C-4/C-12). Rust mirror: `rejected_count()`.
+    public private(set) var rejectedEntryCount: Int
     public init(entries: [UnifiedAuditEntry] = [])
     public var count: Int { get }; public var isEmpty: Bool { get }
     public mutating func add(_ entry: UnifiedAuditEntry)
@@ -1851,6 +1856,14 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.16.0 -- 2026-07-09
+AUDIT-ALERT-RESTORE (Bob's option-1 ruling): `UnifiedAuditLog` gained a
+new public read-only property, `rejectedEntryCount: Int` (Swift) /
+`rejected_count() -> usize` (Rust) — the count of entries rejected on
+this log instance's ingress since construction. Additive only; every
+other member of the `UnifiedAuditLog` surface is unchanged. See
+GENIUSLOCUSKIT_SPEC.md § I-11/B-9/B-10 and NEURONKIT_SPEC.md § 9 C-4/C-12.
 
 ### 1.15.0 -- 2026-06-28
 Security fixes (secfix/c-glk-remaining): two API behaviour clarifications.
