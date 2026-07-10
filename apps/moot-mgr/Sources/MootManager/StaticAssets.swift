@@ -2716,6 +2716,8 @@ import {
   let brainPointer = new THREE.Vector2();
   let brainPivotTween = null;
   const BRAIN_PIVOT_DURATION_MS = 320;
+  let brainSelectTimer = null;
+  const BRAIN_SELECTION_DELAY_MS = 420;
   // L5 radar-loop playback state. active = a playback session holds the playhead
   // (playing or paused mid-loop); playing = the step timer is running.
   let topoPlay = { active: false, playing: false, idx: 0, timer: null, playheadMs: 0 };
@@ -3434,6 +3436,12 @@ import {
     if (runCompletion && pivot && pivot.onComplete) pivot.onComplete();
   }
 
+  function cancelPendingBrainSelection() {
+    if (!brainSelectTimer) return;
+    clearTimeout(brainSelectTimer);
+    brainSelectTimer = null;
+  }
+
   function completeBrainPivot(pivot, destination) {
     var delta = destination.clone().sub(pivot.startTarget);
     brainControls.target.copy(destination);
@@ -3757,9 +3765,11 @@ import {
     brainLabelContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden;';
     container.appendChild(brainLabelContainer);
 
-    // Single-click selects; double-click explicitly expands an aggregate.
+    // A click pivots immediately, but selection waits just long enough to
+    // distinguish it from a double-click. Expansion never selects the node.
     glCanvas.addEventListener('click', function (e) {
       if (e.detail > 1) return;
+      cancelPendingBrainSelection();
       var rect = glCanvas.getBoundingClientRect();
       brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -3770,8 +3780,11 @@ import {
         : topoAggregateCandidate(e.clientX, e.clientY, true, 48);
       if (node) {
         if (node && !brainHidden(node)) {
-          selectBrainNode(node);
           focusBrainNode(node);
+          brainSelectTimer = setTimeout(function () {
+            brainSelectTimer = null;
+            selectBrainNode(node);
+          }, BRAIN_SELECTION_DELAY_MS);
         }
       } else {
         selectBrainNode(null);
@@ -3779,6 +3792,7 @@ import {
     });
 
     glCanvas.addEventListener('dblclick', function (e) {
+      cancelPendingBrainSelection();
       var rect = glCanvas.getBoundingClientRect();
       brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -3790,7 +3804,7 @@ import {
       }
       if (!node || !node.aggregateLevel || brainHidden(node)) return;
       e.preventDefault();
-      selectBrainNode(node);
+      selectBrainNode(null);
       focusBrainNode(node, function () { topoExpand(node); });
     });
 
@@ -3801,6 +3815,7 @@ import {
     // crosses this surface that isn't already on the wire. A miss falls
     // through to the browser's own context menu.
     glCanvas.addEventListener('contextmenu', function (e) {
+      cancelPendingBrainSelection();
       var rect = glCanvas.getBoundingClientRect();
       brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -3822,12 +3837,17 @@ import {
     brainKeyHandler = function (e) {
       var tag = e.target && e.target.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "BUTTON") return;
-      if (e.key === 'Escape' && brainSelectedNode) { selectBrainNode(null); return; }
+      if (e.key === 'Escape') {
+        cancelPendingBrainSelection();
+        if (brainSelectedNode) selectBrainNode(null);
+        return;
+      }
       if (e.key === 'Enter') {
         var candidate = topoAggregateCandidate(null, null, true);
         if (candidate) {
           e.preventDefault();
-          selectBrainNode(candidate);
+          cancelPendingBrainSelection();
+          selectBrainNode(null);
           focusBrainNode(candidate, function () { topoExpand(candidate); });
         }
         return;
@@ -4596,7 +4616,7 @@ import {
 
   // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from
   // brainAdjacency, then refreshes the V2-P2c truth-lens panel — every
-  // selection-changing call site (click, double-click, Escape) funnels
+  // selection-changing call site (settled single-click and Escape) funnels
   // through here, so the panel is the single place that needs to stay in
   // sync (stopBrainAnimation's own teardown reset calls renderSelectionPanel
   // directly, since it bypasses this function — see its comment).
@@ -4849,7 +4869,7 @@ import {
   // =========================================================================
   // V2-P2c SELECTION TRUTH-LENS PANEL — "what is this memory really near?"
   // selectBrainNode(node) calls renderSelectionPanel() on every selection
-  // change (click, double-click, Escape); stopBrainAnimation's own teardown
+  // change (settled single-click and Escape); stopBrainAnimation's own teardown
   // reset calls it too, since that path sets brainSelectedNode directly
   // rather than through selectBrainNode. Every field below is already
   // client-side state built by buildRealBrainNodes/startBrainAnimation — no
@@ -5052,6 +5072,7 @@ import {
     }
     brainRipples = []; brainTrails = []; brainLastPulseNode = null;
     brainActivePulseNodes.clear();
+    cancelPendingBrainSelection();
     brainPivotTween = null;
     topoMetrics.pivotNodeID = null;
     topoMetrics.pivotActive = false;
