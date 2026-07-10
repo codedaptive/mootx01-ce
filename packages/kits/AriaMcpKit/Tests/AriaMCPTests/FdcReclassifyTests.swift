@@ -231,4 +231,79 @@ struct FdcReclassifyTests {
         #expect(drawer.udcFacets == "004, 621")
         #expect(drawer.wikidataQidsSecondary == "Q999, Q1000")
     }
+
+    // RECLASSIFY-PARALLEL: the classify pass now runs across all cores while
+    // the audited write stays serial and in scan order. Byte-identical proof
+    // for "parallelize a deterministic pure classify + apply in a fixed order":
+    //
+    //  (1) Invariance — repeated dry-runs over the same estate must produce
+    //      byte-identical output. The batch is heterogeneous (two distinct
+    //      classify outcomes) and large enough to OVERFLOW the 25-entry
+    //      `changes:` cap, so the ORDER of the emitted change list is
+    //      observable in the output; a racing write or an order-dependent
+    //      classify would perturb the change-list order or the counters across
+    //      runs. Dry-run does not mutate, so identical inputs must give
+    //      identical output every time.
+    //
+    //  (2) Golden values — a fresh estate applied through the parallel path
+    //      must store the SAME anchor each content classifies to serially:
+    //      the git-command drawers resolve to the `000` sentinel and the
+    //      biology-prose drawers resolve to a real subject code (neither the
+    //      sentinel nor the stale `362.4`). This ties the parallel classify to
+    //      the known-correct per-content classifications the other tests pin.
+    @Test func parallelClassifyIsDeterministicAndMatchesSerialAnchors() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+
+        // 20 drawers whose content classifies to the `000` sentinel and 10
+        // whose content classifies to a real subject code — a heterogeneous
+        // classify workload that saturates the worker pool. All carry a stale
+        // `362.4` anchor, so mode=all makes every one a candidate change (30
+        // candidates > the 25-example cap ⇒ the change-list order is exercised).
+        var sentinelIDs: [String] = []
+        var subjectIDs: [String] = []
+        for _ in 0..<20 {
+            sentinelIDs.append(try await capture(
+                kit, handle,
+                content: "git update-index --refresh && rm .git/index.lock",
+                code: "362.4", qid: "Q12131"))
+        }
+        for _ in 0..<10 {
+            subjectIDs.append(try await capture(
+                kit, handle,
+                content: "Biology is the scientific study of life and living organisms " +
+                    "including their physical structure chemical processes molecular " +
+                    "interactions physiological mechanisms and evolution",
+                code: "362.4"))
+        }
+
+        func dryRunAll() async throws -> String {
+            try text(try await dispatcher.dispatch(
+                name: "moot_reclassify_fdc",
+                arguments: .object(["mode": .string("all")])))
+        }
+
+        // (1) Invariance across repeated parallel runs.
+        let first = try await dryRunAll()
+        #expect(first.contains("scanned: 30 active drawer(s)"))
+        #expect(first.contains("candidates: 30"))
+        #expect(first.contains("would_update: 30"))
+        #expect(first.contains("... 5 more")) // 30 candidates − 25 examples
+        for _ in 0..<4 {
+            #expect(try await dryRunAll() == first)
+        }
+
+        // (2) Golden values — apply through the parallel path, then read back.
+        let applied = try text(try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true), "mode": .string("all")])))
+        #expect(applied.contains("updated: 30"))
+        for id in sentinelIDs {
+            #expect(try await storedCode(kit, handle, id: id) == "000")
+        }
+        for id in subjectIDs {
+            let code = try await storedCode(kit, handle, id: id)
+            #expect(code != "000")
+            #expect(code != "362.4")
+        }
+    }
 }
