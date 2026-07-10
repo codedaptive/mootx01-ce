@@ -1429,6 +1429,7 @@ import {
   let topoSelBodyEl = null;
   // L4 strata (3D depth) — toggled by #topoDimToggle.
   let brain3D = true;
+  let brainPointScale = 1.5;
   let brainUsePersistedLayout = false;
   // V2-P2b: nmf_bond (derived lattice/classification bond) edges are faint
   // tissue, not primary structure — hidden by default, toggled on by
@@ -1713,6 +1714,22 @@ import {
     if (node.aggregateLevel) return node.coreSizePx;
     var centrality = Math.max(0, Math.min(1, node.centrality || 0));
     return Math.max(2.5, style.r * 1.6 * (1 + centrality * 0.45));
+  }
+
+  function applyBrainPointScale(value, persist) {
+    var parsed = Number(value);
+    if (!Number.isFinite(parsed)) parsed = 1.5;
+    brainPointScale = Math.max(0.75, Math.min(3, parsed));
+    var slider = $("#topoDotSize");
+    var output = $("#topoDotSizeValue");
+    if (slider) slider.value = String(brainPointScale);
+    if (output) output.value = String(brainPointScale).replace(/\.0$/, "") + "x";
+    if (brainPointsMesh) {
+      brainPointsMesh.material.uniforms.uPointScale.value = brainPointScale;
+    }
+    if (persist) {
+      try { localStorage.setItem("mootmgr-topology-dot-scale", String(brainPointScale)); } catch (_) {}
+    }
   }
 
   // Stable Gaussian-like scatter helper via three deterministic unit samples.
@@ -2091,6 +2108,7 @@ import {
   // shader applies breathing, recency, selection dimming, and depth fog.
   var POINT_VS = [
     'uniform float uPixelRatio;',
+    'uniform float uPointScale;',
     'uniform float uTime;',
     'uniform float uBreathAmount;',
     'attribute float size;',
@@ -2105,7 +2123,7 @@ import {
     '  float breath = 0.82 + 0.18 * sin(uTime * 0.72 + breathPhase);',
     '  vAlpha = alpha * mix(1.0, breath, uBreathAmount);',
     '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
-    '  gl_PointSize = max(1.0, size * uPixelRatio);',
+    '  gl_PointSize = max(1.0, size * uPointScale * uPixelRatio);',
     '  gl_Position = projectionMatrix * mv;',
     '}',
   ].join('\n');
@@ -2433,8 +2451,9 @@ import {
     brainLabelContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden;';
     container.appendChild(brainLabelContainer);
 
-    // Click: raycaster hit → select node.
+    // Single-click selects; double-click explicitly expands an aggregate.
     glCanvas.addEventListener('click', function (e) {
+      if (e.detail > 1) return;
       var rect = glCanvas.getBoundingClientRect();
       brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -2445,10 +2464,6 @@ import {
         : topoAggregateCandidate(e.clientX, e.clientY, true, 48);
       if (node) {
         if (node && !brainHidden(node)) {
-          if (node.aggregateLevel) {
-            topoExpand(node);
-            return;
-          }
           if (node === brainSelectedNode) {
             selectBrainNode(null);
           } else {
@@ -2458,6 +2473,21 @@ import {
       } else {
         selectBrainNode(null);
       }
+    });
+
+    glCanvas.addEventListener('dblclick', function (e) {
+      var rect = glCanvas.getBoundingClientRect();
+      brainPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      brainRaycaster.setFromCamera(brainPointer, brainCamera);
+      var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
+      var node = hits.length > 0 ? brainNodes[hits[0].index] : null;
+      if (!node || !node.aggregateLevel) {
+        node = topoAggregateCandidate(e.clientX, e.clientY, true, 48);
+      }
+      if (!node || !node.aggregateLevel || brainHidden(node)) return;
+      e.preventDefault();
+      topoExpand(node);
     });
 
     // Right-click: raycaster hit → copy a paste-ready AI query about the node.
@@ -2627,6 +2657,7 @@ import {
     var mat = new THREE.ShaderMaterial({
       uniforms: {
         uPixelRatio: { value: window.devicePixelRatio || 1 },
+        uPointScale: { value: brainPointScale },
         uTime:       { value: brainT },
         uBreathAmount: { value: 1.0 },
       },
@@ -4828,6 +4859,16 @@ import {
       if (ssePaused) stopSSE(); else startSSE();
     });
     $("#pipelineEstate").addEventListener("change", renderPipeline);
+    const topoDotSlider = $("#topoDotSize");
+    var savedPointScale = null;
+    try { savedPointScale = localStorage.getItem("mootmgr-topology-dot-scale"); } catch (_) {}
+    applyBrainPointScale(savedPointScale === null ? topoDotSlider.value : savedPointScale, false);
+    topoDotSlider.addEventListener("input", function () {
+      applyBrainPointScale(this.value, false);
+    });
+    topoDotSlider.addEventListener("change", function () {
+      applyBrainPointScale(this.value, true);
+    });
     $("#topoEstate").addEventListener("change", function () {
       topoGraphCache.clear();
       renderTopology("estate", null);

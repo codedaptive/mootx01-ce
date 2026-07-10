@@ -206,6 +206,13 @@ body::before{
   font-family:var(--font-m); font-size:12px; padding:6px 10px; border-radius:var(--rsm);
 }
 .topo-select:focus-visible{outline:2px solid var(--ba2); outline-offset:0}
+.topo-dot-size{
+  display:inline-flex; align-items:center; gap:7px; height:30px;
+  color:var(--muted); font-family:var(--font-m); font-size:10px;
+  text-transform:uppercase; letter-spacing:0; white-space:nowrap;
+}
+.topo-dot-size input{width:88px; accent-color:var(--accent); cursor:pointer}
+.topo-dot-size output{min-width:30px; color:var(--hi); text-align:right; text-transform:none; letter-spacing:0}
 .topo-stage{
   /* -252px (was -200px) leaves room for the L5 playback bar below the canvas */
   position:relative; width:100%; height:calc(100vh - 252px); min-height:380px;
@@ -215,6 +222,11 @@ body::before{
 .topo-canvas{position:absolute; inset:0}
 .topo-canvas canvas{cursor:grab}
 .topo-canvas canvas:active{cursor:grabbing}
+.topo-interaction-hint{
+  position:absolute; top:12px; left:14px; z-index:4; pointer-events:none;
+  color:rgba(232,234,240,.42); font-family:var(--font-m); font-size:10px;
+  letter-spacing:0;
+}
 /* honest pending overlay (centered) — only shown on analytics-grid path */
 .topo-pending{
   position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
@@ -805,6 +817,8 @@ details.panel[open] summary::before{content:"▼ "}
   .topo-bar .title{width:100%}
   .topo-controls{gap:8px; width:100%}
   .topo-controls .tag{flex:1 0 100%}
+  .topo-dot-size{flex:1 1 auto}
+  .topo-dot-size input{flex:1 1 auto; min-width:72px; max-width:140px}
   .topo-row{height:auto; min-height:0; flex-direction:column}
   .topo-row .topo-stage{
     flex:none; width:100%; height:54vh; min-height:340px;

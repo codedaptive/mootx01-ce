@@ -218,6 +218,12 @@ try {
           <!-- V2-P2b: nmf_bond (derived lattice/classification) edges are faint
                tissue, hidden by default — this chip reveals them. -->
           <button class="btn" id="topoLatticeToggle" aria-pressed="false">lattice</button>
+          <label class="topo-dot-size" for="topoDotSize">
+            <span>dot size</span>
+            <input id="topoDotSize" type="range" min="0.75" max="3" step="0.25" value="1.5"
+                   aria-label="Topology dot size">
+            <output id="topoDotSizeValue" for="topoDotSize">1.5x</output>
+          </label>
           <span class="tag">structure <b id="topoStructure">—</b></span>
         </div>
       </div>
@@ -227,6 +233,7 @@ try {
         <div class="topo-stage" id="topoStage">
           <!-- Three.js brain renderer mounts here (full remaining height). -->
           <div class="topo-canvas" id="topoCanvas"></div>
+          <div class="topo-interaction-hint">Double-click a dot to explore</div>
           <!-- Pending overlay: shown whenever real structure is absent — the
                analytics grid when VizGraph analytics exist, a monitoring-aware
                message otherwise. The canvas never shows invented data. -->
