@@ -108,26 +108,54 @@ extension ToolDispatcher {
         return relative.isEmpty ? "root" : relative
     }
 
-    /// Find active drawer by wing="memories" + room matching the path.
+    /// Decode the adjective sensitivity access-control field.
+    ///
+    /// LocusKit's typed drawer accessor is intentionally module-internal, so the
+    /// adapter decodes the public storage bitmap with the same cookbook layout:
+    /// state bits 0–5, sensitivity bits 6–11. Unknown encodings fail closed to
+    /// `.secret` so raw scans never expose a drawer whose access tier cannot be
+    /// understood by this adapter.
+    private func adjectiveSensitivity(of drawer: Drawer) -> AdjectiveSensitivity {
+        let raw = Int((drawer.adjectiveBitmap >> 6) & 0x3F)
+        return AdjectiveSensitivity(rawValue: raw) ?? .secret
+    }
+
+    /// Apply the normal recall sensitivity floor for the memory adapter.
+    ///
+    /// `memory` is a bulk, path-based export surface. Match BitmapEvaluator's
+    /// default no-claims posture by allowing only the Normal-tier sensitivities
+    /// (`.normal` and `.elevated`) and excluding `.restricted`/`.secret` unless
+    /// a future grant-aware path deliberately adds an unlock check.
+    private func isMemoryAdapterVisible(_ drawer: Drawer) -> Bool {
+        guard drawer.tombstonedAt == nil && !drawer.isKnewPast && !drawer.isTerminal else {
+            return false
+        }
+        switch adjectiveSensitivity(of: drawer) {
+        case .normal, .elevated: return true
+        case .restricted, .secret: return false
+        }
+    }
+
+    /// Find active, normally recallable drawer by wing="memories" + room matching the path.
     private func findMemDrawer(_ path: String) async throws -> Drawer? {
         let room = memRoomForPath(path)
         let estate = try await kit.estate(for: handle)
         let all = try await estate.allDrawers(hydrationLevel: .full, limit: nil)
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
         return all.first {
-            $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal
+            isMemoryAdapterVisible($0)
             && nodeNames[$0.parentNodeId]?.wing == memoryAdapterWing
             && nodeNames[$0.parentNodeId]?.room == room
         }
     }
 
-    /// List all active drawers in the adapter wing.
+    /// List all active, normally recallable drawers in the adapter wing.
     private func listMemDrawers() async throws -> [(drawer: Drawer, room: String)] {
         let estate = try await kit.estate(for: handle)
         let all = try await estate.allDrawers(hydrationLevel: .structured, limit: nil)
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
         return all.compactMap { d -> (Drawer, String)? in
-            guard d.tombstonedAt == nil && !d.isKnewPast && !d.isTerminal,
+            guard isMemoryAdapterVisible(d),
                   let names = nodeNames[d.parentNodeId],
                   names.wing == memoryAdapterWing
             else { return nil }
@@ -281,7 +309,7 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            sensitivity: .normal,
+            sensitivity: adjectiveSensitivity(of: drawer),
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
@@ -327,7 +355,7 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            sensitivity: .normal,
+            sensitivity: adjectiveSensitivity(of: drawer),
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
@@ -387,7 +415,7 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            sensitivity: .normal,
+            sensitivity: adjectiveSensitivity(of: drawer),
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
