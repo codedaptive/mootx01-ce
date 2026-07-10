@@ -310,8 +310,15 @@ the estate's knowledge domains — community FDC labels plus the
 Facet-filter multiselect: clicking a row toggles that domain (the first
 click starts a selection containing just it); emptying the selection or
 re-checking everything resets to All. Filtering HIDES deselected content
-entirely while preserving the persisted coordinate frame. Aggregate clicks
-drill Estate → Community → Local and the Up control reverses the path.
+entirely while preserving the persisted coordinate frame. Wheel, trackpad, and
+pinch continuously cross Estate → Community → Local: projected aggregate size
+prefetches the adjacent bounded API level, a larger threshold commits a 220 ms
+stable-position morph, and reverse zoom uses a wider hysteresis threshold.
+The previous frame remains visible until the next scene is ready; graph payloads
+are cached in a six-entry, 60-second LRU and stale render responses cannot replace
+the current view. Aggregate click/Enter drills immediately, +/- follows the same
+camera path, and Up reverses the hierarchy. All semantic level changes preserve
+the replay event set and exact playhead.
 Structural identity is the stable community/fold key, never the FDC label;
 classification is only the color/label overlay. Community colors are
 digit-derived from each community's FDC code (hundreds → hue, tens → shade,

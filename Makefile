@@ -34,7 +34,7 @@ BASE    ?= origin/develop/1.0.x
 .PHONY: help build build-swift build-rust test test-unit test-swift test-rust test-python \
         test-product test-product-swift test-product-rust test-product-python \
         test-validation test-validation-swift test-validation-rust test-validation-python \
-        test-one test-changed test-full test-all test-checks test-glk-latency \
+        test-one test-changed test-full test-all test-checks test-glk-latency test-topology-zoom \
         conformance release pkg list clean clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
@@ -51,6 +51,7 @@ help:
 	@echo "  test-product — app/example tests (explicit product lane)"
 	@echo "  test-validation — validation and benchmark harness tests"
 	@echo "  test-full    — unit + product + validation + check gates"
+	@echo "  test-topology-zoom — run the pure semantic-zoom controller tests"
 	@echo "  check-static-assets — verify StaticAssets.swift matches DashboardAssets/ source"
 	@echo "  check-edition-boundary — verify no SHARED file references an EE-only path"
 	@echo "  conformance  — cross-language shared-vector conformance gate"
@@ -125,7 +126,13 @@ test-one:
 test-changed:
 	@$(TEST_RUNNER) changed "$(BASE)"
 
-test-checks: check-static-assets check-edition-boundary
+test-checks: check-static-assets check-edition-boundary test-topology-zoom
+
+test-topology-zoom:
+	@node --test apps/moot-mgr/Sources/MootManager/DashboardAssets/tests/semantic-zoom.test.mjs
+	@node --check apps/moot-mgr/Sources/MootManager/DashboardAssets/app.js
+	@node --check apps/moot-mgr/Sources/MootManager/DashboardAssets/semantic-zoom.mjs
+	@node --check apps/moot-mgr/Tests/BrowserFixtures/topology_v3_server.mjs
 
 test-full:
 	@$(MAKE) test-checks
@@ -160,6 +167,7 @@ check-static-assets:
 	cp apps/moot-mgr/Sources/MootManager/DashboardAssets/index.html \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.css \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.js \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/semantic-zoom.mjs \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/three.min.js \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/OrbitControls.js \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/gen_static_assets.sh \

@@ -772,6 +772,24 @@ details.panel[open] summary::before{content:"▼ "}
 }
 @media (prefers-reduced-motion:reduce){ .topo-toast{animation:none} }
 
+/* Semantic zoom keeps the previous frame visible while the next bounded LOD
+   becomes ready. Both layers are pointer-transparent except the live canvas. */
+.topo-transition-ghost{
+  position:absolute; inset:0; z-index:4; overflow:hidden; pointer-events:none;
+  opacity:1; transform:scale(1); filter:blur(0);
+  transition:opacity 220ms ease, transform 220ms cubic-bezier(.2,.75,.2,1), filter 220ms ease;
+}
+.topo-transition-ghost canvas{position:absolute; inset:0; display:block}
+.topo-transition-ghost.leaving{opacity:0; filter:blur(.7px)}
+.topo-transition-ghost.zoom-in.leaving{transform:scale(1.08)}
+.topo-transition-ghost.zoom-out.leaving{transform:scale(.9)}
+.topo-semantic-new{opacity:0; transition:opacity 180ms ease}
+.topo-semantic-new.ready{opacity:1}
+@media (prefers-reduced-motion:reduce){
+  .topo-transition-ghost,.topo-semantic-new{transition-duration:1ms}
+  .topo-transition-ghost.leaving{transform:none; filter:none}
+}
+
 /* Compact console shell. Keep the complete read surface reachable on a narrow
    display, then stack the topology instrument above its content filter. */
 @media (max-width:700px){

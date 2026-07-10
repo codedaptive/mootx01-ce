@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from '/OrbitControls.js';
+import {
+  BoundedTTLCache,
+  SemanticZoomController,
+  SEMANTIC_ZOOM_DEFAULTS,
+} from '/semantic-zoom.mjs?v=1';
 
 /*
   moot-mgr read-plane dashboard logic.
@@ -65,8 +70,11 @@ import { OrbitControls } from '/OrbitControls.js';
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
-  async function getJSON(path) {
-    const res = await fetch(path, { headers: { "Accept": "application/json" } });
+  async function getJSON(path, options) {
+    const res = await fetch(path, {
+      headers: { "Accept": "application/json" },
+      signal: options && options.signal,
+    });
     if (!res.ok) throw new Error(path + " → " + res.status);
     return res.json();
   }
@@ -1401,6 +1409,7 @@ import { OrbitControls } from '/OrbitControls.js';
   let brainWorldScale = 1, brainWorldCX = 0, brainWorldCY = 0;
   let brainResizeObs = null;
   let brainContainer = null;         // DOM container for the renderer
+  let brainKeyHandler = null;
   // Selection state — set by selectBrainNode(); drives neighbor highlighting.
   let brainSelectedNode = null;
   let brainHop1 = Object.create(null);
@@ -1437,6 +1446,29 @@ import { OrbitControls } from '/OrbitControls.js';
   let topoViewLevel = "estate";
   let topoFocusKey = null;
   let topoParentKey = null;
+  const topoZoom = new SemanticZoomController();
+  const TOPO_CACHE_LIMIT = 6;
+  const TOPO_CACHE_TTL_MS = 60000;
+  let topoGraphCache = new BoundedTTLCache({ limit: TOPO_CACHE_LIMIT, ttlMs: TOPO_CACHE_TTL_MS });
+  let topoGraphInflight = new Map();
+  let topoActiveRenderAbort = null;
+  let topoActiveRenderKey = null;
+  let topoRenderGeneration = 0;
+  let topoLevelFitDistance = 1;
+  let topoControlDistance = 0;
+  let topoPointer = { x: null, y: null };
+  let topoZoomFrame = null;
+  let topoPendingTransition = null;
+  let topoSemanticMorph = null;
+  let topoFirstFrameStartedAt = 0;
+  const topoMetrics = {
+    cacheHits: 0, cacheMisses: 0, staleResponses: 0,
+    fetchMs: 0, firstFrameMs: 0, transitionMs: 0,
+    initialGeometryBytes: 0, bufferUploadBytes: 0,
+    frameTimes: [], frameTotal: 0, lastLevel: "estate", lastFocusKey: null,
+  };
+  // Read-only diagnostics for performance/browser acceptance tests.
+  window.__mootTopologyMetrics = topoMetrics;
   let brainCommPools = Object.create(null);
   let brainNowMs = 0;
   // Raycaster for click-to-select.
@@ -1464,6 +1496,92 @@ import { OrbitControls } from '/OrbitControls.js';
   let brainActivePulseNodes = new Set();
   let brainNextRecencyRefreshMs = 0;
   let topoUnmappedCount = 0;
+
+  function topoMetricFrame(dtMs) {
+    if (!(dtMs >= 0) || !isFinite(dtMs)) return;
+    topoMetrics.frameTotal++;
+    topoMetrics.frameTimes.push(dtMs);
+    if (topoMetrics.frameTimes.length > 240) topoMetrics.frameTimes.shift();
+  }
+
+  function topoMetricPercentile(values, percentile) {
+    if (!values.length) return 0;
+    var sorted = values.slice().sort(function (a, b) { return a - b; });
+    return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * percentile) - 1)];
+  }
+
+  function topoPublishMetrics() {
+    var stage = $("#topoStage");
+    if (!stage) return;
+    stage.dataset.topologyMetrics = JSON.stringify({
+      cacheHits: topoMetrics.cacheHits,
+      cacheMisses: topoMetrics.cacheMisses,
+      staleResponses: topoMetrics.staleResponses,
+      fetchMs: Math.round(topoMetrics.fetchMs * 10) / 10,
+      firstFrameMs: Math.round(topoMetrics.firstFrameMs * 10) / 10,
+      transitionMs: Math.round(topoMetrics.transitionMs * 10) / 10,
+      initialGeometryBytes: topoMetrics.initialGeometryBytes,
+      bufferUploadBytes: topoMetrics.bufferUploadBytes,
+      frameCount: topoMetrics.frameTotal,
+      p95FrameMs: Math.round(topoMetricPercentile(topoMetrics.frameTimes, 0.95) * 10) / 10,
+      p99FrameMs: Math.round(topoMetricPercentile(topoMetrics.frameTimes, 0.99) * 10) / 10,
+      level: topoMetrics.lastLevel,
+      focusKey: topoMetrics.lastFocusKey,
+    });
+  }
+
+  function topoGraphCacheKey(estate, level, focus) {
+    return [estate || "", level || "estate", focus || ""].join("|");
+  }
+
+  function topoGraphURL(estate, level, focus) {
+    var params = new URLSearchParams();
+    if (estate) params.set("estate", estate);
+    params.set("level", level || "estate");
+    if (focus) params.set("focus", focus);
+    return "/api/graph?" + params.toString();
+  }
+
+  function topoCachePut(key, value) {
+    topoGraphCache.set(key, value);
+  }
+
+  async function topoLoadGraph(estate, level, focus, signal) {
+    var key = topoGraphCacheKey(estate, level, focus);
+    var cached = topoGraphCache.get(key);
+    if (cached !== undefined) {
+      topoMetrics.cacheHits++;
+      topoPublishMetrics();
+      return cached;
+    }
+    var inflight = topoGraphInflight.get(key);
+    if (inflight) return inflight;
+    topoMetrics.cacheMisses++;
+    var started = performance.now();
+    var request = getJSON(topoGraphURL(estate, level, focus), { signal: signal })
+      .then(function (value) {
+        topoMetrics.fetchMs = performance.now() - started;
+        topoCachePut(key, value);
+        topoPublishMetrics();
+        return value;
+      })
+      .finally(function () {
+        if (topoGraphInflight.get(key) === request) topoGraphInflight.delete(key);
+      });
+    topoGraphInflight.set(key, request);
+    return request;
+  }
+
+  function topoPrefetch(intent) {
+    if (!intent || !intent.level) return;
+    var estate = $("#topoEstate").value || "";
+    topoZoom.markPrefetched(intent.level, intent.focusKey);
+    topoLoadGraph(estate, intent.level, intent.focusKey).catch(function () {
+      // A failed speculative request is harmless; a committed transition retries.
+      topoGraphCache.delete(topoGraphCacheKey(estate, intent.level, intent.focusKey));
+      topoZoom.forgetPrefetched(intent.level, intent.focusKey);
+    });
+  }
 
   // Twelve fallback community colors — used only when a community carries no
   // FDC code (fragments bucket, unlabeled lobes, code-less snapshots).
@@ -1874,9 +1992,9 @@ import { OrbitControls } from '/OrbitControls.js';
   // that: once the fastest node's per-frame move stays under an epsilon for a
   // short debounce (or a hard timeout fires for a layout that never calms), we
   // enter SETTLED — physics, node POSITION writes, and the entire edge loop +
-  // edge upload all stop. The alpha/color loop keeps running so breathing,
-  // recency, and in-flight pulses stay alive; steady-state upload is just
-  // alpha+color (~0.84 MB). Any interaction re-arms (exit SETTLED, force at
+  // edge upload all stop. Breathing stays shader-side and active pulses visit
+  // only their nodes; settled steady state performs no geometry upload. Any
+  // interaction re-arms (exit SETTLED, force at
   // least one full frame): drag/orbit, selection change, lattice/3D toggle,
   // an SSE/playback pulse, a playback tick, or a canvas resize.
   //
@@ -2026,6 +2144,179 @@ import { OrbitControls } from '/OrbitControls.js';
     '}',
   ].join('\n');
 
+  function topoCaptureCameraState() {
+    if (!brainCamera || !brainControls) return null;
+    return {
+      position: { x: brainCamera.position.x, y: brainCamera.position.y, z: brainCamera.position.z },
+      target: { x: brainControls.target.x, y: brainControls.target.y, z: brainControls.target.z },
+    };
+  }
+
+  function topoNodeWorld(node) {
+    return new THREE.Vector3(
+      (node.x - brainWorldCX) * brainWorldScale,
+      (brainWorldCY - node.y) * brainWorldScale,
+      -(node.z3 || 0) * (brain3D ? 1.4 : 0),
+    );
+  }
+
+  function topoAggregateCandidate(clientX, clientY) {
+    if (!brainCamera || !brainGLRenderer) return null;
+    var rect = brainGLRenderer.domElement.getBoundingClientRect();
+    var px = Number.isFinite(clientX) ? clientX - rect.left : rect.width / 2;
+    var py = Number.isFinite(clientY) ? clientY - rect.top : rect.height / 2;
+    var best = null, bestDistance = Infinity;
+    brainNodes.forEach(function (node) {
+      if (!node.aggregateLevel || brainHidden(node)) return;
+      var projected = topoNodeWorld(node).project(brainCamera);
+      if (projected.z >= 1) return;
+      var sx = (projected.x * 0.5 + 0.5) * rect.width;
+      var sy = (-projected.y * 0.5 + 0.5) * rect.height;
+      var distance = Math.hypot(sx - px, sy - py);
+      if (distance < bestDistance) { best = node; bestDistance = distance; }
+    });
+    return bestDistance <= 110 ? best : null;
+  }
+
+  function topoProjectedDiameter(node) {
+    if (!node || !brainCamera) return 0;
+    var cameraSpace = topoNodeWorld(node).applyMatrix4(brainCamera.matrixWorldInverse);
+    var size = 0.05 + (node.centrality || 0) * 0.03;
+    return size * brainH / Math.max(0.03, -cameraSpace.z);
+  }
+
+  function topoTransitionAnchor(node) {
+    if (!node || !brainW || !brainH) return null;
+    return { nx: node.x / brainW, ny: node.y / brainH, z3: node.z3 || 0 };
+  }
+
+  function topoCommitZoomIntent(intent, candidate, preserveCamera) {
+    if (!intent) return;
+    if (intent.type === "prefetch") {
+      topoPrefetch(intent);
+      return;
+    }
+    if (intent.type !== "transition" || !topoZoom.begin()) return;
+    topoPendingTransition = {
+      direction: intent.direction,
+      anchor: topoTransitionAnchor(candidate),
+      camera: preserveCamera ? topoCaptureCameraState() : null,
+      parentKey: intent.parentKey || null,
+      startedAt: performance.now(),
+    };
+    renderTopology(intent.level, intent.focusKey, {
+      semantic: true,
+      preserveReplay: true,
+      parentKey: intent.parentKey || null,
+    }).catch(function () {
+      topoPendingTransition = null;
+      topoZoom.cancel();
+    });
+  }
+
+  function topoScheduleSemanticZoom(direction) {
+    if (topoZoomFrame !== null || topoPendingTransition) return;
+    topoZoomFrame = requestAnimationFrame(function () {
+      topoZoomFrame = null;
+      if (!brainControls || !brainCamera) return;
+      var candidate = direction === "in"
+        ? topoAggregateCandidate(topoPointer.x, topoPointer.y)
+        : null;
+      var distance = brainCamera.position.distanceTo(brainControls.target);
+      var intent = topoZoom.observe({
+        direction: direction,
+        candidate: candidate,
+        projectedPx: topoProjectedDiameter(candidate),
+        distanceRatio: distance / Math.max(0.01, topoLevelFitDistance),
+      });
+      topoCommitZoomIntent(intent, candidate, true);
+    });
+  }
+
+  function topoCaptureTransitionGhost(transition) {
+    if (!transition || !brainGLRenderer || !brainContainer) return null;
+    var ghost = document.createElement("div");
+    ghost.className = "topo-transition-ghost " +
+      (transition.direction === "in" ? "zoom-in" : "zoom-out");
+    var source = brainGLRenderer.domElement;
+    try {
+      brainGLRenderer.render(brainScene, brainCamera);
+      var copy = document.createElement("canvas");
+      copy.width = source.width;
+      copy.height = source.height;
+      copy.style.width = brainW + "px";
+      copy.style.height = brainH + "px";
+      var context = copy.getContext("2d");
+      if (context) context.drawImage(source, 0, 0, copy.width, copy.height);
+      ghost.appendChild(copy);
+    } catch (_) {
+      // A browser may decline a WebGL readback; the live canvas still remains
+      // visible until the replacement scene is ready, so no blank frame occurs.
+    }
+    if (brainLabelContainer) ghost.appendChild(brainLabelContainer.cloneNode(true));
+    var anchor = transition.anchor;
+    if (anchor) ghost.style.transformOrigin = (anchor.nx * 100) + "% " + (anchor.ny * 100) + "%";
+    brainContainer.appendChild(ghost);
+    return ghost;
+  }
+
+  function topoRunTransitionVisual(ghost, transition) {
+    if (!transition) { if (ghost) ghost.remove(); return; }
+    var canvas = brainGLRenderer && brainGLRenderer.domElement;
+    if (canvas) canvas.classList.add("topo-semantic-new");
+    if (brainLabelContainer) brainLabelContainer.classList.add("topo-semantic-new");
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        if (canvas) canvas.classList.add("ready");
+        if (brainLabelContainer) brainLabelContainer.classList.add("ready");
+        if (ghost) ghost.classList.add("leaving");
+      });
+    });
+    setTimeout(function () {
+      topoMetrics.transitionMs = performance.now() - transition.startedAt;
+      topoPublishMetrics();
+    }, SEMANTIC_ZOOM_DEFAULTS.transitionMs);
+    setTimeout(function () {
+      if (ghost) ghost.remove();
+      if (canvas) canvas.classList.remove("topo-semantic-new", "ready");
+      if (brainLabelContainer) brainLabelContainer.classList.remove("topo-semantic-new", "ready");
+    }, SEMANTIC_ZOOM_DEFAULTS.transitionMs + 80);
+  }
+
+  function topoPrepareSemanticMorph(transition, W, H) {
+    topoSemanticMorph = null;
+    if (!transition || transition.direction !== "in" || !transition.anchor || !brainNodes.length) return;
+    var sx = transition.anchor.nx * W;
+    var sy = transition.anchor.ny * H;
+    var sz = transition.anchor.z3 || 0;
+    var records = brainNodes.map(function (node) {
+      var record = { node: node, tx: node.x, ty: node.y, tz: node.z3 || 0 };
+      node.x = sx; node.y = sy; node.z3 = sz;
+      node.ax = record.tx; node.ay = record.ty;
+      return record;
+    });
+    topoSemanticMorph = {
+      records: records, sx: sx, sy: sy, sz: sz,
+      startedAt: 0, duration: SEMANTIC_ZOOM_DEFAULTS.transitionMs,
+    };
+    brainUsePersistedLayout = true;
+  }
+
+  function topoTickSemanticMorph(ts) {
+    var morph = topoSemanticMorph;
+    if (!morph) return false;
+    if (!morph.startedAt) morph.startedAt = ts;
+    var raw = Math.min(1, (ts - morph.startedAt) / morph.duration);
+    var eased = raw < 0.5 ? 4 * raw * raw * raw : 1 - Math.pow(-2 * raw + 2, 3) / 2;
+    morph.records.forEach(function (record) {
+      record.node.x = morph.sx + (record.tx - morph.sx) * eased;
+      record.node.y = morph.sy + (record.ty - morph.sy) * eased;
+      record.node.z3 = morph.sz + (record.tz - morph.sz) * eased;
+    });
+    if (raw >= 1) topoSemanticMorph = null;
+    return true;
+  }
+
   function startBrainAnimation(container, W, H) {
     stopBrainAnimation();
     brainW = W;
@@ -2050,10 +2341,17 @@ import { OrbitControls } from '/OrbitControls.js';
     brainCamera = new THREE.PerspectiveCamera(50, aspect, 0.01, 100);
     var fit = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity,
                 minZ: Infinity, maxZ: -Infinity };
-    brainNodes.forEach(function (n) {
-      var wx = (n.x - brainWorldCX) * brainWorldScale;
-      var wy = (brainWorldCY - n.y) * brainWorldScale;
-      var wz = -(n.z3 || 0) * (brain3D ? 1.4 : 0);
+    brainNodes.forEach(function (n, index) {
+      // A semantic morph temporarily collapses live node coordinates to the
+      // parent anchor. Camera fit and reverse hysteresis must use the final
+      // child frame, not that transient start pose.
+      var target = topoSemanticMorph && topoSemanticMorph.records[index];
+      var nx = target ? target.tx : n.x;
+      var ny = target ? target.ty : n.y;
+      var nz = target ? target.tz : (n.z3 || 0);
+      var wx = (nx - brainWorldCX) * brainWorldScale;
+      var wy = (brainWorldCY - ny) * brainWorldScale;
+      var wz = -nz * (brain3D ? 1.4 : 0);
       fit.minX = Math.min(fit.minX, wx); fit.maxX = Math.max(fit.maxX, wx);
       fit.minY = Math.min(fit.minY, wy); fit.maxY = Math.max(fit.maxY, wy);
       fit.minZ = Math.min(fit.minZ, wz); fit.maxZ = Math.max(fit.maxZ, wz);
@@ -2070,7 +2368,25 @@ import { OrbitControls } from '/OrbitControls.js';
       (fit.maxX - fit.minX) / (2 * tanHalfFov * Math.max(0.5, aspect))
     ) * 1.28 + (fit.maxZ - fit.minZ) * 0.45;
     fitDistance = Math.max(0.35, Math.min(3.2, fitDistance));
-    brainCamera.position.set(targetX, targetY, targetZ + fitDistance);
+    topoLevelFitDistance = fitDistance;
+    // Preserve the user's orbit while moving into detail. On the way out, fit
+    // the parent level to its own frame; a child-level camera can be far beyond
+    // the parent's useful range and would collapse the estate into the center.
+    var cameraState = topoPendingTransition &&
+      topoPendingTransition.direction === "in" &&
+      topoPendingTransition.camera;
+    if (cameraState) {
+      targetX = cameraState.target.x;
+      targetY = cameraState.target.y;
+      targetZ = cameraState.target.z;
+      brainCamera.position.set(
+        cameraState.position.x,
+        cameraState.position.y,
+        cameraState.position.z,
+      );
+    } else {
+      brainCamera.position.set(targetX, targetY, targetZ + fitDistance);
+    }
     brainCamera.lookAt(targetX, targetY, targetZ);
 
     // WebGL renderer
@@ -2093,7 +2409,9 @@ import { OrbitControls } from '/OrbitControls.js';
     brainControls.minDistance = 0.2;
     brainControls.maxDistance = 8;
     brainControls.zoomSpeed = 1.2;
+    brainControls.zoomToCursor = true;
     brainControls.update();
+    topoControlDistance = brainCamera.position.distanceTo(brainControls.target);
     // TOPO-SETTLE re-arm on drag/orbit/zoom. 'start' catches the first frame of
     // an interaction; 'change' fires for every camera move including the damping
     // tail after the pointer is released, so the graph stays redrawn until the
@@ -2101,7 +2419,22 @@ import { OrbitControls } from '/OrbitControls.js';
     // dispatches 'change' when the camera actually moved, so a static settled
     // frame never spuriously re-arms.)
     brainControls.addEventListener('start', function () { brainRearm(brainSettle, performance.now()); });
-    brainControls.addEventListener('change', function () { brainRearm(brainSettle, performance.now()); });
+    brainControls.addEventListener('change', function () {
+      brainRearm(brainSettle, performance.now());
+      var distance = brainCamera.position.distanceTo(brainControls.target);
+      if (Math.abs(distance - topoControlDistance) > 0.001) {
+        topoScheduleSemanticZoom(distance < topoControlDistance ? "in" : "out");
+      }
+      topoControlDistance = distance;
+    });
+    glCanvas.addEventListener('pointermove', function (e) {
+      topoPointer.x = e.clientX;
+      topoPointer.y = e.clientY;
+    }, { passive: true });
+    glCanvas.addEventListener('pointerleave', function () {
+      topoPointer.x = null;
+      topoPointer.y = null;
+    }, { passive: true });
 
     // Pre-build node lookup + community pools.
     brainNodeMap = Object.create(null);
@@ -2137,6 +2470,13 @@ import { OrbitControls } from '/OrbitControls.js';
     buildBrainLines();
     buildRippleMesh();
     buildTrailMesh();
+    topoMetrics.initialGeometryBytes = [brainPointsMesh, brainEdgesMesh, brainRippleMesh, brainTrailMesh]
+      .filter(Boolean)
+      .reduce(function (total, mesh) {
+        return total + Object.values(mesh.geometry.attributes).reduce(function (bytes, attr) {
+          return bytes + (attr.array ? attr.array.byteLength : 0);
+        }, 0);
+      }, 0);
     brainRipples = [];
     brainTrails = [];
     brainLastPulseNode = null;
@@ -2195,10 +2535,30 @@ import { OrbitControls } from '/OrbitControls.js';
       copyNodeQuery(node);
     });
 
-    // Escape clears selection.
-    document.addEventListener('keydown', function brainKey(e) {
-      if (e.key === 'Escape' && brainSelectedNode) selectBrainNode(null);
-    });
+    // Keyboard parity: +/- follows the same continuous camera path as wheel
+    // and pinch; Enter drills the aggregate nearest the viewport center.
+    if (brainKeyHandler) document.removeEventListener('keydown', brainKeyHandler);
+    brainKeyHandler = function (e) {
+      var tag = e.target && e.target.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "BUTTON") return;
+      if (e.key === 'Escape' && brainSelectedNode) { selectBrainNode(null); return; }
+      if (e.key === 'Enter') {
+        var candidate = topoAggregateCandidate(null, null);
+        if (candidate) { e.preventDefault(); topoDrill(candidate); }
+        return;
+      }
+      var scale = (e.key === '+' || e.key === '=') ? 0.8
+        : ((e.key === '-' || e.key === '_') ? 1.25 : 0);
+      if (!scale || !brainCamera || !brainControls) return;
+      e.preventDefault();
+      var offset = brainCamera.position.clone().sub(brainControls.target).multiplyScalar(scale);
+      var distance = offset.length();
+      distance = Math.max(brainControls.minDistance, Math.min(brainControls.maxDistance, distance));
+      offset.setLength(distance);
+      brainCamera.position.copy(brainControls.target).add(offset);
+      brainControls.update();
+    };
+    document.addEventListener('keydown', brainKeyHandler);
 
     // ResizeObserver: scale node positions + renderer when container resizes.
     if (typeof ResizeObserver !== 'undefined') {
@@ -2240,19 +2600,21 @@ import { OrbitControls } from '/OrbitControls.js';
     brainRearm(brainSettle, performance.now());
     function frame(ts) {
       var dt = prev ? Math.min(0.05, (ts - prev) / 1000) : 0.016;
+      if (prev) topoMetricFrame(ts - prev);
       prev = ts;
       brainT += dt;
       // Shader-side breathing needs only uTime. CPU decay visits the handful of
       // actively pulsing nodes, not the whole estate.
       var pulseActive = tickBrainDecay(dt);
-      // Playback (active playhead, incl. paused-mid-loop) never settles: node
-      // positions, tombstone dissolve, and the birth/alive filter all move per
-      // tick. Otherwise run the full pipeline only until the layout converges.
-      var playing = topoPlay.active;
-      var full = brainFrameIsFull(brainSettle, playing);
+      // Replay advances on discrete event steps, not on every display frame.
+      // topoPlayStep re-arms one structural frame whenever playheadMs changes;
+      // ripple/trail meshes and active pulse colors animate independently.
+      var playing = false;
+      var morphActive = topoTickSemanticMorph(ts);
+      var full = morphActive || brainFrameIsFull(brainSettle, playing);
       if (full) {
-        var maxMove = brainUsePersistedLayout ? 0 : brainPhysicsStep(dt);
-        brainSettleTrack(brainSettle, maxMove, ts, playing);
+        var maxMove = (brainUsePersistedLayout || morphActive) ? 0 : brainPhysicsStep(dt);
+        if (!morphActive) brainSettleTrack(brainSettle, maxMove, ts, playing);
       }
       // Always update controls so orbit damping keeps coasting; a real camera
       // move dispatches 'change' → brainRearm, which is what re-arms an orbit.
@@ -2265,6 +2627,12 @@ import { OrbitControls } from '/OrbitControls.js';
       }
       updateRipplesAndTrails(dt);
       brainGLRenderer.render(brainScene, brainCamera);
+      if (topoFirstFrameStartedAt) {
+        topoMetrics.firstFrameMs = performance.now() - topoFirstFrameStartedAt;
+        topoFirstFrameStartedAt = 0;
+        topoPublishMetrics();
+      }
+      if (topoMetrics.frameTotal % 60 === 0) topoPublishMetrics();
       brainAnimId = requestAnimationFrame(frame);
     }
     brainAnimId = requestAnimationFrame(frame);
@@ -2477,6 +2845,10 @@ import { OrbitControls } from '/OrbitControls.js';
 
   // Per-frame ripple + trail animation update. Called from updateBrainFrame.
   function updateRipplesAndTrails(dt) {
+    // Fresh meshes already contain invisible slots. Once the last animation
+    // expires, leave those tiny buffers settled instead of re-uploading them
+    // on every display frame.
+    if (!brainRipples.length && !brainTrails.length) return;
     var ws = brainWorldScale, cx = brainWorldCX, cy = brainWorldCY;
     var zDepth = brain3D ? 1.4 : 0;
 
@@ -2514,6 +2886,8 @@ import { OrbitControls } from '/OrbitControls.js';
       brainRippleMesh.geometry.attributes.color.needsUpdate = true;
       brainRippleMesh.geometry.attributes.size.needsUpdate = true;
       brainRippleMesh.geometry.attributes.alpha.needsUpdate = true;
+      topoMetrics.bufferUploadBytes += rPos.byteLength + rCol.byteLength +
+        rSiz.byteLength + rAlp.byteLength;
     }
 
     // --- Trails ---
@@ -2553,6 +2927,7 @@ import { OrbitControls } from '/OrbitControls.js';
       }
       brainTrailMesh.geometry.attributes.position.needsUpdate = true;
       brainTrailMesh.geometry.attributes.color.needsUpdate = true;
+      topoMetrics.bufferUploadBytes += tPos.byteLength + tCol.byteLength;
     }
   }
 
@@ -2654,6 +3029,10 @@ import { OrbitControls } from '/OrbitControls.js';
     geom.attributes.color.needsUpdate = true;
     if (full || anyPulse) geom.attributes.size.needsUpdate = true;
     geom.attributes.alpha.needsUpdate = true;
+    topoMetrics.bufferUploadBytes += geom.attributes.color.array.byteLength +
+      geom.attributes.alpha.array.byteLength +
+      (full ? geom.attributes.position.array.byteLength : 0) +
+      ((full || anyPulse) ? geom.attributes.size.array.byteLength : 0);
 
     // Update edge positions from current node positions. Skipped entirely while
     // settled — edges only move when nodes move (frozen) or when selection /
@@ -2720,6 +3099,9 @@ import { OrbitControls } from '/OrbitControls.js';
       }
       brainEdgesMesh.geometry.attributes.position.needsUpdate = true;
       brainEdgesMesh.geometry.attributes.color.needsUpdate = true;
+      topoMetrics.bufferUploadBytes +=
+        brainEdgesMesh.geometry.attributes.position.array.byteLength +
+        brainEdgesMesh.geometry.attributes.color.array.byteLength;
     }
 
     // Update HTML label overlays for community lobes. Label positions derive
@@ -2741,7 +3123,21 @@ import { OrbitControls } from '/OrbitControls.js';
 
   // Community lobe labels as HTML overlays — crisp text at any zoom.
   function updateBrainLabels() {
-    var ranks = Object.keys(brainLobeLabels);
+    var allRanks = Object.keys(brainLobeLabels);
+    var groups = Object.create(null);
+    brainNodes.forEach(function (n) {
+      if (!n.lobe || brainLobeLabels[n.community] === undefined) return;
+      (groups[n.community] = groups[n.community] || []).push(n);
+    });
+    var labelBudget = topoViewLevel === "estate" ? 12 : (topoViewLevel === "community" ? 16 : 14);
+    var ranks = allRanks
+      .filter(function (rank) { return groups[rank] && groups[rank].length; })
+      .sort(function (a, b) {
+        var ac = groups[a].reduce(function (sum, n) { return sum + (n.centrality || 0); }, 0);
+        var bc = groups[b].reduce(function (sum, n) { return sum + (n.centrality || 0); }, 0);
+        return bc - ac || (+a - +b);
+      })
+      .slice(0, labelBudget);
     // Rebuild label elements if count changed.
     if (brainLabelEls.length !== ranks.length && brainLabelContainer) {
       brainLabelContainer.innerHTML = '';
@@ -2754,12 +3150,10 @@ import { OrbitControls } from '/OrbitControls.js';
         brainLabelEls.push(lbl);
       });
     }
-    // Position each label at its lobe centroid.
-    var groups = Object.create(null);
-    brainNodes.forEach(function (n) {
-      if (!n.lobe || brainLobeLabels[n.community] === undefined) return;
-      (groups[n.community] = groups[n.community] || []).push(n);
-    });
+    // Position each budgeted label at its lobe centroid. Ranks are ordered by
+    // importance, so collision culling keeps the strongest readable label and
+    // suppresses lower-priority text rather than allowing an illegible pileup.
+    var occupied = [];
     ranks.forEach(function (rank, ri) {
       var lbl = brainLabelEls[ri];
       if (!lbl) return;
@@ -2798,6 +3192,19 @@ import { OrbitControls } from '/OrbitControls.js';
       lbl.style.left = Math.max(halfWidth + 6, Math.min(brainW - halfWidth - 6, sp.x)) + 'px';
       lbl.style.top = Math.max(labelHeight + 6, Math.min(brainH - 6, sp.y)) + 'px';
       lbl.style.transform = 'translate(-50%, -100%)';
+      var bounds = lbl.getBoundingClientRect();
+      var padding = 5;
+      var collides = occupied.some(function (other) {
+        return bounds.left < other.right + padding &&
+          bounds.right > other.left - padding &&
+          bounds.top < other.bottom + padding &&
+          bounds.bottom > other.top - padding;
+      });
+      if (collides) {
+        lbl.style.display = 'none';
+      } else {
+        occupied.push(bounds);
+      }
     });
   }
 
@@ -3216,6 +3623,10 @@ import { OrbitControls } from '/OrbitControls.js';
   function stopBrainAnimation() {
     if (brainAnimId) { cancelAnimationFrame(brainAnimId); brainAnimId = null; }
     if (brainResizeObs) { brainResizeObs.disconnect(); brainResizeObs = null; }
+    if (brainKeyHandler) {
+      document.removeEventListener('keydown', brainKeyHandler);
+      brainKeyHandler = null;
+    }
     if (brainPointsMesh) {
       brainPointsMesh.geometry.dispose();
       brainPointsMesh.material.dispose();
@@ -3520,48 +3931,111 @@ import { OrbitControls } from '/OrbitControls.js';
   }
 
   function topoTeardown() {
+    if (topoActiveRenderAbort) {
+      topoActiveRenderAbort.abort();
+      if (topoActiveRenderKey) topoGraphInflight.delete(topoActiveRenderKey);
+      topoActiveRenderAbort = null;
+      topoActiveRenderKey = null;
+      topoRenderGeneration++;
+    }
+    if (topoZoomFrame !== null) { cancelAnimationFrame(topoZoomFrame); topoZoomFrame = null; }
+    document.querySelectorAll(".topo-transition-ghost").forEach(function (node) { node.remove(); });
+    topoPendingTransition = null;
+    topoZoom.cancel();
     stopBrainAnimation();
     topoPlayReset();
     if (sse) sse.removeEventListener("message", topoSSEHandler);
   }
 
   function topoDrill(node) {
-    if (!node || !node.aggregateLevel || !node.aggregateKey) return;
-    if (node.aggregateLevel === "community") {
-      topoParentKey = node.aggregateKey;
-      renderTopology("community", node.aggregateKey);
-    } else if (node.aggregateLevel === "fold") {
-      topoParentKey = node.parentKey || topoFocusKey;
-      renderTopology("local", node.aggregateKey);
-    }
+    var intent = topoZoom.drill(node);
+    topoCommitZoomIntent(intent, node, false);
   }
 
-  async function renderTopology(level, focus) {
-    if (typeof level === "string") topoViewLevel = level;
-    if (focus !== undefined) topoFocusKey = focus || null;
-    if (topoViewLevel === "estate") { topoFocusKey = null; topoParentKey = null; }
-    topoTeardown();
+  function topoNavigateUp() {
+    var intent = null;
+    if (topoViewLevel === "local" && topoParentKey) {
+      intent = {
+        type: "transition", direction: "out", level: "community",
+        focusKey: topoParentKey, parentKey: topoParentKey,
+      };
+    } else if (topoViewLevel === "community") {
+      intent = {
+        type: "transition", direction: "out", level: "estate",
+        focusKey: null, parentKey: null,
+      };
+    }
+    topoCommitZoomIntent(intent, null, false);
+  }
+
+  async function renderTopology(level, focus, options) {
+    options = options || {};
+    var renderStartedAt = performance.now();
+    var requestedLevel = typeof level === "string" ? level : topoViewLevel;
+    var requestedFocus = focus !== undefined ? (focus || null) : topoFocusKey;
+    if (requestedLevel === "estate") requestedFocus = null;
+    var generation = ++topoRenderGeneration;
+    if (topoActiveRenderAbort) {
+      topoActiveRenderAbort.abort();
+      if (topoActiveRenderKey) topoGraphInflight.delete(topoActiveRenderKey);
+    }
+    var renderAbort = new AbortController();
+    topoActiveRenderAbort = renderAbort;
     const container = $("#topoCanvas");
     const estate = $("#topoEstate").value || "";
+    topoActiveRenderKey = topoGraphCacheKey(estate, requestedLevel, requestedFocus);
 
     let g = { structurePending: true, nodes: [], edges: [], analytics: [], communities: [] };
+    let graphLoadFailed = false;
     try {
-      var params = new URLSearchParams();
-      if (estate) params.set("estate", estate);
-      params.set("level", topoViewLevel);
-      if (topoFocusKey) params.set("focus", topoFocusKey);
-      g = await getJSON("/api/graph?" + params.toString());
+      g = await topoLoadGraph(estate, requestedLevel, requestedFocus, renderAbort.signal);
     } catch (_) {
+      graphLoadFailed = true;
       // Endpoint unreachable — fall through with structurePending:true so the
       // honest pending overlay renders. The canvas never shows invented data.
     }
+    if (generation !== topoRenderGeneration) {
+      topoMetrics.staleResponses++;
+      return;
+    }
+    if (topoActiveRenderAbort === renderAbort) {
+      topoActiveRenderAbort = null;
+      topoActiveRenderKey = null;
+    }
+    if (graphLoadFailed && options.semantic && brainGLRenderer) {
+      topoPendingTransition = null;
+      topoZoom.cancel();
+      topoToast("Detail unavailable — current map preserved");
+      return;
+    }
+
+    var transition = options.semantic ? topoPendingTransition : null;
+    var ghost = transition ? topoCaptureTransitionGhost(transition) : null;
+    if (options.semantic) {
+      stopBrainAnimation();
+      if (sse) sse.removeEventListener("message", topoSSEHandler);
+    } else {
+      topoPendingTransition = null;
+      topoZoom.cancel();
+      topoTeardown();
+    }
+
+    topoViewLevel = requestedLevel;
+    topoFocusKey = requestedFocus;
 
     if (!g.structurePending) {
       topoViewLevel = g.viewLevel || topoViewLevel;
       topoFocusKey = g.focusKey || topoFocusKey;
     }
-    if (topoViewLevel === "local" && g.communities && g.communities.length) {
+    if (topoViewLevel === "estate") {
+      topoFocusKey = null;
+      topoParentKey = null;
+    } else if (topoViewLevel === "community") {
+      topoParentKey = topoFocusKey;
+    } else if (topoViewLevel === "local" && g.communities && g.communities.length) {
       topoParentKey = g.communities[0].stableKey || topoParentKey;
+    } else if (options.parentKey) {
+      topoParentKey = options.parentKey;
     }
     var structureText = g.structurePending ? "pending" : topoViewLevel;
     if (!g.structurePending && g.lodTruncated) structureText += " budgeted";
@@ -3585,27 +4059,24 @@ import { OrbitControls } from '/OrbitControls.js';
     const W = stageRect.width > 10 ? stageRect.width : 800;
     const H = stageRect.height > 10 ? stageRect.height : 500;
 
-    // Fetch recent events: they feed the L5 radar-loop playback timeline.
-    let events = [];
-    try { const ep = await getJSON("/api/events"); events = ep.events || []; } catch (_) {}
-
-    // L5: parse + sort the playback timeline ascending by event timestamp.
-    // drawerId (estate row UUID or null) is the pulse-targeting key.
-    topoPlayEvents = events
-      .map(function (ev) {
-        return {
-          ms: Date.parse(ev.ts), ts: ev.ts, kind: ev.kind,
-          nounType: ev.nounType, estate: ev.estate, drawerId: ev.drawerId || null,
-        };
-      })
-      .filter(function (ev) { return !isNaN(ev.ms); })
-      .sort(function (a, b) { return a.ms - b.ms; });
-    topoPlayReset();
-    topoPlayUpdateSpan();
-    // Radar semantics: the loop is ambient — it plays without interaction,
-    // like a weather radar on a wall display. Auto-start when the timeline
-    // has content; the Pause button stops it.
-    if (topoPlayEvents.length > 1) topoPlayToggle();
+    if (!options.preserveReplay || !topoPlayEvents.length) {
+      // Fetch recent events once for a new view/estate. Semantic level changes
+      // preserve this array and the exact playhead rather than restarting time.
+      let events = [];
+      try { const ep = await getJSON("/api/events"); events = ep.events || []; } catch (_) {}
+      topoPlayEvents = events
+        .map(function (ev) {
+          return {
+            ms: Date.parse(ev.ts), ts: ev.ts, kind: ev.kind,
+            nounType: ev.nounType, estate: ev.estate, drawerId: ev.drawerId || null,
+          };
+        })
+        .filter(function (ev) { return !isNaN(ev.ms); })
+        .sort(function (a, b) { return a.ms - b.ms; });
+      topoPlayReset();
+      topoPlayUpdateSpan();
+      if (topoPlayEvents.length > 1) topoPlayToggle();
+    }
 
     // Build node + edge sets from real VizGraph structure; an empty canvas
     // plus the pending overlay is the honest no-structure state.
@@ -3751,6 +4222,7 @@ import { OrbitControls } from '/OrbitControls.js';
     renderCommPicker();
     // L4: assign per-node depth from age now that the node set is final.
     brainAssignDepth(Date.now());
+    topoPrepareSemanticMorph(transition, W, H);
 
     // Overlay visibility: real structure renders with the corner legend; any
     // no-structure state shows the honest pending overlay (with the analytics
@@ -3780,7 +4252,13 @@ import { OrbitControls } from '/OrbitControls.js';
       topoRenderAnalytics(g);
     }
 
+    topoFirstFrameStartedAt = renderStartedAt;
     startBrainAnimation(container, W, H);
+    topoZoom.complete(topoViewLevel, topoFocusKey, topoParentKey);
+    topoMetrics.lastLevel = topoViewLevel;
+    topoMetrics.lastFocusKey = topoFocusKey;
+    topoRunTransitionVisual(ghost, transition);
+    topoPendingTransition = null;
     topoStartSSE();
   }
 
@@ -4078,6 +4556,7 @@ import { OrbitControls } from '/OrbitControls.js';
     }
     var ev = win[topoPlay.idx];
     topoPlay.playheadMs = ev.ms;
+    brainRearm(brainSettle, performance.now());
     var clock = $("#topoPlayClock");
     if (clock) clock.textContent = new Date(ev.ms).toLocaleString();
     var pulsed = topoPlaybackPulse(ev);
@@ -4237,12 +4716,15 @@ import { OrbitControls } from '/OrbitControls.js';
       if (ssePaused) stopSSE(); else startSSE();
     });
     $("#pipelineEstate").addEventListener("change", renderPipeline);
-    $("#topoEstate").addEventListener("change", function () { renderTopology("estate", null); });
-    $("#topoReset").addEventListener("click", function () { renderTopology(topoViewLevel, topoFocusKey); });
-    $("#topoUp").addEventListener("click", function () {
-      if (topoViewLevel === "local" && topoParentKey) renderTopology("community", topoParentKey);
-      else renderTopology("estate", null);
+    $("#topoEstate").addEventListener("change", function () {
+      topoGraphCache.clear();
+      renderTopology("estate", null);
     });
+    $("#topoReset").addEventListener("click", function () {
+      topoGraphCache.delete(topoGraphCacheKey($("#topoEstate").value || "", topoViewLevel, topoFocusKey));
+      renderTopology(topoViewLevel, topoFocusKey);
+    });
+    $("#topoUp").addEventListener("click", topoNavigateUp);
     // L4 strata toggle — flips 3D depth on/off; Three.js geometry is
     // rebuilt to update z-coordinates. The running rAF loop renders
     // the new positions on its next frame.

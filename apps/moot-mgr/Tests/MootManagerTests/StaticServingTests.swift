@@ -133,12 +133,14 @@ struct StaticServingTests {
         #expect(StaticAssets.asset(for: "/index.html") != nil)
         #expect(StaticAssets.asset(for: "/app.css") != nil)
         #expect(StaticAssets.asset(for: "/app.js") != nil)
+        #expect(StaticAssets.asset(for: "/semantic-zoom.mjs") != nil)
         // The Topology renderer lives in app.js (Three.js); the retired
         // /sigma.js path must stay off the list.
         #expect(StaticAssets.asset(for: "/sigma.js") == nil)
         // Anything off the list — including traversal attempts — resolves to nil.
         #expect(StaticAssets.asset(for: "/../StaticAssets.swift") == nil)
         #expect(StaticAssets.asset(for: "/app.css/../app.js") == nil)
+        #expect(StaticAssets.asset(for: "/semantic-zoom.mjs.bak") == nil)
         #expect(StaticAssets.asset(for: "/api/server") == nil)
         #expect(StaticAssets.asset(for: "") == nil)
     }

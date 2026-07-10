@@ -145,10 +145,13 @@ fn static_assets_serve_from_allowlist() {
     assert!(status.contains("200"));
     assert!(body.contains("<!DOCTYPE html>") || body.contains("<html"));
     // app.css with a cache-busting query resolves.
-    let (css_status, _css) = get(port, "/app.css?v=24");
+    let (css_status, _css) = get(port, "/app.css?v=25");
     assert!(css_status.contains("200"));
-    let (js_status, _js) = get(port, "/app.js?v=24");
+    let (js_status, _js) = get(port, "/app.js?v=26");
     assert!(js_status.contains("200"));
+    let (zoom_status, zoom) = get(port, "/semantic-zoom.mjs?v=1");
+    assert!(zoom_status.contains("200"));
+    assert!(zoom.contains("SemanticZoomController"));
     // An off-allowlist path is 404 (no traversal).
     let (nf, _b) = get(port, "/../etc/passwd");
     assert!(nf.contains("404"));

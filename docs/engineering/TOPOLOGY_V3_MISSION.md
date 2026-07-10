@@ -1,7 +1,7 @@
 ---
 title: Topology V3 — Persistent Multilevel Semantic Zoom
-version: v0.5
-status: implemented-p0-through-p3
+version: v0.6
+status: implemented-p0-through-p3-continuous-semantic-zoom
 date: 2026-07-09
 supersedes_title: "Topology V2 Phase 4 — Folds (governor-side subcommunities)"
 description: "Design direction: replace the decorative random-scatter brain with a persistent, multilevel topology the user can zoom — graph relationships supply position, FDC supplies meaning, centrality supplies emphasis, time supplies activity. Folds become one level of this, not the whole feature."
@@ -24,9 +24,9 @@ explicit-edge lifespans, shader-side idle breathing, persisted overlap-matched
 community/fold identities with strict-majority continuity, bridge-weighted
 fold placement, neighbour-relaxed new-node positions, stable normalized
 coordinates, aggregate bridges, Q16 compact positions, hard level budgets,
-Estate → Community → Local drill, and activity projected onto exact current
-aggregates. V2 snapshots remain compatible and the default no-`level` API
-remains the legacy full view.
+continuous Estate → Community → Local semantic zoom with click/keyboard
+fallbacks, and activity projected onto exact current aggregates. V2 snapshots
+remain compatible and the default no-`level` API remains the legacy full view.
 
 P4 remains a separately gated storage feature. Genuine historical topology is
 not represented as complete until a versioned snapshot/delta store, ranged
@@ -210,9 +210,13 @@ temporal *truth*.
    Estate is capped at 96 aggregates with an accounting-preserving "Other
    structure" node; folds are capped at 64 per community; Local is capped at
    2,000 nodes and 12,000 edges and reports truncation. Its edge budget keeps a
-   structural spanning forest before ranked detail. Level changes are explicit
-   object drill actions rather than camera-distance thresholds, eliminating
-   threshold flicker and making navigation keyboard-accessible.
+   structural spanning forest before ranked detail. The browser crosses these
+   discrete server levels through **continuous semantic zoom**: screen-space
+   object size drives bounded prefetch and a 220 ms stable-position morph;
+   hysteresis prevents threshold flicker; stale requests are discarded; click,
+   Enter, Up, and +/- remain precise reversible alternatives. Camera distance
+   alone never chooses focus — the aggregate under the pointer, or nearest the
+   viewport centre, supplies the stable community/fold key.
 4. **Temporal aggregate deltas** keyed by stable community/fold identity, with
    split/merge lineage and an aligned coordinate-frame version. These are the
    Estate/Community replay source; individual event pages remain the Local and
@@ -241,7 +245,9 @@ at dispatch.
   the mental-map churn without any client clustering).
 - **P2 (implemented):** Community level — folds + balanced representative skeleton +
   topology-only-vs-FDC disagreement surfaced.
-- **P3 (implemented):** Local + Selection levels with explicit drill navigation.
+- **P3 (implemented):** Local + Selection levels with continuous wheel/pinch semantic
+  zoom, adjacent-level prefetch/cache, stable-position morphs, and explicit
+  click/keyboard/Up navigation.
 - **P4 (separate storage mission):** paginated time-range API, retained temporal aggregate deltas,
   split/merge lineage, FDC-version history, and genuine historical-topology
   replay in the stable estate coordinate frame.
@@ -260,6 +266,15 @@ at dispatch.
   and label budget.
 - **Performance:** settled live view performs no per-node/per-edge CPU upload;
   replay work is proportional to objects changed at the step, not estate size.
+  On the 52,717-node estate, warm Estate first frame is <=250 ms, cold first
+  frame is <=500 ms, cached semantic transitions are <=250 ms, uncached
+  transitions are <=500 ms without a blank frame, camera motion holds 60 FPS
+  (p95 <=16.7 ms, p99 <=33 ms), and 20 repeated threshold crossings produce no
+  level oscillation.
+- **Continuity:** semantic level changes preserve camera target, selected estate,
+  and the exact replay playhead; the prior frame remains visible until the next
+  bounded level is ready. Reduced-motion users receive the same navigation with
+  a 1 ms dissolve and no spatial expansion.
 - **Parity:** Swift and Rust emit byte-equivalent stable IDs, fold assignments,
   aggregate counts, bridge weights, temporal indexes, and replay visibility for
   shared golden fixtures.
@@ -273,6 +288,20 @@ at dispatch.
 - A non-committed debug scale probe projected 50,000 nodes and 70,000 edges
   into the capped 64 folds in 9.62 seconds on the development host, inside the
   five-minute governor cadence. The fast unit lane remains free of this probe.
+- The deterministic browser fixture accounts for 52,717 memories and 70,000
+  relationships. Its Estate, Community, and Local payloads are 38,677, 24,076,
+  and 403,538 bytes respectively. On the development host, Estate first frame
+  was 59.5-67.8 ms, cached level changes were 236-242 ms, and uncached Local was
+  281 ms. Camera motion held p95 9.2 ms / p99 9.4 ms; a settled 120-frame sample
+  uploaded zero additional bytes.
+- Browser acceptance traversed Estate -> Community -> Local and back using only
+  wheel gestures while preserving the exact paused replay timestamp. The same
+  path passed at 390 x 844 with no document-width overflow, no console warnings
+  or errors, and a nonblank canvas pixel check (11.69% lit, 6.84% chromatic).
+- The pure controller test performs 20 complete in/out threshold cycles and
+  proves one locked level transition per crossing, including reverse
+  hysteresis. Swift and Rust static-serving tests prove the controller module is
+  embedded in both product binaries and remains behind the fixed allow-list.
 
 ## Follow-on decisions
 
