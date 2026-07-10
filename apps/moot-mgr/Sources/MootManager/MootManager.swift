@@ -63,6 +63,15 @@ struct StoredGraphPayload: Decodable {
     let generatedTs: String?
 }
 
+private struct OtherStructureProjection {
+    let visibleCommunities: [GraphCommunityPayload]
+    let community: GraphCommunityPayload
+    let folds: [GraphFoldPayload]
+    let bridges: [GraphBridgePayload]
+    let sliceByCommunityKey: [String: String]
+    let sliceByCommunityID: [Int: String]
+}
+
 /// One raw community descriptor on the ARIA_MCP graph wire (VIZ_V2 contract):
 /// `{id, size, dominantUdcCode}`. A classified dominant UDC code is enriched to
 /// an FDC heading label; empty and "000" unclassified sentinels become nulls.
@@ -171,7 +180,8 @@ public actor MootManager {
         estateKey: String?, raw: Data,
         nodes: [GraphNodePayload], edges: [GraphEdgePayload],
         communities: [GraphCommunityPayload]?, folds: [GraphFoldPayload],
-        bridges: [GraphBridgePayload], topologyVersion: Int,
+        bridges: [GraphBridgePayload], otherProjection: OtherStructureProjection?,
+        topologyVersion: Int,
         coordinateFrameVersion: Int, generatedTs: String?
     )? = nil
 
@@ -895,6 +905,7 @@ public actor MootManager {
         var pendingReasons: [String] = [
             "topology snapshot not yet available — the autonomic governor has not completed its first duty cycle",
         ]
+        var cachedOtherProjection: OtherStructureProjection? = nil
 
         // Estate filter "all"/empty/nil — the dashboard's DEFAULT view — reads
         // the newest snapshot across all estates (nil key); an explicit estate
@@ -919,6 +930,7 @@ public actor MootManager {
                 generatedTs = cached.generatedTs
                 folds = cached.folds
                 bridges = cached.bridges
+                cachedOtherProjection = cached.otherProjection
                 topologyVersion = cached.topologyVersion
                 coordinateFrameVersion = cached.coordinateFrameVersion
                 pendingReasons = []
@@ -940,13 +952,21 @@ public actor MootManager {
                     enriched = Self.enrichCommunities(raw)
                     communities = enriched!
                 }
-                folds = Self.enrichFolds(stored.folds ?? [])
-                bridges = stored.bridges ?? []
-                topologyVersion = stored.topologyVersion ?? 2
+                let enrichedFolds = Self.enrichFolds(stored.folds ?? [])
+                let storedBridges = stored.bridges ?? []
+                let storedTopologyVersion = stored.topologyVersion ?? 2
+                let projection = storedTopologyVersion >= 3 && (enriched?.count ?? 0) > 96
+                    ? Self.otherStructureProjection(
+                        communities: enriched ?? [], bridges: storedBridges)
+                    : nil
+                folds = enrichedFolds
+                bridges = storedBridges
+                cachedOtherProjection = projection
+                topologyVersion = storedTopologyVersion
                 coordinateFrameVersion = stored.coordinateFrameVersion ?? 0
                 topologyEnrichmentCache = (estateKey, snapshotData,
                                            stored.nodes, stored.edges,
-                                           enriched, folds, bridges,
+                                           enriched, folds, bridges, projection,
                                            topologyVersion, coordinateFrameVersion,
                                            stored.generatedTs)
             }
@@ -970,6 +990,13 @@ public actor MootManager {
         let totalEdgeCount = liveEdges.count
         var lodTruncated = false
         var estateVisibleKeys: Set<String>? = nil
+        let needsOtherProjection = resolvedLevel == "estate" || focus == "__other__" ||
+            focus?.hasPrefix("__other__:slice:") == true
+        let otherProjection = needsOtherProjection
+            ? cachedOtherProjection ?? (communities.count > 96
+                ? Self.otherStructureProjection(communities: communities, bridges: bridges)
+                : nil)
+            : nil
 
         if topologyVersion >= 3 {
             switch resolvedLevel {
@@ -978,23 +1005,9 @@ public actor MootManager {
                 responseEdges = []
                 responseFolds = []
                 responseBridges = bridges.filter { $0.level == "community" }
-                if responseCommunities.count > 96 {
-                    let ranked = responseCommunities.sorted {
-                        $0.size != $1.size ? $0.size > $1.size : ($0.stableKey ?? "") < ($1.stableKey ?? "")
-                    }
-                    let visible = Array(ranked.prefix(95))
-                    let omitted = Array(ranked.dropFirst(95))
-                    let omittedSize = omitted.reduce(0) { $0 + $1.size }
-                    let divisor = Double(max(1, omittedSize))
-                    let other = GraphCommunityPayload(
-                        id: -2, code: nil, label: "Other structure", size: omittedSize,
-                        stableKey: "__other__",
-                        x: omitted.reduce(0) { $0 + ($1.x ?? 0) * Double($1.size) } / divisor,
-                        y: omitted.reduce(0) { $0 + ($1.y ?? 0) * Double($1.size) } / divisor,
-                        z: omitted.reduce(0) { $0 + ($1.z ?? 0) * Double($1.size) } / divisor,
-                        foldCount: omitted.reduce(0) { $0 + ($1.foldCount ?? 0) })
-                    responseCommunities = visible + [other]
-                    let visibleKeys = Set(visible.compactMap(\.stableKey))
+                if let otherProjection {
+                    responseCommunities = otherProjection.visibleCommunities + [otherProjection.community]
+                    let visibleKeys = Set(otherProjection.visibleCommunities.compactMap(\.stableKey))
                     estateVisibleKeys = visibleKeys
                     struct BridgeBucket: Hashable { let source: String; let target: String; let type: String }
                     var buckets: [BridgeBucket: (weight: Double, count: Int)] = [:]
@@ -1017,20 +1030,38 @@ public actor MootManager {
                 }
             case "community":
                 guard let focus, !focus.isEmpty else { break }
-                let foldSet = Set(folds.filter { $0.communityKey == focus }.map(\.stableKey))
-                responseCommunities = communities.filter { $0.stableKey == focus }
-                responseFolds = folds.filter { $0.communityKey == focus }
-                responseBridges = bridges.filter {
-                    $0.level == "fold" && foldSet.contains($0.sourceKey) && foldSet.contains($0.targetKey)
+                if focus == "__other__", let otherProjection {
+                    responseCommunities = [otherProjection.community]
+                    responseFolds = otherProjection.folds
+                    responseBridges = otherProjection.bridges
+                } else {
+                    let foldSet = Set(folds.filter { $0.communityKey == focus }.map(\.stableKey))
+                    responseCommunities = communities.filter { $0.stableKey == focus }
+                    responseFolds = folds.filter { $0.communityKey == focus }
+                    responseBridges = bridges.filter {
+                        $0.level == "fold" && foldSet.contains($0.sourceKey) && foldSet.contains($0.targetKey)
+                    }
                 }
                 responseNodes = []
                 responseEdges = []
             case "local":
                 guard let focus, !focus.isEmpty else { break }
-                responseNodes = liveNodes.filter { $0.foldKey == focus || $0.communityKey == focus }
+                let otherFold = otherProjection?.folds.first { $0.stableKey == focus }
+                if otherFold != nil, let otherProjection {
+                    responseNodes = liveNodes.filter { node in
+                        let slice = node.communityKey.flatMap { otherProjection.sliceByCommunityKey[$0] }
+                            ?? otherProjection.sliceByCommunityID[node.communityId]
+                        return slice == focus
+                    }
+                } else {
+                    responseNodes = liveNodes.filter { $0.foldKey == focus || $0.communityKey == focus }
+                }
                 let nodeSet = Set(responseNodes.map(\.id))
                 responseEdges = liveEdges.filter { nodeSet.contains($0.source) && nodeSet.contains($0.target) }
-                if let fold = folds.first(where: { $0.stableKey == focus }) {
+                if let otherFold, let otherProjection {
+                    responseCommunities = [otherProjection.community]
+                    responseFolds = [otherFold]
+                } else if let fold = folds.first(where: { $0.stableKey == focus }) {
                     responseCommunities = communities.filter { $0.stableKey == fold.communityKey }
                     responseFolds = [fold]
                 } else {
@@ -1069,6 +1100,10 @@ public actor MootManager {
                 var key = resolvedLevel == "estate" ? node.communityKey : node.foldKey
                 if resolvedLevel == "estate", let visible = estateVisibleKeys,
                    let raw = key, !visible.contains(raw) { key = "__other__" }
+                if resolvedLevel == "community", focus == "__other__", let otherProjection {
+                    key = node.communityKey.flatMap { otherProjection.sliceByCommunityKey[$0] }
+                        ?? otherProjection.sliceByCommunityID[node.communityId]
+                }
                 if let key, !key.isEmpty { activityPairs.append((event.rowIDStr, key)) }
             }
         }
@@ -1095,6 +1130,120 @@ public actor MootManager {
             estate: (estate?.isEmpty == false ? estate! : "all"),
             snapshotTs: Self.iso8601String(from: now)
         )
+    }
+
+    /// Turn estate communities omitted by the 96-dot budget into a bounded,
+    /// deterministic second level. The spatial ordering keeps nearby omitted
+    /// communities together while cumulative weight partitions retain every
+    /// member count and avoid one aggregate expanding into 50k dots.
+    private static func otherStructureProjection(
+        communities: [GraphCommunityPayload], bridges: [GraphBridgePayload],
+        visibleLimit: Int = 95, sliceLimit: Int = 64
+    ) -> OtherStructureProjection {
+        let ranked = communities.sorted {
+            $0.size != $1.size ? $0.size > $1.size : ($0.stableKey ?? "") < ($1.stableKey ?? "")
+        }
+        let visible = Array(ranked.prefix(visibleLimit))
+        let omittedByRank = Array(ranked.dropFirst(visibleLimit))
+        func coordinate(_ value: Double?) -> Double {
+            guard let value, value.isFinite else { return 0 }
+            return value == 0 ? 0 : value
+        }
+        let omitted = omittedByRank.sorted { lhs, rhs in
+            let lx = coordinate(lhs.x), rx = coordinate(rhs.x)
+            if lx != rx { return lx < rx }
+            let ly = coordinate(lhs.y), ry = coordinate(rhs.y)
+            if ly != ry { return ly < ry }
+            return (lhs.stableKey ?? "community:\(lhs.id)") <
+                (rhs.stableKey ?? "community:\(rhs.id)")
+        }
+        let sliceCount = max(1, min(sliceLimit, omitted.count))
+        let totalWeight = max(1, omitted.reduce(0) { $0 + max(1, $1.size) })
+        var buckets: [[GraphCommunityPayload]] = Array(repeating: [], count: sliceCount)
+        var cumulativeWeight = 0
+        for community in omitted {
+            let bucket = min(sliceCount - 1, cumulativeWeight * sliceCount / totalWeight)
+            buckets[bucket].append(community)
+            cumulativeWeight += max(1, community.size)
+        }
+
+        var folds: [GraphFoldPayload] = []
+        var sliceByKey: [String: String] = [:]
+        var sliceByID: [Int: String] = [:]
+        for (bucketIndex, members) in buckets.enumerated() where !members.isEmpty {
+            let stableKey = "__other__:slice:\(bucketIndex)"
+            let weight = max(1, members.reduce(0) { $0 + max(1, $1.size) })
+            let weighted = { (axis: (GraphCommunityPayload) -> Double?) -> Double in
+                members.reduce(0) {
+                    $0 + coordinate(axis($1)) * Double(max(1, $1.size))
+                } / Double(weight)
+            }
+            var codeWeights: [String: Int] = [:]
+            var representativeIds: [String] = []
+            var seenRepresentatives = Set<String>()
+            for member in members {
+                if let code = member.code, !code.isEmpty {
+                    codeWeights[code, default: 0] += max(1, member.size)
+                }
+                for id in member.representativeIds ?? []
+                    where representativeIds.count < 8 && seenRepresentatives.insert(id).inserted {
+                    representativeIds.append(id)
+                }
+                let rawKey = member.stableKey ?? "community:\(member.id)"
+                sliceByKey[rawKey] = stableKey
+                sliceByID[member.id] = stableKey
+            }
+            let code = codeWeights.sorted {
+                $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key
+            }.first?.key
+            folds.append(GraphFoldPayload(
+                stableKey: stableKey, communityKey: "__other__", code: code,
+                label: "Other structure region \(folds.count + 1)",
+                size: members.reduce(0) { $0 + $1.size },
+                x: weighted(\.x), y: weighted(\.y), z: weighted(\.z),
+                representativeIds: representativeIds))
+        }
+
+        struct BridgeBucket: Hashable { let source: String; let target: String; let type: String }
+        var bridgeBuckets: [BridgeBucket: (weight: Double, count: Int)] = [:]
+        for bridge in bridges where bridge.level == "community" {
+            guard let rawSource = sliceByKey[bridge.sourceKey],
+                  let rawTarget = sliceByKey[bridge.targetKey], rawSource != rawTarget else { continue }
+            let pair = rawSource < rawTarget ? (rawSource, rawTarget) : (rawTarget, rawSource)
+            let key = BridgeBucket(source: pair.0, target: pair.1, type: bridge.edgeType)
+            let old = bridgeBuckets[key] ?? (0, 0)
+            bridgeBuckets[key] = (old.weight + bridge.weight, old.count + bridge.edgeCount)
+        }
+        let sliceBridges = bridgeBuckets.map { key, value in
+            GraphBridgePayload(level: "fold", sourceKey: key.source, targetKey: key.target,
+                               edgeType: key.type, weight: value.weight, edgeCount: value.count)
+        }.sorted { ($0.sourceKey, $0.targetKey, $0.edgeType) <
+                   ($1.sourceKey, $1.targetKey, $1.edgeType) }
+
+        let omittedSize = omittedByRank.reduce(0) { $0 + $1.size }
+        let omittedWeight = max(1, omittedByRank.reduce(0) { $0 + max(1, $1.size) })
+        let summaryWeighted = { (axis: (GraphCommunityPayload) -> Double?) -> Double in
+            omittedByRank.reduce(0) {
+                $0 + coordinate(axis($1)) * Double(max(1, $1.size))
+            } / Double(omittedWeight)
+        }
+        var summaryRepresentatives: [String] = []
+        var seenSummary = Set<String>()
+        for community in omittedByRank {
+            for id in community.representativeIds ?? []
+                where summaryRepresentatives.count < 8 && seenSummary.insert(id).inserted {
+                summaryRepresentatives.append(id)
+            }
+        }
+        let summary = GraphCommunityPayload(
+            id: -2, code: nil, label: "Other structure", size: omittedSize,
+            stableKey: "__other__", x: summaryWeighted(\.x), y: summaryWeighted(\.y),
+            z: summaryWeighted(\.z), foldCount: folds.count,
+            representativeIds: summaryRepresentatives)
+        return OtherStructureProjection(
+            visibleCommunities: visible, community: summary, folds: folds,
+            bridges: sliceBridges, sliceByCommunityKey: sliceByKey,
+            sliceByCommunityID: sliceByID)
     }
 
     /// Keep Local views GPU- and wire-bounded without erasing their structural

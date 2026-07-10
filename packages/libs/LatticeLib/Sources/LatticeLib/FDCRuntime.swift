@@ -88,7 +88,7 @@ public enum FDC {
     }
 
     /// Version of the deterministic classifier algorithm itself.
-    public static let classifierVersion = "4.0.0"
+    public static let classifierVersion = "4.1.0"
 
     /// Estate-wide recalculation floor. This covers every input that can change
     /// an assigned code: algorithm, frame, lexicon, and signatures.
