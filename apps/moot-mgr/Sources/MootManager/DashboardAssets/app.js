@@ -1401,8 +1401,6 @@ import {
   // Three.js WebGL renderer state — replaces Canvas2D brain renderer.
   let brainScene = null, brainCamera = null, brainGLRenderer = null;
   let brainControls = null;          // OrbitControls instance
-  let brainTissueMesh = null;        // aggregate lobe volumes behind the cores
-  let brainTissueNodes = [];
   let brainHierarchyMesh = null;     // parent-child arcs; not estate tunnels
   let brainHierarchyLinks = [];
   let brainPointsMesh = null;        // THREE.Points for all nodes
@@ -1711,6 +1709,12 @@ import {
     return S[t] || S[0];
   }
 
+  function brainNodeSizePx(node, style) {
+    if (node.aggregateLevel) return node.coreSizePx;
+    var centrality = Math.max(0, Math.min(1, node.centrality || 0));
+    return Math.max(2.5, style.r * 1.6 * (1 + centrality * 0.45));
+  }
+
   // Stable Gaussian-like scatter helper via three deterministic unit samples.
   function brainGauss(id, salt) {
     return (stableUnit(id, salt + ':a') + stableUnit(id, salt + ':b') +
@@ -1833,9 +1837,7 @@ import {
         aggregateSize: n.aggregateSize || 0,
         aggregateLabel: n.aggregateLabel || null,
         representativeIds: n.representativeIds || [],
-        tissueSize: aggregateStyle ? aggregateStyle.tissueSize : 0,
-        coreSize: aggregateStyle ? aggregateStyle.coreSize : 0,
-        tissueAlpha: aggregateStyle ? aggregateStyle.tissueAlpha : 0,
+        coreSizePx: aggregateStyle ? aggregateStyle.coreSizePx : 0,
       };
       node.ax = node.x; node.ay = node.y;
       nodes.push(node);
@@ -2084,15 +2086,11 @@ import {
     return Math.sqrt(maxMove2);  // px moved by the fastest node this frame
   }
 
-  // Point shader: each node is a screen-space circle with per-point size,
-  // color, and alpha. The fragment shader draws a soft-edged disc and applies
-  // per-point alpha for breathing, recency, selection dimming, and depth fog.
-  // Point vertex shader: size is in world-space units; the projection
-  // converts to screen pixels via the viewport height (resolution.y)
-  // so points remain a consistent angular size as you orbit.
+  // Point shader: each node is a screen-space circle with a CSS-pixel diameter.
+  // Camera movement changes projected separation, not glyph size. The fragment
+  // shader applies breathing, recency, selection dimming, and depth fog.
   var POINT_VS = [
     'uniform float uPixelRatio;',
-    'uniform float uViewportH;',
     'uniform float uTime;',
     'uniform float uBreathAmount;',
     'attribute float size;',
@@ -2107,33 +2105,8 @@ import {
     '  float breath = 0.82 + 0.18 * sin(uTime * 0.72 + breathPhase);',
     '  vAlpha = alpha * mix(1.0, breath, uBreathAmount);',
     '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
-    '  gl_PointSize = size * uViewportH * uPixelRatio / -mv.z;',
+    '  gl_PointSize = max(1.0, size * uPixelRatio);',
     '  gl_Position = projectionMatrix * mv;',
-    '}',
-  ].join('\n');
-
-  // Aggregate tissue is one GPU point per real aggregate. Its softly folded
-  // interior communicates mass and lobe identity without fabricating memories
-  // or links. The node core remains a separate point above this layer.
-  var TISSUE_FS = [
-    'varying vec3 vColor;',
-    'varying float vAlpha;',
-    'varying float vPhase;',
-    'void main() {',
-    '  vec2 p = gl_PointCoord - vec2(0.5);',
-    '  float d = length(p);',
-    '  if (d > 0.5) discard;',
-    '  float angle = atan(p.y, p.x);',
-    '  float edgeWarp = sin(angle * 5.0 + vPhase) * 0.018 + sin(angle * 9.0 - vPhase) * 0.012;',
-    '  float waveA = sin(p.x * 42.0 + sin(p.y * 17.0 + vPhase) * 2.8);',
-    '  float waveB = sin(p.y * 39.0 + sin(p.x * 14.0 - vPhase) * 2.5);',
-    '  float folds = smoothstep(0.28, 1.52, abs(waveA + waveB));',
-    '  float body = 1.0 - smoothstep(0.32 + edgeWarp, 0.5 + edgeWarp, d);',
-    '  float rim = smoothstep(0.34, 0.41, d) * (1.0 - smoothstep(0.45, 0.5, d));',
-    '  float center = 1.0 - smoothstep(0.0, 0.38, d);',
-    '  vec3 tissue = vColor * (0.30 + folds * 0.52) + vec3(center * 0.08);',
-    '  float alpha = vAlpha * body * (0.38 + folds * 0.62) + vAlpha * rim * 0.62;',
-    '  gl_FragColor = vec4(tissue, alpha);',
     '}',
   ].join('\n');
   var POINT_FS = [
@@ -2147,9 +2120,25 @@ import {
     '}',
   ].join('\n');
 
+  // Replay ripples intentionally grow in world-space, independently of the
+  // fixed-size node glyphs.
+  var RIPPLE_VS = [
+    'uniform float uPixelRatio;',
+    'uniform float uViewportH;',
+    'attribute float size;',
+    'attribute float alpha;',
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  vColor = color;',
+    '  vAlpha = alpha;',
+    '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+    '  gl_PointSize = size * uViewportH * uPixelRatio / -mv.z;',
+    '  gl_Position = projectionMatrix * mv;',
+    '}',
+  ].join('\n');
+
   // Ripple ring shader: hollow expanding circle that fades as it grows.
-  // The `alpha` attribute carries (1 - age/duration) so the ring fades
-  // out over its lifecycle. The `size` attribute grows with age.
   var RIPPLE_FS = [
     'varying vec3 vColor;',
     'varying float vAlpha;',
@@ -2417,17 +2406,15 @@ import {
     // Threshold in world-space units — ~8px at default zoom.
     brainRaycaster.params.Points.threshold = 8 * brainWorldScale;
 
-    // Build Three.js geometry from back to front: aggregate tissue, real
-    // relationship lines, hierarchy fibers, then the crisp node cores.
-    buildBrainTissue();
+    // Build real relationships and hierarchy fibers behind fixed-size nodes.
     buildBrainLines();
     buildBrainHierarchyLines();
     buildBrainPoints();
     buildRippleMesh();
     buildTrailMesh();
     topoMetrics.initialGeometryBytes = [
-      brainTissueMesh, brainEdgesMesh, brainHierarchyMesh,
-      brainPointsMesh, brainRippleMesh, brainTrailMesh,
+      brainEdgesMesh, brainHierarchyMesh, brainPointsMesh,
+      brainRippleMesh, brainTrailMesh,
     ]
       .filter(Boolean)
       .reduce(function (total, mesh) {
@@ -2541,13 +2528,7 @@ import {
         brainCamera.aspect = newW / newH;
         brainCamera.updateProjectionMatrix();
         brainGLRenderer.setSize(newW, newH);
-        // Update shader uniform for point sizing.
-        if (brainPointsMesh) {
-          brainPointsMesh.material.uniforms.uViewportH.value = newH;
-        }
-        if (brainTissueMesh) {
-          brainTissueMesh.material.uniforms.uViewportH.value = newH;
-        }
+        if (brainRippleMesh) brainRippleMesh.material.uniforms.uViewportH.value = newH;
         // TOPO-SETTLE: node positions were just rescaled and the viewport moved,
         // so a settled graph must redraw — re-arm a full frame.
         brainRearm(brainSettle, performance.now());
@@ -2584,7 +2565,6 @@ import {
       // move dispatches 'change' → brainRearm, which is what re-arms an orbit.
       brainControls.update();
       if (brainPointsMesh) brainPointsMesh.material.uniforms.uTime.value = brainT;
-      if (brainTissueMesh) brainTissueMesh.material.uniforms.uTime.value = brainT;
       var recencyDue = Date.now() >= brainNextRecencyRefreshMs;
       if (full || pulseActive || recencyDue) {
         updateBrainFrame(full);
@@ -2634,10 +2614,7 @@ import {
       colors[i * 3]     = lum + (rgb[0] / 255 - lum) * sat;
       colors[i * 3 + 1] = lum + (rgb[1] / 255 - lum) * sat;
       colors[i * 3 + 2] = lum + (rgb[2] / 255 - lum) * sat;
-      // Aggregate clusters are first-class objects; drawers remain compact.
-      sizes[i] = n.aggregateLevel
-        ? n.coreSize
-        : (style.r * (1 + n.centrality * 1.2)) * 0.005;
+      sizes[i] = brainNodeSizePx(n, style);
       alphas[i] = style.a;
       breathPhases[i] = n.breathPhase;
     }
@@ -2650,7 +2627,6 @@ import {
     var mat = new THREE.ShaderMaterial({
       uniforms: {
         uPixelRatio: { value: window.devicePixelRatio || 1 },
-        uViewportH:  { value: brainH },
         uTime:       { value: brainT },
         uBreathAmount: { value: 1.0 },
       },
@@ -2663,59 +2639,6 @@ import {
     brainPointsMesh = new THREE.Points(geom, mat);
     brainPointsMesh.renderOrder = 3;
     brainScene.add(brainPointsMesh);
-  }
-
-  function buildBrainTissue() {
-    if (brainTissueMesh) {
-      brainScene.remove(brainTissueMesh);
-      brainTissueMesh.geometry.dispose();
-      brainTissueMesh.material.dispose();
-    }
-    brainTissueNodes = brainNodes.filter(function (n) { return !!n.aggregateLevel; });
-    if (!brainTissueNodes.length) { brainTissueMesh = null; return; }
-    var N = brainTissueNodes.length;
-    var positions = new Float32Array(N * 3);
-    var colors = new Float32Array(N * 3);
-    var sizes = new Float32Array(N);
-    var alphas = new Float32Array(N);
-    var phases = new Float32Array(N);
-    var zDepth = brain3D ? 1.4 : 0;
-    for (var i = 0; i < N; i++) {
-      var n = brainTissueNodes[i];
-      positions[i * 3] = (n.x - brainWorldCX) * brainWorldScale;
-      positions[i * 3 + 1] = (brainWorldCY - n.y) * brainWorldScale;
-      positions[i * 3 + 2] = -(n.z3 || 0) * zDepth;
-      var rgb = n.rgb || [232, 234, 240];
-      var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
-      colors[i * 3] = lum + (rgb[0] / 255 - lum) * 0.72;
-      colors[i * 3 + 1] = lum + (rgb[1] / 255 - lum) * 0.72;
-      colors[i * 3 + 2] = lum + (rgb[2] / 255 - lum) * 0.72;
-      sizes[i] = n.tissueSize;
-      alphas[i] = n.tissueAlpha;
-      phases[i] = n.breathPhase;
-    }
-    var geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
-    geom.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
-    geom.setAttribute('breathPhase', new THREE.BufferAttribute(phases, 1));
-    var mat = new THREE.ShaderMaterial({
-      uniforms: {
-        uPixelRatio: { value: window.devicePixelRatio || 1 },
-        uViewportH: { value: brainH },
-        uTime: { value: brainT },
-        uBreathAmount: { value: 0.12 },
-      },
-      vertexShader: POINT_VS,
-      fragmentShader: TISSUE_FS,
-      vertexColors: true,
-      transparent: true,
-      depthWrite: false,
-    });
-    brainTissueMesh = new THREE.Points(geom, mat);
-    brainTissueMesh.renderOrder = 0;
-    brainScene.add(brainTissueMesh);
   }
 
   // V2-P2b edge-type render channels — the single source of truth for what
@@ -2917,10 +2840,8 @@ import {
       uniforms: {
         uPixelRatio: { value: window.devicePixelRatio || 1 },
         uViewportH:  { value: brainH },
-        uTime:       { value: 0 },
-        uBreathAmount: { value: 0 },
       },
-      vertexShader: POINT_VS,
+      vertexShader: RIPPLE_VS,
       fragmentShader: RIPPLE_FS,
       vertexColors: true,
       transparent: true,
@@ -3104,10 +3025,8 @@ import {
       var pr = lum + (rgb[0] / 255 - lum) * sat;
       var pg = lum + (rgb[1] / 255 - lum) * sat;
       var pb = lum + (rgb[2] / 255 - lum) * sat;
-      var baseSize = n.aggregateLevel
-        ? n.coreSize
-        : (style.r * (1 + n.centrality * 1.2)) * 0.005;
-      var pulseSize = n.aggregateLevel ? 0.035 : 0.03;
+      var baseSize = brainNodeSizePx(n, style);
+      var pulseSize = n.aggregateLevel ? 3 : 2;
       if (n.pulseOrange > 0.01) {
         var t2 = n.pulseOrange;
         pr = pr + (1 - pr) * t2 * 0.6;
@@ -3140,27 +3059,6 @@ import {
       (full ? geom.attributes.position.array.byteLength : 0) +
       ((full || anyPulse) ? geom.attributes.size.array.byteLength : 0);
 
-    // Aggregate tissue follows detail morphs and camera-facing depth, but its
-    // folded texture and breathing remain shader-side. This loop is bounded by
-    // the aggregate LOD (not the estate's memory count) and runs only on a full
-    // structural frame.
-    if (full && brainTissueMesh) {
-      var tissueGeom = brainTissueMesh.geometry;
-      var tissuePos = tissueGeom.attributes.position.array;
-      var tissueAlpha = tissueGeom.attributes.alpha.array;
-      for (var ti = 0; ti < brainTissueNodes.length; ti++) {
-        var tn = brainTissueNodes[ti];
-        tissuePos[ti * 3] = (tn.x - cx) * ws;
-        tissuePos[ti * 3 + 1] = (cy - tn.y) * ws;
-        tissuePos[ti * 3 + 2] = -(tn.z3 || 0) * zDepth;
-        var tissueMod = hasSel ? 0.32 : 1;
-        if (brain3D) tissueMod *= 1 - 0.24 * (tn.z3 || 0);
-        tissueAlpha[ti] = tn.tissueAlpha * tissueMod;
-      }
-      tissueGeom.attributes.position.needsUpdate = true;
-      tissueGeom.attributes.alpha.needsUpdate = true;
-      topoMetrics.bufferUploadBytes += tissuePos.byteLength + tissueAlpha.byteLength;
-    }
     if (full) updateBrainHierarchyGeometry();
 
     // Update edge positions from current node positions. Skipped entirely while
@@ -3299,15 +3197,16 @@ import {
       var spread = members.reduce(function (s, n) {
         return s + Math.hypot(n.x - lCx, n.y - lCy);
       }, 0) / members.length;
-      // Convert pixel centroid to world-space for projection, placing
-      // the label above the lobe centroid.
+      // Project the lobe centroid, then lift the label in screen pixels so its
+      // offset remains stable under camera zoom just like the node glyphs.
       var wx = (lCx - lWcx) * lWs;
-      var tissueLift = members.reduce(function (largest, n) {
-        return Math.max(largest, n.tissueSize || 0);
-      }, 0) * 0.58;
-      var wy = (lWcy - lCy) * lWs + Math.max(spread * lWs * 1.2, tissueLift);
+      var wy = (lWcy - lCy) * lWs + spread * lWs * 1.2;
       var sp = worldToScreen(wx, wy, lCz);
       if (!sp.visible) { lbl.style.display = 'none'; return; }
+      var coreLiftPx = members.reduce(function (largest, n) {
+        return Math.max(largest, n.coreSizePx || 0);
+      }, 0) * 0.5 + 7;
+      sp.y -= coreLiftPx;
       lbl.style.display = '';
       // V2-P2a: the label swatch/text use the LOBE's resolved aura color
       // (brainLobeRGB — purity-desaturated dominant code), not an
@@ -3795,13 +3694,6 @@ import {
       brainScene.remove(brainPointsMesh);
       brainPointsMesh = null;
     }
-    if (brainTissueMesh) {
-      brainTissueMesh.geometry.dispose();
-      brainTissueMesh.material.dispose();
-      brainScene.remove(brainTissueMesh);
-      brainTissueMesh = null;
-    }
-    brainTissueNodes = [];
     if (brainHierarchyMesh) {
       brainHierarchyMesh.geometry.dispose();
       brainHierarchyMesh.material.dispose();

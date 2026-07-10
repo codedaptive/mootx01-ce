@@ -7,10 +7,8 @@ export const EXPANSION_DEFAULTS = Object.freeze({
   transitionMs: 420,
 });
 
-// Logarithmic mass keeps a very large estate aggregate dominant without
-// reducing one-memory regions to sub-pixel dust. The exponent restores useful
-// area contrast after log compression: size 50k reads materially larger than
-// size 500, while both remain clickable in the same camera frame.
+// Logarithmic mass keeps a very large estate aggregate legible without
+// reducing one-memory regions to sub-pixel dust.
 export function aggregateVisualWeight(size, maximumSize) {
   const mass = Math.max(1, Number.isFinite(size) ? size : 1);
   const ceiling = Math.max(mass, Number.isFinite(maximumSize) ? maximumSize : mass);
@@ -20,12 +18,12 @@ export function aggregateVisualWeight(size, maximumSize) {
 
 export function aggregateVisualStyle(size, maximumSize, level = "community") {
   const weight = aggregateVisualWeight(size, maximumSize);
-  const levelScale = level === "fold" ? 0.78 : 1;
+  const levelScale = level === "fold" ? 0.82 : 1;
   return Object.freeze({
     weight,
-    tissueSize: (0.065 + 0.275 * weight) * levelScale,
-    coreSize: (0.024 + 0.052 * weight) * levelScale,
-    tissueAlpha: 0.10 + 0.14 * weight,
+    // CSS-pixel diameter. Camera zoom changes projected separation, never the
+    // size of the glyph itself. Mass remains a restrained secondary signal.
+    coreSizePx: (5.5 + 7.5 * weight) * levelScale,
   });
 }
 

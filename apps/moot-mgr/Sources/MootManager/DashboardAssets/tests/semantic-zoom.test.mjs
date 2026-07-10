@@ -26,11 +26,11 @@ test("aggregate mass is monotonic, bounded, and visibly differentiated", () => {
   const large = aggregateVisualStyle(50_000, 50_000, "community");
   assert.ok(aggregateVisualWeight(1, 50_000) >= 0);
   assert.ok(large.weight <= 1);
-  assert.ok(tiny.tissueSize < medium.tissueSize);
-  assert.ok(medium.tissueSize < large.tissueSize);
-  assert.ok(large.tissueSize / medium.tissueSize > 1.5);
-  assert.ok(tiny.coreSize > 0, "one-memory aggregates remain visible and clickable");
-  assert.ok(aggregateVisualStyle(500, 50_000, "fold").tissueSize < medium.tissueSize);
+  assert.ok(tiny.coreSizePx < medium.coreSizePx);
+  assert.ok(medium.coreSizePx < large.coreSizePx);
+  assert.ok(tiny.coreSizePx >= 4, "one-memory aggregates remain visible and clickable");
+  assert.ok(large.coreSizePx <= 13, "aggregate dots stay compact at every camera distance");
+  assert.ok(aggregateVisualStyle(500, 50_000, "fold").coreSizePx < medium.coreSizePx);
 });
 
 test("fallback brain field is deterministic and uses both hemispheres", () => {
