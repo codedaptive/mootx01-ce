@@ -157,10 +157,37 @@ const CODE_LIKE_SIGNALS: &[&str] = &[
     "function ",
 ];
 
-fn should_skip_classification(text: &str) -> bool {
+const SOURCE_DECLARATION_MODIFIERS: &[&str] = &[
+    "fileprivate",
+    "final",
+    "internal",
+    "open",
+    "override",
+    "private",
+    "public",
+    "static",
+];
+
+const SOURCE_DECLARATION_STARTS: &[&str] = &[
+    "class ",
+    "const ",
+    "enum ",
+    "extension ",
+    "func ",
+    "function ",
+    "import ",
+    "interface ",
+    "let ",
+    "protocol ",
+    "struct ",
+    "typealias ",
+    "var ",
+];
+
+fn special_classification(text: &str) -> Option<&'static str> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return false;
+        return None;
     }
     let lowered = trimmed.to_ascii_lowercase();
 
@@ -170,7 +197,7 @@ fn should_skip_classification(text: &str) -> bool {
         || lowered.contains("index.lock")
         || lowered.contains("read_signal")
     {
-        return true;
+        return Some("000");
     }
 
     let lines: Vec<&str> = trimmed
@@ -197,7 +224,38 @@ fn should_skip_classification(text: &str) -> bool {
         }
     }
     if command_line_count >= 2 || (command_line_count == 1 && lines.len() <= 6) {
-        return true;
+        return Some("000");
+    }
+
+    let declaration_line_count = lines
+        .iter()
+        .filter(|line| {
+            let lowered_line = line.to_ascii_lowercase();
+            let mut words = lowered_line.split_whitespace().peekable();
+            while words.peek().is_some_and(|word| {
+                let modifier = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+                SOURCE_DECLARATION_MODIFIERS.contains(&modifier)
+            }) {
+                words.next();
+            }
+            let body = words.collect::<Vec<_>>().join(" ");
+            if !SOURCE_DECLARATION_STARTS
+                .iter()
+                .any(|prefix| body.starts_with(prefix))
+            {
+                return false;
+            }
+            let declarator_needs_syntax = body.starts_with("let ")
+                || body.starts_with("var ")
+                || body.starts_with("const ");
+            let function_needs_syntax =
+                body.starts_with("func ") || body.starts_with("function ");
+            (!declarator_needs_syntax || line.contains(':') || line.contains('='))
+                && (!function_needs_syntax || line.contains('('))
+        })
+        .count();
+    if declaration_line_count >= 2 {
+        return Some("005");
     }
 
     let signal_count = CODE_LIKE_SIGNALS
@@ -205,20 +263,21 @@ fn should_skip_classification(text: &str) -> bool {
         .filter(|signal| lowered.contains(**signal))
         .count();
     if signal_count >= 3 {
-        return true;
+        return Some("000");
     }
 
     let non_whitespace_count = trimmed.chars().filter(|c| !c.is_whitespace()).count();
     if non_whitespace_count == 0 {
-        return false;
+        return None;
     }
     let symbol_count = trimmed
         .chars()
         .filter(|c| "{}[]();=$|/\\<>".contains(*c))
         .count();
-    lines.len() >= 2
+    let code_like = lines.len() >= 2
         && signal_count >= 2
-        && (symbol_count as f64 / non_whitespace_count as f64) > 0.08
+        && (symbol_count as f64 / non_whitespace_count as f64) > 0.08;
+    code_like.then_some("000")
 }
 
 /// An intern-keyed bag: TermID → count. Used internally for all scoring
@@ -821,9 +880,9 @@ impl FdcMatcher {
         if text.trim().is_empty() {
             return (None, None);
         }
-        if should_skip_classification(text) {
+        if let Some(special_code) = special_classification(text) {
             return if self.use_hierarchical_resolution {
-                (Some("000".to_owned()), None)
+                (Some(special_code.to_owned()), None)
             } else {
                 (None, None)
             };
@@ -857,9 +916,9 @@ impl FdcMatcher {
         if text.trim().is_empty() {
             return (None, None);
         }
-        if should_skip_classification(text) {
+        if let Some(special_code) = special_classification(text) {
             return if self.use_hierarchical_resolution {
-                (Some("000".to_owned()), None)
+                (Some(special_code.to_owned()), None)
             } else {
                 (None, None)
             };

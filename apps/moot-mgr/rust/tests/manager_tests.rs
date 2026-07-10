@@ -337,6 +337,55 @@ fn graph_payload_missing_drill_focus_keeps_estate_budget() {
 }
 
 #[test]
+fn graph_payload_other_structure_drills_into_real_slices() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        let nodes: Vec<_> = (0..100).map(|index| serde_json::json!({
+            "id": format!("n-{index}"), "communityId": index,
+            "centrality": 0.1, "anomaly": false,
+            "communityKey": format!("c-{index:03}"),
+            "x": index as f64 / 100.0 - 0.5,
+            "y": (index % 10) as f64 / 10.0 - 0.5,
+            "z": 0.0, "representative": true
+        })).collect();
+        let communities: Vec<_> = (0..100).map(|index| serde_json::json!({
+            "id": index, "size": 1, "dominantUdcCode": "005",
+            "stableKey": format!("c-{index:03}"),
+            "x": index as f64 / 100.0 - 0.5,
+            "y": (index % 10) as f64 / 10.0 - 0.5,
+            "z": 0.0, "foldCount": 1,
+            "representativeIds": [format!("n-{index}")],
+            "classificationPurity": 1.0
+        })).collect();
+        let snapshot = serde_json::json!({
+            "nodes": nodes, "edges": [], "structurePending": false,
+            "topologyVersion": 3, "coordinateFrameVersion": 1,
+            "communities": communities, "folds": [], "bridges": [],
+            "generatedTs": "2026-07-10T00:00:00Z"
+        }).to_string();
+        store.write_topology_snapshot("estate-other", NOW, &snapshot, None).unwrap();
+    }
+
+    let estate = m.graph_payload_view(NOW, Some("estate-other"), Some("estate"), None).unwrap();
+    let other = estate.communities.iter()
+        .find(|community| community.stable_key.as_deref() == Some("__other__"))
+        .expect("estate budget must include Other structure");
+    assert_eq!(other.size, 5);
+
+    let community = m.graph_payload_view(
+        NOW, Some("estate-other"), Some("community"), Some("__other__")).unwrap();
+    assert!(!community.folds.is_empty());
+    assert_eq!(community.folds.iter().map(|fold| fold.size).sum::<i64>(), 5);
+    let slice_key = community.folds[0].stable_key.clone();
+
+    let local = m.graph_payload_view(
+        NOW, Some("estate-other"), Some("local"), Some(&slice_key)).unwrap();
+    assert!(!local.ids.is_empty(), "every visible Other slice must open into real bounded nodes");
+    m.stop();
+}
+
+#[test]
 fn graph_payload_dictionary_encodes_per_node_codes() {
     // V2-P1b: a stored snapshot whose nodes carry udcCode dictionary-encodes
     // onto the wire — deduped, first-seen order, with a -1 sentinel for the

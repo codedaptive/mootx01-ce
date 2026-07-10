@@ -37,6 +37,7 @@
 // Mirrors Swift `MootManager.ariaAPIBase`. See `daemon_client` for the raw GET.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use cognition_kit::capability::shipped_capabilities;
 use observer_sink::{DropboxMetricAggregate, EventRow, MetricRow, StatsStore};
@@ -93,6 +94,22 @@ pub struct MootManager {
     /// retention-cutoff control row). Seeded to epoch zero (matches the store's
     /// own seed) until the first pass runs.
     last_retention_cutoff_epoch: f64,
+    topology_projection_cache: Mutex<Option<TopologyProjectionCache>>,
+}
+
+struct OtherStructureProjection {
+    visible_communities: Vec<GraphCommunityPayload>,
+    community: GraphCommunityPayload,
+    folds: Vec<GraphFoldPayload>,
+    bridges: Vec<GraphBridgePayload>,
+    slice_by_community_key: HashMap<String, String>,
+    slice_by_community_id: HashMap<i64, String>,
+}
+
+struct TopologyProjectionCache {
+    estate_key: Option<String>,
+    snapshot: String,
+    projection: Arc<OtherStructureProjection>,
 }
 
 impl MootManager {
@@ -104,6 +121,7 @@ impl MootManager {
             store: None,
             retention_override_secs: None,
             last_retention_cutoff_epoch: 0.0,
+            topology_projection_cache: Mutex::new(None),
         }
     }
 
@@ -727,6 +745,8 @@ impl MootManager {
             "topology snapshot not yet available — the autonomic governor has not completed its first duty cycle"
                 .to_string(),
         ];
+        let mut cached_other_projection: Option<Arc<OtherStructureProjection>> = None;
+        let mut projection_snapshot: Option<String> = None;
 
         // "all"/empty/None → newest snapshot across all estates; an explicit
         // estate filter reads that estate's row.
@@ -735,6 +755,11 @@ impl MootManager {
             _ => None,
         };
         if let Some(snapshot) = store.latest_topology_snapshot(estate_key)? {
+            cached_other_projection = self.topology_projection_cache.lock().ok()
+                .and_then(|cache| cache.as_ref().and_then(|entry| {
+                    let key_matches = entry.estate_key.as_deref() == estate_key;
+                    (key_matches && entry.snapshot == snapshot).then(|| Arc::clone(&entry.projection))
+                }));
             if let Ok(stored) = serde_json::from_str::<StoredGraphPayload>(&snapshot) {
                 if !stored.structure_pending {
                     live_nodes = stored.nodes;
@@ -755,6 +780,7 @@ impl MootManager {
                     bridges = stored.bridges;
                     topology_version = stored.topology_version.unwrap_or(2);
                     coordinate_frame_version = stored.coordinate_frame_version.unwrap_or(0);
+                    projection_snapshot = Some(snapshot);
                 }
             }
         }
@@ -776,30 +802,38 @@ impl MootManager {
         let total_edge_count = live_edges.len();
         let mut lod_truncated = false;
         let mut estate_visible_keys: Option<HashSet<String>> = None;
+        let needs_other_projection = resolved_level == "estate"
+            || focus == Some("__other__")
+            || focus.is_some_and(|value| value.starts_with("__other__:slice:"));
+        let other_projection = if communities.len() > 96 && needs_other_projection {
+            if let Some(projection) = cached_other_projection {
+                Some(projection)
+            } else {
+                let projection = Arc::new(other_structure_projection(&communities, &bridges, 95, 64));
+                if let Some(snapshot) = projection_snapshot {
+                    if let Ok(mut cache) = self.topology_projection_cache.lock() {
+                        *cache = Some(TopologyProjectionCache {
+                            estate_key: estate_key.map(str::to_owned),
+                            snapshot,
+                            projection: Arc::clone(&projection),
+                        });
+                    }
+                }
+                Some(projection)
+            }
+        } else {
+            None
+        };
         if topology_version >= 3 {
             match resolved_level {
                 "estate" => {
                     response_nodes.clear(); response_edges.clear(); response_folds.clear();
                     response_bridges.retain(|bridge| bridge.level == "community");
-                    if response_communities.len() > 96 {
-                        response_communities.sort_by(|a, b| b.size.cmp(&a.size)
-                            .then_with(|| a.stable_key.cmp(&b.stable_key)));
-                        let omitted = response_communities.split_off(95);
-                        let omitted_size: i64 = omitted.iter().map(|community| community.size).sum();
-                        let divisor = omitted_size.max(1) as f64;
-                        let weighted = |axis: fn(&GraphCommunityPayload) -> Option<f64>| -> f64 {
-                            omitted.iter().map(|community| axis(community).unwrap_or(0.0) * community.size as f64).sum::<f64>() / divisor
-                        };
-                        response_communities.push(GraphCommunityPayload {
-                            id: -2, code: None, label: Some("Other structure".into()), size: omitted_size,
-                            stable_key: Some("__other__".into()),
-                            x: Some(weighted(|c| c.x)), y: Some(weighted(|c| c.y)), z: Some(weighted(|c| c.z)),
-                            fold_count: Some(omitted.iter().map(|c| c.fold_count.unwrap_or(0)).sum()),
-                            representative_ids: None, classification_purity: None,
-                        });
-                        let visible: HashSet<String> = response_communities.iter()
-                            .filter_map(|community| community.stable_key.clone())
-                            .filter(|key| key != "__other__").collect();
+                    if let Some(projection) = &other_projection {
+                        response_communities = projection.visible_communities.clone();
+                        response_communities.push(projection.community.clone());
+                        let visible: HashSet<String> = projection.visible_communities.iter()
+                            .filter_map(|community| community.stable_key.clone()).collect();
                         let mut buckets: BTreeMap<(String, String, String), (f64, i64)> = BTreeMap::new();
                         for bridge in &response_bridges {
                             let raw_source = if visible.contains(&bridge.source_key) { bridge.source_key.clone() } else { "__other__".into() };
@@ -818,23 +852,47 @@ impl MootManager {
                 }
                 "community" => {
                     let focus = focus.expect("community level normalized to require focus");
-                    let fold_set: HashSet<String> = folds.iter()
-                        .filter(|fold| fold.community_key == focus)
-                        .map(|fold| fold.stable_key.clone()).collect();
-                    response_communities.retain(|community| community.stable_key.as_deref() == Some(focus));
-                    response_folds.retain(|fold| fold.community_key == focus);
-                    response_bridges.retain(|bridge| bridge.level == "fold"
-                        && fold_set.contains(&bridge.source_key) && fold_set.contains(&bridge.target_key));
+                    if focus == "__other__" {
+                        if let Some(projection) = &other_projection {
+                            response_communities = vec![projection.community.clone()];
+                            response_folds = projection.folds.clone();
+                            response_bridges = projection.bridges.clone();
+                        }
+                    } else {
+                        let fold_set: HashSet<String> = folds.iter()
+                            .filter(|fold| fold.community_key == focus)
+                            .map(|fold| fold.stable_key.clone()).collect();
+                        response_communities.retain(|community| community.stable_key.as_deref() == Some(focus));
+                        response_folds.retain(|fold| fold.community_key == focus);
+                        response_bridges.retain(|bridge| bridge.level == "fold"
+                            && fold_set.contains(&bridge.source_key) && fold_set.contains(&bridge.target_key));
+                    }
                     response_nodes.clear();
                     response_edges.clear();
                 }
                 "local" => {
                     let focus = focus.expect("local level normalized to require focus");
-                    response_nodes.retain(|node| node.fold_key.as_deref() == Some(focus)
-                        || node.community_key.as_deref() == Some(focus));
+                    let other_fold = other_projection.as_ref()
+                        .and_then(|projection| projection.folds.iter()
+                            .find(|fold| fold.stable_key == focus).cloned());
+                    if other_fold.is_some() {
+                        let projection = other_projection.as_ref().expect("Other fold requires projection");
+                        response_nodes.retain(|node| {
+                            node.community_key.as_ref()
+                                .and_then(|key| projection.slice_by_community_key.get(key))
+                                .or_else(|| projection.slice_by_community_id.get(&node.community_id))
+                                .is_some_and(|slice| slice == focus)
+                        });
+                    } else {
+                        response_nodes.retain(|node| node.fold_key.as_deref() == Some(focus)
+                            || node.community_key.as_deref() == Some(focus));
+                    }
                     let node_set: HashSet<&str> = response_nodes.iter().map(|node| node.id.as_str()).collect();
                     response_edges.retain(|edge| node_set.contains(edge.source.as_str()) && node_set.contains(edge.target.as_str()));
-                    if let Some(fold) = folds.iter().find(|fold| fold.stable_key == focus) {
+                    if let (Some(other_fold), Some(projection)) = (other_fold, &other_projection) {
+                        response_communities = vec![projection.community.clone()];
+                        response_folds = vec![other_fold];
+                    } else if let Some(fold) = folds.iter().find(|fold| fold.stable_key == focus) {
                         response_communities.retain(|community| community.stable_key.as_deref() == Some(fold.community_key.as_str()));
                         response_folds.retain(|candidate| candidate.stable_key == fold.stable_key);
                     } else {
@@ -872,6 +930,13 @@ impl MootManager {
                 if resolved_level == "estate" {
                     if let (Some(visible), Some(raw)) = (&estate_visible_keys, &key) {
                         if !visible.contains(raw) { key = Some("__other__".into()); }
+                    }
+                }
+                if resolved_level == "community" && focus == Some("__other__") {
+                    if let Some(projection) = &other_projection {
+                        key = node.community_key.as_ref()
+                            .and_then(|raw| projection.slice_by_community_key.get(raw).cloned())
+                            .or_else(|| projection.slice_by_community_id.get(&node.community_id).cloned());
                     }
                 }
                 if let Some(key) = key.filter(|key| !key.is_empty()) {
@@ -1197,6 +1262,147 @@ impl MootManager {
 /// Keep Local views bounded while retaining a deterministic structural
 /// spanning forest. Remaining slots prefer stronger evidence and edges that
 /// touch representative nodes.
+fn other_structure_projection(
+    communities: &[GraphCommunityPayload],
+    bridges: &[GraphBridgePayload],
+    visible_limit: usize,
+    slice_limit: usize,
+) -> OtherStructureProjection {
+    let mut ranked = communities.to_vec();
+    ranked.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| {
+        a.stable_key.as_deref().unwrap_or("").cmp(b.stable_key.as_deref().unwrap_or(""))
+    }));
+    let visible_count = visible_limit.min(ranked.len());
+    let omitted_by_rank = ranked.split_off(visible_count);
+    let visible_communities = ranked;
+    let coordinate = |value: Option<f64>| value.filter(|value| value.is_finite()).unwrap_or(0.0);
+    let mut omitted: Vec<&GraphCommunityPayload> = omitted_by_rank.iter().collect();
+    omitted.sort_by(|a, b| coordinate(a.x).total_cmp(&coordinate(b.x))
+        .then_with(|| coordinate(a.y).total_cmp(&coordinate(b.y)))
+        .then_with(|| {
+            let a_key = a.stable_key.clone().unwrap_or_else(|| format!("community:{}", a.id));
+            let b_key = b.stable_key.clone().unwrap_or_else(|| format!("community:{}", b.id));
+            a_key.cmp(&b_key)
+        }));
+
+    let slice_count = slice_limit.max(1).min(omitted.len().max(1));
+    let total_weight: i64 = omitted.iter().map(|community| community.size.max(1)).sum::<i64>().max(1);
+    let mut buckets: Vec<Vec<&GraphCommunityPayload>> = vec![Vec::new(); slice_count];
+    let mut cumulative_weight = 0_i64;
+    for community in omitted {
+        let bucket = ((cumulative_weight * slice_count as i64) / total_weight)
+            .min(slice_count as i64 - 1) as usize;
+        buckets[bucket].push(community);
+        cumulative_weight += community.size.max(1);
+    }
+
+    let mut folds = Vec::new();
+    let mut slice_by_community_key = HashMap::new();
+    let mut slice_by_community_id = HashMap::new();
+    for (bucket_index, members) in buckets.into_iter().enumerate() {
+        if members.is_empty() { continue; }
+        let stable_key = format!("__other__:slice:{bucket_index}");
+        let weight: i64 = members.iter().map(|community| community.size.max(1)).sum::<i64>().max(1);
+        let weighted = |axis: fn(&GraphCommunityPayload) -> Option<f64>| -> f64 {
+            members.iter().map(|community| {
+                coordinate(axis(community)) * community.size.max(1) as f64
+            }).sum::<f64>() / weight as f64
+        };
+        let mut code_weights: BTreeMap<String, i64> = BTreeMap::new();
+        let mut representative_ids = Vec::new();
+        let mut seen_representatives = HashSet::new();
+        for member in &members {
+            if let Some(code) = member.code.as_ref().filter(|code| !code.is_empty()) {
+                *code_weights.entry(code.clone()).or_insert(0) += member.size.max(1);
+            }
+            if let Some(ids) = &member.representative_ids {
+                for id in ids {
+                    if representative_ids.len() >= 8 { break; }
+                    if seen_representatives.insert(id.clone()) { representative_ids.push(id.clone()); }
+                }
+            }
+            let raw_key = member.stable_key.clone().unwrap_or_else(|| format!("community:{}", member.id));
+            slice_by_community_key.insert(raw_key, stable_key.clone());
+            slice_by_community_id.insert(member.id, stable_key.clone());
+        }
+        let mut ranked_codes: Vec<(String, i64)> = code_weights.into_iter().collect();
+        ranked_codes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        folds.push(GraphFoldPayload {
+            stable_key,
+            community_key: "__other__".into(),
+            code: ranked_codes.first().map(|entry| entry.0.clone()),
+            label: Some(format!("Other structure region {}", folds.len() + 1)),
+            size: members.iter().map(|community| community.size).sum(),
+            x: weighted(|community| community.x),
+            y: weighted(|community| community.y),
+            z: weighted(|community| community.z),
+            representative_ids,
+        });
+    }
+
+    let mut bridge_buckets: BTreeMap<(String, String, String), (f64, i64)> = BTreeMap::new();
+    for bridge in bridges.iter().filter(|bridge| bridge.level == "community") {
+        let (Some(raw_source), Some(raw_target)) = (
+            slice_by_community_key.get(&bridge.source_key),
+            slice_by_community_key.get(&bridge.target_key),
+        ) else { continue };
+        if raw_source == raw_target { continue; }
+        let (source, target) = if raw_source < raw_target {
+            (raw_source.clone(), raw_target.clone())
+        } else {
+            (raw_target.clone(), raw_source.clone())
+        };
+        let value = bridge_buckets.entry((source, target, bridge.edge_type.clone())).or_insert((0.0, 0));
+        value.0 += bridge.weight;
+        value.1 += bridge.edge_count;
+    }
+    let slice_bridges = bridge_buckets.into_iter().map(
+        |((source_key, target_key, edge_type), (weight, edge_count))| GraphBridgePayload {
+            level: "fold".into(), source_key, target_key, edge_type, weight, edge_count,
+        }
+    ).collect();
+
+    let omitted_size: i64 = omitted_by_rank.iter().map(|community| community.size).sum();
+    let omitted_weight: i64 = omitted_by_rank.iter()
+        .map(|community| community.size.max(1)).sum::<i64>().max(1);
+    let summary_weighted = |axis: fn(&GraphCommunityPayload) -> Option<f64>| -> f64 {
+        omitted_by_rank.iter().map(|community| {
+            coordinate(axis(community)) * community.size.max(1) as f64
+        }).sum::<f64>() / omitted_weight as f64
+    };
+    let mut representative_ids = Vec::new();
+    let mut seen_representatives = HashSet::new();
+    for community in &omitted_by_rank {
+        if let Some(ids) = &community.representative_ids {
+            for id in ids {
+                if representative_ids.len() >= 8 { break; }
+                if seen_representatives.insert(id.clone()) { representative_ids.push(id.clone()); }
+            }
+        }
+    }
+    let community = GraphCommunityPayload {
+        id: -2,
+        code: None,
+        label: Some("Other structure".into()),
+        size: omitted_size,
+        stable_key: Some("__other__".into()),
+        x: Some(summary_weighted(|community| community.x)),
+        y: Some(summary_weighted(|community| community.y)),
+        z: Some(summary_weighted(|community| community.z)),
+        fold_count: Some(folds.len() as i64),
+        representative_ids: Some(representative_ids),
+        classification_purity: None,
+    };
+    OtherStructureProjection {
+        visible_communities,
+        community,
+        folds,
+        bridges: slice_bridges,
+        slice_by_community_key,
+        slice_by_community_id,
+    }
+}
+
 fn bounded_local_edges(
     edges: Vec<GraphEdgePayload>,
     nodes: &[GraphNodePayload],

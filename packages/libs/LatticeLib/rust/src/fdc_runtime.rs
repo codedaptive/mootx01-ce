@@ -35,7 +35,7 @@ use crate::word_class_table;
 // here. `1` is the pinned ship value; classification accuracy is governed by
 // within-region scoring (§5), not this cutoff. Mirrors Swift FDCRuntime.swift.
 const STOP_THRESHOLD: usize = 1;
-const CLASSIFIER_VERSION: &str = "4.0.0";
+const CLASSIFIER_VERSION: &str = "4.1.0";
 
 /// The bundled artifacts and the assembled matcher — loaded once per process.
 struct Bundle {
@@ -140,6 +140,8 @@ fn get_bundle() -> Option<&'static Bundle> {
 pub struct Fdc;
 
 impl Fdc {
+    pub const CLASSIFIER_VERSION: &'static str = CLASSIFIER_VERSION;
+
     /// Encode `text` to an FDC code. Nonempty text without defensible subject
     /// evidence returns `000`; None is reserved for empty input or unavailable
     /// bundled artifacts. Pure over the pinned artifacts.

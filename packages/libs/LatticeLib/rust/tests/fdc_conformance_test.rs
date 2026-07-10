@@ -98,6 +98,27 @@ git status --short
 }
 
 #[test]
+fn source_code_memories_use_programming_subject() {
+    let swift_source = r#"
+et nodeId: String
+public let indexType: IndexType
+public var semanticVector: [Double]
+public var graphVector: GraphVector
+public var behavioralVector: BehavioralVector
+public var temporalVector: TemporalVector
+public let createdAt: Date
+public var updatedAt: Date
+"#;
+    assert_eq!(Fdc::encode(swift_source), Some("005".to_owned()));
+    assert_eq!(Fdc::encode_anchor(swift_source).1, None);
+    assert_eq!(Fdc::CLASSIFIER_VERSION, "4.1.0");
+    assert_ne!(
+        Fdc::encode("Let us remember the meeting.\nLet everyone review the notes."),
+        Some("005".to_owned())
+    );
+}
+
+#[test]
 fn incidental_inherited_signature_terms_do_not_certify_narrow_headings() {
     // These were bad v1/v2 confidence failures caused by the compact signature
     // artifact flattening label/title/article/ancestor terms into one membership
@@ -171,7 +192,7 @@ fn query_repetition_cannot_manufacture_precision() {
 #[test]
 fn recalculation_version_covers_algorithm_and_artifacts() {
     let version = Fdc::recalculation_version();
-    assert!(version.contains("classifier:4.0.0"));
+    assert!(version.contains("classifier:4.1.0"));
     assert!(version.contains("frame:1.1.0"));
     assert!(version.contains("lexicon:1.1.0"));
     assert!(version.contains("signatures:2.0.0"));
