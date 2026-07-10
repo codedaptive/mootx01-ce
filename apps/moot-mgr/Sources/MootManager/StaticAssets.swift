@@ -2689,7 +2689,6 @@ import {
   let topoActiveRenderKey = null;
   let topoRenderGeneration = 0;
   let topoLevelFitDistance = 1;
-  let topoControlDistance = 0;
   let topoPointer = { x: null, y: null };
   let topoZoomFrame = null;
   let topoPendingTransition = null;
@@ -3078,6 +3077,8 @@ import {
         aggregateLevel: n.aggregateLevel || null,
         aggregateKey: n.aggregateKey || null,
         parentKey: n.parentKey || null,
+        aggregateSize: n.aggregateSize || 0,
+        aggregateLabel: n.aggregateLabel || null,
         representativeIds: n.representativeIds || [],
       };
       node.ax = node.x; node.ay = node.y;
@@ -3639,13 +3640,13 @@ import {
     // Orbit target at the midpoint of the z-range so rotation reveals depth.
     brainControls.target.set(targetX, targetY, targetZ);
     brainControls.enableDamping = true;
-    brainControls.dampingFactor = 0.12;
+    brainControls.dampingFactor = 0.16;
     brainControls.minDistance = 0.2;
     brainControls.maxDistance = 8;
-    brainControls.zoomSpeed = 1.2;
+    brainControls.zoomSpeed = 0.65;
+    brainControls.rotateSpeed = 0.55;
     brainControls.zoomToCursor = true;
     brainControls.update();
-    topoControlDistance = brainCamera.position.distanceTo(brainControls.target);
     // TOPO-SETTLE re-arm on drag/orbit/zoom. 'start' catches the first frame of
     // an interaction; 'change' fires for every camera move including the damping
     // tail after the pointer is released, so the graph stays redrawn until the
@@ -3655,12 +3656,35 @@ import {
     brainControls.addEventListener('start', function () { brainRearm(brainSettle, performance.now()); });
     brainControls.addEventListener('change', function () {
       brainRearm(brainSettle, performance.now());
-      var distance = brainCamera.position.distanceTo(brainControls.target);
-      if (Math.abs(distance - topoControlDistance) > 0.001) {
-        topoScheduleSemanticZoom(distance < topoControlDistance ? "in" : "out");
-      }
-      topoControlDistance = distance;
     });
+    // Semantic levels respond only to explicit zoom input. OrbitControls also
+    // moves the camera while rotation damping settles; treating every camera
+    // change as zoom intent made a gentle rotation cross data levels.
+    glCanvas.addEventListener('wheel', function (e) {
+      topoScheduleSemanticZoom(e.deltaY < 0 ? "in" : "out");
+    }, { passive: true });
+    var topoPinchDistance = null;
+    glCanvas.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 2) { topoPinchDistance = null; return; }
+      topoPinchDistance = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY,
+      );
+    }, { passive: true });
+    glCanvas.addEventListener('touchmove', function (e) {
+      if (e.touches.length !== 2) { topoPinchDistance = null; return; }
+      var distance = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY,
+      );
+      if (topoPinchDistance !== null && Math.abs(distance - topoPinchDistance) >= 2) {
+        topoScheduleSemanticZoom(distance > topoPinchDistance ? "in" : "out");
+      }
+      topoPinchDistance = distance;
+    }, { passive: true });
+    function clearTopoPinch() { topoPinchDistance = null; }
+    glCanvas.addEventListener('touchend', clearTopoPinch, { passive: true });
+    glCanvas.addEventListener('touchcancel', clearTopoPinch, { passive: true });
     glCanvas.addEventListener('pointermove', function (e) {
       topoPointer.x = e.clientX;
       topoPointer.y = e.clientY;
@@ -3760,12 +3784,14 @@ import {
       brainPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       brainRaycaster.setFromCamera(brainPointer, brainCamera);
       var hits = brainPointsMesh ? brainRaycaster.intersectObject(brainPointsMesh) : [];
-      if (!hits.length) return;
-      var node = brainNodes[hits[0].index];
+      // Aggregate points are rendered much larger than raw memories. Use the
+      // same nearest-visible-cluster targeting as semantic zoom so a right-click
+      // anywhere on the visible glow is not rejected by the raw 8px ray radius.
+      var node = hits.length ? brainNodes[hits[0].index]
+        : topoAggregateCandidate(e.clientX, e.clientY);
       if (!node || brainHidden(node)) return;
-      if (node.aggregateLevel) return;
       e.preventDefault();
-      selectBrainNode(node);   // highlight what the query refers to
+      if (!node.aggregateLevel) selectBrainNode(node); // highlight a real memory
       copyNodeQuery(node);
     });
 
@@ -3791,6 +3817,7 @@ import {
       offset.setLength(distance);
       brainCamera.position.copy(brainControls.target).add(offset);
       brainControls.update();
+      topoScheduleSemanticZoom(scale < 1 ? "in" : "out");
     };
     document.addEventListener('keydown', brainKeyHandler);
 
@@ -4572,6 +4599,36 @@ import {
     return lines.join("\n");
   }
 
+  // Aggregate dots are navigation summaries, not memory records. Their query
+  // names the visible group and gives the receiving AI real representative
+  // memory ids to inspect without pretending the synthetic key is retrievable.
+  function buildAggregateQuery(node) {
+    var ids = (node.representativeIds || []).slice(0, 8);
+    var level = node.aggregateLevel || "group";
+    var lines = [
+      "Using my MOOTx01 memory estate, help me understand the " + level +
+        " cluster shown by the management console.",
+      "The console aggregate key is " + node.aggregateKey +
+        ". It is a visualization key, not a memory id.",
+    ];
+    var details = [];
+    if (node.code) details.push("FDC code " + node.code);
+    var label = node.aggregateLabel || (node.code && brainCodeLabelMap[node.code]);
+    if (label) details.push("label \"" + label + "\"");
+    if (Number.isFinite(node.aggregateSize)) details.push(node.aggregateSize + " memories");
+    if (details.length) lines.push("The console describes it as " + details.join(", ") + ".");
+    if (ids.length) {
+      lines.push("Inspect these representative memories with moot_memory_get: " + ids.join(", ") + ".");
+      lines.push("Summarize what they have in common, verify their real connections with " +
+                 "moot_connection_map or moot_connection_search, and suggest related " +
+                 "memories worth reading next with moot_memory_search.");
+    } else {
+      lines.push("Search the estate for memories matching that FDC code or label with " +
+                 "moot_memory_search, then explain what this cluster is likely about.");
+    }
+    return lines.join("\n");
+  }
+
   // Copy `node`'s AI query to the clipboard, with the Safari no-user-
   // activation fallback (contextmenu events carry no user activation, so
   // BOTH clipboard paths are refused there — the button click from the
@@ -4580,7 +4637,7 @@ import {
   // right-click context-menu handler and the V2-P2c selection panel's
   // "Copy AI query" button — one copy flow, one success/failure UX either way.
   function copyNodeQuery(node) {
-    var query = buildNodeQuery(node);
+    var query = node.aggregateLevel ? buildAggregateQuery(node) : buildNodeQuery(node);
     copyText(query, function (ok) {
       if (ok) {
         topoToast("Query copied — paste it into your AI to explore this memory");
@@ -5409,6 +5466,8 @@ import {
           position: { x: a.x || 0, y: a.y || 0, z: a.z || 0 },
           aggregateLevel: aggregateLevel, aggregateKey: key,
           parentKey: a.communityKey || null,
+          aggregateSize: a.size || 0,
+          aggregateLabel: a.label || null,
           representativeIds: a.representativeIds || [],
         };
       });
@@ -6007,10 +6066,10 @@ import {
 // be tested with Node's built-in test runner.
 
 export const SEMANTIC_ZOOM_DEFAULTS = Object.freeze({
-  prefetchPx: 26,
-  enterPx: 48,
-  exitDistanceRatio: 1.45,
-  transitionMs: 220,
+  prefetchPx: 42,
+  enterPx: 72,
+  exitDistanceRatio: 1.7,
+  transitionMs: 260,
 });
 
 const NEXT_LEVEL = Object.freeze({ estate: "community", community: "local" });

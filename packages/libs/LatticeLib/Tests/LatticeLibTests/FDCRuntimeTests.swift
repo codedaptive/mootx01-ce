@@ -117,6 +117,24 @@ struct FDCRuntimeTests {
         #expect(FDC.encodeAnchor(markdown).conceptQID == nil)
     }
 
+    @Test("source-code memories classify as computer programming")
+    func sourceCodeUsesProgrammingSubject() {
+        let swiftSource = """
+        et nodeId: String
+        public let indexType: IndexType
+        public var semanticVector: [Double]
+        public var graphVector: GraphVector
+        public var behavioralVector: BehavioralVector
+        public var temporalVector: TemporalVector
+        public let createdAt: Date
+        public var updatedAt: Date
+        """
+        #expect(FDC.encode(swiftSource) == "005")
+        #expect(FDC.encodeAnchor(swiftSource).conceptQID == nil)
+        #expect(FDC.classifierVersion == "4.1.0")
+        #expect(FDC.encode("Let us remember the meeting.\nLet everyone review the notes.") != "005")
+    }
+
     @Test("incidental inherited signature terms do not certify narrow headings")
     func incidentalInheritedSignatureTermsUseTrustedAliases() {
         // These were bad v1/v2 confidence failures caused by the compact
@@ -170,7 +188,7 @@ struct FDCRuntimeTests {
 
     @Test("recalculation version covers algorithm and artifacts")
     func recalculationVersionIsComposite() {
-        #expect(FDC.recalculationVersion.contains("classifier:4.0.0"))
+        #expect(FDC.recalculationVersion.contains("classifier:4.1.0"))
         #expect(FDC.recalculationVersion.contains("frame:1.1.0"))
         #expect(FDC.recalculationVersion.contains("lexicon:1.1.0"))
         #expect(FDC.recalculationVersion.contains("signatures:2.0.0"))

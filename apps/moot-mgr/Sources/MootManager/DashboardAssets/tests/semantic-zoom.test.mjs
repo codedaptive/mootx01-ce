@@ -1,10 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { BoundedTTLCache, SemanticZoomController } from "../semantic-zoom.mjs";
+import {
+  BoundedTTLCache,
+  SemanticZoomController,
+  SEMANTIC_ZOOM_DEFAULTS,
+} from "../semantic-zoom.mjs";
 
 const community = { aggregateKey: "c-alpha", parentKey: null };
 const fold = { aggregateKey: "f-alpha", parentKey: "c-alpha" };
+
+test("default thresholds require a deliberate gesture and stable reverse zoom", () => {
+  assert.deepEqual(SEMANTIC_ZOOM_DEFAULTS, {
+    prefetchPx: 42,
+    enterPx: 72,
+    exitDistanceRatio: 1.7,
+    transitionMs: 260,
+  });
+});
 
 test("prefetches once before the enter threshold", () => {
   const zoom = new SemanticZoomController({ prefetchPx: 20, enterPx: 40 });

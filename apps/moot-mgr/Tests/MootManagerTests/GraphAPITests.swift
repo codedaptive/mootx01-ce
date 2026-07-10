@@ -179,6 +179,67 @@ struct GraphAPITests {
                 "a malformed drill request must retain the aggregate budget")
     }
 
+    @Test("Topology V3 Other structure drills into accounting-preserving slices")
+    func topologyV3OtherStructureDrill() async throws {
+        let nodes: [[String: Any]] = (0..<100).map { index in
+            var node: [String: Any] = [:]
+            node["id"] = "n-\(index)"
+            node["communityId"] = index
+            node["centrality"] = 0.1
+            node["anomaly"] = false
+            node["communityKey"] = String(format: "c-%03d", index)
+            node["x"] = Double(index) / 100.0 - 0.5
+            node["y"] = Double(index % 10) / 10.0 - 0.5
+            node["z"] = 0.0
+            node["representative"] = true
+            return node
+        }
+        let communities: [[String: Any]] = (0..<100).map { index in
+            var community: [String: Any] = [:]
+            community["id"] = index
+            community["size"] = 1
+            community["dominantUdcCode"] = "005"
+            community["stableKey"] = String(format: "c-%03d", index)
+            community["x"] = Double(index) / 100.0 - 0.5
+            community["y"] = Double(index % 10) / 10.0 - 0.5
+            community["z"] = 0.0
+            community["foldCount"] = 1
+            community["representativeIds"] = ["n-\(index)"]
+            community["classificationPurity"] = 1.0
+            return community
+        }
+        let snapshot = try JSONSerialization.data(withJSONObject: [
+            "nodes": nodes, "edges": [], "structurePending": false,
+            "topologyVersion": 3, "coordinateFrameVersion": 1,
+            "communities": communities, "folds": [], "bridges": [],
+            "generatedTs": "2026-07-10T00:00:00Z",
+        ], options: [.sortedKeys])
+        let (host, port) = try await makeStartedHost { store in
+            try await store.writeTopologySnapshot(
+                estate: "estate-other", generatedAt: Date(timeIntervalSince1970: 1_000),
+                payload: snapshot)
+        }
+        defer { Task { await host.stop() } }
+
+        let estate = try await jsonObject(
+            port: port, path: "/api/graph?estate=estate-other&level=estate")
+        let estateCommunities = try #require(estate["communities"] as? [[String: Any]])
+        let other = try #require(estateCommunities.first { ($0["stableKey"] as? String) == "__other__" })
+        #expect((other["size"] as? Int) == 5)
+
+        let community = try await jsonObject(
+            port: port, path: "/api/graph?estate=estate-other&level=community&focus=__other__")
+        let slices = try #require(community["folds"] as? [[String: Any]])
+        #expect(!slices.isEmpty)
+        #expect(slices.reduce(0) { $0 + ($1["size"] as? Int ?? 0) } == 5)
+        let sliceKey = try #require(slices.first?["stableKey"] as? String)
+
+        let local = try await jsonObject(
+            port: port, path: "/api/graph?estate=estate-other&level=local&focus=\(sliceKey)")
+        #expect((local["ids"] as? [String])?.isEmpty == false,
+                "every visible Other slice must open into real bounded nodes")
+    }
+
     @Test("GET /api/graph returns the topology snapshot envelope shape")
     func graphEnvelopeShape() async throws {
         let (host, port) = try await makeStartedHost { try await seedVizGraph($0, estate: "home") }
@@ -440,6 +501,11 @@ struct TopologyRendererAssetTests {
         #expect(js.contains("topoCaptureTransitionGhost"))
         #expect(js.contains("topoPrepareSemanticMorph"))
         #expect(js.contains("brainControls.zoomToCursor = true"))
+        #expect(js.contains("brainControls.zoomSpeed = 0.65"))
+        #expect(js.contains("brainControls.rotateSpeed = 0.55"))
+        #expect(js.contains("function buildAggregateQuery"))
+        #expect(js.contains("topoAggregateCandidate(e.clientX, e.clientY)"))
+        #expect(js.contains("topoScheduleSemanticZoom(e.deltaY < 0 ? \"in\" : \"out\")"))
         #expect(js.contains("var playing = false"))
         #expect(js.contains("g.positionQ16"))
         #expect(js.contains("selectBrainNode"))

@@ -539,12 +539,23 @@ public struct FDCMatcher: Sendable {
     private static let codeSymbolCharacters: Set<Character> =
         Set("{}[]();=$|/\\<>")
 
-    /// Operational/code fragments are not FDC knowledge-domain prose. Production
-    /// hierarchy mode maps them to Generalities (`000`) instead of forcing them
-    /// into an unrelated public taxonomy heading by incidental lexical overlap.
-    private static func shouldSkipClassification(_ text: String) -> Bool {
+    private static let sourceDeclarationModifiers: Set<String> = [
+        "fileprivate", "final", "internal", "open", "override", "private",
+        "public", "static"
+    ]
+
+    private static let sourceDeclarationStarts: [String] = [
+        "class ", "const ", "enum ", "extension ", "func ", "function ",
+        "import ", "interface ", "let ", "protocol ", "struct ",
+        "typealias ", "var "
+    ]
+
+    /// Route non-prose fragments before lexical scoring: operational commands
+    /// stay in Generalities (`000`), while recognizable source declarations use
+    /// Computer programming (`005`) instead of an incidental topical heading.
+    private static func specialClassification(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
+        guard !trimmed.isEmpty else { return nil }
         let lowered = trimmed.lowercased()
 
         if lowered.contains("```") ||
@@ -552,7 +563,7 @@ public struct FDCMatcher: Sendable {
             lowered.contains(".git/") ||
             lowered.contains("index.lock") ||
             lowered.contains("read_signal") {
-            return true
+            return "000"
         }
 
         let lines = trimmed
@@ -570,18 +581,41 @@ public struct FDCMatcher: Sendable {
             if shellCommandStarts.contains(command) { commandLineCount += 1 }
         }
         if commandLineCount >= 2 || (commandLineCount == 1 && lines.count <= 6) {
-            return true
+            return "000"
+        }
+
+        let declarationLineCount = lines.reduce(0) { count, line in
+            var words = line.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+            while let first = words.first,
+                  sourceDeclarationModifiers.contains(
+                    first.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+                  ) {
+                words.removeFirst()
+            }
+            let body = words.joined(separator: " ")
+            guard sourceDeclarationStarts.contains(where: body.hasPrefix) else { return count }
+            let declaratorNeedsSyntax = body.hasPrefix("let ") || body.hasPrefix("var ") ||
+                body.hasPrefix("const ")
+            let functionNeedsSyntax = body.hasPrefix("func ") || body.hasPrefix("function ")
+            if declaratorNeedsSyntax && !line.contains(":") && !line.contains("=") { return count }
+            if functionNeedsSyntax && !line.contains("(") { return count }
+            return count + 1
+        }
+        if declarationLineCount >= 2 {
+            return "005"
         }
 
         let signalCount = codeLikeSignals.reduce(0) { count, signal in
             lowered.contains(signal) ? count + 1 : count
         }
-        if signalCount >= 3 { return true }
+        if signalCount >= 3 { return "000" }
 
         let nonWhitespaceCount = trimmed.reduce(0) { $1.isWhitespace ? $0 : $0 + 1 }
-        guard nonWhitespaceCount > 0 else { return false }
+        guard nonWhitespaceCount > 0 else { return nil }
         let symbolCount = trimmed.reduce(0) { codeSymbolCharacters.contains($1) ? $0 + 1 : $0 }
-        return lines.count >= 2 && signalCount >= 2 && Double(symbolCount) / Double(nonWhitespaceCount) > 0.08
+        let codeLike = lines.count >= 2 && signalCount >= 2 &&
+            Double(symbolCount) / Double(nonWhitespaceCount) > 0.08
+        return codeLike ? "000" : nil
     }
 
 
@@ -605,8 +639,8 @@ public struct FDCMatcher: Sendable {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (nil, nil)
         }
-        if Self.shouldSkipClassification(text) {
-            return useHierarchicalResolution ? ("000", nil) : (nil, nil)
+        if let specialCode = Self.specialClassification(text) {
+            return useHierarchicalResolution ? (specialCode, nil) : (nil, nil)
         }
         let bag = BagBuilder.bag(text, lexicon: lexicon)
         let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
@@ -620,8 +654,8 @@ public struct FDCMatcher: Sendable {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (nil, nil)
         }
-        if Self.shouldSkipClassification(text) {
-            return useHierarchicalResolution ? ("000", nil) : (nil, nil)
+        if let specialCode = Self.specialClassification(text) {
+            return useHierarchicalResolution ? (specialCode, nil) : (nil, nil)
         }
         let bag = BagBuilder.bag(text, lexicon: lexicon, taggerChoice: taggerChoice)
         let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
@@ -648,8 +682,8 @@ public struct FDCMatcher: Sendable {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (nil, nil)
         }
-        if Self.shouldSkipClassification(text) {
-            return useHierarchicalResolution ? ("000", nil) : (nil, nil)
+        if let specialCode = Self.specialClassification(text) {
+            return useHierarchicalResolution ? (specialCode, nil) : (nil, nil)
         }
         // Non-recording: build bag via the non-recording BagBuilder overload so
         // novel user-memory tokens never accumulate in sharedNovelCache.

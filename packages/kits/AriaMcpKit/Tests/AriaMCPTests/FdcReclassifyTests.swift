@@ -109,7 +109,7 @@ struct FdcReclassifyTests {
         #expect(body.contains("floor_stamp: stamped"))
         #expect(body.contains("updated: 1"))
         #expect(try await storedCode(kit, handle, id: id) == "000")
-        #expect(try await fdcFloor(kit, handle)?.contains("classifier:4.0.0") == true)
+        #expect(try await fdcFloor(kit, handle)?.contains("classifier:4.1.0") == true)
 
         let status = try await dispatcher.dispatch(
             name: "moot_estate_status", arguments: .object([:]))

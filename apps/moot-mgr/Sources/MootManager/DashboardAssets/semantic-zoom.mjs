@@ -3,10 +3,10 @@
 // be tested with Node's built-in test runner.
 
 export const SEMANTIC_ZOOM_DEFAULTS = Object.freeze({
-  prefetchPx: 26,
-  enterPx: 48,
-  exitDistanceRatio: 1.45,
-  transitionMs: 220,
+  prefetchPx: 42,
+  enterPx: 72,
+  exitDistanceRatio: 1.7,
+  transitionMs: 260,
 });
 
 const NEXT_LEVEL = Object.freeze({ estate: "community", community: "local" });
