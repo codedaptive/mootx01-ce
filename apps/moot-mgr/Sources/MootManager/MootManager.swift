@@ -54,6 +54,10 @@ struct StoredGraphPayload: Decodable {
     /// Optional so a snapshot predating VIZ_V2 still decodes; nil falls back
     /// to the local count-only rollup.
     let communities: [ARIACommunityDescriptor]?
+    let topologyVersion: Int?
+    let coordinateFrameVersion: Int?
+    let folds: [ARIAFoldDescriptor]?
+    let bridges: [GraphBridgePayload]?
     /// ISO-8601 instant the governor produced this snapshot. Optional so
     /// older snapshots without the field still decode.
     let generatedTs: String?
@@ -70,12 +74,38 @@ struct ARIACommunityDescriptor: Decodable {
     /// Most frequent classified `udcCode` among the community's member drawers;
     /// "" when none. Optional-tolerant decode for older daemons.
     let dominantUdcCode: String?
+    let stableKey: String?
+    let x: Double?
+    let y: Double?
+    let z: Double?
+    let foldCount: Int?
+    let representativeIds: [String]?
+    let classificationPurity: Double?
 
-    init(id: Int, size: Int, dominantUdcCode: String?) {
+    init(id: Int, size: Int, dominantUdcCode: String?, stableKey: String? = nil,
+         x: Double? = nil, y: Double? = nil, z: Double? = nil,
+         foldCount: Int? = nil, representativeIds: [String]? = nil,
+         classificationPurity: Double? = nil) {
         self.id = id
         self.size = size
         self.dominantUdcCode = dominantUdcCode
+        self.stableKey = stableKey
+        self.x = x; self.y = y; self.z = z
+        self.foldCount = foldCount
+        self.representativeIds = representativeIds
+        self.classificationPurity = classificationPurity
     }
+}
+
+struct ARIAFoldDescriptor: Decodable {
+    let stableKey: String
+    let communityKey: String
+    let size: Int
+    let dominantUdcCode: String?
+    let x: Double
+    let y: Double
+    let z: Double
+    let representativeIds: [String]
 }
 
 // MARK: - MootManager
@@ -140,7 +170,9 @@ public actor MootManager {
     private var topologyEnrichmentCache: (
         estateKey: String?, raw: Data,
         nodes: [GraphNodePayload], edges: [GraphEdgePayload],
-        communities: [GraphCommunityPayload]?, generatedTs: String?
+        communities: [GraphCommunityPayload]?, folds: [GraphFoldPayload],
+        bridges: [GraphBridgePayload], topologyVersion: Int,
+        coordinateFrameVersion: Int, generatedTs: String?
     )? = nil
 
     private let logger = Logger(subsystem: "com.mootx01.kit", category: "MootManager")
@@ -766,7 +798,8 @@ public actor MootManager {
     ///     overlay to the matching estate tag.
     /// - Returns: A `GraphPayload`.
     /// - Throws: `StorageError` / `ManagerError.notStarted`.
-    public func graphPayload(now: Date, estate: String? = nil) async throws -> GraphPayload {
+    public func graphPayload(now: Date, estate: String? = nil,
+                             level: String? = nil, focus: String? = nil) async throws -> GraphPayload {
         let store = try requireStore()
 
         // The canonical VizGraph signal names (SubstrateML/VizGraphSignals.swift).
@@ -853,6 +886,10 @@ public actor MootManager {
         // returns structurePending:true with the honest enumeration below.
         var liveNodes: [GraphNodePayload] = []
         var liveEdges: [GraphEdgePayload] = []
+        var folds: [GraphFoldPayload] = []
+        var bridges: [GraphBridgePayload] = []
+        var topologyVersion = 2
+        var coordinateFrameVersion = 0
         var structurePending = true
         var generatedTs: String? = nil
         var pendingReasons: [String] = [
@@ -880,6 +917,10 @@ public actor MootManager {
                 liveEdges = cached.edges
                 structurePending = false
                 generatedTs = cached.generatedTs
+                folds = cached.folds
+                bridges = cached.bridges
+                topologyVersion = cached.topologyVersion
+                coordinateFrameVersion = cached.coordinateFrameVersion
                 pendingReasons = []
                 if let enriched = cached.communities { communities = enriched }
             } else if let stored = try? JSONDecoder().decode(StoredGraphPayload.self, from: snapshotData),
@@ -899,16 +940,154 @@ public actor MootManager {
                     enriched = Self.enrichCommunities(raw)
                     communities = enriched!
                 }
+                folds = Self.enrichFolds(stored.folds ?? [])
+                bridges = stored.bridges ?? []
+                topologyVersion = stored.topologyVersion ?? 2
+                coordinateFrameVersion = stored.coordinateFrameVersion ?? 0
                 topologyEnrichmentCache = (estateKey, snapshotData,
                                            stored.nodes, stored.edges,
-                                           enriched, stored.generatedTs)
+                                           enriched, folds, bridges,
+                                           topologyVersion, coordinateFrameVersion,
+                                           stored.generatedTs)
+            }
+        }
+
+        var resolvedLevel = level ?? "full"
+        if topologyVersion < 3 { resolvedLevel = "full" }
+        if !["estate", "community", "local", "full"].contains(resolvedLevel) {
+            resolvedLevel = "estate"
+        }
+        if (resolvedLevel == "community" || resolvedLevel == "local"),
+           focus?.isEmpty != false {
+            resolvedLevel = "estate"
+        }
+        var responseNodes = liveNodes
+        var responseEdges = liveEdges
+        var responseCommunities = communities
+        var responseFolds = folds
+        var responseBridges = bridges
+        let totalNodeCount = liveNodes.count
+        let totalEdgeCount = liveEdges.count
+        var lodTruncated = false
+        var estateVisibleKeys: Set<String>? = nil
+
+        if topologyVersion >= 3 {
+            switch resolvedLevel {
+            case "estate":
+                responseNodes = []
+                responseEdges = []
+                responseFolds = []
+                responseBridges = bridges.filter { $0.level == "community" }
+                if responseCommunities.count > 96 {
+                    let ranked = responseCommunities.sorted {
+                        $0.size != $1.size ? $0.size > $1.size : ($0.stableKey ?? "") < ($1.stableKey ?? "")
+                    }
+                    let visible = Array(ranked.prefix(95))
+                    let omitted = Array(ranked.dropFirst(95))
+                    let omittedSize = omitted.reduce(0) { $0 + $1.size }
+                    let divisor = Double(max(1, omittedSize))
+                    let other = GraphCommunityPayload(
+                        id: -2, code: nil, label: "Other structure", size: omittedSize,
+                        stableKey: "__other__",
+                        x: omitted.reduce(0) { $0 + ($1.x ?? 0) * Double($1.size) } / divisor,
+                        y: omitted.reduce(0) { $0 + ($1.y ?? 0) * Double($1.size) } / divisor,
+                        z: omitted.reduce(0) { $0 + ($1.z ?? 0) * Double($1.size) } / divisor,
+                        foldCount: omitted.reduce(0) { $0 + ($1.foldCount ?? 0) })
+                    responseCommunities = visible + [other]
+                    let visibleKeys = Set(visible.compactMap(\.stableKey))
+                    estateVisibleKeys = visibleKeys
+                    struct BridgeBucket: Hashable { let source: String; let target: String; let type: String }
+                    var buckets: [BridgeBucket: (weight: Double, count: Int)] = [:]
+                    for bridge in responseBridges {
+                        let rawSource = visibleKeys.contains(bridge.sourceKey) ? bridge.sourceKey : "__other__"
+                        let rawTarget = visibleKeys.contains(bridge.targetKey) ? bridge.targetKey : "__other__"
+                        if rawSource == rawTarget { continue }
+                        let pair = rawSource < rawTarget ? (rawSource, rawTarget) : (rawTarget, rawSource)
+                        let key = BridgeBucket(source: pair.0, target: pair.1, type: bridge.edgeType)
+                        let old = buckets[key] ?? (0, 0)
+                        buckets[key] = (old.weight + bridge.weight, old.count + bridge.edgeCount)
+                    }
+                    responseBridges = buckets.map { key, value in
+                        GraphBridgePayload(level: "community", sourceKey: key.source,
+                                           targetKey: key.target, edgeType: key.type,
+                                           weight: value.weight, edgeCount: value.count)
+                    }.sorted { ($0.sourceKey, $0.targetKey, $0.edgeType) <
+                               ($1.sourceKey, $1.targetKey, $1.edgeType) }
+                    lodTruncated = true
+                }
+            case "community":
+                guard let focus, !focus.isEmpty else { break }
+                let foldSet = Set(folds.filter { $0.communityKey == focus }.map(\.stableKey))
+                responseCommunities = communities.filter { $0.stableKey == focus }
+                responseFolds = folds.filter { $0.communityKey == focus }
+                responseBridges = bridges.filter {
+                    $0.level == "fold" && foldSet.contains($0.sourceKey) && foldSet.contains($0.targetKey)
+                }
+                responseNodes = []
+                responseEdges = []
+            case "local":
+                guard let focus, !focus.isEmpty else { break }
+                responseNodes = liveNodes.filter { $0.foldKey == focus || $0.communityKey == focus }
+                let nodeSet = Set(responseNodes.map(\.id))
+                responseEdges = liveEdges.filter { nodeSet.contains($0.source) && nodeSet.contains($0.target) }
+                if let fold = folds.first(where: { $0.stableKey == focus }) {
+                    responseCommunities = communities.filter { $0.stableKey == fold.communityKey }
+                    responseFolds = [fold]
+                } else {
+                    responseCommunities = communities.filter { $0.stableKey == focus }
+                    responseFolds = folds.filter { $0.communityKey == focus }
+                }
+                responseBridges = []
+                if responseNodes.count > 2_000 {
+                    responseNodes = Array(responseNodes.sorted {
+                        if $0.representative != $1.representative { return $0.representative && !$1.representative }
+                        if $0.centrality != $1.centrality { return $0.centrality > $1.centrality }
+                        return $0.id < $1.id
+                    }.prefix(2_000))
+                    let nodeSet = Set(responseNodes.map(\.id))
+                    responseEdges = responseEdges.filter {
+                        nodeSet.contains($0.source) && nodeSet.contains($0.target)
+                    }
+                    lodTruncated = true
+                }
+                if responseEdges.count > 12_000 {
+                    responseEdges = Self.boundedLocalEdges(
+                        responseEdges, nodes: responseNodes, limit: 12_000)
+                    lodTruncated = true
+                }
+            default:
+                break
+            }
+        }
+
+        var activityPairs: [(String, String)] = []
+        if topologyVersion >= 3 && (resolvedLevel == "estate" || resolvedLevel == "community") {
+            let nodeByID = Dictionary(uniqueKeysWithValues: liveNodes.map { ($0.id, $0) })
+            var seen = Set<String>()
+            for event in vizEvents.reversed() where !event.rowIDStr.isEmpty && activityPairs.count < 2_000 {
+                guard seen.insert(event.rowIDStr).inserted, let node = nodeByID[event.rowIDStr] else { continue }
+                var key = resolvedLevel == "estate" ? node.communityKey : node.foldKey
+                if resolvedLevel == "estate", let visible = estateVisibleKeys,
+                   let raw = key, !visible.contains(raw) { key = "__other__" }
+                if let key, !key.isEmpty { activityPairs.append((event.rowIDStr, key)) }
             }
         }
 
         return GraphPayload(
-            nodes: liveNodes,
-            edges: liveEdges,
-            communities: communities,
+            nodes: responseNodes,
+            edges: responseEdges,
+            communities: responseCommunities,
+            folds: responseFolds,
+            bridges: responseBridges,
+            topologyVersion: topologyVersion,
+            coordinateFrameVersion: coordinateFrameVersion,
+            viewLevel: resolvedLevel,
+            focusKey: focus,
+            activityIds: activityPairs.map(\.0),
+            activityKeys: activityPairs.map(\.1),
+            totalNodeCount: totalNodeCount,
+            totalEdgeCount: totalEdgeCount,
+            lodTruncated: lodTruncated,
             analytics: analytics,
             structurePending: structurePending,
             pending: pendingReasons,
@@ -916,6 +1095,71 @@ public actor MootManager {
             estate: (estate?.isEmpty == false ? estate! : "all"),
             snapshotTs: Self.iso8601String(from: now)
         )
+    }
+
+    /// Keep Local views GPU- and wire-bounded without erasing their structural
+    /// shape. A deterministic spanning forest of non-classification edges is
+    /// retained first; the remaining slots prefer stronger evidence and edges
+    /// that touch representative nodes.
+    static func boundedLocalEdges(
+        _ edges: [GraphEdgePayload], nodes: [GraphNodePayload], limit: Int
+    ) -> [GraphEdgePayload] {
+        guard limit > 0, edges.count > limit else { return limit > 0 ? edges : [] }
+        let representatives = Set(nodes.filter(\.representative).map(\.id))
+        func typePriority(_ type: String) -> Int {
+            switch type {
+            case "tunnel": return 0
+            case "kgFact": return 1
+            case "association": return 2
+            default: return 3
+            }
+        }
+        let ranked = edges.indices.sorted { lhs, rhs in
+            let l = edges[lhs], r = edges[rhs]
+            let lp = typePriority(l.edgeType), rp = typePriority(r.edgeType)
+            if lp != rp { return lp < rp }
+            let lr = representatives.contains(l.source) || representatives.contains(l.target)
+            let rr = representatives.contains(r.source) || representatives.contains(r.target)
+            if lr != rr { return lr && !rr }
+            if l.weight != r.weight { return l.weight > r.weight }
+            if l.source != r.source { return l.source < r.source }
+            if l.target != r.target { return l.target < r.target }
+            if l.edgeType != r.edgeType { return l.edgeType < r.edgeType }
+            return lhs < rhs
+        }
+
+        var parent = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0.id) })
+        func root(_ id: String) -> String {
+            var value = id
+            while let next = parent[value], next != value { value = next }
+            var cursor = id
+            while let next = parent[cursor], next != cursor {
+                parent[cursor] = value
+                cursor = next
+            }
+            return value
+        }
+        var forest = Set<Int>()
+        for index in ranked {
+            let edge = edges[index]
+            if edge.edgeType == "nmf_bond" || edge.edgeType == "lattice" { continue }
+            let sourceRoot = root(edge.source)
+            let targetRoot = root(edge.target)
+            if sourceRoot != targetRoot {
+                parent[targetRoot] = sourceRoot
+                forest.insert(index)
+            }
+        }
+
+        var result: [GraphEdgePayload] = []
+        result.reserveCapacity(limit)
+        for index in ranked where forest.contains(index) && result.count < limit {
+            result.append(edges[index])
+        }
+        for index in ranked where !forest.contains(index) && result.count < limit {
+            result.append(edges[index])
+        }
+        return result
     }
 
     // MARK: - Lattice snapshot (GET /api/lattice)
@@ -981,8 +1225,26 @@ public actor MootManager {
                 id: descriptor.id,
                 code: code,
                 label: code.flatMap { FDC.label(for: $0) },
-                size: descriptor.size
+                size: descriptor.size,
+                stableKey: descriptor.stableKey,
+                x: descriptor.x, y: descriptor.y, z: descriptor.z,
+                foldCount: descriptor.foldCount,
+                representativeIds: descriptor.representativeIds,
+                classificationPurity: descriptor.classificationPurity
             )
+        }
+    }
+
+    static func enrichFolds(_ raw: [ARIAFoldDescriptor]) -> [GraphFoldPayload] {
+        raw.map { descriptor in
+            let code = descriptor.dominantUdcCode.flatMap {
+                $0.isEmpty || $0 == "000" ? nil : $0
+            }
+            return GraphFoldPayload(
+                stableKey: descriptor.stableKey, communityKey: descriptor.communityKey,
+                code: code, label: code.flatMap { FDC.label(for: $0) }, size: descriptor.size,
+                x: descriptor.x, y: descriptor.y, z: descriptor.z,
+                representativeIds: descriptor.representativeIds)
         }
     }
 

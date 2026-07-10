@@ -514,10 +514,6 @@ pub struct AutonomicGovernor {
     /// Watermark: drawer count at last preference computation. Same skip
     /// logic as centrality. Mirrors Swift `preferenceCount` in estate.meta.
     last_preference_drawer_count: Option<usize>,
-    /// Watermark: drawer count at last topology snapshot. Gates the full
-    /// allDrawers+allTunnels+allKGFacts load. Mirrors Swift topology
-    /// audit-count watermark.
-    last_topology_drawer_count: Option<usize>,
     /// Pool-reduce cadence in milliseconds (default 3 600 000 = 1 hour).
     /// Overridden by `MOOTX01_POOL_REDUCE_CADENCE_SECONDS` at construction.
     /// Mirrors Swift `poolReduceCadenceMs`.
@@ -796,7 +792,6 @@ impl AutonomicGovernor {
             last_preference_secs: None,
             last_centrality_drawer_count: None,
             last_preference_drawer_count: None,
-            last_topology_drawer_count: None,
             pool_reduce_cadence_ms,
             last_pool_reduce_secs: None,
             pool_dir,
@@ -1423,18 +1418,6 @@ impl AutonomicGovernor {
                 // method returns true on any read failure (fail-open) so a
                 // transient error never silently freezes topology.
                 if sink.is_monitoring_enabled() {
-                    // Watermark gate: skip the full allDrawers+allTunnels+allKGFacts
-                    // load when drawer count is unchanged. Mirrors Swift's outer
-                    // hasAuditGrown check that prevents the full-estate load.
-                    let topo_count = self.store.all_drawers()
-                        .map(|d| d.iter().filter(|x| x.tombstoned_at.is_none()).count())
-                        .unwrap_or(0);
-                    if self.last_topology_fingerprint.is_some()
-                        && self.last_topology_drawer_count == Some(topo_count)
-                    {
-                        // Estate unchanged and we have a prior fingerprint — skip.
-                    } else {
-                    self.last_topology_drawer_count = Some(topo_count);
                     let estate_id = Uuid::from_bytes(self.handle.estate_uuid).to_string();
                     // F5: seed the comparison fingerprint, loading the persisted
                     // one once so the first post-restart duty skips the recompute
@@ -1454,7 +1437,6 @@ impl AutonomicGovernor {
                         self.store.as_ref(),
                         self.last_topology_fingerprint.take(),
                     );
-                    } // end else (estate changed)
                 }
             }
         }
@@ -1878,14 +1860,13 @@ fn preference_duty(
 /// cadences. The token reduces to a STABLE `fingerprint` (process-independent)
 /// that IS persisted beside the snapshot (F5) and compared across restarts: the
 /// duty's dirty-check compares the freshly-computed fingerprint against the one
-/// loaded from disk, so an unchanged estate skips the full topology read on the
-/// first post-restart duty.
+/// loaded from disk, so an unchanged estate skips graph projection, encoding,
+/// and rewriting on the first post-restart duty.
 ///
 /// Built from already-fetched rows only — counts, maximum ingest/event
-/// instants, dead counts, and an order-independent inputs digest (wrapping sum
-/// of per-drawer FNV-1a(id+udc) hashes, catching re-anchoring that changes
-/// neither counts nor timestamps). FNV-1a (not `DefaultHasher`) keeps the digest
-/// identical across process runs so the fingerprint round-trips through disk.
+/// instants, dead counts, and a sorted digest of every topology-affecting
+/// drawer, tunnel, and active fact field. FNV-1a (not `DefaultHasher`) keeps the
+/// digest identical across process runs so the fingerprint round-trips through disk.
 /// Mirrors Swift `TopologyInputsToken`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopologyInputsToken {
@@ -1896,9 +1877,7 @@ pub struct TopologyInputsToken {
     dead_tunnel_count: usize,
     max_filed_at: Option<i64>,
     max_event_time: Option<i64>,
-    /// Order-independent wrapping sum of per-drawer FNV-1a(id+udc) hashes.
-    /// STABLE across process launches (FNV, not `DefaultHasher`) so the
-    /// `fingerprint` persists and compares across restarts.
+    /// Stable FNV-1a over sorted, length-prefixed topology input records.
     inputs_digest: u64,
 }
 
@@ -1906,7 +1885,7 @@ impl TopologyInputsToken {
     fn new(
         drawers: &[locus_kit::drawer::Drawer],
         tunnels: &[locus_kit::tunnel::Tunnel],
-        fact_count: usize,
+        facts: &[locus_kit::kg_fact::KGFact],
     ) -> Self {
         let dead_drawer_count = drawers.iter().filter(|d| d.tombstoned_at.is_some()).count();
         let dead_tunnel_count = tunnels.iter().filter(|t| t.tombstoned_at.is_some()).count();
@@ -1914,34 +1893,51 @@ impl TopologyInputsToken {
             .chain(tunnels.iter().map(|t| t.filed_at))
             .max();
         let max_event_time = drawers.iter().map(|d| d.event_time).max();
-        // Overflow-add of per-drawer STABLE hashes keeps the digest
-        // order-independent across query order AND identical across process runs.
-        let mut digest: u64 = 0;
+        let field = |value: &str| format!("{}:{value}", value.len());
+        let mut records = Vec::with_capacity(drawers.len() + tunnels.len() + facts.len());
         for d in drawers {
-            digest = digest.wrapping_add(Self::fnv1a(&format!("{}\u{1}{}", d.id, d.udc_code)));
+            records.push([
+                field("drawer"), field(&d.id), field(&d.udc_code),
+                field(&d.filed_at.to_string()), field(&d.event_time.to_string()),
+                field(if d.tombstoned_at.is_some() { "1" } else { "0" }),
+                field(&d.tombstoned_at.map(|value| value.to_string()).unwrap_or_else(|| "-".into())),
+            ].concat());
+        }
+        for tunnel in tunnels {
+            records.push([
+                field("tunnel"),
+                field(tunnel.source_drawer_id.as_deref().unwrap_or("-")),
+                field(tunnel.target_drawer_id.as_deref().unwrap_or("-")),
+                field(&tunnel.filed_at.to_string()),
+                field(&tunnel.tombstoned_at.map(|value| value.to_string()).unwrap_or_else(|| "-".into())),
+            ].concat());
+        }
+        for fact in facts {
+            records.push([
+                field("fact"), field(&fact.id), field(&fact.subject), field(&fact.source_drawer_id),
+                field(&fact.filed_at.to_string()),
+            ].concat());
+        }
+        records.sort();
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for record in records {
+            for byte in record.bytes() {
+                digest ^= byte as u64;
+                digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            digest ^= 0xff;
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
         }
         TopologyInputsToken {
             drawer_count: drawers.len(),
             tunnel_count: tunnels.len(),
-            fact_count,
+            fact_count: facts.len(),
             dead_drawer_count,
             dead_tunnel_count,
             max_filed_at,
             max_event_time,
             inputs_digest: digest,
         }
-    }
-
-    /// FNV-1a 64-bit over a string's UTF-8 — a small, stable, process-independent
-    /// hash (no external dependency, no `DefaultHasher` salt). Mirrors Swift
-    /// `TopologyInputsToken.fnv1a`.
-    fn fnv1a(s: &str) -> u64 {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in s.bytes() {
-            h ^= byte as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        h
     }
 
     /// Stable, persistable fingerprint of these inputs. Two tokens are equal iff
@@ -1972,8 +1968,9 @@ impl TopologyInputsToken {
 /// (Louvain + centrality, full analysis) → wire-shape JSON → snapshot write.
 ///
 /// Dirty check: the inputs are reduced to a STABLE fingerprint BEFORE the math;
-/// a fingerprint matching `previous_fingerprint` returns without touching the
-/// store, so `generatedTs` keeps meaning "when the content last changed". The
+/// a fingerprint matching `previous_fingerprint` returns without projecting,
+/// encoding, or writing a snapshot, so `generatedTs` keeps meaning "when the
+/// content last changed". The
 /// fingerprint persists beside the snapshot (F5), so the skip also holds across
 /// a restart when `previous_fingerprint` was loaded from disk. Returns the
 /// fingerprint to hold as governor state (`previous_fingerprint` is passed back
@@ -1981,6 +1978,10 @@ impl TopologyInputsToken {
 /// spurious recompute next cadence).
 ///
 /// Errors are logged to stderr; the governor loop continues on failure.
+fn topology_snapshot_edge_type(edge_type: &str) -> &str {
+    if edge_type == "lattice" { "nmf_bond" } else { edge_type }
+}
+
 fn topology_snapshot_duty(
     estate_id: &str,
     now_epoch_secs: f64,
@@ -2010,7 +2011,7 @@ fn topology_snapshot_duty(
         }
     };
 
-    let token = TopologyInputsToken::new(&drawers, &tunnels, facts.len());
+    let token = TopologyInputsToken::new(&drawers, &tunnels, &facts);
     let fingerprint = token.fingerprint();
     if previous_fingerprint.as_deref() == Some(fingerprint.as_str()) {
         return previous_fingerprint;
@@ -2047,6 +2048,8 @@ fn topology_snapshot_duty(
     // Thread estate_id and now_epoch_secs so VizGraph telemetry carries the
     // correct estate tag and timestamp — not empty/0 defaults.
     let topo = graph_topology(&drawer_inputs, &tunnel_inputs, &fact_inputs, estate_id, now_epoch_secs);
+    let previous_snapshot = sink.load_topology_snapshot(estate_id);
+    let projection = crate::topology_projection::project(&topo, previous_snapshot.as_deref());
 
     // Wire-shape serialization — field names match the Swift snapshot payload
     // (moot-mgr's GraphNodePayload/GraphEdgePayload decode both legs' bytes).
@@ -2068,6 +2071,18 @@ fn topology_snapshot_duty(
             if let Some(code) = &n.udc_code {
                 obj["udcCode"] = serde_json::Value::String(code.clone());
             }
+            if let Some(projected) = projection.nodes_by_id.get(&n.id) {
+                if let Some(key) = &projected.community_key {
+                    obj["communityKey"] = serde_json::Value::String(key.clone());
+                }
+                if let Some(key) = &projected.fold_key {
+                    obj["foldKey"] = serde_json::Value::String(key.clone());
+                }
+                obj["x"] = serde_json::json!(projected.x);
+                obj["y"] = serde_json::json!(projected.y);
+                obj["z"] = serde_json::json!(projected.z);
+                obj["representative"] = serde_json::json!(projected.representative);
+            }
             obj
         })
         .collect();
@@ -2075,18 +2090,48 @@ fn topology_snapshot_duty(
         .map(|e| serde_json::json!({
             "source": e.source,
             "target": e.target,
-            "edgeType": e.edge_type,
+            "edgeType": topology_snapshot_edge_type(e.edge_type),
             "weight": e.weight,
             "decayedWeight": e.weight,
             "createdTs": e.created_ts,
             "tombstonedTs": e.tombstoned_ts
         }))
         .collect();
-    let communities: Vec<serde_json::Value> = topo.communities.iter()
+    let raw_communities: std::collections::HashMap<i64, _> = topo.communities.iter()
+        .map(|community| (community.id, community)).collect();
+    let communities: Vec<serde_json::Value> = projection.communities.iter()
         .map(|c| serde_json::json!({
-            "id": c.id, "size": c.size, "dominantUdcCode": c.dominant_udc_code
+            "id": c.raw_id,
+            "size": c.size,
+            "dominantUdcCode": raw_communities.get(&c.raw_id)
+                .map(|raw| raw.dominant_udc_code.as_str()).unwrap_or(""),
+            "stableKey": c.stable_key,
+            "x": c.point.x,
+            "y": c.point.y,
+            "z": c.point.z,
+            "foldCount": c.fold_count,
+            "representativeIds": c.representative_ids,
+            "classificationPurity": c.classification_purity
         }))
         .collect();
+    let folds: Vec<serde_json::Value> = projection.folds.iter().map(|fold| serde_json::json!({
+        "stableKey": fold.stable_key,
+        "communityKey": fold.community_key,
+        "size": fold.size,
+        "dominantUdcCode": fold.dominant_udc_code,
+        "x": fold.point.x,
+        "y": fold.point.y,
+        "z": fold.point.z,
+        "representativeIds": fold.representative_ids
+    })).collect();
+    let bridges: Vec<serde_json::Value> = projection.bridges.iter().map(|bridge| serde_json::json!({
+        "level": bridge.level,
+        "sourceKey": bridge.source_key,
+        "targetKey": bridge.target_key,
+        "edgeType": bridge.edge_type,
+        "weight": bridge.weight,
+        "edgeCount": bridge.edge_count
+    })).collect();
 
     let generated_ts = epoch_secs_to_iso8601(now_epoch_secs as i64);
     let body = serde_json::json!({
@@ -2094,6 +2139,10 @@ fn topology_snapshot_duty(
         "edges": edges,
         "structurePending": false,
         "communities": communities,
+        "topologyVersion": 3,
+        "coordinateFrameVersion": 1,
+        "folds": folds,
+        "bridges": bridges,
         "generatedTs": generated_ts
     });
     let payload = serde_json::to_string(&body)
@@ -2181,5 +2230,29 @@ mod tests {
     #[test]
     fn epoch_to_iso8601_unix_epoch() {
         assert_eq!(epoch_secs_to_iso8601(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn topology_snapshot_maps_internal_lattice_edge_to_public_wire_type() {
+        assert_eq!(topology_snapshot_edge_type("lattice"), "nmf_bond");
+        assert_eq!(topology_snapshot_edge_type("tunnel"), "tunnel");
+        assert_eq!(topology_snapshot_edge_type("kgFact"), "kgFact");
+    }
+
+    #[test]
+    fn same_count_fact_replacement_changes_topology_fingerprint() {
+        use locus_kit::kg_fact::KGFact;
+        let first = KGFact::new(
+            "fact".into(), "alpha".into(), "relates".into(), "value".into(),
+            "drawer-a".into(), 1_700_000_000,
+        );
+        let replacement = KGFact::new(
+            "fact".into(), "beta".into(), "relates".into(), "value".into(),
+            "drawer-b".into(), 1_700_000_000,
+        );
+        let first_token = TopologyInputsToken::new(&[], &[], &[first]);
+        let replacement_token = TopologyInputsToken::new(&[], &[], &[replacement]);
+        assert_eq!(first_token.fact_count, replacement_token.fact_count);
+        assert_ne!(first_token.fingerprint(), replacement_token.fingerprint());
     }
 }

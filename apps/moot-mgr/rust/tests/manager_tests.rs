@@ -309,6 +309,30 @@ fn graph_payload_serves_stored_snapshot() {
     // key and the node gets the -1 "no code" sentinel.
     assert_eq!(p.code_index, vec![-1]);
     assert!(p.codes.is_empty());
+    assert!(p.position_q16.is_empty(), "legacy snapshots must retain layout fallback");
+    m.stop();
+}
+
+#[test]
+fn graph_payload_missing_drill_focus_keeps_estate_budget() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        let snapshot = r#"{
+          "nodes":[{"id":"n1","communityId":0,"centrality":0.5,"anomaly":false,
+                    "communityKey":"c-one","foldKey":"f-one","x":0.1,"y":0.2,"z":0.3}],
+          "edges":[],"structurePending":false,"topologyVersion":3,"coordinateFrameVersion":1,
+          "communities":[{"id":0,"size":1,"stableKey":"c-one","x":0.1,"y":0.2,"z":0.3}],
+          "folds":[{"stableKey":"f-one","communityKey":"c-one","size":1,
+                    "x":0.1,"y":0.2,"z":0.3}],"bridges":[]}"#;
+        store.write_topology_snapshot("estate-v3", NOW, snapshot, None).unwrap();
+    }
+    let payload = m
+        .graph_payload_view(NOW, Some("estate-v3"), Some("local"), None)
+        .unwrap();
+    assert_eq!(payload.view_level, "estate");
+    assert!(payload.ids.is_empty(), "missing focus must not return raw geometry");
+    assert_eq!(payload.communities.len(), 1);
     m.stop();
 }
 

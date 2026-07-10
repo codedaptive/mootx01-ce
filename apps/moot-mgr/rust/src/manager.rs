@@ -36,14 +36,15 @@
 // Daemon address: ARIA_MCP_API_BASE env var, default http://127.0.0.1:4242.
 // Mirrors Swift `MootManager.ariaAPIBase`. See `daemon_client` for the raw GET.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cognition_kit::capability::shipped_capabilities;
 use observer_sink::{DropboxMetricAggregate, EventRow, MetricRow, StatsStore};
 
 use crate::api_payloads::{
     AriaCommunityDescriptor, ConfigPayload, DropboxSummaryPayload, EstatePayload, EstatesPayload,
-    EventPayload, EventsPayload, GraphAnalyticPayload, GraphCommunityPayload, GraphPayload,
+    AriaFoldDescriptor, EventPayload, EventsPayload, GraphAnalyticPayload, GraphBridgePayload,
+    GraphCommunityPayload, GraphEdgePayload, GraphFoldPayload, GraphNodePayload, GraphPayload,
     ServerPayload, StoredGraphPayload,
 };
 use crate::status_report::{GroupCount, StatusReport};
@@ -603,6 +604,16 @@ impl MootManager {
         now_epoch: f64,
         estate: Option<&str>,
     ) -> Result<GraphPayload, ManagerError> {
+        self.graph_payload_view(now_epoch, estate, None, None)
+    }
+
+    pub fn graph_payload_view(
+        &self,
+        now_epoch: f64,
+        estate: Option<&str>,
+        level: Option<&str>,
+        focus: Option<&str>,
+    ) -> Result<GraphPayload, ManagerError> {
         let store = self.require_store()?;
 
         // The five canonical VizGraph signal names — the wire contract between
@@ -696,6 +707,9 @@ impl MootManager {
                     code: None,
                     label: None,
                     size: 0,
+                    stable_key: None, x: None, y: None, z: None,
+                    fold_count: None, representative_ids: None,
+                    classification_purity: None,
                 });
             }
         }
@@ -703,6 +717,10 @@ impl MootManager {
         // Read the topology snapshot from the shared stats store.
         let mut live_nodes = Vec::new();
         let mut live_edges = Vec::new();
+        let mut folds: Vec<GraphFoldPayload> = Vec::new();
+        let mut bridges: Vec<GraphBridgePayload> = Vec::new();
+        let mut topology_version = 2_i64;
+        let mut coordinate_frame_version = 0_i64;
         let mut structure_pending = true;
         let mut generated_ts: Option<String> = None;
         let mut pending = vec![
@@ -733,17 +751,147 @@ impl MootManager {
                     if let Some(raw) = &stored.communities {
                         communities = Self::enrich_communities(raw);
                     }
+                    folds = Self::enrich_folds(&stored.folds);
+                    bridges = stored.bridges;
+                    topology_version = stored.topology_version.unwrap_or(2);
+                    coordinate_frame_version = stored.coordinate_frame_version.unwrap_or(0);
                 }
             }
         }
+
+        let mut resolved_level = if topology_version >= 3 { level.unwrap_or("full") } else { "full" };
+        if !matches!(resolved_level, "estate" | "community" | "local" | "full") {
+            resolved_level = "estate";
+        }
+        if matches!(resolved_level, "community" | "local")
+            && focus.filter(|value| !value.is_empty()).is_none() {
+            resolved_level = "estate";
+        }
+        let mut response_nodes = live_nodes.clone();
+        let mut response_edges = live_edges.clone();
+        let mut response_communities = communities.clone();
+        let mut response_folds = folds.clone();
+        let mut response_bridges = bridges.clone();
+        let total_node_count = live_nodes.len();
+        let total_edge_count = live_edges.len();
+        let mut lod_truncated = false;
+        let mut estate_visible_keys: Option<HashSet<String>> = None;
+        if topology_version >= 3 {
+            match resolved_level {
+                "estate" => {
+                    response_nodes.clear(); response_edges.clear(); response_folds.clear();
+                    response_bridges.retain(|bridge| bridge.level == "community");
+                    if response_communities.len() > 96 {
+                        response_communities.sort_by(|a, b| b.size.cmp(&a.size)
+                            .then_with(|| a.stable_key.cmp(&b.stable_key)));
+                        let omitted = response_communities.split_off(95);
+                        let omitted_size: i64 = omitted.iter().map(|community| community.size).sum();
+                        let divisor = omitted_size.max(1) as f64;
+                        let weighted = |axis: fn(&GraphCommunityPayload) -> Option<f64>| -> f64 {
+                            omitted.iter().map(|community| axis(community).unwrap_or(0.0) * community.size as f64).sum::<f64>() / divisor
+                        };
+                        response_communities.push(GraphCommunityPayload {
+                            id: -2, code: None, label: Some("Other structure".into()), size: omitted_size,
+                            stable_key: Some("__other__".into()),
+                            x: Some(weighted(|c| c.x)), y: Some(weighted(|c| c.y)), z: Some(weighted(|c| c.z)),
+                            fold_count: Some(omitted.iter().map(|c| c.fold_count.unwrap_or(0)).sum()),
+                            representative_ids: None, classification_purity: None,
+                        });
+                        let visible: HashSet<String> = response_communities.iter()
+                            .filter_map(|community| community.stable_key.clone())
+                            .filter(|key| key != "__other__").collect();
+                        let mut buckets: BTreeMap<(String, String, String), (f64, i64)> = BTreeMap::new();
+                        for bridge in &response_bridges {
+                            let raw_source = if visible.contains(&bridge.source_key) { bridge.source_key.clone() } else { "__other__".into() };
+                            let raw_target = if visible.contains(&bridge.target_key) { bridge.target_key.clone() } else { "__other__".into() };
+                            if raw_source == raw_target { continue; }
+                            let (source, target) = if raw_source < raw_target { (raw_source, raw_target) } else { (raw_target, raw_source) };
+                            let value = buckets.entry((source, target, bridge.edge_type.clone())).or_insert((0.0, 0));
+                            value.0 += bridge.weight; value.1 += bridge.edge_count;
+                        }
+                        response_bridges = buckets.into_iter().map(|((source_key, target_key, edge_type), (weight, edge_count))| GraphBridgePayload {
+                            level: "community".into(), source_key, target_key, edge_type, weight, edge_count,
+                        }).collect();
+                        estate_visible_keys = Some(visible);
+                        lod_truncated = true;
+                    }
+                }
+                "community" => {
+                    let focus = focus.expect("community level normalized to require focus");
+                    let fold_set: HashSet<String> = folds.iter()
+                        .filter(|fold| fold.community_key == focus)
+                        .map(|fold| fold.stable_key.clone()).collect();
+                    response_communities.retain(|community| community.stable_key.as_deref() == Some(focus));
+                    response_folds.retain(|fold| fold.community_key == focus);
+                    response_bridges.retain(|bridge| bridge.level == "fold"
+                        && fold_set.contains(&bridge.source_key) && fold_set.contains(&bridge.target_key));
+                    response_nodes.clear();
+                    response_edges.clear();
+                }
+                "local" => {
+                    let focus = focus.expect("local level normalized to require focus");
+                    response_nodes.retain(|node| node.fold_key.as_deref() == Some(focus)
+                        || node.community_key.as_deref() == Some(focus));
+                    let node_set: HashSet<&str> = response_nodes.iter().map(|node| node.id.as_str()).collect();
+                    response_edges.retain(|edge| node_set.contains(edge.source.as_str()) && node_set.contains(edge.target.as_str()));
+                    if let Some(fold) = folds.iter().find(|fold| fold.stable_key == focus) {
+                        response_communities.retain(|community| community.stable_key.as_deref() == Some(fold.community_key.as_str()));
+                        response_folds.retain(|candidate| candidate.stable_key == fold.stable_key);
+                    } else {
+                        response_communities.retain(|community| community.stable_key.as_deref() == Some(focus));
+                        response_folds.retain(|fold| fold.community_key == focus);
+                    }
+                    response_bridges.clear();
+                    if response_nodes.len() > 2_000 {
+                        response_nodes.sort_by(|a, b| b.representative.cmp(&a.representative)
+                            .then_with(|| b.centrality.total_cmp(&a.centrality)).then_with(|| a.id.cmp(&b.id)));
+                        response_nodes.truncate(2_000);
+                        let node_set: HashSet<&str> = response_nodes.iter().map(|node| node.id.as_str()).collect();
+                        response_edges.retain(|edge| node_set.contains(edge.source.as_str()) && node_set.contains(edge.target.as_str()));
+                        lod_truncated = true;
+                    }
+                    if response_edges.len() > 12_000 {
+                        response_edges = bounded_local_edges(response_edges, &response_nodes, 12_000);
+                        lod_truncated = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut activity_pairs = Vec::new();
+        if topology_version >= 3 && matches!(resolved_level, "estate" | "community") {
+            let node_by_id: HashMap<&str, &crate::api_payloads::GraphNodePayload> =
+                live_nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+            let mut seen = HashSet::new();
+            for event in viz_events.iter().rev() {
+                if activity_pairs.len() >= 2_000 || event.estate_row_id.is_empty()
+                    || !seen.insert(event.estate_row_id.as_str()) { continue; }
+                let Some(node) = node_by_id.get(event.estate_row_id.as_str()) else { continue };
+                let mut key = if resolved_level == "estate" { node.community_key.clone() } else { node.fold_key.clone() };
+                if resolved_level == "estate" {
+                    if let (Some(visible), Some(raw)) = (&estate_visible_keys, &key) {
+                        if !visible.contains(raw) { key = Some("__other__".into()); }
+                    }
+                }
+                if let Some(key) = key.filter(|key| !key.is_empty()) {
+                    activity_pairs.push((event.estate_row_id.clone(), key));
+                }
+            }
+        }
+
+        live_nodes = response_nodes;
+        live_edges = response_edges;
+        communities = response_communities;
+        folds = response_folds;
+        bridges = response_bridges;
 
         // FIX 2b — build compact parallel-array wire payload from stored per-object nodes/edges.
         //
         // Parallel node arrays eliminate per-node JSON key overhead.
         // Compact edges `[si, ti, w, et]` eliminate UUID duplication in edge endpoints
         // (70k edges × 2 × 36-char UUIDs ≈ 5 MB saved).  Mirrors Swift GraphPayload init(nodes:edges:).
-        use crate::api_payloads::CompactEdge;
-        use std::collections::HashMap;
+        use crate::api_payloads::{CompactEdge, topology_epoch_seconds};
 
         let node_count = live_nodes.len();
         let mut ids        = Vec::with_capacity(node_count);
@@ -766,6 +914,13 @@ impl MootManager {
         let mut codes: Vec<String> = Vec::new();
         let mut code_to_index: HashMap<String, i64> = HashMap::new();
         let mut code_index: Vec<i64> = Vec::with_capacity(node_count);
+        let mut positions = Vec::with_capacity(node_count * 3);
+        let mut representatives = Vec::new();
+        let has_complete_positions = !live_nodes.is_empty() && live_nodes.iter().all(|node| {
+            node.x.is_some_and(f64::is_finite)
+                && node.y.is_some_and(f64::is_finite)
+                && node.z.is_some_and(f64::is_finite)
+        });
 
         for (idx, n) in live_nodes.iter().enumerate() {
             id_to_idx.insert(n.id.clone(), idx);
@@ -792,7 +947,24 @@ impl MootManager {
                 None => -1,
             };
             code_index.push(code_idx);
+            let quantize = |value: Option<f64>| -> i16 {
+                (value.unwrap_or(0.0).clamp(-1.0, 1.0) * 32_767.0).round() as i16
+            };
+            if has_complete_positions {
+                positions.extend([quantize(n.x), quantize(n.y), quantize(n.z)]);
+            }
+            if n.representative { representatives.push(idx); }
         }
+
+        // One shared epoch origin turns 10-digit timestamps into small offsets,
+        // keeping truthful 70k-edge replay inside the 5 MB payload ceiling.
+        let edge_time_origin = live_edges.iter()
+            .flat_map(|e| [
+                topology_epoch_seconds(e.created_ts.as_deref()),
+                topology_epoch_seconds(e.tombstoned_ts.as_deref()),
+            ])
+            .flatten()
+            .min();
 
         // Map stored per-object edges → compact index-pair edges.
         // Edges whose endpoints are not in the node set are dropped (safety guard
@@ -805,6 +977,10 @@ impl MootManager {
                 ti: *ti,
                 w: e.weight,
                 et: CompactEdge::edge_type_ordinal(&e.edge_type),
+                born: topology_epoch_seconds(e.created_ts.as_deref())
+                    .and_then(|t| edge_time_origin.map(|origin| t - origin)),
+                dead: topology_epoch_seconds(e.tombstoned_ts.as_deref())
+                    .and_then(|t| edge_time_origin.map(|origin| t - origin)),
             })
         }).collect();
 
@@ -817,8 +993,22 @@ impl MootManager {
             tombstoned,
             codes,
             code_index,
+            position_q16: encode_q16_base64(&positions),
+            representatives,
             edges: compact_edges,
+            edge_time_origin,
             communities,
+            folds,
+            bridges,
+            topology_version,
+            coordinate_frame_version,
+            view_level: resolved_level.to_string(),
+            focus_key: focus.filter(|value| !value.is_empty()).map(str::to_owned),
+            activity_ids: activity_pairs.iter().map(|pair| pair.0.clone()).collect(),
+            activity_keys: activity_pairs.iter().map(|pair| pair.1.clone()).collect(),
+            total_node_count,
+            total_edge_count,
+            lod_truncated,
             analytics,
             structure_pending,
             pending,
@@ -849,7 +1039,7 @@ impl MootManager {
                 let code = d
                     .dominant_udc_code
                     .as_deref()
-                    .filter(|c| !c.is_empty())
+                    .filter(|c| !c.is_empty() && *c != "000")
                     .map(str::to_owned);
                 let label = code.as_deref().and_then(lattice_lib::Fdc::label);
                 GraphCommunityPayload {
@@ -857,9 +1047,29 @@ impl MootManager {
                     code,
                     label,
                     size: d.size,
+                    stable_key: d.stable_key.clone(),
+                    x: d.x, y: d.y, z: d.z,
+                    fold_count: d.fold_count,
+                    representative_ids: d.representative_ids.clone(),
+                    classification_purity: d.classification_purity,
                 }
             })
             .collect()
+    }
+
+    fn enrich_folds(raw: &[AriaFoldDescriptor]) -> Vec<GraphFoldPayload> {
+        raw.iter().map(|descriptor| {
+            let code = descriptor.dominant_udc_code.as_deref()
+                .filter(|code| !code.is_empty() && *code != "000").map(str::to_owned);
+            let label = code.as_deref().and_then(lattice_lib::Fdc::label);
+            GraphFoldPayload {
+                stable_key: descriptor.stable_key.clone(),
+                community_key: descriptor.community_key.clone(),
+                code, label, size: descriptor.size,
+                x: descriptor.x, y: descriptor.y, z: descriptor.z,
+                representative_ids: descriptor.representative_ids.clone(),
+            }
+        }).collect()
     }
 
     // MARK: - Lexicon payload (GET /api/lexicon)
@@ -984,6 +1194,106 @@ impl MootManager {
     }
 }
 
+/// Keep Local views bounded while retaining a deterministic structural
+/// spanning forest. Remaining slots prefer stronger evidence and edges that
+/// touch representative nodes.
+fn bounded_local_edges(
+    edges: Vec<GraphEdgePayload>,
+    nodes: &[GraphNodePayload],
+    limit: usize,
+) -> Vec<GraphEdgePayload> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if edges.len() <= limit {
+        return edges;
+    }
+    let representatives: HashSet<&str> = nodes
+        .iter()
+        .filter(|node| node.representative)
+        .map(|node| node.id.as_str())
+        .collect();
+    let type_priority = |edge_type: &str| match edge_type {
+        "tunnel" => 0,
+        "kgFact" => 1,
+        "association" => 2,
+        _ => 3,
+    };
+    let mut ranked: Vec<usize> = (0..edges.len()).collect();
+    ranked.sort_by(|lhs, rhs| {
+        let left = &edges[*lhs];
+        let right = &edges[*rhs];
+        type_priority(&left.edge_type)
+            .cmp(&type_priority(&right.edge_type))
+            .then_with(|| {
+                let left_representative = representatives.contains(left.source.as_str())
+                    || representatives.contains(left.target.as_str());
+                let right_representative = representatives.contains(right.source.as_str())
+                    || representatives.contains(right.target.as_str());
+                right_representative.cmp(&left_representative)
+            })
+            .then_with(|| right.weight.total_cmp(&left.weight))
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.target.cmp(&right.target))
+            .then_with(|| left.edge_type.cmp(&right.edge_type))
+            .then_with(|| lhs.cmp(rhs))
+    });
+
+    let node_index: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.as_str(), index))
+        .collect();
+    let mut parent: Vec<usize> = (0..nodes.len()).collect();
+    fn root(parent: &mut [usize], index: usize) -> usize {
+        let mut value = index;
+        while parent[value] != value {
+            value = parent[value];
+        }
+        let mut cursor = index;
+        while parent[cursor] != cursor {
+            let next = parent[cursor];
+            parent[cursor] = value;
+            cursor = next;
+        }
+        value
+    }
+    let mut forest = HashSet::new();
+    for &index in &ranked {
+        let edge = &edges[index];
+        if matches!(edge.edge_type.as_str(), "nmf_bond" | "lattice") {
+            continue;
+        }
+        let (Some(&source), Some(&target)) = (
+            node_index.get(edge.source.as_str()),
+            node_index.get(edge.target.as_str()),
+        ) else {
+            continue;
+        };
+        let source_root = root(&mut parent, source);
+        let target_root = root(&mut parent, target);
+        if source_root != target_root {
+            parent[target_root] = source_root;
+            forest.insert(index);
+        }
+    }
+
+    let mut result = Vec::with_capacity(limit);
+    for &index in ranked.iter().filter(|index| forest.contains(index)) {
+        if result.len() == limit {
+            return result;
+        }
+        result.push(edges[index].clone());
+    }
+    for &index in ranked.iter().filter(|index| !forest.contains(index)) {
+        if result.len() == limit {
+            break;
+        }
+        result.push(edges[index].clone());
+    }
+    result
+}
+
 // ─────────────────────── Daemon proxy helpers ────────────────────────────────
 //
 // These are module-level free functions so they can be unit-tested without a
@@ -1094,6 +1404,24 @@ fn clone_metric(m: &MetricRow) -> MetricRow {
         ts_epoch: m.ts_epoch,
         dropbox_id: m.dropbox_id.clone(),
     }
+}
+
+/// Dependency-free RFC 4648 base64 for the little-endian Q16 coordinate block.
+fn encode_q16_base64(values: &[i16]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut bytes = Vec::with_capacity(values.len() * 2);
+    for value in values { bytes.extend_from_slice(&value.to_le_bytes()); }
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        out.push(TABLE[(a >> 2) as usize] as char);
+        out.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 { TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[(c & 0x3f) as usize] as char } else { '=' });
+    }
+    out
 }
 
 /// Build per-dropbox sample summaries from the metric + event scans, sorted by
@@ -1234,6 +1562,31 @@ mod tests {
         format!("{:08x}-{:p}", nanos, &nanos as *const _)
     }
 
+    #[test]
+    fn local_edge_budget_preserves_structural_spanning_forest() {
+        let nodes: Vec<GraphNodePayload> = serde_json::from_value(serde_json::json!([
+            {"id":"a","representative":true}, {"id":"b"}, {"id":"c"}, {"id":"d"}
+        ])).unwrap();
+        let mut edges: Vec<GraphEdgePayload> = serde_json::from_value(serde_json::json!([
+            {"source":"a","target":"b","edgeType":"tunnel","weight":1.0},
+            {"source":"b","target":"c","edgeType":"tunnel","weight":0.8},
+            {"source":"c","target":"d","edgeType":"kgFact","weight":0.3}
+        ])).unwrap();
+        for index in 0..20 {
+            edges.push(serde_json::from_value(serde_json::json!({
+                "source": if index % 2 == 0 { "a" } else { "b" },
+                "target": if index % 2 == 0 { "d" } else { "c" },
+                "edgeType":"nmf_bond","weight":0.2
+            })).unwrap());
+        }
+        let bounded = bounded_local_edges(edges, &nodes, 3);
+        assert_eq!(bounded.len(), 3);
+        assert!(bounded.iter().all(|edge| edge.edge_type != "nmf_bond"));
+        let endpoints: HashSet<&str> = bounded.iter()
+            .flat_map(|edge| [edge.source.as_str(), edge.target.as_str()]).collect();
+        assert_eq!(endpoints, HashSet::from(["a", "b", "c", "d"]));
+    }
+
     // ── community count cap — unbounded allocation guard ─────────────────────
 
     #[test]
@@ -1305,7 +1658,11 @@ mod tests {
             .map(|i| {
                 let si = (i as usize) % n;
                 let ti = (i as usize + 1) % n;
-                CompactEdge { si, ti, w: 0.8, et: 0 }
+                CompactEdge {
+                    si, ti, w: 0.8, et: 0,
+                    // Worst common case: every explicit tunnel owns a birth.
+                    born: Some(0), dead: None,
+                }
             })
             .collect();
 
@@ -1318,8 +1675,22 @@ mod tests {
             tombstoned,
             codes,
             code_index,
+            position_q16: encode_q16_base64(&vec![0; n * 3]),
+            representatives: vec![],
             edges,
+            edge_time_origin: Some(1_700_000_000),
             communities: vec![],
+            folds: vec![],
+            bridges: vec![],
+            topology_version: 3,
+            coordinate_frame_version: 1,
+            view_level: "full".to_string(),
+            focus_key: None,
+            activity_ids: vec![],
+            activity_keys: vec![],
+            total_node_count: n,
+            total_edge_count: 70_000,
+            lod_truncated: false,
             analytics: vec![],
             structure_pending: false,
             pending: vec![],
@@ -1500,7 +1871,7 @@ mod tests {
     // ── community enrichment (VIZ_V2 L3) — mirrors Swift CommunityEnrichmentTests ──
 
     #[test]
-    fn enrich_communities_passes_code_and_resolves_own_label() {
+    fn enrich_communities_treats_000_as_unclassified() {
         if !lattice_lib::Fdc::is_available() {
             return;
         }
@@ -1508,21 +1879,20 @@ mod tests {
             id: 3,
             size: 7,
             dominant_udc_code: Some("000".into()),
+            ..Default::default()
         }]);
         assert_eq!(enriched.len(), 1);
         assert_eq!(enriched[0].id, 3);
         assert_eq!(enriched[0].size, 7);
-        assert_eq!(enriched[0].code.as_deref(), Some("000"));
-        // Label is the code's OWN frame label (must agree with Fdc::label).
-        assert_eq!(enriched[0].label, lattice_lib::Fdc::label("000"));
-        assert!(enriched[0].label.is_some());
+        assert!(enriched[0].code.is_none());
+        assert!(enriched[0].label.is_none());
     }
 
     #[test]
     fn enrich_communities_empty_or_absent_code_yields_nulls() {
         let enriched = MootManager::enrich_communities(&[
-            AriaCommunityDescriptor { id: 0, size: 5, dominant_udc_code: Some("".into()) },
-            AriaCommunityDescriptor { id: 1, size: 2, dominant_udc_code: None },
+            AriaCommunityDescriptor { id: 0, size: 5, dominant_udc_code: Some("".into()), ..Default::default() },
+            AriaCommunityDescriptor { id: 1, size: 2, dominant_udc_code: None, ..Default::default() },
         ]);
         assert!(enriched[0].code.is_none() && enriched[0].label.is_none());
         assert!(enriched[1].code.is_none() && enriched[1].label.is_none());
@@ -1536,6 +1906,7 @@ mod tests {
             id: 4,
             size: 1,
             dominant_udc_code: None,
+            ..Default::default()
         }]);
         let json = serde_json::to_value(&enriched[0]).expect("serialize");
         let obj = json.as_object().expect("object");
@@ -1559,7 +1930,7 @@ mod tests {
         let raw = stored.communities.expect("communities present");
         let enriched = MootManager::enrich_communities(&raw);
         assert_eq!(enriched.len(), 2);
-        assert_eq!(enriched[0].code.as_deref(), Some("000"));
+        assert!(enriched[0].code.is_none());
         assert!(enriched[1].code.is_none());
     }
 }

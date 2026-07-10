@@ -281,10 +281,15 @@ public enum AriaResident {
         }
         // F5: one-shot fingerprint loader. The governor calls this once on its
         // first topology duty to learn the persisted fingerprint, so it can skip
-        // the full topology read when nothing changed since the last run.
+        // graph projection, encoding, and rewriting when nothing changed.
         let topologyFingerprintLoader: (@Sendable () async -> String?)? = statsStore.map { store in
             { @Sendable in
                 try? await store.loadTopologyFingerprint(estate: handle.estateUUID.uuidString)
+            }
+        }
+        let topologySnapshotLoader: (@Sendable () async -> Data?)? = statsStore.map { store in
+            { @Sendable in
+                try? await store.latestTopologySnapshot(estate: handle.estateUUID.uuidString)
             }
         }
         let topologyReader: (@Sendable (String?) async -> Data?)? = statsStore.map { store in
@@ -366,6 +371,7 @@ public enum AriaResident {
             baseTickMs: config.brainTickMs,
             topologyHandler: topologyHandler,
             topologyFingerprintLoader: topologyFingerprintLoader,
+            topologySnapshotLoader: topologySnapshotLoader,
             topologyGate: topologyGate,
             graphAnalyticsHandler: graphAnalyticsHandler
         )

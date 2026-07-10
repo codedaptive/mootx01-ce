@@ -155,6 +155,10 @@ public actor AutonomicGovernor {
     /// nil = no persistence (the first duty always recomputes). Symmetric to
     /// `topologyHandler`.
     private let topologyFingerprintLoader: (@Sendable () async -> String?)?
+    /// Loads the previous persisted snapshot when a changed estate must be
+    /// reprojected. V3 uses it to preserve stable aggregate identities and
+    /// coordinates across growth, splits, and merges.
+    private let topologySnapshotLoader: (@Sendable () async -> Data?)?
     /// Whether the persisted fingerprint has been loaded into
     /// `lastTopologyFingerprint` yet (one-shot, on the first topology duty).
     private var topologyFingerprintLoaded = false
@@ -213,6 +217,7 @@ public actor AutonomicGovernor {
         poolReduceCadenceMs: Int = autonomicGovernorDefaultPoolReduceCadenceMs(),
         topologyHandler: (@Sendable (String, Date, Data, String) async -> Void)? = nil,
         topologyFingerprintLoader: (@Sendable () async -> String?)? = nil,
+        topologySnapshotLoader: (@Sendable () async -> Data?)? = nil,
         topologyGate: (@Sendable () async -> Bool)? = nil,
         // Graph analytics handler: the host (AriaMcpKit) injects the
         // CognitionKit-based Keystones + Constellation scan. Nil = no graph
@@ -242,6 +247,7 @@ public actor AutonomicGovernor {
         self.poolTableArtifactURL = poolTableArtifactURL
         self.topologyHandler = topologyHandler
         self.topologyFingerprintLoader = topologyFingerprintLoader
+        self.topologySnapshotLoader = topologySnapshotLoader
         self.topologyGate = topologyGate
         self.gcSweepIntervalMs = gcSweepIntervalMs
         self.clock = clock
@@ -514,63 +520,20 @@ public actor AutonomicGovernor {
             lastTopologySnapshotFired = now
             if let handler = topologyHandler {
                 // nonisolated static func — actor executor released at first await.
-                Task { [kit, handle, now, handler, topologyGate] in
+                Task { [kit, handle, now, handler, topologyGate, topologySnapshotLoader] in
                     if let gate = topologyGate, !(await gate()) { return }
                     // Seed the comparison fingerprint, loading the persisted one once
                     // (F5) so the first post-restart duty skips the recompute when the
                     // estate is unchanged.
                     let previousFingerprint = await self.topologyFingerprintForDuty()
 
-                    // Bug 2 fix (ADR025-AUDITLOG-GOVERNOR): audit-count watermark check
-                    // BEFORE the full-estate load inside topologySnapshotDuty.
-                    //
-                    // `topologySnapshotDuty` loads allDrawers + allTunnels + allKGFacts
-                    // before checking its fingerprint, so the full O(N) data load was paid
-                    // even on the "nothing changed, skip" path. Adding the audit-count
-                    // check here — one O(1) COUNT(*) SQL call — gates the entire duty call
-                    // when the estate is verifiably unchanged. The skip requires both:
-                    //   1. A valid previous fingerprint (we have run at least once)
-                    //   2. No new audit events since the last topology-count watermark
-                    // If either condition is absent, proceed to the full duty.
-                    if previousFingerprint != nil {
-                        do {
-                            let estate = try await kit.estate(for: handle)
-                            let savedCountRaw = try await estate.meta(
-                                key: NeuronKitManifestKey.topologyCount)
-                            let savedCount = savedCountRaw.flatMap { Int($0) }
-                            let changed = try await kit.hasAuditGrown(for: handle, since: savedCount)
-                            if !changed {
-                                // Estate provably unchanged — skip the full duty.
-                                return
-                            }
-                        } catch {
-                            // Watermark probe failed (transient I/O); fall through to the
-                            // full duty as a safe fallback. The duty's own fingerprint check
-                            // provides the final skip guard.
-                            logger.debug(
-                                "AutonomicGovernor: topology watermark probe error (falling through): \(error)")
-                        }
-                    }
-
                     do {
                         let token = try await AutonomicGovernor.topologySnapshotDuty(
                             kit: kit, handle: handle, now: now,
                             previousFingerprint: previousFingerprint,
+                            previousSnapshotLoader: topologySnapshotLoader,
                             handler: handler)
                         self.recordTopologyInputsToken(token)
-                        // Save the topology audit-count watermark after a successful duty
-                        // run so the next cadence tick can short-circuit at this level.
-                        do {
-                            let estate = try await kit.estate(for: handle)
-                            let currentCount = try await kit.auditEventCount(for: handle)
-                            try await estate.setMeta(
-                                key: NeuronKitManifestKey.topologyCount,
-                                value: String(currentCount))
-                        } catch {
-                            // Non-fatal: next tick will re-run the full duty and re-save.
-                            logger.debug(
-                                "AutonomicGovernor: topology count watermark save error: \(error)")
-                        }
                     } catch {
                         logger.error("AutonomicGovernor: topologySnapshotDuty error: \(error)")
                     }
@@ -970,6 +933,8 @@ public actor AutonomicGovernor {
         handle: EstateHandle,
         now: Date,
         previousFingerprint: String? = nil,
+        previousSnapshot: Data? = nil,
+        previousSnapshotLoader: (@Sendable () async -> Data?)? = nil,
         handler: @Sendable (String, Date, Data, String) async -> Void
     ) async throws -> TopologyInputsToken {
         let locus = try await kit.estate(for: handle)
@@ -980,13 +945,20 @@ public actor AutonomicGovernor {
 
         // Dirty check: compute the stable inputs fingerprint BEFORE the expensive
         // work. An unchanged fingerprint means the stored snapshot is still current,
-        // so the duty returns without touching the store. The fingerprint is stable
-        // across process launches, so this skip holds across a restart too (F5).
+        // so the duty skips graph projection, encoding, and the snapshot write. The
+        // fingerprint is stable across process launches, so this skip holds across a
+        // restart too (F5).
         let token = TopologyInputsToken(drawers: allDrawerRows,
                                         tunnels: allTunnelRows,
-                                        factCount: kgFacts.count)
+                                        facts: kgFacts)
         if let previousFingerprint, token.fingerprint == previousFingerprint {
             return token
+        }
+        let projectionBaseline: Data?
+        if let previousSnapshot {
+            projectionBaseline = previousSnapshot
+        } else {
+            projectionBaseline = await previousSnapshotLoader?()
         }
 
         // Tombstone instant resolution: prefer decoded tombstonedAt; fall back to
@@ -1029,6 +1001,7 @@ public actor AutonomicGovernor {
                                            facts: factInputs,
                                            estate: handle.estateUUID.uuidString,
                                            now: now)
+        let projection = TopologyProjector.project(topo, previousSnapshot: projectionBaseline)
 
         let nodes = topo.nodes.map { n in
             TopologySnapshotNode(
@@ -1040,19 +1013,43 @@ public actor AutonomicGovernor {
                 lastActiveTs: n.lastActiveTs,
                 createdTs: n.createdTs,
                 tombstonedTs: n.tombstonedTs,
-                udcCode: n.udcCode)
+                udcCode: n.udcCode,
+                communityKey: projection.nodesByID[n.id]?.communityKey,
+                foldKey: projection.nodesByID[n.id]?.foldKey,
+                x: projection.nodesByID[n.id]?.x,
+                y: projection.nodesByID[n.id]?.y,
+                z: projection.nodesByID[n.id]?.z,
+                representative: projection.nodesByID[n.id]?.representative ?? false)
         }
         let edges = topo.edges.map { e in
             TopologySnapshotEdge(
                 source: e.source, target: e.target,
-                edgeType: e.edgeType,
+                edgeType: e.edgeType == "lattice" ? "nmf_bond" : e.edgeType,
                 weight: e.weight,
                 decayedWeight: e.weight,  // no decay at this layer; mirrors weight
                 createdTs: e.createdTs,
                 tombstonedTs: e.tombstonedTs)
         }
-        let communities = topo.communities.map { c in
-            TopologySnapshotCommunity(id: c.id, size: c.size, dominantUdcCode: c.dominantUdcCode)
+        let rawCommunities = Dictionary(uniqueKeysWithValues: topo.communities.map { ($0.id, $0) })
+        let communities = projection.communities.map { c in
+            TopologySnapshotCommunity(
+                id: c.rawID, size: c.size,
+                dominantUdcCode: rawCommunities[c.rawID]?.dominantUdcCode ?? "",
+                stableKey: c.stableKey, x: c.x, y: c.y, z: c.z,
+                foldCount: c.foldCount, representativeIds: c.representativeIDs,
+                classificationPurity: c.classificationPurity)
+        }
+        let folds = projection.folds.map { f in
+            TopologySnapshotFold(
+                stableKey: f.stableKey, communityKey: f.communityKey,
+                size: f.size, dominantUdcCode: f.dominantUdcCode,
+                x: f.x, y: f.y, z: f.z,
+                representativeIds: f.representativeIDs)
+        }
+        let bridges = projection.bridges.map { b in
+            TopologySnapshotBridge(
+                level: b.level, sourceKey: b.sourceKey, targetKey: b.targetKey,
+                edgeType: b.edgeType, weight: b.weight, edgeCount: b.edgeCount)
         }
 
         // ISO-8601 generatedTs stamped with the injected `now` — never calls Date() here.
@@ -1062,6 +1059,10 @@ public actor AutonomicGovernor {
             edges: edges,
             structurePending: false,
             communities: communities,
+            topologyVersion: 3,
+            coordinateFrameVersion: 1,
+            folds: folds,
+            bridges: bridges,
             generatedTs: generatedTs)
 
         // Deterministic encoding: JSONEncoder with sorted keys so two identical estates
@@ -1138,9 +1139,8 @@ public actor AutonomicGovernor {
 /// `hashValue`, which is salted per launch and would not compare across processes.
 ///
 /// Built from already-fetched rows only — counts, maximum ingest/event instants,
-/// dead counts, and an order-independent inputs digest (overflow sum of per-drawer
-/// id+udcCode FNV hashes, catching re-anchoring that changes neither counts nor
-/// timestamps).
+/// dead counts, and a sorted digest of every topology-affecting drawer, tunnel,
+/// and active fact field.
 public struct TopologyInputsToken: Sendable, Equatable {
     public let drawerCount: Int
     public let tunnelCount: Int
@@ -1149,17 +1149,17 @@ public struct TopologyInputsToken: Sendable, Equatable {
     public let deadTunnelCount: Int
     public let maxFiledAt: Date?
     public let maxEventTime: Date?
-    /// Order-independent overflow sum of per-drawer FNV-1a(id + udcCode) hashes.
-    /// STABLE across process launches (FNV, not Swift `hashValue`) so the
-    /// `fingerprint` persists and compares across restarts.
+    /// Stable FNV-1a over sorted, length-prefixed topology input records.
+    /// Includes drawer state, tunnel endpoints/lifespans, and active fact
+    /// identity/subject/source so same-count structural changes cannot be missed.
     public let inputsDigest: UInt64
 
     // Package-internal initialiser — tests in the same module use this; cross-module
     // consumers receive tokens from the governor itself, never construct them directly.
-    init(drawers: [Drawer], tunnels: [Tunnel], factCount: Int) {
+    init(drawers: [Drawer], tunnels: [Tunnel], facts: [KGFact]) {
         self.drawerCount = drawers.count
         self.tunnelCount = tunnels.count
-        self.factCount = factCount
+        self.factCount = facts.count
         self.deadDrawerCount = drawers.lazy
             .filter { $0.state == .tombstoned || $0.tombstonedAt != nil }.count
         self.deadTunnelCount = tunnels.lazy.filter { $0.tombstonedAt != nil }.count
@@ -1167,24 +1167,42 @@ public struct TopologyInputsToken: Sendable, Equatable {
         let tunnelMaxFiled = tunnels.lazy.map(\.filedAt).max()
         self.maxFiledAt = [drawerMaxFiled, tunnelMaxFiled].compactMap { $0 }.max()
         self.maxEventTime = drawers.lazy.map(\.eventTime).max()
-        // Overflow-add of per-drawer STABLE hashes keeps the digest
-        // order-independent across query order AND identical across process runs.
-        var digest: UInt64 = 0
+        func field(_ value: String) -> String { "\(value.utf8.count):\(value)" }
+        var records: [String] = []
+        records.reserveCapacity(drawers.count + tunnels.count + facts.count)
         for d in drawers {
-            digest = digest &+ Self.fnv1a("\(d.id)\u{1}\(d.udcCode)")
+            let dead = d.state == .tombstoned || d.tombstonedAt != nil
+            records.append([
+                "drawer", d.id, d.udcCode,
+                String(d.filedAt.timeIntervalSince1970),
+                String(d.eventTime.timeIntervalSince1970),
+                dead ? "1" : "0",
+                d.tombstonedAt.map { String($0.timeIntervalSince1970) } ?? "-",
+            ].map(field).joined())
+        }
+        for tunnel in tunnels {
+            records.append([
+                "tunnel", tunnel.sourceDrawerId ?? "-", tunnel.targetDrawerId ?? "-",
+                String(tunnel.filedAt.timeIntervalSince1970),
+                tunnel.tombstonedAt.map { String($0.timeIntervalSince1970) } ?? "-",
+            ].map(field).joined())
+        }
+        for fact in facts {
+            records.append([
+                "fact", fact.id, fact.subject, fact.sourceDrawerID,
+                String(fact.filedAt.timeIntervalSince1970),
+            ].map(field).joined())
+        }
+        var digest: UInt64 = 0xcbf2_9ce4_8422_2325
+        for record in records.sorted() {
+            for byte in record.utf8 {
+                digest ^= UInt64(byte)
+                digest = digest &* 0x0000_0100_0000_01b3
+            }
+            digest ^= 0xff
+            digest = digest &* 0x0000_0100_0000_01b3
         }
         self.inputsDigest = digest
-    }
-
-    /// FNV-1a 64-bit over a string's UTF-8 — a small, stable, process-independent
-    /// hash (no external dependency, no Swift `hashValue` salt).
-    static func fnv1a(_ s: String) -> UInt64 {
-        var h: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in s.utf8 {
-            h ^= UInt64(byte)
-            h = h &* 0x0000_0100_0000_01b3
-        }
-        return h
     }
 
     /// Stable, persistable fingerprint of these inputs. Two tokens are equal iff
@@ -1219,10 +1237,17 @@ struct TopologySnapshotNode: Codable, Sendable {
     /// matching the lastActiveTs/createdTs convention. Absent in older snapshots
     /// (pre-V2-P1a) — decodable without the key present.
     let udcCode: String?
+    let communityKey: String?
+    let foldKey: String?
+    let x: Double?
+    let y: Double?
+    let z: Double?
+    let representative: Bool
 
     private enum CodingKeys: String, CodingKey {
         case id, nounType, communityId, centrality, anomaly
         case lastActiveTs, createdTs, tombstonedTs, udcCode
+        case communityKey, foldKey, x, y, z, representative
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1238,6 +1263,12 @@ struct TopologySnapshotNode: Codable, Sendable {
         try c.encode(tombstonedTs, forKey: .tombstonedTs)
         // udcCode is ABSENT when nil (not null) — unanchored drawers carry no classification key.
         try c.encodeIfPresent(udcCode, forKey: .udcCode)
+        try c.encodeIfPresent(communityKey, forKey: .communityKey)
+        try c.encodeIfPresent(foldKey, forKey: .foldKey)
+        try c.encodeIfPresent(x, forKey: .x)
+        try c.encodeIfPresent(y, forKey: .y)
+        try c.encodeIfPresent(z, forKey: .z)
+        try c.encode(representative, forKey: .representative)
     }
 }
 
@@ -1274,6 +1305,33 @@ struct TopologySnapshotCommunity: Codable, Sendable {
     let id: Int
     let size: Int
     let dominantUdcCode: String
+    let stableKey: String
+    let x: Double
+    let y: Double
+    let z: Double
+    let foldCount: Int
+    let representativeIds: [String]
+    let classificationPurity: Double
+}
+
+struct TopologySnapshotFold: Codable, Sendable {
+    let stableKey: String
+    let communityKey: String
+    let size: Int
+    let dominantUdcCode: String
+    let x: Double
+    let y: Double
+    let z: Double
+    let representativeIds: [String]
+}
+
+struct TopologySnapshotBridge: Codable, Sendable {
+    let level: String
+    let sourceKey: String
+    let targetKey: String
+    let edgeType: String
+    let weight: Double
+    let edgeCount: Int
 }
 
 /// Full payload produced by the governor's topology-snapshot duty.
@@ -1288,6 +1346,10 @@ struct TopologySnapshotPayload: Codable, Sendable {
     let edges: [TopologySnapshotEdge]
     let structurePending: Bool
     let communities: [TopologySnapshotCommunity]
+    let topologyVersion: Int
+    let coordinateFrameVersion: Int
+    let folds: [TopologySnapshotFold]
+    let bridges: [TopologySnapshotBridge]
     /// ISO-8601 UTC timestamp of when the governor produced this snapshot.
     let generatedTs: String
 }
