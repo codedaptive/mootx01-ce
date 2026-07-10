@@ -292,7 +292,6 @@ body::before{
 .tsp-label{font-family:var(--font-m); font-size:9px; text-transform:uppercase; letter-spacing:.5px; color:var(--hi)}
 .tsp-value{font-family:var(--font-m); font-size:11px; color:var(--text); word-break:break-word}
 .tsp-value.muted{color:var(--muted); font-style:italic}
-.tsp-copy{width:100%; text-align:center}
 
 /* Static legend sections (PoC-spec style: Node types / Activity / Edges) */
 .topo-lsect{

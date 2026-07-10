@@ -1469,6 +1469,7 @@ import {
     fetchMs: 0, firstFrameMs: 0, transitionMs: 0,
     initialGeometryBytes: 0, bufferUploadBytes: 0,
     frameTimes: [], frameTotal: 0, lastLevel: "estate", lastFocusKey: null,
+    pivotNodeID: null, pivotActive: false,
   };
   // Read-only diagnostics for performance/browser acceptance tests.
   window.__mootTopologyMetrics = topoMetrics;
@@ -1477,6 +1478,8 @@ import {
   // Raycaster for click-to-select.
   let brainRaycaster = null;
   let brainPointer = new THREE.Vector2();
+  let brainPivotTween = null;
+  const BRAIN_PIVOT_DURATION_MS = 320;
   // L5 radar-loop playback state. active = a playback session holds the playhead
   // (playing or paused mid-loop); playing = the step timer is running.
   let topoPlay = { active: false, playing: false, idx: 0, timer: null, playheadMs: 0 };
@@ -1530,6 +1533,8 @@ import {
       p99FrameMs: Math.round(topoMetricPercentile(topoMetrics.frameTimes, 0.99) * 10) / 10,
       level: topoMetrics.lastLevel,
       focusKey: topoMetrics.lastFocusKey,
+      pivotNodeID: topoMetrics.pivotNodeID,
+      pivotActive: topoMetrics.pivotActive,
     });
   }
 
@@ -2186,6 +2191,68 @@ import {
     );
   }
 
+  function cancelBrainPivot(runCompletion) {
+    var pivot = brainPivotTween;
+    brainPivotTween = null;
+    topoMetrics.pivotActive = false;
+    if (runCompletion && pivot && pivot.onComplete) pivot.onComplete();
+  }
+
+  function completeBrainPivot(pivot, destination) {
+    var delta = destination.clone().sub(pivot.startTarget);
+    brainControls.target.copy(destination);
+    brainCamera.position.copy(pivot.startCamera).add(delta);
+    brainControls.update();
+    brainPivotTween = null;
+    topoMetrics.pivotNodeID = pivot.node.id || pivot.node.aggregateKey || null;
+    topoMetrics.pivotActive = false;
+    if (pivot.onComplete) pivot.onComplete();
+  }
+
+  function focusBrainNode(node, onComplete) {
+    if (!node || !brainCamera || !brainControls) {
+      if (onComplete) onComplete();
+      return;
+    }
+    if (brainPivotTween && brainPivotTween.node.id === node.id) {
+      if (onComplete) brainPivotTween.onComplete = onComplete;
+      return;
+    }
+    cancelBrainPivot(false);
+    var pivot = {
+      node: node,
+      startCamera: brainCamera.position.clone(),
+      startTarget: brainControls.target.clone(),
+      startedAt: 0,
+      duration: BRAIN_PIVOT_DURATION_MS,
+      onComplete: onComplete || null,
+    };
+    var destination = topoNodeWorld(node);
+    var reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion || destination.distanceToSquared(pivot.startTarget) < 1e-10) {
+      completeBrainPivot(pivot, destination);
+      return;
+    }
+    brainPivotTween = pivot;
+    topoMetrics.pivotNodeID = null;
+    topoMetrics.pivotActive = true;
+    brainRearm(brainSettle, performance.now());
+  }
+
+  function topoTickBrainPivot(ts) {
+    var pivot = brainPivotTween;
+    if (!pivot || !brainCamera || !brainControls) return false;
+    if (!pivot.startedAt) pivot.startedAt = ts;
+    var raw = Math.min(1, (ts - pivot.startedAt) / pivot.duration);
+    var eased = raw < 0.5 ? 4 * raw * raw * raw : 1 - Math.pow(-2 * raw + 2, 3) / 2;
+    var destination = topoNodeWorld(pivot.node);
+    var delta = destination.clone().sub(pivot.startTarget).multiplyScalar(eased);
+    brainControls.target.copy(pivot.startTarget).add(delta);
+    brainCamera.position.copy(pivot.startCamera).add(delta);
+    if (raw >= 1) completeBrainPivot(pivot, destination);
+    return true;
+  }
+
   function topoAggregateCandidate(clientX, clientY, expandableOnly, maxDistance) {
     if (!brainCamera || !brainGLRenderer) return null;
     var rect = brainGLRenderer.domElement.getBoundingClientRect();
@@ -2391,7 +2458,10 @@ import {
     // orbit fully coasts to rest, then settles. (OrbitControls.update() only
     // dispatches 'change' when the camera actually moved, so a static settled
     // frame never spuriously re-arms.)
-    brainControls.addEventListener('start', function () { brainRearm(brainSettle, performance.now()); });
+    brainControls.addEventListener('start', function () {
+      cancelBrainPivot(true);
+      brainRearm(brainSettle, performance.now());
+    });
     brainControls.addEventListener('change', function () {
       brainRearm(brainSettle, performance.now());
     });
@@ -2464,11 +2534,8 @@ import {
         : topoAggregateCandidate(e.clientX, e.clientY, true, 48);
       if (node) {
         if (node && !brainHidden(node)) {
-          if (node === brainSelectedNode) {
-            selectBrainNode(null);
-          } else {
-            selectBrainNode(node);
-          }
+          selectBrainNode(node);
+          focusBrainNode(node);
         }
       } else {
         selectBrainNode(null);
@@ -2487,7 +2554,8 @@ import {
       }
       if (!node || !node.aggregateLevel || brainHidden(node)) return;
       e.preventDefault();
-      topoExpand(node);
+      selectBrainNode(node);
+      focusBrainNode(node, function () { topoExpand(node); });
     });
 
     // Right-click: raycaster hit → copy a paste-ready AI query about the node.
@@ -2509,7 +2577,6 @@ import {
         : topoAggregateCandidate(e.clientX, e.clientY);
       if (!node || brainHidden(node)) return;
       e.preventDefault();
-      if (!node.aggregateLevel) selectBrainNode(node); // highlight a real memory
       copyNodeQuery(node);
     });
 
@@ -2522,7 +2589,11 @@ import {
       if (e.key === 'Escape' && brainSelectedNode) { selectBrainNode(null); return; }
       if (e.key === 'Enter') {
         var candidate = topoAggregateCandidate(null, null, true);
-        if (candidate) { e.preventDefault(); topoExpand(candidate); }
+        if (candidate) {
+          e.preventDefault();
+          selectBrainNode(candidate);
+          focusBrainNode(candidate, function () { topoExpand(candidate); });
+        }
         return;
       }
       var scale = (e.key === '+' || e.key === '=') ? 0.8
@@ -2593,6 +2664,7 @@ import {
       }
       // Always update controls so orbit damping keeps coasting; a real camera
       // move dispatches 'change' → brainRearm, which is what re-arms an orbit.
+      topoTickBrainPivot(ts);
       brainControls.update();
       if (brainPointsMesh) brainPointsMesh.material.uniforms.uTime.value = brainT;
       var recencyDue = Date.now() >= brainNextRecencyRefreshMs;
@@ -3288,11 +3360,12 @@ import {
 
   // Set or clear the selection. Computes hop-1 and hop-2 neighbor sets from
   // brainAdjacency, then refreshes the V2-P2c truth-lens panel — every
-  // selection-changing call site (click, right-click, Escape) funnels
+  // selection-changing call site (click, double-click, Escape) funnels
   // through here, so the panel is the single place that needs to stay in
   // sync (stopBrainAnimation's own teardown reset calls renderSelectionPanel
   // directly, since it bypasses this function — see its comment).
   function selectBrainNode(node) {
+    if (!node) cancelBrainPivot(false);
     brainSelectedNode = node;
     brainHop1 = Object.create(null);
     brainHop2 = Object.create(null);
@@ -3430,13 +3503,10 @@ import {
     return lines.join("\n");
   }
 
-  // Copy `node`'s AI query to the clipboard, with the Safari no-user-
-  // activation fallback (contextmenu events carry no user activation, so
-  // BOTH clipboard paths are refused there — the button click from the
-  // selection panel normally has activation, but browsers lacking the async
-  // Clipboard API still fall through the same path). Shared by the
-  // right-click context-menu handler and the V2-P2c selection panel's
-  // "Copy AI query" button — one copy flow, one success/failure UX either way.
+  // Copy `node`'s AI query to the clipboard. Some browsers refuse clipboard
+  // writes from a contextmenu event, so showQueryFallback supplies a normal
+  // activation-bearing Copy button when needed. This remains a right-click
+  // graph action, separate from single-click pivot selection.
   function copyNodeQuery(node) {
     var query = node.aggregateLevel ? buildAggregateQuery(node) : buildNodeQuery(node);
     copyText(query, function (ok) {
@@ -3543,7 +3613,7 @@ import {
   // =========================================================================
   // V2-P2c SELECTION TRUTH-LENS PANEL — "what is this memory really near?"
   // selectBrainNode(node) calls renderSelectionPanel() on every selection
-  // change (click, right-click, Escape); stopBrainAnimation's own teardown
+  // change (click, double-click, Escape); stopBrainAnimation's own teardown
   // reset calls it too, since that path sets brainSelectedNode directly
   // rather than through selectBrainNode. Every field below is already
   // client-side state built by buildRealBrainNodes/startBrainAnimation — no
@@ -3552,7 +3622,8 @@ import {
 
   // Lazily builds and appends the panel chrome to #topoStage, same
   // append-on-demand pattern as topoToast — caches the result so repeated
-  // selections don't rebuild the head/copy-button chrome, only the body.
+  // selections don't rebuild the panel chrome, only the body. AI-query copy
+  // remains a right-click action on the graph itself.
   //
   // Placement: bottom-left, stacked ABOVE .topo-feed (the activity feed
   // overlay, also anchored bottom-left at 14px from the stage edge). Rather
@@ -3568,11 +3639,11 @@ import {
     var panel = el("div", "topo-selpanel");
     panel.id = "topoSelPanel";
     panel.setAttribute("role", "region");
-    panel.setAttribute("aria-label", "Selected memory");
+    panel.setAttribute("aria-label", "Selected pivot");
     panel.hidden = true;
 
     var head = el("div", "tsp-head");
-    head.appendChild(el("span", "tsp-title", "Selected memory"));
+    head.appendChild(el("span", "tsp-title", "Selected pivot"));
     var closeBtn = el("button", "tsp-close", "×");
     closeBtn.type = "button";
     closeBtn.setAttribute("aria-label", "Clear selection");
@@ -3582,13 +3653,6 @@ import {
 
     topoSelBodyEl = el("div", "tsp-body");
     panel.appendChild(topoSelBodyEl);
-
-    var copyBtn = el("button", "btn tsp-copy", "Copy AI query");
-    copyBtn.type = "button";
-    copyBtn.addEventListener("click", function () {
-      if (brainSelectedNode) copyNodeQuery(brainSelectedNode);
-    });
-    panel.appendChild(copyBtn);
 
     stage.appendChild(panel);
     topoSelPanelEl = panel;
@@ -3752,6 +3816,9 @@ import {
     }
     brainRipples = []; brainTrails = []; brainLastPulseNode = null;
     brainActivePulseNodes.clear();
+    brainPivotTween = null;
+    topoMetrics.pivotNodeID = null;
+    topoMetrics.pivotActive = false;
     if (brainControls) { brainControls.dispose(); brainControls = null; }
     if (brainGLRenderer) {
       brainGLRenderer.dispose();
