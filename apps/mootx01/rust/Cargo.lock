@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "mootx01-cli"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "aria-mcp",
  "libc",

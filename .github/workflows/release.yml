@@ -13,6 +13,13 @@ on:
   # regex, so gating on the tag string is NOT sufficient to keep branch-built
   # code out of the signing pipeline. The event type is the trust boundary.
   # (SECURITY 734e9908: branch-built macOS signing bypass.)
+  #
+  # Narrow exception: `winget-tag` re-runs ONLY the winget-pkgs submission for
+  # an ALREADY-PUBLISHED release tag (assets exist on the GitHub release; no
+  # building, no signing — wingetcreate just downloads the published EXEs and
+  # opens the community PR). It exists because the submission can fail for
+  # reasons independent of the release itself (matcher quirks, rate limits)
+  # and re-pushing a tag to retry would re-run the entire pipeline.
   workflow_dispatch:
     inputs:
       platform:
@@ -25,6 +32,11 @@ on:
           - linux
           - windows-x64
           - windows-arm64
+          - none
+      winget-tag:
+        description: 'Resubmit an existing published release tag (e.g. v1.0.27) to winget-pkgs. Combine with platform: none.'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -1033,18 +1045,29 @@ jobs:
   # public_repo scope (fine-grained PATs cannot access repos outside the org).
   submit-winget:
     name: Submit to winget-pkgs
-    if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+    # Runs on tag push (the normal release path), or on manual dispatch with
+    # `winget-tag` set (resubmission for an already-published release — see the
+    # workflow_dispatch comment at the top). `!cancelled()` lets the dispatch
+    # path run even though its `needs` (update-winget) is skipped on dispatch;
+    # the manifests in this repo were already updated by the original tag run.
+    if: ${{ !cancelled() && ((startsWith(github.ref, 'refs/tags/') && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.winget-tag != '')) }}
     needs: [update-winget]
     runs-on: windows-latest
     steps:
       - name: Submit via wingetcreate
         env:
           WINGET_PAT: ${{ secrets.WINGET_SUBMIT_PAT }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event.inputs.winget-tag || github.ref_name }}
         run: |
           if (-not $env:WINGET_PAT) {
-            Write-Host "::warning::WINGET_PUSH_PAT missing — skipping winget-pkgs submission"
+            Write-Host "::warning::WINGET_SUBMIT_PAT missing — skipping winget-pkgs submission"
             exit 0
+          }
+          # The tag is untrusted input (dispatch box or tag name): validate
+          # against the strict release-version shape before it reaches URLs.
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Host "::error::RELEASE_TAG '$($env:RELEASE_TAG)' is not a release version tag (vX.Y.Z)"
+            exit 1
           }
           $VERSION = $env:RELEASE_TAG -replace '^v',''
           $X86_URL = "https://github.com/codedaptive/mootx01-ce/releases/download/$($env:RELEASE_TAG)/mootx01-$VERSION-windows-x86_64-setup.exe"
@@ -1054,10 +1077,16 @@ jobs:
           # Submit: creates a PR on microsoft/winget-pkgs.
           # The package identifier is POSITIONAL — wingetcreate has no --id
           # option and exits 1 with "Option 'id' is unknown" if given one.
+          # Each URL pins its architecture via the `|arch` override: our x64
+          # setup EXE carries a 32-bit Inno stub, so wingetcreate's binary
+          # detection reports it as X86, which matches NEITHER existing
+          # manifest entry exactly and both by installer type — the
+          # "Multiple matches found for X86 Inno installer" failure that
+          # blocked the 1.0.26 and 1.0.27 submissions.
           .\wingetcreate.exe update `
             Codedaptive.MOOTx01 `
             --version $VERSION `
-            --urls $X86_URL $ARM_URL `
+            --urls "$X86_URL|x64" "$ARM_URL|arm64" `
             --token $env:WINGET_PAT `
             --submit
         shell: pwsh
