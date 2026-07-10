@@ -153,7 +153,8 @@ final class LaunchAgentTests: XCTestCase {
         XCTAssertNil(try? fm.destinationOfSymbolicLink(atPath: entry.path),
                      "PATH entry must be a wrapper script, not a symlink")
         let wrapper = try String(contentsOfFile: entry.path, encoding: .utf8)
-        XCTAssertTrue(wrapper.contains("exec \"\(dest.path)\" \"$@\""),
+        // The wrapper single-quotes the exec target (#15 shell-escape).
+        XCTAssertTrue(wrapper.contains("exec '\(dest.path)' \"$@\""),
                       "wrapper must exec the placed moot-mgr")
 
         // Re-running is overwrite-safe (idempotent).

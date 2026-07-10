@@ -209,7 +209,7 @@ struct InstallerTests {
                 "PATH entry must not be a symlink")
         let script = try String(contentsOfFile: entry.path, encoding: .utf8)
         #expect(script.hasPrefix("#!/bin/sh"), "wrapper must be a shell script")
-        #expect(script.contains("exec \"\(placed)\" \"$@\""),
+        #expect(script.contains("exec '\(placed)' \"$@\""),
                 "wrapper must exec the placed binary, forwarding all args")
         let attrs = try fm.attributesOfItem(atPath: entry.path)
         let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
@@ -236,7 +236,7 @@ struct InstallerTests {
         #expect((try? fm.destinationOfSymbolicLink(atPath: entry.path)) == nil,
                 "legacy symlink must be replaced by the wrapper")
         let script = try String(contentsOfFile: entry.path, encoding: .utf8)
-        #expect(script.contains("exec \"\(placed)\" \"$@\""))
+        #expect(script.contains("exec '\(placed)' \"$@\""))
     }
 
     @Test("placeBinary overwrites an existing install (re-install is safe)")
@@ -284,7 +284,7 @@ struct InstallerTests {
         #expect(try String(contentsOfFile: placed, encoding: .utf8) == "real",
                 "the real binary content must survive re-install from itself")
         let wrapper = try String(contentsOfFile: pathEntry, encoding: .utf8)
-        #expect(wrapper.contains("exec \"\(placed)\" \"$@\""),
+        #expect(wrapper.contains("exec '\(placed)' \"$@\""),
                 "PATH wrapper still execs the real placed binary")
     }
 
