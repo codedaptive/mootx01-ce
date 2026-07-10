@@ -1,8 +1,8 @@
 ---
 title: FDC Encoder Canonical Specification
-version: 1.1.0
+version: 1.2.0
 status: active
-date: 2026-07-09
+date: 2026-07-10
 description: "Canonical specification of the FDC encoder: the deterministic content-to-classification mapping the substrate ships."
 spec_type: encoder
 authors: MOOTx01 maintainers
@@ -14,18 +14,21 @@ relates_to:
 
 ## 1. Thesis
 
-Any block of text can be deterministically assigned a single location code on a shared, public-domain classification frame without coordination between parties or a network call at runtime. Classifier v4 combines hierarchy-first lexical evidence with a pinned sparse semantic micro-ranker. The ranker is learned at build time, but runtime inference is a byte-defined integer calculation over a checked-in artifact, not a platform model or generative LLM. Two independent devices using the same artifacts produce the same code. Agreement remains a property of the function, not a product of runtime consensus.
+Any block of text can be deterministically assigned a single location code on a shared, public-domain classification frame without coordination between parties or a network call at runtime. Classifier v4.2 combines a deterministic content-shape router, hierarchy-first lexical evidence, and a pinned sparse semantic micro-ranker. The ranker is learned at build time, but runtime inference is a byte-defined integer calculation over a checked-in artifact, not a platform model or generative LLM. Two independent devices using the same artifacts produce the same code. Agreement remains a property of the function, not a product of runtime consensus.
 
 The engine lives in **LatticeLib** (`FDC`, `FDCMatcher`). It is what consumers call to classify text; `EideticLib.lookup` is the first such consumer (it calls `FDC.encodeAnchor` and carries the result onto an `Anchor`). There is one engine home and one frame.
 
-The function has two shipped entry points, one a thin wrapper over the other:
+The function has three shipped entry points:
 
-    FDC.encode(text)       -> code?                       # nil == UNRESOLVED
-    FDC.encodeAnchor(text) -> (code?, conceptQID?)
+    FDC.encode(text)                                 -> code?
+    FDC.encodeAnchor(text)                           -> (code?, conceptQID?)
+    FDC.encodeAnchor(text, contentKind, recordNovel) -> (code?, conceptQID?)
 
-`encode` returns the FDC code or `nil` for unmatched input — the encoder never guesses. `encodeAnchor` returns the same code plus the **dominant concept Q-ID**: the highest-weighted Wikidata Q-ID in the input's concept bag (ties broken by lowest Q-ID, so it is deterministic), or `nil` if the bag carries no Q-ID concept. The dominant Q-ID is "what the text is most about"; `EideticLib.lookup` carries it as the Anchor's `wikidataQID`. Both are computed in a single bagging pass.
+Empty input returns `nil`. Nonempty input without defensible subject evidence returns `000` (Generalities/unclassified), never an arbitrary narrow code. `encodeAnchor` returns the same code plus a concept Q-ID. On the lexical path this is the highest-weighted Wikidata Q-ID in the input's concept bag (ties broken by lowest Q-ID). For programming source classified as `005`, a decisively recognized language instead supplies its pinned public Wikidata Q-ID as the refinement. `EideticLib.lookup` carries it as the Anchor's `wikidataQID`.
 
-One bagging pass. One exit. No branches except an explicit guard for unmatched input. (There is no separate "trail" return — an earlier draft surfaced a score-sorted trail; the shipped extra is the dominant concept Q-ID described above.)
+The v4.2 shape router runs before lexical scoring. Explicit `contentKind=code` is authoritative and sends every nonempty block to `005`. Without explicit metadata, recognized programming-language fences, unlabeled source fences, declaration-heavy source, and syntax-heavy source also route to `005`. Operational shell transcripts route to `000`; explicitly marking the same transcript as code overrides that heuristic. Language detection is a checked-in weighted rule table shared by Swift and Rust. Ties and weak evidence produce no language Q-ID.
+
+Source-shape routing is a bounded pre-pass. Inputs that continue to subject matching use one bagging pass and one result; there is no separate score-sorted "trail" return.
 
 ---
 
@@ -71,7 +74,7 @@ Nothing in this list requires a proprietary runtime, a generative model, or a ru
 
 ## 3. Logic
 
-The encoder runs the same five-step pipeline in two contexts:
+After the v4.2 shape router, the encoder runs the same lexical and semantic pipeline in two contexts:
 
 **Build time:** steps 1–3 are run over each FDC code's reference text drawn from three sources: its FDC label, its subject-heading title, and its Wikipedia article. The three sources vary enormously in size. To prevent the article from drowning the label, LexRank is applied to the article first, reducing it to its most central terms before it enters the pipeline. The three resulting bags are then merged with source-type weights applied: label terms carry the highest weight, title terms medium, article terms lowest. These weights are part of the pinned contract. A code inherits its ancestors' merged signature terms down the decimal tree, so a child code carries the union of its own terms and every ancestor's terms.
 
@@ -92,7 +95,7 @@ Because both sides use identical steps on comparable inputs, the runtime bag is 
     score[code] = Σ_{t ∈ bag ∩ sig(code)}  bag[t] · idf(t)
     idf(t)      = ln( N / df(t) )    # N = total code signatures, df(t) = # signatures containing t
 
-A term that appears in many signatures contributes little; a distinctive term dominates. This is the scoring the runtime ships. The plain raw-overlap sum (`Σ bag[t]`, no IDF) lets codes with large, broad signatures win on breadth alone, which is why IDF — rewarding distinctive terms — was chosen over it; cosine and IDF-cosine variants were measured and rejected (cosine worse, IDF-cosine behind IDF). `idf(t)` is precomputed once from the pinned signatures at load (no additional shipped artifact). **Determinism:** the IDF-weighted sums are floating-point and float addition is non-associative, so every per-code sum is accumulated in sorted term order, making the result bit-identical across runs and across the Swift and Rust ports. If no candidate shares a term, return UNRESOLVED. The encoder never guesses. (The raw-overlap sum is the matcher's `.raw` mode and is what the direct unit tests use; the runtime is constructed in `.idf` mode.)
+A term that appears in many signatures contributes little; a distinctive term dominates. This is the scoring the runtime ships. The plain raw-overlap sum (`Σ bag[t]`, no IDF) lets codes with large, broad signatures win on breadth alone, which is why IDF — rewarding distinctive terms — was chosen over it; cosine and IDF-cosine variants were measured and rejected (cosine worse, IDF-cosine behind IDF). `idf(t)` is precomputed once from the pinned signatures at load (no additional shipped artifact). **Determinism:** the IDF-weighted sums are floating-point and float addition is non-associative, so every per-code sum is accumulated in sorted term order, making the result bit-identical across runs and across the Swift and Rust ports. If no candidate shares a term, return `000` for nonempty runtime input. The encoder never guesses a narrow subject. (The raw-overlap sum is the matcher's `.raw` mode and is what the direct unit tests use; the runtime is constructed in `.idf` mode.)
 
 **Step 5 — Descend the frame to the deepest passing code.** Take the highest-scoring top-level region under the same IDF scoring (tie-break: lowest code value). Check its children: a child is a descent candidate only if its **raw integer overlap** (`Σ bag[t]`, mode-independent) clears `STOP_THRESHOLD`; among the candidates that clear it, the highest IDF score wins (tie-break: lowest code value). Move to that child and repeat. Stop when no child clears the threshold. The descent cutoff gates on the raw overlap so its meaning is independent of the scoring mode; the IDF score only ranks the candidates that pass the gate. Coarse agreement is guaranteed; fine depth is best-effort and depends on whether the text is specific enough to light up a child signature.
 
@@ -113,7 +116,18 @@ A term that appears in many signatures contributes little; a distinctive term do
 #   STOP_THRESHOLD    : minimum RAW overlap to continue descent (pinned = 1, inert)
 
 # The shipped surface is encodeAnchor; encode(text) == encodeAnchor(text).code.
-encodeAnchor(text) -> (code | UNRESOLVED, conceptQID | None):
+encodeAnchor(text, contentKind = text) -> (code | UNRESOLVED, conceptQID | None):
+
+    if normalize(text) is empty:
+        return (UNRESOLVED, None)
+
+    language = detect_programming_language(text)  # pinned Swift/Rust rule table
+    if contentKind == code:
+        return (005, language.wikidataQID if language else None)
+    if is_operational_shell_transcript(text):
+        return (000, None)
+    if is_source_fence(text) or is_source_shaped(text):
+        return (005, language.wikidataQID if language else None)
 
     # STEP 1+2+3 — one bagging pass: keep nouns/verbs OR Q-ID concepts,
     # canonicalize to concept IDs, weight by frequency.
@@ -132,14 +146,14 @@ encodeAnchor(text) -> (code | UNRESOLVED, conceptQID | None):
     conceptQID = argmax_count({k: v for k, v in bag if k.startswith("Q")},
                               tiebreak=lowest_qid) or None
     if bag is empty:
-        return (UNRESOLVED, conceptQID)
+        return (000, None)
 
     # STEP 4 — single-pass inverted-index match, IDF-weighted score.
     # (SimHash pre-filter for long input is deferred — not implemented; the
     # runtime always scores against every candidate signature. See §2 / cookbook §5.1.)
     candidates = { code for term in bag for code in index.get(term, []) }
     if candidates is empty:
-        return (UNRESOLVED, conceptQID)           # never guess
+        return (000, None)                        # never guess a narrow subject
 
     def score(code):                              # SHIPPED scoring (.idf mode)
         overlap = sorted(t for t in signatures[code] if t in bag)   # SORTED for float determinism
@@ -222,6 +236,9 @@ These are designed-but-unshipped surfaces. They are named here so a reader does 
 - **Novel-token pool reducer / submit endpoint** — the cache accumulates against a no-op submitter; the pool reducer is not yet built.
 
 ## Changelog
+
+### 1.2.0 -- 2026-07-10
+Specified classifier v4.2: authoritative code-kind routing to `005`, deterministic source-shape fallback, operational-shell separation, pinned programming-language Wikidata refinements, and estate recalculation through the stored content kind.
 
 ### 1.1.0 -- 2026-07-09
 Specified classifier v4: pinned sparse semantic artifact, integer Swift/Rust inference, confidence-gated hierarchy fusion, model-hash recalculation floor, and exact semantic conformance vectors.

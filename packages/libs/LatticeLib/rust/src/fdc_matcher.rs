@@ -191,8 +191,17 @@ fn special_classification(text: &str) -> Option<&'static str> {
     }
     let lowered = trimmed.to_ascii_lowercase();
 
-    if lowered.contains("```")
-        || lowered.contains("#!/")
+    if crate::fdc_code_language::detect_code_language(trimmed).is_some() {
+        return Some("005");
+    }
+    if matches!(
+        crate::fdc_code_language::fenced_hint(trimmed),
+        Some(crate::fdc_code_language::FencedCodeHint::Operational)
+    ) {
+        return Some("000");
+    }
+
+    if lowered.contains("#!/")
         || lowered.contains(".git/")
         || lowered.contains("index.lock")
         || lowered.contains("read_signal")
@@ -225,6 +234,9 @@ fn special_classification(text: &str) -> Option<&'static str> {
     }
     if command_line_count >= 2 || (command_line_count == 1 && lines.len() <= 6) {
         return Some("000");
+    }
+    if crate::fdc_code_language::fenced_hint(trimmed).is_some() {
+        return Some("005");
     }
 
     let declaration_line_count = lines
@@ -263,7 +275,7 @@ fn special_classification(text: &str) -> Option<&'static str> {
         .filter(|signal| lowered.contains(**signal))
         .count();
     if signal_count >= 3 {
-        return Some("000");
+        return Some("005");
     }
 
     let non_whitespace_count = trimmed.chars().filter(|c| !c.is_whitespace()).count();
@@ -277,7 +289,7 @@ fn special_classification(text: &str) -> Option<&'static str> {
     let code_like = lines.len() >= 2
         && signal_count >= 2
         && (symbol_count as f64 / non_whitespace_count as f64) > 0.08;
-    code_like.then_some("000")
+    code_like.then_some("005")
 }
 
 /// An intern-keyed bag: TermID → count. Used internally for all scoring

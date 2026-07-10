@@ -29,7 +29,8 @@ struct FdcReclassifyTests {
         code: String,
         qid: String? = nil,
         facets: String? = nil,
-        secondaryQIDs: String? = nil
+        secondaryQIDs: String? = nil,
+        kind: ContentKind = .prose
     ) async throws -> String {
         let frame = CaptureFrame(
             content: content,
@@ -41,7 +42,8 @@ struct FdcReclassifyTests {
                 wikidataQID: qid,
                 wikidataQidsSecondary: secondaryQIDs),
             addedBy: "fdc-reclassify-tests",
-            embeddingModelID: "test-model-v1")
+            embeddingModelID: "test-model-v1",
+            kind: kind)
         return try await kit.capture(handle, frame).id
     }
 
@@ -73,7 +75,7 @@ struct FdcReclassifyTests {
         let id = try await capture(
             kit,
             handle,
-            content: "```swift\nlet read_signal = try store.readSignal()\n```",
+            content: "```bash\nread_signal && git status --short\n```",
             code: "362.4",
             qid: "Q12131")
 
@@ -87,6 +89,46 @@ struct FdcReclassifyTests {
         #expect(body.contains("would_update: 1"))
         #expect(body.contains("\(id): 362.4 [Q12131] -> 000"))
         #expect(try await storedCode(kit, handle, id: id) == "362.4")
+        #expect(try await fdcFloor(kit, handle) == nil)
+    }
+
+    @Test func allModeReclassifiesStoredCodeKindsAndAddsLanguageQID() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        let shortID = try await capture(
+            kit, handle, content: "x += 1", code: "362.4", kind: .code)
+        let swiftID = try await capture(
+            kit, handle,
+            content: "import Foundation\npublic struct User { public let name: String }",
+            code: "005", kind: .code)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true), "mode": .string("all")]))
+        let body = try text(result)
+        #expect(body.contains("updated: 2"))
+
+        let short = try await storedDrawer(kit, handle, id: shortID)
+        #expect(short.udcCode == "005")
+        #expect(short.wikidataQID == nil)
+        let swift = try await storedDrawer(kit, handle, id: swiftID)
+        #expect(swift.udcCode == "005")
+        #expect(swift.wikidataQID == "Q17118377")
+    }
+
+    @Test func suspectOnlyAddsMissingLanguageQIDWhenCodeIsUnchanged() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        let id = try await capture(
+            kit, handle,
+            content: "import Foundation\npublic struct User { public let name: String }",
+            code: "005", kind: .code)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true)]))
+        let body = try text(result)
+        #expect(body.contains("mode: suspectOnly"))
+        #expect(body.contains("updated: 1"))
+        #expect(try await storedDrawer(kit, handle, id: id).wikidataQID == "Q17118377")
         #expect(try await fdcFloor(kit, handle) == nil)
     }
 
@@ -109,7 +151,7 @@ struct FdcReclassifyTests {
         #expect(body.contains("floor_stamp: stamped"))
         #expect(body.contains("updated: 1"))
         #expect(try await storedCode(kit, handle, id: id) == "000")
-        #expect(try await fdcFloor(kit, handle)?.contains("classifier:4.1.0") == true)
+        #expect(try await fdcFloor(kit, handle)?.contains("classifier:4.2.0") == true)
 
         let status = try await dispatcher.dispatch(
             name: "moot_estate_status", arguments: .object([:]))

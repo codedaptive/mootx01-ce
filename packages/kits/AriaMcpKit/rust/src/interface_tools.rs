@@ -2681,7 +2681,7 @@ fn should_repair_fdc_anchor(
         FdcReclassifyMode::SuspectOnly => {
             new_code == DEFAULT_LATTICE_CODE
                 || old_code == DEFAULT_LATTICE_CODE
-                || (old_qid.is_some() && old_qid != new_qid)
+                || (old_code == new_code && old_qid != new_qid)
         }
     }
 }
@@ -2738,7 +2738,7 @@ fn run_reclassify_fdc(
     let mut examples: Vec<FdcReclassifyChange> = Vec::new();
 
     // Phase A — PARALLEL classify. Each drawer's content anchor is a pure
-    // function of its content over the pinned FDC artifacts:
+    // function of its content and stored kind over the pinned FDC artifacts:
     // `eidetic_lib::lookup_no_record` skips the only shared-mutable write (the
     // novel-token pool cache), and every other artifact on the path is
     // read-only after init or a lock-guarded pure-function memo. So the classify
@@ -2747,8 +2747,15 @@ fn run_reclassify_fdc(
     // the semantic ranker), so lifting it off the serial path is the
     // core-saturation win. Anchors are returned in the SAME order as `active`,
     // preserving scan order for the serial audited write in Phase B.
-    let contents: Vec<&str> = active.iter().map(|d| d.content.as_str()).collect();
-    let anchors = classify_contents_in_parallel(&contents);
+    let inputs: Vec<(&str, lattice_lib::FdcContentKind)> = active.iter().map(|drawer| {
+        let kind = if drawer.content_kind() == ContentKind::Code {
+            lattice_lib::FdcContentKind::Code
+        } else {
+            lattice_lib::FdcContentKind::Text
+        };
+        (drawer.content.as_str(), kind)
+    }).collect();
+    let anchors = classify_contents_in_parallel(&inputs);
 
     // Phase B — SERIAL, ORDERED apply. Identical to the pre-parallel loop
     // except the inline classify call is replaced by the precomputed
@@ -2908,12 +2915,12 @@ fn run_reclassify_fdc(
     Ok(text_result(&lines.join("\n")))
 }
 
-/// Classify each content string to its FDC anchor across a bounded worker
-/// pool, returning anchors in the SAME order as `contents`.
+/// Classify each content/kind pair to its FDC anchor across a bounded worker
+/// pool, returning anchors in the SAME order as `inputs`.
 ///
 /// Used by `run_reclassify_fdc` to parallelize the one expensive step of a
 /// reclassify scan (running content through the v4 classifier + semantic
-/// ranker). `eidetic_lib::lookup_no_record` is a pure function of its argument
+/// ranker). `eidetic_lib::lookup_no_record_with_kind` is a pure function of its arguments
 /// over the pinned artifacts and is thread-safe for concurrent calls — the
 /// no-record seam skips the shared novel-token cache write, and the reference
 /// tables / ranker / Q-ID-closure memo it reads are read-only after init or
@@ -2925,8 +2932,10 @@ fn run_reclassify_fdc(
 /// are unaffected). Each worker owns a disjoint output slice; contiguous
 /// chunking of the input and output in lockstep preserves index order, so the
 /// caller's serial audited-write phase sees the identical scan order.
-fn classify_contents_in_parallel(contents: &[&str]) -> Vec<eidetic_lib::Anchor> {
-    let n = contents.len();
+fn classify_contents_in_parallel(
+    inputs: &[(&str, lattice_lib::FdcContentKind)],
+) -> Vec<eidetic_lib::Anchor> {
+    let n = inputs.len();
     if n == 0 {
         return Vec::new();
     }
@@ -2935,9 +2944,9 @@ fn classify_contents_in_parallel(contents: &[&str]) -> Vec<eidetic_lib::Anchor> 
         .unwrap_or(1)
         .min(n);
     if workers <= 1 {
-        return contents
+        return inputs
             .iter()
-            .map(|c| eidetic_lib::lookup_no_record(c))
+            .map(|(content, kind)| eidetic_lib::lookup_no_record_with_kind(content, *kind))
             .collect();
     }
 
@@ -2947,10 +2956,10 @@ fn classify_contents_in_parallel(contents: &[&str]) -> Vec<eidetic_lib::Anchor> 
     let mut results: Vec<Option<eidetic_lib::Anchor>> = (0..n).map(|_| None).collect();
     let chunk = n.div_ceil(workers);
     std::thread::scope(|scope| {
-        for (out_chunk, in_chunk) in results.chunks_mut(chunk).zip(contents.chunks(chunk)) {
+        for (out_chunk, in_chunk) in results.chunks_mut(chunk).zip(inputs.chunks(chunk)) {
             scope.spawn(move || {
-                for (slot, content) in out_chunk.iter_mut().zip(in_chunk.iter()) {
-                    *slot = Some(eidetic_lib::lookup_no_record(content));
+                for (slot, (content, kind)) in out_chunk.iter_mut().zip(in_chunk.iter()) {
+                    *slot = Some(eidetic_lib::lookup_no_record_with_kind(content, *kind));
                 }
             });
         }
