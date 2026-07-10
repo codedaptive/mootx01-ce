@@ -151,7 +151,11 @@ fn static_assets_serve_from_allowlist() {
     assert!(js_status.contains("200"));
     let (zoom_status, zoom) = get(port, "/semantic-zoom.mjs?v=1");
     assert!(zoom_status.contains("200"));
-    assert!(zoom.contains("SemanticZoomController"));
+    // Mirrors the Swift asset test (TopologyRendererAssetTests): the served
+    // module must export the expansion controller and the Engram Field
+    // presentation helper the dashboard imports.
+    assert!(zoom.contains("SemanticExpansionController"));
+    assert!(zoom.contains("engramFieldPresentation"));
     // An off-allowlist path is 404 (no traversal).
     let (nf, _b) = get(port, "/../etc/passwd");
     assert!(nf.contains("404"));
