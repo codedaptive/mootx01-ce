@@ -25,17 +25,56 @@ import PersistenceKitInMemory
 
 // MARK: - Test-only actor extension
 
-// Injects synthetic audit entries directly into the kit's in-memory
-// G-Set, bypassing the LocusKit bridge. Used to set up deterministic
-// Apriori test fixtures without needing live captures. The method is
-// actor-isolated; callers `await` it.
+// Appends synthetic, mutate-shaped audit events to the estate's DURABLE
+// audit log (`storage.auditLog`) — the store `auditLog(for:)` paginates
+// and bridges for the miners. Audit data lives only in `_storagekit_audit`
+// (ADR-026 removed the in-memory G-Set), so fixtures must land there to be
+// visible to mining.
+//
+// Event shape: verb "mutate", beforeBitmaps all-zero, afterBitmaps as
+// given, and IDENTICAL before/after lattice anchors. `AuditBridge` then
+// emits exactly one `.bitmap` UnifiedAuditEntry per CHANGED column and no
+// anchor/Q-ID entries — full control of each row's attribute set.
+// `RowAttributeView` turns every set bit at position p of a column value
+// into one (column, p) attribute, and the alphabetical fieldPath
+// vocabulary ("adjective" < "operational" < "provenance") yields field
+// indices 0 / 1 / 2 respectively. So `adjective: 1 << v` produces exactly
+// the item `Item(field: 0, value: v)`, and so on per column.
+struct AuditFixtureRow {
+    let rowID: UUID
+    var adjective: Int64 = 0
+    var operational: Int64 = 0
+    var provenance: Int64 = 0
+    let hlc: HLC
+}
+
 extension GeniusLocusKit {
-    func injectAuditEntries(
-        _ entries: [UnifiedAuditEntry],
+    func injectAuditEvents(
+        _ rows: [AuditFixtureRow],
         for handle: EstateHandle
-    ) {
-        // ADR-026: in-memory auditLogs removed. No-op stub.
-        _ = entries
+    ) async throws {
+        guard let storage = storages[handle] else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        // Same anchor before and after: the bridge emits latticeAnchor /
+        // wikidataQID entries only when the anchor CHANGES, so a fixed
+        // anchor keeps those paths out of the mining vocabulary.
+        let anchor = LatticeAnchor(udcCode: 0, qidPointer: 0)
+        for row in rows {
+            try await storage.auditLog.append(AuditEvent(
+                estateUuid: handle.estateUUID,
+                rowId: row.rowID,
+                hlc: row.hlc,
+                verb: "mutate",
+                beforeBitmaps: (adjective: 0, operational: 0, provenance: 0),
+                afterBitmaps: (adjective: row.adjective,
+                               operational: row.operational,
+                               provenance: row.provenance),
+                beforeLatticeAnchor: anchor,
+                afterLatticeAnchor: anchor,
+                actor: "test-fixture"
+            ))
+        }
     }
 }
 
@@ -131,18 +170,21 @@ struct EstateAssociationRuleMiningTests {
     // MARK: - Apriori
 
     /// Inject the canonical am-002 dataset (mirrored from AprioriMining's
-    /// conformance vector) via `UnifiedAuditEntry` so the adapter path is
-    /// exercised end-to-end.
+    /// conformance vector) via durable audit events so the adapter path
+    /// (storage → AuditBridge → RowAttributeView → Apriori) is exercised
+    /// end-to-end.
     ///
-    /// Dataset (N=5 rows, 5 unique rowIDs):
-    ///   Rows 0-2: f.x=1 AND f.y=2   (both fields co-occur)
-    ///   Row  3:   f.x=1 AND f.z=3
-    ///   Row  4:   f.z=3 only
+    /// Dataset (N=5 rows, 5 unique rowIDs), expressed through the three
+    /// bitmap columns (bit position p on a column = item value p; the
+    /// alphabetical column vocabulary gives adjective=0, operational=1,
+    /// provenance=2):
+    ///   Rows 0-2: adjective bit 1 AND operational bit 2   (co-occur)
+    ///   Row  3:   adjective bit 1 AND provenance bit 3
+    ///   Row  4:   provenance bit 3 only
     ///
     /// With minSupport=0.5, minConfidence=0.5:
-    ///   Vocab: ["f.x", "f.y", "f.z"] → indices 0, 1, 2
-    ///   RowAttributeView rows (from integer low-byte extraction):
-    ///     rows 0-2: [(0,1),(1,2)]   ← f.x→item(0,1), f.y→item(1,2)
+    ///   RowAttributeView rows:
+    ///     rows 0-2: [(0,1),(1,2)]
     ///     row 3:    [(0,1),(2,3)]
     ///     row 4:    [(2,3)]
     ///   {item(0,1)}: 4 rows → support=0.8 ✓
@@ -157,60 +199,22 @@ struct EstateAssociationRuleMiningTests {
         // Five distinct row IDs for the 5-row dataset.
         let rowIDs = (0..<5).map { _ in UUID() }
 
-        var entries: [UnifiedAuditEntry] = []
-
-        // Rows 0-2: both f.x=1 and f.y=2 captured.
+        var rows: [AuditFixtureRow] = []
+        // Rows 0-2: adjective bit 1 + operational bit 2.
         for i in 0..<3 {
-            entries.append(UnifiedAuditEntry(
-                tier: .locus,
-                hlc: hlc(Int64(i + 1), 0),
-                verb: .capture,
-                rowID: rowIDs[i],
-                fieldPath: "f.x",
-                beforeValue: .null,
-                afterValue: .integer(1)
-            ))
-            entries.append(UnifiedAuditEntry(
-                tier: .locus,
-                hlc: hlc(Int64(i + 1), 1),
-                verb: .capture,
-                rowID: rowIDs[i],
-                fieldPath: "f.y",
-                beforeValue: .null,
-                afterValue: .integer(2)
-            ))
+            rows.append(AuditFixtureRow(
+                rowID: rowIDs[i], adjective: 1 << 1, operational: 1 << 2,
+                hlc: hlc(Int64(i + 1), 0)))
         }
-        // Row 3: f.x=1 and f.z=3.
-        entries.append(UnifiedAuditEntry(
-            tier: .locus,
-            hlc: hlc(10, 0),
-            verb: .capture,
-            rowID: rowIDs[3],
-            fieldPath: "f.x",
-            beforeValue: .null,
-            afterValue: .integer(1)
-        ))
-        entries.append(UnifiedAuditEntry(
-            tier: .locus,
-            hlc: hlc(10, 1),
-            verb: .capture,
-            rowID: rowIDs[3],
-            fieldPath: "f.z",
-            beforeValue: .null,
-            afterValue: .integer(3)
-        ))
-        // Row 4: only f.z=3.
-        entries.append(UnifiedAuditEntry(
-            tier: .locus,
-            hlc: hlc(20, 0),
-            verb: .capture,
-            rowID: rowIDs[4],
-            fieldPath: "f.z",
-            beforeValue: .null,
-            afterValue: .integer(3)
-        ))
+        // Row 3: adjective bit 1 + provenance bit 3.
+        rows.append(AuditFixtureRow(
+            rowID: rowIDs[3], adjective: 1 << 1, provenance: 1 << 3,
+            hlc: hlc(10, 0)))
+        // Row 4: provenance bit 3 only.
+        rows.append(AuditFixtureRow(
+            rowID: rowIDs[4], provenance: 1 << 3, hlc: hlc(20, 0)))
 
-        await kit.injectAuditEntries(entries, for: handle)
+        try await kit.injectAuditEvents(rows, for: handle)
 
         let thresholds = AprioriThresholds(
             minSupport: 0.5,
@@ -253,45 +257,23 @@ struct EstateAssociationRuleMiningTests {
     func aprioriMaxK3Rules() async throws {
         let (kit, handle) = try await openEstate()
 
-        // 3 rows with fields A, B, C all co-occurring.
-        // Vocab: ["f.a","f.b","f.c"] → Item(0,1), Item(1,1), Item(2,1)
+        // 3 rows with items A, B, C all co-occurring — bit 1 on each of the
+        // three columns: A=Item(0,1) adjective, B=Item(1,1) operational,
+        // C=Item(2,1) provenance.
         let rowIDs = (0..<4).map { _ in UUID() }
-        var entries: [UnifiedAuditEntry] = []
-        let fields = [("f.a", 1), ("f.b", 1), ("f.c", 1)]
+        var rows: [AuditFixtureRow] = []
         for i in 0..<3 {
-            for (j, (path, v)) in fields.enumerated() {
-                entries.append(UnifiedAuditEntry(
-                    tier: .locus,
-                    hlc: hlc(Int64(i + 1), Int32(j)),
-                    verb: .capture,
-                    rowID: rowIDs[i],
-                    fieldPath: path,
-                    beforeValue: .null,
-                    afterValue: .integer(Int64(v))
-                ))
-            }
+            rows.append(AuditFixtureRow(
+                rowID: rowIDs[i],
+                adjective: 1 << 1, operational: 1 << 1, provenance: 1 << 1,
+                hlc: hlc(Int64(i + 1), 0)))
         }
         // 1 row with only A and B (breaks C's frequency).
-        entries.append(UnifiedAuditEntry(
-            tier: .locus,
-            hlc: hlc(100, 0),
-            verb: .capture,
-            rowID: rowIDs[3],
-            fieldPath: "f.a",
-            beforeValue: .null,
-            afterValue: .integer(1)
-        ))
-        entries.append(UnifiedAuditEntry(
-            tier: .locus,
-            hlc: hlc(100, 1),
-            verb: .capture,
-            rowID: rowIDs[3],
-            fieldPath: "f.b",
-            beforeValue: .null,
-            afterValue: .integer(1)
-        ))
+        rows.append(AuditFixtureRow(
+            rowID: rowIDs[3], adjective: 1 << 1, operational: 1 << 1,
+            hlc: hlc(100, 0)))
 
-        await kit.injectAuditEntries(entries, for: handle)
+        try await kit.injectAuditEvents(rows, for: handle)
 
         let thresholds = AprioriThresholds(
             minSupport: 0.5,
@@ -329,11 +311,14 @@ struct EstateAssociationRuleMiningTests {
     // `entryLimit` override so the cap boundary can be exercised with a
     // small fixture (10 old entries + 10 new entries, limit = 10).
     //
-    // Design:
-    //   Old group (HLC 1-10): 5 rows × 2 fields, values (f.x=1, f.y=2).
+    // Design (bit position p on a column = item value p; column vocab
+    // sorts alphabetically: adjective=0, operational=1):
+    //   Old group (HLC 1-5): 5 rows, adjective bit 1 + operational bit 2 —
+    //     each event bridges to 2 entries → 10 old entries.
     //     Pattern: Item(field:0, value:1) ↔ Item(field:1, value:2)
     //
-    //   New group (HLC 11-20): 5 rows × 2 fields, values (f.x=3, f.y=4).
+    //   New group (HLC 11-15): 5 rows, adjective bit 3 + operational bit 4
+    //     → 10 new entries.
     //     Pattern: Item(field:0, value:3) ↔ Item(field:1, value:4)
     //
     //   With entryLimit=10: only the 10 newest entries (the new group) are
@@ -343,11 +328,6 @@ struct EstateAssociationRuleMiningTests {
     //   With entryLimit=20 (all entries): both groups are visible. Rows are
     //   distinct (different UUIDs), so both patterns contribute, and rules
     //   for values 1, 2, 3, 4 can appear.
-    //
-    // RowAttributeView vocab sorts field paths alphabetically: "f.x" < "f.y"
-    // → "f.x" is field index 0, "f.y" is field index 1.
-    // Item values come from Int64 low-byte extraction (val & 0x3F).
-    //   value 1  → Item(field:0, value:1) or Item(field:1, value:1) etc.
     @Test("Apriori cap excludes oldest entries and mines only the bounded window")
     func auditEntriesCapExcludesOldestEntries() async throws {
         let (kit, handle) = try await openEstate()
@@ -356,53 +336,22 @@ struct EstateAssociationRuleMiningTests {
         let oldRows = (0..<5).map { _ in UUID() }
         let newRows = (0..<5).map { _ in UUID() }
 
-        var entries: [UnifiedAuditEntry] = []
+        var rows: [AuditFixtureRow] = []
 
-        // Old group: HLC 1-10. Values (1, 2).
+        // Old group: HLC 1-5. Bits (adjective 1, operational 2).
         for (i, rowID) in oldRows.enumerated() {
-            entries.append(UnifiedAuditEntry(
-                tier: .locus,
-                hlc: hlc(Int64(i + 1), 0),
-                verb: .capture,
-                rowID: rowID,
-                fieldPath: "f.x",
-                beforeValue: .null,
-                afterValue: .integer(1)
-            ))
-            entries.append(UnifiedAuditEntry(
-                tier: .locus,
-                hlc: hlc(Int64(i + 1), 1),
-                verb: .capture,
-                rowID: rowID,
-                fieldPath: "f.y",
-                beforeValue: .null,
-                afterValue: .integer(2)
-            ))
+            rows.append(AuditFixtureRow(
+                rowID: rowID, adjective: 1 << 1, operational: 1 << 2,
+                hlc: hlc(Int64(i + 1), 0)))
         }
-
-        // New group: HLC 11-20. Values (3, 4).
+        // New group: HLC 11-15. Bits (adjective 3, operational 4).
         for (i, rowID) in newRows.enumerated() {
-            entries.append(UnifiedAuditEntry(
-                tier: .locus,
-                hlc: hlc(Int64(11 + i), 0),
-                verb: .capture,
-                rowID: rowID,
-                fieldPath: "f.x",
-                beforeValue: .null,
-                afterValue: .integer(3)
-            ))
-            entries.append(UnifiedAuditEntry(
-                tier: .locus,
-                hlc: hlc(Int64(11 + i), 1),
-                verb: .capture,
-                rowID: rowID,
-                fieldPath: "f.y",
-                beforeValue: .null,
-                afterValue: .integer(4)
-            ))
+            rows.append(AuditFixtureRow(
+                rowID: rowID, adjective: 1 << 3, operational: 1 << 4,
+                hlc: hlc(Int64(11 + i), 0)))
         }
 
-        await kit.injectAuditEntries(entries, for: handle)
+        try await kit.injectAuditEvents(rows, for: handle)
 
         let thresholds = AprioriThresholds(
             minSupport: 0.5,
