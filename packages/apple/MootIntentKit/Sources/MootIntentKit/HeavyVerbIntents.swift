@@ -1,5 +1,6 @@
 import Foundation
 import AppIntents
+import UniformTypeIdentifiers
 
 // MARK: - Heavy-verb intents  (M-MXA-3R — the 27-gated surface)
 //
@@ -21,8 +22,23 @@ import AppIntents
 /// Shared progress watcher: counts outstanding drain work down while a
 /// heavy verb runs, so the system's automatic Live Activity shows movement.
 @available(macOS 27.0, iOS 27.0, *)
+private actor HeavyVerbWatchState {
+    private var operationFinished = false
+
+    func finish() {
+        operationFinished = true
+    }
+
+    func isFinished() -> Bool {
+        operationFinished
+    }
+}
+
+@available(macOS 27.0, iOS 27.0, *)
 private func watchDrains(
-    progress: Progress, caller: any MootToolCalling
+    progress: Progress,
+    caller: any MootToolCalling,
+    state: HeavyVerbWatchState
 ) async {
     var peak = 0
     while !Task.isCancelled {
@@ -34,8 +50,31 @@ private func watchDrains(
             progress.totalUnitCount = Int64(peak)
             progress.completedUnitCount = Int64(peak - outstanding)
         }
-        if outstanding == 0 { return }
+        // The first poll often happens before the verb has enqueued work. Do
+        // not interpret that startup zero as completion; wait until the verb
+        // itself has returned and the queues have then settled.
+        if outstanding == 0, await state.isFinished() { return }
         try? await Task.sleep(for: .seconds(2))
+    }
+}
+
+@available(macOS 27.0, iOS 27.0, *)
+private func runWatchingDrains(
+    progress: Progress,
+    caller: any MootToolCalling,
+    operation: @escaping @Sendable () async throws -> String
+) async throws -> String {
+    let state = HeavyVerbWatchState()
+    async let watcher: Void = watchDrains(progress: progress, caller: caller, state: state)
+    do {
+        let result = try await operation()
+        await state.finish()
+        _ = await watcher
+        return result
+    } catch {
+        await state.finish()
+        _ = await watcher
+        throw error
     }
 }
 
@@ -44,13 +83,15 @@ private func watchDrains(
 /// verb: reindex · rebuild missing derived indexes. Fire-and-poll: the tool
 /// acks immediately; progress reads the drain queues until they settle.
 @available(macOS 27.0, iOS 27.0, *)
-public struct ReindexEstateIntent: AppIntent, LongRunningIntent, CancellableIntent {
+public struct ReindexEstateIntent: MootEstateIntent, LongRunningIntent, CancellableIntent {
     public static let title: LocalizedStringResource = "Reindex Memory Estate"
     public static let description = IntentDescription(
         "Rebuild the memory estate's search indexes.",
         categoryName: "Estate"
     )
     public static let isDiscoverable = true
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     public var caller: (any MootToolCalling)?
 
@@ -61,9 +102,9 @@ public struct ReindexEstateIntent: AppIntent, LongRunningIntent, CancellableInte
         let c = try await resolvedCaller(caller)
         let progress = self.progress
         let ack = try await performBackgroundTask {
-            let ack = try await HeavyVerbCore.startReindex(caller: c)
-            await watchDrains(progress: progress, caller: c)
-            return ack
+            try await runWatchingDrains(progress: progress, caller: c) {
+                try await HeavyVerbCore.startReindex(caller: c)
+            }
         } onCancel: { _ in
             // Reindex is server-side single-flight and not interruptible;
             // cancel only stops the progress watcher (see header).
@@ -77,7 +118,7 @@ public struct ReindexEstateIntent: AppIntent, LongRunningIntent, CancellableInte
 /// verb: palace import · blocking; the four import guards are inside the
 /// call, so cancellation can never leave a partial-guard state.
 @available(macOS 27.0, iOS 27.0, *)
-public struct ImportPalaceIntent: AppIntent, LongRunningIntent, CancellableIntent {
+public struct ImportPalaceIntent: MootEstateIntent, LongRunningIntent, CancellableIntent {
     public static let title: LocalizedStringResource = "Import Memory Palace"
     public static let description = IntentDescription(
         "Import a MemPalace into the memory estate.",
@@ -85,15 +126,17 @@ public struct ImportPalaceIntent: AppIntent, LongRunningIntent, CancellableInten
     )
     public static let isDiscoverable = true
     /// Imports mutate the estate wholesale; not from a locked device.
-    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
-    @Parameter(title: "Palace Path") public var palacePath: String
+    @Parameter(title: "Palace", supportedContentTypes: [.folder])
+    public var palace: IntentFile
 
     public var caller: (any MootToolCalling)?
 
     public init() {}
-    public init(palacePath: String, caller: (any MootToolCalling)? = nil) {
-        self.palacePath = palacePath
+    public init(palace: IntentFile, caller: (any MootToolCalling)? = nil) {
+        self.palace = palace
         self.caller = caller
     }
 
@@ -101,14 +144,15 @@ public struct ImportPalaceIntent: AppIntent, LongRunningIntent, CancellableInten
         let c = try await resolvedCaller(caller)
         let progress = self.progress
         let report = try await performBackgroundTask {
-            // background encode speed: yields to the host during very large
-            // imports — the right default for an intent-driven run.
-            async let watcher: Void = watchDrains(progress: progress, caller: c)
-            let report = try await HeavyVerbCore.importPalace(
-                path: palacePath, background: true, caller: c
-            )
-            _ = await watcher
-            return report
+            try await palace.withFile(contentType: .folder, allowOpenInPlace: true) { url, _ in
+                // background encode speed: yields to the host during very
+                // large imports — the right default for an intent-driven run.
+                try await runWatchingDrains(progress: progress, caller: c) {
+                    try await HeavyVerbCore.importPalace(
+                        path: url.path, background: true, caller: c
+                    )
+                }
+            }
         } onCancel: { _ in
             // The blocking import call completes server-side; abandoning the
             // wait cannot violate the import guards (transaction boundary is
@@ -122,22 +166,24 @@ public struct ImportPalaceIntent: AppIntent, LongRunningIntent, CancellableInten
 
 /// verb: vault import · same blocking/guard/cancellation shape as palace.
 @available(macOS 27.0, iOS 27.0, *)
-public struct ImportVaultIntent: AppIntent, LongRunningIntent, CancellableIntent {
+public struct ImportVaultIntent: MootEstateIntent, LongRunningIntent, CancellableIntent {
     public static let title: LocalizedStringResource = "Import Vault"
     public static let description = IntentDescription(
         "Import a vault of notes into the memory estate.",
         categoryName: "Estate"
     )
     public static let isDiscoverable = true
-    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
-    @Parameter(title: "Vault Path") public var vaultPath: String
+    @Parameter(title: "Vault", supportedContentTypes: [.folder])
+    public var vault: IntentFile
 
     public var caller: (any MootToolCalling)?
 
     public init() {}
-    public init(vaultPath: String, caller: (any MootToolCalling)? = nil) {
-        self.vaultPath = vaultPath
+    public init(vault: IntentFile, caller: (any MootToolCalling)? = nil) {
+        self.vault = vault
         self.caller = caller
     }
 
@@ -145,12 +191,13 @@ public struct ImportVaultIntent: AppIntent, LongRunningIntent, CancellableIntent
         let c = try await resolvedCaller(caller)
         let progress = self.progress
         let report = try await performBackgroundTask {
-            async let watcher: Void = watchDrains(progress: progress, caller: c)
-            let report = try await HeavyVerbCore.importVault(
-                path: vaultPath, background: true, caller: c
-            )
-            _ = await watcher
-            return report
+            try await vault.withFile(contentType: .folder, allowOpenInPlace: true) { url, _ in
+                try await runWatchingDrains(progress: progress, caller: c) {
+                    try await HeavyVerbCore.importVault(
+                        path: url.path, background: true, caller: c
+                    )
+                }
+            }
         } onCancel: { _ in
             // Same rationale as ImportPalaceIntent.
         }
@@ -162,13 +209,15 @@ public struct ImportVaultIntent: AppIntent, LongRunningIntent, CancellableIntent
 
 /// verb: dream · accelerator rebuild + one dreaming cycle, blocking.
 @available(macOS 27.0, iOS 27.0, *)
-public struct DreamEstateIntent: AppIntent, LongRunningIntent, CancellableIntent {
+public struct DreamEstateIntent: MootEstateIntent, LongRunningIntent, CancellableIntent {
     public static let title: LocalizedStringResource = "Dream"
     public static let description = IntentDescription(
         "Rebuild derived accelerators and run one dreaming cycle over the estate.",
         categoryName: "Estate"
     )
     public static let isDiscoverable = true
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     public var caller: (any MootToolCalling)?
 
@@ -179,10 +228,9 @@ public struct DreamEstateIntent: AppIntent, LongRunningIntent, CancellableIntent
         let c = try await resolvedCaller(caller)
         let progress = self.progress
         let report = try await performBackgroundTask {
-            async let watcher: Void = watchDrains(progress: progress, caller: c)
-            let report = try await HeavyVerbCore.dream(caller: c)
-            _ = await watcher
-            return report
+            try await runWatchingDrains(progress: progress, caller: c) {
+                try await HeavyVerbCore.dream(caller: c)
+            }
         } onCancel: { _ in
             // Blocking single call; abandoning the wait is guard-safe.
         }

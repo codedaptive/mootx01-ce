@@ -10,15 +10,15 @@ import AriaMCP   // JSONValue, for building tool arguments
 // ARIA tool surface (moot_file_memory) every other adapter uses; nothing here
 // reaches around the dispatcher into the substrate.
 //
-// System registration: this intent is a live iOS-native capability. It is not
-// yet registered with the system Shortcuts catalog because that requires an
-// Xcode app bundle to declare this package's AppIntentsPackage — a packaging
-// step, not a capability gap. perform() runs correctly today in-process and
-// in tests against a real estate.
+// System registration is supplied by MootIntentPackage; linking apps expose
+// this intent through their extracted App Intents metadata.
 
-public struct CaptureDrawerIntent: AppIntent {
+public struct CaptureDrawerIntent: MootEstateIntent {
 
     public static let title: LocalizedStringResource = "Capture Memory"
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @available(anyAppleOS 27.0, *)
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     public static let description = IntentDescription(
         "File caller content into the MOOT as a verbatim drawer.",

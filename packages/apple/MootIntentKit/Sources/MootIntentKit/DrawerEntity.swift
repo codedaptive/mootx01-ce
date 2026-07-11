@@ -88,7 +88,7 @@ extension DrawerEntity: SyncableEntity {}
 // The caller is resolved through IntentRuntimeBridge.shared (the same fallback
 // all intents use when the host has registered a bridge at launch).
 
-public struct DrawerEntityQuery: EntityQuery {
+public struct DrawerEntityQuery: EntityQuery, EntityStringQuery {
 
     public init() {}
 
@@ -125,6 +125,12 @@ public struct DrawerEntityQuery: EntityQuery {
         guard let caller = try? await IntentRuntimeBridge.shared.bridge() else { return [] }
         // An empty query returns recent drawers via the structural/BM25 lane.
         return await caller.recallDrawers(query: "", limit: 20)
+    }
+
+    /// Resolve the text people enter in Siri and Shortcuts entity pickers.
+    public func entities(matching string: String) async throws -> [DrawerEntity] {
+        guard let caller = try? await IntentRuntimeBridge.shared.bridge() else { return [] }
+        return await caller.recallDrawers(query: string, limit: 20)
     }
 }
 

@@ -3,9 +3,8 @@ import MootGateway
 
 // MARK: - Miner settings  (M-ING-2 — consent/config surface)
 //
-// Per-source configuration for the platform miners: enable toggle, wing/room
-// targeting (M-ING-1 model: wing = life area, room = subject matter), and
-// cadence (D7: user-configurable daily/weekly/manual). Sources ship DISABLED
+// Per-source configuration for the platform miners: enable toggle and cadence
+// (D7: user-configurable daily/weekly/manual). Sources ship DISABLED
 // until the user turns them on; enabling arms the source but the FIRST LIVE
 // READ (and its TCC consent prompt) only happens when a mining run actually
 // fires — never from merely rendering this view.
@@ -62,6 +61,8 @@ public struct MinerSourceConfig: Sendable, Equatable {
 public struct MinerSettingsView: View {
     @State private var calendar = MinerSourceConfig.load(sourceID: "calendar", room: "calendar")
     @State private var birthdays = MinerSourceConfig.load(sourceID: "birthdays", room: "birthdays")
+    @State private var runningSources: Set<String> = []
+    @State private var sourceStatus: [String: String] = [:]
 
     public init() {}
 
@@ -71,12 +72,14 @@ public struct MinerSettingsView: View {
                 title: String(localized: "miner.calendar.title", defaultValue: "Calendar"),
                 note: String(localized: "miner.calendar.note",
                              defaultValue: "Files upcoming events as facts. Asks for calendar access on the first run."),
+                sourceID: "calendar",
                 config: $calendar
             )
             sourceSection(
                 title: String(localized: "miner.birthdays.title", defaultValue: "Birthdays"),
                 note: String(localized: "miner.birthdays.note",
                              defaultValue: "Files contact birthdays as facts. Asks for contacts access on the first run."),
+                sourceID: "birthdays",
                 config: $birthdays
             )
         }
@@ -86,15 +89,11 @@ public struct MinerSettingsView: View {
     }
 
     @ViewBuilder
-    private func sourceSection(title: String, note: String,
+    private func sourceSection(title: String, note: String, sourceID: String,
                                config: Binding<MinerSourceConfig>) -> some View {
         Section {
             Toggle(title, isOn: config.enabled)
             if config.wrappedValue.enabled {
-                TextField(String(localized: "miner.wing", defaultValue: "Wing"),
-                          text: config.wing)
-                TextField(String(localized: "miner.room", defaultValue: "Room"),
-                          text: config.room)
                 Picker(String(localized: "miner.cadence", defaultValue: "Cadence"),
                        selection: config.cadence) {
                     Text(String(localized: "miner.cadence.daily", defaultValue: "Daily"))
@@ -104,9 +103,49 @@ public struct MinerSettingsView: View {
                     Text(String(localized: "miner.cadence.manual", defaultValue: "Manual only"))
                         .tag(MiningCadence.manual)
                 }
+                Button {
+                    Task { await mineNow(sourceID: sourceID) }
+                } label: {
+                    Label(
+                        runningSources.contains(sourceID)
+                            ? String(localized: "miner.running", defaultValue: "Mining")
+                            : String(localized: "miner.now", defaultValue: "Mine Now"),
+                        systemImage: "play.fill"
+                    )
+                }
+                .disabled(runningSources.contains(sourceID))
+                if let status = sourceStatus[sourceID] {
+                    Text(status)
+                        .foregroundStyle(.secondary)
+                }
             }
         } footer: {
             Text(note)
+        }
+    }
+
+    @MainActor
+    private func mineNow(sourceID: String) async {
+        runningSources.insert(sourceID)
+        defer { runningSources.remove(sourceID) }
+        do {
+            let caller = try await GatewayRuntime.shared.bridge()
+            let loop = MinerRunLoop.liveLoop()
+            let summary = await loop.runNow(sourceID: sourceID, now: Date(), caller: caller)
+            if let summary {
+                sourceStatus[sourceID] = String(
+                    localized: "miner.complete",
+                    defaultValue: "Filed \(summary.result.filed), updated the current source snapshot."
+                )
+            } else {
+                let state = loop.lastStatus(for: sourceID) ?? "unavailable"
+                sourceStatus[sourceID] = String(
+                    localized: "miner.unavailable",
+                    defaultValue: "Mining did not run (\(state))."
+                )
+            }
+        } catch {
+            sourceStatus[sourceID] = error.localizedDescription
         }
     }
 }

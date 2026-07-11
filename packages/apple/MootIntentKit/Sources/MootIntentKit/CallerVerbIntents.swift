@@ -20,8 +20,11 @@ import AriaMCP   // JSONValue
 // MARK: ReanchorDrawerIntent
 
 /// verb: reanchor · move where a drawer sits in structure.
-public struct ReanchorDrawerIntent: AppIntent {
+public struct ReanchorDrawerIntent: MootEstateIntent {
     public static let title: LocalizedStringResource = "Move Memory"
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @available(anyAppleOS 27.0, *)
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
     public static let description = IntentDescription(
         "Move a memory to a different location.",
         categoryName: "Memory"
@@ -65,8 +68,11 @@ public struct ReanchorDrawerIntent: AppIntent {
 // MARK: MutateDrawerIntent
 
 /// verb: mutate · apply a named mutation to a memory's structural state.
-public struct MutateDrawerIntent: AppIntent {
+public struct MutateDrawerIntent: MootEstateIntent {
     public static let title: LocalizedStringResource = "Update Memory"
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @available(anyAppleOS 27.0, *)
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
     public static let description = IntentDescription(
         "Apply a named change to a memory.",
         categoryName: "Memory"
@@ -108,8 +114,11 @@ public struct MutateDrawerIntent: AppIntent {
 // MARK: WithdrawDrawerIntent
 
 /// verb: withdraw · retire a memory; history preserved.
-public struct WithdrawDrawerIntent: AppIntent {
+public struct WithdrawDrawerIntent: MootEstateIntent {
     public static let title: LocalizedStringResource = "Withdraw Memory"
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @available(anyAppleOS 27.0, *)
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
     public static let description = IntentDescription(
         "Retire a memory from active circulation.",
         categoryName: "Memory"
@@ -144,8 +153,10 @@ public struct WithdrawDrawerIntent: AppIntent {
 // MARK: ExpungeDrawerIntent
 
 /// verb: expunge · irreversible hard-erase. Guarded — requires confirmation.
-public struct ExpungeDrawerIntent: AppIntent {
+public struct ExpungeDrawerIntent: MootEstateIntent {
     public static let title: LocalizedStringResource = "Erase Memory"
+    @available(anyAppleOS 27.0, *)
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
     public static let description = IntentDescription(
         "Permanently erase a memory and its audit trail.",
         categoryName: "Memory"
@@ -157,7 +168,7 @@ public struct ExpungeDrawerIntent: AppIntent {
     /// (wwdc2026-347 lock-screen hardening, M-MXA-2R rider). Complements —
     /// does not replace — the substrate's confirmed:true tool-level guard.
     @available(macOS 27.0, iOS 27.0, *)
-    public static var authenticationPolicy: IntentAuthenticationPolicy { .requiresAuthentication }
+    public static var authenticationPolicy: IntentAuthenticationPolicy { .requiresLocalDeviceAuthentication }
 
     @Parameter(title: "Memory ID") public var id: String
     @Parameter(title: "Reason") public var reason: String

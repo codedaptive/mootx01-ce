@@ -19,9 +19,9 @@ struct AdapterShellTests {
     /// so the test does not touch ~/.mootx01. Also registers the bridge with
     /// IntentRuntimeBridge so intent perform() fallback resolves correctly.
     private func freshInMemoryRuntime() async throws {
-        await GatewayRuntime.shared.configure(databaseURL: nil)
+        await GatewayRuntime.shared.configureInMemoryForTesting()
         let bridge = try await GatewayRuntime.shared.bridge()
-        await IntentRuntimeBridge.shared.register(bridge)
+        IntentRuntimeBridge.shared.register(bridge)
     }
 
     @Test("CaptureDrawerIntent.perform() files a drawer")

@@ -28,13 +28,15 @@ import AriaMCP   // JSONValue, for building tool arguments
 /// the benign end of the verb ledger, so no extra guard beyond the
 /// substrate's own per-mutation legality checks.
 @available(macOS 27.0, iOS 27.0, *)
-public struct BatchMutateIntent: AppIntent {
+public struct BatchMutateIntent: MootEstateIntent {
     public static let title: LocalizedStringResource = "Update Memories"
     public static let description = IntentDescription(
         "Apply one mutation (confirm, reject, …) to several memories at once.",
         categoryName: "Memory"
     )
     public static let isDiscoverable = true
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     @Parameter(title: "Memories") public var drawers: EntityCollection<DrawerEntity>
     @Parameter(title: "Mutation", default: "confirm") public var mutation: String
@@ -81,7 +83,7 @@ public struct BatchMutateIntent: AppIntent {
 /// confirmation (count in the dialog) fires before anything is withdrawn —
 /// deterministic, at the action execution stage (wwdc2026-347).
 @available(macOS 27.0, iOS 27.0, *)
-public struct BatchWithdrawIntent: AppIntent {
+public struct BatchWithdrawIntent: MootEstateIntent {
     public static let title: LocalizedStringResource = "Withdraw Memories"
     public static let description = IntentDescription(
         "Withdraw several memories from circulation. Reversible with Undo Last Withdraw.",
@@ -90,7 +92,8 @@ public struct BatchWithdrawIntent: AppIntent {
     public static let isDiscoverable = true
     /// Withdrawing content is curation of sensitive state; do not allow it
     /// from a locked device (wwdc2026-347 lock-screen hardening).
-    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     @Parameter(title: "Memories") public var drawers: EntityCollection<DrawerEntity>
     @Parameter(title: "Reason") public var reason: String?

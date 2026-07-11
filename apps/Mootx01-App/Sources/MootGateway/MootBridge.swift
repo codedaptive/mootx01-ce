@@ -95,9 +95,8 @@ public actor MootBridge {
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
     }
 
-    /// Attach an ephemeral in-memory MOOT. Used by tests and by the App
-    /// Intent shells when the system instantiates them without a prior
-    /// app launch (no app bundle has configured a durable estate).
+    /// Attach an ephemeral in-memory MOOT. Test-only callers select this
+    /// explicitly; production App Intents always resolve the durable estate.
     public static func attachInMemory(serverName: String = "Gateway") async throws -> MootBridge {
         let owner = OwnerCredentials(ownerIdentifier: "gateway-owner")
         let configuration = EstateConfiguration(estateID: UUID(), backend: .inMemory)
@@ -125,10 +124,18 @@ public actor MootBridge {
         // on a signed build.
         // Shared access group (#94): both the app and the managed server
         // must read the same Keychain item for the same SQLCipher estate.
+        #if os(iOS)
+        // iOS has no managed subprocess peer. Using the app's default access
+        // group keeps the encrypted estate available to cold App Intents
+        // without requiring a nonexistent shared-keychain entitlement.
+        let keychainAccessGroup: String? = nil
+        #else
+        let keychainAccessGroup: String? = "com.codedaptive.mootx01.shared"
+        #endif
         let key = try KeychainKeyStore(
             service: "com.codedaptive.mootx01",
             estateURL: url,
-            accessGroup: "com.codedaptive.mootx01.shared"
+            accessGroup: keychainAccessGroup
         ).loadOrCreateKey()
         let configuration = EstateConfiguration(
             estateID: UUID(),

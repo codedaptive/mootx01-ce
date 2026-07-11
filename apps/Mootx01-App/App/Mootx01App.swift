@@ -4,6 +4,8 @@ import GatewayUI
 import MootGateway  // MinerRunLoop + GatewayRuntime (M-ING-2 executor)
 #if os(macOS)
 import AppKit
+#elseif os(iOS)
+import BackgroundTasks
 #endif
 
 // MARK: - Mootx01App
@@ -40,6 +42,17 @@ struct Mootx01App: App {
     @AppStorage(MenuBarPolicy.defaultsKey) private var menuBarModeEnabled = true
     #endif
 
+    init() {
+        #if DEBUG
+        EstateConfigurationResolver.installDebugLaunchOverride()
+        #endif
+        GatewayRuntime.installIntentProvider()
+        #if os(iOS)
+        IOSMiningBackgroundTasks.register()
+        Task { await IOSMiningBackgroundTasks.schedule() }
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup(id: "main") {
             #if os(macOS)
@@ -67,6 +80,49 @@ struct Mootx01App: App {
         #endif
     }
 }
+
+#if os(iOS)
+/// Opportunistic iOS refresh. Cadence remains a request to the system, not a
+/// promise of exact execution time. Disabled and unauthorized miners are
+/// skipped without prompting.
+private enum IOSMiningBackgroundTasks {
+    static let identifier = "com.codedaptive.mootx01.mining.refresh"
+
+    static func register() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
+            guard let refresh = task as? BGAppRefreshTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let handle = BackgroundRefreshHandle(refresh)
+            let work = Task {
+                do {
+                    let caller = try await GatewayRuntime.shared.bridge()
+                    _ = await MinerRunLoop.liveLoop().tick(now: Date(), caller: caller)
+                    handle.task.setTaskCompleted(success: !Task.isCancelled)
+                } catch {
+                    handle.task.setTaskCompleted(success: false)
+                }
+                await schedule()
+            }
+            refresh.expirationHandler = {
+                work.cancel()
+            }
+        }
+    }
+
+    static func schedule() async {
+        let request = BGAppRefreshTaskRequest(identifier: identifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 60 * 60)
+        try? await BGTaskScheduler.shared.submitTaskRequest(request)
+    }
+}
+
+private final class BackgroundRefreshHandle: @unchecked Sendable {
+    let task: BGAppRefreshTask
+    init(_ task: BGAppRefreshTask) { self.task = task }
+}
+#endif
 
 #if os(macOS)
 /// A bundled macOS app activates normally; this only forces foreground focus

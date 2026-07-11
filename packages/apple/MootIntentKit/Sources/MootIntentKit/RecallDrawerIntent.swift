@@ -21,9 +21,12 @@ import AriaMCP   // JSONValue, for building tool arguments
 // surface (currently tool results are text content blocks). The slot is here
 // for that future upgrade.
 
-public struct RecallDrawerIntent: AppIntent {
+public struct RecallDrawerIntent: MootEstateIntent {
 
     public static let title: LocalizedStringResource = "Recall Memories"
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @available(anyAppleOS 27.0, *)
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     public static let description = IntentDescription(
         "Read memories back from the MOOT by a query, honoring the export policy.",

@@ -49,6 +49,7 @@ let package = Package(
         // MootIntentKit owns the intent surface; MootBridge conforms to its
         // MootToolCalling protocol so the kit never reaches substrate internals.
         .package(name: "MootIntentKit", path: "../../packages/apple/MootIntentKit"),
+        .package(name: "MootFoundationModelsKit", path: "../../packages/apple/MootFoundationModelsKit"),
     ],
     targets: [
         .target(
@@ -69,6 +70,7 @@ let package = Package(
             dependencies: [
                 "MootGateway",
                 .product(name: "MootIntentKit", package: "MootIntentKit"),
+                .product(name: "MootFoundationModelsKit", package: "MootFoundationModelsKit"),
             ],
             path: "Sources/GatewayUI"
         ),

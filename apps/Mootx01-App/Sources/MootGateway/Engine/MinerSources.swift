@@ -72,32 +72,68 @@ public enum MinerMappers {
 public struct CalendarMiner: MinerSource {
     public let sourceID = "calendar"
     let reader: @Sendable () async throws -> [CalendarEventSample]
+    let statusReader: @Sendable () async -> MinerAuthorizationStatus
+    let authorizationRequester: @Sendable () async -> MinerAuthorizationStatus
 
-    public init(reader: @escaping @Sendable () async throws -> [CalendarEventSample]) {
+    public init(
+        reader: @escaping @Sendable () async throws -> [CalendarEventSample],
+        statusReader: @escaping @Sendable () async -> MinerAuthorizationStatus = { .authorized },
+        authorizationRequester: @escaping @Sendable () async -> MinerAuthorizationStatus = { .authorized }
+    ) {
         self.reader = reader
+        self.statusReader = statusReader
+        self.authorizationRequester = authorizationRequester
     }
 
     public func collect() async throws -> [MinedFact] {
-        try await reader().map(MinerMappers.fact)
+        let status = await authorizationStatus()
+        guard status == .authorized else {
+            throw MinerSourceError.authorizationRequired(status)
+        }
+        return try await reader().map(MinerMappers.fact)
+    }
+
+    public func authorizationStatus() async -> MinerAuthorizationStatus {
+        await statusReader()
+    }
+
+    public func requestAuthorization() async -> MinerAuthorizationStatus {
+        await authorizationRequester()
     }
 
     #if canImport(EventKit)
     /// LIVE reader: day-ahead window (now → +7d). First call prompts for
     /// calendar consent — attended sessions only.
     public static func live(daysAhead: Int = 7) -> CalendarMiner {
-        CalendarMiner {
+        let status: @Sendable () async -> MinerAuthorizationStatus = {
+            switch EKEventStore.authorizationStatus(for: .event) {
+            case .notDetermined: return .notDetermined
+            case .authorized, .fullAccess: return .authorized
+            case .denied, .restricted, .writeOnly: return .denied
+            @unknown default: return .unavailable
+            }
+        }
+        return CalendarMiner(reader: {
             let store = EKEventStore()
-            guard try await store.requestFullAccessToEvents() else { return [] }
             let end = Date().addingTimeInterval(TimeInterval(daysAhead) * 86_400)
             let predicate = store.predicateForEvents(withStart: Date(), end: end, calendars: nil)
             return store.events(matching: predicate).map {
                 CalendarEventSample(
-                    eventID: $0.eventIdentifier ?? UUID().uuidString,
+                    // calendarItemIdentifier is the deterministic fallback
+                    // for recurring events whose eventIdentifier is absent.
+                    eventID: $0.eventIdentifier ?? $0.calendarItemIdentifier,
                     title: $0.title ?? "untitled",
                     start: $0.startDate
                 )
             }
-        }
+        }, statusReader: status, authorizationRequester: {
+            do {
+                _ = try await EKEventStore().requestFullAccessToEvents()
+            } catch {
+                return .denied
+            }
+            return await status()
+        })
     }
     #endif
 }
@@ -106,22 +142,49 @@ public struct CalendarMiner: MinerSource {
 public struct BirthdayMiner: MinerSource {
     public let sourceID = "birthdays"
     let reader: @Sendable () async throws -> [BirthdaySample]
+    let statusReader: @Sendable () async -> MinerAuthorizationStatus
+    let authorizationRequester: @Sendable () async -> MinerAuthorizationStatus
 
-    public init(reader: @escaping @Sendable () async throws -> [BirthdaySample]) {
+    public init(
+        reader: @escaping @Sendable () async throws -> [BirthdaySample],
+        statusReader: @escaping @Sendable () async -> MinerAuthorizationStatus = { .authorized },
+        authorizationRequester: @escaping @Sendable () async -> MinerAuthorizationStatus = { .authorized }
+    ) {
         self.reader = reader
+        self.statusReader = statusReader
+        self.authorizationRequester = authorizationRequester
     }
 
     public func collect() async throws -> [MinedFact] {
-        try await reader().map(MinerMappers.fact)
+        let status = await authorizationStatus()
+        guard status == .authorized else {
+            throw MinerSourceError.authorizationRequired(status)
+        }
+        return try await reader().map(MinerMappers.fact)
+    }
+
+    public func authorizationStatus() async -> MinerAuthorizationStatus {
+        await statusReader()
+    }
+
+    public func requestAuthorization() async -> MinerAuthorizationStatus {
+        await authorizationRequester()
     }
 
     #if canImport(Contacts)
     /// LIVE reader: all contacts with a birthday. First call prompts for
     /// contacts consent — attended sessions only.
     public static func live() -> BirthdayMiner {
-        BirthdayMiner {
+        let status: @Sendable () async -> MinerAuthorizationStatus = {
+            switch CNContactStore.authorizationStatus(for: .contacts) {
+            case .notDetermined: return .notDetermined
+            case .authorized: return .authorized
+            case .denied, .restricted, .limited: return .denied
+            @unknown default: return .unavailable
+            }
+        }
+        return BirthdayMiner(reader: {
             let store = CNContactStore()
-            guard try await store.requestAccess(for: .contacts) else { return [] }
             let keys = [CNContactIdentifierKey, CNContactGivenNameKey,
                         CNContactFamilyNameKey, CNContactBirthdayKey] as [CNKeyDescriptor]
             let request = CNContactFetchRequest(keysToFetch: keys)
@@ -136,7 +199,14 @@ public struct BirthdayMiner: MinerSource {
                 ))
             }
             return samples
-        }
+        }, statusReader: status, authorizationRequester: {
+            do {
+                _ = try await CNContactStore().requestAccess(for: .contacts)
+            } catch {
+                return .denied
+            }
+            return await status()
+        })
     }
     #endif
 }

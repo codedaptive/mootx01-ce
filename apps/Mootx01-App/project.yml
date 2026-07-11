@@ -109,7 +109,26 @@ targets:
     info:
       path: derived-Info-iOS.plist
       properties:
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.codedaptive.mootx01.mining.refresh
+        UIBackgroundModes:
+          - fetch
         CFBundleURLTypes:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
               - mootx01
+
+  Mootx01-AppIntentsTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: Mootx01-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.app-intents-tests
+        PRODUCT_NAME: Mootx01-AppIntentsTests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        TEST_TARGET_NAME: Mootx01-iOS

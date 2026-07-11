@@ -1,6 +1,7 @@
 #if os(macOS)
 import SwiftUI
 import AppKit
+import MootGateway
 
 // MARK: - Menu-bar headless mode  (M-MXA-7)
 //
@@ -38,6 +39,8 @@ public enum MenuBarPolicy {
 public struct MenuBarView: View {
     @Bindable private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @State private var miningSource: String?
+    @State private var miningStatus: String?
 
     public init(model: AppModel) {
         self.model = model
@@ -50,6 +53,26 @@ public struct MenuBarView: View {
 
         Divider()
 
+        Button {
+            Task { await mineNow("calendar") }
+        } label: {
+            Label("Mine Calendar Now", systemImage: "calendar.badge.clock")
+        }
+        .disabled(miningSource != nil)
+
+        Button {
+            Task { await mineNow("birthdays") }
+        } label: {
+            Label("Mine Birthdays Now", systemImage: "person.crop.circle.badge.clock")
+        }
+        .disabled(miningSource != nil)
+
+        if let miningStatus {
+            Text(miningStatus)
+        }
+
+        Divider()
+
         Button(String(localized: "menubar.open", defaultValue: "Open MOOTx01")) {
             openWindow(id: "main")
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -59,6 +82,23 @@ public struct MenuBarView: View {
 
         Button(String(localized: "menubar.quit", defaultValue: "Quit MOOTx01")) {
             NSApplication.shared.terminate(nil)
+        }
+    }
+
+    @MainActor
+    private func mineNow(_ sourceID: String) async {
+        miningSource = sourceID
+        defer { miningSource = nil }
+        do {
+            let caller = try await GatewayRuntime.shared.bridge()
+            let loop = MinerRunLoop.liveLoop()
+            if let summary = await loop.runNow(sourceID: sourceID, now: Date(), caller: caller) {
+                miningStatus = "Filed \(summary.result.filed) from \(sourceID)."
+            } else {
+                miningStatus = "\(sourceID): \(loop.lastStatus(for: sourceID) ?? "not enabled")"
+            }
+        } catch {
+            miningStatus = error.localizedDescription
         }
     }
 }

@@ -13,6 +13,15 @@ private struct FixtureSource: MinerSource {
     func collect() async throws -> [MinedFact] { facts }
 }
 
+private actor AuthorizationState {
+    private var value: MinerAuthorizationStatus = .notDetermined
+    func get() -> MinerAuthorizationStatus { value }
+    func grant() -> MinerAuthorizationStatus {
+        value = .authorized
+        return value
+    }
+}
+
 @Suite("MinerEngine (M-ING-2)", .serialized)
 struct MinerEngineTests {
 
@@ -63,6 +72,71 @@ struct MinerEngineTests {
         ])
         #expect(search.isError == false)
         #expect(search.text.contains("82.1 kg"))
+    }
+
+    @Test("changed source records replace and retire the stale fact")
+    func changedRecordReconciles() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let original = MinedFact(
+            subject: "calendar.event.changed",
+            predicate: "scheduled",
+            object: "Review at 2026-07-11T10:00:00Z"
+        )
+        let replacement = MinedFact(
+            subject: original.subject,
+            predicate: original.predicate,
+            object: "Review at 2026-07-11T11:00:00Z"
+        )
+        _ = try await MinerEngine.run(FixtureSource(facts: [original]), caller: bridge)
+        let result = try await MinerEngine.run(FixtureSource(facts: [replacement]), caller: bridge)
+        #expect(result == .init(filed: 1, skipped: 0, failed: 0))
+
+        let active = await bridge.callToolFull("moot_fact_search", arguments: [
+            "subject_exact": .string(original.subject),
+            "source_id_exact": .string("miner:fixture"),
+        ])
+        #expect(active.text.contains(replacement.object))
+        #expect(!active.text.contains(original.object))
+    }
+
+    @Test("records deleted at the source are retired")
+    func deletedRecordReconciles() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        _ = try await MinerEngine.run(FixtureSource(facts: day1), caller: bridge)
+        let result = try await MinerEngine.run(FixtureSource(facts: [day1[0]]), caller: bridge)
+        #expect(result == .init(filed: 0, skipped: 1, failed: 0))
+
+        let deleted = await bridge.callToolFull("moot_fact_search", arguments: [
+            "subject_exact": .string(day1[1].subject),
+            "source_id_exact": .string("miner:fixture"),
+        ])
+        #expect(deleted.text.hasPrefix("facts: 0"))
+    }
+
+    @Test("sample identities are exact, not substring matches")
+    func substringIdentityDoesNotCollide() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let long = MinedFact(subject: "calendar.event.ev-10", predicate: "scheduled", object: "ten")
+        let short = MinedFact(subject: "calendar.event.ev-1", predicate: "scheduled", object: "one")
+        _ = try await MinerEngine.run(FixtureSource(facts: [long]), caller: bridge)
+        let result = try await MinerEngine.run(FixtureSource(facts: [long, short]), caller: bridge)
+        #expect(result == .init(filed: 1, skipped: 1, failed: 0))
+    }
+
+    @Test("duplicate identities in one source snapshot fail closed")
+    func duplicateSnapshotIdentityFails() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let duplicate = MinedFact(
+            subject: day1[0].subject,
+            predicate: day1[0].predicate,
+            object: "different"
+        )
+        await #expect(throws: MinerEngineError.self) {
+            _ = try await MinerEngine.run(
+                FixtureSource(facts: [day1[0], duplicate]),
+                caller: bridge
+            )
+        }
     }
 }
 
@@ -198,5 +272,40 @@ struct MinerRunLoopTests {
         #expect(await loop.tick(now: t0, caller: bridge) == [])
         let ran = await loop.runNow(sourceID: "fixture", now: t0, caller: bridge)
         #expect(ran?.result.filed == 1)
+    }
+
+    @Test("unattended ticks never request platform authorization")
+    func tickDoesNotPromptForAuthorization() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let d = try freshDefaults()
+        d.set(true, forKey: "miner.calendar.enabled")
+        let source = CalendarMiner(
+            reader: { [] },
+            statusReader: { .notDetermined },
+            authorizationRequester: {
+                Issue.record("unattended tick requested authorization")
+                return .authorized
+            }
+        )
+        let loop = MinerRunLoop(sources: [source], defaults: d)
+        #expect(await loop.tick(now: t0, caller: bridge).isEmpty)
+        #expect(loop.lastRun(for: "calendar") == nil)
+    }
+
+    @Test("Mine Now is the attended authorization path")
+    func runNowRequestsAuthorization() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let d = try freshDefaults()
+        d.set(true, forKey: "miner.calendar.enabled")
+        let authorization = AuthorizationState()
+        let source = CalendarMiner(
+            reader: { [] },
+            statusReader: { await authorization.get() },
+            authorizationRequester: { await authorization.grant() }
+        )
+        let loop = MinerRunLoop(sources: [source], defaults: d)
+        let result = await loop.runNow(sourceID: "calendar", now: t0, caller: bridge)
+        #expect(result != nil)
+        #expect(loop.lastStatus(for: "calendar") == "complete")
     }
 }

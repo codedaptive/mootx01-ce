@@ -68,13 +68,16 @@ public enum BatchCurationCore {
 /// Single-slot by ruling (D5: "undo last import, nothing more") — only the
 /// LAST batch is revertible, and a fully successful undo clears the slot.
 /// Uses no 2027-wave APIs, so it ships at the kit floor.
-public struct UndoLastBatchWithdrawIntent: AppIntent {
+public struct UndoLastBatchWithdrawIntent: MootEstateIntent {
     public static let title: LocalizedStringResource = "Undo Last Withdraw"
     public static let description = IntentDescription(
         "Restore the memories withdrawn by the most recent batch withdraw.",
         categoryName: "Memory"
     )
     public static let isDiscoverable = true
+    public static let authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
+    @available(anyAppleOS 27.0, *)
+    public static let allowedExecutionTargets: IntentExecutionTargets = .main
 
     public var caller: (any MootToolCalling)?
 
@@ -97,7 +100,8 @@ public struct UndoLastBatchWithdrawIntent: AppIntent {
                 stringLiteral: "restored \(outcome.succeeded.count) memories"
             ))
         }
-        // Partial revert: keep the slot (retry-able) and say exactly what failed.
+        // Partial revert: retry only the revivals that actually failed.
+        BatchWithdrawLedger.shared.replace(with: outcome.failed)
         return .result(dialog: IntentDialog(
             stringLiteral: "restored \(outcome.succeeded.count) of \(batch.count) memories; "
                 + "\(outcome.failed.count) refused: \(outcome.failed.joined(separator: ", "))"
@@ -142,5 +146,10 @@ public final class BatchWithdrawLedger: @unchecked Sendable {
     public func clear() {
         lock.lock(); defer { lock.unlock() }
         lastBatch = nil
+    }
+
+    public func replace(with ids: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        lastBatch = ids.isEmpty ? nil : ids
     }
 }

@@ -29,6 +29,9 @@ public struct ContentView: View {
                 Tab(String(localized: "Recall"), systemImage: "tray.and.arrow.up") {
                     RecallView(model: model)
                 }
+                Tab(String(localized: "Intelligence"), systemImage: "brain.head.profile") {
+                    IntelligenceView()
+                }
                 Tab(String(localized: "The Top"), systemImage: "list.bullet.rectangle") {
                     SurfaceMapView(model: model)
                 }

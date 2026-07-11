@@ -350,6 +350,11 @@ public enum ToolProjection {
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "query": stringSchema("Optional search string. Matched as a substring against subject, predicate, and object fields. Omit to return all active facts."),
+                        "subject_exact": stringSchema("Optional exact, case-sensitive subject filter."),
+                        "predicate_exact": stringSchema("Optional exact, case-sensitive predicate filter."),
+                        "object_exact": stringSchema("Optional exact, case-sensitive object filter."),
+                        "source_id_exact": stringSchema("Optional exact provenance source filter."),
+                        "limit": integerSchema("Maximum rows to return (default 100, maximum 500)."),
                     ],
                     required: []
                 )),

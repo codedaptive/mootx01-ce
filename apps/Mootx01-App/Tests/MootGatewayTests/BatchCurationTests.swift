@@ -2,6 +2,33 @@ import Testing
 import Foundation
 @testable import MootGateway
 import MootIntentKit
+import AriaMCP
+
+private actor PartialReviveCaller: MootToolCalling {
+    private var failuresRemaining: Set<String>
+    private var attemptedIDs: [String] = []
+
+    init(failOnceFor id: String) {
+        failuresRemaining = [id]
+    }
+
+    func callTool(_ name: String, arguments: [String: JSONValue]) async -> IntentCallResult {
+        guard name == "moot_update_memory",
+              case .string(let id)? = arguments["id"],
+              case .string("revive")? = arguments["mutation"] else {
+            return IntentCallResult(text: "unexpected call", isError: true)
+        }
+        attemptedIDs.append(id)
+        if failuresRemaining.remove(id) != nil {
+            return IntentCallResult(text: "temporary refusal", isError: true)
+        }
+        return IntentCallResult(text: "revived", isError: false)
+    }
+
+    func attempts() -> [String] {
+        attemptedIDs
+    }
+}
 
 // M-MXA-2R — batch curation against a live in-memory estate.
 //
@@ -114,5 +141,22 @@ struct BatchCurationTests {
         #expect(BatchWithdrawLedger.shared.peek() == ["a", "b"])
         BatchWithdrawLedger.shared.clear()
         #expect(BatchWithdrawLedger.shared.peek() == nil)
+    }
+
+    @Test("partial undo retries only the drawers that failed to revive")
+    @MainActor
+    func partialUndoRetainsOnlyFailures() async throws {
+        let first = "11111111-1111-1111-1111-111111111111"
+        let retry = "22222222-2222-2222-2222-222222222222"
+        let caller = PartialReviveCaller(failOnceFor: retry)
+        BatchWithdrawLedger.shared.clear()
+        BatchWithdrawLedger.shared.record([first, retry])
+
+        _ = try await UndoLastBatchWithdrawIntent(caller: caller).perform()
+        #expect(BatchWithdrawLedger.shared.peek() == [retry])
+
+        _ = try await UndoLastBatchWithdrawIntent(caller: caller).perform()
+        #expect(BatchWithdrawLedger.shared.peek() == nil)
+        #expect(await caller.attempts() == [first, retry, retry])
     }
 }
