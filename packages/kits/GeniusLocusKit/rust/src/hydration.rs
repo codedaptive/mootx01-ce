@@ -675,12 +675,29 @@ pub(crate) fn feed_synthetic_audit_entries(
     storage: &dyn Storage,
     log: &mut UnifiedAuditLog,
 ) -> persistence_kit::error::StorageResult<()> {
-    let events = storage.audit_log().iterate(None, None, 50_000)?;
-    for event in &events {
-        let verb = verb_from_str(&event.verb);
-        if is_synthetic_verb(verb) {
-            log.add(synthetic_entry_from_pk_event(event, verb));
+    // Paginate with an HLC cursor. `iterate` returns HLC-ascending and
+    // enforces the page limit, so a single fixed iterate(None, None, 50_000)
+    // silently dropped every synthetic grant/sensitivity audit row past the
+    // first 50k — a local client with many ordinary audited mutations could
+    // push security-relevant records past the cap. Loop until a short page
+    // signals the end, advancing the cursor past the last HLC each round.
+    const PAGE: usize = 10_000;
+    let mut after: Option<substrate_types::hlc::HLC> = None;
+    loop {
+        let page = storage.audit_log().iterate(after, None, PAGE)?;
+        if page.is_empty() {
+            break;
         }
+        for event in &page {
+            let verb = verb_from_str(&event.verb);
+            if is_synthetic_verb(verb) {
+                log.add(synthetic_entry_from_pk_event(event, verb));
+            }
+        }
+        if page.len() < PAGE {
+            break;
+        }
+        after = page.last().map(|e| e.hlc);
     }
     Ok(())
 }

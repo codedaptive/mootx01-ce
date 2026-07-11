@@ -554,14 +554,12 @@ public extension GeniusLocusKit {
 
     /// Return a snapshot of the unified audit log for the given handle.
     ///
-    /// Issues a single SQL query against `_storagekit_audit` — one
-    /// `SELECT * FROM _storagekit_audit ORDER BY hlc ASC LIMIT 50_000`
-    /// regardless of estate size. This replaces the former in-memory
-    /// G-Set CRDT pattern (Bug 1 fix, ADR025-AUDITLOG-GOVERNOR): the
-    /// old approach kept a grow-only `auditLogs: [EstateHandle:
-    /// UnifiedAuditLog]` dictionary and fed it via an N+1 per-drawer
-    /// walk (`feedAuditLog`). Both are removed — audit data lives on
-    /// disk in `_storagekit_audit` and this method reads it directly.
+    /// Paginates `_storagekit_audit` with an HLC cursor. This replaces the
+    /// former in-memory G-Set CRDT pattern (Bug 1 fix, ADR025-AUDITLOG-
+    /// GOVERNOR): the old approach kept a grow-only `auditLogs: [EstateHandle:
+    /// UnifiedAuditLog]` dictionary and fed it via an N+1 per-drawer walk
+    /// (`feedAuditLog`). Both are removed — audit data lives on disk in
+    /// `_storagekit_audit` and this method reads it directly.
     ///
     /// The returned `UnifiedAuditLog` is a value type, safe to use
     /// outside the actor without aliasing any shared state.
@@ -573,13 +571,24 @@ public extension GeniusLocusKit {
         guard let storage = storages[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
-        // One SQL round-trip instead of N+1 per-drawer calls. AuditBridge
-        // converts each substrate AuditEvent to one or more UnifiedAuditEntries
-        // (one per changed bitmap column); the 50 000 row limit caps unbounded
-        // growth on very large estates while covering normal usage.
-        let events = try await storage.auditLog.iterate(after: nil, rowID: nil, limit: 50_000)
+        // Paginate with an HLC cursor. `iterate` returns HLC-ascending and
+        // enforces the page limit, so a single fixed LIMIT 50_000 silently
+        // dropped every audit row past the first 50k on a large estate —
+        // including security-relevant grant/sensitivity records that the
+        // per-drawer walk cannot reach. Loop until a short page signals the
+        // end, advancing the cursor past the last HLC each round. AuditBridge
+        // converts each substrate AuditEvent to one or more UnifiedAuditEntries.
+        let pageSize = 10_000
         var log = UnifiedAuditLog()
-        log.add(contentsOf: events.flatMap { AuditBridge.bridge($0) })
+        var after: HLC? = nil
+        while true {
+            let page = try await storage.auditLog.iterate(
+                after: after, rowID: nil, limit: pageSize)
+            if page.isEmpty { break }
+            log.add(contentsOf: page.flatMap { AuditBridge.bridge($0) })
+            if page.count < pageSize { break }
+            after = page.last?.hlc
+        }
         return log
     }
 }
