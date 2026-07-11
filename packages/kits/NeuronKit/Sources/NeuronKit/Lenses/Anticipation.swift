@@ -49,6 +49,12 @@ extension NeuronKit {
         // every observation lands at zero (I-17: the matrix owns the math).
         var matrix = SubstrateML.ActionOutcomeMatrix()
         for o in observations {
+            // action/outcome are the 6-bit bitmap categories (o07/o08): the
+            // matrix key traps on anything ≥ 64. This is a public Codable
+            // surface, so decoded bytes span the full UInt8 range — skip
+            // out-of-range observations rather than let them abort the process.
+            // No valid caller (closed CognitionKit enums) is affected.
+            guard o.action < 64, o.outcome < 64 else { continue }
             matrix.observe(action: o.action, outcome: o.outcome, success: o.success, at: HLC.zero)
         }
 
