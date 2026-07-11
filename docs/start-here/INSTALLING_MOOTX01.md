@@ -291,10 +291,20 @@ your platform:
 - **Linux** — the systemd-user units (`mootx01.service`, and `mootx01-mgr.service` if it was installed)
 - **Windows** — the Task Scheduler logon task `mootx01` (and `mootx01-mgr` only if it was installed)
 
-Your estate data is **not** deleted — your memory is preserved. It lives at:
+Your estate data is **not** deleted by default — your memory is preserved. It
+lives at:
 
 - **macOS** — `~/Library/Application Support/com.mootx01.ce/`
 - **Linux** — `~/.local/share/mootx01/` (or `$XDG_DATA_HOME/mootx01/`)
 - **Windows** — `%LOCALAPPDATA%\MOOTx01\`
 
-Delete that directory manually if you want a complete removal.
+A full uninstall run from a terminal then **offers** to remove that data (the
+estate databases and the moot-mgr history). Removal always requires typing
+`yes`, and the data is moved to the platform trash (macOS Trash / Recycle
+Bin / XDG trash) — not hard-deleted — so it stays recoverable until you empty
+the trash. For scripted removal use `mootx01 uninstall --purge --yes`.
+
+Reinstalling over an existing database prompts to **reuse** it (adopt it as
+the default estate) or **replace** it (previous database moves to the trash;
+a fresh one is created on first start). Non-interactive installs leave an
+existing database untouched unless `--reuse-db` or `--replace-db` is passed.

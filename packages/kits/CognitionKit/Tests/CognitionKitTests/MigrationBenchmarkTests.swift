@@ -123,6 +123,58 @@ struct MigrationBenchmarkTests {
                 guard case RecipeError.silentConceptLoss = error else { return false }
                 return true
             }
+
+            // C-5 is server-side: the run DISCARDED the disqualified branch,
+            // so it can never be promoted — not by the in-process path, and
+            // not by a stateless caller replaying its id with no
+            // disqualification claim (the reported bypass shape).
+            let dqBranch = try #require(await kit.branchHandle(for: dq.branchID))
+            #expect(dqBranch.status == .discarded)
+            await #expect {
+                try await recipe.confirmPromotion(
+                    winnerBranchID: dq.branchID,
+                    discardBranchIDs: [],
+                    estate: handle, kit: kit)
+            } throws: { error in
+                guard case RecipeError.silentConceptLoss = error else { return false }
+                return true
+            }
+            #expect(dqBranch.status == .discarded, "the bypass attempt must not change branch state")
+        }
+    }
+
+    @Test("over-cap plan count throws tooManyPlans before deriving")
+    func overCapPlanCountThrows() async throws {
+        let (kit, handle) = try await makeEstate()
+        let origin = ExternalCorpus(name: "src", entries: [
+            ExternalEntry(id: "a", content: "anything", tags: []),
+        ])
+        let plans = (0...MigrationBenchmark.maxPlans).map {
+            plan("plan-\($0)", room: "r\($0)", code: "000")
+        }
+        let input = MigrationBenchmark.Input(origin: origin, plans: plans)
+        await #expect {
+            _ = try await MigrationBenchmark().run(input: input, estate: handle, kit: kit)
+        } throws: { error in
+            guard case RecipeError.tooManyPlans = error else { return false }
+            return true
+        }
+    }
+
+    @Test("over-cap origin entries throws tooManyOriginEntries before deriving")
+    func overCapOriginEntriesThrows() async throws {
+        let (kit, handle) = try await makeEstate()
+        let entries = (0...MigrationBenchmark.maxOriginEntries).map {
+            ExternalEntry(id: "e\($0)", content: "c\($0)", tags: [])
+        }
+        let origin = ExternalCorpus(name: "src", entries: entries)
+        let input = MigrationBenchmark.Input(
+            origin: origin, plans: [plan("only", room: "r1", code: "000")])
+        await #expect {
+            _ = try await MigrationBenchmark().run(input: input, estate: handle, kit: kit)
+        } throws: { error in
+            guard case RecipeError.tooManyOriginEntries = error else { return false }
+            return true
         }
     }
 
@@ -190,26 +242,27 @@ struct MigrationBenchmarkTests {
         }
     }
 
-    @Test("id-based confirm guards against disqualified winner")
-    func idBasedConfirmGuardsAgainstDisqualifiedWinner() async throws {
+    @Test("id-based confirm refuses a discarded branch with no caller claim")
+    func idBasedConfirmRefusesDiscardedBranch() async throws {
         let (kit, handle) = try await makeEstate()
-        // Derive one real branch so its id resolves; then assert that
-        // naming it as winner while it is in the disqualified set raises
+        // Derive one real branch and discard it (what `run` does to a
+        // disqualified plan). Naming it as winner — with NO client-supplied
+        // disqualification set, the exact reported bypass — must raise
         // silentConceptLoss BEFORE any promotion (C-5 across the boundary).
         let branch = try await NeuronKit.deriveBranch(
             name: "p", from: handle, in: kit)
+        try await branch.discard()
         await #expect {
             try await MigrationBenchmark().confirmPromotion(
                 winnerBranchID: branch.branchID,
                 discardBranchIDs: [],
-                disqualifiedBranchIDs: [branch.branchID],
                 estate: handle, kit: kit)
         } throws: { error in
             guard case RecipeError.silentConceptLoss = error else { return false }
             return true
         }
-        // The branch was never promoted — still active.
-        #expect(branch.status == .active)
+        // The branch was never promoted — still discarded.
+        #expect(branch.status == .discarded)
     }
 
     @Test("id-based confirm unknown branch throws")

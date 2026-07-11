@@ -93,7 +93,12 @@ where
     let (summary_a, ac) = summarize(handle_a)?;
     let (summary_b, bc) = summarize(handle_b)?;
 
-    if ac == 0 || bc == 0 {
+    // Below k-anonymity, no fingerprint bit can reach the DP-OR threshold, so
+    // both summaries collapse to identical all-zero/noise-only aggregates and
+    // summary_overlap returns a false 1.0 for unrelated tiny estates. Treat < k
+    // recalled drawers as insufficient data => 0 overlap (subsumes the
+    // empty-estate case, since 0 < K_ANONYMITY).
+    if ac < K_ANONYMITY || bc < K_ANONYMITY {
         return Ok(MindOverlap {
             overlap: 0.0,
             a_count: ac,

@@ -194,16 +194,26 @@ fn parse_branch_id(s: &str) -> Result<BranchId, SubstrateError> {
 /// object itself. Parity of the Swift `MigrationBenchmark.confirmPromotion`
 /// by-id overload; the cross-version behavioral contract is maintained there.
 ///
-/// Guard order mirrors the Swift reference:
-///   1. C-5: `winner_branch_id` in `disqualified_branch_ids` →
-///      `RecipeError::SilentConceptLoss { branch_id: winner id string,
-///      lost_concepts: vec![] }` (the by-id shape carries no lost-concept
-///      detail — callers echo ids from the run report, not concept lists).
-///   2. Resolve: `coord.branch_handle_for(winner_branch_id)` → `None` →
+/// C-5 across the boundary is enforced AUTHORITATIVELY server-side: the run
+/// discards every disqualified branch before returning (see
+/// `discard_disqualified_branches`), and this confirm refuses any branch
+/// that is not `Active`. No client-supplied claim participates — an earlier
+/// revision accepted a caller-echoed `disqualified_branch_ids` slice
+/// (treating an empty slice as "no disqualifications"), which let a caller
+/// omit the set and promote a branch the report had disqualified. Mirrors
+/// the Swift reference exactly.
+///
+/// Guard order:
+///   1. Resolve: `coord.branch_handle_for(winner_branch_id)` → `None` →
 ///      `RecipeError::UserConfirmationRequired { action: "promote unknown
 ///      branch <id>" }`.
+///   2. C-5: a resolved branch in `Discarded` status →
+///      `RecipeError::SilentConceptLoss` (the by-id shape carries no
+///      lost-concept detail); `Won`/`Merged` →
+///      `UserConfirmationRequired` (terminal, but not the disqualified case).
 ///   3. `coord.glk_promote_branch(winner_branch_id, handle, now)`, mapped
-///      exactly as the report-based path maps it.
+///      exactly as the report-based path maps it (the GLK verb enforces the
+///      same lifecycle invariant one layer down).
 ///   4. Discard loop over `discard_branch_ids` skipping ids equal to the
 ///      winner and skipping unresolvable ids silently (parity of the
 ///      report-based path's discard behaviour).
@@ -211,26 +221,37 @@ pub fn confirm_migration_promotion_by_id(
     coord: &mut EstateCoordinator,
     winner_branch_id: BranchId,
     discard_branch_ids: &[BranchId],
-    disqualified_branch_ids: &[BranchId],
     handle: &EstateHandle,
     now: i64,
 ) -> Result<(), RecipeRunError> {
-    // Guard 1 — C-5: a disqualified branch is never promoted.
-    // The by-id shape carries no lost-concept detail; callers hold ids only.
-    if disqualified_branch_ids.contains(&winner_branch_id) {
-        return Err(RecipeError::SilentConceptLoss {
-            branch_id: winner_branch_id.to_string(),
-            lost_concepts: vec![],
-        }
-        .into());
-    }
-
-    // Guard 2 — resolve: an id the coordinator does not hold is unknown.
-    coord.branch_handle_for(winner_branch_id).ok_or_else(|| {
+    // Guard 1 — resolve: an id the coordinator does not hold is unknown.
+    let winner = coord.branch_handle_for(winner_branch_id).ok_or_else(|| {
         RecipeError::UserConfirmationRequired {
             action: format!("promote unknown branch {winner_branch_id}"),
         }
     })?;
+
+    // Guard 2 — C-5: never promote a branch that is no longer active.
+    // Discarded is exactly the disqualified case across this boundary (the
+    // run discards disqualified branches; confirm discards losers).
+    match winner.status() {
+        genius_locus_kit::branches::BranchStatus::Active => {}
+        genius_locus_kit::branches::BranchStatus::Discarded => {
+            return Err(RecipeError::SilentConceptLoss {
+                branch_id: winner_branch_id.to_string(),
+                lost_concepts: vec![],
+            }
+            .into());
+        }
+        other => {
+            return Err(RecipeError::UserConfirmationRequired {
+                action: format!(
+                    "promote branch {winner_branch_id} in terminal status {other:?}"
+                ),
+            }
+            .into());
+        }
+    }
 
     // Guard 3 — promote.
     coord
@@ -240,7 +261,7 @@ pub fn confirm_migration_promotion_by_id(
     // Guard 4 — discard loop; winner and unresolvable ids skipped silently.
     for &bid in discard_branch_ids {
         if bid != winner_branch_id {
-            let _ = coord.glk_discard_branch(bid);
+            let _ = coord.glk_discard_branch(bid, now);
         }
     }
     Ok(())
@@ -298,6 +319,35 @@ pub fn confirm_migration_promotion(
             action: format!("promote unknown plan '{winner_plan_name}'"),
         })?;
     let winner_bid = parse_branch_id(&winner.branch_id)?;
+    // C-5 (defense in depth): bind the promotion to the coordinator's OWN branch
+    // status, not just the caller-supplied `report.disqualified` — a forged
+    // report could omit a disqualified entry. A branch the run already discarded
+    // (disqualified) is Discarded here and must never be promoted. Mirrors the
+    // status guard in confirm_migration_promotion_by_id; glk_promote_branch also
+    // rejects non-Active branches, but checking here yields the precise C-5
+    // error rather than a generic NotActive.
+    match coord.branch_handle_for(winner_bid).map(|b| b.status()) {
+        Some(genius_locus_kit::branches::BranchStatus::Active) => {}
+        Some(genius_locus_kit::branches::BranchStatus::Discarded) => {
+            return Err(RecipeError::SilentConceptLoss {
+                branch_id: winner.branch_id.clone(),
+                lost_concepts: vec![],
+            }
+            .into());
+        }
+        Some(other) => {
+            return Err(RecipeError::UserConfirmationRequired {
+                action: format!("promote branch {winner_bid} in terminal status {other:?}"),
+            }
+            .into());
+        }
+        None => {
+            return Err(RecipeError::UserConfirmationRequired {
+                action: format!("promote unknown branch {winner_bid}"),
+            }
+            .into());
+        }
+    }
     coord
         .glk_promote_branch(winner_bid, handle, now)
         .map_err(|e| SubstrateError::new("promote_branch", format!("{e:?}")))?;
@@ -306,7 +356,7 @@ pub fn confirm_migration_promotion(
     for pr in &report.plan_results {
         if pr.name != winner_plan_name {
             if let Ok(bid) = parse_branch_id(&pr.branch_id) {
-                let _ = coord.glk_discard_branch(bid);
+                let _ = coord.glk_discard_branch(bid, now);
             }
         }
     }
@@ -373,7 +423,33 @@ pub fn run_migration_benchmark_sqlite(
         .map_err(|e| SubstrateError::new("open_estate", format!("{e:?}")))?;
     let mut sub = LiveRecipeSubstrate::new(&mut coord, handle, now);
     let report = run_migration_benchmark(&mut sub, plans, origin)?;
+    discard_disqualified_branches(&mut coord, &report, now);
     Ok((report, coord, handle))
+}
+
+/// C-5 enforcement at the source: a plan the C-13 gate disqualified has no
+/// legitimate future, so its branch is discarded immediately after the run,
+/// before any confirm step can address it. The GLK promote/merge verbs
+/// refuse non-active branches, so a stateless caller replaying the
+/// disqualified id cannot promote it regardless of what it sends. Rows are
+/// retained for audit (I-15); the report still carries the lost-concept
+/// detail. Every caller that drives `run_migration_benchmark` over a live
+/// coordinator must call this with the resulting report — parity of the
+/// discard loop at the end of the Swift `MigrationBenchmark.run`.
+pub fn discard_disqualified_branches(coord: &mut EstateCoordinator, report: &CoreReport, now: i64) {
+    for d in &report.disqualified {
+        let Some(bid) = report
+            .plan_results
+            .iter()
+            .find(|p| p.name == d.name)
+            .and_then(|p| Uuid::parse_str(&p.branch_id).ok())
+        else {
+            continue;
+        };
+        // NotTracked is the only failure and means there is nothing to
+        // discard — ignore, matching the Swift discard's idempotent intent.
+        let _ = coord.glk_discard_branch(bid, now);
+    }
 }
 
 #[cfg(test)]
@@ -581,7 +657,6 @@ mod tests {
             &mut coord,
             winner_bid,
             &[], // no other branches to discard
-            &[], // no disqualified ids
             &h,
             NOW,
         )
@@ -591,9 +666,11 @@ mod tests {
         assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 2);
     }
 
-    // CK-LIVE-7: winner id is in the disqualified set → SilentConceptLoss (C-5).
-    // The by-id shape returns an empty lost_concepts vec (no concept detail
-    // available from ids alone).
+    // CK-LIVE-7: the run disqualified the plan → its branch was discarded
+    // server-side → naming it as winner with NO caller-supplied claim (the
+    // exact reported bypass shape) is SilentConceptLoss (C-5). The by-id
+    // shape returns an empty lost_concepts vec (no concept detail available
+    // from ids alone).
     #[test]
     fn ck_live7_by_id_disqualified_winner_is_silent_concept_loss() {
         let (mut coord, h) = coord_with_parent();
@@ -604,6 +681,10 @@ mod tests {
             let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
             run_migration_benchmark(&mut sub, &plans, &origin).expect("run")
         };
+        // What every live driver does after the run (the sqlite wrapper and
+        // the ARIA run tool both call this).
+        discard_disqualified_branches(&mut coord, &report, NOW);
+        assert_eq!(report.disqualified.len(), 1, "plan must be disqualified");
 
         let winner_id_str = report
             .plan_results
@@ -613,12 +694,11 @@ mod tests {
             .expect("flat plan result");
         let winner_bid: BranchId = Uuid::parse_str(&winner_id_str).expect("uuid");
 
-        // Treat winner as disqualified — passes the id in disqualified_branch_ids.
+        // The bypass shape: winner named by id, no disqualification claim.
         let err = confirm_migration_promotion_by_id(
             &mut coord,
             winner_bid,
             &[],
-            &[winner_bid], // winner is disqualified
             &h,
             NOW,
         )
@@ -650,7 +730,7 @@ mod tests {
         let (mut coord, h) = coord_with_parent();
         let unknown_bid = Uuid::new_v4(); // not minted by any derive
 
-        let err = confirm_migration_promotion_by_id(&mut coord, unknown_bid, &[], &[], &h, NOW)
+        let err = confirm_migration_promotion_by_id(&mut coord, unknown_bid, &[], &h, NOW)
             .unwrap_err();
 
         match err {
@@ -666,29 +746,23 @@ mod tests {
 
     // CK-LIVE-7b: guard ORDER proof — a winner id that is BOTH unknown to
     // the coordinator AND in the disqualified set raises SilentConceptLoss,
-    // not UserConfirmationRequired: the C-5 membership guard runs before
-    // id resolution (an inverted implementation would resolve first, get
-    // None, and raise the wrong variant).
+    // The C-5 verdict is the branch's own lifecycle state: a branch
+    // discarded through ANY path (not only the benchmark run) is refused
+    // with SilentConceptLoss — the server-side record, no caller claim.
     #[test]
-    fn ck_live7b_by_id_disqualified_unknown_winner_is_still_concept_loss() {
+    fn ck_live7b_by_id_discarded_via_any_path_is_still_concept_loss() {
         let (mut coord, h) = coord_with_parent();
-        let unknown_bid = Uuid::new_v4(); // never minted, AND disqualified
+        let bid = coord.glk_derive_branch("p", &h, NOW).expect("derive");
+        coord.glk_discard_branch(bid, NOW).expect("discard");
 
-        let err = confirm_migration_promotion_by_id(
-            &mut coord,
-            unknown_bid,
-            &[],
-            &[unknown_bid],
-            &h,
-            NOW,
-        )
-        .unwrap_err();
+        let err = confirm_migration_promotion_by_id(&mut coord, bid, &[], &h, NOW)
+            .unwrap_err();
 
         match err {
             RecipeRunError::Recipe(RecipeError::SilentConceptLoss { branch_id, .. }) => {
-                assert_eq!(branch_id, unknown_bid.to_string());
+                assert_eq!(branch_id, bid.to_string());
             }
-            other => panic!("expected SilentConceptLoss (C-5 precedes resolution), got {other:?}"),
+            other => panic!("expected SilentConceptLoss for a discarded branch, got {other:?}"),
         }
     }
 
@@ -719,7 +793,6 @@ mod tests {
             &mut coord,
             winner_bid,
             &[bogus_bid], // bogus; glk_discard_branch will return Err, skipped
-            &[],
             &h,
             NOW,
         )

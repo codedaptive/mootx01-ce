@@ -200,7 +200,7 @@ enum LensTools {
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_anticipate",
-                description: "Reasoning lens: learn which capture actions tend to reach a target outcome, ranked by conservative success rate.",
+                description: "Reasoning lens: learn which capture actions tend to reach a target outcome, ranked by conservative success rate. Confirmation-level filters in the recall frame (userConfirmed/unconfirmed) are ignored — the lens performs its own dual recall (confirmed = success, unconfirmed = non-success) to compute a differentiated rate; sensitivity and other scoping filters are honored.",
                 inputSchema: objectSchema(
                     properties: [
                         "targetKind": stringSchema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly."),

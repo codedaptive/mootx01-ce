@@ -30,12 +30,19 @@ pub struct LatentThemes {
     pub reconstruction_error: f64,  // widened from f32 at the NeuronKit boundary
 }
 
+/// Upper bound on distinct labels the dense n×n factorization will accept.
+/// n=4096 ⇒ a 4096² × 8B ≈ 128 MB matrix worst case; beyond this the O(n²)
+/// allocation becomes a local-DoS vector, so an over-cap input degrades to an
+/// empty factorization. Mirrors the Swift `maxLatentThemeLabels`.
+pub const MAX_LATENT_THEME_LABELS: usize = 4096;
+
 /// Factor the symmetric co-occurrence over `labels` into `k` latent themes.
 /// `cooccurrence` is sparse — `(label_a, label_b, weight)` — and treated as
 /// symmetric; pairs whose endpoints are not in `labels` are ignored. `k` is
 /// clamped to the label count. Each label gets a soft loading vector and its
-/// dominant theme (argmax). Deterministic for a fixed `seed`. No labels or
-/// `k == 0` ⇒ empty factorization (C-16).
+/// dominant theme (argmax). Deterministic for a fixed `seed`. No labels,
+/// `k == 0`, or more than `MAX_LATENT_THEME_LABELS` labels ⇒ empty
+/// factorization (C-16).
 pub fn latent_themes(
     labels: &[String],
     cooccurrence: &[(String, String, f64)],
@@ -43,7 +50,13 @@ pub fn latent_themes(
     seed: u64,
 ) -> LatentThemes {
     let n = labels.len();
-    if n == 0 || k == 0 {
+    // DoS ceiling: the dense n×n co-occurrence matrix below is O(n²) memory
+    // (n=10_000 ⇒ 800 MB; larger inputs OOM the process). Treat an over-cap
+    // label count as a degenerate input ⇒ empty factorization, consistent with
+    // the n==0 / k==0 C-16 contract. A real estate's distinct field-value labels
+    // never approach MAX_LATENT_THEME_LABELS; the ceiling only bounds a
+    // pathological/adversarial local caller.
+    if n == 0 || k == 0 || n > MAX_LATENT_THEME_LABELS {
         return LatentThemes {
             k: 0,
             loadings: Vec::new(),

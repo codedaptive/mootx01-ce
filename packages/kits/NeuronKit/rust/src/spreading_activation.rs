@@ -30,11 +30,27 @@ pub fn spreading_activation(
     rng_seed: u64,
     k: usize,
 ) -> Vec<Activation> {
-    if seed >= adjacency.len() || walk_length == 0 || k == 0 {
+    // restart_prob is forwarded to RandomWalks::walk, whose assert panics for
+    // anything outside [0, 1). Validate at this public lens boundary rather than
+    // trap — the substrate is the trusted layer, the lens is the caller edge.
+    if seed >= adjacency.len()
+        || walk_length == 0
+        || k == 0
+        || !(restart_prob >= 0.0 && restart_prob < 1.0)
+    {
         return Vec::new();
     }
 
-    let visits = RandomWalks::walk(adjacency, seed, walk_length, restart_prob, rng_seed);
+    // RandomWalks::walk asserts every neighbor index into [0, n); an out-of-range
+    // node from a caller would panic. Drop structurally-invalid edges (keep every
+    // valid one) before forwarding. Mirrors the Swift spreadingActivation filter.
+    let n = adjacency.len();
+    let walk_graph: Vec<Vec<(usize, f64)>> = adjacency
+        .iter()
+        .map(|row| row.iter().copied().filter(|&(node, _)| node < n).collect())
+        .collect();
+
+    let visits = RandomWalks::walk(&walk_graph, seed, walk_length, restart_prob, rng_seed);
 
     // Visit frequency, normalised to a fraction of the walk.
     let mut counts = vec![0u64; adjacency.len()];

@@ -60,6 +60,15 @@ extension ToolProjection {
 extension ToolDispatcher {
 
     func runMemoryTool(_ args: [String: JSONValue]) async throws -> JSONValue {
+        // Guard: the memory tool is opt-in (MOOTX01_MEMORY_TOOL). The feature
+        // flag gated only tool PROJECTION (tools/list), so a disabled tool was
+        // merely hidden — a hard-coded tools/call to `memory` still dispatched
+        // here, reaching the read/write /memories surface. Enforce the flag at
+        // dispatch too, mirroring the vault surface's disabled-refusal guard.
+        guard ToolProjection.memoryToolEnabled else {
+            return Self.errorResult(
+                "memory tool is disabled; run `mootx01 enable memory-tool` to activate it")
+        }
         guard case .string(let command) = args["command"] else {
             return Self.textResult("Error: missing or invalid 'command' parameter")
         }
@@ -108,26 +117,41 @@ extension ToolDispatcher {
         return relative.isEmpty ? "root" : relative
     }
 
-    /// Find active drawer by wing="memories" + room matching the path.
+    /// Sensitivity gate for the `memory` surface: only Normal-tier drawers
+    /// (adjective sensitivity `.normal` / `.elevated`) are visible. `memory`
+    /// is a bulk, path-addressed read/write surface with no grant ceremony,
+    /// so it matches BitmapEvaluator's default no-claims recall posture
+    /// (`.sensitivityAtMost(.elevated)`, ADR-007 Decision 2): `.restricted`
+    /// and `.secret` drawers neither list nor resolve here. The adjective
+    /// axis is the access-gate-relevant tier (spec § 7.9.2) — the provenance
+    /// sensitivity axis is deliberately NOT consulted. Mirrors
+    /// `drawer_visible_to_adapter` in the Rust memory_adapter.rs.
+    private func isMemoryAdapterVisible(_ drawer: Drawer) -> Bool {
+        drawer.tombstonedAt == nil && !drawer.isKnewPast && !drawer.isTerminal
+            && drawer.adjectiveSensitivity.isBulkExportable
+    }
+
+    /// Find an active, normally recallable drawer by wing="memories" + room
+    /// matching the path.
     private func findMemDrawer(_ path: String) async throws -> Drawer? {
         let room = memRoomForPath(path)
         let estate = try await kit.estate(for: handle)
         let all = try await estate.allDrawers(hydrationLevel: .full, limit: nil)
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
         return all.first {
-            $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal
+            isMemoryAdapterVisible($0)
             && nodeNames[$0.parentNodeId]?.wing == memoryAdapterWing
             && nodeNames[$0.parentNodeId]?.room == room
         }
     }
 
-    /// List all active drawers in the adapter wing.
+    /// List all active, normally recallable drawers in the adapter wing.
     private func listMemDrawers() async throws -> [(drawer: Drawer, room: String)] {
         let estate = try await kit.estate(for: handle)
         let all = try await estate.allDrawers(hydrationLevel: .structured, limit: nil)
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
         return all.compactMap { d -> (Drawer, String)? in
-            guard d.tombstonedAt == nil && !d.isKnewPast && !d.isTerminal,
+            guard isMemoryAdapterVisible(d),
                   let names = nodeNames[d.parentNodeId],
                   names.wing == memoryAdapterWing
             else { return nil }
@@ -281,7 +305,9 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            sensitivity: .normal,
+            // Carry the source drawer's tier forward — a re-capture with a
+            // hardcoded .normal silently DOWNGRADED elevated drawers on edit.
+            sensitivity: drawer.adjectiveSensitivity,
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
@@ -327,7 +353,9 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            sensitivity: .normal,
+            // Carry the source drawer's tier forward — a re-capture with a
+            // hardcoded .normal silently DOWNGRADED elevated drawers on edit.
+            sensitivity: drawer.adjectiveSensitivity,
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing
@@ -387,7 +415,9 @@ extension ToolDispatcher {
             latticeAnchor: .udc("000"),
             addedBy: serverIdentity,
             embeddingModelID: "fdc-simhash-v1",
-            sensitivity: .normal,
+            // Carry the source drawer's tier forward — a re-capture with a
+            // hardcoded .normal silently DOWNGRADED elevated drawers on edit.
+            sensitivity: drawer.adjectiveSensitivity,
             provenanceChannel: .mcpAgent,
             sourceType: .imported,
             wing: memoryAdapterWing

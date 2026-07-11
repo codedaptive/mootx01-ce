@@ -116,7 +116,12 @@ pub fn dispatch(
             let top_k = crate::dispatch::clamp_limit(
                 Some(opt_integer(args, "topK", 5)?), "topK", 5, crate::dispatch::LIMIT_HARD_CEILING
             )?;
-            let ranked = run_keystones(&coord, &estate.handle, wing, top_k, now as f64)
+            // `now` is `wall_now()` epoch MILLISECONDS (ADR-023); the keystones
+            // VizGraph telemetry `ts` is epoch SECONDS (mirrors the Swift recipe,
+            // which threads `Date.timeIntervalSince1970`). Scale ms→s for this
+            // telemetry-only float — do NOT change `wall_now()`, which the i64
+            // ms-timestamp lenses depend on.
+            let ranked = run_keystones(&coord, &estate.handle, wing, top_k, now as f64 / 1000.0)
                 .map_err(lens_error)?;
             Ok(list(
                 "keystones",
@@ -130,7 +135,10 @@ pub fn dispatch(
         "moot_lens_constellation" => {
             // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
-            let out = run_constellation(&coord, &estate.handle, wing, now as f64)
+            // ms→s: `now` is `wall_now()` epoch milliseconds; the constellation
+            // VizGraph `ts` is epoch seconds (mirrors the Swift recipe's
+            // `Date.timeIntervalSince1970`). See the keystones arm above.
+            let out = run_constellation(&coord, &estate.handle, wing, now as f64 / 1000.0)
                 .map_err(lens_error)?;
             Ok(list(
                 "constellation",

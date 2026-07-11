@@ -112,6 +112,23 @@ public actor InvertedIndexStore {
     /// once a fresh pair has been built.
     private var isDirty: Bool = true
 
+    /// Monotonic counter bumped on every mutation (via `markDirty()`). Because
+    /// this actor is reentrant at `await` points, a mutation can land while
+    /// `buildIndex` is suspended loading from SQLite; `buildIndex` snapshots
+    /// this before its awaits and only publishes/clears the cache if the value
+    /// is unchanged on resume — otherwise its snapshot is stale and it must not
+    /// mark the cache clean. Without this, an interleaved `remove` could be
+    /// overwritten by `isDirty = false`, caching removed-but-not-expunged
+    /// postings until the next unrelated write.
+    private var dirtyGeneration: Int = 0
+
+    /// Mark the built cache stale. The single funnel for `isDirty = true` so the
+    /// generation counter can never drift out of sync with the flag.
+    private func markDirty() {
+        isDirty = true
+        dirtyGeneration &+= 1
+    }
+
     // MARK: - Init
 
     /// Create an InvertedIndexStore. Requires a `Storage` backend opened
@@ -199,7 +216,21 @@ public actor InvertedIndexStore {
         // Remove existing state for this item first (idempotent re-index).
         try await deleteFromStorage(itemID: itemID)
 
-        guard !tokens.isEmpty else { isDirty = true; return }
+        // ramResident cache coherence (SECURITY): the durable delete above
+        // does not touch the RAM mirror, and the re-add below only writes the
+        // NEW tokens — so a term present in the OLD tokenization but absent
+        // from the new one would linger in ramTermFreqs and still surface this
+        // item on a BM25 query for that stale term. Purge this item's prior
+        // entries from the mirror before re-adding.
+        if ramTermFreqs != nil {
+            for term in Array(ramTermFreqs?.keys ?? [:].keys) {
+                ramTermFreqs?[term]?.removeValue(forKey: itemID)
+                if ramTermFreqs?[term]?.isEmpty == true { ramTermFreqs?.removeValue(forKey: term) }
+            }
+            ramDocLengths?.removeValue(forKey: itemID)
+        }
+
+        guard !tokens.isEmpty else { markDirty(); return }
 
         var tf = [String: Int]()
         for t in tokens { tf[t, default: 0] += 1 }
@@ -233,7 +264,7 @@ public actor InvertedIndexStore {
             }
             ramDocLengths?[itemID] = docLen
         }
-        isDirty = true
+        markDirty()
     }
 
     /// Fold worker-computed postings into the IN-MEMORY maps only — the memory
@@ -251,7 +282,14 @@ public actor InvertedIndexStore {
     /// on the next query. The `items` parameter is accepted for API
     /// compatibility but the data is NOT copied into RAM dictionaries.
     public func foldPostings(_ items: [(itemID: String, tf: [String: Int], docLen: Int)]) {
-        isDirty = true
+        markDirty()
+        // ramResident cache coherence (SECURITY): an external shard merge has
+        // written new postings to the durable iix_* tables, but the RAM mirror
+        // still holds the pre-merge maps and `buildIndex` trusts a non-nil
+        // mirror over SQLite. Drop the mirror so the next buildIndex reloads
+        // the merged data from disk (matches the remove()/deleteAll() pattern).
+        ramTermFreqs = nil
+        ramDocLengths = nil
     }
 
     /// Remove a document from the index.
@@ -264,7 +302,7 @@ public actor InvertedIndexStore {
         cachedPair = nil
         ramTermFreqs = nil
         ramDocLengths = nil
-        isDirty = true
+        markDirty()
     }
 
     private func deleteFromStorage(itemID: String) async throws {
@@ -293,6 +331,13 @@ public actor InvertedIndexStore {
         parameters: BM25Parameters = BM25Parameters()
     ) async throws -> (index: InvertedIndex, termMapping: [String: UInt32]) {
         if let cached = cachedPair, !isDirty { return cached }
+        // Snapshot the mutation generation before any suspension point. This
+        // actor is reentrant at `await`, so a mutation (remove/deleteAll/index/
+        // foldPostings) can run while the SQLite loads below are suspended and
+        // bump the generation. If it does, the snapshot we build is stale and we
+        // must NOT publish it or clear `isDirty` — otherwise an interleaved
+        // remove would be masked and stale postings cached until the next write.
+        let builtFromGeneration = dirtyGeneration
         // ADR-026: use RAM maps when ramResident, else load from SQLite.
         let termFreqs: BM25Weighting.TermFreqTable
         let docLengths: [String: Int]
@@ -307,8 +352,14 @@ public actor InvertedIndexStore {
             docLengths: docLengths,
             parameters: parameters
         )
-        cachedPair = pair
-        isDirty = false
+        // Only cache + mark clean if no mutation interleaved during the awaits.
+        // If one did, return this (possibly-stale) pair to the current caller but
+        // leave `isDirty` set so the NEXT buildIndex rebuilds from fresh state —
+        // staleness is bounded to this single call, never persisted.
+        if dirtyGeneration == builtFromGeneration {
+            cachedPair = pair
+            isDirty = false
+        }
         return pair
     }
 
@@ -358,7 +409,7 @@ public actor InvertedIndexStore {
         cachedPair = nil
         ramTermFreqs = nil
         ramDocLengths = nil
-        isDirty = true
+        markDirty()
         logger.info("InvertedIndexStore: deleteAll cleared all term-freq + doc-len rows")
     }
 

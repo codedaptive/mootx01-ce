@@ -1107,7 +1107,25 @@ public extension GeniusLocusKit {
     ///   - handle: The estate to derive from. Must be open in this kit.
     /// - Returns: An active `BranchHandle` with `lineageDepth == 1`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    /// Maximum number of simultaneously ACTIVE branches this kit will hold.
+    /// Each active branch retains a full in-memory copy of its parent's rows,
+    /// so an unbounded active set is a memory-exhaustion vector for any caller
+    /// that can trigger derivation. Terminal branches (won/merged/discarded)
+    /// release their rows and do not count. Mirrors Rust `MAX_ACTIVE_BRANCHES`.
+    static let maxActiveBranches = 64
+
+    /// Refuse a new derivation when the active-branch quota is reached.
+    /// Terminal branches have released their rows and do not count.
+    private func checkActiveBranchQuota() throws {
+        let active = branches.values.filter { $0.status == .active }.count
+        guard active < Self.maxActiveBranches else {
+            throw GeniusLocusKitError.activeBranchQuotaExceeded(
+                active: active, maximum: Self.maxActiveBranches)
+        }
+    }
+
     func glkDeriveBranch(name: String, from handle: EstateHandle) async throws -> any BranchHandle {
+        try checkActiveBranchQuota()
         let parentEstate = try estate(for: handle)
         let snapshotRows = try await recallRows(from: parentEstate)
         let branch = try await EstateBranch(
@@ -1136,6 +1154,7 @@ public extension GeniusLocusKit {
         // Registry membership check ensures the parent branch was derived by
         // THIS kit instance; branches from a different GeniusLocusKit actor
         // may pass the type cast but are not tracked here.
+        try checkActiveBranchQuota()
         guard let concreteBranch = parentBranch as? EstateBranch else {
             throw GeniusLocusKitError.branchNotTracked(branchID: parentBranch.branchID)
         }
@@ -1177,6 +1196,14 @@ public extension GeniusLocusKit {
         // pass the type cast but are not tracked by this actor.
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
+        }
+        // Lifecycle guard: the doc contract above ("Must be in `.active`
+        // status") was previously unenforced, which let a DISCARDED branch —
+        // e.g. one the migration benchmark disqualified for silent concept
+        // loss — be promoted by any caller holding its id (C-5 bypass).
+        guard concreteBranch.status == .active else {
+            throw GeniusLocusKitError.branchNotActive(
+                branchID: concreteBranch.branchID, status: concreteBranch.status)
         }
         // Validate the handle before the E-2 guard: estate(for:) throws
         // .estateNotOpen for a stale handle, surfacing the error before the
@@ -1253,8 +1280,11 @@ public extension GeniusLocusKit {
             _ = try await capture(handle, captureFrame, mode: .regular)
         }
 
-        // Transition the branch to .won.
+        // Transition the branch to .won, then release its now-redundant row
+        // copy (the promoted rows live in the parent estate). The O(1) .won
+        // shell stays in the registry.
         concreteBranch.setStatus(.won)
+        try await concreteBranch.releaseRows()
         Self.verbLog.debug("glkPromoteBranch '\(branch.name, privacy: .public)' → .won (\(newRows.count) rows promoted)")
     }
 
@@ -1284,6 +1314,13 @@ public extension GeniusLocusKit {
         // pass the type cast but are not tracked by this actor.
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
+        }
+        // Lifecycle guard: same invariant as glkPromoteBranch — terminal
+        // branches (won/merged/discarded) are read-only history and cannot
+        // cherry-pick content into the parent.
+        guard concreteBranch.status == .active else {
+            throw GeniusLocusKitError.branchNotActive(
+                branchID: concreteBranch.branchID, status: concreteBranch.status)
         }
         // Validate the handle before the E-2 guard: estate(for:) throws
         // .estateNotOpen for a stale handle, surfacing the error before the
@@ -1365,8 +1402,11 @@ public extension GeniusLocusKit {
             merged.append(id)
         }
 
-        // Transition the branch to .merged.
+        // Transition the branch to .merged, then release the row copy (the
+        // merged rows live in the parent estate now). The O(1) .merged shell
+        // stays in the registry.
         concreteBranch.setStatus(.merged)
+        try await concreteBranch.releaseRows()
         Self.verbLog.debug("glkMergeDrawers '\(branch.name, privacy: .public)' → .merged (\(merged.count) merged, \(skipped.count) skipped)")
 
         return MergeReport(merged: merged, conflicts: [], skipped: skipped)

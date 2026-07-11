@@ -46,7 +46,24 @@ pub enum RecipeError {
     /// A recipe reached a step requiring explicit human confirmation and
     /// none was provided. Recipes never auto-confirm (spec B-3).
     UserConfirmationRequired { action: String },
+
+    /// More migration plans than the recipe admits. Each plan derives a
+    /// retained COW branch, so an unbounded plan count is a
+    /// resource-exhaustion vector. Refused before any branch is derived.
+    /// Mirrors Swift `RecipeError.tooManyPlans`.
+    TooManyPlans { count: usize, maximum: usize },
+
+    /// More origin entries than the recipe admits. Each entry is captured
+    /// into every branch, so an unbounded corpus is O(plans × entries)
+    /// work. Refused before any branch is derived. Mirrors Swift
+    /// `RecipeError.tooManyOriginEntries`.
+    TooManyOriginEntries { count: usize, maximum: usize },
 }
+
+/// DoS bounds on attacker-influenceable migration input. Mirror Swift
+/// `MigrationBenchmark.maxPlans` / `maxOriginEntries`.
+pub const MAX_MIGRATION_PLANS: usize = 20;
+pub const MAX_MIGRATION_ORIGIN_ENTRIES: usize = 5000;
 
 impl fmt::Display for RecipeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -85,6 +102,16 @@ impl fmt::Display for RecipeError {
                 f,
                 "RecipeError.userConfirmationRequired: '{}' requires explicit human confirmation.",
                 action
+            ),
+            RecipeError::TooManyPlans { count, maximum } => write!(
+                f,
+                "RecipeError.tooManyPlans: {} plans exceeds the maximum of {}.",
+                count, maximum
+            ),
+            RecipeError::TooManyOriginEntries { count, maximum } => write!(
+                f,
+                "RecipeError.tooManyOriginEntries: {} origin entries exceeds the maximum of {}.",
+                count, maximum
             ),
         }
     }
@@ -255,6 +282,8 @@ mod tests {
             RecipeError::UserConfirmationRequired {
                 action: "promote".into(),
             },
+            RecipeError::TooManyPlans { count: 21, maximum: 20 },
+            RecipeError::TooManyOriginEntries { count: 5001, maximum: 5000 },
         ];
         // Exhaustive match — compiler enforces that every arm is covered.
         for c in &cases {
@@ -265,15 +294,19 @@ mod tests {
                 RecipeError::SilentConceptLoss { .. } => "silentConceptLoss",
                 RecipeError::TournamentNoWinner { .. } => "tournamentNoWinner",
                 RecipeError::UserConfirmationRequired { .. } => "userConfirmationRequired",
+                RecipeError::TooManyPlans { .. } => "tooManyPlans",
+                RecipeError::TooManyOriginEntries { .. } => "tooManyOriginEntries",
             };
         }
-        // All six descriptions carry the Swift-matching case-name prefix.
+        // Every description carries the Swift-matching case-name prefix.
         assert!(format!("{}", cases[0]).contains("missingCapability"));
         assert!(format!("{}", cases[1]).contains("insufficientBranches"));
         assert!(format!("{}", cases[2]).contains("duplicatePlanName"));
         assert!(format!("{}", cases[3]).contains("silentConceptLoss"));
         assert!(format!("{}", cases[4]).contains("tournamentNoWinner"));
         assert!(format!("{}", cases[5]).contains("userConfirmationRequired"));
+        assert!(format!("{}", cases[6]).contains("tooManyPlans"));
+        assert!(format!("{}", cases[7]).contains("tooManyOriginEntries"));
     }
 
     // ── SubstrateError ────────────────────────────────────────────────────────

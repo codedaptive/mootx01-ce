@@ -7,7 +7,7 @@
 // namespaces). Tool names are injected (the real caller derives them from
 // the linked AriaMCP ToolProjection at runtime); most tests use a fixed
 // fixture list, but `classificationTableIsExhaustive` uses a PINNED copy of
-// the real 65-tool inventory (see its own doc comment for why it is pinned
+// the real 66-tool inventory (see its own doc comment for why it is pinned
 // rather than fetched live). All I/O uses sandbox directories.
 
 import Testing
@@ -113,7 +113,7 @@ struct PermissionsWriterTests {
     /// gains or removes a tool, update BOTH this pinned list and whichever
     /// of `readTools` / `additiveWriteTools` / `mutationTools` /
     /// `destructiveTools` the new tool belongs in.
-    @Test("classify's tier tables are exhaustive over the real 65-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 66-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
@@ -128,18 +128,19 @@ struct PermissionsWriterTests {
             "moot_lens_overlap", "moot_lens_partial_cue", "moot_lens_precedence", "moot_lens_rhythm",
             "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
-            "moot_memory_search", "moot_monitoring_status", "moot_move_memory", "moot_palace_import",
+            "moot_memory_list", "moot_memory_search", "moot_monitoring_status", "moot_move_memory",
+            "moot_palace_import",
             "moot_read_journal", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped",
             "moot_reclassify_fdc", "moot_recollect", "moot_reindex", "moot_retire_fact", "moot_run_migration",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
             "moot_write_journal",
         ]
-        // Count guard (see doc comment): 65 as of moot_reclassify_fdc.
+        // Count guard (see doc comment): 66 as of moot_memory_list.
         // A mismatch here means THIS PINNED LIST is stale relative to
         // tool_list.rs / ToolProjection.swift — fix the pin first, then re-run
         // before trusting the set-difference below.
-        #expect(realTools.count == 65, "pinned tool inventory drifted from the real surface count")
+        #expect(realTools.count == 66, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)

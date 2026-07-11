@@ -76,6 +76,18 @@ impl From<persistence_kit::StorageError> for ManagerError {
 /// synchronous too — there is no actor; the resident host serializes access
 /// through its own owner. The clock boundary is the caller's: every method that
 /// needs "now" takes it as an epoch-seconds parameter (determinism rule).
+/// DoS bound for the unauthenticated loopback read APIs. The dropbox-ID set
+/// derived from the event stream is attacker-influenceable (a poisoned local
+/// stats store can mint many unique dropbox IDs), and each ID drives a
+/// separate per-dropbox metric query. 200 is far above any real installation
+/// while bounding worst-case fan-out. Mirrors Swift `maxDropboxIDsPerQuery`.
+const MAX_DROPBOX_IDS_PER_QUERY: usize = 200;
+
+/// Per-dropbox row cap for the viz-metric historical scan. The graph path
+/// dedups to latest-per-(estate,signal), so the newest N rows suffice.
+/// Mirrors Swift `maxMetricRowsPerDropbox`.
+const MAX_METRIC_ROWS_PER_DROPBOX: usize = 2000;
+
 pub struct MootManager {
     config: crate::manager_config::ManagerConfig,
     /// The owned stats store. `Some` after `start()` succeeds.
@@ -362,7 +374,7 @@ impl MootManager {
             "server.proto_version",
             "substrate.kernel.backend_selected",
         ];
-        let server_metrics = store.query_metrics_by_names(server_metric_names, None)?;
+        let server_metrics = store.query_metrics_by_names(server_metric_names, None, None)?;
         // latest_by_name[name] = (newer, older). older is None until the second sample.
         let mut latest_by_name: BTreeMap<String, (MetricRow, Option<MetricRow>)> = BTreeMap::new();
         for m in server_metrics.iter() {
@@ -517,6 +529,7 @@ impl MootManager {
             .map(|e| e.dropbox_id.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
+            .take(MAX_DROPBOX_IDS_PER_QUERY)
             .collect();
         let queue_metric_name_slice: Vec<&str> = queue_metric_names.iter().copied().collect();
         let queue_metrics = store.query_latest_metrics_by_names_and_dropboxes(
@@ -660,11 +673,12 @@ impl MootManager {
             .map(|e| e.dropbox_id.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
+            .take(MAX_DROPBOX_IDS_PER_QUERY)
             .collect();
         let viz_signal_slice: Vec<&str> = viz_signals.iter().copied().collect();
         let mut viz_metrics: Vec<MetricRow> = Vec::new();
         for dropbox_id in &viz_dropbox_ids {
-            let rows = store.query_metrics_by_names(&viz_signal_slice, Some(dropbox_id.as_str()))?;
+            let rows = store.query_metrics_by_names(&viz_signal_slice, Some(dropbox_id.as_str()), Some(MAX_METRIC_ROWS_PER_DROPBOX))?;
             viz_metrics.extend(rows);
         }
 

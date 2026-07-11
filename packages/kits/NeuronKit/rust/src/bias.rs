@@ -16,6 +16,17 @@ use crate::tournament::{bradley_terry, PairwiseOutcome, TournamentError};
 /// synthetic baseline and surfaces as `TournamentError::SelfPairing`.
 pub const PREFERENCE_BASELINE: &str = "PREFERENCE_BASELINE";
 
+/// Maximum number of preference records (rooms) the dense Bradley-Terry
+/// fitter will accept. Each record becomes a competitor; the fitter
+/// allocates O(n²) matrices and runs O(n²) sweeps, so an unbounded room
+/// count is a CPU/memory-exhaustion vector (rooms are attacker-creatable
+/// via capture). 200 is far above any legitimate estate's distinct-room
+/// cardinality while keeping the dense fit bounded (200² × 10⁴ sweeps).
+/// `run_bias` truncates to the highest-signal rooms before calling; this
+/// guard also protects direct callers of the public `learned_preference`.
+/// Mirrors Swift `Bias.maxPreferenceRooms`.
+pub const MAX_PREFERENCE_ROOMS: usize = 200;
+
 /// One category's representation bias: estate share, reference share, and the
 /// signed difference. Positive = over-represented; negative = avoided.
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +126,11 @@ pub fn learned_preference(
     if records.is_empty() {
         return Ok(Vec::new());
     }
+    // Bound the dense fitter: reject an over-large competitor set rather than
+    // allocate O(n²) matrices and run O(n²) sweeps over it (DoS guard).
+    if records.len() > MAX_PREFERENCE_ROOMS {
+        return Err(TournamentError::TooManyCompetitors(records.len()));
+    }
 
     // Build the anchor-reduction tally. Each room vs the baseline:
     //   +1 pseudo-win each direction, +endorsements room-beats-baseline,
@@ -157,10 +173,18 @@ pub fn learned_preference(
         .find(|s| s.competitor_id == PREFERENCE_BASELINE)
         .map(|s| s.strength)
         .unwrap_or(0.0);
-    let counts: HashMap<&str, (i64, i64)> = records
-        .iter()
-        .map(|(l, e, d)| (l.as_str(), (*e, *d)))
-        .collect();
+    // Aggregate duplicate labels by summing their counts. The Bradley-Terry
+    // fitter treats repeated records of one label as a single competitor
+    // (identity is the label), so the per-label counts are the totals across
+    // those records. A plain `.collect()` here would silently keep only the
+    // last duplicate; summing matches the Swift leg (which would otherwise trap
+    // on a duplicate key) and the fitter's own competitor aggregation.
+    let mut counts: HashMap<&str, (i64, i64)> = HashMap::new();
+    for (l, e, d) in records {
+        let entry = counts.entry(l.as_str()).or_insert((0, 0));
+        entry.0 += *e;
+        entry.1 += *d;
+    }
 
     let mut rooms: Vec<PreferenceStrength> = fitted
         .iter()
@@ -331,5 +355,34 @@ mod tests {
         let corrupted = prefs.iter().find(|p| p.label == "corrupted").unwrap();
         assert_eq!(corrupted.endorsements, -5, "raw endorsement count preserved");
         assert_eq!(corrupted.dismissals, -10, "raw dismissal count preserved");
+    }
+}
+
+#[cfg(test)]
+mod dos_guard_tests {
+    use super::*;
+
+    #[test]
+    fn learned_preference_rejects_over_cap_record_set() {
+        // MAX_PREFERENCE_ROOMS + 1 distinct rooms must be refused before the
+        // dense O(n²) fitter allocates — the DoS guard.
+        let records: Vec<(String, i64, i64)> = (0..=MAX_PREFERENCE_ROOMS)
+            .map(|i| (format!("room-{i}"), 1, 0))
+            .collect();
+        match learned_preference(&records) {
+            Err(TournamentError::TooManyCompetitors(n)) => {
+                assert_eq!(n, MAX_PREFERENCE_ROOMS + 1);
+            }
+            other => panic!("expected TooManyCompetitors, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn learned_preference_accepts_at_cap() {
+        // Exactly MAX_PREFERENCE_ROOMS must still fit.
+        let records: Vec<(String, i64, i64)> = (0..MAX_PREFERENCE_ROOMS)
+            .map(|i| (format!("room-{i}"), 1, 0))
+            .collect();
+        assert!(learned_preference(&records).is_ok());
     }
 }

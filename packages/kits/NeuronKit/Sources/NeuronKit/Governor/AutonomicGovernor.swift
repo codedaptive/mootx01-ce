@@ -941,6 +941,22 @@ public actor AutonomicGovernor {
     ) async throws -> TopologyInputsToken {
         let locus = try await kit.estate(for: handle)
 
+        // Cheap outer watermark (DoS fix): every drawer/tunnel/fact mutation
+        // writes an audit event, so an unchanged audit count means an unchanged
+        // estate. Probe that O(1) COUNT(*) BEFORE loading all drawers, tunnels,
+        // and facts and sorting them into a fingerprint — otherwise an attacker
+        // who creates many KG facts (with long subjects) forces a full load +
+        // O(n log n) sort every topology cadence even when nothing changed.
+        // Mirrors graphCentralityScan's watermark. Only skips when a prior
+        // fingerprint exists (a snapshot has been produced before).
+        if let previousFingerprint {
+            let savedCountRaw = try await locus.meta(key: NeuronKitManifestKey.topologyCount)
+            let savedCount: Int? = savedCountRaw.flatMap { Int($0) }
+            if try await !kit.hasAuditGrown(for: handle, since: savedCount) {
+                return TopologyInputsToken(unchangedFingerprint: previousFingerprint)
+            }
+        }
+
         let allDrawerRows = try await locus.allDrawers()
         let allTunnelRows = try await locus.allTunnels()
         let kgFacts = try await locus.allKGFacts()
@@ -1072,6 +1088,12 @@ public actor AutonomicGovernor {
         let body = try encoder.encode(payload)
 
         await handler(handle.estateUUID.uuidString, now, body, token.fingerprint)
+        // Persist the audit-count watermark so the next cadence can skip the
+        // full-estate load when nothing has changed (see the gate above).
+        if let currentCount = try? await kit.auditEventCount(for: handle) {
+            try? await locus.setMeta(
+                key: NeuronKitManifestKey.topologyCount, value: String(currentCount))
+        }
         return token
     }
 
@@ -1203,7 +1225,29 @@ public struct TopologyInputsToken: Sendable, Equatable {
             digest = digest &* 0x0000_0100_0000_01b3
         }
         self.inputsDigest = digest
+        self.overrideFingerprint = nil
     }
+
+    /// Skip-path token: carries a known fingerprint directly, WITHOUT loading
+    /// the estate. Used when the cheap audit-count watermark shows the estate
+    /// is unchanged, so the duty can return the prior fingerprint without the
+    /// full drawer/tunnel/fact load + sort. All count fields read zero and are
+    /// never consumed on this path (only `fingerprint` is).
+    init(unchangedFingerprint: String) {
+        self.drawerCount = 0
+        self.tunnelCount = 0
+        self.factCount = 0
+        self.deadDrawerCount = 0
+        self.deadTunnelCount = 0
+        self.maxFiledAt = nil
+        self.maxEventTime = nil
+        self.inputsDigest = 0
+        self.overrideFingerprint = unchangedFingerprint
+    }
+
+    /// When set (skip-path init), `fingerprint` returns this verbatim instead
+    /// of recomputing from the (empty) input fields.
+    private let overrideFingerprint: String?
 
     /// Stable, persistable fingerprint of these inputs. Two tokens are equal iff
     /// their fingerprints are equal, so the duty's dirty-check compares
@@ -1212,6 +1256,7 @@ public struct TopologyInputsToken: Sendable, Equatable {
     /// recalculation floor: bumping the frame changes the fingerprint even when
     /// every estate input is unchanged.
     public var fingerprint: String {
+        if let overrideFingerprint { return overrideFingerprint }
         let filed = maxFiledAt.map { String($0.timeIntervalSince1970) } ?? "-"
         let event = maxEventTime.map { String($0.timeIntervalSince1970) } ?? "-"
         return [

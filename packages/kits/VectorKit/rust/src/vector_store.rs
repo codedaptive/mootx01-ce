@@ -1385,9 +1385,8 @@ impl VectorStore {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
         }
-        let mut scored = self.float_scan_from_table(probe, model_id)?;
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(k);
+        // float_scan_from_table returns the k nearest, ordered best-first.
+        let scored = self.float_scan_from_table(probe, model_id, k, true)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
             distance: (dist * 10_000.0).round() as i32,
@@ -1421,10 +1420,8 @@ impl VectorStore {
         if k == 0 || probe.is_empty() {
             return Ok(Vec::new());
         }
-        let mut scored = self.float_scan_from_table(probe, model_id)?;
-        // Farthest = descending by distance.
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(k);
+        // float_scan_from_table returns the k farthest, ordered best-first.
+        let scored = self.float_scan_from_table(probe, model_id, k, false)?;
         Ok(scored.into_iter().map(|(dist, item_id)| VectorMatch {
             item_id,
             distance: (dist * 10_000.0).round() as i32,
@@ -1835,13 +1832,24 @@ impl VectorStore {
     /// ADR-026: scan the SQLite `vectors` table directly for float NN
     /// search, computing cosine distance per row. No cached index, no
     /// heap-resident vector array. Returns (distance, item_id) pairs.
+    /// Scan the model's float rows and return the `k` best-scoring by cosine
+    /// distance — `nearest = true` keeps the SMALLEST distances, `false` the
+    /// largest. Maintains a bounded top-k ordered best-first while scanning
+    /// (DoS fix): memory is O(k) and cost O(n log k), instead of materializing
+    /// and sorting a score entry for every row on every recall — a large
+    /// estate could otherwise exhaust CPU/memory from a normal MCP search.
     fn float_scan_from_table(
         &self,
         probe: &[f32],
         model_id: &str,
+        k: usize,
+        nearest: bool,
     ) -> Result<Vec<(f32, String)>, VectorKitError> {
         let records = self.fetch_float_records(model_id)?;
-        let mut scored: Vec<(f32, String)> = Vec::with_capacity(records.len());
+        // Bounded top-k, kept ordered best-first (index 0 = best, last = worst).
+        let mut top: Vec<(f32, String)> = Vec::with_capacity(k.min(64));
+        // `a` is better than `b` when it should rank ahead in the result.
+        let better = |a: f32, b: f32| if nearest { a < b } else { a > b };
         for (key, payload) in &records {
             let bytes = &payload.bytes;
             let dim = bytes.len() / 4;
@@ -1870,9 +1878,23 @@ impl VectorStore {
             } else {
                 1.0
             };
-            scored.push((dist, key.item_id.clone()));
+            // Bounded insert: skip if worse than the current worst and full.
+            if k == 0 {
+                continue;
+            }
+            if top.len() >= k && !better(dist, top[top.len() - 1].0) {
+                continue;
+            }
+            let mut i = top.len();
+            while i > 0 && better(dist, top[i - 1].0) {
+                i -= 1;
+            }
+            top.insert(i, (dist, key.item_id.clone()));
+            if top.len() > k {
+                top.pop();
+            }
         }
-        Ok(scored)
+        Ok(top)
     }
 
     fn ensure_float_index_built_locked(

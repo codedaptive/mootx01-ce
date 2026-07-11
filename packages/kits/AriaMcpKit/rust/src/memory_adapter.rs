@@ -19,6 +19,16 @@ pub fn dispatch_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    // Guard: the memory tool is opt-in (MOOTX01_MEMORY_TOOL == "1"). The flag
+    // gated only tool projection (the tool is absent from tools/list), so a
+    // hard-coded tools/call to `memory` still reached this read/write surface.
+    // Enforce the flag at dispatch too, mirroring the vault disabled-refusal.
+    let enabled = std::env::var("MOOTX01_MEMORY_TOOL").map(|v| v == "1").unwrap_or(false);
+    if !enabled {
+        return Ok(error_result(
+            "memory tool is disabled; run `mootx01 enable memory-tool` to activate it",
+        ));
+    }
     let command = require_string(args, "command")?;
     match command {
         "view" => memory_view(args, registry),
@@ -52,6 +62,21 @@ fn path_to_room(path: &str) -> String {
 
 fn vpath(room: &str) -> String { format!("{MEMORIES_ROOT}/{room}") }
 
+/// Sensitivity gate for the `memory` surface: only Normal-tier drawers
+/// (adjective sensitivity Normal / Elevated) are visible. `memory` is a
+/// bulk, path-addressed read/write surface with no grant ceremony, so it
+/// matches BitmapEvaluator's default no-claims recall posture
+/// (`sensitivityAtMost(.elevated)`, ADR-007 Decision 2): Restricted and
+/// Secret drawers neither list nor resolve here. The adjective axis is the
+/// access-gate-relevant tier (spec § 7.9.2) — the provenance sensitivity
+/// axis is deliberately NOT consulted. Mirrors `isMemoryAdapterVisible` in
+/// the Swift MemoryToolAdapter.swift.
+fn drawer_visible_to_adapter(drawer: &Drawer) -> bool {
+    drawer.tombstoned_at.is_none()
+        && (drawer.adjective_bitmap & 0x3F) < 4
+        && drawer.adjective_sensitivity().is_bulk_exportable()
+}
+
 fn find_drawer(path: &str, args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry)
     -> Result<Option<Drawer>, JSONRPCError>
 {
@@ -63,7 +88,7 @@ fn find_drawer(path: &str, args: &BTreeMap<String, JsonValue>, registry: &Estate
     let names = coord.resolve_drawer_node_names(&estate.handle,
         &all.iter().map(|d| d.parent_node_id.clone()).collect::<Vec<_>>());
     Ok(all.into_iter().find(|d| {
-        d.tombstoned_at.is_none() && (d.adjective_bitmap & 0x3F) < 4
+        drawer_visible_to_adapter(d)
             && names.get(&d.parent_node_id).map_or(false, |(w, r)| w == ADAPTER_WING && r == &room)
     }))
 }
@@ -78,19 +103,29 @@ fn list_drawers(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry)
     let names = coord.resolve_drawer_node_names(&estate.handle,
         &all.iter().map(|d| d.parent_node_id.clone()).collect::<Vec<_>>());
     Ok(all.into_iter().filter_map(|d| {
-        if d.tombstoned_at.is_some() || (d.adjective_bitmap & 0x3F) >= 4 { return None; }
+        if !drawer_visible_to_adapter(&d) { return None; }
         let (w, r) = names.get(&d.parent_node_id)?;
         if w != ADAPTER_WING { return None; }
         Some((d, r.clone()))
     }).collect())
 }
 
-fn new_frame(content: &str, room: &str, identity: &str) -> CaptureFrame {
+/// Build a capture frame for the adapter wing. `sensitivity` is the
+/// adjective-sensitivity tier the new drawer is filed at: creates pass
+/// Normal; edit/rename re-captures pass the SOURCE drawer's tier — a
+/// hardcoded Normal here silently DOWNGRADED elevated drawers on edit.
+fn new_frame(
+    content: &str,
+    room: &str,
+    identity: &str,
+    sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+) -> CaptureFrame {
     let mut frame = CaptureFrame::new(
         content, CaptureChannel::Actuator, room,
         LatticeAnchor::udc("000"), identity, "default",
     );
     frame.wing = Some(ADAPTER_WING.to_string());
+    frame.sensitivity = sensitivity;
     frame
 }
 
@@ -139,7 +174,8 @@ fn memory_create(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) 
     let room = path_to_room(&path);
     let estate = registry.resolve_direct(args)?;
     let mut coord = estate.coord.lock().unwrap();
-    coord.capture(&estate.handle, new_frame(file_text, &room, &registry.server_identity), wall_now())
+    coord.capture(&estate.handle, new_frame(file_text, &room, &registry.server_identity,
+        locus_kit::adjectives::AdjectiveSensitivity::Normal), wall_now())
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, format!("{e:?}")))?;
     Ok(text_result(&format!("File created successfully at: {path}")))
 }
@@ -163,7 +199,8 @@ fn memory_str_replace(args: &BTreeMap<String, JsonValue>, registry: &EstateRegis
     let room = path_to_room(&path);
     let estate = registry.resolve_direct(args)?;
     let mut coord = estate.coord.lock().unwrap();
-    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity), wall_now())
+    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity,
+        d.adjective_sensitivity()), wall_now())
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, format!("{e:?}")))?;
     let _ = coord.withdraw(&estate.handle, &d.id, Some("memory str_replace supersession"), wall_now());
     Ok(text_result("The memory file has been edited."))
@@ -187,7 +224,8 @@ fn memory_insert(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) 
     let room = path_to_room(&path);
     let estate = registry.resolve_direct(args)?;
     let mut coord = estate.coord.lock().unwrap();
-    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity), wall_now())
+    coord.capture(&estate.handle, new_frame(&new_content, &room, &registry.server_identity,
+        d.adjective_sensitivity()), wall_now())
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, format!("{e:?}")))?;
     let _ = coord.withdraw(&estate.handle, &d.id, Some("memory insert supersession"), wall_now());
     Ok(text_result(&format!("The file {path} has been edited.")))
@@ -224,7 +262,8 @@ fn memory_rename(args: &BTreeMap<String, JsonValue>, registry: &EstateRegistry) 
     let new_room = path_to_room(&new_path);
     let estate = registry.resolve_direct(args)?;
     let mut coord = estate.coord.lock().unwrap();
-    coord.capture(&estate.handle, new_frame(&d.content, &new_room, &registry.server_identity), wall_now())
+    coord.capture(&estate.handle, new_frame(&d.content, &new_room, &registry.server_identity,
+        d.adjective_sensitivity()), wall_now())
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, format!("{e:?}")))?;
     let _ = coord.withdraw(&estate.handle, &d.id, Some(&format!("memory rename: {old_path} → {new_path}")), wall_now());
     Ok(text_result(&format!("Successfully renamed {old_path} to {new_path}")))

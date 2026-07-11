@@ -9,6 +9,7 @@ import {
   remapDetailCommunities,
   SemanticExpansionController,
   stableUnit,
+  trustedFdcCode,
 } from '/semantic-zoom.mjs?v=2';
 
 /*
@@ -3518,6 +3519,9 @@ import {
   // may not exist as tunnels at all. Total neighbor list is capped to keep
   // the prompt readable — plain language throughout, no console-internal
   // jargon, since the receiving AI may be any model.
+  // trustedFdcCode (prompt-injection guard) is imported from semantic-zoom.mjs
+  // so it is unit-testable; see that module for the rationale.
+
   function buildNodeQuery(node) {
     var NEIGHBOR_CAP = 12;
     var byType = nodeNeighborsByType(node.id);
@@ -3559,13 +3563,14 @@ import {
                  "related memories (moot_memory_search) and suggest what it should link to.");
     }
 
-    if (node.code) {
-      if (node.code === "000") {
+    var safeCode = trustedFdcCode(node.code);
+    if (safeCode) {
+      if (safeCode === "000") {
         lines.push("The console's word-level classifier marked this node's wording as " +
                    "unclassified (code 000).");
       } else {
-        var label = brainCodeLabelMap[node.code];
-        lines.push("The console classifies its wording under code " + node.code +
+        var label = brainCodeLabelMap[safeCode];
+        lines.push("The console classifies its wording under code " + safeCode +
                    (label ? " (\"" + label + "\")" : "") +
                    " — this reflects word-level classification, not necessarily the memory's topic.");
       }
@@ -3586,8 +3591,9 @@ import {
         ". It is a visualization key, not a memory id.",
     ];
     var details = [];
-    if (node.code) details.push("FDC code " + node.code);
-    var label = node.aggregateLabel || (node.code && brainCodeLabelMap[node.code]);
+    var safeCode = trustedFdcCode(node.code);
+    if (safeCode) details.push("FDC code " + safeCode);
+    var label = node.aggregateLabel || (safeCode && brainCodeLabelMap[safeCode]);
     if (label) details.push("label \"" + label + "\"");
     if (Number.isFinite(node.aggregateSize)) details.push(node.aggregateSize + " memories");
     if (details.length) lines.push("The console describes it as " + details.join(", ") + ".");

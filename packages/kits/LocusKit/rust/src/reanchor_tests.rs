@@ -343,6 +343,38 @@ mod tests {
     }
 
     #[test]
+    fn estate_reanchor_empty_room_returns_invalid_content() {
+        // An empty room is the container-fingerprint wing-rollup sentinel and
+        // is excluded from room-level enumeration, so a row reanchored to ""
+        // is hidden from pruned recall. Reject it, mirroring the capture guard.
+        let estate = make_estate();
+        let d = basic_capture(&estate, "empty room guard", "room-a", "000");
+        let err = estate.reanchor(&d.id, Some(""), None, None).unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(_)),
+            "expected InvalidContent for empty to_room, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn estate_reanchor_empty_udc_returns_invalid_content() {
+        // An empty lattice code violates the I-5 anchor invariant.
+        let estate = make_estate();
+        let d = basic_capture(&estate, "empty udc guard", "room-a", "000");
+        let anchor = LatticeAnchor {
+            udc_code: String::new(),
+            udc_facets: None,
+            wikidata_qid: None,
+            wikidata_qids_secondary: None,
+        };
+        let err = estate.reanchor(&d.id, None, None, Some(anchor)).unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(_)),
+            "expected InvalidContent for empty udc_code, got {err:?}"
+        );
+    }
+
+    #[test]
     fn estate_reanchor_whitespace_wing_returns_invalid_content() {
         // A whitespace-only string is equivalent to empty for wing names.
         let estate = make_estate();

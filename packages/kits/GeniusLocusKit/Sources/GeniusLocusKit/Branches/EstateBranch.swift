@@ -43,16 +43,35 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
     /// The in-memory estate that owns this branch's rows. Exposed
     /// internally so `glkDeriveBranch(name:fromBranch:)` can derive a
     /// child branch by reading rows from this estate.
-    let branchEstate: LocusKit.Estate
+    ///
+    /// `private(set) var` (not `let`) so a terminal transition can release
+    /// the heavy copied rows via `releaseRows()` — swapping in a fresh empty
+    /// estate to free the O(rows) content while the O(1) status shell is
+    /// retained in the coordinator registry. Only mutated on terminal
+    /// transition (discard / promote / merge), which the coordinator
+    /// serializes and which never races an in-flight read of a still-active
+    /// branch (terminal branches are not recalled). DoS fix (memory growth).
+    private(set) var branchEstate: LocusKit.Estate
 
     /// The parent estate this branch was derived from. Used by
-    /// `compareToParent`. Never written to; I-15 invariant.
-    let parentEstate: LocusKit.Estate
+    /// `compareToParent` and the E-2 promotion/merge-target check. Never
+    /// written to (I-15 invariant).
+    ///
+    /// `private(set) var` (not `let`) so a terminal transition can release it
+    /// via `releaseRows()`. A branch-of-branch's `parentEstate` references its
+    /// parent branch's `branchEstate` actor; without releasing it, a terminal
+    /// child keeps that whole parent estate alive — the derive→discard
+    /// memory-exhaustion vector the active-branch quota is meant to close. Only
+    /// read on Active branches (compareToParent / promotion validation), which
+    /// the coordinator serializes strictly before any terminal transition.
+    private(set) var parentEstate: LocusKit.Estate
 
     /// Branch-estate IDs of rows copied from the parent at derivation.
     /// Any ID NOT in this set was captured after derivation and is
-    /// therefore "new in branch."
-    let snapshotIDs: Set<DrawerID>
+    /// therefore "new in branch." Cleared by `releaseRows()` on a terminal
+    /// transition (the snapshot is only meaningful while the branch can be
+    /// promoted/merged, which terminal branches cannot).
+    private(set) var snapshotIDs: Set<DrawerID>
 
     // MARK: - Private
 
@@ -181,11 +200,43 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         return rows
     }
 
-    /// Transition the branch to `.discarded`. Rows are retained for the
-    /// audit trail; `recall` continues to work after discard.
+    /// Transition the branch to `.discarded` and release its heavy row store.
+    /// The coordinator keeps the status shell so C-5 can still refuse a
+    /// disqualified branch as unpromotable, but the O(rows) copied content is
+    /// freed — a derive→discard loop no longer accumulates row copies (DoS
+    /// fix). No caller reads a discarded branch's rows.
     func discard() async throws {
         _statusLock.withLock { $0 = .discarded }
+        try await releaseRows()
         log.debug("EstateBranch '\(self.name, privacy: .public)' discarded")
+    }
+
+    /// Drop the branch estate's copied rows, replacing it with a fresh empty
+    /// estate and clearing the snapshot set. Called on every terminal
+    /// transition (discard / promote / merge) after any work that needs the
+    /// rows has completed. Reduces a terminal branch to an O(1) status shell.
+    func releaseRows() async throws {
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        let credentials = OwnerCredentials(
+            ownerIdentifier: "branch-\(branchID.uuidString)-released")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: credentials)
+        let empty = try await LocusKit.Estate.open(storage: storage, owner: credentials)
+        self.branchEstate = empty
+        self.snapshotIDs = []
+        // Also drop the reference to the parent estate. A branch-of-branch's
+        // parentEstate is its parent branch's branchEstate actor; without this,
+        // a terminal child keeps that whole parent estate alive (the
+        // derive→discard memory-exhaustion vector). parentEstate is only read on
+        // Active branches, strictly before this terminal transition, so an empty
+        // sentinel is safe. Mirrors the Rust release_rows parent-estate release.
+        let parentConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let parentStorage = InMemoryStorage(configuration: parentConfig)
+        let parentCredentials = OwnerCredentials(
+            ownerIdentifier: "branch-\(branchID.uuidString)-parent-released")
+        _ = try await LocusKit.Estate.create(storage: parentStorage, owner: parentCredentials)
+        self.parentEstate = try await LocusKit.Estate.open(
+            storage: parentStorage, owner: parentCredentials)
     }
 
     /// Compare the current branch state to the parent.

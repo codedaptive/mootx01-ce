@@ -13,6 +13,13 @@ on:
   # regex, so gating on the tag string is NOT sufficient to keep branch-built
   # code out of the signing pipeline. The event type is the trust boundary.
   # (SECURITY 734e9908: branch-built macOS signing bypass.)
+  #
+  # Narrow exception: `winget-tag` re-runs ONLY the winget-pkgs submission for
+  # an ALREADY-PUBLISHED release tag (assets exist on the GitHub release; no
+  # building, no signing — wingetcreate just downloads the published EXEs and
+  # opens the community PR). It exists because the submission can fail for
+  # reasons independent of the release itself (matcher quirks, rate limits)
+  # and re-pushing a tag to retry would re-run the entire pipeline.
   workflow_dispatch:
     inputs:
       platform:
@@ -25,6 +32,11 @@ on:
           - linux
           - windows-x64
           - windows-arm64
+          - none
+      winget-tag:
+        description: 'Resubmit an existing published release tag (e.g. v1.0.27) to winget-pkgs. Combine with platform: none.'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -998,12 +1010,19 @@ jobs:
 
   # ── Publish moot-memory to PyPI ─────────────────────────────────────────
   # pip install moot-memory for Messages API users.
-  # Requires PYPI_API_TOKEN secret (scoped to the moot-memory project).
+  # Uses PyPI Trusted Publishing (OIDC); configure the moot-memory PyPI project
+  # to trust this repository, workflow, and release environment.
   publish-pypi:
     name: Publish moot-memory to PyPI
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     needs: [release]
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/moot-memory
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
@@ -1011,21 +1030,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build and publish
-        env:
-          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Build distribution
         run: |
-          if [ -z "$PYPI_TOKEN" ]; then
-            echo "::warning::PYPI_API_TOKEN missing — skipping PyPI publish"
-            exit 0
-          fi
           cd apps/moot-memory-adapter
           # Sync version from release tag
           VERSION="${GITHUB_REF_NAME#v}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-          pip install build twine
+          python -m pip install --upgrade build
           python -m build
-          twine upload dist/* --username __token__ --password "$PYPI_TOKEN" --non-interactive
+
+      - name: Publish distribution to PyPI
+        # Pinned by commit SHA like every other action in this workflow —
+        # `release/v1` is a mutable branch and this step holds the OIDC
+        # publish credential.
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: apps/moot-memory-adapter/dist/
 
   # ── Submit to winget-pkgs (Microsoft community repository) ──────────────
   # Opens a PR against microsoft/winget-pkgs so `winget install/upgrade`
@@ -1033,31 +1053,57 @@ jobs:
   # public_repo scope (fine-grained PATs cannot access repos outside the org).
   submit-winget:
     name: Submit to winget-pkgs
-    if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+    # Runs on tag push (the normal release path), or on manual dispatch with
+    # `winget-tag` set (resubmission for an already-published release — see the
+    # workflow_dispatch comment at the top). `!cancelled()` lets the dispatch
+    # path run even though its `needs` (update-winget) is skipped on dispatch;
+    # the manifests in this repo were already updated by the original tag run.
+    if: ${{ !cancelled() && ((startsWith(github.ref, 'refs/tags/') && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.winget-tag != '')) }}
     needs: [update-winget]
     runs-on: windows-latest
     steps:
       - name: Submit via wingetcreate
         env:
           WINGET_PAT: ${{ secrets.WINGET_SUBMIT_PAT }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event.inputs.winget-tag || github.ref_name }}
+          WINGETCREATE_VERSION: v1.12.8.0
+          WINGETCREATE_SHA256: 8BD738851B524885410112678E3771B341C5C716DE60FBBECB88AB0A363ED85D
         run: |
           if (-not $env:WINGET_PAT) {
-            Write-Host "::warning::WINGET_PUSH_PAT missing — skipping winget-pkgs submission"
+            Write-Host "::warning::WINGET_SUBMIT_PAT missing — skipping winget-pkgs submission"
             exit 0
+          }
+          # The tag is untrusted input (dispatch box or tag name): validate
+          # against the strict release-version shape before it reaches URLs.
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Host "::error::RELEASE_TAG '$($env:RELEASE_TAG)' is not a release version tag (vX.Y.Z)"
+            exit 1
           }
           $VERSION = $env:RELEASE_TAG -replace '^v',''
           $X86_URL = "https://github.com/codedaptive/mootx01-ce/releases/download/$($env:RELEASE_TAG)/mootx01-$VERSION-windows-x86_64-setup.exe"
           $ARM_URL = "https://github.com/codedaptive/mootx01-ce/releases/download/$($env:RELEASE_TAG)/mootx01-$VERSION-windows-arm64-setup.exe"
-          # Download wingetcreate
-          Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/self-contained" -OutFile wingetcreate.exe
+          # Download a pinned wingetcreate release and verify its checked-in SHA-256
+          # before executing it with WINGET_PAT in scope.
+          $WingetCreateUrl = "https://github.com/microsoft/winget-create/releases/download/$($env:WINGETCREATE_VERSION)/wingetcreate.exe"
+          Invoke-WebRequest -Uri $WingetCreateUrl -OutFile wingetcreate.exe
+          $ActualSha256 = (Get-FileHash -Path wingetcreate.exe -Algorithm SHA256).Hash
+          if ($ActualSha256 -ne $env:WINGETCREATE_SHA256) {
+            Write-Host "::error::wingetcreate.exe SHA-256 mismatch. Expected $($env:WINGETCREATE_SHA256), got $ActualSha256"
+            exit 1
+          }
           # Submit: creates a PR on microsoft/winget-pkgs.
           # The package identifier is POSITIONAL — wingetcreate has no --id
           # option and exits 1 with "Option 'id' is unknown" if given one.
+          # Each URL pins its architecture via the `|arch` override: our x64
+          # setup EXE carries a 32-bit Inno stub, so wingetcreate's binary
+          # detection reports it as X86, which matches NEITHER existing
+          # manifest entry exactly and both by installer type — the
+          # "Multiple matches found for X86 Inno installer" failure that
+          # blocked the 1.0.26 and 1.0.27 submissions.
           .\wingetcreate.exe update `
             Codedaptive.MOOTx01 `
             --version $VERSION `
-            --urls $X86_URL $ARM_URL `
+            --urls "$X86_URL|x64" "$ARM_URL|arm64" `
             --token $env:WINGET_PAT `
             --submit
         shell: pwsh

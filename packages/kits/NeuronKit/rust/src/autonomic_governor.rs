@@ -505,12 +505,15 @@ pub struct AutonomicGovernor {
     /// True once the persisted fingerprint has been loaded (one-shot, on the
     /// first topology duty). Mirrors Swift `topologyFingerprintLoaded`.
     topology_fingerprint_loaded: bool,
-    /// Watermark: drawer count at last graph-centrality computation. When the
-    /// active drawer count hasn't changed since last cadence, the full
-    /// eigenvalue recompute is skipped (scores re-registered from estate.meta
-    /// cache). None = never computed, forces first computation. Mirrors Swift
-    /// `centralityCount` stored in estate.meta.
-    last_centrality_drawer_count: Option<usize>,
+    /// Watermark: (drawer, tunnel, KG-fact) counts at last graph-centrality
+    /// computation. Centrality depends on all three (tunnels are the graph
+    /// edges), so the three counts are compared INDEPENDENTLY — a single packed
+    /// integer (e.g. `d + t*1000 + f*1000000`) is non-injective (1000 drawers +
+    /// 1 tunnel collides with 2000 drawers + 0 tunnels) and would skip a real
+    /// change. When all three match last cadence, the full eigenvalue recompute
+    /// is skipped (scores re-registered from the coordinator cache). None =
+    /// never computed, forces first computation.
+    last_centrality_counts: Option<(usize, usize, usize)>,
     /// Watermark: drawer count at last preference computation. Same skip
     /// logic as centrality. Mirrors Swift `preferenceCount` in estate.meta.
     last_preference_drawer_count: Option<usize>,
@@ -790,7 +793,7 @@ impl AutonomicGovernor {
             // graph centrality. First fire is immediate (None).
             preference_cadence_ms: DEFAULT_PREFERENCE_CADENCE_MS,
             last_preference_secs: None,
-            last_centrality_drawer_count: None,
+            last_centrality_counts: None,
             last_preference_drawer_count: None,
             pool_reduce_cadence_ms,
             last_pool_reduce_secs: None,
@@ -1471,10 +1474,11 @@ impl AutonomicGovernor {
         };
         if graph_centrality_fired {
             self.last_graph_centrality_secs = Some(now_epoch_secs);
-            // Watermark gate: skip the full eigenvalue recompute when the active
-            // drawer count hasn't changed since the last computation. Mirrors
-            // Composite watermark (#4): centrality depends on drawers, tunnels,
-            // and KG facts. Drawer count alone misses tunnel/fact changes.
+            // Watermark gate: skip the full eigenvalue recompute when the estate
+            // is unchanged. Centrality depends on drawers, tunnels (the graph
+            // edges), and KG facts, so the three counts are compared as a tuple
+            // — comparing a single packed integer would be non-injective and
+            // could skip a real change (see `last_centrality_counts`).
             let drawer_count = self.store.all_drawers()
                 .map(|d| d.iter().filter(|x| x.tombstoned_at.is_none()).count())
                 .unwrap_or(0);
@@ -1482,8 +1486,8 @@ impl AutonomicGovernor {
                 .map(|t| t.len()).unwrap_or(0);
             let fact_count = self.store.all_kg_facts()
                 .map(|f| f.len()).unwrap_or(0);
-            let current_count = drawer_count + tunnel_count * 1000 + fact_count * 1000000;
-            if self.last_centrality_drawer_count == Some(current_count) {
+            let current_counts = (drawer_count, tunnel_count, fact_count);
+            if self.last_centrality_counts == Some(current_counts) {
                 // Estate unchanged — skip recompute. Scores from last run are
                 // still registered on the coordinator.
             } else {
@@ -1494,7 +1498,7 @@ impl AutonomicGovernor {
                         Uuid::from_bytes(self.handle.estate_uuid)
                     );
                 } else {
-                    self.last_centrality_drawer_count = Some(current_count);
+                    self.last_centrality_counts = Some(current_counts);
                 }
             }
         }

@@ -266,9 +266,21 @@ public enum VersionSkewAdvisory {
     /// as an integer so "1.0.10" > "1.0.9" (string comparison would disagree).
     /// Missing trailing components are treated as 0 (e.g. "1.2" == "1.2.0").
     /// Returns `false` on parse failure or equality.
+    /// Parse the leading decimal digits of a version component, ignoring any
+    /// trailing prerelease/build suffix (e.g. "15-rc1" → 15, "0+meta" → 0).
+    /// Returns nil only when the component has no leading digit, so a fully
+    /// non-numeric component is still dropped (and the empty-parts guard fires).
+    /// Without this, `compactMap { Int($0) }` drops the WHOLE "15-rc1"
+    /// component, collapsing "1.0.15-rc1" to [1, 0] and misordering it against
+    /// "1.0.11" — the advisory would then recommend the wrong side.
+    private static func leadingInt(_ s: some StringProtocol) -> Int? {
+        let digits = s.prefix(while: \.isNumber)
+        return digits.isEmpty ? nil : Int(digits)
+    }
+
     private static func versionGreaterThan(_ a: String, _ b: String) -> Bool {
-        let aParts = a.split(separator: ".").compactMap { Int($0) }
-        let bParts = b.split(separator: ".").compactMap { Int($0) }
+        let aParts = a.split(separator: ".").compactMap { Self.leadingInt($0) }
+        let bParts = b.split(separator: ".").compactMap { Self.leadingInt($0) }
         guard !aParts.isEmpty, !bParts.isEmpty else { return false }
         let len = max(aParts.count, bParts.count)
         for i in 0..<len {
