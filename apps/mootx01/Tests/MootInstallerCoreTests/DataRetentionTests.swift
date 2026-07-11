@@ -184,25 +184,29 @@ struct DataRetentionTests {
             choose: { true }, confirm: { false }) == .aborted)
     }
 
-    /// Security (Codex 7441be4c): --yes must NOT skip the typed destruction
-    /// confirmation for an INTERACTIVELY-chosen replace — only for the
-    /// explicit --replace-db automation path. A user who types "replace" at
-    /// the prompt under --yes still gets the destruction gate.
-    @Test("--yes does not skip confirm for an interactively-chosen replace")
-    func yesDoesNotSkipConfirmForInteractiveReplace() {
-        // Interactive prompt chooses replace; --yes set; confirm denies.
+    /// Security (Codex 7441be4c, tightened for the brew-postinstall hang):
+    /// under --yes with no explicit flag the prompt is never shown — the
+    /// prompt's default (reuse, non-destructive) is taken, so a wrapper that
+    /// runs `install --yes` with a TTY attached cannot block, and replace is
+    /// unreachable without the explicit --replace-db flag. The typed
+    /// destruction confirmation is skipped ONLY on the explicit
+    /// --replace-db --yes automation path.
+    @Test("--yes answers the prompt with reuse; replace needs the explicit flag")
+    func yesAnswersPromptWithReuse() {
+        // --yes + no flag + interactive: reuse, without ever prompting.
         #expect(DataRetention.decideExistingDb(
             flag: nil, yes: true, interactive: true,
-            choose: { true }, confirm: { false }) == .aborted,
-            "interactive replace under --yes must still confirm")
-        // When the user does confirm, it proceeds.
-        #expect(DataRetention.decideExistingDb(
-            flag: nil, yes: true, interactive: true,
-            choose: { true }, confirm: { true }) == .replace)
+            choose: neverCalled, confirm: neverCalled) == .reuse,
+            "--yes must take the non-destructive default without prompting")
         // Explicit-flag path unchanged: --replace-db --yes skips confirm.
         #expect(DataRetention.decideExistingDb(
             flag: .replace, yes: true, interactive: true,
             choose: neverCalled, confirm: neverCalled) == .replace)
+        // Explicit --replace-db WITHOUT --yes still gates on the typed
+        // confirmation (destruction is never a silent default).
+        #expect(DataRetention.decideExistingDb(
+            flag: .replace, yes: false, interactive: true,
+            choose: neverCalled, confirm: { false }) == .aborted)
     }
 
     // MARK: - Inventory and detection
