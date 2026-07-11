@@ -127,7 +127,7 @@ pub fn run_bias(
     rooms.extend(active_by_room.keys().cloned());
     rooms.extend(confirmed_by_room.keys().cloned());
     rooms.extend(withdrawn_by_room.keys().cloned());
-    let records: Vec<(String, i64, i64)> = rooms
+    let mut records: Vec<(String, i64, i64)> = rooms
         .into_iter()
         .map(|room| {
             let endorsements = confirmed_by_room.get(&room).copied().unwrap_or(0.0) as i64;
@@ -135,6 +135,20 @@ pub fn run_bias(
             (room, endorsements, dismissals)
         })
         .collect();
+    // DoS guard: the distinct-room count is attacker-influenceable (rooms are
+    // set at capture time), and every room becomes a Bradley-Terry competitor
+    // in a dense O(n²) fit. Cap the record set at MAX_PREFERENCE_ROOMS, keeping
+    // the highest-signal rooms (most endorsements+dismissals) — the ones the
+    // preference model is actually about — with the room name as a
+    // deterministic tie-break so the truncation is stable across runs.
+    if records.len() > neuron_kit::bias::MAX_PREFERENCE_ROOMS {
+        records.sort_by(|a, b| {
+            let sa = a.1.saturating_add(a.2);
+            let sb = b.1.saturating_add(b.2);
+            sb.cmp(&sa).then_with(|| a.0.cmp(&b.0))
+        });
+        records.truncate(neuron_kit::bias::MAX_PREFERENCE_ROOMS);
+    }
     let learned = learned_preference(&records)
         .map_err(|e| SubstrateError::new("learned_preference", format!("{e:?}")))?;
 
