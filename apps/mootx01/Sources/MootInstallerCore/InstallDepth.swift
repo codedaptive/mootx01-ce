@@ -427,7 +427,10 @@ public enum DepthInstaller {
         // their package payloads; this step is Claude Code specific.)
         if host.id == "claude-code" {
             try registerClaudeCodeMarketplace(pluginDir: dest)
-            refreshStrandedPluginCache(homeDirectory: homeDirectory, claudeCLIRunner: claudeCLIRunner)
+            if let line = refreshStrandedPluginCache(
+                homeDirectory: homeDirectory, claudeCLIRunner: claudeCLIRunner) {
+                print(line)
+            }
         }
 
         return .plugin(path: dest.path)
@@ -457,25 +460,34 @@ public enum DepthInstaller {
     /// If it IS already installed, ask the live `claude` CLI to refresh its
     /// cached copy (`claude plugin update <id>`, default scope `user` —
     /// matches where `registerClaudeCodeMarketplace` registers). Never fails
-    /// the install over this: a missing CLI or a nonzero exit only prints a
+    /// the install over this: a missing CLI or a nonzero exit only yields a
     /// one-line instruction asking the user to run the refresh themselves,
     /// then restart Claude Code.
+    ///
+    /// Returns the user-facing line the CALLER prints, or nil when the
+    /// plugin was never installed (nothing to say). The success line exists
+    /// because `claude plugin update` refreshes the ON-DISK cache only — a
+    /// running Claude Code session keeps the previous plugin snapshot
+    /// loaded until it is restarted, so a silent success left users testing
+    /// against the old plugin while the upgrade reported clean
+    /// (MOOT-INSTALL-E defect 1). Returning the message instead of printing
+    /// it here keeps the line unit-testable via the fake runner.
     ///
     /// - Parameter claudeCLIRunner: injectable seam so this is testable
     ///   without shelling out to a real `claude` binary.
     static func refreshStrandedPluginCache(
         homeDirectory: URL,
         claudeCLIRunner: ClaudeCLIRunning
-    ) {
+    ) -> String? {
         guard PluginDetector.isPluginInstalled(
             pluginID: claudeCodePluginID, homeDirectory: homeDirectory
         ) else {
-            return
+            return nil
         }
         guard claudeCLIRunner.run(arguments: ["plugin", "update", claudeCodePluginID]) else {
-            print("  ⓘ Could not refresh the cached mootx01 plugin automatically — run `claude plugin update \(claudeCodePluginID)` yourself, then restart Claude Code.")
-            return
+            return "  ⓘ Could not refresh the cached mootx01 plugin automatically — run `claude plugin update \(claudeCodePluginID)` yourself, then restart Claude Code."
         }
+        return "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new session) to load the updated plugin."
     }
 
     /// Register the just-materialised plugin dir as a local (directory-source)
