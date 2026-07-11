@@ -46,6 +46,13 @@ pub fn anticipate(
     // observation lands at zero (I-17: the matrix owns the math).
     let mut matrix = ActionOutcomeMatrix::new();
     for o in observations {
+        // action/outcome are the 6-bit bitmap categories (o07/o08): the matrix
+        // key asserts on anything >= 64. Skip out-of-range observations rather
+        // than let a caller-supplied byte panic the process. Mirrors the Swift
+        // anticipate guard; no valid (closed-enum) caller is affected.
+        if o.action >= 64 || o.outcome >= 64 {
+            continue;
+        }
         matrix.observe(o.action, o.outcome, o.success, HLC::zero());
     }
 

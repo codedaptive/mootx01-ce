@@ -32,7 +32,10 @@ extension NeuronKit {
                                       maxPasses: Int,
                                       estate: String,
                                       now: Date) -> Constellation {
-        guard !nodeIDs.isEmpty else { return Constellation(communities: []) }
+        // maxPasses reaches CommunityDetection's `0..<maxPasses`, which traps in
+        // Swift when maxPasses < 0 (Range requires lowerBound <= upperBound).
+        // 0 is legal (empty loop). Guard the negative case at this public edge.
+        guard !nodeIDs.isEmpty, maxPasses >= 0 else { return Constellation(communities: []) }
 
         let adjacency = StructureGraph.build(nodeIDs: nodeIDs, edges: edges)
         // Full Louvain at the shared lens resolution (see

@@ -532,10 +532,10 @@ public struct IssueGrantResult: Sendable {
     public let grant: Grant; public let scopeKey: Data?   // non-nil for handed-over / decay-derived / time-aging custody
 }
 ```
-**Rust:** `FederatedRecallResult`, `FederatedReadRefusalReason`, and
-`IssueGrantResult` are NOT yet present in the Rust port. The federation
-sub-surface is deferred. Callers on the Rust side use `VerbDispatchError`
-to surface grant failures until it ships.
+**Rust:** `FederatedRecallResult` and `FederatedReadRefusalReason` ARE present
+in the Rust port (`coordinator.rs`); the `GeniusLocusKitError::CrossEstateReadRefused`
+case carries the refusal reason. `IssueGrantResult` is NOT yet present. Callers
+on the Rust side use `VerbDispatchError` to surface grant failures until it ships.
 
 #### Grant model: `Grant`, `GrantOptions`, `GrantScope`, `GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`, `GrantError`
 
@@ -749,9 +749,11 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     case crossEstateReadRefused(source: UUID, requester: UUID, reason: FederatedReadRefusalReason)
 }
 ```
-**Rust:** `pub enum GeniusLocusKitError` (`coordinator.rs`) mirrors the full
-case set across the lifecycle, fan-out, scheduler, grant, branch, and
-federation surfaces. Meaning: SPEC § 6.
+**Rust:** `pub enum GeniusLocusKitError` (`coordinator.rs`) covers the
+lifecycle, fan-out, and federation-refusal (`CrossEstateReadRefused`) cases.
+Scheduler, branch, and grant failures are surfaced through module-specific
+error types (`VerbDispatchError`, `BranchError`) rather than this single enum.
+Meaning: SPEC § 6.
 
 ### Tier 2 — broader surface (table of contents)
 

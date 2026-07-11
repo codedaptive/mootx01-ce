@@ -10,6 +10,7 @@
 // SHA-256 is pure integer math — no platform variability, no backend
 // gating.
 
+import Foundation  // String(format:) — Foundation overlay; required on non-Darwin
 import Testing
 @testable import SubstrateKernel
 

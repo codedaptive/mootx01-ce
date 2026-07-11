@@ -145,8 +145,15 @@ extension NeuronKit {
         // Re-centre on the baseline's fitted strength so the baseline reads 0
         // and each room's sign is its preference relative to neutral.
         let baselineStrength = fitted.first { $0.competitorID == baseline }?.strength ?? 0
-        let countsByLabel = Dictionary(uniqueKeysWithValues:
-            records.map { ($0.label, ($0.endorsements, $0.dismissals)) })
+        // Aggregate duplicate labels by summing their counts. The Bradley-Terry
+        // fitter already treats repeated records of one label as a single
+        // competitor (identity is the label), so the per-label display counts
+        // are the totals across those records. Plain Dictionary(uniqueKeysWith‌‌:)
+        // would instead TRAP the process on a duplicate label; summing matches
+        // the Rust leg and the fitter's own competitor aggregation.
+        let countsByLabel = Dictionary(
+            records.map { ($0.label, ($0.endorsements, $0.dismissals)) },
+            uniquingKeysWith: { lhs, rhs in (lhs.0 + rhs.0, lhs.1 + rhs.1) })
 
         let rooms = fitted.compactMap { score -> PreferenceStrength? in
             guard score.competitorID != baseline else { return nil }

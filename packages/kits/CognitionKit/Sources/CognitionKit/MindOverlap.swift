@@ -89,7 +89,12 @@ public enum MindOverlapLens {
         let (summaryA, aCount) = try await summarize(handleA)
         let (summaryB, bCount) = try await summarize(handleB)
 
-        guard aCount > 0, bCount > 0 else {
+        // Below k-anonymity, no fingerprint bit can reach the DP-OR threshold,
+        // so both summaries collapse to identical all-zero/noise-only aggregates
+        // and summaryOverlap returns a false 1.0 for unrelated tiny estates.
+        // Treat < k recalled drawers as insufficient data ⇒ 0 overlap (this also
+        // subsumes the empty-estate case, since 0 < kAnonymity).
+        guard aCount >= kAnonymity, bCount >= kAnonymity else {
             return MindOverlap(overlap: 0, aCount: aCount, bCount: bCount)
         }
 

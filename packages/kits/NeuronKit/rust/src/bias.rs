@@ -173,10 +173,18 @@ pub fn learned_preference(
         .find(|s| s.competitor_id == PREFERENCE_BASELINE)
         .map(|s| s.strength)
         .unwrap_or(0.0);
-    let counts: HashMap<&str, (i64, i64)> = records
-        .iter()
-        .map(|(l, e, d)| (l.as_str(), (*e, *d)))
-        .collect();
+    // Aggregate duplicate labels by summing their counts. The Bradley-Terry
+    // fitter treats repeated records of one label as a single competitor
+    // (identity is the label), so the per-label counts are the totals across
+    // those records. A plain `.collect()` here would silently keep only the
+    // last duplicate; summing matches the Swift leg (which would otherwise trap
+    // on a duplicate key) and the fitter's own competitor aggregation.
+    let mut counts: HashMap<&str, (i64, i64)> = HashMap::new();
+    for (l, e, d) in records {
+        let entry = counts.entry(l.as_str()).or_insert((0, 0));
+        entry.0 += *e;
+        entry.1 += *d;
+    }
 
     let mut rooms: Vec<PreferenceStrength> = fitted
         .iter()
