@@ -1681,8 +1681,29 @@ public actor VectorStore {
             internCache[s] = s
             return s
         }
-        var scored: [(distance: Float, key: VectorRecordKey)] = []
-        scored.reserveCapacity(rows.count)
+        // Bounded top-k (DoS fix): retain only the k best-scoring rows while
+        // scanning rather than materializing + sorting every float row. `top`
+        // is kept ordered best-first and capped at k, so memory is O(k) and
+        // the cost is O(n log k) — independent of estate size. Previously this
+        // reserved rows.count and sorted the full result on every recall, so a
+        // large estate could exhaust CPU/memory from a normal MCP search.
+        let nearest = (direction == .nearest)  // nearest keeps SMALLEST distances
+        var top: [(distance: Float, key: VectorRecordKey)] = []
+        top.reserveCapacity(min(k, 64))
+        // Insert `e` into `top` keeping it ordered best-first, capped at k.
+        func consider(_ e: (distance: Float, key: VectorRecordKey)) {
+            if k <= 0 { return }
+            // Better = smaller distance for nearest, larger for farthest.
+            func better(_ a: Float, _ b: Float) -> Bool { nearest ? a < b : a > b }
+            if top.count >= k, !better(e.distance, top[top.count - 1].distance) {
+                return  // worse than the current worst; skip
+            }
+            // Linear insertion (k is small and caller-clamped).
+            var i = top.count
+            while i > 0, better(e.distance, top[i - 1].distance) { i -= 1 }
+            top.insert(e, at: i)
+            if top.count > k { top.removeLast() }
+        }
         for row in rows {
             guard case let .text(itemID) = row["item_id"] ?? .null,
                   case let .int(vectorIndex) = row["vector_index"] ?? .null,
@@ -1724,16 +1745,10 @@ public actor VectorStore {
                 modelID: intern(rawModelID),
                 modelVersion: intern(rawModelVersion)
             )
-            scored.append((distance: dist, key: key))
+            consider((distance: dist, key: key))
         }
-        // Sort and take top-k.
-        switch direction {
-        case .nearest:
-            scored.sort { $0.distance < $1.distance }
-        case .farthest:
-            scored.sort { $0.distance > $1.distance }
-        }
-        return Array(scored.prefix(k))
+        // `top` is already ordered best-first and capped at k.
+        return top
     }
 
     enum FloatSearchDirection { case nearest, farthest }
