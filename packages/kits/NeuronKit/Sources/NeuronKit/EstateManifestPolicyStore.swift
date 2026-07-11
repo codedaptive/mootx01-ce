@@ -29,18 +29,32 @@ enum NeuronKitManifestKey {
     static let maintenanceState = "neuronkit.maintenance.state"
 
     // Governor compute-cache keys (ADR025-AUDITLOG-GOVERNOR O(N) RAM fix).
-    // Each duty persists its computed output + an audit-event-count watermark
+    // Each duty persists its computed output + a change-detection watermark
     // so that the next cadence invocation can skip an expensive full-estate
     // load when the estate is unchanged.
     //
     // Key format: "governor.<duty>.scores.v1" (JSON blob of [String: Float])
-    //             "governor.<duty>.count.v1"  (Int as JSON — audit event count
-    //                                          when the scores were last fitted)
+    //             "governor.<duty>.count.v1"  (watermark string, format varies
+    //                                          by duty — see below)
     //
-    // Why Int not HLC: `AuditLog.count()` is a single O(1) SQL COUNT(*).
-    // It advances on every new event, so "count unchanged" == "nothing new".
-    // No HLC round-trip, no schema change. See AuditProbe.swift for the
-    // `hasAuditGrown(for:since:)` helper that reads this watermark.
+    // Watermark formats by duty:
+    //   centralityCount, topologyCount:
+    //     Composite topology-change signature produced by
+    //     `GeniusLocusKit.topologyChangeSignature(for:)`:
+    //     "\(auditCount),\(tunnelCount),\(kgFactCount)" — three O(1) COUNT(*)
+    //     values that together detect drawer, tunnel, AND KG-fact writes.
+    //     Tunnel and KG-fact writes produce no audit event, so an audit-only
+    //     watermark missed them (stale centrality / topology after
+    //     tunnel-only or fact-only writes — Kong finding, resolved here).
+    //     A bare-Int value written by the OLD watermark is treated as changed
+    //     (format mismatch → one-time recompute on upgrade; safe and correct).
+    //
+    //   preferenceCount:
+    //     Bare audit-event count as a decimal Int string, read via
+    //     `hasAuditGrown(for:since:)`. Preferences model recall-trace reward
+    //     history, which is driven by drawer captures (audited). Tunnels and
+    //     KG-facts do not affect recall traces, so the audit-only watermark
+    //     is correct and sufficient for the preference duty.
     static let centralityScores = "governor.centrality.scores.v1"
     static let centralityCount  = "governor.centrality.count.v1"
     static let preferenceScores = "governor.preference.scores.v1"

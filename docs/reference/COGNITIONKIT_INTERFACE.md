@@ -435,7 +435,7 @@ pub fn run_complexity(
 ### Federated (category 9)
 
 ```rust
-pub struct MindOverlap { pub overlap: f64, pub a_count: usize, pub b_count: usize }
+pub struct MindOverlap { pub overlap: f64, pub a_sufficient: bool, pub b_sufficient: bool }
 pub fn run_mind_overlap<F: Fn() -> RecallFrame>(
     coord: &EstateCoordinator, handle_a: &EstateHandle, handle_b: &EstateHandle,
     make_frame: F, now: i64,
@@ -601,7 +601,7 @@ every row, so it is stated once here rather than repeated:
 | Tunnel successor (prediction) | `TunnelSuccessor` enum (`TunnelSuccessor.swift:30`) | `run_tunnel_successor` fn (`tunnel_successor_recipe.rs:35`) | public both | Swift enum-namespace `static run` / Rust free fn | `TunnelSuccessorTests.swift` + `tunnel_successor_recipe.rs #[cfg(test)]` | Confirmed |
 | Successor result | `Successor` struct (`TunnelSuccessor.swift:6`) | `Successor` struct (`tunnel_successor_recipe.rs:27`) | public both | `id: String`, `weight: Int/usize`; identical | `TunnelSuccessorTests.swift` + `tunnel_successor_recipe.rs #[cfg(test)]` | Confirmed |
 | Mind overlap (federated) | `MindOverlapLens` enum (`MindOverlap.swift:44`) | `run_mind_overlap` fn (`mind_overlap_recipe.rs:53`) | public both | Swift `…Lens` namespace / Rust free fn (generic over frame factory) | `MindOverlapTests.swift` + `mind_overlap_recipe.rs #[cfg(test)]` | Confirmed |
-| Mind overlap result | `MindOverlap` struct (`MindOverlap.swift:10`) | `MindOverlap` struct (`mind_overlap_recipe.rs:32`) | public both | `overlap`, `aCount`/`a_count`, `bCount`/`b_count` | `MindOverlapTests.swift` + `mind_overlap_recipe.rs #[cfg(test)]` | Confirmed |
+| Mind overlap result | `MindOverlap` struct (`MindOverlap.swift:10`) | `MindOverlap` struct (`mind_overlap_recipe.rs:32`) | public both | `overlap`, `aSufficient`/`a_sufficient`, `bSufficient`/`b_sufficient` (k-anonymity flags; exact counts not exposed) | `MindOverlapTests.swift` + `mind_overlap_recipe.rs #[cfg(test)]` | Confirmed |
 | Estate divergence (federated) | `EstateDivergenceLens` enum (`EstateDivergence.swift:40`) | `run_estate_divergence` fn (`estate_divergence_recipe.rs:54`) | public both | Swift `…Lens` namespace / Rust free fn | `EstateDivergenceTests.swift` + `estate_divergence_recipe.rs #[cfg(test)]` | Confirmed |
 | Estate divergence result | `EstateDivergence` struct (`EstateDivergence.swift:8`) | `EstateDivergence` struct (`estate_divergence_recipe.rs:29`) | public both | `divergence: DriftScore`, `aCount`/`a_count`, `bCount`/`b_count` | `EstateDivergenceTests.swift` + `estate_divergence_recipe.rs #[cfg(test)]` | Confirmed |
 | Moment (time) | `Moment` enum (`Moment.swift`) | `run_moment` fn (`moment_recipe.rs`) | public both | Swift reads GLK surface (glkFingerprintsCaptured); Rust accepts pre-fetched `&[Fingerprint256]` slices (GLK dormant surface gap — sanctioned) | `MomentTests.swift` + `moment_recipe.rs #[cfg(test)]` | Confirmed |

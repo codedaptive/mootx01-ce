@@ -72,14 +72,59 @@ extension GeniusLocusKit {
     /// Returns the current total audit-event count for `handle`, or `0` if the
     /// estate is not open.
     ///
-    /// Called by the autonomic governor after a successful compute (topology/
-    /// centrality/preference) to stamp the watermark. The returned count is
-    /// persisted via `estate.setMeta` and passed to `hasAuditGrown(for:since:)`
-    /// on the next cadence tick.
+    /// Called by `preferenceScan` after a successful compute to stamp the
+    /// audit-only watermark. The returned count is persisted via `estate.setMeta`
+    /// and passed to `hasAuditGrown(for:since:)` on the next cadence tick.
+    ///
+    /// `graphCentralityScan` and `topologySnapshotDuty` use the composite
+    /// `topologyChangeSignature(for:)` instead, which additionally tracks tunnel
+    /// and KG-fact row counts that do not write audit events.
     ///
     /// - Complexity: O(1) — `SELECT COUNT(*)` on the audit table.
     public func auditEventCount(for handle: EstateHandle) async throws -> Int {
         guard let storage = storages[handle] else { return 0 }
         return try await storage.auditLog.count()
+    }
+
+    /// Returns a composite topology-change signature for `handle` as a
+    /// comma-delimited count tuple `"\(audit),\(tunnel),\(kgfact)"`.
+    ///
+    /// The signature is a complete change-detection watermark that covers all
+    /// three topology-affecting write paths:
+    ///
+    ///   - Drawer captures write an audit event (audit count advances).
+    ///   - Standalone tunnel writes (`DrawerStore.addTunnel`) do a bare row
+    ///     insert with NO audit event; only the tunnel count advances.
+    ///   - Standalone KG-fact writes (`DrawerStore.addKGFact`) do a bare row
+    ///     insert with NO audit event; only the kg-fact count advances.
+    ///
+    /// Two signatures are equal iff all three counts are equal, so a tunnel-only
+    /// or fact-only write produces an unequal signature even when the audit count
+    /// is unchanged. A saved signature in the OLD bare-Int format (prior to this
+    /// probe) compares unequal to the new format, causing a one-time recompute
+    /// on upgrade — safe and correct.
+    ///
+    /// When `handle` is not open, returns `"0,0,0"` — the governor treats any
+    /// signature that differs from its saved value as changed, and the estate-
+    /// not-open sentinel differs from any real signature, triggering a recompute
+    /// on the next tick. Conservative: safe.
+    ///
+    /// Called by `graphCentralityScan` and `topologySnapshotDuty`. NOT called by
+    /// `preferenceScan` — preferences model recall-trace reward history, which
+    /// is driven by drawer captures (audited); tunnel and KG-fact writes do not
+    /// affect recall traces, so the audit-only watermark is correct and sufficient
+    /// for that duty.
+    ///
+    /// - Complexity: O(1) — three independent `SELECT COUNT(*)` calls.
+    public func topologyChangeSignature(for handle: EstateHandle) async throws -> String {
+        guard let storage = storages[handle] else {
+            // Estate not open — return the conservative sentinel. The governor
+            // will treat any mismatch against saved state as a change trigger.
+            return "0,0,0"
+        }
+        let auditCount = try await storage.auditLog.count()
+        let tunnelCount = try await storage.rowStore.count(table: "tunnels", where: nil)
+        let kgFactCount = try await storage.rowStore.count(table: "kg_facts", where: nil)
+        return "\(auditCount),\(tunnelCount),\(kgFactCount)"
     }
 }

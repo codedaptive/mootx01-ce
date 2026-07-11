@@ -266,7 +266,7 @@ public extension GeniusLocusKit {
     /// not mediate verb calls; it only routes by handle.
     ///
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
-    public func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
+    func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
         guard let estate = registry[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }

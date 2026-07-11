@@ -1168,6 +1168,20 @@ impl Estate {
         self.store.count_drawer_rows()
     }
 
+    /// Count all rows in the `tunnels` table via `COUNT(*)` — O(1), bypasses
+    /// row-decode. Delegates to `DrawerStore::count_tunnel_rows`. Mirrors Swift
+    /// `Estate.countTunnelRows()`.
+    pub fn count_tunnel_rows(&self) -> Result<usize, LocusKitError> {
+        self.store.count_tunnel_rows()
+    }
+
+    /// Count all rows in the `kg_facts` table via `COUNT(*)` — O(1), bypasses
+    /// row-decode. Delegates to `DrawerStore::count_kg_fact_rows`. Mirrors Swift
+    /// `Estate.countKGFactRows()`.
+    pub fn count_kg_fact_rows(&self) -> Result<usize, LocusKitError> {
+        self.store.count_kg_fact_rows()
+    }
+
     // -----------------------------------------------------------------------
     // tunnels_from_wing
     // -----------------------------------------------------------------------
