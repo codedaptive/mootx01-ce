@@ -56,7 +56,7 @@ internal extension GeniusLocusKit {
     /// - Throws: Storage open or schema errors are not thrown — any failure
     ///   falls back to a transient in-memory backend with an OSLog error entry.
     ///   The dreaming enqueue degrades silently so recall is never interrupted.
-    internal func ensureDreamingQueue(for handle: EstateHandle) async throws -> (queue: QueueKit, hlc: HLCGenerator) {
+    func ensureDreamingQueue(for handle: EstateHandle) async throws -> (queue: QueueKit, hlc: HLCGenerator) {
         if let q = dreamingQueues[handle], let h = dreamingHLCs[handle] {
             return (q, h)
         }
@@ -138,7 +138,7 @@ internal extension GeniusLocusKit {
     ///     payload (result order = deterministic).
     ///   - handle: The estate the recall ran against. Must be open.
     ///   - now: The wall-clock instant at which the recall completed.
-    internal func enqueueDreamingItem(drawers: [Drawer], handle: EstateHandle, now: Date) async {
+    func enqueueDreamingItem(drawers: [Drawer], handle: EstateHandle, now: Date) async {
         // Deduplicate ids while preserving result order (first occurrence wins).
         // The guard is strictly >1 distinct ids — a set of one makes no pair.
         var seen = Set<String>()
