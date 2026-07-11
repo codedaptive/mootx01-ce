@@ -35,6 +35,7 @@ BASE    ?= origin/develop/1.0.x
         test-product test-product-swift test-product-rust test-product-python \
         test-validation test-validation-swift test-validation-rust test-validation-python \
         test-one test-changed test-full test-all test-checks test-glk-latency test-topology-zoom \
+        test-apple-app-ios \
         conformance release pkg list clean clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
@@ -52,6 +53,7 @@ help:
 	@echo "  test-validation — validation and benchmark harness tests"
 	@echo "  test-full    — unit + product + validation + check gates"
 	@echo "  test-topology-zoom — run the pure semantic-zoom controller tests"
+	@echo "  test-apple-app-ios — regenerate and build the Apple app for the generic iOS simulator"
 	@echo "  check-static-assets — verify StaticAssets.swift matches DashboardAssets/ source"
 	@echo "  check-edition-boundary — verify no SHARED file references an EE-only path"
 	@echo "  conformance  — cross-language shared-vector conformance gate"
@@ -133,6 +135,9 @@ test-topology-zoom:
 	@node --check apps/moot-mgr/Sources/MootManager/DashboardAssets/app.js
 	@node --check apps/moot-mgr/Sources/MootManager/DashboardAssets/semantic-zoom.mjs
 	@node --check apps/moot-mgr/Tests/BrowserFixtures/topology_v3_server.mjs
+
+test-apple-app-ios:
+	@$(TEST_RUNNER) apple-app-ios
 
 test-full:
 	@$(MAKE) test-checks

@@ -1,5 +1,10 @@
 # Xcode
 *.xcodeproj/xcuserdata/
+
+# Mootx01-App xcodegen outputs (project.yml is the source of truth)
+/apps/Mootx01-App/Mootx01-App.xcodeproj/
+/apps/Mootx01-App/derived-Info-*.plist
+/apps/Mootx01-App/App/Mootx01-macOS.entitlements
 *.xcworkspace/xcuserdata/
 DerivedData/
 *.moved-aside
