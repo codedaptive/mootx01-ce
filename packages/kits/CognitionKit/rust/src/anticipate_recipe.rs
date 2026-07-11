@@ -247,4 +247,37 @@ mod tests {
         assert_eq!(t.count, 4);
         assert_eq!(v.count, 4);
     }
+
+    // Security invariant (Codex 3269c59 verification): the recipe deliberately
+    // OWNS the confirmation axis (it unions a confirmed and an unconfirmed
+    // recall to compute a differentiated success rate — unconfirmed rows are
+    // the non-success signal, not a leak). But `without_confirmation_level`
+    // must strip ONLY the confirmation-level filters — the caller's real
+    // access gate, `SensitivityAtMost`, and every other non-confirmation
+    // filter must survive so the two recalls stay scoped to the caller's
+    // clearance. This test locks that: stripping confirmation does not strip
+    // sensitivity/wing/other filters.
+    #[test]
+    fn without_confirmation_level_preserves_sensitivity_and_other_filters() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        let chain = vec![
+            Filter::UserConfirmed,
+            Filter::SensitivityAtMost(AdjectiveSensitivity::Elevated),
+            Filter::Unconfirmed,
+            Filter::InWing("study".to_string()),
+            Filter::AutomatedConfirmedOnly,
+        ];
+        let base = without_confirmation_level(&chain);
+        // Confirmation-level filters removed.
+        assert!(!base.iter().any(|f| matches!(
+            f,
+            Filter::UserConfirmed | Filter::AutomatedConfirmedOnly | Filter::Unconfirmed
+        )));
+        // The access gate and other scoping filters survive.
+        assert!(base.iter().any(|f|
+            matches!(f, Filter::SensitivityAtMost(AdjectiveSensitivity::Elevated))),
+            "the caller's sensitivity ceiling must NOT be stripped alongside confirmation");
+        assert!(base.iter().any(|f| matches!(f, Filter::InWing(w) if w == "study")),
+            "wing scoping must survive the confirmation strip");
+    }
 }

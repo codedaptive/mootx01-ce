@@ -33,7 +33,13 @@ public enum Anticipate {
     /// filter must not survive to conflict. Rust mirrors this as
     /// `AutomatedConfirmedOnly` (renamed from `ModelConfirmedOnly` in F13
     /// parity pass; see `anticipate_recipe.rs`).
-    private static func withoutConfirmationLevel(_ chain: [Filter]) -> [Filter] {
+    ///
+    /// Strips ONLY the confirmation axis: the caller's real access gate
+    /// (`.sensitivityAtMost`) and every other scoping filter survive so the
+    /// dual recall stays bounded by the caller's clearance. `internal` (not
+    /// `private`) so the security invariant is directly testable — see
+    /// `AnticipateTests.withoutConfirmationLevelPreservesSensitivity`.
+    static func withoutConfirmationLevel(_ chain: [Filter]) -> [Filter] {
         chain.filter { filter in
             switch filter {
             case .userConfirmed, .automatedConfirmedOnly, .unconfirmed: return false
