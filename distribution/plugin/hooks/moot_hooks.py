@@ -40,13 +40,19 @@ import tempfile
 THRESHOLDS = (65, 75, 85, 95)
 DEFAULT_WINDOW = 200_000
 
+# Markers are the MCP-QUALIFIED tool-name fragment ("mcp__<server>__moot_*"
+# contains "__moot_*"), which only appears in genuine tool-use records of the
+# transcript. Bare "moot_*" names must NOT be used here: this hook's own
+# banners (ORIENT_MESSAGE, the context-meter messages) name the bare tools in
+# every session's transcript, so a bare match reports tool use that never
+# happened.
 WRITEBACK_MARKERS = (
-    "moot_file_memory",
-    "moot_file_fact",
-    "moot_link_memories",
-    "moot_write_journal",
-    "moot_update_memory",
-    "moot_confirm_memory",
+    "__moot_file_memory",
+    "__moot_file_fact",
+    "__moot_link_memories",
+    "__moot_write_journal",
+    "__moot_update_memory",
+    "__moot_confirm_memory",
 )
 
 MESSAGES = {
@@ -105,7 +111,9 @@ STOP_REASON = (
     "moot_link_memories, or moot_write_journal). If this session produced "
     "durable decisions, preferences, corrections, or useful project facts, "
     "file them and write a brief journal entry now. If nothing durable "
-    "happened, say so in one line and finish."
+    "happened, say so in one line and finish. If the MOOTx01 MCP tools are "
+    "not available in this session, do not attempt or retry them — note the "
+    "skipped writeback in one line and finish."
 )
 
 
@@ -284,7 +292,12 @@ def transcript_flags(transcript_path):
     try:
         with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if not used_moot and "moot_" in line:
+                # "__moot_" matches only MCP-qualified tool names
+                # (mcp__<server>__moot_*) — i.e. actual tool invocations.
+                # Bare "moot_" would also match this hook's own banners,
+                # which land in EVERY transcript, and made the stop nag
+                # fire in sessions that never used a MOOTx01 tool.
+                if not used_moot and "__moot_" in line:
                     used_moot = True
                 if not wrote_back:
                     for marker in WRITEBACK_MARKERS:
