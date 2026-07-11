@@ -109,6 +109,11 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         // A fresh in-memory estate per branch keeps each branch's rows
         // fully isolated. The estateID is a new UUID; the owner
         // identifier encodes the branchID for traceability in logs.
+        // Identity keys: Estate.open resolves the key store from the
+        // backend, so this `.inMemory` estate mints its Ed25519 identity
+        // into an in-memory store — a branch is ephemeral and must never
+        // leave a permanent com.mootx01.estate.identity item in the login
+        // keychain (one per derive/discard cycle, unbounded growth).
         let branchID = self.branchID
         let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let storage = InMemoryStorage(configuration: config)

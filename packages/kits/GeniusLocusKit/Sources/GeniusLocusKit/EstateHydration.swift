@@ -137,7 +137,17 @@ public extension GeniusLocusKit {
         // Step 3 — Estate open over the populated in-memory backend.
         // The manifest row is already present (copied in step 2). Estate.open
         // reads it to derive the estate UUID and zoom window.
-        let handle = try await open(storage: inMemory, owner: owner)
+        //
+        // The Keychain key store is passed EXPLICITLY: this is a DURABLE
+        // estate being served from hydrated in-memory storage, and its real
+        // Ed25519 signing key lives in the login keychain. The backend-keyed
+        // default would resolve `.inMemory` → InMemoryEstateIdentityKeyStore
+        // and silently fail to load the key (grant signing would throw).
+        let handle = try await open(
+            storage: inMemory,
+            owner: owner,
+            identityKeyStore: KeychainEstateIdentityKeyStore()
+        )
 
         // Steps 4-6 — Audit log, matrix rebuild.
         // Separated into a dedicated method so callers can also call it standalone

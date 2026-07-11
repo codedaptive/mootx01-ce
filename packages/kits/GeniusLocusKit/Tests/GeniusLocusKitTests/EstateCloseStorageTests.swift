@@ -104,7 +104,12 @@ struct EstateCloseFileLockTests {
         // Opening an estate on the same path requires reading the manifest.
         // This will succeed only if the connection is writable (i.e. no shared WAL lock).
         // We use Estate.open which reads the manifest; if the file is still locked this throws.
-        let estate2 = try await LocusKit.Estate.open(storage: storage2, owner: testOwner)
+        let estate2 = try await LocusKit.Estate.open(
+            storage: storage2, owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory.
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         let manifest = try await estate2.manifest
         // The estate name must still be in the file (data is durable).
         #expect(manifest.estateName == "FileLockTest",

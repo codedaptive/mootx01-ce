@@ -175,10 +175,19 @@ public actor Estate {
     ///   - owner: credentials identifying the opening party. The
     ///     substrate only validates that `ownerIdentifier` is non-empty.
     ///   - identityKeyStore: the store used to persist and retrieve the
-    ///     estate's Ed25519 private signing key. Defaults to
-    ///     `KeychainEstateIdentityKeyStore` (production). Inject
-    ///     `InMemoryEstateIdentityKeyStore` in tests to avoid Keychain
-    ///     entitlement requirements and cross-test pollution.
+    ///     estate's Ed25519 private signing key. When nil (the default) it is
+    ///     resolved from the storage backend: durable backends (SQLite,
+    ///     PostgreSQL) use `KeychainEstateIdentityKeyStore`; an `.inMemory`
+    ///     backend uses `InMemoryEstateIdentityKeyStore`, so an ephemeral
+    ///     estate never persists an identity key to the login keychain
+    ///     (branch estates, in-memory serving modes, and test estates were
+    ///     each leaving one permanent keychain item per throwaway estate).
+    ///     Callers serving a DURABLE estate from hydrated in-memory storage
+    ///     must pass `KeychainEstateIdentityKeyStore()` explicitly so the
+    ///     estate's real signing key is found — see GLK
+    ///     `open(inMemory:owner:hydrateFrom:)`. Tests may still inject
+    ///     `InMemoryEstateIdentityKeyStore` explicitly (required when the
+    ///     test estate lives on temp-dir SQLite storage).
     /// - Throws:
     ///   - `EstateError.emptyOwnerIdentifier` if the owner identifier
     ///     is empty (raised before any storage call).
@@ -191,11 +200,12 @@ public actor Estate {
     public static func open(
         storage: any Storage,
         owner: OwnerCredentials,
-        identityKeyStore: any EstateIdentityKeyStore = KeychainEstateIdentityKeyStore()
+        identityKeyStore: (any EstateIdentityKeyStore)? = nil
     ) async throws -> Estate {
         guard !owner.ownerIdentifier.isEmpty else {
             throw EstateError.emptyOwnerIdentifier
         }
+        let identityKeyStore = identityKeyStore ?? Self.defaultIdentityKeyStore(for: storage)
         let store: DrawerStore
         do {
             store = try await DrawerStore(storage: storage)
@@ -383,15 +393,33 @@ public actor Estate {
         // Estate.create does not mint the Ed25519 keypair — that happens in
         // Estate.open (the first open after create). The created estate carries
         // no identity key store and no cached private key; callers that need
-        // grant signing must open the estate after creating it.
+        // grant signing must open the estate after creating it. The key store
+        // is resolved by backend durability, matching open(), so a created
+        // in-memory estate never references the Keychain.
         return try Estate(
             store: store,
             containerFP: containerFP,
             nodeStore: nodeStore,
             manifest: manifest,
-            identityKeyStore: KeychainEstateIdentityKeyStore(),
+            identityKeyStore: Self.defaultIdentityKeyStore(for: storage),
             privateSigningKeyData: nil
         )
+    }
+
+    /// The identity key store implied by the storage backend when the caller
+    /// does not inject one. Identity persistence follows storage durability:
+    /// an estate on an `.inMemory` backend is ephemeral, so persisting its
+    /// freshly-minted signing key to the login keychain would orphan one
+    /// permanent keychain item per throwaway estate (branch estates, in-memory
+    /// serving modes, tests — observed as hundreds of
+    /// "com.mootx01.estate.identity" entries in Keychain Access). Durable
+    /// backends keep the Keychain default so a real estate's identity
+    /// survives restarts.
+    static func defaultIdentityKeyStore(for storage: any Storage) -> any EstateIdentityKeyStore {
+        if case .inMemory = storage.configuration.backend {
+            return InMemoryEstateIdentityKeyStore()
+        }
+        return KeychainEstateIdentityKeyStore()
     }
 
     // MARK: - Close

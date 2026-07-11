@@ -267,7 +267,12 @@ struct CaptureBatchTests {
         let config = EstateConfiguration(estateID: UUID(), backend: .sqlite(url: dbURL))
         let storage = try SQLiteStorage(configuration: config)
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        // Temp-dir SQLite counts as durable, so the backend-keyed default
+        // would mint into the real login keychain — keep test identities in
+        // memory.
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         defer { Task { try? await kit.close(handle) } }
 
         let frames = (1...5).map { captureFrame("sqlite batch item \($0)") }
