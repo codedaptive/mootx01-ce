@@ -187,6 +187,20 @@ public actor MootManager {
 
     private let logger = Logger(subsystem: "com.mootx01.kit", category: "MootManager")
 
+    /// DoS bound for the unauthenticated loopback read APIs. The dropbox-ID
+    /// set derived from the event stream is attacker-influenceable (a poisoned
+    /// local stats store can mint many unique dropbox IDs), and each ID drives
+    /// a separate per-dropbox metric query (8×N on /api/estates, N on
+    /// /api/graph). 200 is far above any real installation (1–10 dropboxes)
+    /// while bounding worst-case fan-out. Mirrors Rust `MAX_DROPBOX_IDS_PER_QUERY`.
+    static let maxDropboxIDsPerQuery = 200
+
+    /// Per-dropbox row cap for the viz-metric historical scan. A single
+    /// dropbox can retain many samples within the retention window; the graph
+    /// path dedups to latest-per-(estate,signal), so the newest N rows suffice.
+    /// Mirrors Rust `MAX_METRIC_ROWS_PER_DROPBOX`.
+    static let maxMetricRowsPerDropbox = 2000
+
     // MARK: - ARIA_MCP proxy
 
     /// Base URL for ARIA_MCP read endpoints. Read from `ARIA_MCP_API_BASE` at
@@ -670,7 +684,7 @@ public actor MootManager {
         ]
         // Restrict to the dropboxIDs seen in the event stream — same set of
         // dropboxes that report queue metrics. Unknown dropboxes produce no rows.
-        let queueDropboxIDs = Array(Set(events.map(\.dropboxID)))
+        let queueDropboxIDs = Array(Set(events.map(\.dropboxID)).sorted().prefix(Self.maxDropboxIDsPerQuery))
         let queueMetrics = try await store.queryLatestMetricsByNamesAndDropboxes(
             queueMetricNames, dropboxIDs: queueDropboxIDs
         )
@@ -830,10 +844,18 @@ public actor MootManager {
         // AndDropboxes) to ensure rows for ALL estates within a dropboxID are
         // returned; the analytics code below keeps the latest per (estate, signal).
         let vizEvents = try await store.queryEvents(dropboxID: nil)
-        let vizDropboxIDs = Array(Set(vizEvents.map(\.dropboxID)))
+        // DoS bound (unauthenticated loopback GET): the dropbox-ID cardinality
+        // is attacker-influenceable (a poisoned local stats store can create
+        // many unique dropbox IDs), and each drives a separate per-dropbox
+        // query. Cap the fan-out; sorted for a deterministic selection.
+        let vizDropboxIDs = Array(Set(vizEvents.map(\.dropboxID)).sorted().prefix(Self.maxDropboxIDsPerQuery))
         var vizMetrics: [MetricRow] = []
         for dropboxID in vizDropboxIDs {
-            let rows = try await store.queryMetricsByNames(vizSignals, dropboxID: dropboxID)
+            // Bound the per-dropbox scan too: a single dropbox can retain many
+            // historical viz rows. The dedup below keeps latest-per-key, so
+            // the newest `maxMetricRowsPerDropbox` rows are sufficient.
+            let rows = try await store.queryMetricsByNames(
+                vizSignals, dropboxID: dropboxID, limit: Self.maxMetricRowsPerDropbox)
             vizMetrics.append(contentsOf: rows)
         }
 

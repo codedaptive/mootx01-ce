@@ -902,7 +902,8 @@ public final class StatsStore: Sendable {
     /// - Throws: `StorageError` on I/O failure.
     public func queryMetricsByNames(
         _ names: Set<String>,
-        dropboxID: String? = nil
+        dropboxID: String? = nil,
+        limit: Int? = nil
     ) async throws -> [MetricRow] {
         guard !names.isEmpty else { return [] }
 
@@ -923,14 +924,21 @@ public final class StatsStore: Sendable {
             predicate = namePredicate
         }
 
+        // When a `limit` is supplied the caller wants the most-recent rows
+        // (it dedups to latest-per-key downstream), so order DESCENDING and
+        // cap — this bounds an otherwise unbounded historical scan (a stats
+        // store with many retained samples would otherwise materialize every
+        // matching row). Without a limit the legacy ascending, unbounded
+        // behavior is preserved for callers that consume full history.
+        let direction: OrderDirection = limit == nil ? .ascending : .descending
         let rows = try await storage.rowStore.query(
             table: StatsStoreSchema.metricSamplesTable,
             where: predicate,
             orderBy: [OrderClause(column: Column(
                 table: StatsStoreSchema.metricSamplesTable,
                 name: StatsStoreSchema.tsColumn
-            ), direction: .ascending)],
-            limit: nil,
+            ), direction: direction)],
+            limit: limit,
             offset: nil
         )
         return rows.compactMap(MetricRow.init(storageRow:))

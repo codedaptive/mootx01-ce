@@ -910,6 +910,7 @@ impl StatsStore {
         &self,
         names: &[&str],
         dropbox_id: Option<&str>,
+        limit: Option<usize>,
     ) -> Result<Vec<MetricRow>, persistence_kit::StorageError> {
         if names.is_empty() {
             return Ok(vec![]);
@@ -935,18 +936,27 @@ impl StatsStore {
         } else {
             name_predicate
         };
+        // When a `limit` is supplied the caller wants the most-recent rows (it
+        // dedups to latest-per-key downstream), so order DESCENDING and cap —
+        // this bounds an otherwise unbounded historical scan. Without a limit
+        // the legacy ascending, unbounded behavior is preserved.
+        let direction = if limit.is_none() {
+            OrderDirection::Ascending
+        } else {
+            OrderDirection::Descending
+        };
         let order = vec![PkOrderClause {
             column: Column {
                 table: StatsStoreSchema::METRIC_SAMPLES_TABLE.to_string(),
                 name: StatsStoreSchema::TS_COLUMN.to_string(),
             },
-            direction: OrderDirection::Ascending,
+            direction,
         }];
         let rows = rs.query(
             StatsStoreSchema::METRIC_SAMPLES_TABLE,
             Some(&predicate),
             &order,
-            None,
+            limit,
             None,
         )?;
         Ok(rows.into_iter().filter_map(MetricRow::from_storage_row).collect())
