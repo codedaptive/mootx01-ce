@@ -640,8 +640,11 @@ pub(crate) enum DbDecision {
 /// Resolve the flag/prompt matrix for an existing database.
 ///
 /// - `flag`        — explicit `--reuse-db` / `--replace-db`.
-/// - `yes`         — `--yes` skips the typed destruction confirmation, but
-///                   only when the choice itself was explicit (`--replace-db`).
+/// - `yes`         — `--yes` answers the reuse-or-replace prompt with its
+///                   default (reuse, non-destructive) instead of asking, and
+///                   skips the typed destruction confirmation — but only when
+///                   the choice itself was explicit (`--replace-db`). Under
+///                   `--yes` with no explicit flag, replace is unreachable.
 /// - `interactive` — stdin is a terminal.
 /// - `choose`      — interactive reuse-or-replace prompt; true = replace.
 /// - `confirm`     — the typed-'yes' destruction gate for replace.
@@ -668,6 +671,12 @@ pub(crate) fn decide_existing_db(
                 "existing database left untouched (non-interactive; pass --reuse-db or --replace-db to choose)",
             );
         }
+        // `--yes` answers the prompt with its default: reuse. This keeps
+        // wrappers that run `install --yes` with a terminal attached (e.g.
+        // package-manager post-install hooks) from blocking on the prompt,
+        // and it is non-destructive by construction — replace is only
+        // reachable via the explicit --replace-db flag under --yes.
+        None if yes => return DbDecision::Reuse,
         None => choose(),
     };
     if !replace {
@@ -1302,21 +1311,25 @@ mod tests {
         assert_eq!(d, DbDecision::Aborted);
     }
 
-    // Security (Codex 7441be4c): --yes must NOT skip the typed destruction
-    // confirmation for an INTERACTIVELY-chosen replace — only for the explicit
-    // --replace-db automation path. A user who types "replace" at the prompt
-    // under --yes still gets the destruction gate.
+    // Security (Codex 7441be4c, tightened for the brew-postinstall hang):
+    // under --yes with no explicit flag the prompt is never shown — the
+    // prompt's default (reuse, non-destructive) is taken, so a wrapper that
+    // runs `install --yes` with a TTY attached cannot block, and replace is
+    // unreachable without the explicit --replace-db flag. The typed
+    // destruction confirmation is skipped ONLY on the explicit
+    // --replace-db --yes automation path.
     #[test]
-    fn yes_does_not_skip_confirm_for_interactively_chosen_replace() {
-        // Interactive prompt chooses replace; --yes is set; confirm() DENIES.
-        let d = decide_existing_db(None, true, true, || true, || false);
-        assert_eq!(d, DbDecision::Aborted, "interactive replace under --yes must still confirm");
-        // And when the user does confirm, it proceeds.
-        let d = decide_existing_db(None, true, true, || true, || true);
-        assert_eq!(d, DbDecision::Replace);
+    fn yes_answers_prompt_with_default_reuse() {
+        // --yes + no flag + interactive: reuse, without ever prompting.
+        let d = decide_existing_db(None, true, true, never, never);
+        assert_eq!(d, DbDecision::Reuse, "--yes must take the non-destructive default without prompting");
         // The explicit-flag path is unchanged: --replace-db --yes skips confirm.
         let d = decide_existing_db(Some(ExistingDbArg::Replace), true, true, never, never);
         assert_eq!(d, DbDecision::Replace);
+        // Explicit --replace-db WITHOUT --yes still gates on the typed
+        // confirmation (destruction is never a silent default).
+        let d = decide_existing_db(Some(ExistingDbArg::Replace), false, true, never, || false);
+        assert_eq!(d, DbDecision::Aborted);
     }
 
     #[test]

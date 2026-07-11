@@ -86,9 +86,12 @@ public enum DataRetention {
     /// Resolve the flag/prompt matrix for an existing database on install.
     ///
     /// - `flag`        — explicit `--reuse-db` / `--replace-db`.
-    /// - `yes`         — `--yes` skips the typed destruction confirmation,
-    ///                   but only when the choice itself was explicit
-    ///                   (`--replace-db`).
+    /// - `yes`         — `--yes` answers the reuse-or-replace prompt with its
+    ///                   default (reuse, non-destructive) instead of asking,
+    ///                   and skips the typed destruction confirmation — but
+    ///                   only when the choice itself was explicit
+    ///                   (`--replace-db`). Under `--yes` with no explicit
+    ///                   flag, replace is unreachable.
     /// - `interactive` — stdin is a terminal.
     /// - `choose`      — interactive reuse-or-replace prompt; true = replace.
     /// - `confirm`     — the typed-'yes' destruction gate for replace.
@@ -118,6 +121,12 @@ public enum DataRetention {
                 return .untouched(
                     "existing database left untouched (non-interactive; pass --reuse-db or --replace-db to choose)")
             }
+            // `--yes` answers the prompt with its default: reuse. This keeps
+            // wrappers that run `install --yes` with a terminal attached
+            // (e.g. package-manager post-install hooks) from blocking on the
+            // prompt, and it is non-destructive by construction — replace is
+            // only reachable via the explicit --replace-db flag under --yes.
+            if yes { return .reuse }
             replace = choose()
         }
         if !replace {
