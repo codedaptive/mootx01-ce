@@ -34,7 +34,7 @@ pub enum Command {
     /// §4.2 install [--target <ids>] [--location global|local] [--yes]
     ///              [--mode server|skills|plugin]
     ///              [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon]
-    ///              [--vault-on | --vault-off]
+    ///              [--vault-on | --vault-off] [--reuse-db | --replace-db]
     Install {
         target: Option<Vec<String>>,
         location: Location,
@@ -54,6 +54,13 @@ pub enum Command {
         /// command then prompts (interactive) or defaults to plugin (`--yes` /
         /// non-interactive). Some(_) when `--mode server|skills|plugin` is given.
         depth: Option<InstallDepthArg>,
+        /// What to do when an estate database already exists at install time.
+        /// None → prompt when interactive, leave everything untouched when not.
+        /// Some(Reuse) → adopt the existing database as the default estate and
+        /// reset the moot-mgr history store. Some(Replace) → move the existing
+        /// default estate and the moot-mgr store to the platform trash so a
+        /// fresh database is created on first serve.
+        db: Option<ExistingDbArg>,
     },
     /// §4.3 uninstall [--target <ids>] [--location global|local] [--yes] [--purge]
     Uninstall {
@@ -124,6 +131,15 @@ pub enum InstallDepthArg {
     Server,
     Skills,
     Plugin,
+}
+
+/// Explicit disposition of a pre-existing estate database at install time
+/// (`--reuse-db` / `--replace-db`). Mirrors the Swift InstallCommand flags —
+/// both ports must present the same reinstall contract.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExistingDbArg {
+    Reuse,
+    Replace,
 }
 
 /// A usage error: carries the message printed to stderr. Exit code is
@@ -293,6 +309,10 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
     let mut vault_on = true;
     // §4.4 integration depth. None until --mode is seen.
     let mut depth: Option<InstallDepthArg> = None;
+    // Existing-database disposition. None until --reuse-db/--replace-db is
+    // seen; the two flags are mutually exclusive because they resolve the
+    // same question in opposite directions.
+    let mut db: Option<ExistingDbArg> = None;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--target" => {
@@ -335,11 +355,20 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
             // opt-in to the default and is accepted for symmetry / scripting.
             "--vault-on" => { /* vault_on already true; explicit for clarity */ }
             "--vault-off" => vault_on = false,
+            "--reuse-db" | "--replace-db" => {
+                let this = if a == "--reuse-db" { ExistingDbArg::Reuse } else { ExistingDbArg::Replace };
+                if matches!(db, Some(prior) if prior != this) {
+                    return Err(UsageError(
+                        "Error: '--reuse-db' and '--replace-db' are mutually exclusive.".into(),
+                    ));
+                }
+                db = Some(this);
+            }
             "--help" | "-h" => return Ok(Command::HelpFor("install")),
             other => return Err(unexpected(other, "install")),
         }
     }
-    Ok(Command::Install { target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth })
+    Ok(Command::Install { target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db })
 }
 
 fn parse_uninstall(it: &mut Args) -> Result<Command, UsageError> {
@@ -571,7 +600,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.".into(),
         "install" => "Wire mootx01 into MCP clients.\n\
             \n\
-            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--mode <depth>] [--yes] [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off]\n\
+            USAGE: mootx01 install [--target <ids>] [--location <scope>] [--mode <depth>] [--yes] [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon] [--vault-on | --vault-off] [--reuse-db | --replace-db]\n\
             \n\
             OPTIONS:\n\
             \x20 --target <ids>          Comma-separated client ids to install (e.g. claude,cursor). Default: interactive picker.\n\
@@ -583,7 +612,9 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --no-mgr                Skip registering the moot-mgr management console as a background service.\n\
             \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background service.\n\
             \x20 --vault-on              Enable Vault MCP tools (moot_vault_*). Default behavior: vault is on when neither flag is specified.\n\
-            \x20 --vault-off             Hide Vault MCP tools from the MCP surface. Disables import/export for a more secure install position.".into(),
+            \x20 --vault-off             Hide Vault MCP tools from the MCP surface. Disables import/export for a more secure install position.\n\
+            \x20 --reuse-db              When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).\n\
+            \x20 --replace-db            When an estate database already exists: move it and the moot-mgr history to the platform trash so a fresh database is created on first serve. Asks for a typed confirmation unless --yes.".into(),
         "uninstall" => "Remove mootx01 from MCP clients.\n\
             \n\
             USAGE: mootx01 uninstall [--target <ids>] [--location <scope>] [--yes] [--purge]\n\
@@ -592,7 +623,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --target <ids>          Comma-separated client ids to uninstall. Default: all detected.\n\
             \x20 --location <scope>      Config scope: 'global', 'local', or omitted for both. Local removes Claude Code project .mcp.json and .claude/settings.json.\n\
             \x20 -y, --yes               Skip prompts; uninstall from all detected clients.\n\
-            \x20 --purge                 Also delete all estate databases. Irreversible.".into(),
+            \x20 --purge                 Also remove all estate databases and the moot-mgr history (moved to the platform trash after a typed confirmation; --yes skips the prompt). Full uninstall only.".into(),
         "db" => "Manage named estate databases.\n\
             \n\
             USAGE: mootx01 db <create|list|open|delete>\n\
@@ -757,6 +788,7 @@ mod tests {
                 no_daemon: true,
                 vault_on: true, // default when neither --vault-on nor --vault-off is passed
                 depth: None,    // default when --mode is not passed
+                db: None,      // default when --reuse-db/--replace-db is not passed
             }
         );
         // --grant-permissions flips the opt-in flag on.
@@ -772,6 +804,7 @@ mod tests {
                 no_daemon: false,
                 vault_on: true,
                 depth: None,
+                db: None,
             }
         );
     }
@@ -796,6 +829,7 @@ mod tests {
                     no_daemon: false,
                     vault_on: true,
                     depth: Some(want),
+                    db: None,
                 }
             );
         }
@@ -823,6 +857,7 @@ mod tests {
                 no_daemon: false,
                 vault_on: false,
                 depth: None,
+                db: None,
             }
         );
         // --vault-on is explicit opt-in to the default
@@ -838,6 +873,7 @@ mod tests {
                 no_daemon: false,
                 vault_on: true,
                 depth: None,
+                db: None,
             }
         );
         // default (neither flag) is vault-on
@@ -853,6 +889,7 @@ mod tests {
                 no_daemon: false,
                 vault_on: true,
                 depth: None,
+                db: None,
             }
         );
     }

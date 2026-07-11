@@ -73,7 +73,7 @@ const READ_TOOLS: &[&str] = &[
     "moot_estate_status", "moot_estate_ping", "moot_drain_status",
     "moot_list_lenses", "moot_list_recipes",
     "moot_vault_status", "moot_vault_job",
-    "moot_memory_search", "moot_memory_get",
+    "moot_memory_search", "moot_memory_get", "moot_memory_list",
     "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled", "moot_recollect",
     "moot_fact_search", "moot_fact_timeline",
     "moot_connection_search", "moot_connection_map",
@@ -97,7 +97,7 @@ const ADDITIVE_WRITE_TOOLS: &[&str] =
 const MUTATION_TOOLS: &[&str] = &[
     "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
     "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-    "moot_reindex", "moot_dream", "moot_consolidate", "moot_synthesize",
+    "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_consolidate", "moot_synthesize",
     "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
     // Monitoring flag mutation (ADR-025 wave 8.2): sets daemon telemetry state
     // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
@@ -364,9 +364,14 @@ pub fn migrate_tiers(settings_path: &Path) -> Result<usize, MergeError> {
             if existing_key == "deny" {
                 continue; // Rule 1: deny is sacred.
             }
-            if existing_key == "ask" {
-                continue; // Rule 2 (#9): ask is sacred — may be user-intentional.
-            }
+            // Rule 2 (ask convergence): an entry sitting at ask converges
+            // onto the shipped tier. This loosens ask→allow ONLY for
+            // allow-class tools (reads + additive writes) — the class an old
+            // default fossilized at ask, which made moot unusable from
+            // permission prompts. A user-set ask on a mutation/destructive
+            // tool is never loosened by construction: those classify as ask
+            // (or deny), so convergence is a no-op or a tightening for them.
+            // Mirrors Swift PermissionsWriter.migrateTiers (Swift leads).
             if existing_key == target_key {
                 continue; // already correct.
             }

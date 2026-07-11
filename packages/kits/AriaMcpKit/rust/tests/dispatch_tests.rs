@@ -6785,3 +6785,109 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
         "a row admitted regardless of any grant must not be recorded as read-under-grant"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Anthropic memory tool — sensitivity gate (twin of Swift
+// MemoryToolAdapterSensitivityTests). The `memory` surface is bulk and
+// path-addressed with no grant ceremony, so it matches the default
+// no-claims recall posture: adjective sensitivity Normal/Elevated visible,
+// Restricted/Secret invisible; edits carry the source tier forward.
+// ---------------------------------------------------------------------------
+
+/// Seed a drawer into the adapter wing ("memories") at a given adjective
+/// sensitivity tier, bypassing the MCP surface (the gate under test).
+fn seed_memory_wing_with_sensitivity(
+    registry: &EstateRegistry,
+    content: &str,
+    room: &str,
+    sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+) {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Actuator,
+        room,
+        LatticeAnchor::udc("000"),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.wing = Some("memories".to_string());
+    frame.sensitivity = sensitivity;
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("sensitivity-tiered capture must succeed");
+}
+
+#[test]
+fn memory_tool_excludes_restricted_and_secret_drawers() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_wing_with_sensitivity(&registry, "visible normal", "normal.txt", AdjectiveSensitivity::Normal);
+    seed_memory_wing_with_sensitivity(&registry, "visible elevated", "elevated.txt", AdjectiveSensitivity::Elevated);
+    seed_memory_wing_with_sensitivity(&registry, "private restricted secret-value", "private.txt", AdjectiveSensitivity::Restricted);
+    seed_memory_wing_with_sensitivity(&registry, "top secret secret-value", "secret.txt", AdjectiveSensitivity::Secret);
+
+    let listing = dispatch_tool(
+        "memory",
+        &args! {"command" => "view", "path" => "/memories"},
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory view must succeed");
+    let text = content_text(&listing);
+    assert!(text.contains("/memories/normal.txt"), "{text}");
+    assert!(
+        text.contains("/memories/elevated.txt"),
+        "elevated is Normal-tier and must stay visible (no-claims ceiling): {text}"
+    );
+    assert!(!text.contains("/memories/private.txt"), "{text}");
+    assert!(!text.contains("/memories/secret.txt"), "{text}");
+
+    let restricted_view = dispatch_tool(
+        "memory",
+        &args! {"command" => "view", "path" => "/memories/private.txt"},
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory view of a hidden path must not error");
+    let text = content_text(&restricted_view);
+    assert!(text.contains("does not exist"), "{text}");
+    assert!(!text.contains("private restricted secret-value"), "{text}");
+}
+
+#[test]
+fn memory_tool_edit_preserves_elevated_sensitivity() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_wing_with_sensitivity(&registry, "elevated old text", "elevated.txt", AdjectiveSensitivity::Elevated);
+
+    let edit = dispatch_tool(
+        "memory",
+        &args! {
+            "command" => "str_replace",
+            "path" => "/memories/elevated.txt",
+            "old_str" => "old",
+            "new_str" => "new",
+        },
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory str_replace must succeed");
+    assert!(content_text(&edit).contains("edited"), "{}", content_text(&edit));
+
+    let coord = registry.coord.lock().unwrap();
+    let all = coord.all_drawers(&registry.default.handle).expect("all_drawers");
+    let active = all
+        .iter()
+        .find(|d| d.content == "elevated new text" && d.tombstoned_at.is_none())
+        .expect("edited drawer must exist");
+    assert_eq!(
+        active.adjective_sensitivity(),
+        AdjectiveSensitivity::Elevated,
+        "str_replace re-capture must carry the source tier, not downgrade to Normal"
+    );
+}

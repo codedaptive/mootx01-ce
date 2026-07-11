@@ -192,7 +192,7 @@ Typical shape:
 
 Do not run a remote installer script to uninstall unless it is pinned to an authenticated release artifact and verified before execution.
 
-Before uninstalling, tell the user whether the command removes only binaries, configs, and services, or whether it also removes local estate data.
+Before uninstalling, tell the user whether the command removes only binaries, configs, and services, or whether it also removes local estate data. A full interactive uninstall offers to remove the estate databases and moot-mgr history behind a typed 'yes' confirmation; removal moves the data to the platform trash (recoverable), never a hard delete. Non-interactive runs leave data in place unless `--purge --yes` is passed.
 
 Do not delete memory data unless the user explicitly asks.
 
