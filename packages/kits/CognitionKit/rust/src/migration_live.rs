@@ -319,6 +319,35 @@ pub fn confirm_migration_promotion(
             action: format!("promote unknown plan '{winner_plan_name}'"),
         })?;
     let winner_bid = parse_branch_id(&winner.branch_id)?;
+    // C-5 (defense in depth): bind the promotion to the coordinator's OWN branch
+    // status, not just the caller-supplied `report.disqualified` — a forged
+    // report could omit a disqualified entry. A branch the run already discarded
+    // (disqualified) is Discarded here and must never be promoted. Mirrors the
+    // status guard in confirm_migration_promotion_by_id; glk_promote_branch also
+    // rejects non-Active branches, but checking here yields the precise C-5
+    // error rather than a generic NotActive.
+    match coord.branch_handle_for(winner_bid).map(|b| b.status()) {
+        Some(genius_locus_kit::branches::BranchStatus::Active) => {}
+        Some(genius_locus_kit::branches::BranchStatus::Discarded) => {
+            return Err(RecipeError::SilentConceptLoss {
+                branch_id: winner.branch_id.clone(),
+                lost_concepts: vec![],
+            }
+            .into());
+        }
+        Some(other) => {
+            return Err(RecipeError::UserConfirmationRequired {
+                action: format!("promote branch {winner_bid} in terminal status {other:?}"),
+            }
+            .into());
+        }
+        None => {
+            return Err(RecipeError::UserConfirmationRequired {
+                action: format!("promote unknown branch {winner_bid}"),
+            }
+            .into());
+        }
+    }
     coord
         .glk_promote_branch(winner_bid, handle, now)
         .map_err(|e| SubstrateError::new("promote_branch", format!("{e:?}")))?;
