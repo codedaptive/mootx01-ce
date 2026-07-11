@@ -53,6 +53,34 @@ struct EstateTunnelReadTests {
         #expect(tunnels.isEmpty)
     }
 
+    // The tunnel graph read applies the same no-claims sensitivity ceiling as
+    // drawer recall: a restricted/secret edge (sensitivity inherited from a
+    // restricted endpoint drawer) is excluded; Normal-tier edges are visible.
+    @Test("tunnelsFromWing excludes restricted/secret edges")
+    func excludesRestrictedEdges() async throws {
+        let estate = try await makeEstate()
+        // A restricted drawer; a tunnel touching it inherits restricted
+        // sensitivity (max over endpoints).
+        let secretDrawer = try await estate.capture(CaptureFrame(
+            content: "restricted endpoint",
+            channel: .typed, room: "r1",
+            latticeAnchor: .udc("000"),
+            addedBy: "bilby", embeddingModelID: "test-v1",
+            sensitivity: .restricted))
+        // Tunnel from study touching the restricted drawer → restricted edge.
+        _ = try await estate.capture(TunnelCaptureFrame(
+            sourceWing: "study", sourceRoom: "r1",
+            targetWing: "vault", targetRoom: "r2",
+            label: "sensitive-link", addedBy: "bilby",
+            sourceDrawerId: secretDrawer.id, targetDrawerId: nil, kind: .references))
+        // A plain Normal-tier tunnel from study → visible.
+        _ = try await estate.capture(frame(source: "study", target: "kitchen", label: "normal-link"))
+
+        let tunnels = try await estate.tunnelsFromWing("study")
+        #expect(Set(tunnels.map(\.targetWing)) == ["kitchen"],
+            "only the Normal-tier edge is visible; the restricted edge is excluded")
+    }
+
     // The read is scoped to the source wing — other wings' tunnels are excluded.
     @Test("tunnelsFromWing is scoped to the source wing")
     func scopedToSourceWing() async throws {
