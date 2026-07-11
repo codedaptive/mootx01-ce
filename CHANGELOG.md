@@ -5,6 +5,42 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.29 — 2026-07-11
+
+First-run reliability release. Same-day follow-up to v1.0.28 driven by a
+fresh-machine install shakeout: every fix targets the out-of-box experience
+or per-machine hygiene.
+
+- **Install no longer hangs wiring Claude Code.** The plugin-refresh step
+  shells out to the `claude` CLI; it now runs with stdin closed and a hard
+  60-second deadline, so a CLI that decides to prompt (first-run onboarding,
+  consent) or stall can never freeze the installer — it falls back to a
+  printed instruction and the launchd services always get registered.
+- **`install --yes` takes the safe default.** With an existing database and
+  no explicit flag, `--yes` now adopts it (reuse) without prompting instead
+  of blocking on a hidden question. Replacing still requires the explicit
+  `--replace-db` flag — destruction is never a silent default.
+- **Fresh sessions no longer show a spurious stop-hook error.** The
+  writeback reminder matched its own banner text as "memory tools were
+  used", then drove a tool call in sessions whose MCP connection wasn't up
+  ("MCP server not connected"). It now recognizes genuine tool invocations
+  only, and finishes quietly when the tools are unavailable.
+- **Keychain hygiene.** Ephemeral estates (branch copies, in-memory serving
+  modes, test estates) no longer persist their identity keys to the login
+  Keychain — identity persistence now follows storage durability. A
+  long-running install previously accumulated one orphaned
+  `com.mootx01.estate.identity` item per throwaway estate, unboundedly.
+- **Homebrew flow reworked.** The formula no longer runs a sandboxed
+  post-install step that could neither write user config nor answer
+  prompts; setup is one caveat-printed command, and stale `~/.local/bin`
+  shadows from earlier script installs are called out explicitly.
+- **winget manifests move to schema 1.12.0** (1.6.0 was deprecated and
+  blocked submission validation). This release's winget submission is the
+  first to carry the current schema.
+- **Test integrity.** Restored the GLK audit-mining test fixtures that a
+  refactor had silently disconnected, and pinned the transaction-isolation
+  invariants at the persistence boundary.
+
 ## v1.0.28 — 2026-07-11
 
 Security-hardening and substrate-robustness release. A full sweep of the
