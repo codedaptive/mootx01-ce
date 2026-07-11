@@ -62,13 +62,46 @@ impl ClaudeCliRunning for ProcessClaudeCliRunner {
             .find(|p| p.is_file())
             .cloned()
             .unwrap_or_else(|| std::path::PathBuf::from("claude"));
-        std::process::Command::new(bin)
+        // stdin is EXPLICITLY nulled and the run is bounded by a deadline.
+        // Both are load-bearing: with the installer's stdout/stderr as the
+        // only visible output, a `claude` that decides to prompt (first-run
+        // onboarding, consent, an update question) would otherwise read from
+        // the inherited terminal with its question invisible — the install
+        // appears to hang forever (observed on a brew-migrated macOS machine,
+        // 2026-07-11, in the Swift twin of this runner). Nulled stdin turns
+        // any prompt into immediate EOF; the deadline catches non-prompt
+        // stalls (network, lock). Both surface as `false`, which callers
+        // treat exactly like a nonzero exit: print the run-it-yourself
+        // fallback and continue the install.
+        let mut child = match std::process::Command::new(bin)
             .args(args)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // 60s: `claude plugin update` normally finishes in seconds; this
+        // leaves room for a slow network fetch while guaranteeing return.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
     }
 }
 
