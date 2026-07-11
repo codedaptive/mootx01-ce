@@ -1563,6 +1563,21 @@ public extension Estate {
                 "reanchor: toWing must not be empty or whitespace-only"
             )
         }
+        // Room non-empty invariant: mirror the capture-path guard (see this
+        // file's capture() `room must not be empty`). An empty room is the
+        // ContainerFingerprintStore wing-rollup sentinel and is excluded from
+        // roomLevelEntries — a drawer reanchored to "" is skipped by pruned
+        // recall paths (hidden from recall). reanchor must not produce estate
+        // state capture would refuse.
+        if let r = toRoom, r.isEmpty {
+            throw LocusKitError.invalidContent("reanchor: toRoom must not be empty")
+        }
+        // UDC non-empty invariant (spec I-5): mirror the capture-path guard.
+        // An empty lattice code poisons lattice/audit placement state.
+        if let l = toLattice, l.udcCode.isEmpty {
+            throw LocusKitError.invalidContent(
+                "reanchor: toLattice.udcCode must not be empty (spec I-5)")
+        }
         guard try await store.getDrawer(id: rowID) != nil else {
             throw LocusKitError.drawerNotFound(id: rowID)
         }

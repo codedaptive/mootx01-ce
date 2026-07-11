@@ -274,11 +274,6 @@ enum RecipeTools {
                         "description": .string("UUIDs of losing branches to discard."),
                         "items": .object(["type": .string("string")]),
                     ]),
-                    "disqualifiedBranchIDs": .object([
-                        "type": .string("array"),
-                        "description": .string("UUIDs the run report disqualified; the C-5 guard refuses to promote any of these."),
-                        "items": .object(["type": .string("string")]),
-                    ]),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
                 ],
                 required: ["winnerBranchID"]),
@@ -797,7 +792,9 @@ enum RecipeTools {
             lines.append("  - \(d.planName) [\(d.branchID)] lost: \(d.lostConcepts.joined(separator: ", "))")
         }
         lines.append("")
-        lines.append("To promote, call \(confirmMigrationPromotionToolName) with winnerBranchID, discardBranchIDs (the other ranking ids), and disqualifiedBranchIDs from above.")
+        // Disqualified branches were discarded server-side by the run; the
+        // confirm tool refuses them regardless of what the caller sends.
+        lines.append("To promote, call \(confirmMigrationPromotionToolName) with winnerBranchID and discardBranchIDs (the other ranking ids). Disqualified branches above were already discarded and cannot be promoted.")
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
@@ -810,13 +807,14 @@ enum RecipeTools {
     ) async throws -> JSONValue {
         let winner = try requireUUID(args, "winnerBranchID")
         let discard = try decodeUUIDArray(args["discardBranchIDs"])
-        let disqualified = Set(try decodeUUIDArray(args["disqualifiedBranchIDs"]))
+        // NOTE: no client-supplied disqualification set. The C-5 verdict is
+        // server-side: the run discarded disqualified branches, and the
+        // confirm below refuses any non-active branch.
 
         do {
             try await MigrationBenchmark().confirmPromotion(
                 winnerBranchID: winner,
                 discardBranchIDs: discard,
-                disqualifiedBranchIDs: disqualified,
                 estate: handle, kit: kit)
         } catch let error as RecipeError {
             // Recipe-level refusal (e.g. silentConceptLoss on a

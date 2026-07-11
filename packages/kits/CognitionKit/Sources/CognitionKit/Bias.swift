@@ -128,10 +128,24 @@ public enum Bias {
             .union(confirmedByRoom.keys)
             .union(withdrawnByRoom.keys)
             .sorted()
-        let records = rooms.map { room in
+        var records = rooms.map { room in
             (label: room,
              endorsements: Int(confirmedByRoom[room] ?? 0),
              dismissals: Int(withdrawnByRoom[room] ?? 0))
+        }
+        // DoS guard: the distinct-room count is attacker-influenceable (rooms
+        // are set at capture time), and every room becomes a Bradley-Terry
+        // competitor in a dense O(n²) fit. Cap at maxPreferenceRooms, keeping
+        // the highest-signal rooms (most endorsements+dismissals) — the ones
+        // the preference model is about — with the room name as a
+        // deterministic tie-break so the truncation is stable across runs.
+        if records.count > NeuronKit.maxPreferenceRooms {
+            records.sort {
+                let sa = $0.endorsements + $0.dismissals
+                let sb = $1.endorsements + $1.dismissals
+                return sa != sb ? sa > sb : $0.label < $1.label
+            }
+            records = Array(records.prefix(NeuronKit.maxPreferenceRooms))
         }
         let learned = try NeuronKit.learnedPreference(records: records)
 

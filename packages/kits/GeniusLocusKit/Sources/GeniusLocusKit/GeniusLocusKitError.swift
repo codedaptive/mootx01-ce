@@ -83,6 +83,20 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     /// the destination that was passed.
     case invalidPromotionTarget(branchID: BranchID, expectedEstateUUID: UUID, actualEstateUUID: UUID)
 
+    /// A `glkPromoteBranch` or `glkMergeDrawers` call addressed a branch
+    /// that is no longer `.active` (already won, merged, or discarded).
+    /// Terminal branches are read-only history: promoting a discarded
+    /// branch would resurrect content a prior decision rejected — the
+    /// migration benchmark relies on this to keep disqualified branches
+    /// unpromotable across the stateless MCP boundary (C-5).
+    case branchNotActive(branchID: BranchID, status: BranchStatus)
+
+    /// The kit already holds `maxActiveBranches` active branches. Each active
+    /// branch retains a full row copy, so admitting more without bound is a
+    /// memory-exhaustion vector. Terminal branches free their rows and don't
+    /// count. Mirrors Rust `BranchError::ActiveBranchQuotaExceeded`.
+    case activeBranchQuotaExceeded(active: Int, maximum: Int)
+
     /// A cross-estate federated read was refused because the source
     /// estate holds no valid grant naming the requester as grantee.
     /// This is the substrate-level enforcement of the A-versus-C
@@ -132,6 +146,10 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
             return "branch \(id) is not tracked in this kit instance"
         case let .invalidPromotionTarget(id, expected, actual):
             return "branch \(id) cannot be promoted into estate \(actual): its parent estate is \(expected)"
+        case let .branchNotActive(id, status):
+            return "branch \(id) is \(status.rawValue), not active — terminal branches cannot be promoted or merged"
+        case let .activeBranchQuotaExceeded(active, maximum):
+            return "active branch quota exceeded: \(active) active branches (maximum \(maximum)); discard or promote a branch before deriving another"
         case let .crossEstateReadRefused(source, requester, reason):
             return "cross-estate read of \(source) by \(requester) refused: \(reason)"
         case let .recallLaneUnavailable(lane):

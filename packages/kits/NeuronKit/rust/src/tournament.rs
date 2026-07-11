@@ -94,6 +94,12 @@ pub enum TournamentError {
     /// the Swift documentation for why strong connectivity is the exact
     /// finiteness condition (Ford 1957; Hunter 2004 § 3).
     DisconnectedComparisonGraph,
+    /// More competitors than the fitter admits. Bradley-Terry allocates
+    /// dense O(n²) matrices and runs up to MAX_ITERATIONS O(n²) sweeps, so
+    /// an unbounded competitor count (e.g. one preference room per
+    /// attacker-created room) is a CPU/memory-exhaustion vector. Carries
+    /// the offending count. Mirrors Swift `MOOTx01Error.tooManyCompetitors`.
+    TooManyCompetitors(usize),
 }
 
 /// Fits the Bradley-Terry model and returns one score per competitor,

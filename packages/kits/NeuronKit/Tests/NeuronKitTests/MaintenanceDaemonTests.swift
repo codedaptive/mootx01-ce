@@ -72,6 +72,31 @@ private actor RecordingSink: MaintenanceProposalSink {
     }
 }
 
+/// A sink that throws on the Nth `propose` (0-based), recording every frame
+/// whose write succeeded. Used to prove B-4 idempotency: a key must not be
+/// committed to `proposedKeys` unless ITS proposal was persisted, so a
+/// transient write failure cannot permanently suppress a finding.
+private struct SinkError: Error {}
+private actor FailingSink: MaintenanceProposalSink {
+    private(set) var proposals: [ProposeFrame] = []
+    private(set) var diaryEntries: [DiaryEntry] = []
+    private let failAt: Int
+    private var proposeCalls = 0
+
+    init(failAt: Int) { self.failAt = failAt }
+
+    func propose(_ frame: ProposeFrame) async throws {
+        defer { proposeCalls += 1 }
+        if proposeCalls == failAt { throw SinkError() }
+        proposals.append(frame)
+    }
+    func recordCycleDiary(_ entry: DiaryEntry) async throws { diaryEntries.append(entry) }
+    func updateEnrichmentStatus(rowID: RowID, newProvenance: Int64, now: Date) async throws {}
+
+    func proposalCount() -> Int { proposals.count }
+    func proposedTargets() -> Set<String> { Set(proposals.map(\.target)) }
+}
+
 /// Returns whatever substrate state the test configures.
 ///
 /// The `qidPending` array is the seam's view of drawers with
@@ -387,6 +412,57 @@ struct MaintenanceDaemonTests {
         // Two cycles produced exactly the proposals of one.
         let total = await sink.proposalCount()
         #expect(total == 5)
+    }
+
+    // MARK: - B-4: a failed proposal write must not suppress the finding
+
+    @Test("B-4: a sink failure mid-cycle does not permanently suppress unwritten findings")
+    func b4FailedProposalIsRetriedNextCycle() async throws {
+        // Five detected candidates → five proposals in scan order. The sink
+        // throws on the 3rd propose (index 2), so decisions 0 and 1 persist,
+        // decision 2 fails, decisions 3 and 4 never run. The pre-fix code
+        // committed ALL FIVE keys to proposedKeys before the loop, so a later
+        // cycle would suppress every one — permanently silencing findings 2–4
+        // whose proposals were never written. The fix commits per-key after a
+        // successful propose, so only 0 and 1 are remembered.
+        let forbidden = drawer(id: "d-forbidden", filedAt: t0, sensitivity: .secret, exportability: .public_)
+        let decayed = drawer(id: "d-decay", filedAt: t0.addingTimeInterval(-40 * 86_400))
+        let tomb = drawer(
+            id: "d-tomb", filedAt: t0.addingTimeInterval(-100 * 86_400),
+            tombstonedAt: t0.addingTimeInterval(-10 * 86_400))
+        func freshReader() -> FakeReader {
+            FakeReader(
+                active: [forbidden, decayed],
+                tombstoned: [tomb],
+                references: [LearnedReferenceObservation(referenceRowID: "ref-1", sourceDriftFraction: 0.5)],
+                fingerprints: [FingerprintDriftObservation(scopeKey: "node-room-1", nodeId: "node-room-1", driftFraction: 0.5)],
+                auditLog: cleanAuditLog())
+        }
+
+        // Cycle 1: sink throws at propose index 2 → the cycle throws.
+        let failingSink = FailingSink(failAt: 2)
+        let policyStore = InMemoryMaintenancePolicyStore()
+        let d = MaintenanceDaemon(reader: freshReader(), sink: failingSink, policyStore: policyStore)
+        await #expect(throws: SinkError.self) {
+            _ = try await d.triggerMaintenanceCycle(now: t0)
+        }
+        // Exactly two proposals were written before the throw.
+        let firstWritten = await failingSink.proposedTargets()
+        #expect(firstWritten.count == 2, "only the two pre-failure proposals persisted")
+
+        // Cycle 2: the failing sink no longer fails (its failAt index is past),
+        // same daemon (retains proposedKeys). The two committed findings are
+        // suppressed as duplicates; the three whose writes never landed are
+        // re-emitted — NOT permanently suppressed.
+        let second = try await d.triggerMaintenanceCycle(now: t0.addingTimeInterval(60))
+        #expect(second.proposalsEmitted.count == 3,
+                "the three unwritten findings are retried, not suppressed")
+        #expect(second.suppressedDuplicates == 2,
+                "only the two successfully-written findings are treated as already-proposed")
+
+        // Across both cycles every distinct finding was ultimately written once.
+        let allWritten = await failingSink.proposedTargets()
+        #expect(allWritten.count == 5, "all five findings reach the sink across the retry")
     }
 
     // MARK: - Policy round-trips through the manifest seam

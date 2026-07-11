@@ -155,7 +155,7 @@ CloudKit and live federation fan-out remain future work.
 the stateless run→confirm boundary. The server's in-memory coordinator retains all
 minted branches; the run result text carries the branch ids the caller needs.
 Required: `winnerBranchID` (UUID). Optional: `discardBranchIDs`,
-`disqualifiedBranchIDs` (arrays of UUID strings).
+`discardBranchIDs` (an array of UUID strings); the C-5 disqualification verdict is enforced server-side — disqualified branches are discarded by the run and cannot be promoted.
 
 **Federation tool (moot_cross_estate_recall) is out of scope.** The federated
 recall surface requires the grant model and the federation authorization layer.

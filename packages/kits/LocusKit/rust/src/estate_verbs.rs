@@ -1176,8 +1176,27 @@ impl Estate {
     /// `DrawerStore::tunnels_from_wing`. The drawer-to-drawer tunnels are the
     /// edges of the estate's association graph; a reasoning lens (e.g.
     /// keystone centrality) consumes them through the kit. Read-only.
+    ///
+    /// Sensitivity gate: the underlying store query filters only by source
+    /// wing + tombstone, so it would return restricted/secret tunnel edges
+    /// (endpoint ids, free-form labels, adjective bitmaps) that the drawer
+    /// recall pipeline excludes by default. This surface applies the same
+    /// no-claims sensitivity ceiling BitmapEvaluator inserts for drawers —
+    /// Normal tier (normal + elevated) visible, restricted/secret excluded —
+    /// so a reasoning lens reading the graph never sees an edge whose tier is
+    /// above the default recall ceiling. Trust/state axes are not gated here
+    /// (sensitivity is the disclosure-relevant axis; the drawer endpoints are
+    /// independently sensitivity-gated on recall). Synthetic containment
+    /// edges carry adjective_bitmap 0 (Normal) and always pass. Mirrors the
+    /// Swift `Estate.tunnelsFromWing` gate and the AriaMcpKit MCP-boundary
+    /// filter, now enforced at the source so every caller is covered.
     pub fn tunnels_from_wing(&self, wing: &str) -> Result<Vec<Tunnel>, LocusKitError> {
-        self.store.tunnels_from_wing(wing)
+        Ok(self
+            .store
+            .tunnels_from_wing(wing)?
+            .into_iter()
+            .filter(|t| t.adjective_sensitivity().is_bulk_exportable())
+            .collect())
     }
 
     /// Add a tunnel (an association-graph edge) to the estate — the
@@ -2119,6 +2138,25 @@ impl Estate {
             if w.trim().is_empty() {
                 return Err(LocusKitError::InvalidContent(
                     "reanchor: to_wing must not be empty or whitespace-only".to_string(),
+                ));
+            }
+        }
+        // Room non-empty invariant: mirror the capture-path guard. An empty
+        // room is the ContainerFingerprintStore wing-rollup sentinel and is
+        // excluded from room_level_entries — a drawer reanchored to "" is
+        // skipped by pruned recall paths (hidden from recall).
+        if let Some(r) = to_room {
+            if r.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "reanchor: to_room must not be empty".to_string(),
+                ));
+            }
+        }
+        // UDC non-empty invariant (spec I-5): mirror the capture-path guard.
+        if let Some(ref l) = to_lattice {
+            if l.udc_code.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "reanchor: to_lattice.udc_code must not be empty (spec I-5)".to_string(),
                 ));
             }
         }
@@ -4034,6 +4072,44 @@ mod tests {
             tunnels.iter().map(|t| t.target_wing.as_str()).collect();
         assert_eq!(targets, ["garden", "kitchen"].into_iter().collect());
         assert!(tunnels.iter().all(|t| t.source_wing == "study"));
+    }
+
+    #[test]
+    fn tunnels_from_wing_excludes_restricted_and_secret_edges() {
+        // The tunnel graph read must apply the same no-claims sensitivity
+        // ceiling as drawer recall: Normal tier (normal + elevated) visible,
+        // restricted/secret excluded — so a lens reading the graph never sees
+        // a sensitive edge the store query (wing + tombstone only) would leak.
+        use crate::adjectives::AdjectiveSensitivity;
+        let estate = make_estate();
+        // A normal edge (adjective_bitmap 0) — visible.
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "normal-link"), 1_700_000_001)
+            .unwrap();
+        // Restricted and secret edges filed directly with sensitivity bits set
+        // (bits 6–11 hold the sensitivity raw value).
+        for (target, sens) in [
+            ("vault", AdjectiveSensitivity::Restricted),
+            ("safe", AdjectiveSensitivity::Secret),
+        ] {
+            let mut t = crate::tunnel::Tunnel::new(
+                format!("t-{target}"),
+                "study".into(), "r1".into(),
+                target.into(), "r2".into(),
+                "sensitive-link".into(), "bilby".into(), 1_700_000_003,
+            );
+            t.adjective_bitmap = sens.raw_value() << 6;
+            estate.add_tunnel(&t).unwrap();
+        }
+
+        let tunnels = estate.tunnels_from_wing("study").unwrap();
+        let targets: std::collections::BTreeSet<&str> =
+            tunnels.iter().map(|t| t.target_wing.as_str()).collect();
+        assert_eq!(
+            targets,
+            ["kitchen"].into_iter().collect(),
+            "only the Normal-tier edge is visible; restricted/secret excluded"
+        );
     }
 
     #[test]

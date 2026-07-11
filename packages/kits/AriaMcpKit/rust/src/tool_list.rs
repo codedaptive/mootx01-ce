@@ -801,11 +801,6 @@ fn confirm_migration_tool() -> serde_json::Value {
                     "type": "array",
                     "description": "UUIDs of losing branches to discard.",
                     "items": { "type": "string" }
-                },
-                "disqualifiedBranchIDs": {
-                    "type": "array",
-                    "description": "UUIDs the run report disqualified.",
-                    "items": { "type": "string" }
                 }
             }),
             json!(["winnerBranchID"])
@@ -841,7 +836,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_contradiction" => "Reasoning lens: surface genuine semantic contradictions — drawer pairs linked by a contradicts tunnel and KG facts with conflicting objects for the same subject+predicate key.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
         "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
-        "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns.",
+        "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns. Confirmation-level filters in the recall frame (userConfirmed/unconfirmed) are ignored — the lens performs its own dual recall (confirmed = success, unconfirmed = non-success) to compute a differentiated rate; sensitivity and other scoping filters are honored.",
         "moot_lens_successors" => "Reasoning lens: suggest probable successor drawers via tunnel traversal.",
         "moot_lens_overlap" => "Reasoning lens: compute thematic overlap between two estates.",
         "moot_lens_divergence" => "Reasoning lens: measure topic divergence between two estates.",

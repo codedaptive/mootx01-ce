@@ -167,7 +167,7 @@ struct RecipeRunErrorTests {
         func describe(_ e: RecipeRunError) -> String {
             switch e {
             case .recipe(let inner):
-                // RecipeError is itself exhaustive over its 6 cases.
+                // RecipeError is itself exhaustive over its cases.
                 switch inner {
                 case .missingCapability: return "recipe.missingCapability"
                 case .insufficientBranches: return "recipe.insufficientBranches"
@@ -175,6 +175,8 @@ struct RecipeRunErrorTests {
                 case .silentConceptLoss: return "recipe.silentConceptLoss"
                 case .tournamentNoWinner: return "recipe.tournamentNoWinner"
                 case .userConfirmationRequired: return "recipe.userConfirmationRequired"
+                case .tooManyPlans: return "recipe.tooManyPlans"
+                case .tooManyOriginEntries: return "recipe.tooManyOriginEntries"
                 }
             case .substrate:
                 return "substrate"

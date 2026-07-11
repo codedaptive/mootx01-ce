@@ -98,7 +98,7 @@ fn produced_cache(registry: &EstateRegistry) -> (GraphCentralityCache, Vec<Strin
     let facts = coord.recall_kg_facts(h).expect("recall_kg_facts");
     let graph = build_centrality_graph(&drawers, &tunnels, &facts);
     let node_ids = graph.node_ids.clone();
-    let scores = compute_centrality_scores(&graph);
+    let scores = compute_centrality_scores(&graph, "parity-test-estate", 0.0);
     (GraphCentralityCache::new(scores), node_ids)
 }
 
@@ -128,7 +128,7 @@ fn producer_equals_direct_keystones() {
     let tunnels = coord.all_tunnels(h).unwrap();
     let facts = coord.recall_kg_facts(h).unwrap();
     let graph = build_centrality_graph(&drawers, &tunnels, &facts);
-    let ranked = neuron_kit::keystones(&graph.node_ids, &graph.edges, graph.node_ids.len());
+    let ranked = neuron_kit::keystones(&graph.node_ids, &graph.edges, graph.node_ids.len(), "parity-test-estate", 0.0);
     let mut expected = std::collections::HashMap::new();
     for k in ranked {
         expected.insert(k.id, k.centrality as f32);

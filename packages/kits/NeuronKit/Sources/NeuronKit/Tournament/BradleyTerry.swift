@@ -56,6 +56,14 @@ public enum MOOTx01Error: Error, Sendable, Equatable {
     /// (an undirected-disconnected graph is never strongly connected),
     /// so that case throws too.
     case disconnectedComparisonGraph
+
+    /// More competitors than the fitter admits. Bradley-Terry allocates
+    /// dense O(n²) matrices and runs up to `bradleyTerryMaxIterations`
+    /// O(n²) sweeps, so an unbounded competitor count (e.g. one preference
+    /// room per attacker-created room) is a CPU/memory-exhaustion vector.
+    /// Carries the offending count. Mirrors Rust
+    /// `TournamentError::TooManyCompetitors`.
+    case tooManyCompetitors(count: Int)
 }
 
 /// Convergence tolerance for the MM fixed-point iteration: the fit
