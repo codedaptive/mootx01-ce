@@ -78,7 +78,13 @@ struct EstateTests {
         let created = try await Estate.create(storage: TestStorage.sqlite(url), owner: testOwner)
         try await created.close()
 
-        let opened = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+        let opened = try await Estate.open(
+            storage: TestStorage.sqlite(url), owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert manifest/meta behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         try await opened.close()
     }
 
@@ -122,10 +128,22 @@ struct EstateTests {
         let first = try await Estate.create(storage: TestStorage.sqlite(url), owner: testOwner)
         try await first.close()
 
-        let second = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+        let second = try await Estate.open(
+            storage: TestStorage.sqlite(url), owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert manifest/meta behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         try await second.close()
 
-        let third = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+        let third = try await Estate.open(
+            storage: TestStorage.sqlite(url), owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert manifest/meta behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         try await third.close()
     }
 
@@ -183,7 +201,13 @@ struct EstateTests {
         }
 
         // Reopen the same database — the value persisted.
-        let reopened = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+        let reopened = try await Estate.open(
+            storage: TestStorage.sqlite(url), owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert manifest/meta behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         defer { Task { try? await reopened.close() } }
         let restored = try await reopened.meta(key: key)
         #expect(restored == value, "Consumer manifest value must survive a restart")
@@ -215,7 +239,13 @@ struct EstateTests {
 
         // Re-open must throw manifestMismatch keyed on bitmap_layout_version.
         do {
-            _ = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+            _ = try await Estate.open(
+            storage: TestStorage.sqlite(url), owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert manifest/meta behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
             Issue.record("Expected manifestMismatch but open succeeded")
         } catch let EstateError.manifestMismatch(key, found, expected) {
             #expect(key == "bitmap_layout_version")
@@ -261,7 +291,13 @@ struct EstateTests {
         let created = try await Estate.create(storage: TestStorage.sqlite(url), owner: testOwner, manifest: seed)
         try await created.close()
 
-        let opened = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+        let opened = try await Estate.open(
+            storage: TestStorage.sqlite(url), owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert manifest/meta behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         defer { Task { try? await opened.close() } }
         let manifest = try await opened.manifest
         #expect(manifest.estateName == "Test Estate")
@@ -297,7 +333,13 @@ struct EstateTests {
         let firstUUID = await first.estateUUID
         try await first.close()
 
-        let second = try await Estate.open(storage: TestStorage.sqlite(url), owner: testOwner)
+        let second = try await Estate.open(
+            storage: TestStorage.sqlite(url), owner: testOwner,
+            // Temp-dir SQLite counts as durable, so the backend-keyed default
+            // would mint into the real login keychain — keep test identities
+            // in memory. (These tests assert manifest/meta behavior, not
+            // signing, so a fresh store per open is fine.)
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         let secondUUID = await second.estateUUID
         try await second.close()
 

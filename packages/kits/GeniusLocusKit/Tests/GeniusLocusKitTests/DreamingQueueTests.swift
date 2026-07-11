@@ -61,7 +61,11 @@ private func openSQLiteEstate(at dir: URL) async throws
     let owner = OwnerCredentials(ownerIdentifier: "dreaming-queue-test-owner")
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
     let kit = GeniusLocusKit()
-    let handle = try await kit.open(storage: storage, owner: owner)
+    // Temp-dir SQLite counts as durable, so the backend-keyed default would
+    // mint into the real login keychain — keep test identities in memory.
+    let handle = try await kit.open(
+        storage: storage, owner: owner,
+        identityKeyStore: InMemoryEstateIdentityKeyStore())
     return (kit, handle, storage)
 }
 

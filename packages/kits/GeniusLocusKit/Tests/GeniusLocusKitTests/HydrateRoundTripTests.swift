@@ -359,7 +359,12 @@ struct VectorSidecarUnificationTests {
 
         _ = try await LocusKit.Estate.create(storage: sqlite, owner: owner)
         let kit = GeniusLocusKit()
-        let handle = try await kit.open(storage: sqlite, owner: owner)
+        // Temp-dir SQLite counts as durable, so the backend-keyed default
+        // would mint into the real login keychain — keep test identities in
+        // memory.
+        let handle = try await kit.open(
+            storage: sqlite, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
 
         let glkVS = await kit.vectorStores[handle]
@@ -386,7 +391,12 @@ struct VectorSidecarUnificationTests {
 
         _ = try await LocusKit.Estate.create(storage: sqlite, owner: owner)
         let kit = GeniusLocusKit()
-        let handle = try await kit.open(storage: sqlite, owner: owner)
+        // Temp-dir SQLite counts as durable, so the backend-keyed default
+        // would mint into the real login keychain — keep test identities in
+        // memory.
+        let handle = try await kit.open(
+            storage: sqlite, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
         try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
 
         let vs = await kit.vectorStores[handle]
@@ -432,7 +442,12 @@ struct MatrixSnapshotPersistenceTests {
         let kit = GeniusLocusKit()
         // open(storage:owner:) backs the estate with this SQLite directly, so
         // storages[handle] is SQLite and the snapshot store writes/reads real rows.
-        let handle = try await kit.open(storage: sqlite, owner: owner)
+        // Temp-dir SQLite counts as durable, so the backend-keyed default
+        // would mint into the real login keychain — keep test identities in
+        // memory.
+        let handle = try await kit.open(
+            storage: sqlite, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
 
         // ── First wave of captures, then the cold-start rebuild (persists) ──────
         for i in 0..<3 {
