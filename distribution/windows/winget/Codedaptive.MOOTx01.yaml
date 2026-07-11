@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
 #
 # Version manifest — the entry point winget reads first. It names the
 # package and points at the default locale; the installer.yaml and
@@ -12,4 +12,4 @@ PackageIdentifier: Codedaptive.MOOTx01
 PackageVersion: 1.0.28
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
