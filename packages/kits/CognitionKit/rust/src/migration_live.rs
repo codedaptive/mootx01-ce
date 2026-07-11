@@ -261,7 +261,7 @@ pub fn confirm_migration_promotion_by_id(
     // Guard 4 — discard loop; winner and unresolvable ids skipped silently.
     for &bid in discard_branch_ids {
         if bid != winner_branch_id {
-            let _ = coord.glk_discard_branch(bid);
+            let _ = coord.glk_discard_branch(bid, now);
         }
     }
     Ok(())
@@ -327,7 +327,7 @@ pub fn confirm_migration_promotion(
     for pr in &report.plan_results {
         if pr.name != winner_plan_name {
             if let Ok(bid) = parse_branch_id(&pr.branch_id) {
-                let _ = coord.glk_discard_branch(bid);
+                let _ = coord.glk_discard_branch(bid, now);
             }
         }
     }
@@ -394,7 +394,7 @@ pub fn run_migration_benchmark_sqlite(
         .map_err(|e| SubstrateError::new("open_estate", format!("{e:?}")))?;
     let mut sub = LiveRecipeSubstrate::new(&mut coord, handle, now);
     let report = run_migration_benchmark(&mut sub, plans, origin)?;
-    discard_disqualified_branches(&mut coord, &report);
+    discard_disqualified_branches(&mut coord, &report, now);
     Ok((report, coord, handle))
 }
 
@@ -407,7 +407,7 @@ pub fn run_migration_benchmark_sqlite(
 /// detail. Every caller that drives `run_migration_benchmark` over a live
 /// coordinator must call this with the resulting report — parity of the
 /// discard loop at the end of the Swift `MigrationBenchmark.run`.
-pub fn discard_disqualified_branches(coord: &mut EstateCoordinator, report: &CoreReport) {
+pub fn discard_disqualified_branches(coord: &mut EstateCoordinator, report: &CoreReport, now: i64) {
     for d in &report.disqualified {
         let Some(bid) = report
             .plan_results
@@ -419,7 +419,7 @@ pub fn discard_disqualified_branches(coord: &mut EstateCoordinator, report: &Cor
         };
         // NotTracked is the only failure and means there is nothing to
         // discard — ignore, matching the Swift discard's idempotent intent.
-        let _ = coord.glk_discard_branch(bid);
+        let _ = coord.glk_discard_branch(bid, now);
     }
 }
 
@@ -654,7 +654,7 @@ mod tests {
         };
         // What every live driver does after the run (the sqlite wrapper and
         // the ARIA run tool both call this).
-        discard_disqualified_branches(&mut coord, &report);
+        discard_disqualified_branches(&mut coord, &report, NOW);
         assert_eq!(report.disqualified.len(), 1, "plan must be disqualified");
 
         let winner_id_str = report
@@ -724,7 +724,7 @@ mod tests {
     fn ck_live7b_by_id_discarded_via_any_path_is_still_concept_loss() {
         let (mut coord, h) = coord_with_parent();
         let bid = coord.glk_derive_branch("p", &h, NOW).expect("derive");
-        coord.glk_discard_branch(bid).expect("discard");
+        coord.glk_discard_branch(bid, NOW).expect("discard");
 
         let err = confirm_migration_promotion_by_id(&mut coord, bid, &[], &h, NOW)
             .unwrap_err();

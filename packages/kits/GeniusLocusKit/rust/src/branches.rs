@@ -36,6 +36,15 @@ use crate::intake::WriteMode;
 /// Swift `BranchID = UUID`.
 pub type BranchId = Uuid;
 
+/// Maximum number of simultaneously ACTIVE branches a coordinator will hold.
+/// Each active branch retains a full in-memory copy of its parent's rows, so
+/// an unbounded active set is a memory-exhaustion vector for any caller that
+/// can trigger derivation. Terminal branches (won/merged/discarded) release
+/// their rows and do not count. 64 is far above any real workload — the
+/// migration benchmark derives a handful of concurrent branches — while
+/// bounding peak retained row-copy memory. Mirrors Swift `maxActiveBranches`.
+pub const MAX_ACTIVE_BRANCHES: usize = 64;
+
 /// Lifecycle state of a COW branch. Valid transitions:
 /// `Active -> Won | Merged | Discarded`. Terminal states preserve the
 /// branch estate's rows for audit access (I-15).
@@ -106,6 +115,14 @@ pub enum BranchError {
     NotActive {
         branch_id: BranchId,
         status: BranchStatus,
+    },
+    /// The coordinator already holds `MAX_ACTIVE_BRANCHES` active branches.
+    /// Each active branch retains a full row copy, so admitting more without
+    /// bound is a memory-exhaustion vector. Terminal branches free their rows
+    /// and don't count. Mirrors Swift `GeniusLocusKitError.activeBranchQuotaExceeded`.
+    ActiveBranchQuotaExceeded {
+        active: usize,
+        maximum: usize,
     },
 }
 
@@ -343,10 +360,28 @@ impl EstateBranch {
         self.branch_estate.recall(frame, now).collect_all()
     }
 
-    /// Transition the branch to `Discarded`. Rows are retained for audit;
-    /// `recall` still works afterwards.
-    pub(crate) fn set_discarded(&mut self) {
+    /// Transition the branch to `Discarded` and release its heavy row store.
+    /// The status shell is retained in the coordinator registry so C-5 can
+    /// still report a disqualified branch as unpromotable (see
+    /// `glk_promote_branch`'s NotActive guard), but the O(rows) copied
+    /// content is freed — a derive→discard loop no longer accumulates row
+    /// copies (DoS fix). No caller reads a discarded branch's rows.
+    pub(crate) fn set_discarded(&mut self, now: i64) {
         self.status = BranchStatus::Discarded;
+        self.release_rows(now);
+    }
+
+    /// Drop the branch estate's copied rows, replacing it with a fresh empty
+    /// estate and clearing the snapshot set. Called on every terminal
+    /// transition (discard / promote / merge) after any work that needs the
+    /// rows has completed. Reduces a terminal branch to an O(1) status shell.
+    /// Best-effort: if a fresh empty estate cannot be built the rows are left
+    /// in place (correctness over reclamation).
+    fn release_rows(&mut self, now: i64) {
+        if let Ok(empty) = Self::new_branch_estate(self.branch_id, now) {
+            self.branch_estate = empty;
+            self.snapshot_ids.clear();
+        }
     }
 
     /// Compare the current branch state to the derivation snapshot.
@@ -400,6 +435,9 @@ impl EstateBranch {
             }
         }
         self.status = BranchStatus::Merged;
+        // Selected rows now live in the parent; release the branch copy,
+        // keeping the O(1) Merged shell.
+        self.release_rows(now);
         Ok(MergeReport {
             merged,
             conflicts: Vec::new(),
@@ -411,6 +449,27 @@ impl EstateBranch {
 // MARK: - Branch verbs on the kit (parity of VerbSurface.swift branch verbs)
 
 impl EstateCoordinator {
+    /// Count branches currently in `Active` status. Terminal branches have
+    /// released their rows and do not count toward the live-memory quota.
+    fn active_branch_count(&self) -> usize {
+        self.branches
+            .values()
+            .filter(|b| b.status() == BranchStatus::Active)
+            .count()
+    }
+
+    /// Refuse a new derivation when the active-branch quota is reached.
+    fn check_active_branch_quota(&self) -> Result<(), BranchError> {
+        let active = self.active_branch_count();
+        if active >= MAX_ACTIVE_BRANCHES {
+            return Err(BranchError::ActiveBranchQuotaExceeded {
+                active,
+                maximum: MAX_ACTIVE_BRANCHES,
+            });
+        }
+        Ok(())
+    }
+
     /// Derive a COW branch from the estate addressed by `handle` (lineage
     /// depth 1). Snapshots all current parent rows into a fresh branch estate
     /// and retains the branch in the registry. Parity of
@@ -421,6 +480,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         now: i64,
     ) -> Result<BranchId, BranchError> {
+        self.check_active_branch_quota()?;
         let parent = self
             .estate_for(handle)
             .map_err(|_| BranchError::EstateNotOpen)?;
@@ -442,6 +502,7 @@ impl EstateCoordinator {
         parent_branch_id: BranchId,
         now: i64,
     ) -> Result<BranchId, BranchError> {
+        self.check_active_branch_quota()?;
         let parent_branch =
             self.branches
                 .get(&parent_branch_id)
@@ -548,6 +609,9 @@ impl EstateCoordinator {
             .get_mut(&branch_id)
             .ok_or(BranchError::NotTracked { branch_id })?;
         branch.status = BranchStatus::Won;
+        // Promoted rows now live in the parent estate; the branch copy is
+        // redundant. Release it, keeping the O(1) Won shell.
+        branch.release_rows(now);
 
         Ok(new_rows.len())
     }
@@ -582,14 +646,19 @@ impl EstateCoordinator {
         branch.merge_drawers(drawer_ids, now)
     }
 
-    /// Discard a tracked branch (status -> `Discarded`); rows retained for
-    /// audit. Parity of `BranchHandle.discard()`.
-    pub fn glk_discard_branch(&mut self, branch_id: BranchId) -> Result<(), BranchError> {
+    /// Discard a tracked branch (status -> `Discarded`) and release its heavy
+    /// row store; the status shell is retained so C-5 stays precise. Parity
+    /// of `BranchHandle.discard()`.
+    pub fn glk_discard_branch(
+        &mut self,
+        branch_id: BranchId,
+        now: i64,
+    ) -> Result<(), BranchError> {
         let branch = self
             .branches
             .get_mut(&branch_id)
             .ok_or(BranchError::NotTracked { branch_id })?;
-        branch.set_discarded();
+        branch.set_discarded(now);
         Ok(())
     }
 
@@ -765,15 +834,17 @@ mod tests {
         let (mut coord, h) = coord_with_parent(&["alpha"]);
         let bid = coord.glk_derive_branch("b6", &h, NOW).unwrap();
         branch_capture(&coord, bid, "gamma");
-        coord.glk_discard_branch(bid).unwrap();
+        coord.glk_discard_branch(bid, NOW).unwrap();
+        // The status shell is retained so C-5 can still refuse a disqualified
+        // branch, but the heavy row store is released on discard (DoS fix).
         assert_eq!(
             coord.branch_handle_for(bid).unwrap().status(),
             BranchStatus::Discarded
         );
         assert_eq!(
             coord.branch_handle_for(bid).unwrap().recall(NOW).len(),
-            2,
-            "rows retained"
+            0,
+            "rows released on discard (only the status shell is retained)"
         );
         assert_eq!(
             coord.recall(&h, all_frame(), NOW).unwrap().len(),
@@ -1056,6 +1127,47 @@ mod tests {
             row.exportability(),
             AdjectiveExportability::Public,
             "exportability must be preserved on derive — born-public row went private before fix"
+        );
+    }
+
+    // DoS: the active-branch quota refuses derivation past MAX_ACTIVE_BRANCHES,
+    // and terminal (discarded) branches free a slot — they no longer count.
+    #[test]
+    fn active_branch_quota_bounds_live_branches_and_terminal_frees_a_slot() {
+        let (mut coord, h) = coord_with_parent(&["alpha"]);
+        let mut ids = Vec::new();
+        for i in 0..MAX_ACTIVE_BRANCHES {
+            ids.push(coord.glk_derive_branch(&format!("b{i}"), &h, NOW).unwrap());
+        }
+        // One more active branch must be refused.
+        match coord.glk_derive_branch("over", &h, NOW) {
+            Err(BranchError::ActiveBranchQuotaExceeded { active, maximum }) => {
+                assert_eq!(active, MAX_ACTIVE_BRANCHES);
+                assert_eq!(maximum, MAX_ACTIVE_BRANCHES);
+            }
+            other => panic!("expected ActiveBranchQuotaExceeded, got {other:?}"),
+        }
+        // Discarding a branch frees a slot (terminal branches don't count),
+        // and the freed branch's rows were released.
+        coord.glk_discard_branch(ids[0], NOW).unwrap();
+        assert_eq!(coord.branch_handle_for(ids[0]).unwrap().recall(NOW).len(), 0);
+        // Now one more derive succeeds.
+        assert!(coord.glk_derive_branch("after-free", &h, NOW).is_ok());
+    }
+
+    // DoS: promotion releases the branch's row copy (rows live in the parent
+    // now); the Won status shell remains resolvable.
+    #[test]
+    fn promote_releases_branch_rows_keeping_status_shell() {
+        let (mut coord, h) = coord_with_parent(&["alpha"]);
+        let bid = coord.glk_derive_branch("b", &h, NOW).unwrap();
+        branch_capture(&coord, bid, "beta");
+        let _ = coord.glk_promote_branch(bid, &h, NOW).unwrap();
+        assert_eq!(coord.branch_handle_for(bid).unwrap().status(), BranchStatus::Won);
+        assert_eq!(
+            coord.branch_handle_for(bid).unwrap().recall(NOW).len(),
+            0,
+            "promoted branch rows are released; only the status shell remains"
         );
     }
 }

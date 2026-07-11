@@ -154,23 +154,26 @@ struct GLK_COW_01_BranchTests {
         #expect(branch.status == .discarded)
     }
 
-    // MARK: - Test 6: discarded branch recall still works (audit trail preserved)
+    // MARK: - Test 6: discard releases rows, retains the status shell
 
-    /// Rows captured before discard remain accessible in a discarded branch.
+    /// A discarded branch releases its heavy row copy (DoS fix — a
+    /// derive→discard loop must not accumulate row copies), but the O(1)
+    /// status shell is retained so C-5 can still refuse a disqualified branch
+    /// as unpromotable.
     @Test
-    func discardedBranchRecallPreservesAuditTrail() async throws {
+    func discardReleasesRowsKeepingStatusShell() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await kit.glkDeriveBranch(name: "audit-branch", from: handle)
 
         let branchFrame = CaptureFrame(
-            content: "audit-preserved-content",
+            content: "released-on-discard",
             channel: .typed,
             room: "branch-tests",
             latticeAnchor: .udc("000"),
             addedBy: "branch-tests",
             embeddingModelID: "test-model-v1"
         )
-        let stored = try await branch.capture(branchFrame)
+        _ = try await branch.capture(branchFrame)
 
         try await branch.discard()
         #expect(branch.status == .discarded)
@@ -181,8 +184,8 @@ struct GLK_COW_01_BranchTests {
             ordering: .byCaptureTimeDesc
         )
         let branchRows = try await branch.recall(recallFrame)
-        #expect(branchRows.contains(where: { $0.id == stored.id }),
-            "Discarded branch must preserve audit trail — rows must remain recall-able")
+        #expect(branchRows.isEmpty,
+            "Discarded branch releases its rows; only the status shell is retained")
     }
 
     // MARK: - Test 7: glkPromoteBranch — parent rows match branch rows
@@ -469,4 +472,12 @@ struct GLK_COW_01_BranchTests {
         #expect(row.exportability == .public_,
             "Exportability must be preserved on derive — born-public row went private before fix")
     }
+
+    // The active-branch quota semantics (refuse past maxActiveBranches;
+    // terminal branches free a slot) are covered by the fast in-memory Rust
+    // test `active_branch_quota_bounds_live_branches_and_terminal_frees_a_slot`
+    // in branches.rs — the logic is a byte-mirror. Reproducing it in Swift
+    // would require 64 real estate-backed derivations (heavy per-derive
+    // setup), exceeding the unit-test time budget, so the Swift leg is proven
+    // through the parity contract rather than a duplicated slow test.
 }

@@ -601,7 +601,7 @@ fn run_migration_benchmark_tool(
         .map_err(error_from_recipe)?;
     // C-5 at the source: discard disqualified branches server-side so no
     // later confirm call can promote them (parity of the Swift run).
-    cognition_kit::migration_live::discard_disqualified_branches(&mut coord, &report);
+    cognition_kit::migration_live::discard_disqualified_branches(&mut coord, &report, now);
 
     let mut lines = vec![format!("run_migration_benchmark: corpus={corpus_name}")];
     if let Some(winner) = &report.winner {
