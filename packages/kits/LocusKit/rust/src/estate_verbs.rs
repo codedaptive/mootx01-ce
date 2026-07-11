@@ -2122,6 +2122,25 @@ impl Estate {
                 ));
             }
         }
+        // Room non-empty invariant: mirror the capture-path guard. An empty
+        // room is the ContainerFingerprintStore wing-rollup sentinel and is
+        // excluded from room_level_entries — a drawer reanchored to "" is
+        // skipped by pruned recall paths (hidden from recall).
+        if let Some(r) = to_room {
+            if r.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "reanchor: to_room must not be empty".to_string(),
+                ));
+            }
+        }
+        // UDC non-empty invariant (spec I-5): mirror the capture-path guard.
+        if let Some(ref l) = to_lattice {
+            if l.udc_code.is_empty() {
+                return Err(LocusKitError::InvalidContent(
+                    "reanchor: to_lattice.udc_code must not be empty (spec I-5)".to_string(),
+                ));
+            }
+        }
         if self.store.get_drawer(row_id)?.is_none() {
             return Err(LocusKitError::DrawerNotFound {
                 id: row_id.to_string(),
