@@ -328,6 +328,57 @@ case ":$PATH:" in
     echo "  export PATH=\"$BIN_DIR:\$PATH\""
     ;;
 esac
+
+# ── PATH shadow check (MOOT-INSTALL-B; pattern from codegraph #1071) ───────
+# Membership above answers "is $BIN_DIR reachable at all?". This answers the
+# separate question "does something ELSE win?": PATH order decides which
+# executable runs, so a stale copy earlier on PATH (an old install dir,
+# Homebrew, a prior custom MOOTX01_BIN_DIR) silently shadows the copy just
+# installed and `mootx01 --version` disagrees with what this script placed.
+# One IFS-split walk per name; first hit is the winner. String comparison
+# against "$BIN_DIR/<name>" is deliberate — matching the reference
+# implementation — so a duplicate PATH spelling of the same directory
+# (trailing slash, symlinked alias) warns rather than passes silently.
+
+# First executable named $1 in PATH order, or empty when none resolves.
+path_winner() {
+  _pw_name="$1"
+  _pw_saved_ifs="$IFS"
+  IFS=:
+  for _pw_dir in $PATH; do
+    # Empty components mean "current directory" historically; skip them —
+    # an installer must not report cwd-relative winners.
+    [ -n "$_pw_dir" ] || continue
+    if [ -f "$_pw_dir/$_pw_name" ] && [ -x "$_pw_dir/$_pw_name" ]; then
+      IFS="$_pw_saved_ifs"
+      printf '%s\n' "$_pw_dir/$_pw_name"
+      return 0
+    fi
+  done
+  IFS="$_pw_saved_ifs"
+  return 0
+}
+
+# Warn when the PATH winner for $1 is not the copy this script installed.
+warn_if_shadowed() {
+  _ws_name="$1"
+  _ws_winner="$(path_winner "$_ws_name")"
+  if [ -n "$_ws_winner" ] && [ "$_ws_winner" != "$BIN_DIR/$_ws_name" ]; then
+    echo ""
+    echo "WARNING: another $_ws_name on your PATH shadows this install:"
+    echo "  shadowing copy: $_ws_winner"
+    echo "  this install:   $BIN_DIR/$_ws_name"
+    echo "Running \`$_ws_name\` by name will use the shadowing copy, not the one"
+    echo "just installed. Fix: remove the other copy"
+    echo "  rm \"$_ws_winner\""
+    echo "or put $BIN_DIR first on your PATH."
+  fi
+}
+
+warn_if_shadowed "mootx01"
+if [ "$mgr_installed" = "1" ]; then
+  warn_if_shadowed "moot-mgr"
+fi
 echo ""
 echo "Next: wire mootx01 into your AI clients (interactive menu):"
 echo "  mootx01 install"
