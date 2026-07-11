@@ -357,8 +357,16 @@ struct InstallDepthTests {
         try writeInstalledPlugins(home: home)
 
         let fake = FakeClaudeCLIRunner(shouldSucceed: true)
-        DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: fake)
+        let line = DepthInstaller.refreshStrandedPluginCache(
+            homeDirectory: home, claudeCLIRunner: fake)
         #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]])
+        // MOOT-INSTALL-E defect 1: `claude plugin update` refreshes the
+        // on-disk cache only — a running session keeps the old snapshot
+        // until restarted, so the SUCCESS path must say so explicitly.
+        let unwrapped = try #require(line, "success must yield a user-facing line")
+        #expect(unwrapped.contains("restart Claude Code"),
+                "success line must tell the user to restart Claude Code")
+        #expect(unwrapped.contains("✓"))
     }
 
     @Test("stranded cache: refresh is a no-op when the plugin is not yet installed")
@@ -366,8 +374,25 @@ struct InstallDepthTests {
         let home = sandbox()
         defer { cleanup(home) }
         let fake = FakeClaudeCLIRunner(shouldSucceed: true)
-        DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: fake)
+        let line = DepthInstaller.refreshStrandedPluginCache(
+            homeDirectory: home, claudeCLIRunner: fake)
         #expect(fake.invokedArguments.isEmpty, "no stale cache to refresh when the plugin was never installed")
+        #expect(line == nil, "nothing to say when the plugin was never installed")
+    }
+
+    @Test("stranded cache: a failing runner yields the run-it-yourself instruction")
+    func strandedCacheRefreshFailureMessage() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home)
+
+        let fake = FakeClaudeCLIRunner(shouldSucceed: false)
+        let line = DepthInstaller.refreshStrandedPluginCache(
+            homeDirectory: home, claudeCLIRunner: fake)
+        let unwrapped = try #require(line, "failure must yield a user-facing line")
+        #expect(unwrapped.contains("claude plugin update mootx01@mootx01"),
+                "failure line must name the exact command to run")
+        #expect(unwrapped.contains("restart Claude Code"))
     }
 
     @Test("stranded cache: a failing runner never fails the install (plain fallback instruction only)")
