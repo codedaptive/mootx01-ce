@@ -264,17 +264,25 @@ public actor MaintenanceDaemon {
             byReferenceDriftThreshold: policy.byReferenceDriftThreshold,
             alreadyProposedKeys: proposedKeys
         )
-        proposedKeys = outcome.updatedProposedKeys
+        // B-4 idempotency: a key must enter the "already proposed" memory
+        // ONLY after its proposal is durably written. The previous code
+        // committed outcome.updatedProposedKeys wholesale here, before the
+        // async throwing propose loop below — so a transient sink failure on
+        // any frame left every key marked proposed while none (or only some)
+        // were persisted, permanently suppressing those findings on every
+        // later cycle. Each key is now inserted after ITS propose succeeds.
 
         // Enact the decisions: build one ProposeFrame per emitted decision
         // (in the core's scan order), choosing the ProposalKind and
         // justification from the category. The audit entry-count comes from
         // the in-scope `auditReport`; the drift fractions come from each
-        // decision's `detailValue`.
+        // decision's `detailValue`. A throw here aborts the cycle: keys whose
+        // propose has not yet run stay uncommitted and are retried next cycle.
         var emitted: [ProposeFrame] = []
         for decision in outcome.emitted {
             let frame = frame(for: decision, auditReport: auditReport)
             try await sink.propose(frame)
+            proposedKeys.insert(decision.key)
             emitted.append(frame)
         }
         let suppressed = outcome.suppressedDuplicates

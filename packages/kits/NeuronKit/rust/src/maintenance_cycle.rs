@@ -482,7 +482,12 @@ impl MaintenanceDaemon {
             by_reference_drift_threshold: self.policy.by_reference_drift_threshold,
             already_proposed_keys: &self.proposed_keys,
         });
-        self.proposed_keys = outcome.updated_proposed_keys.clone();
+        // B-4 idempotency: a key enters the "already proposed" memory ONLY
+        // after its proposal is written — committed per-key in the loop below,
+        // not wholesale here. The current sink seam is infallible so this
+        // ordering is presently inert, but it keeps parity with the Swift
+        // daemon (whose sink can throw) so a future fallible Rust sink cannot
+        // reintroduce the permanent-suppression bug.
 
         // Emit one proposal per cleared decision, in the core's scan order.
         let mut proposals_emitted: Vec<ProposeFrameOut> = Vec::new();
@@ -494,6 +499,7 @@ impl MaintenanceDaemon {
                 justification: format!("maintenance: {:?} on {} {}", d.category, d.target, detail),
             };
             sink.propose(frame.clone());
+            self.proposed_keys.insert(d.key.clone());
             proposals_emitted.push(frame);
         }
 
