@@ -44,7 +44,11 @@ private func openSQLite() async throws -> (GeniusLocusKit, EstateHandle, URL) {
     let config = EstateConfiguration(estateID: UUID(), backend: .sqlite(url: tmp))
     let storage = try SQLiteStorage(configuration: config)
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-    let handle = try await kit.open(storage: storage, owner: owner)
+    // Temp-dir SQLite counts as durable, so the backend-keyed default would
+    // mint into the real login keychain — keep test identities in memory.
+    let handle = try await kit.open(
+        storage: storage, owner: owner,
+        identityKeyStore: InMemoryEstateIdentityKeyStore())
     return (kit, handle, tmp)
 }
 
