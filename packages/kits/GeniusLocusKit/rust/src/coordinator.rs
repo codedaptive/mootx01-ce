@@ -1158,7 +1158,13 @@ impl EstateCoordinator {
             })?;
         let estate_uuid: EstateUuid = estate.estate_uuid().into_bytes();
         let handle = EstateHandle::new(estate_uuid, zoom_window_low, zoom_window_high)?;
-        if self.registry.contains_key(&handle) {
+        // Duplicate detection is keyed by estate UUID ALONE, not the full
+        // handle. The handle's Eq/Hash include the caller-supplied zoom window,
+        // so `contains_key(&handle)` would let the same backing estate be opened
+        // a second time under a different window — two registry entries for one
+        // UUID, each overlapping a different lattice region in fan-out. Estate
+        // UUIDs are immutable (spec §7.7), so any repeat UUID is the same store.
+        if self.registry.keys().any(|h| h.estate_uuid == estate_uuid) {
             return Err(GeniusLocusKitError::DuplicateEstate { estate_uuid });
         }
         self.registry.insert(handle, estate);
