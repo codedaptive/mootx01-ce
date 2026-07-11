@@ -830,7 +830,7 @@ public extension GeniusLocusKit {
     ///   per-row seal errors.
     /// - Throws: `GeniusLocusKitError.underlyingEstateFailure` when the
     ///   orphan-set query itself fails (estate is unusable for sweep).
-    public func runExpungeIntegritySweep(
+    func runExpungeIntegritySweep(
         _ handle: EstateHandle,
         now: Date = Date()
     ) async throws -> ExpungeIntegritySweepResult {

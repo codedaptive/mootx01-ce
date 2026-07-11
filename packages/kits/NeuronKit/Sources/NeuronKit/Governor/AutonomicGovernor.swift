@@ -725,26 +725,35 @@ public actor AutonomicGovernor {
         handle: EstateHandle,
         now: Date
     ) async throws {
-        // Bug 3 fix (ADR025-AUDITLOG-GOVERNOR): skip full-estate load + O(N²)
-        // eigenvalue recompute when no new audit events exist since the last scan.
+        // Bug 3 fix (ADR025-AUDITLOG-GOVERNOR) + topology-coverage fix (B3):
+        // skip full-estate load + O(N²) eigenvalue recompute when no topology-
+        // affecting change has occurred since the last scan.
         //
-        // Strategy: persist computed scores + an audit-event-count watermark to
-        // estate.meta. On each cadence, check the watermark first (one O(1) SQL
-        // COUNT(*) call) before touching allDrawers/allTunnels/allKGFacts. When
-        // the estate is unchanged, re-register the cached scores and return — the
-        // recall `graph` column continues serving correct values with zero load.
+        // Strategy: persist computed scores + a COMPOSITE topology-change signature
+        // to estate.meta. The signature is "\(auditCount),\(tunnelCount),\(kgFactCount)"
+        // — three O(1) COUNT(*) calls that together detect:
+        //   - drawer captures    (advance auditCount)
+        //   - tunnel-only writes (advance tunnelCount; NO audit event written)
+        //   - fact-only writes   (advance kgFactCount; NO audit event written)
+        //
+        // An audit-only watermark missed the latter two, producing stale centrality
+        // scores after standalone tunnel or KG-fact writes (Kong finding).
+        // The composite signature is the fix. The value format is a change from the
+        // old bare-Int format: a stored bare-Int compares unequal to the new
+        // composite, causing one recompute on upgrade — safe and correct.
         let estate = try await kit.estate(for: handle)
-        let savedCountRaw = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
-        let savedCount: Int? = savedCountRaw.flatMap { Int($0) }
+        let savedSig = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let currentSig = try await kit.topologyChangeSignature(for: handle)
 
-        // Cheap watermark probe: no new events → estate unchanged → skip recompute.
-        let changed = try await kit.hasAuditGrown(for: handle, since: savedCount)
-        if !changed,
+        // Composite signature probe: same signature → estate topology unchanged → skip.
+        // A nil savedSig (first run) or a format-mismatched old value both compare
+        // unequal to currentSig, correctly triggering recompute.
+        if savedSig == currentSig,
            let scoresJSON = try await estate.meta(key: NeuronKitManifestKey.centralityScores),
            let scoresData = scoresJSON.data(using: .utf8),
            let cachedScores = try? JSONDecoder().decode([String: Float].self, from: scoresData),
            !cachedScores.isEmpty {
-            // Estate unchanged and valid cache present — re-register and return.
+            // Topology unchanged and valid cache present — re-register and return.
             // This avoids allDrawers + allTunnels + allKGFacts + eigenvalue compute.
             await kit.registerGraphCache(GraphCentralityCache(scores: cachedScores), for: handle)
             return
@@ -798,16 +807,18 @@ public actor AutonomicGovernor {
 
         await kit.registerGraphCache(GraphCentralityCache(scores: scores), for: handle)
 
-        // Persist computed scores + current audit-event-count watermark so the
-        // next cadence invocation can skip this full load when unchanged.
-        let currentCount = try await kit.auditEventCount(for: handle)
+        // Persist computed scores + fresh composite topology-change signature so
+        // the next cadence invocation can skip this full load when unchanged.
+        // The signature is re-read AFTER the compute to capture any writes that
+        // arrived during the full load (correct: next cadence detects those too).
+        let finalSig = try await kit.topologyChangeSignature(for: handle)
         if let scoresData = try? JSONEncoder().encode(scores),
            let scoresJSON = String(data: scoresData, encoding: .utf8) {
             try await estate.setMeta(key: NeuronKitManifestKey.centralityScores, value: scoresJSON)
         }
         try await estate.setMeta(
             key: NeuronKitManifestKey.centralityCount,
-            value: String(currentCount))
+            value: finalSig)
     }
 
     // MARK: - Preference producer duty
@@ -865,7 +876,11 @@ public actor AutonomicGovernor {
         let savedCountRaw = try await estate.meta(key: NeuronKitManifestKey.preferenceCount)
         let savedCount: Int? = savedCountRaw.flatMap { Int($0) }
 
-        // Cheap watermark probe.
+        // Audit-only watermark — intentionally NOT the composite topology-change
+        // signature. Preferences model recall-trace reward history, which is driven
+        // by drawer captures (audited). Tunnel and KG-fact writes do not affect the
+        // recall_trace table, so audit-only is correct and sufficient here; the
+        // composite signature would cause harmless but wasteful spurious recomputes.
         let changed = try await kit.hasAuditGrown(for: handle, since: savedCount)
         if !changed,
            let scoresJSON = try await estate.meta(key: NeuronKitManifestKey.preferenceScores),
@@ -941,18 +956,25 @@ public actor AutonomicGovernor {
     ) async throws -> TopologyInputsToken {
         let locus = try await kit.estate(for: handle)
 
-        // Cheap outer watermark (DoS fix): every drawer/tunnel/fact mutation
-        // writes an audit event, so an unchanged audit count means an unchanged
-        // estate. Probe that O(1) COUNT(*) BEFORE loading all drawers, tunnels,
-        // and facts and sorting them into a fingerprint — otherwise an attacker
-        // who creates many KG facts (with long subjects) forces a full load +
-        // O(n log n) sort every topology cadence even when nothing changed.
-        // Mirrors graphCentralityScan's watermark. Only skips when a prior
-        // fingerprint exists (a snapshot has been produced before).
+        // Cheap outer watermark (DoS fix): probe a composite topology-change
+        // signature BEFORE loading all drawers, tunnels, and facts — otherwise
+        // an attacker who creates many KG facts (with long subjects) forces a
+        // full load + O(n log n) sort every topology cadence when nothing changed.
+        //
+        // The signature is "\(auditCount),\(tunnelCount),\(kgFactCount)": three
+        // O(1) COUNT(*) calls that together detect drawer captures, standalone
+        // tunnel writes, AND standalone KG-fact writes. Drawer captures advance
+        // the audit count; tunnel and KG-fact writes do NOT write audit events,
+        // so an audit-only watermark would miss them (stale topology snapshot
+        // after a tunnel-only or fact-only write — Kong finding, resolved here).
+        //
+        // Only skips when a prior fingerprint exists (a snapshot has been
+        // produced before). A stored bare-Int value (old format) compares unequal
+        // to the new composite string, causing one recompute on upgrade — safe.
         if let previousFingerprint {
-            let savedCountRaw = try await locus.meta(key: NeuronKitManifestKey.topologyCount)
-            let savedCount: Int? = savedCountRaw.flatMap { Int($0) }
-            if try await !kit.hasAuditGrown(for: handle, since: savedCount) {
+            let savedSig = try await locus.meta(key: NeuronKitManifestKey.topologyCount)
+            let currentSig = try await kit.topologyChangeSignature(for: handle)
+            if savedSig == currentSig {
                 return TopologyInputsToken(unchangedFingerprint: previousFingerprint)
             }
         }
@@ -1088,11 +1110,13 @@ public actor AutonomicGovernor {
         let body = try encoder.encode(payload)
 
         await handler(handle.estateUUID.uuidString, now, body, token.fingerprint)
-        // Persist the audit-count watermark so the next cadence can skip the
-        // full-estate load when nothing has changed (see the gate above).
-        if let currentCount = try? await kit.auditEventCount(for: handle) {
+        // Persist the fresh composite topology-change signature so the next cadence
+        // can skip the full-estate load when nothing has changed (see the gate above).
+        // Re-read AFTER the compute to capture any writes that arrived during the
+        // full load — the next cadence will then correctly detect those changes.
+        if let sig = try? await kit.topologyChangeSignature(for: handle) {
             try? await locus.setMeta(
-                key: NeuronKitManifestKey.topologyCount, value: String(currentCount))
+                key: NeuronKitManifestKey.topologyCount, value: sig)
         }
         return token
     }

@@ -108,6 +108,20 @@ let package = Package(
                 // shipped SQLite builds with NDEBUG; the codec correctness does
                 // not depend on SQLite's internal asserts.
                 .define("NDEBUG"),
+                // Vendored amalgamation, not first-party code: the SQLite/SQLCipher
+                // sources trip Apple clang's -Wshorten-64-to-32 (implicit 64→32
+                // truncations) and -Wambiguous-macro (MIN/MAX clashing with framework
+                // macros) under the macOS 27 SDK — ~125 diagnostics, all inside
+                // sqlite3.c. Scoped silence on THIS target only: hand-editing the
+                // amalgamation is worse than suppressing warnings we do not own, and
+                // there is no behavior change. Owned here (not in each consumer) so
+                // path-dep consumers such as Forge inherit a clean build instead of
+                // carrying their own local strip. Product and Swift code are
+                // unaffected — they still surface all warnings.
+                .unsafeFlags([
+                    "-Wno-shorten-64-to-32",
+                    "-Wno-ambiguous-macro",
+                ]),
             ],
             linkerSettings: [
                 .linkedFramework("Security"),

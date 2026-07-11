@@ -957,6 +957,16 @@ impl Storage for SqliteStorage {
         // `inner` is taken only to issue each bracket statement and released
         // before the block runs — the block's sub-stores re-lock per call, so
         // holding it across `block` would deadlock against them.
+        //
+        // ISOLATION INVARIANT: because the `inner` mutex is released during the
+        // block, this method does not self-serialize concurrent Rust callers.
+        // Transaction isolation instead rests on SQLite's own locking: there is
+        // ONE connection per instance, and BEGIN IMMEDIATE holds the
+        // connection-wide write lock for the whole transaction, so a concurrent
+        // second BEGIN IMMEDIATE gets SQLITE_BUSY (busy-timeout serializes it)
+        // and any concurrent non-transactional write blocks behind that write
+        // lock rather than slipping into this open transaction. Production
+        // additionally serializes all estate access behind the coordinator lock.
         self.inner
             .lock()
             .unwrap()

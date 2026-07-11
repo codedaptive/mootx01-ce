@@ -602,6 +602,14 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.count_drawer_rows()
     }
 
+    fn count_tunnel_rows(&self) -> Result<usize, LocusKitError> {
+        self.0.count_tunnel_rows()
+    }
+
+    fn count_kg_fact_rows(&self) -> Result<usize, LocusKitError> {
+        self.0.count_kg_fact_rows()
+    }
+
     fn audit_events_for_row(
         &self,
         row_id: &str,

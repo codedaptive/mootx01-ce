@@ -703,6 +703,20 @@ public actor Estate {
         try await store.countDrawerRows()
     }
 
+    /// Count all rows in the `tunnels` table via a SQL `COUNT(*)` — O(1), bypasses
+    /// row-decode. Delegates to `DrawerStore.countTunnelRows`. Mirrors Rust
+    /// `Estate::count_tunnel_rows`.
+    public func countTunnelRows() async throws -> Int {
+        try await store.countTunnelRows()
+    }
+
+    /// Count all rows in the `kg_facts` table via a SQL `COUNT(*)` — O(1), bypasses
+    /// row-decode. Delegates to `DrawerStore.countKGFactRows`. Mirrors Rust
+    /// `Estate::count_kg_fact_rows`.
+    public func countKGFactRows() async throws -> Int {
+        try await store.countKGFactRows()
+    }
+
     // MARK: - Unfiltered full-corpus reads (recall surface)
 
     /// All proposals estate-wide, ordered by `filedAt` ascending.

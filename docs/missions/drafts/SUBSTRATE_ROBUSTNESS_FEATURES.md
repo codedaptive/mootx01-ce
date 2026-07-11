@@ -25,6 +25,59 @@ log; the WORK is framed as features below.
 
 ---
 
+## Resolution status (2026-07-11 — Fable implementation pass)
+
+Each part was verified against the on-disk code before implementing (the
+draft above was written from memory at high context; reality differed on
+several parts). Outcomes:
+
+- **Part 1 — LANDING as B3 (Swift-only governor watermark).** Kong review
+  (`docs/analysis/AUDIT_COVERAGE_TUNNEL_FACT.md`) found the unsoundness is
+  Swift-ONLY: the Rust governor already compares a `(drawer, tunnel, fact)`
+  count tuple. The proposed "route tunnel/fact capture through the drawer
+  AuditGate" is NOT sound as written — the gate/vocabulary/ForbiddenCombinations
+  are drawer-state-semantic. B3 (composite count watermark aligning Swift to
+  the existing Rust approach) fixes the watermark bug with no audit-primitive,
+  vocabulary, or conformance change, and does NOT reverse VERB-CAP-01. The
+  broader B2 (genesis-marker audit events for tunnels/facts — what the
+  "tunnel capture bypasses audit-gated writes" finding actually needs for
+  audit-log completeness) is DEFERRED to its own mission + ADR (it expands the
+  audit-stream contract seen by federation/fold consumers, and AuditEvent
+  carries no nounType field).
+- **Part 2 — DEFERRED to the PG-backend-activation mission.** The Rust
+  `PostgresStorage` is dormant (no CE instantiation path; only an env-gated
+  conformance test). The fix needs a new `serde_json` dependency + the postgres
+  `with-serde_json-1` feature (JSONB bind) and `ColumnType` threaded through
+  ~15 `to_param` bind sites (NULL typing) — invasive and CI-untestable without
+  a live PG server. Fix it where it is testable. (Follow-up note: verify
+  whether the Swift aria-mcp Postgres URL path is reachable and shares the bug.)
+- **Part 3 — Largely INERT; landing the safe comment work.** Kinsta
+  investigation (`docs/findings/TXN_ISOLATION_STORAGE.md`) found the Rust race
+  INERT (SQLite `BEGIN IMMEDIATE` + one-connection-per-instance + the
+  coordinator Mutex serialize all writes) and the Swift gap low-severity /
+  self-healing (a non-transactional `containerFP.orIn` after the drawer
+  transaction; stale fingerprint bits heal at estate-open `rebuildAll`, and it
+  requires a rare failing transaction). Patch actions: fix the stale comment in
+  `drawer_store_inmemory.rs` (it wrongly claims the internal Mutex provides
+  transaction-rollback atomicity) and document the `transaction()`
+  non-self-serialization invariant at the PersistenceKit boundary. The
+  originally-prescribed SQLite/InMemory rewrites are unnecessary; the Swift
+  `containerFP.orIn`-inside-transaction hardening is DEFERRED (own scope).
+- **Part 4 — DONE.** MindOverlap reports per-side k-sufficiency instead of
+  exact drawer counts (commit `9dd4b04d`, both legs). Privacy ledger/budget
+  remains a separate sub-mission.
+- **Part 5 — DEFERRED to its own minor-version mission.** The Rust manifest
+  already carries the zoom window and `read_manifest` defaults it to `(0, 99)`.
+  Dropping the `EstateCoordinator::open` caller params would silently change the
+  recall fan-out window for ~15 bare-store call sites across four kits
+  (CognitionKit/VaultKit/AriaMcpKit/GLK) that rely on the caller-supplied window
+  — a cross-kit, four-way-conformance behavioral refactor, not a patch. The
+  security-relevant half (double-registration under differing windows) already
+  shipped via the UUID-dedup fix (`26a0d9ec`). A "manifest-else-caller" fallback
+  would be a prohibited bridge pattern.
+
+---
+
 ## Part 1 — Complete audit coverage for graph edges & knowledge facts
 **(root fix for: "Tunnel capture bypasses audit-gated writes" + "Audit
 watermark skips unaudited topology changes")**

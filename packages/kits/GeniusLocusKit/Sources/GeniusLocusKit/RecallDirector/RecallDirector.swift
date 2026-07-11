@@ -168,7 +168,7 @@ public extension GeniusLocusKit {
     /// before exposing hydrated bodies at the MCP boundary. `Estate` enforces
     /// tombstone exclusion and default state/trust/sensitivity filters inside
     /// `getDrawers(ids:matchingFrame:hydrationLevel:)`.
-    public func hydrate(
+    func hydrate(
         _ handle: EstateHandle,
         ids: [String],
         matchingFrame frame: RecallFrame,
