@@ -184,6 +184,27 @@ struct DataRetentionTests {
             choose: { true }, confirm: { false }) == .aborted)
     }
 
+    /// Security (Codex 7441be4c): --yes must NOT skip the typed destruction
+    /// confirmation for an INTERACTIVELY-chosen replace — only for the
+    /// explicit --replace-db automation path. A user who types "replace" at
+    /// the prompt under --yes still gets the destruction gate.
+    @Test("--yes does not skip confirm for an interactively-chosen replace")
+    func yesDoesNotSkipConfirmForInteractiveReplace() {
+        // Interactive prompt chooses replace; --yes set; confirm denies.
+        #expect(DataRetention.decideExistingDb(
+            flag: nil, yes: true, interactive: true,
+            choose: { true }, confirm: { false }) == .aborted,
+            "interactive replace under --yes must still confirm")
+        // When the user does confirm, it proceeds.
+        #expect(DataRetention.decideExistingDb(
+            flag: nil, yes: true, interactive: true,
+            choose: { true }, confirm: { true }) == .replace)
+        // Explicit-flag path unchanged: --replace-db --yes skips confirm.
+        #expect(DataRetention.decideExistingDb(
+            flag: .replace, yes: true, interactive: true,
+            choose: neverCalled, confirm: neverCalled) == .replace)
+    }
+
     // MARK: - Inventory and detection
 
     @Test("inventory reports default, named, and mgr; nil when empty")

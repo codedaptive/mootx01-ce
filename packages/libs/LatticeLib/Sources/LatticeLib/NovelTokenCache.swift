@@ -98,6 +98,7 @@ public final class NovelTokenCache: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [PoolEntry] = []
 
+    #if DEBUG
     // TEST-ONLY witness bookkeeping (WORDCLASS-CACHE-RACE mission,
     // 2026-07-09). `count` alone cannot prove a SPECIFIC token was
     // recorded when this instance is `sharedNovelCache` — a process-wide
@@ -111,8 +112,14 @@ public final class NovelTokenCache: @unchecked Sendable {
     // test explicitly calls `watch(token:)`, so production behavior
     // (buffering, threshold check, submission) is completely unchanged;
     // `record()` only pays one `isEmpty` check per call when unused.
+    //
+    // SECURITY: the whole seam is gated `#if DEBUG` so it does not exist in
+    // release builds — no public API to reach it, no unbounded plaintext-
+    // token sets in shipped binaries. `swift test` runs in DEBUG, so the
+    // tests still compile and link.
     private var watchedTokens: Set<String> = []
     private var confirmedTokens: Set<String> = []
+    #endif
 
     private let tableVersion: String
     private let platform: String
@@ -145,14 +152,17 @@ public final class NovelTokenCache: @unchecked Sendable {
     public func record(token: String, wordClass: WordClass) {
         lock.lock()
         pending.append(PoolEntry(token: token, tag: wordClass.poolTag))
+        #if DEBUG
         // Witness bookkeeping (see `watchedTokens` docs above): cheap
         // no-op for the overwhelmingly common case where no test is
         // watching. Marking `confirmedTokens` inside this same lock
         // acquisition — before any drain below can occur — is what
         // makes `wasRecorded` race-immune to a concurrent drain.
+        // Compiled out of release builds (test-only seam).
         if !watchedTokens.isEmpty, watchedTokens.remove(token) != nil {
             confirmedTokens.insert(token)
         }
+        #endif
         let submission: PoolSubmission?
         if pending.count >= Self.poolSubmitThreshold {
             submission = PoolSubmission(
@@ -193,6 +203,7 @@ public final class NovelTokenCache: @unchecked Sendable {
     /// `sharedNovelCache` from a parallel test suite because it only
     /// ever affects observability of the exact token string given, not
     /// buffering/threshold/submission behavior for any token.
+    #if DEBUG
     public func watch(token: String) {
         lock.lock()
         defer { lock.unlock() }
@@ -211,4 +222,5 @@ public final class NovelTokenCache: @unchecked Sendable {
         defer { lock.unlock() }
         return confirmedTokens.contains(token)
     }
+    #endif
 }
