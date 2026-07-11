@@ -33,10 +33,14 @@
 //!
 //! - Swift `public actor DrawerStore` → Rust sync `DrawerStoreCore`. The
 //!   persistence-kit Rust trait surface is sync; the underlying
-//!   `InMemoryStorage` backend serialises access via an internal `Mutex`,
-//!   which gives every multi-step path the atomicity the Swift
-//!   `storage.transaction(isolation:)` provides.  Same shape as
-//!   `ContainerFingerprintStore` (LP-1C) and `NodeBundleStore` (LP-1D).
+//!   `InMemoryStorage` backend serialises each individual operation via an
+//!   internal `Mutex`, giving per-operation atomicity. That internal `Mutex`
+//!   does NOT by itself provide multi-step transaction-rollback isolation: a
+//!   `transaction()` rollback restores a pre-transaction snapshot and would
+//!   revert any concurrent non-transactional write that completed during the
+//!   block. Rollback isolation is guaranteed instead by serialising all estate
+//!   access above this layer (the coordinator `Mutex` in production).  Same
+//!   shape as `ContainerFingerprintStore` (LP-1C) and `NodeBundleStore` (LP-1D).
 //! - Swift `async throws` → `Result<T, LocusKitError>`.
 //! - Swift `Date` everywhere → Rust `i64` epoch-seconds parameter on
 //!   every mutation method, threading the deterministic-clock rule
