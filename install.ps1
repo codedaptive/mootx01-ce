@@ -85,6 +85,47 @@ function Remove-FromUserPath($dir) {
     [Environment]::SetEnvironmentVariable("PATH", ($parts -join ";"), "User")
 }
 
+# ── PATH shadow check (MOOT-INSTALL-B; mirrors install.sh) ──────────────────
+# PATH order decides which executable runs, so a stale copy earlier on
+# $env:Path (an old install dir, a prior custom location) silently shadows
+# the copy just installed — and Add-ToUserPath APPENDS the install dir, so
+# on Windows any pre-existing copy always wins. The walk is BY HAND over
+# $env:Path, deliberately NOT Get-Command: command caching and App
+# Execution Aliases can misreport the effective winner.
+
+# First file named $exeName in $env:Path order, or $null when none exists.
+function Get-PathWinner($exeName) {
+    foreach ($dir in ($env:Path -split ";")) {
+        # Skip empties; strip the quotes Windows PATH entries may carry.
+        $clean = $dir.Trim().Trim('"')
+        if ([string]::IsNullOrWhiteSpace($clean)) { continue }
+        $candidate = Join-Path $clean $exeName
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+# Warn when the PATH winner for $exeName is not the copy this script
+# installed at $installedPath. Path comparison is case-insensitive
+# (PowerShell -ne default) over resolved provider paths, so differing
+# separators or 8.3 spellings of the SAME file do not warn.
+function Warn-IfShadowed($exeName, $installedPath) {
+    $winner = Get-PathWinner $exeName
+    if (-not $winner) { return }
+    $winnerFull    = (Resolve-Path -LiteralPath $winner).ProviderPath
+    $installedFull = (Resolve-Path -LiteralPath $installedPath).ProviderPath
+    if ($winnerFull -ne $installedFull) {
+        Write-Host ""
+        Write-Host "WARNING: another $exeName on your PATH shadows this install:" -ForegroundColor Yellow
+        Write-Host "  shadowing copy: $winnerFull"
+        Write-Host "  this install:   $installedFull"
+        Write-Host "Running '$([IO.Path]::GetFileNameWithoutExtension($exeName))' by name will use the shadowing copy, not the"
+        Write-Host "one just installed. Fix: remove the other copy"
+        Write-Host "  Remove-Item '$winnerFull'"
+        Write-Host "or put $INSTALL_DIR first on your PATH."
+    }
+}
+
 # ════════════════════════════════════════════════════════════════════════════
 # UNINSTALL
 # ════════════════════════════════════════════════════════════════════════════
@@ -521,4 +562,13 @@ if (Get-Command mootx01 -ErrorAction SilentlyContinue) {
     Write-Host "'mootx01' isn't resolving in this terminal yet. To use it:"
     Write-Host "  - open a NEW terminal ($INSTALL_DIR was added to your user PATH), or"
     Write-Host "  - run it by full path right now:  $BINARY install"
+}
+
+# PATH shadow check (MOOT-INSTALL-B): the Get-Command probe above only says
+# whether SOMETHING named mootx01 resolves — not whether it is the copy this
+# script just installed. Walk $env:Path for the true winner and warn when a
+# different copy shadows the fresh install.
+Warn-IfShadowed "mootx01.exe" $BINARY
+if (Test-Path -LiteralPath $MGR_BINARY) {
+    Warn-IfShadowed "moot-mgr.exe" $MGR_BINARY
 }

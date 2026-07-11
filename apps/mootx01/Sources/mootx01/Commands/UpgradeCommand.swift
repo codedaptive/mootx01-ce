@@ -1,11 +1,16 @@
 // UpgradeCommand.swift
 //
 // Replace the installed mootx01 binary with a newer release, then restart
-// both background agents. Upgrade installs only from a local binary:
+// both background agents. Two sources, mirroring the Rust vertical
+// (rust/src/commands/upgrade.rs):
 //
-//   Local (--from <path>): mirrors the original developer workflow — copies a
-//   freshly built binary from an explicit path or searches .build/release/
-//   and .build/debug/ relative to the current directory.
+//   Remote (default): fetch the latest GitHub release via ReleaseDownloader
+//   (SHA-256 + tarball-member validation), confirm unless --yes, place, and
+//   run the convergence steps (plugin rematerialization, permission-tier
+//   migration, service restart).
+//
+//   Local (--from <path>): the developer workflow — copies a freshly built
+//   binary from an explicit path (e.g. --from .build/release/mootx01).
 //
 // Use --check to query the latest release without downloading.
 
@@ -17,13 +22,13 @@ import MootInstallerCore
 struct UpgradeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "upgrade",
-        abstract: "Upgrade mootx01 from a local build.",
+        abstract: "Upgrade mootx01 to the latest release (or from a local build).",
         discussion: """
-            Upgrade installs a local binary and restarts background services.
-            Without --from, it searches the local build tree
-            (.build/release/mootx01, .build/debug/mootx01).
+            Without flags, upgrade downloads the latest release (SHA-256
+            verified), installs it, converges plugin packages and tool
+            permissions, and restarts the background services.
 
-            Use --from to install from a specific path:
+            Use --from to install a local build instead of downloading:
               mootx01 upgrade --from .build/release/mootx01
 
             Use --check to print the latest available version without downloading:
@@ -37,25 +42,38 @@ struct UpgradeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("check"), help: "Print the latest available version and exit without downloading.")
     var checkOnly: Bool = false
 
-    @Flag(name: .long, help: "Deprecated; online binary installation is disabled.")
+    @Flag(name: .long, help: "Skip the download confirmation prompt.")
     var yes: Bool = false
 
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
 
-    // run() is intentionally inline: --check terminates early, then the local-build
-    // path copies the selected binary and restarts services. Extracting single-use
-    // helpers would scatter closely-related error-handling logic without reducing
-    // actual complexity.
+    /// GitHub repo slug the upgrade queries and downloads from.
+    ///
+    /// Defaults to the public CE repo; MOOTX01_REPO overrides it — the same
+    /// env override install.sh honors — so internal (ee) builds can point at
+    /// their private repo. The previous HARDCODED "codedaptive/mootx01-ee"
+    /// slug arrived with the EE→CE shared-code merge (39c274fe) and made
+    /// `upgrade --check` a dead flag for every public user: no ee access,
+    /// so GitHub answered 404 instead of version info (MOOT-INSTALL-E
+    /// defect 2).
+    static func repoSlug() -> String {
+        ProcessInfo.processInfo.environment["MOOTX01_REPO"] ?? "codedaptive/mootx01-ce"
+    }
+
+    // run() is intentionally inline: --check terminates early, then the remote
+    // or local-build path places the selected binary and restarts services.
+    // Extracting single-use helpers would scatter closely-related
+    // error-handling logic without reducing actual complexity.
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd  = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let downloader = ReleaseDownloader(
+            repo: Self.repoSlug(),
+            currentVersion: Mootx01.currentVersion)
 
         // --check: query GitHub and print the latest tag without downloading.
         if checkOnly {
-            let downloader = ReleaseDownloader(
-                repo: "codedaptive/mootx01-ee",
-                currentVersion: Mootx01.currentVersion)
             if let tag = try await downloader.latestTag() {
                 print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
             } else {
@@ -64,8 +82,52 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
-        // Local path: resolve from --from flag or search .build/ tree (original behavior).
-        let sourcePath = try resolveSource(cwd: cwd)
+        // Source resolution, mirroring the Rust vertical: --from is the
+        // local developer path; the default is the verified remote download
+        // (MOOT-INSTALL-E fix 3a — ReleaseDownloader's SHA-256 + tarball
+        // member validation, the machinery ReleaseDownloaderTests covers).
+        let sourcePath: String
+        var downloadTmpDir: URL?
+        if from != nil {
+            sourcePath = try resolveSource(cwd: cwd)
+        } else {
+            let tag: String?
+            do {
+                tag = try await downloader.latestTag()
+            } catch {
+                print("""
+                    Cannot reach the release feed (\(error)).
+                    For a local build use `mootx01 upgrade --from <path>`.
+                    """)
+                throw ExitCode.failure
+            }
+            guard let tag else {
+                print("Already up to date (\(Mootx01.currentVersion)).")
+                return
+            }
+            print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
+            // Typed confirmation before replacing the installed binary,
+            // skipped by --yes — same gate as the Rust vertical. A non-TTY
+            // caller without --yes reads EOF and aborts, never blocks.
+            if !yes {
+                print("Download and install \(tag)? Type 'yes' to confirm: ", terminator: "")
+                guard readLine()?.trimmingCharacters(in: .whitespaces) == "yes" else {
+                    print("Aborted.")
+                    throw ExitCode.failure
+                }
+            }
+            let binaryURL = try await downloader.download(tag: tag)
+            // The tarball unpacks moot-mgr beside mootx01 in the same temp
+            // directory, so the existing mgr-sibling pickup below applies to
+            // the remote path unchanged.
+            downloadTmpDir = binaryURL.deletingLastPathComponent()
+            sourcePath = binaryURL.path
+        }
+        defer {
+            if let downloadTmpDir {
+                try? FileManager.default.removeItem(at: downloadTmpDir)
+            }
+        }
         print("Upgrading from: \(sourcePath)")
 
         let binaryPath: String
@@ -207,34 +269,18 @@ struct UpgradeCommand: AsyncParsableCommand {
         #endif
     }
 
+    /// Validate the explicit `--from` path. The old bare-invocation search
+    /// of `.build/release` / `.build/debug` is gone: a bare `mootx01
+    /// upgrade` now takes the verified remote path (matching the Rust
+    /// vertical), and developers name their build explicitly with `--from`.
     private func resolveSource(cwd: URL) throws -> String {
-        // Explicit --from takes priority.
-        if let explicit = from {
-            let url = URL(fileURLWithPath: explicit, relativeTo: cwd).standardizedFileURL
-            guard FileManager.default.isExecutableFile(atPath: url.path) else {
-                throw ValidationError("Binary not found or not executable: \(url.path)")
-            }
-            return url.path
+        guard let explicit = from else {
+            throw ValidationError("resolveSource requires --from (remote path handles the default)")
         }
-
-        // Search build outputs relative to CWD.
-        let candidates = [
-            cwd.appendingPathComponent(".build/release/mootx01").path,
-            cwd.appendingPathComponent(".build/debug/mootx01").path,
-        ]
-        for path in candidates {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
-            }
+        let url = URL(fileURLWithPath: explicit, relativeTo: cwd).standardizedFileURL
+        guard FileManager.default.isExecutableFile(atPath: url.path) else {
+            throw ValidationError("Binary not found or not executable: \(url.path)")
         }
-
-        throw ValidationError("""
-            Could not find a new binary to install.
-            Build first, then upgrade:
-              swift build -c release
-              mootx01 upgrade
-            Or specify the path explicitly:
-              mootx01 upgrade --from .build/release/mootx01
-            """)
+        return url.path
     }
 }
