@@ -184,8 +184,11 @@ Script and tarball installs land in:
 ~/.mootx01/bin
 ```
 
-Re-run to upgrade. Every release asset is covered by a minisign-signed
-`checksums.txt` on the release page.
+To upgrade any script or tarball install, run `mootx01 upgrade` — it
+downloads the latest release (SHA-256 verified), converges the plugin
+packages and tool permissions, and restarts the background services.
+Re-running the install script works too. Every release asset is covered
+by a minisign-signed `checksums.txt` on the release page.
 
 ### 2 · Wire it in
 
