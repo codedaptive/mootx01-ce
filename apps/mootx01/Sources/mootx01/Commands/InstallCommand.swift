@@ -47,10 +47,24 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Hide Vault MCP tools (moot_vault_*) from the MCP surface. For a more secure install position that disables import/export. Use --vault-on to re-enable.")
     var vaultOff: Bool = false
 
+    @Flag(name: .long, help: "When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).")
+    var reuseDb: Bool = false
+
+    @Flag(name: .long, help: "When an estate database already exists: move it and the moot-mgr history to the Trash so a fresh database is created on first serve. Destructive — asks for a typed confirmation unless --yes.")
+    var replaceDb: Bool = false
+
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let local = location == "local"
+
+        guard !(reuseDb && replaceDb) else {
+            throw ValidationError("--reuse-db and --replace-db are mutually exclusive.")
+        }
+        // Existing-database disposition (reinstall contract): resolved BEFORE
+        // any wiring so a 'replace' that cannot proceed (daemon running,
+        // trash failure) aborts the install with nothing half-done.
+        try handleExistingDatabase(homeDirectory: home)
 
         // Resolve the SOURCE binary (the running executable). We never
         // write this path into a client config — instead we copy it to a
@@ -511,5 +525,77 @@ struct InstallCommand: AsyncParsableCommand {
             print("Vault (import/export to disk) is ON by default.")
             print("  For a more secure position: mootx01 install --vault-off  # disables import/export")
         }
+    }
+
+    // MARK: - Existing-database disposition (reinstall contract)
+
+    /// Reuse-or-replace flow for a pre-existing estate database. The
+    /// decision matrix lives in `DataRetention.decideExistingDb`
+    /// (unit-tested); this wrapper owns the prompts, the service stop, and
+    /// the exit codes. Mirrors `handle_existing_database` in the Rust
+    /// vertical — with one platform divergence: Rust refuses while its
+    /// daemon is alive (systemd/task platforms, where the user stops the
+    /// service), whereas here the launchd services are booted out before
+    /// the stores move and the normal install flow re-registers them.
+    private func handleExistingDatabase(homeDirectory home: URL) throws {
+        let environment = ProcessInfo.processInfo.environment
+        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
+        guard DataRetention.defaultEstateExists(in: dataDir) else { return }
+
+        let flag: DataRetention.ExistingDbChoice? =
+            reuseDb ? .reuse : (replaceDb ? .replace : nil)
+        let decision = DataRetention.decideExistingDb(
+            flag: flag,
+            yes: yes,
+            interactive: isatty(STDIN_FILENO) != 0,
+            choose: {
+                print("\nAn existing MOOTx01 database was found at \(dataDir.path).")
+                print("Reuse it, or replace it with a fresh one? [reuse/replace] (reuse): ", terminator: "")
+                return readLine()?.trimmingCharacters(in: .whitespaces).lowercased() == "replace"
+            },
+            confirm: {
+                print("WARNING: replacing DESTROYS the current default estate and moot-mgr history.")
+                print("They will be moved to \(DataRetention.trashName) (recoverable until you empty it).")
+                print("Type 'yes' to confirm: ", terminator: "")
+                return readLine()?.trimmingCharacters(in: .whitespaces) == "yes"
+            }
+        )
+
+        switch decision {
+        case let .untouched(reason):
+            print("  ⓘ \(reason)")
+        case .aborted:
+            print("Aborted — nothing was installed or removed.")
+            throw ExitCode.failure
+        case .reuse:
+            stopResidentServices(homeDirectory: home)
+            do {
+                try DataRetention.applyReuse(in: dataDir)
+                print("  ✓ Existing database adopted as the default estate; moot-mgr history reset.")
+            } catch {
+                print("  ✗ Could not adopt the existing database: \(error)")
+                throw ExitCode.failure
+            }
+        case .replace:
+            stopResidentServices(homeDirectory: home)
+            do {
+                try DataRetention.applyReplace(in: dataDir)
+                print("  ✓ Previous database moved to \(DataRetention.trashName); a fresh estate will be created on first serve.")
+            } catch {
+                print("  ✗ Could not replace the database: \(error)")
+                throw ExitCode.failure
+            }
+        }
+    }
+
+    /// Boot the resident daemon and management console out of launchd so no
+    /// process holds the estate/stats stores open while they move to the
+    /// Trash. The install flow re-registers both later (unless --no-daemon /
+    /// --no-manager), so this is a restart, not a teardown.
+    private func stopResidentServices(homeDirectory home: URL) {
+        #if os(macOS)
+        LaunchAgent.uninstallDaemon(homeDirectory: home)
+        LaunchAgent.uninstall(homeDirectory: home)
+        #endif
     }
 }

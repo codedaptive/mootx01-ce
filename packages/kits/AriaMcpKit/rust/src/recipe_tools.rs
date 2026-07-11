@@ -64,7 +64,9 @@
 //! two-call pattern (run then confirm) works because the coordinator retains all
 //! minted branches in memory, and the run result text carries the branch ids the
 //! caller needs. Required: `winnerBranchID` (UUID string). Optional:
-//! `discardBranchIDs` and `disqualifiedBranchIDs` (arrays of UUID strings). Mirrors
+//! `discardBranchIDs` (an array of UUID strings; the C-5 disqualification
+//! verdict is server-side — disqualified branches are discarded by the run
+//! and refused by the GLK lifecycle guard). Mirrors
 //! the Swift server's confirm handler contract and the Swift
 //! `MigrationBenchmark.confirmPromotion` by-id overload as the behavioral reference.
 
@@ -597,6 +599,9 @@ fn run_migration_benchmark_tool(
 
     let report = cognition_kit::run_migration_benchmark(&mut substrate, &plans, &origin)
         .map_err(error_from_recipe)?;
+    // C-5 at the source: discard disqualified branches server-side so no
+    // later confirm call can promote them (parity of the Swift run).
+    cognition_kit::migration_live::discard_disqualified_branches(&mut coord, &report, now);
 
     let mut lines = vec![format!("run_migration_benchmark: corpus={corpus_name}")];
     if let Some(winner) = &report.winner {
@@ -640,7 +645,7 @@ fn run_migration_benchmark_tool(
     }
     lines.push(String::new());
     lines.push(format!(
-        "To promote, call {} with winnerBranchID, discardBranchIDs (the other ranking ids), and disqualifiedBranchIDs from above.",
+        "To promote, call {} with winnerBranchID and discardBranchIDs (the other ranking ids). Disqualified branches above were already discarded and cannot be promoted.",
         "moot_confirm_migration"
     ));
     Ok(text_result(&lines.join("\n")))
@@ -668,8 +673,9 @@ fn run_confirm_promotion_tool(
     // element → invalidParams.
     let discard_bids = parse_uuid_array(args, "discardBranchIDs")?;
 
-    // Parse optional disqualifiedBranchIDs — same shape.
-    let disqualified_bids = parse_uuid_array(args, "disqualifiedBranchIDs")?;
+    // NOTE: no client-supplied disqualification set. The C-5 verdict is
+    // server-side: the run discarded disqualified branches, and the confirm
+    // below refuses any non-active branch.
 
     // Resolve estate — absent estateID → default estate (v1 single-estate path).
     let estate = registry.resolve_direct(args)?;
@@ -683,7 +689,6 @@ fn run_confirm_promotion_tool(
         &mut coord,
         winner_bid,
         &discard_bids,
-        &disqualified_bids,
         &estate.handle,
         now,
     ) {

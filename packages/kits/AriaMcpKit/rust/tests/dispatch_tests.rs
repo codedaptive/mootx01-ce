@@ -1,9 +1,10 @@
 //! Dispatch-surface integration tests — 5-tier AI-client interface (MCP-RUST-ALIGN-01).
 //!
-//! Tests the 64-tool surface: 21 interface tools (Tier 1–5 + moot_monitoring_status,
+//! Tests the 66-tool surface: 22 interface tools (Tier 1–5 + moot_monitoring_status,
 //! including moot_memory_get), 1 federation tool, 11 recipe tools, 23 lens tools
 //! (including moot_lens_cohesion and moot_lens_contradiction), 5 vault tools,
-//! and 3 maintenance tools (moot_reindex, moot_drain_status, moot_palace_import).
+//! and 4 maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
+//! moot_palace_import).
 //! Exercises dispatch routing, argument validation, and result shapes through
 //! the full stack using an in-memory estate. One success path + one
 //! error/validation path per tool group.
@@ -28,6 +29,8 @@ use aria_mcp::{
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+
+const FDC_FLOOR_KEY: &str = "aria.fdc.recalced_data_version";
 
 macro_rules! args {
     () => { BTreeMap::new() };
@@ -120,12 +123,128 @@ fn file_one_memory_with_provenance_sensitivity(
     drawer.id.clone()
 }
 
+fn seed_memory_with_anchor(
+    registry: &EstateRegistry,
+    content: &str,
+    code: &str,
+    qid: Option<&str>,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "fdc-reclassify",
+        LatticeAnchor::new(code, None, qid.map(ToOwned::to_owned), None),
+        "aria-mcp-tests",
+        "default",
+    );
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("seed_memory_with_anchor capture must succeed");
+    drawer.id
+}
+
+fn seed_code_memory_with_anchor(
+    registry: &EstateRegistry,
+    content: &str,
+    code: &str,
+) -> String {
+    use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "fdc-reclassify",
+        LatticeAnchor::new(code, None, None, None),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.kind = ContentKind::Code;
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    coord.capture(&registry.default.handle, frame, now)
+        .expect("seed code capture must succeed").id
+}
+
+/// Advisory 1 (FDC-RECLASSIFY-ADVISORIES) fixture: seed a drawer whose
+/// anchor carries populated `udcFacets` / `wikidataQidsSecondary`, so the
+/// reclassify-apply test can assert the repair carries them forward
+/// unchanged rather than defaulting them to `None`.
+fn seed_memory_with_full_anchor(
+    registry: &EstateRegistry,
+    content: &str,
+    code: &str,
+    qid: Option<&str>,
+    facets: Option<&str>,
+    secondary_qids: Option<&str>,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "fdc-reclassify",
+        LatticeAnchor::new(
+            code,
+            facets.map(ToOwned::to_owned),
+            qid.map(ToOwned::to_owned),
+            secondary_qids.map(ToOwned::to_owned),
+        ),
+        "aria-mcp-tests",
+        "default",
+    );
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    let drawer = coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("seed_memory_with_full_anchor capture must succeed");
+    drawer.id
+}
+
+fn stored_drawer(registry: &EstateRegistry, id: &str) -> locus_kit::drawer::Drawer {
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .all_drawers(&registry.default.handle)
+        .expect("all_drawers must succeed")
+        .into_iter()
+        .find(|d| d.id == id)
+        .expect("seeded drawer must exist")
+}
+
+fn stored_fdc_code(registry: &EstateRegistry, id: &str) -> String {
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .all_drawers(&registry.default.handle)
+        .expect("all_drawers must succeed")
+        .into_iter()
+        .find(|d| d.id == id)
+        .expect("seeded drawer must exist")
+        .udc_code
+}
+
+fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
+    registry
+        .default
+        .store
+        .get_meta(FDC_FLOOR_KEY)
+        .expect("FDC floor metadata read must succeed")
+}
+
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 64 tools exact
+// 1. tools/list surface assertions — 66 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_64() {
+fn tools_list_count_is_66() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -135,7 +254,7 @@ fn tools_list_count_is_64() {
     // moot_palace_import (direct palace import, PAR-PB-1) +
     // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling) +
     // moot_monitoring_status (ADR-025 wave 8.2, daemon telemetry monitoring control):
-    //   21  interface tools (Tier 1–5 + monitoring_status)
+    //   22  interface tools (Tier 1–5 + monitoring_status)
     //    1  federation tool (moot_federated_search)
     //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped, dream,
@@ -144,16 +263,16 @@ fn tools_list_count_is_64() {
     //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
-    //    3  maintenance tools (moot_reindex, moot_drain_status, moot_palace_import)
-    //   64  total
+    //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
+    //   66  total
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 64, "expected 64 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 66, "expected 66 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_64_names() {
-    // Gate: all 64 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_66_names() {
+    // Gate: all 66 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -165,9 +284,10 @@ fn tools_list_name_set_matches_expected_64_names() {
     // moot_memory_get fetches a full drawer by id (fetch-drawer-by-ID gap,
     // shipped in the 1.0.x train per Bob's build-now ruling).
     let expected: std::collections::HashSet<&str> = [
-        // Tier 1 — Core memory (8)
+        // Tier 1 — Core memory (9)
         "moot_file_memory",
         "moot_memory_search",
+        "moot_memory_list",
         "moot_memory_get",
         "moot_update_memory",
         "moot_withdraw_memory",
@@ -210,6 +330,7 @@ fn tools_list_name_set_matches_expected_64_names() {
         "moot_recollect",
         "moot_reindex",
         "moot_drain_status",
+        "moot_reclassify_fdc",
         "moot_palace_import",
         // Lens tools (23) — names from lens_tools.rs LENS_TOOLS constant
         "moot_lens_keystones",
@@ -280,6 +401,14 @@ fn moot_reindex_passes_membership_gate() {
 }
 
 #[test]
+fn moot_reclassify_fdc_passes_membership_gate() {
+    assert!(
+        aria_mcp::interface_tools::is_interface_tool("moot_reclassify_fdc"),
+        "moot_reclassify_fdc must pass is_interface_tool — omitting it causes -32601 Unknown tool"
+    );
+}
+
+#[test]
 fn all_interface_dispatch_cases_pass_membership_gate() {
     // Every tool name in the Rust `interface_tools::dispatch` match arms must
     // also be in `INTERFACE_TOOLS` (the gate checked before dispatch is called).
@@ -288,8 +417,9 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
     //
     // Mirrors the Swift `testMembershipGateCoversAllDispatchCases` test.
     let dispatch_cases = [
-        // Tier 1 — Core memory (8)
-        "moot_file_memory", "moot_memory_search", "moot_memory_get", "moot_update_memory",
+        // Anthropic memory adapter + Tier 1 — Core memory (9)
+        "memory", "moot_file_memory", "moot_memory_search", "moot_memory_list",
+        "moot_memory_get", "moot_update_memory",
         "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
         "moot_move_memory",
         // Tier 2 — Connections (3)
@@ -301,14 +431,444 @@ fn all_interface_dispatch_cases_pass_membership_gate() {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate (3)
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
-        // Maintenance / admin (3)
-        "moot_reindex", "moot_drain_status", "moot_palace_import",
+        // Monitoring + Maintenance / admin (4)
+        "moot_monitoring_status", "moot_reindex", "moot_drain_status",
+        "moot_reclassify_fdc", "moot_palace_import",
     ];
     for name in &dispatch_cases {
         assert!(
             aria_mcp::interface_tools::is_interface_tool(name),
             "{name} is in the dispatch switch but missing from the membership gate"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1c. FDC maintenance repair/reset tool
+// ---------------------------------------------------------------------------
+
+#[test]
+fn moot_reclassify_fdc_dry_run_reports_suspect_without_mutating() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_anchor(
+        &registry,
+        "```bash\nread_signal && git status --short\n```",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc dry-run must dispatch");
+
+    assert!(is_success(&result), "dry-run should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("fdc_reclassify: dry-run"), "got: {text}");
+    assert!(text.contains("candidates: 1"), "got: {text}");
+    assert!(text.contains("would_update: 1"), "got: {text}");
+    assert!(
+        text.contains(&format!("{id}: 362.4 [Q12131] -> 000")),
+        "got: {text}"
+    );
+    assert_eq!(stored_fdc_code(&registry, &id), "362.4");
+    assert_eq!(fdc_floor(&registry), None, "dry-run must not stamp estate FDC floor");
+}
+
+#[test]
+fn moot_reclassify_fdc_all_mode_uses_content_kind_and_adds_language_qid() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let short_id = seed_code_memory_with_anchor(&registry, "x += 1", "362.4");
+    let swift_id = seed_code_memory_with_anchor(
+        &registry,
+        "import Foundation\npublic struct User { public let name: String }",
+        "005",
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true, "mode" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("moot_reclassify_fdc must dispatch");
+    let text = content_text(&result);
+    assert!(text.contains("updated: 2"), "got: {text}");
+
+    let short = stored_drawer(&registry, &short_id);
+    assert_eq!(short.udc_code, "005");
+    assert_eq!(short.wikidata_qid, None);
+    let swift = stored_drawer(&registry, &swift_id);
+    assert_eq!(swift.udc_code, "005");
+    assert_eq!(swift.wikidata_qid.as_deref(), Some("Q17118377"));
+}
+
+#[test]
+fn moot_reclassify_fdc_suspect_only_adds_qid_when_code_is_unchanged() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_code_memory_with_anchor(
+        &registry,
+        "import Foundation\npublic struct User { public let name: String }",
+        "005",
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    ).expect("moot_reclassify_fdc must dispatch");
+    let text = content_text(&result);
+    assert!(text.contains("mode: suspectOnly"), "got: {text}");
+    assert!(text.contains("updated: 1"), "got: {text}");
+    assert_eq!(
+        stored_drawer(&registry, &id).wikidata_qid.as_deref(),
+        Some("Q17118377")
+    );
+    assert_eq!(fdc_floor(&registry), None);
+}
+
+#[test]
+fn moot_reclassify_fdc_apply_repairs_false_positive_to_unclassified() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true, "mode" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("fdc_reclassify: applied"), "got: {text}");
+    assert!(text.contains("fdc_data_version: "), "got: {text}");
+    assert!(text.contains("floor_stamp: stamped"), "got: {text}");
+    assert!(text.contains("updated: 1"), "got: {text}");
+    assert_eq!(stored_fdc_code(&registry, &id), "000");
+    assert_eq!(
+        fdc_floor(&registry),
+        Some(lattice_lib::Fdc::recalculation_version()),
+        "full apply must stamp the composite estate FDC floor"
+    );
+    let status = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    assert!(content_text(&status).contains("fdc_recalculation: current"));
+}
+
+#[test]
+fn moot_reclassify_fdc_suspect_only_skips_broad_code_change_until_all_mode() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_with_anchor(
+        &registry,
+        "Biology is the scientific study of life and living organisms \
+         including their physical structure chemical processes molecular \
+         interactions physiological mechanisms and evolution",
+        "362.4",
+        None,
+    );
+
+    let conservative = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc conservative dry-run must dispatch");
+    let conservative_text = content_text(&conservative);
+    assert!(conservative_text.contains("candidates: 0"), "got: {conservative_text}");
+    assert!(
+        conservative_text.contains("skipped_non_candidate_changes: 1"),
+        "got: {conservative_text}"
+    );
+    assert!(conservative_text.contains("mode=all"), "got: {conservative_text}");
+
+    let all_mode = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["mode" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc all-mode dry-run must dispatch");
+    let all_text = content_text(&all_mode);
+    assert!(all_text.contains("mode: all"), "got: {all_text}");
+    assert!(all_text.contains("candidates: 1"), "got: {all_text}");
+    assert!(all_text.contains("would_update: 1"), "got: {all_text}");
+    assert_eq!(fdc_floor(&registry), None, "dry-run mode=all must not stamp");
+}
+
+#[test]
+fn moot_reclassify_fdc_apply_limited_run_does_not_stamp_floor() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_with_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true, "mode" => "all", "limit" => 1],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc limited apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains("floor_stamp: skipped: limited run cannot update estate-wide floor"),
+        "got: {text}"
+    );
+    assert_eq!(fdc_floor(&registry), None, "limited apply must not stamp estate FDC floor");
+}
+
+#[test]
+fn moot_reclassify_fdc_conservative_apply_does_not_stamp_floor() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_with_anchor(
+        &registry,
+        "Biology is the scientific study of life and living organisms including evolution",
+        "362.4",
+        None,
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc conservative apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("skipped_non_candidate_changes: 1"), "got: {text}");
+    assert!(
+        text.contains("floor_stamp: skipped: mode=all is required for an estate-wide floor"),
+        "got: {text}"
+    );
+    assert_eq!(fdc_floor(&registry), None, "conservative apply must not stamp the floor");
+}
+
+#[test]
+fn estate_status_distinguishes_missing_and_stale_fdc_floors() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let missing = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    assert!(content_text(&missing).contains("fdc_recalculation: missing"));
+
+    registry
+        .default
+        .store
+        .set_meta(FDC_FLOOR_KEY, "classifier:old|frame:old|lexicon:old|signatures:old")
+        .expect("stale FDC floor write must succeed");
+    let stale = dispatch_tool(
+        "moot_estate_status",
+        &args![],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("estate status must dispatch");
+    assert!(content_text(&stale).contains("fdc_recalculation: stale"));
+}
+
+// Advisory 1 (FDC-RECLASSIFY-ADVISORIES): apply must repair only the primary
+// udc_code/wikidata_qid and carry udc_facets + wikidata_qids_secondary
+// forward unchanged. Before the fix, run_reclassify_fdc's apply branch built
+// the replacement LatticeAnchor with only the two primary fields, silently
+// defaulting facets/secondary QIDs to None and wiping enrichment metadata.
+#[test]
+fn moot_reclassify_fdc_apply_retains_facets_and_secondary_qids() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_full_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+        Some("004, 621"),
+        Some("Q999, Q1000"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(text.contains("fdc_reclassify: applied"), "got: {text}");
+    assert!(text.contains("updated: 1"), "got: {text}");
+
+    let drawer = stored_drawer(&registry, &id);
+    assert_eq!(drawer.udc_code, "000", "primary udc_code must be repaired");
+    assert_eq!(
+        drawer.udc_facets.as_deref(),
+        Some("004, 621"),
+        "udc_facets must be carried forward unchanged"
+    );
+    assert_eq!(
+        drawer.wikidata_qids_secondary.as_deref(),
+        Some("Q999, Q1000"),
+        "wikidata_qids_secondary must be carried forward unchanged"
+    );
+}
+
+// Advisory 2 (FDC-RECLASSIFY-ADVISORIES): apply must attribute the audit
+// event to the running server identity with the tool's own reason string,
+// not the generic `coord.reanchor` attribution ("reanchored via
+// Estate.reanchor", stamped with the estate owner). Before the fix,
+// run_reclassify_fdc's apply branch called the generic `coord.reanchor`,
+// which has no way to carry a caller-supplied changed_by/reason.
+#[test]
+fn moot_reclassify_fdc_apply_audit_event_carries_tool_reason() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let id = seed_memory_with_anchor(
+        &registry,
+        "git update-index --refresh && rm .git/index.lock",
+        "362.4",
+        Some("Q12131"),
+    );
+
+    let result = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+    assert!(is_success(&result), "apply should succeed; got: {result:?}");
+
+    let events = registry
+        .default
+        .store
+        .audit_events_for_row(&id)
+        .expect("audit_events_for_row must succeed");
+    let reanchor_event = events
+        .iter()
+        .find(|e| e.reason.as_deref() == Some("FDC reclassified via moot_reclassify_fdc"))
+        .expect("reclassify apply must append an audit event with the tool reason");
+    assert_eq!(
+        reanchor_event.actor, "mootx01",
+        "audit event must attribute the repair to the running server identity, got: {}",
+        reanchor_event.actor
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e.reason.as_deref() != Some("reanchored via Estate.reanchor")),
+        "reclassify apply must not fall back to the generic reanchor reason"
+    );
+}
+
+// RECLASSIFY-PARALLEL: the classify pass now runs across all cores while the
+// audited write stays serial and in scan order. Byte-identical proof for
+// "parallelize a deterministic pure classify + apply in a fixed order":
+//
+//  (1) Invariance — repeated dry-runs over the same estate must produce
+//      byte-identical output. The batch is heterogeneous (two distinct
+//      classify outcomes) and large enough to OVERFLOW the 25-entry change
+//      list, so the ORDER of the emitted list is observable; a racing write or
+//      an order-dependent classify would perturb the list order or the counters
+//      across runs. Dry-run does not mutate, so identical inputs must give
+//      identical output every time.
+//
+//  (2) Golden values — a fresh estate applied through the parallel path must
+//      store the same anchor each content classifies to serially: the
+//      git-command drawers resolve to the `000` sentinel and the biology-prose
+//      drawers resolve to a real subject code (neither the sentinel nor the
+//      stale `362.4`).
+#[test]
+fn moot_reclassify_fdc_parallel_classify_is_deterministic_and_matches_serial_anchors() {
+    let registry = EstateRegistry::new_inmemory_bare();
+
+    // 20 drawers that classify to the `000` sentinel and 10 that classify to a
+    // real subject code — a heterogeneous classify workload that saturates the
+    // worker pool. All carry a stale `362.4` anchor, so mode=all makes every one
+    // a candidate change (30 candidates > the 25-example cap ⇒ list order is
+    // exercised).
+    let mut sentinel_ids = Vec::new();
+    let mut subject_ids = Vec::new();
+    for _ in 0..20 {
+        sentinel_ids.push(seed_memory_with_anchor(
+            &registry,
+            "git update-index --refresh && rm .git/index.lock",
+            "362.4",
+            Some("Q12131"),
+        ));
+    }
+    for _ in 0..10 {
+        subject_ids.push(seed_memory_with_anchor(
+            &registry,
+            "Biology is the scientific study of life and living organisms \
+             including their physical structure chemical processes molecular \
+             interactions physiological mechanisms and evolution",
+            "362.4",
+            None,
+        ));
+    }
+
+    let dry_run_all = || {
+        let result = dispatch_tool(
+            "moot_reclassify_fdc",
+            &args!["mode" => "all"],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("moot_reclassify_fdc dry-run must dispatch");
+        assert!(is_success(&result), "dry-run should succeed; got: {result:?}");
+        content_text(&result).to_owned()
+    };
+
+    // (1) Invariance across repeated parallel runs.
+    let first = dry_run_all();
+    assert!(first.contains("scanned: 30 active drawer(s)"), "got: {first}");
+    assert!(first.contains("candidates: 30"), "got: {first}");
+    assert!(first.contains("would_update: 30"), "got: {first}");
+    assert!(first.contains("... 5 more"), "got: {first}"); // 30 − 25 examples
+    for _ in 0..4 {
+        assert_eq!(dry_run_all(), first, "repeated parallel dry-runs must be byte-identical");
+    }
+
+    // (2) Golden values — apply through the parallel path, then read back.
+    let applied = dispatch_tool(
+        "moot_reclassify_fdc",
+        &args!["apply" => true, "mode" => "all"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_reclassify_fdc apply must dispatch");
+    assert!(content_text(&applied).contains("updated: 30"), "got: {}", content_text(&applied));
+    for id in &sentinel_ids {
+        assert_eq!(stored_fdc_code(&registry, id), "000");
+    }
+    for id in &subject_ids {
+        let code = stored_fdc_code(&registry, id);
+        assert_ne!(code, "000", "biology prose must classify to a real subject code");
+        assert_ne!(code, "362.4", "the stale anchor must have been replaced");
     }
 }
 
@@ -2757,47 +3317,115 @@ fn vault_export_stamps_manifest_then_status_reports_it() {
 
 #[test]
 fn vault_export_then_import_round_trips() {
-    // Export from the default estate to a vault, then import that vault into
-    // the same estate via a fresh VaultBridge. The import should report at
-    // least 1 written (idempotent per lineage_id, but the fresh import will
-    // write the note again as a new lineage or update). Even if it updates,
-    // the vault_import response is isError:false.
+    // Export from the default estate to a vault, then import that vault back
+    // into the SAME estate via a fresh VaultBridge. Even if the reimport is
+    // a content-idempotent no-op for every row (the same estate it was just
+    // exported from — every lineage already exists unchanged), no row's
+    // content may vanish: it must be accounted for as written, updated, or
+    // explicitly skipped-unchanged. The vault_import response must be
+    // isError:false throughout.
+    //
+    // scope: "believed" is passed explicitly on export. The default export
+    // scope (CAND-032) is `exportable`, which only includes drawers
+    // explicitly marked exportability==public; `file_one_memory` captures
+    // are born-private (LocusKit `CaptureFrame::new`: "Privacy-preserving
+    // default: drawers are born private"). Without an explicit `believed`
+    // scope the export would write zero files and the round trip would be
+    // vacuous — see the identical CAND-032 adaptation in
+    // `vault_reconcile_apply_deleted_files_are_never_expunged`.
+    use aria_mcp::{dispatch::dispatch_tool_with_vault_ledger, vault_tools::VaultJobLedger};
+
     let registry = EstateRegistry::new_inmemory();
     let vault = temp_vault_dir();
+    let ledger = VaultJobLedger::new();
+    let recall_ledger = SurfacedRecallLedger::new();
 
     file_one_memory(&registry, "Toluene is a solvent.", "chem/lab");
 
-    dispatch_tool(
+    dispatch_tool_with_vault_ledger(
         "moot_vault_export",
-        &args!["vaultPath" => vault.to_str().unwrap()],
+        &args!["vaultPath" => vault.to_str().unwrap(), "scope" => "believed"],
         &registry,
-        &SurfacedRecallLedger::new(),
+        &recall_ledger,
+        &ledger,
+        "", "",
     )
     .expect("export must succeed");
 
-    let import_result = dispatch_tool(
+    let import_result = dispatch_tool_with_vault_ledger(
         "moot_vault_import",
         &args!["vaultPath" => vault.to_str().unwrap()],
         &registry,
-        &SurfacedRecallLedger::new(),
+        &recall_ledger,
+        &ledger,
+        "", "",
     )
     .expect("moot_vault_import must not throw transport fault");
-
-    std::fs::remove_dir_all(&vault).ok();
 
     assert!(
         is_success(&import_result),
         "moot_vault_import must be isError:false; got: {import_result:?}"
     );
     let text = content_text(&import_result);
-    // Response shape now mirrors Swift async model: job_id / vault / note_count / poll.
+    // Response shape: job_id / vault / note_count / status: COMPLETE / stats.
+    // The Rust backend completes the import synchronously before returning
+    // (see `run_import`'s doc comment), so the response reports the finished
+    // result inline rather than a poll hint. Commit 68d5997f replaced the
+    // earlier "status: RUNNING" + poll-hint shape (612a5dab) with
+    // "status: COMPLETE" + real stats, because a job that is already done by
+    // the time the tool returns should not tell the caller to poll for a
+    // status it already has.
     assert!(
         text.contains("job_id:"),
         "import text must contain 'job_id:' (async job shape); got: {text}"
     );
     assert!(
-        text.contains("poll: moot_vault_job to check status"),
-        "import text must include poll hint (async job shape); got: {text}"
+        text.contains("status: COMPLETE"),
+        "import text must report status: COMPLETE (Rust backend is synchronous); got: {text}"
+    );
+
+    // Round-trip integrity: poll moot_vault_job for the full record — the
+    // immediate text response above omits drawersSkippedUnchanged /
+    // drawersSkippedTombstoned (see `run_import`), so only the job record
+    // can confirm every exported row was actually accounted for.
+    let job_id = text
+        .lines()
+        .find(|l| l.starts_with("job_id: "))
+        .and_then(|l| l.strip_prefix("job_id: "))
+        .expect("import response must contain 'job_id: <uuid>'")
+        .to_owned();
+    let job_result = dispatch_tool_with_vault_ledger(
+        "moot_vault_job",
+        &args!["job_id" => job_id.as_str()],
+        &registry,
+        &recall_ledger,
+        &ledger,
+        "", "",
+    )
+    .expect("moot_vault_job must not throw transport fault");
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&job_result),
+        "moot_vault_job for the import id must be isError:false; got: {job_result:?}"
+    );
+    let job_text = content_text(&job_result);
+    let field = |name: &str| -> i64 {
+        job_text
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{name}:")))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    let accounted_for = field("drawersWritten")
+        + field("drawersUpdated")
+        + field("drawersSkippedUnchanged")
+        + field("drawersSkippedTombstoned");
+    assert!(
+        accounted_for >= 1,
+        "round-tripped note must be written, updated, or explicitly skipped — \
+         not silently dropped; got job record:\n{job_text}"
     );
 }
 
@@ -4029,7 +4657,6 @@ fn confirm_migration_success_end_to_end() {
     let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
     a.insert("winnerBranchID".into(), JsonValue::from(serde_json::json!(winner_bid)));
     a.insert("discardBranchIDs".into(), JsonValue::from(serde_json::json!([])));
-    a.insert("disqualifiedBranchIDs".into(), JsonValue::from(serde_json::json!([])));
 
     let result = dispatch_tool("moot_confirm_migration", &a, &registry, &SurfacedRecallLedger::new())
         .expect("moot_confirm_migration must not throw");
@@ -4567,7 +5194,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 64, "vault-on must produce 64 tools");
+    assert_eq!(arr.len(), 66, "vault-on must produce 66 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -4582,7 +5209,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 58, "vault-off must produce 58 tools (64 − 5 vault − palace import)");
+    assert_eq!(arr.len(), 60, "vault-off must produce 60 tools (66 - 5 vault - palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -6155,5 +6782,144 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
     assert!(
         log.ordered_entries().into_iter().all(|e| e.verb != UnifiedAuditVerb::SensitivityReadUnderGrant),
         "a row admitted regardless of any grant must not be recorded as read-under-grant"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic memory tool — sensitivity gate (twin of Swift
+// MemoryToolAdapterSensitivityTests). The `memory` surface is bulk and
+// path-addressed with no grant ceremony, so it matches the default
+// no-claims recall posture: adjective sensitivity Normal/Elevated visible,
+// Restricted/Secret invisible; edits carry the source tier forward.
+// ---------------------------------------------------------------------------
+
+/// Seed a drawer into the adapter wing ("memories") at a given adjective
+/// sensitivity tier, bypassing the MCP surface (the gate under test).
+fn seed_memory_wing_with_sensitivity(
+    registry: &EstateRegistry,
+    content: &str,
+    room: &str,
+    sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+) {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Actuator,
+        room,
+        LatticeAnchor::udc("000"),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.wing = Some("memories".to_string());
+    frame.sensitivity = sensitivity;
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("sensitivity-tiered capture must succeed");
+}
+
+/// Serializes the env-sensitive memory-tool tests so their MOOTX01_MEMORY_TOOL
+/// mutations do not race each other under the parallel test runner.
+fn memory_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Security (Codex b5716d8): the memory tool is opt-in. With the flag unset,
+/// a hard-coded tools/call to `memory` must be REFUSED at dispatch (not merely
+/// hidden from tools/list), mirroring the vault disabled-refusal.
+#[test]
+fn memory_tool_disabled_refuses_dispatch() {
+    let _env = memory_env_lock();
+    std::env::remove_var("MOOTX01_MEMORY_TOOL");
+    let registry = EstateRegistry::new_inmemory_bare();
+    let result = dispatch_tool(
+        "memory",
+        &args! {"command" => "view", "path" => "/memories"},
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch returns a tool result, not a transport error");
+    let text = content_text(&result);
+    assert!(text.contains("disabled"), "expected a disabled refusal, got: {text}");
+    // Re-enable so it does not disturb other memory tests holding the lock next.
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
+}
+
+#[test]
+fn memory_tool_excludes_restricted_and_secret_drawers() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    let _env = memory_env_lock();
+    // The memory tool is opt-in; enable it for this dispatch-behavior test.
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_wing_with_sensitivity(&registry, "visible normal", "normal.txt", AdjectiveSensitivity::Normal);
+    seed_memory_wing_with_sensitivity(&registry, "visible elevated", "elevated.txt", AdjectiveSensitivity::Elevated);
+    seed_memory_wing_with_sensitivity(&registry, "private restricted secret-value", "private.txt", AdjectiveSensitivity::Restricted);
+    seed_memory_wing_with_sensitivity(&registry, "top secret secret-value", "secret.txt", AdjectiveSensitivity::Secret);
+
+    let listing = dispatch_tool(
+        "memory",
+        &args! {"command" => "view", "path" => "/memories"},
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory view must succeed");
+    let text = content_text(&listing);
+    assert!(text.contains("/memories/normal.txt"), "{text}");
+    assert!(
+        text.contains("/memories/elevated.txt"),
+        "elevated is Normal-tier and must stay visible (no-claims ceiling): {text}"
+    );
+    assert!(!text.contains("/memories/private.txt"), "{text}");
+    assert!(!text.contains("/memories/secret.txt"), "{text}");
+
+    let restricted_view = dispatch_tool(
+        "memory",
+        &args! {"command" => "view", "path" => "/memories/private.txt"},
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory view of a hidden path must not error");
+    let text = content_text(&restricted_view);
+    assert!(text.contains("does not exist"), "{text}");
+    assert!(!text.contains("private restricted secret-value"), "{text}");
+}
+
+#[test]
+fn memory_tool_edit_preserves_elevated_sensitivity() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    let _env = memory_env_lock();
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
+    let registry = EstateRegistry::new_inmemory_bare();
+    seed_memory_wing_with_sensitivity(&registry, "elevated old text", "elevated.txt", AdjectiveSensitivity::Elevated);
+
+    let edit = dispatch_tool(
+        "memory",
+        &args! {
+            "command" => "str_replace",
+            "path" => "/memories/elevated.txt",
+            "old_str" => "old",
+            "new_str" => "new",
+        },
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory str_replace must succeed");
+    assert!(content_text(&edit).contains("edited"), "{}", content_text(&edit));
+
+    let coord = registry.coord.lock().unwrap();
+    let all = coord.all_drawers(&registry.default.handle).expect("all_drawers");
+    let active = all
+        .iter()
+        .find(|d| d.content == "elevated new text" && d.tombstoned_at.is_none())
+        .expect("edited drawer must exist");
+    assert_eq!(
+        active.adjective_sensitivity(),
+        AdjectiveSensitivity::Elevated,
+        "str_replace re-capture must carry the source tier, not downgrade to Normal"
     );
 }

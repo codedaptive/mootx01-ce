@@ -87,6 +87,16 @@ MOOTx01 is not just a vector database. It stores memory as a substrate: memories
 
 In plain English: it keeps what happened, finds what matters, and helps your AI use that memory when it matters.
 
+## Drop-in replacement for Anthropic's memory system
+
+MOOTx01 implements Anthropic's `memory_20250818` tool contract — the same six commands Claude already knows — but backed by a governed estate instead of flat files. Every model-written memory lands as unconfirmed and auditable. Deletes are soft and reversible. Edits preserve full history.   
+Enable it with:   
+
+- `mootx01 enable memory-tool` for MCP and Interactive use.   
+- `pip install moot-memory` for the Messages API.   
+
+See the [Memory Adapter README](apps/moot-memory-adapter/README.md) for details.
+
 ## What it looks like
 
 Behind the scenes, the AI uses ARIA tools like these:
@@ -161,12 +171,12 @@ winget install Codedaptive.MOOTx01
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
 irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
-# review install.ps1, then:
+# Review install.ps1 before running it, then:
 .\install.ps1
 ```
 
-(Download-then-run, not `irm | iex` — the script itself should be reviewable
-before anything executes. The TLS line is required on Windows PowerShell 5.1.)
+(Downloads the script to disk so you can review it before running it.
+The TLS line is required on Windows PowerShell 5.1.)
 
 Script and tarball installs land in:
 

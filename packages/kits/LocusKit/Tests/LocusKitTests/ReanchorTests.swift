@@ -337,4 +337,33 @@ struct ReanchorTests {
         // Must not throw.
         try await estate.reanchor(rowID: drawer.id, toWing: "Personal")
     }
+
+    // MARK: - Finding: reanchor rejects empty room / empty UDC
+
+    /// `Estate.reanchor` with `toRoom: ""` must throw. An empty room is the
+    /// ContainerFingerprintStore wing-rollup sentinel and is excluded from
+    /// roomLevelEntries, so a drawer reanchored to "" is hidden from pruned
+    /// recall. The guard mirrors the capture-path room invariant.
+    @Test("Estate.reanchor: empty toRoom is rejected with invalidContent")
+    func reanchorRejectsEmptyRoom() async throws {
+        let (estate, _) = try await makeEstate()
+        let drawer = try await captureOne(estate: estate)
+
+        await #expect(throws: LocusKitError.self) {
+            try await estate.reanchor(rowID: drawer.id, toRoom: "")
+        }
+    }
+
+    /// `Estate.reanchor` with an empty `toLattice.udcCode` must throw —
+    /// spec I-5 requires a non-empty lattice anchor.
+    @Test("Estate.reanchor: empty toLattice.udcCode is rejected with invalidContent")
+    func reanchorRejectsEmptyUDC() async throws {
+        let (estate, _) = try await makeEstate()
+        let drawer = try await captureOne(estate: estate)
+
+        await #expect(throws: LocusKitError.self) {
+            try await estate.reanchor(
+                rowID: drawer.id, toLattice: LatticeAnchor(udcCode: ""))
+        }
+    }
 }

@@ -1,6 +1,6 @@
 ---
 title: moot-mgr Specification
-version: 1.0.0
+version: 1.1.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -216,19 +216,78 @@ moot-mgr reads the topology snapshot from its own `topology_snapshots` table
 Source of truth: `StatsStore.latestTopologySnapshot(estate:)`. When a snapshot
 is present, moot-mgr decodes the stored `StoredGraphPayload` and enriches
 `communities` at the content boundary: the governor's `{id, size, dominantUdcCode}`
-becomes `{id, label, size}` where `label = FDC.label(for: dominantUdcCode)`
-(LatticeLib; parent-walk for 3-digit codes) or `null` when unresolvable. The
-raw `dominantUdcCode` is dropped — codes stay server-side, labels cross to the
-browser. `generatedTs` from the stored snapshot is forwarded verbatim on the
-`GraphPayload` wire.
+becomes `{id, code, label, size}` where `label = FDC.label(for: dominantUdcCode)`
+(LatticeLib; every code resolves to its own frame label) or `null` when
+unresolvable, and `code` is the dominant classification code passed through
+(`null` when empty/absent). The code crosses on the same basis as
+`GET /api/lattice`, which already serves raw codes: a classification code is a
+pure function of the pinned public frame, never memory content. The dashboard
+derives community colors from the code digits (hundreds → hue, tens → shade,
+ones → brightness). `generatedTs` from the stored snapshot is forwarded
+verbatim on the `GraphPayload` wire.
 
 When no snapshot has been written yet (governor first duty cycle not complete),
 or when no estate key is provided, the local fallback serves `{id: runningIndex,
-label: null, size: 0}` rows derived from the `community.assignment` analytic
-metric and `structurePending: true` with empty `nodes`/`edges`.
+code: null, label: null, size: 0}` rows derived from the `community.assignment`
+analytic metric and `structurePending: true` with empty `nodes`/`edges`.
 
 Full node/edge contract (createdTs, tombstonedTs, Louvain communityId, normalised
 centrality): ARIA_MCP_SPEC.md § response shapes.
+
+### `GET /api/graph` — Topology V3 levels and compact positions
+
+V3 snapshots add stable `communityKey`/`foldKey` identities, normalized
+coordinates, folds, aggregate bridges, representative ids, and classification
+purity. The read API accepts `level=estate|community|local|full` plus an
+optional stable `focus` key:
+
+- `estate` returns community aggregates and community bridges; it does not
+  allocate or serialize individual node/edge geometry. The level is capped at
+  96 aggregates. Overflow reconciles into the neutral `__other__` aggregate.
+- `community&focus=<communityKey>` returns that community's fold aggregates
+  and fold bridges. Fold production is capped at 64 per community.
+- `local&focus=<foldKey|communityKey>` returns real nodes and edges for the
+  focused structure, capped at 2,000 nodes and 12,000 edges. Edge truncation
+  retains a deterministic non-classification spanning forest before ranked
+  detail edges.
+- `full` is the compatibility view. Omitting `level` preserves this behavior.
+
+`totalNodeCount`, `totalEdgeCount`, and `lodTruncated` make every budget
+explicit. `activityIds`/`activityKeys` map up to 2,000 recent exact drawer ids
+to visible aggregates so activity replay never guesses a substitute node.
+
+Per-node coordinates use `positionQ16`: RFC 4648 base64 over interleaved
+little-endian signed 16-bit normalized values (`x0,y0,z0,...`). This is a
+fixed 6 bytes per node before base64 and keeps the 50k-node/70k-edge full-view
+fixture below 5 MB in both ports. `representatives` is a sparse node-index list.
+
+### `GET /api/graph` — per-node classification codes (`codes`/`codeIndex`)
+
+Stored topology snapshots carry an optional per-node `udcCode` (the node's
+FDC/UDC classification code) so the dashboard can color nodes by meaning.
+moot-mgr decodes it tolerantly — absent key or empty string both mean "no
+code" — and both legs (Swift `GraphNodePayload.udcCode: String?`, Rust
+`GraphNodePayload.udc_code: Option<String>` with `#[serde(default)]`)
+decode a snapshot written before this field existed without error.
+
+The code never crosses the wire per-node. `GraphPayload` dictionary-encodes
+it into two new top-level members, built from the decoded node array in the
+same pass as the other parallel arrays (`ids`, `communityId`, …):
+
+- `codes: [String]` — the deduped code dictionary, first-seen order over the
+  node array.
+- `codeIndex: [Int]` — parallel to `ids`; the index into `codes` for that
+  node, or `-1` when the node has no code.
+
+At up to 50k nodes and ~10^2 distinct codes, dictionary encoding keeps this
+addition inside the existing 5 MB `/api/graph` ceiling (§ size ceiling
+above) — a per-node string would have cost tens of bytes × 50k nodes,
+the dictionary costs bytes × ~135 distinct codes plus one small integer per
+node. Both arrays are always present, even on the local-fallback path
+(`codes: []`, `codeIndex: []`), never omitted or null. Codes cross this
+surface on the same basis as `GET /api/lattice` and the community `code`
+field above: a classification code is a pure function of the pinned public
+FDC/UDC frame, never memory content.
 
 ### `GET /api/graph` — enrichment cache
 
@@ -251,10 +310,38 @@ the estate's knowledge domains — community FDC labels plus the
 Facet-filter multiselect: clicking a row toggles that domain (the first
 click starts a selection containing just it); emptying the selection or
 re-checking everything resets to All. Filtering HIDES deselected content
-entirely and RE-LAYS-OUT the selection to fill the canvas. Selections are
-keyed by label (content identity), not Louvain community id — ids renumber
-on every governor recompute while labels are stable — and hues are pinned
-per label from the full-estate ranking so colors never reshuffle under
-filtering. Picker rows always derive from the FULL estate regardless of the
-active filter (a layout reset or snapshot refresh mid-selection must never
-collapse the available choices). Client-side only — no API surface.
+entirely while preserving the persisted coordinate frame. Wheel, trackpad, and
+pinch continuously cross Estate → Community → Local: projected aggregate size
+prefetches the adjacent bounded API level, a larger threshold commits a 220 ms
+stable-position morph, and reverse zoom uses a wider hysteresis threshold.
+The previous frame remains visible until the next scene is ready; graph payloads
+are cached in a six-entry, 60-second LRU and stale render responses cannot replace
+the current view. Aggregate click/Enter drills immediately, +/- follows the same
+camera path, and Up reverses the hierarchy. All semantic level changes preserve
+the replay event set and exact playhead.
+Structural identity is the stable community/fold key, never the FDC label;
+classification is only the color/label overlay. Community colors are
+digit-derived from each community's FDC code (hundreds → hue, tens → shade,
+ones → brightness), so a code renders the same color on every host and
+refresh; code-less communities fall back to a static palette pinned per
+label from the full-estate ranking. Picker rows always derive from the FULL
+estate regardless of the active filter (a layout reset or snapshot refresh
+mid-selection must never collapse the available choices). The panel renders
+as a fixed right-hand column beside the canvas (never an overlay above it)
+and scrolls horizontally when a label exceeds the column width. Client-side
+only — no API surface.
+
+### Node query-to-clipboard (dashboard)
+
+Right-clicking a node copies a paste-ready natural-language query to the
+clipboard (and selects the node): it asks the user's own AI session to look
+up that memory by id, its hop-1 neighbors (capped list), and what the
+neighborhood is likely about, citing the MOOTx01 tools by name. Browsers
+that grant contextmenu events no user activation (Safari) refuse
+programmatic clipboard writes — the dashboard then opens a fallback dialog
+with the query pre-selected and a Copy button, whose click carries the
+activation. The query is
+built entirely from metadata already on the wire (drawer id, domain label,
+classification code, neighbor ids) — retrieval of memory CONTENT happens in
+the user's AI session under its own authorization, never through this
+console. Content-safety boundary is unchanged; no API surface.

@@ -482,7 +482,12 @@ impl MaintenanceDaemon {
             by_reference_drift_threshold: self.policy.by_reference_drift_threshold,
             already_proposed_keys: &self.proposed_keys,
         });
-        self.proposed_keys = outcome.updated_proposed_keys.clone();
+        // B-4 idempotency: a key enters the "already proposed" memory ONLY
+        // after its proposal is written — committed per-key in the loop below,
+        // not wholesale here. The current sink seam is infallible so this
+        // ordering is presently inert, but it keeps parity with the Swift
+        // daemon (whose sink can throw) so a future fallible Rust sink cannot
+        // reintroduce the permanent-suppression bug.
 
         // Emit one proposal per cleared decision, in the core's scan order.
         let mut proposals_emitted: Vec<ProposeFrameOut> = Vec::new();
@@ -494,6 +499,7 @@ impl MaintenanceDaemon {
                 justification: format!("maintenance: {:?} on {} {}", d.category, d.target, detail),
             };
             sink.propose(frame.clone());
+            self.proposed_keys.insert(d.key.clone());
             proposals_emitted.push(frame);
         }
 
@@ -768,6 +774,7 @@ mod tests {
             audit: Some(AuditVerdict {
                 valid: true,
                 first_broken_at_millis: None,
+                rejected_entry_count: 0,
             }),
             forbidden_drawer_ids: vec!["d-forbidden".to_string()],
             aged_active: vec![aged("d-old", 3_000_000.0), aged("d-forbidden", 1.0)],
@@ -820,12 +827,19 @@ node-invariant-violations 0"
 
     // MC-2: a tampered audit chain emits exactly the audit-integrity
     // proposal, target audit-break-<millis>. (Swift C4, broken at 2000.)
+    //
+    // This test injects a fake `AuditVerdict { valid: false, .. }` directly
+    // — it exercises `decide`'s HLC-reversal branch but never the real
+    // `UnifiedAuditLog` ingress / `AuditChainVerifier`. See
+    // `mc2b_real_tampered_entry_rejected_at_ingress_emits_integrity_proposal`
+    // below for the real-path coverage (AUDIT-ALERT-RESTORE, 2026-07-09).
     #[test]
     fn mc2_tampered_audit_emits_integrity() {
         let scan = MaintenanceScan {
             audit: Some(AuditVerdict {
                 valid: false,
                 first_broken_at_millis: Some(2000),
+                rejected_entry_count: 0,
             }),
             ..MaintenanceScan::default()
         };
@@ -835,6 +849,82 @@ node-invariant-violations 0"
         let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
         assert_eq!(report.proposals_emitted.len(), 1);
         assert_eq!(report.proposals_emitted[0].target, "audit-break-2000");
+        assert_eq!(report.proposals_emitted[0].kind, "other:audit_integrity");
+    }
+
+    // MC-2b: AUDIT-ALERT-RESTORE (2026-07-09) — drives the REAL path. Unlike
+    // MC-2 above (a fake verdict struct literal), this test builds a real
+    // `genius_locus_kit::UnifiedAuditLog`, tampers an entry (mutates a
+    // public field post-construction so its stored id no longer matches its
+    // content hash — the same technique `audit/verifier.rs`'s
+    // `av3_tampered_entry_rejected_at_add_boundary` test uses), feeds it
+    // through the REAL `add()` ingress (the entry is rejected;
+    // `rejected_count()` observes it), runs the REAL `AuditChainVerifier`
+    // over what remains (vacuously valid — the tampered entry never
+    // reached the walk), and derives a real `AuditVerdict` from both. Only
+    // then does it hand that verdict to the daemon via the `FakeReader`
+    // seam (the seam itself stays a fake — only the estate reads are
+    // faked, per the established pattern; the audit primitives are real).
+    #[test]
+    fn mc2b_real_tampered_entry_rejected_at_ingress_emits_integrity_proposal() {
+        use genius_locus_kit::audit::{
+            AuditChainVerifier, AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog,
+            UnifiedAuditValue, UnifiedAuditVerb,
+        };
+        use substrate_types::hlc::HLC;
+
+        let honest = UnifiedAuditEntry::new(
+            AuditTier::Locus,
+            HLC::new(1_000, 0, 1),
+            UnifiedAuditVerb::Capture,
+            EntryUUID([7u8; 16]),
+            "content".to_string(),
+            UnifiedAuditValue::Null,
+            UnifiedAuditValue::StringValue("x".to_string()),
+            None,
+        );
+        let mut tampered = UnifiedAuditEntry::new(
+            AuditTier::Locus,
+            HLC::new(2_000, 0, 1),
+            UnifiedAuditVerb::Mutate,
+            EntryUUID([7u8; 16]),
+            "content".to_string(),
+            UnifiedAuditValue::StringValue("a".to_string()),
+            UnifiedAuditValue::StringValue("b".to_string()),
+            None,
+        );
+        // Alter a field WITHOUT recomputing the id — simulates the forgery
+        // a hostile peer (or corrupted decode) might supply. The stored id
+        // no longer matches the wire encoding of the mutated entry.
+        tampered.field_path = "provenance".to_string();
+
+        let mut log = UnifiedAuditLog::new();
+        log.add(honest);
+        log.add(tampered); // rejected at the real add() boundary
+
+        assert_eq!(log.count(), 1, "only the honest entry was admitted");
+        assert_eq!(log.rejected_count(), 1, "the real ingress path counted the rejection");
+
+        let report = AuditChainVerifier::verify(&log);
+        assert!(report.valid, "the walked chain is vacuously valid — the tampered entry never reached it");
+
+        let audit_verdict = AuditVerdict {
+            valid: report.valid,
+            first_broken_at_millis: report.first_broken_at_millis,
+            rejected_entry_count: log.rejected_count(),
+        };
+
+        let scan = MaintenanceScan {
+            audit: Some(audit_verdict),
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        assert_eq!(report.proposals_emitted.len(), 1, "the ingress rejection is alerted via exactly one integrity proposal");
+        assert_eq!(report.proposals_emitted[0].target, "audit-rejected-1");
         assert_eq!(report.proposals_emitted[0].kind, "other:audit_integrity");
     }
 

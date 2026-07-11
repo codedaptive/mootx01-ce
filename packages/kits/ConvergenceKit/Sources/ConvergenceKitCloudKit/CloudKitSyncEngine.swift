@@ -126,6 +126,9 @@ actor CloudKitStateActor {
             logger.info("zone setup (may already exist): \(String(describing: error))")
         }
 
+        // Ensure the _ck_sync_meta side table exists before any pull (#12 fix).
+        try await Self.ensureSyncMetaTable(storage: storage)
+
         // Start observing each declared table that is not pull-only.
         for table in manifest.tables where table.direction != .pullOnly {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
@@ -407,29 +410,35 @@ actor CloudKitStateActor {
     /// Side table name. Owned by ConvergenceKit, not by the application schema.
     private static let syncMetaTable = "_ck_sync_meta"
 
-    /// Ensure the side table exists. Called once at engine init. Idempotent.
+    /// Ensure the side table exists. Must be called before any pull.
+    /// Uses SchemaDeclaration + migrate so the table is created via the
+    /// standard PersistenceKit schema path (works on all backends).
     static func ensureSyncMetaTable(storage: any Storage) async throws {
-        // CREATE TABLE IF NOT EXISTS is backend-safe (SQLite, PG, InMemory).
-        let sql = """
-            CREATE TABLE IF NOT EXISTS "\(syncMetaTable)" (
-                "table_name" TEXT NOT NULL,
-                "primary_key" TEXT NOT NULL,
-                "sync_hlc" INTEGER NOT NULL,
-                "schema_version" INTEGER NOT NULL DEFAULT 0,
-                "kit_id" TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY ("table_name", "primary_key")
-            )
-        """
-        // Use the rowStore's underlying connection if possible. For backends
-        // that don't support raw SQL, the table may need to be declared via
-        // SchemaDeclaration — but CREATE TABLE IF NOT EXISTS works on all
-        // current backends (SQLite exec, PG executeSimple, InMemory no-op).
-        _ = try? await storage.rowStore.upsert(
-            table: syncMetaTable,
-            values: ["table_name": .text("__init__"), "primary_key": .text("__init__"),
-                     "sync_hlc": .int(0), "schema_version": .int(0), "kit_id": .text("")],
-            conflictColumns: ["table_name", "primary_key"]
+        let schema = SchemaDeclaration(
+            kitID: "ConvergenceKitCloudKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: syncMetaTable,
+                    columns: [
+                        ColumnDeclaration(name: "table_name", type: .text, nullable: false),
+                        ColumnDeclaration(name: "primary_key", type: .text, nullable: false),
+                        ColumnDeclaration(name: "sync_hlc", type: .int, nullable: false,
+                                          defaultValue: .int(0)),
+                        ColumnDeclaration(name: "schema_version", type: .int, nullable: false,
+                                          defaultValue: .int(0)),
+                        ColumnDeclaration(name: "kit_id", type: .text, nullable: false,
+                                          defaultValue: .text("")),
+                    ],
+                    primaryKey: ["table_name", "primary_key"]
+                ),
+            ],
+            indices: []
         )
+        // migrate(to:) is ADDITIVE — it creates missing tables without
+        // replacing the backend's active schema declaration. open(schema:)
+        // would clobber the application schema, breaking all row operations.
+        try await storage.migrate(to: schema)
     }
 
     /// Read the persisted sync HLC for a specific row.

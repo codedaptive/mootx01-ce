@@ -283,6 +283,10 @@ fn graph_payload_is_pending_without_snapshot() {
     assert!(p.ids.is_empty());
     assert_eq!(p.estate, "all");
     assert!(!p.pending.is_empty());
+    // V2-P1b: the local-fallback path always emits codes/codeIndex as empty
+    // arrays — never omitted, never null.
+    assert!(p.codes.is_empty());
+    assert!(p.code_index.is_empty());
     m.stop();
 }
 
@@ -301,6 +305,109 @@ fn graph_payload_serves_stored_snapshot() {
     assert_eq!(p.ids.len(), 1);
     assert_eq!(p.ids[0], "n1");
     assert_eq!(p.estate, "estate-a");
+    // V2-P1b: this fixture predates udcCode — decode tolerates the absent
+    // key and the node gets the -1 "no code" sentinel.
+    assert_eq!(p.code_index, vec![-1]);
+    assert!(p.codes.is_empty());
+    assert!(p.position_q16.is_empty(), "legacy snapshots must retain layout fallback");
+    m.stop();
+}
+
+#[test]
+fn graph_payload_missing_drill_focus_keeps_estate_budget() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        let snapshot = r#"{
+          "nodes":[{"id":"n1","communityId":0,"centrality":0.5,"anomaly":false,
+                    "communityKey":"c-one","foldKey":"f-one","x":0.1,"y":0.2,"z":0.3}],
+          "edges":[],"structurePending":false,"topologyVersion":3,"coordinateFrameVersion":1,
+          "communities":[{"id":0,"size":1,"stableKey":"c-one","x":0.1,"y":0.2,"z":0.3}],
+          "folds":[{"stableKey":"f-one","communityKey":"c-one","size":1,
+                    "x":0.1,"y":0.2,"z":0.3}],"bridges":[]}"#;
+        store.write_topology_snapshot("estate-v3", NOW, snapshot, None).unwrap();
+    }
+    let payload = m
+        .graph_payload_view(NOW, Some("estate-v3"), Some("local"), None)
+        .unwrap();
+    assert_eq!(payload.view_level, "estate");
+    assert!(payload.ids.is_empty(), "missing focus must not return raw geometry");
+    assert_eq!(payload.communities.len(), 1);
+    m.stop();
+}
+
+#[test]
+fn graph_payload_other_structure_drills_into_real_slices() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        let nodes: Vec<_> = (0..100).map(|index| serde_json::json!({
+            "id": format!("n-{index}"), "communityId": index,
+            "centrality": 0.1, "anomaly": false,
+            "communityKey": format!("c-{index:03}"),
+            "x": index as f64 / 100.0 - 0.5,
+            "y": (index % 10) as f64 / 10.0 - 0.5,
+            "z": 0.0, "representative": true
+        })).collect();
+        let communities: Vec<_> = (0..100).map(|index| serde_json::json!({
+            "id": index, "size": 1, "dominantUdcCode": "005",
+            "stableKey": format!("c-{index:03}"),
+            "x": index as f64 / 100.0 - 0.5,
+            "y": (index % 10) as f64 / 10.0 - 0.5,
+            "z": 0.0, "foldCount": 1,
+            "representativeIds": [format!("n-{index}")],
+            "classificationPurity": 1.0
+        })).collect();
+        let snapshot = serde_json::json!({
+            "nodes": nodes, "edges": [], "structurePending": false,
+            "topologyVersion": 3, "coordinateFrameVersion": 1,
+            "communities": communities, "folds": [], "bridges": [],
+            "generatedTs": "2026-07-10T00:00:00Z"
+        }).to_string();
+        store.write_topology_snapshot("estate-other", NOW, &snapshot, None).unwrap();
+    }
+
+    let estate = m.graph_payload_view(NOW, Some("estate-other"), Some("estate"), None).unwrap();
+    let other = estate.communities.iter()
+        .find(|community| community.stable_key.as_deref() == Some("__other__"))
+        .expect("estate budget must include Engram Fields");
+    assert_eq!(other.size, 5);
+    assert_eq!(other.label.as_deref(), Some("Engram Fields"));
+
+    let community = m.graph_payload_view(
+        NOW, Some("estate-other"), Some("community"), Some("__other__")).unwrap();
+    assert!(!community.folds.is_empty());
+    assert_eq!(community.folds.iter().map(|fold| fold.size).sum::<i64>(), 5);
+    assert_eq!(community.folds[0].label.as_deref(), Some("Engram Field 1"));
+    assert_eq!(community.folds[0].code.as_deref(), Some("005"));
+    let slice_key = community.folds[0].stable_key.clone();
+
+    let local = m.graph_payload_view(
+        NOW, Some("estate-other"), Some("local"), Some(&slice_key)).unwrap();
+    assert!(!local.ids.is_empty(), "every visible Engram Field must open into real bounded nodes");
+    m.stop();
+}
+
+#[test]
+fn graph_payload_dictionary_encodes_per_node_codes() {
+    // V2-P1b: a stored snapshot whose nodes carry udcCode dictionary-encodes
+    // onto the wire — deduped, first-seen order, with a -1 sentinel for the
+    // node that has none.
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        let snapshot = r#"{"nodes":[
+            {"id":"n1","communityId":0,"centrality":0.1,"anomaly":false,"udcCode":"657"},
+            {"id":"n2","communityId":0,"centrality":0.2,"anomaly":false,"udcCode":"615.85"},
+            {"id":"n3","communityId":0,"centrality":0.3,"anomaly":false,"udcCode":"657"},
+            {"id":"n4","communityId":0,"centrality":0.4,"anomaly":false}
+        ],"edges":[],"structurePending":false}"#;
+        store.write_topology_snapshot("estate-codes", NOW, snapshot, None).unwrap();
+    }
+    let p = m.graph_payload(NOW, Some("estate-codes")).unwrap();
+    assert_eq!(p.ids, vec!["n1", "n2", "n3", "n4"]);
+    assert_eq!(p.codes, vec!["657".to_string(), "615.85".to_string()]);
+    assert_eq!(p.code_index, vec![0, 1, 0, -1]);
     m.stop();
 }
 

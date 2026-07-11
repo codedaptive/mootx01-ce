@@ -1107,7 +1107,25 @@ public extension GeniusLocusKit {
     ///   - handle: The estate to derive from. Must be open in this kit.
     /// - Returns: An active `BranchHandle` with `lineageDepth == 1`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    /// Maximum number of simultaneously ACTIVE branches this kit will hold.
+    /// Each active branch retains a full in-memory copy of its parent's rows,
+    /// so an unbounded active set is a memory-exhaustion vector for any caller
+    /// that can trigger derivation. Terminal branches (won/merged/discarded)
+    /// release their rows and do not count. Mirrors Rust `MAX_ACTIVE_BRANCHES`.
+    static let maxActiveBranches = 64
+
+    /// Refuse a new derivation when the active-branch quota is reached.
+    /// Terminal branches have released their rows and do not count.
+    private func checkActiveBranchQuota() throws {
+        let active = branches.values.filter { $0.status == .active }.count
+        guard active < Self.maxActiveBranches else {
+            throw GeniusLocusKitError.activeBranchQuotaExceeded(
+                active: active, maximum: Self.maxActiveBranches)
+        }
+    }
+
     func glkDeriveBranch(name: String, from handle: EstateHandle) async throws -> any BranchHandle {
+        try checkActiveBranchQuota()
         let parentEstate = try estate(for: handle)
         let snapshotRows = try await recallRows(from: parentEstate)
         let branch = try await EstateBranch(
@@ -1136,6 +1154,7 @@ public extension GeniusLocusKit {
         // Registry membership check ensures the parent branch was derived by
         // THIS kit instance; branches from a different GeniusLocusKit actor
         // may pass the type cast but are not tracked here.
+        try checkActiveBranchQuota()
         guard let concreteBranch = parentBranch as? EstateBranch else {
             throw GeniusLocusKitError.branchNotTracked(branchID: parentBranch.branchID)
         }
@@ -1177,6 +1196,14 @@ public extension GeniusLocusKit {
         // pass the type cast but are not tracked by this actor.
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
+        }
+        // Lifecycle guard: the doc contract above ("Must be in `.active`
+        // status") was previously unenforced, which let a DISCARDED branch —
+        // e.g. one the migration benchmark disqualified for silent concept
+        // loss — be promoted by any caller holding its id (C-5 bypass).
+        guard concreteBranch.status == .active else {
+            throw GeniusLocusKitError.branchNotActive(
+                branchID: concreteBranch.branchID, status: concreteBranch.status)
         }
         // Validate the handle before the E-2 guard: estate(for:) throws
         // .estateNotOpen for a stale handle, surfacing the error before the
@@ -1253,8 +1280,11 @@ public extension GeniusLocusKit {
             _ = try await capture(handle, captureFrame, mode: .regular)
         }
 
-        // Transition the branch to .won.
+        // Transition the branch to .won, then release its now-redundant row
+        // copy (the promoted rows live in the parent estate). The O(1) .won
+        // shell stays in the registry.
         concreteBranch.setStatus(.won)
+        try await concreteBranch.releaseRows()
         Self.verbLog.debug("glkPromoteBranch '\(branch.name, privacy: .public)' → .won (\(newRows.count) rows promoted)")
     }
 
@@ -1284,6 +1314,13 @@ public extension GeniusLocusKit {
         // pass the type cast but are not tracked by this actor.
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
+        }
+        // Lifecycle guard: same invariant as glkPromoteBranch — terminal
+        // branches (won/merged/discarded) are read-only history and cannot
+        // cherry-pick content into the parent.
+        guard concreteBranch.status == .active else {
+            throw GeniusLocusKitError.branchNotActive(
+                branchID: concreteBranch.branchID, status: concreteBranch.status)
         }
         // Validate the handle before the E-2 guard: estate(for:) throws
         // .estateNotOpen for a stale handle, surfacing the error before the
@@ -1365,8 +1402,11 @@ public extension GeniusLocusKit {
             merged.append(id)
         }
 
-        // Transition the branch to .merged.
+        // Transition the branch to .merged, then release the row copy (the
+        // merged rows live in the parent estate now). The O(1) .merged shell
+        // stays in the registry.
         concreteBranch.setStatus(.merged)
+        try await concreteBranch.releaseRows()
         Self.verbLog.debug("glkMergeDrawers '\(branch.name, privacy: .public)' → .merged (\(merged.count) merged, \(skipped.count) skipped)")
 
         return MergeReport(merged: merged, conflicts: [], skipped: skipped)
@@ -1657,7 +1697,7 @@ public extension GeniusLocusKit {
         // Emit the grant-issued audit entry now that the grant is
         // persisted and the scope key is in custody, so the estate's
         // unified chain records the grant lifecycle (FUP-C / GLK-03 seam).
-        appendGrantAuditEntry(
+        try await appendGrantAuditEntry(
             verb: .grantIssued,
             grantID: grant.id,
             custodyToken: grant.custodyMode.columnToken,
@@ -1696,7 +1736,7 @@ public extension GeniusLocusKit {
         // Emit the grant-revoked audit entry after the revocation record
         // is written and the mode-1 key is dropped from the vault, so the
         // chain records the lifecycle close (FUP-C / GLK-03 seam).
-        appendGrantAuditEntry(
+        try await appendGrantAuditEntry(
             verb: .grantRevoked,
             grantID: grantID,
             custodyToken: stored.grant.custodyMode.columnToken,
@@ -1761,9 +1801,21 @@ extension GeniusLocusKit {
     /// is milliseconds since the Unix epoch derived from `now`, matching
     /// `AuditBridge` so a grant entry orders on the same clock as the
     /// LocusKit-tier entries; `verifyAuditChain` sorts by HLC, so the
-    /// appended entry cannot break the chain. The append uses the same
-    /// default-insert idiom as `feedAuditLog`, and the G-Set dedupes a
-    /// re-emitted entry by content hash.
+    /// appended entry cannot break the chain.
+    ///
+    /// Durable append through the same substrate `AuditEvent` pipeline
+    /// `appendSensitivityAuditEntry` uses (SensitivityAuditVerbs.swift):
+    /// a synthetic (non-drawer) event whose bitmap slots carry the
+    /// `before`/`after` values via `SyntheticAuditValueCodec`
+    /// (AuditBridge.swift) rather than real bitmap-column state, decoded
+    /// back into a `UnifiedAuditEntry` by `AuditBridge`'s synthetic-verb
+    /// path. `storage.auditLog` is the estate's durable, O(N)-bounded
+    /// audit store (764b370e) — this append adds one row, not an
+    /// in-memory G-Set entry, so the O(N)-RAM goal that migration set
+    /// holds. Awaited (not fire-and-forget): a failed durable append on
+    /// this security-relevant write path must surface to the caller, not
+    /// be silently dropped (issueGrant / revokeGrant are already `async
+    /// throws`, so the throw propagates with no signature change there).
     private func appendGrantAuditEntry(
         verb: UnifiedAuditVerb,
         grantID: UUID,
@@ -1772,13 +1824,30 @@ extension GeniusLocusKit {
         after: UnifiedAuditValue,
         handle: EstateHandle,
         now: Date
-    ) {
-        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no-op. The in-memory `auditLogs`
-        // dict is removed; grant audit entries are persisted by LocusKit's audit
-        // machinery when the underlying grant verb fires. They are visible via
-        // `auditLog(for:)` which reads directly from `_storagekit_audit`.
-        // The docstring above is preserved for history; this method will be removed
-        // in a follow-up cleanup once all callers are verified.
+    ) async throws {
+        guard let storage = storages[handle] else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        // Synthetic HLC: physical time from `now`, logical 0, node 0 —
+        // matches the sensitivity-unlock seam's derivation exactly so a
+        // grant entry and a sensitivity entry order on the same clock.
+        let hlc = HLC(physicalTime: nowMs, logicalCount: 0, nodeID: 0)
+        let (beforeKind, beforePayload) = SyntheticAuditValueCodec.encode(before)
+        let (afterKind, afterPayload) = SyntheticAuditValueCodec.encode(after)
+        let event = AuditEvent(
+            estateUuid: handle.estateUUID,
+            rowId: grantID,
+            hlc: hlc,
+            verb: verb.rawValue,
+            beforeBitmaps: (adjective: beforePayload, operational: 0, provenance: beforeKind),
+            afterBitmaps: (adjective: afterPayload, operational: 0, provenance: afterKind),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0),
+            actor: "grant-audit",
+            reason: custodyToken
+        )
+        try await storage.auditLog.append(event)
     }
 
     /// Drop the grant surface for a handle on close. The vault is

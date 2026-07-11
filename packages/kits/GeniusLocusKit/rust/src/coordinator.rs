@@ -73,6 +73,7 @@ use std::path::Path;
 use locus_kit::default_wings::DEFAULT_WINGS;
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::ContentKind;
 use uuid::Uuid;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::error::LocusKitError;
@@ -597,10 +598,24 @@ pub struct EstateCoordinator {
     // coordinator reaches them through `corpus_kits[handle]` and is pure
     // orchestration — it enqueues work and, via the Corpus `on_encoded`
     // callback wired at provision, rolls up the touched LocusKit rooms.
-    /// Per-estate unified audit-log G-Set. Minted empty on `open`, fed from
-    /// the estate's LocusKit audit trail by `feed_audit_log`, and read back by
-    /// `current_audit_log` for the maintenance reader's audit-integrity input.
-    /// Mirrors the Swift actor's `auditLogs: [EstateHandle: UnifiedAuditLog]`.
+    /// Per-estate unified audit-log G-Set. Minted empty on `open`. Bug 4 fix
+    /// (ADR025-AUDITLOG-GOVERNOR): `current_audit_log` / `verify_audit_chain`
+    /// / `verify_audit_chain_with_rejections` no longer read from or write to
+    /// this registry — each builds a fresh transient log per call via
+    /// `hydration::feed_audit_log_from_estate` and returns it directly.
+    /// Populated by `set_audit_log`, called from the hydrate-on-launch path
+    /// (`open_hydrating`) after replaying the durable audit trail, AND
+    /// (RUST-AUDIT-DURABILITY, 2026-07-09) directly by
+    /// `append_sensitivity_audit_entry` / `append_grant_audit_entry` on every
+    /// sensitivity-unlock and grant-lifecycle write, so a live (non-reopened)
+    /// session sees its own writes immediately without waiting for a
+    /// hydrate cycle. A non-hydrated, no-sensitivity/grant-activity estate's
+    /// entry stays at the empty log minted here for the estate's lifetime.
+    /// Read back by the public `audit_log(&self, handle)` getter. Mirrors
+    /// the Swift actor's `auditLogs: [EstateHandle: UnifiedAuditLog]` (Swift
+    /// removed this map entirely post-Bug-4-fix; Rust retains it as the
+    /// live-session read path while durability is layered on top via the
+    /// `_storagekit_audit` seam).
     audit_logs: HashMap<EstateHandle, crate::audit::UnifiedAuditLog>,
     /// Per-estate recall-scoring matrix tier. Registered by
     /// `register_matrix_tier` (called from `rebuild_derived_accelerators` and
@@ -1179,8 +1194,12 @@ impl EstateCoordinator {
         }
         // Mint an empty unified audit log for the estate (GLK-03 parity). The
         // log starts empty so a verify pass before any feed reports a clean,
-        // zero-entry chain; `feed_audit_log` populates it from the LocusKit
-        // audit trail on demand. Mirrors Swift `auditLogs[handle] = UnifiedAuditLog()`.
+        // zero-entry chain. Bug 4 fix (ADR025-AUDITLOG-GOVERNOR): nothing
+        // populates this registry entry on demand any more — `current_audit_log`
+        // / `verify_audit_chain` build a fresh transient log per call instead
+        // (see the `audit_logs` field doc). Only `set_audit_log` (the
+        // hydrate-on-launch path) ever overwrites this entry. Mirrors Swift
+        // `auditLogs[handle] = UnifiedAuditLog()`.
         self.audit_logs.insert(handle, crate::audit::UnifiedAuditLog::new());
 
         // Telemetry: emit mount-state transition to mounted (GLK_ROLLUPS_001).
@@ -1743,16 +1762,21 @@ impl EstateCoordinator {
                 // tokens into the plaintext pool pipeline (secfix/fdc-pool, same
                 // rationale as capture_with_mode in intake.rs). Result is
                 // byte-identical to encode_anchor.
-                let (code_opt, qid_opt) =
-                    lattice_lib::fdc_runtime::Fdc::encode_anchor_no_record(&frame.content);
+                let content_kind = if frame.kind == ContentKind::Code {
+                    lattice_lib::FdcContentKind::Code
+                } else {
+                    lattice_lib::FdcContentKind::Text
+                };
+                let (code_opt, qid_opt) = lattice_lib::Fdc::encode_anchor_for_content_no_record(
+                    &frame.content, content_kind);
                 match code_opt {
                     Some(code) if !code.is_empty() => {
                         let mut f = frame;
                         f.lattice_anchor = LatticeAnchor {
                             udc_code: code,
-                            udc_facets: None,
+                            udc_facets: f.lattice_anchor.udc_facets.clone(),
                             wikidata_qid: qid_opt,
-                            wikidata_qids_secondary: None,
+                            wikidata_qids_secondary: f.lattice_anchor.wikidata_qids_secondary.clone(),
                         };
                         f
                     }
@@ -2920,6 +2944,29 @@ impl EstateCoordinator {
             .map_err(|e| remap("reanchor", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
+    // MARK: - reanchor_anchor
+
+    /// Update a drawer's lattice anchor with an explicit audit identity and
+    /// reason, rather than the generic estate-owner attribution `reanchor`
+    /// (above) stamps. Twin of Swift's `Estate.reanchorAnchor` — for
+    /// automated tool-driven repairs (e.g. `moot_reclassify_fdc`) that must
+    /// not misattribute their audit event to the estate owner or a generic
+    /// reason string. Like `reanchor`, `now` is generated internally by the
+    /// LocusKit layer rather than threaded through this wrapper.
+    pub fn reanchor_anchor(
+        &self,
+        handle: &EstateHandle,
+        row_id: &str,
+        to_lattice: LatticeAnchor,
+        changed_by: &str,
+        reason: &str,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .reanchor_anchor(row_id, to_lattice, changed_by, reason)
+            .map_err(|e| remap("reanchor_anchor", &uuid_to_str(&handle.estate_uuid), e).into())
+    }
+
     // MARK: - learn
 
     /// Ingest a learned reference into the estate addressed by `handle`.
@@ -3571,6 +3618,34 @@ impl EstateCoordinator {
         Ok(crate::audit::AuditChainVerifier::verify(&log))
     }
 
+    /// Verify the estate's audit chain AND surface the ingress-rejected
+    /// entry count from the SAME freshly-replayed snapshot, read-only.
+    ///
+    /// AUDIT-ALERT-RESTORE (2026-07-09, Bob's option-1 ruling): additive
+    /// sibling of `verify_audit_chain` — same replay, same verifier call,
+    /// plus `UnifiedAuditLog::rejected_count()` off the SAME log build (no
+    /// second O(N) replay). `verify_audit_chain` is left unchanged for its
+    /// existing caller(s); this method exists because the maintenance
+    /// reader adapter (`estate_maintenance_reader.rs`) needs both values
+    /// to build the daemon's `AuditVerdict` and a second full replay per
+    /// audit-check cycle would double the read cost for no benefit.
+    pub fn verify_audit_chain_with_rejections(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<(crate::audit::AuditChainReport, usize), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let log: crate::audit::UnifiedAuditLog =
+            crate::hydration::feed_audit_log_from_estate(estate).map_err(|e| {
+                VerbDispatchError::from(remap(
+                    "verify_audit_chain_with_rejections",
+                    &uuid_to_str(&handle.estate_uuid),
+                    e,
+                ))
+            })?;
+        let report = crate::audit::AuditChainVerifier::verify(&log);
+        Ok((report, log.rejected_count()))
+    }
+
     // MARK: - matrix tier (recall-scoring accelerator)
 
     /// Register a `MatrixTier` snapshot for `handle`. The `matrixAware` recall
@@ -4089,6 +4164,13 @@ impl EstateCoordinator {
     // surface extracts `.rawRepresentation` from a `Curve25519.Signing.PrivateKey`
     // before calling into the vault. The Rust port carries no CryptoKit types.
 
+    /// Bit 0 of a grant audit entry's bitmap value marks the grant as in
+    /// force. A `GrantIssued` entry transitions the value from `.Null` (the
+    /// grant did not exist) to this bit set; a `GrantRevoked` entry
+    /// transitions it from this bit set to `.Bitmap(0)` (cleared). Mirrors
+    /// Swift `VerbSurface.grantActiveBit`.
+    const GRANT_ACTIVE_BIT: u64 = 1;
+
     /// Issue a grant for the estate addressed by `handle`.
     ///
     /// Constructs a `Grant` from `options`, inserts it into the estate's
@@ -4162,6 +4244,21 @@ impl EstateCoordinator {
         store.insert(&grant)
             .map_err(|_| GrantError::GrantNotFound(grant.id))?;
 
+        // Emit the grant-issued audit entry now that the grant is persisted
+        // and the scope key is in custody, so the estate's unified chain
+        // records the grant lifecycle (FUP-C / GLK-03 seam). Mirrors Swift
+        // `issueGrant`'s `appendGrantAuditEntry(verb: .grantIssued, ...)`
+        // call, placed after the same two prerequisites.
+        self.append_grant_audit_entry(
+            handle,
+            crate::audit::UnifiedAuditVerb::GrantIssued,
+            grant.id,
+            grant.custody_mode.column_token(),
+            crate::audit::UnifiedAuditValue::Null,
+            crate::audit::UnifiedAuditValue::Bitmap(Self::GRANT_ACTIVE_BIT),
+            (now * 1000.0) as i64,
+        )?;
+
         Ok(IssueGrantResult { grant, scope_key })
     }
 
@@ -4179,6 +4276,14 @@ impl EstateCoordinator {
     ) -> Result<(), GrantError> {
         let store = self.grant_stores.get_mut(handle)
             .ok_or(GrantError::GrantNotFound(grant_id))?;
+        // Capture the stored grant (not just its presence) BEFORE revoking,
+        // so the audit entry below can record the revoked grant's
+        // custody-mode token — mirrors Swift `revokeGrant`'s `guard let
+        // stored = try await store.get(id: grantID)` read-before-revoke.
+        let custody_token = store.get(grant_id)
+            .map_err(|_| GrantError::GrantNotFound(grant_id))?
+            .ok_or(GrantError::GrantNotFound(grant_id))?
+            .grant.custody_mode.column_token();
         // revoke_at_unix converts the f64 Unix epoch seconds to ISO-8601
         // before persisting — matching Swift GrantStore.revoke(id:at:).
         store.revoke_at_unix(grant_id, now)
@@ -4186,6 +4291,19 @@ impl EstateCoordinator {
         if let Some(vault) = self.scope_vaults.get_mut(handle) {
             vault.revoke(grant_id);
         }
+        // Emit the grant-revoked audit entry after the revocation record is
+        // written and the mode-1 key is dropped from the vault, so the
+        // chain records the lifecycle close (FUP-C / GLK-03 seam). Mirrors
+        // Swift `revokeGrant`'s `appendGrantAuditEntry(verb: .grantRevoked, ...)`.
+        self.append_grant_audit_entry(
+            handle,
+            crate::audit::UnifiedAuditVerb::GrantRevoked,
+            grant_id,
+            custody_token,
+            crate::audit::UnifiedAuditValue::Bitmap(Self::GRANT_ACTIVE_BIT),
+            crate::audit::UnifiedAuditValue::Bitmap(0),
+            (now * 1000.0) as i64,
+        )?;
         Ok(())
     }
 
@@ -4195,13 +4313,16 @@ impl EstateCoordinator {
     // `UnifiedAuditVerb` cases (sensitivityGrantIssued/Denied/Revoked,
     // sensitivityReadUnderGrant) — NOT the federation-reserved
     // grantIssued/grantRevoked (see `audit/log.rs`'s enum doc comment).
-    // Unlike `issue_grant`/`revoke_grant` above (which do not append any
-    // audit entry in this Rust port today — a pre-existing, unrelated
-    // divergence from Swift's FUP-C seam, out of scope for ADR-025), these
-    // four methods DO append directly to `self.audit_logs`, since ADR-025
-    // §4 explicitly requires it. `tier` uses LocusKit's existing
-    // `AdjectiveSensitivity` rather than a new type — GeniusLocusKit must
-    // not depend on a higher-layer (AriaMcpKit) tier vocabulary.
+    // `issue_grant`/`revoke_grant` above append the federation-reserved
+    // verbs through their own `append_grant_audit_entry` helper
+    // (RUST-AUDIT-DURABILITY, 2026-07-09) — a separate helper, mirroring
+    // Swift's separate `appendGrantAuditEntry` (VerbSurface.swift) vs.
+    // `appendSensitivityAuditEntry` (SensitivityAuditVerbs.swift), even
+    // though both durably append through the identical synthetic-entry
+    // encoding (`hydration::write_synthetic_audit_event`). `tier` uses
+    // LocusKit's existing `AdjectiveSensitivity` rather than a new type —
+    // GeniusLocusKit must not depend on a higher-layer (AriaMcpKit) tier
+    // vocabulary.
 
     /// Record that a sensitivity-unlock grant was approved and is now
     /// live. `grant_id` is a fresh identifier the caller mints per grant;
@@ -4225,8 +4346,7 @@ impl EstateCoordinator {
             crate::audit::UnifiedAuditValue::Null,
             crate::audit::UnifiedAuditValue::Integer(expires_at_ms),
             now_ms,
-        );
-        Ok(())
+        )
     }
 
     /// Record that a sensitivity-unlock grant request was DENIED (a
@@ -4248,8 +4368,7 @@ impl EstateCoordinator {
             crate::audit::UnifiedAuditValue::Null,
             crate::audit::UnifiedAuditValue::Null,
             now_ms,
-        );
-        Ok(())
+        )
     }
 
     /// Record a manual revocation (`mootx01 lock`) of a live grant.
@@ -4272,8 +4391,7 @@ impl EstateCoordinator {
             crate::audit::UnifiedAuditValue::Integer(1),
             crate::audit::UnifiedAuditValue::Null,
             now_ms,
-        );
-        Ok(())
+        )
     }
 
     /// Record that a specific drawer was read only because a live
@@ -4305,16 +4423,30 @@ impl EstateCoordinator {
             crate::audit::UnifiedAuditValue::Null,
             crate::audit::UnifiedAuditValue::Null,
             now_ms,
-        );
-        Ok(())
+        )
     }
 
-    /// Shared append helper for the four methods above. HLC physical
-    /// time is `now_ms` directly (already epoch-milliseconds — the Rust
-    /// dispatch layer's canonical `now` unit, `wall_now()` in
-    /// aria-mcp's `dispatch.rs`); `tier` (the audit entry field) is
-    /// always `Locus` since a sensitivity grant governs LocusKit-tier
-    /// drawers. Mirrors Swift `appendSensitivityAuditEntry` exactly.
+    /// Shared append helper for the four methods above. Writes BOTH to the
+    /// in-memory `self.audit_logs` map (live-session read-back via
+    /// `audit_log(&self, handle)`, unchanged from before RUST-AUDIT-
+    /// DURABILITY) AND durably through `storage.audit_log()` (new — the
+    /// `_storagekit_audit` seam `feed_synthetic_audit_entries` reads back
+    /// on the next hydrate). HLC physical time is `now_ms` directly
+    /// (already epoch-milliseconds — the Rust dispatch layer's canonical
+    /// `now` unit, `wall_now()` in aria-mcp's `dispatch.rs`); `tier` (the
+    /// audit entry field) is always `Locus` since a sensitivity grant
+    /// governs LocusKit-tier drawers.
+    ///
+    /// Best-effort on a missing storage (mirrors Swift
+    /// `appendSensitivityAuditEntry`'s `guard let storage = storages[handle]
+    /// else { return }`): a handle with no retained `Storage` (a test/mock
+    /// `DrawerStore` that leaves `storage()` at its `None` default) still
+    /// gets the in-memory entry, just not a durable one. A genuine write
+    /// failure on a PRESENT storage propagates as
+    /// `GeniusLocusKitError::UnderlyingEstateFailure`, mirroring Swift's
+    /// `try await storage.auditLog.append(event)` (awaited, not
+    /// fire-and-forget — a security-relevant write must surface, not be
+    /// silently dropped).
     fn append_sensitivity_audit_entry(
         &mut self,
         handle: &EstateHandle,
@@ -4324,7 +4456,24 @@ impl EstateCoordinator {
         before_value: crate::audit::UnifiedAuditValue,
         after_value: crate::audit::UnifiedAuditValue,
         now_ms: i64,
-    ) {
+    ) -> Result<(), GeniusLocusKitError> {
+        if let Some(storage) = self.storages.get(handle) {
+            crate::hydration::write_synthetic_audit_event(
+                storage.as_ref(),
+                Uuid::from_bytes(handle.estate_uuid),
+                row_id,
+                verb,
+                field_path,
+                &before_value,
+                &after_value,
+                now_ms,
+                "sensitivity-audit",
+            )
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("{e:?}"),
+            })?;
+        }
+
         let hlc = substrate_types::hlc::HLC {
             physical_time: now_ms,
             logical_count: 0,
@@ -4344,6 +4493,67 @@ impl EstateCoordinator {
             .entry(*handle)
             .or_insert_with(crate::audit::UnifiedAuditLog::new)
             .add(entry);
+        Ok(())
+    }
+
+    /// Shared append helper for `issue_grant`/`revoke_grant`'s
+    /// grant-lifecycle audit entries. Twin of `append_sensitivity_audit_entry`
+    /// above — same durable-write + in-memory-map double-write shape — but
+    /// FAIL-CLOSED on a missing storage, mirroring Swift `appendGrantAuditEntry`'s
+    /// `guard let storage = storages[handle] else { throw
+    /// GeniusLocusKitError.estateNotOpen(...) }` (grant-lifecycle audit is
+    /// not best-effort the way sensitivity-unlock's is; the FUP-C / GLK-03
+    /// contract requires every issue/revoke to land). Storage-layer
+    /// failures (missing storage OR a write error) are both surfaced as
+    /// `GrantError::GrantNotFound(grant_id)` — the closest available
+    /// `GrantError` variant, matching the existing convention `issue_grant`
+    /// already uses for its own storage failures a few lines above.
+    fn append_grant_audit_entry(
+        &mut self,
+        handle: &EstateHandle,
+        verb: crate::audit::UnifiedAuditVerb,
+        grant_id: Uuid,
+        custody_token: &'static str,
+        before_value: crate::audit::UnifiedAuditValue,
+        after_value: crate::audit::UnifiedAuditValue,
+        now_ms: i64,
+    ) -> Result<(), GrantError> {
+        let storage = self.storages.get(handle)
+            .cloned()
+            .ok_or(GrantError::GrantNotFound(grant_id))?;
+        crate::hydration::write_synthetic_audit_event(
+            storage.as_ref(),
+            Uuid::from_bytes(handle.estate_uuid),
+            grant_id,
+            verb,
+            custody_token,
+            &before_value,
+            &after_value,
+            now_ms,
+            "grant-audit",
+        )
+        .map_err(|_| GrantError::GrantNotFound(grant_id))?;
+
+        let hlc = substrate_types::hlc::HLC {
+            physical_time: now_ms,
+            logical_count: 0,
+            node_id: 0,
+        };
+        let entry = crate::audit::UnifiedAuditEntry::new(
+            crate::audit::AuditTier::Locus,
+            hlc,
+            verb,
+            crate::audit::EntryUUID(grant_id.as_u128().to_be_bytes()),
+            custody_token,
+            before_value,
+            after_value,
+            None,
+        );
+        self.audit_logs
+            .entry(*handle)
+            .or_insert_with(crate::audit::UnifiedAuditLog::new)
+            .add(entry);
+        Ok(())
     }
 
     /// The `field_path` token stamped onto a sensitivity-unlock audit
@@ -7789,17 +7999,28 @@ mod tests {
         );
     }
 
-    // ACC-5: feed_audit_log is idempotent — re-feeding the same trail is a
-    // G-Set no-op (entry count unchanged).
+    // ACC-5: current_audit_log is idempotent — re-reading the same trail
+    // produces an unchanged entry count.
+    //
+    // Pre-existing drift fix (found while verifying the mission's cargo
+    // test baseline, AUDIT-ALERT-RESTORE 2026-07-09, unrelated to this
+    // mission's blast radius): this test previously called
+    // `coord.feed_audit_log(&h)` / read back via the vestigial registry
+    // getter `coord.audit_log(&h)`. Both belong to the pre-Bug-4-fix
+    // accumulate-into-registry pattern (see `current_audit_log`'s doc
+    // comment) and no longer compile against the current coordinator
+    // surface — `feed_audit_log` was renamed to `current_audit_log`,
+    // which builds a fresh transient log per call instead of accumulating
+    // into `self.audit_logs`. Rewritten against the live API, preserving
+    // the test's original intent (repeated reads of unchanged estate
+    // state converge to the same entry count).
     #[test]
-    fn acc5_feed_audit_log_is_idempotent() {
-        let (mut coord, h) = open_one();
+    fn acc5_current_audit_log_is_idempotent() {
+        let (coord, h) = open_one();
         coord.capture(&h, cap_frame("alpha"), NOW).expect("capture");
-        coord.feed_audit_log(&h).expect("feed 1");
-        let first = coord.audit_log(&h).expect("log").count();
-        coord.feed_audit_log(&h).expect("feed 2");
-        let second = coord.audit_log(&h).expect("log").count();
-        assert_eq!(first, second, "re-feeding the same trail adds no entries");
+        let first = coord.current_audit_log(&h).expect("current audit log 1").count();
+        let second = coord.current_audit_log(&h).expect("current audit log 2").count();
+        assert_eq!(first, second, "re-reading the same trail yields the same entry count");
     }
 
     // ACC-6: verify_audit_chain on an empty (freshly opened) estate is
@@ -7834,7 +8055,17 @@ mod tests {
         coord.rebuild_derived_accelerators(&h, NOW).expect("rebuild");
         assert!(coord.matrix_tier(&h).is_some(), "tier present after rebuild");
         // The audit log was fed as part of the rebuild.
-        assert!(!coord.audit_log(&h).expect("log").is_empty());
+        //
+        // Pre-existing drift fix (found while verifying the mission's cargo
+        // test baseline, AUDIT-ALERT-RESTORE 2026-07-09, unrelated to this
+        // mission's blast radius): `rebuild_derived_accelerators` no longer
+        // accumulates into the registry `self.audit_logs` (Bug 4 fix — see
+        // its doc comment), so the registry getter `coord.audit_log(&h)`
+        // returns `EstateNotOpen` here for a non-hydrated test estate
+        // regardless of the rebuild. `current_audit_log` is the live
+        // replacement that rebuilds the same transient snapshot the rebuild
+        // step itself consumed.
+        assert!(!coord.current_audit_log(&h).expect("log").is_empty());
     }
 
     // ACC-9: closing an estate drops its audit log and matrix tier — a stale

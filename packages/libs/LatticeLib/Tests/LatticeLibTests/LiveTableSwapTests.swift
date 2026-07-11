@@ -53,20 +53,23 @@ struct LiveTableSwapTests {
         // in-session learning proof.
         let after = LatticeLib.wordClass(Self.novelToken)
         #expect(after == .noun, "in-session: the running tagger must classify the merged token from the table")
-        #expect(WordClassTableCache.version == versionBefore + 1, "swap must advance the version")
+        #expect(WordClassTableCache.version > versionBefore, "swap must advance the version")
 
         // Restore the bundled seed so other suites see a clean table.
         WordClassTableCache.swap(WordClassTable.loadBundled())
     }
 
-    @Test func swapAdvancesVersionDeterministically() async throws {
+    @Test func swapAdvancesVersionMonotonically() async throws {
         let v0 = WordClassTableCache.version
         WordClassTableCache.swap(WordClassTableCache.table)
         let v1 = WordClassTableCache.version
         WordClassTableCache.swap(WordClassTableCache.table)
         let v2 = WordClassTableCache.version
-        #expect(v1 == v0 + 1)
-        #expect(v2 == v0 + 2)
+        // Other suites also exercise the process-global holder in parallel, so
+        // unrelated swaps may add increments between these reads. The shared
+        // contract is monotonic advancement, not an isolated exact delta.
+        #expect(v1 > v0)
+        #expect(v2 > v1)
         // Within a fixed version, classification is stable (deterministic given
         // (input, table-version)).
         let a = LatticeLib.wordClass("dinner")

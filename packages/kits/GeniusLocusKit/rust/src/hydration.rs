@@ -24,6 +24,13 @@
 //   5. Audit log feed — walk all drawers in the estate; for each drawer call
 //                       estate.audit_trail(id) and bridge each
 //                       substrate_types::AuditEvent → [UnifiedAuditEntry].
+//   5b. Synthetic feed — RUST-AUDIT-DURABILITY (2026-07-09): read
+//                       `_storagekit_audit` directly for the six grant-
+//                       lifecycle / sensitivity-unlock synthetic verbs. Five
+//                       of the six are keyed on a synthetic id (a grant or
+//                       denial id, not a drawer id), so step 5's per-drawer
+//                       walk cannot reach them — this step recovers them.
+//                       Idempotent union with step 5's result via the G-Set.
 //   6. Matrix rebuild — MatrixTier::full_rebuild(log) runs both passes:
 //                         Pass 1 (rebuild)          → F, O, C, live_row_count
 //                         Pass 2 (rebuild_temporal) → T, temporal_watermark_hlc
@@ -80,6 +87,7 @@ use crate::coordinator::{EstateCoordinator, GeniusLocusKitError};
 use crate::grants::GrantStore;
 use crate::handle::EstateHandle;
 use crate::matrix::{MatrixTier, MatrixSnapshotStore};
+use uuid::Uuid;
 
 // MARK: - Composite GLK SchemaDeclaration
 
@@ -361,7 +369,19 @@ pub fn open_hydrating(
     // Step 5 — Audit log feed: walk all drawers and convert their audit trail
     // into UnifiedAuditEntry items. Bridge converts the substrate-level bitmap
     // snapshots into the GLK-level field-path entries required by MatrixTier.
-    let unified_log = feed_audit_log_from_estate(&estate)
+    let mut unified_log = feed_audit_log_from_estate(&estate)
+        .map_err(|e| HydrateError::AuditFeed(format!("{e:?}")))?;
+
+    // Step 5b — Synthetic audit feed (RUST-AUDIT-DURABILITY): recover
+    // grant-lifecycle and sensitivity-unlock entries directly from
+    // `_storagekit_audit`. Five of the six synthetic verbs have no drawer
+    // backing them, so the per-drawer walk above cannot reach them —
+    // without this step a durably-written grant/sensitivity entry is
+    // silently dropped on every hydrate, exactly reproducing the bug this
+    // mission fixes. Reads from `storage` (the retained clone of the
+    // now-hydrated `in_memory` backend), so this sees rows
+    // `replication::hydrate` already copied from `durable` in step 2.
+    feed_synthetic_audit_entries(storage.as_ref(), &mut unified_log)
         .map_err(|e| HydrateError::AuditFeed(format!("{e:?}")))?;
 
     // Step 6 — Matrix rebuild (full: both passes). Build the event_time map
@@ -503,6 +523,240 @@ impl EstateCoordinator {
     }
 }
 
+// MARK: - Synthetic (non-drawer) audit entries — RUST-AUDIT-DURABILITY
+//
+// Mirror of Swift `SyntheticAuditValueCodec` and `AuditBridge`'s synthetic-
+// verb path (AuditBridge.swift). Grant-lifecycle (`GrantIssued`/
+// `GrantRevoked`) and sensitivity-unlock (`SensitivityGrantIssued`/
+// `SensitivityGrantDenied`/`SensitivityGrantRevoked`/
+// `SensitivityReadUnderGrant`) events are not drawer mutations — they have
+// no `adjective`/`operational`/`provenance` bitmap columns to diff. Both
+// the durable-write side (`EstateCoordinator::append_sensitivity_audit_entry`,
+// `append_grant_audit_entry` in coordinator.rs) and this read-back side
+// repurpose the event's bitmap slots as a `(kind, payload)` pair instead of
+// real column state: `adjective` carries the payload, `provenance` carries
+// the type discriminant, `operational` is always 0/unused.
+
+/// The six verbs that describe a grant-lifecycle or sensitivity-unlock
+/// event rather than a drawer mutation. Mirrors Swift `AuditBridge.syntheticVerbs`.
+pub(crate) fn is_synthetic_verb(verb: UnifiedAuditVerb) -> bool {
+    matches!(
+        verb,
+        UnifiedAuditVerb::GrantIssued
+            | UnifiedAuditVerb::GrantRevoked
+            | UnifiedAuditVerb::SensitivityGrantIssued
+            | UnifiedAuditVerb::SensitivityGrantDenied
+            | UnifiedAuditVerb::SensitivityGrantRevoked
+            | UnifiedAuditVerb::SensitivityReadUnderGrant
+    )
+}
+
+/// Encodes a `UnifiedAuditValue` into the `(kind, payload)` i64 pair carried
+/// in a synthetic (grant-lifecycle / sensitivity-unlock) audit event's
+/// bitmap slot, and decodes it back. Mirrors Swift `SyntheticAuditValueCodec`
+/// (AuditBridge.swift) byte-for-byte: `.null` -> `(0, 0)`, `.bitmap(v)` ->
+/// `(1, v as i64)`, `.integer(v)` -> `(2, v)`. Only these three cases are
+/// ever constructed by a synthetic append call site (grant active-bit
+/// transitions and sensitivity expiry epoch-ms timestamps); `StringValue`/
+/// `Bytes` cannot fit an i64 slot and degrade to `.null` on encode, matching
+/// Swift's `assertionFailure` + null-degrade path.
+pub(crate) struct SyntheticAuditValueCodec;
+
+impl SyntheticAuditValueCodec {
+    pub(crate) fn encode(value: &UnifiedAuditValue) -> (i64, i64) {
+        match value {
+            UnifiedAuditValue::Null => (0, 0),
+            UnifiedAuditValue::Bitmap(v) => (1, *v as i64),
+            UnifiedAuditValue::Integer(v) => (2, *v),
+            UnifiedAuditValue::StringValue(_) | UnifiedAuditValue::Bytes(_) => {
+                debug_assert!(
+                    false,
+                    "SyntheticAuditValueCodec: StringValue/Bytes cannot be encoded into a synthetic audit event's i64 slot"
+                );
+                (0, 0)
+            }
+        }
+    }
+
+    pub(crate) fn decode(kind: i64, payload: i64) -> UnifiedAuditValue {
+        match kind {
+            1 => UnifiedAuditValue::Bitmap(payload as u64),
+            2 => UnifiedAuditValue::Integer(payload),
+            _ => UnifiedAuditValue::Null,
+        }
+    }
+}
+
+/// Build the single `UnifiedAuditEntry` a synthetic (grant/sensitivity)
+/// `substrate_types::AuditEvent` represents — the per-drawer-walk path
+/// (`bridge_audit_event`, below). Reached only for `SensitivityReadUnderGrant`
+/// in practice (the only synthetic verb whose `row_id` is a real drawer id,
+/// so it is the only one a per-drawer `audit_trail` walk can surface); the
+/// other five synthetic verbs use a non-drawer synthetic id and are instead
+/// recovered by `feed_synthetic_audit_entries` (below), which reads
+/// `_storagekit_audit` directly. Mirrors Swift
+/// `AuditBridge.syntheticEntry(for:verb:)`.
+fn synthetic_entry_from_substrate_event(
+    event: &substrate_types::audit_event::AuditEvent,
+    verb: UnifiedAuditVerb,
+) -> UnifiedAuditEntry {
+    let row_uuid: u128 = event.row_id.0;
+    let entry_uuid = EntryUUID(row_uuid.to_be_bytes());
+    let before = match event.before_bitmaps {
+        Some((adjective, _operational, provenance)) => {
+            SyntheticAuditValueCodec::decode(provenance, adjective)
+        }
+        None => UnifiedAuditValue::Null,
+    };
+    let (after_adj, _after_op, after_prov) = event.after_bitmaps;
+    let after = SyntheticAuditValueCodec::decode(after_prov, after_adj);
+    UnifiedAuditEntry::new(
+        AuditTier::Locus,
+        event.hlc,
+        verb,
+        entry_uuid,
+        event.reason.clone().unwrap_or_default(),
+        before,
+        after,
+        None,
+    )
+}
+
+/// Same decode as `synthetic_entry_from_substrate_event`, but reading
+/// directly off a durably-stored `persistence_kit::audit_log::AuditEvent`
+/// (the flat `_storagekit_audit` row shape) rather than the LocusKit
+/// per-drawer substrate `AuditEvent`. Used by `feed_synthetic_audit_entries`,
+/// which bypasses the per-drawer walk entirely (there is no drawer to walk
+/// from for a grant id or a denial's synthetic id).
+fn synthetic_entry_from_pk_event(
+    event: &persistence_kit::audit_log::AuditEvent,
+    verb: UnifiedAuditVerb,
+) -> UnifiedAuditEntry {
+    let entry_uuid = EntryUUID(event.row_id.as_u128().to_be_bytes());
+    let before = match (event.before_adjective, event.before_provenance) {
+        (Some(payload), Some(kind)) => SyntheticAuditValueCodec::decode(kind, payload),
+        _ => UnifiedAuditValue::Null,
+    };
+    let after = SyntheticAuditValueCodec::decode(event.after_provenance, event.after_adjective);
+    UnifiedAuditEntry::new(
+        AuditTier::Locus,
+        event.hlc,
+        verb,
+        entry_uuid,
+        event.reason.clone().unwrap_or_default(),
+        before,
+        after,
+        None,
+    )
+}
+
+/// Recover grant-lifecycle and sensitivity-unlock audit entries directly
+/// from durable storage, bypassing the per-drawer walk.
+///
+/// `feed_audit_log_from_estate` (below) walks `estate.all_drawers()` and
+/// pulls each drawer's `audit_trail` — but five of the six synthetic verbs
+/// (`GrantIssued`/`GrantRevoked`/`SensitivityGrantIssued`/
+/// `SensitivityGrantDenied`/`SensitivityGrantRevoked`) are keyed on a
+/// synthetic grant/denial id, not any drawer's row id, so no per-drawer
+/// walk can ever reach them — they would be silently dropped on every
+/// hydrate. This reads `_storagekit_audit` directly (bounded, mirroring
+/// Swift `auditLog(for:)`'s 50_000-row safety cap) and decodes only the
+/// synthetic-verb rows into `log`. Idempotent: `UnifiedAuditLog::add` is
+/// content-addressed, so an entry already fed by the per-drawer walk
+/// (`SensitivityReadUnderGrant`, whose row_id IS a real drawer id) is a
+/// G-Set no-op here, not a duplicate.
+///
+/// NOTE: this is deliberately narrower than the "full fix (direct
+/// `AuditLog::iterate` bypassing per-drawer)" `current_audit_log`'s doc
+/// comment defers to v1.1 — that full fix would replace the per-drawer walk
+/// for ALL verbs (a broader performance/architecture change). This only
+/// covers the six verbs the per-drawer walk structurally cannot reach.
+pub(crate) fn feed_synthetic_audit_entries(
+    storage: &dyn Storage,
+    log: &mut UnifiedAuditLog,
+) -> persistence_kit::error::StorageResult<()> {
+    // Paginate with an HLC cursor. `iterate` returns HLC-ascending and
+    // enforces the page limit, so a single fixed iterate(None, None, 50_000)
+    // silently dropped every synthetic grant/sensitivity audit row past the
+    // first 50k — a local client with many ordinary audited mutations could
+    // push security-relevant records past the cap. Loop until a short page
+    // signals the end, advancing the cursor past the last HLC each round.
+    const PAGE: usize = 10_000;
+    let mut after: Option<substrate_types::hlc::HLC> = None;
+    loop {
+        let page = storage.audit_log().iterate(after, None, PAGE)?;
+        if page.is_empty() {
+            break;
+        }
+        for event in &page {
+            let verb = verb_from_str(&event.verb);
+            if is_synthetic_verb(verb) {
+                log.add(synthetic_entry_from_pk_event(event, verb));
+            }
+        }
+        if page.len() < PAGE {
+            break;
+        }
+        after = page.last().map(|e| e.hlc);
+    }
+    Ok(())
+}
+
+/// Durably append one synthetic (grant-lifecycle / sensitivity-unlock)
+/// audit event through `storage.audit_log()` — the same `_storagekit_audit`
+/// seam `appendAuditEvent` writes to on the Swift port (SQLiteStorage.swift)
+/// and `replication::hydrate`/`feed_synthetic_audit_entries` (above) read
+/// back from. Mirrors Swift `appendSensitivityAuditEntry`
+/// (SensitivityAuditVerbs.swift) / `appendGrantAuditEntry`
+/// (VerbSurface.swift): `before`/`after` are encoded via
+/// `SyntheticAuditValueCodec` into the event's `adjective` (payload) and
+/// `provenance` (kind) columns; `operational` is always 0/unused;
+/// `field_path` rides in `reason`; the lattice-anchor columns are the
+/// synthetic zero-anchor (`SubstrateTypes.LatticeAnchor(udcCode: 0,
+/// qidPointer: 0)` on Swift). `event_id` is a fresh random UUID per call —
+/// `AuditEvent.eventID` is generated at construction on both ports and
+/// never reused, so the `(event_id, hlc)` idempotency key in
+/// `_storagekit_audit` cannot collide two distinct synthetic writes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_synthetic_audit_event(
+    storage: &dyn Storage,
+    estate_uuid: Uuid,
+    row_id: Uuid,
+    verb: UnifiedAuditVerb,
+    field_path: &str,
+    before_value: &UnifiedAuditValue,
+    after_value: &UnifiedAuditValue,
+    now_ms: i64,
+    actor: &str,
+) -> persistence_kit::error::StorageResult<()> {
+    let (before_kind, before_payload) = SyntheticAuditValueCodec::encode(before_value);
+    let (after_kind, after_payload) = SyntheticAuditValueCodec::encode(after_value);
+    let event = persistence_kit::audit_log::AuditEvent {
+        event_id: Uuid::new_v4(),
+        estate_uuid,
+        row_id,
+        hlc: substrate_types::hlc::HLC {
+            physical_time: now_ms,
+            logical_count: 0,
+            node_id: 0,
+        },
+        verb: verb.raw_value().to_string(),
+        before_adjective: Some(before_payload),
+        before_operational: Some(0),
+        before_provenance: Some(before_kind),
+        after_adjective: after_payload,
+        after_operational: 0,
+        after_provenance: after_kind,
+        before_lattice_anchor: None,
+        after_lattice_anchor: 0,
+        before_lattice_qid: None,
+        after_lattice_qid: 0,
+        actor: actor.to_string(),
+        reason: Some(field_path.to_string()),
+    };
+    storage.audit_log().append(event)
+}
+
 // MARK: - Audit bridge (AuditEvent → [UnifiedAuditEntry])
 
 /// Convert one `substrate_types::AuditEvent` into the `UnifiedAuditEntry`
@@ -521,8 +775,16 @@ impl EstateCoordinator {
 ///   - before_value: `.bitmap(before_col)` or `.null` on capture
 ///   - after_value:  `.bitmap(after_col)`
 ///   - origin_row_id: None
+///
+/// Synthetic (grant-lifecycle / sensitivity-unlock) verbs are routed to
+/// `synthetic_entry_from_substrate_event` instead — they have no bitmap
+/// columns to diff (RUST-AUDIT-DURABILITY, mirrors Swift `AuditBridge.bridge`'s
+/// `syntheticVerbs` early-return).
 pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> Vec<UnifiedAuditEntry> {
     let unified_verb = verb_from_str(&event.verb);
+    if is_synthetic_verb(unified_verb) {
+        return vec![synthetic_entry_from_substrate_event(event, unified_verb)];
+    }
     let (after_adj, after_op, after_prov) = event.after_bitmaps;
     let before = event.before_bitmaps;
 
@@ -641,6 +903,16 @@ pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> V
 /// a partial one must read the substrate audit trail directly (the verb
 /// string is preserved there as-is).
 ///
+/// Grant-lifecycle (`EstateCoordinator::issue_grant`/`revoke_grant`,
+/// coordinator.rs's `append_grant_audit_entry`, GLK-03 seam / FUP-C) and
+/// sensitivity-unlock (`append_sensitivity_audit_entry`, ADR-025 §4) both
+/// write their case's `raw_value()` verbatim as the durable event's `verb`
+/// string — these six cases are the read-back symmetric to that write.
+/// Before RUST-AUDIT-DURABILITY (2026-07-09) these six collapsed to
+/// `.Mutate` here, which would have misrouted a durably-recovered synthetic
+/// entry through the three-column bitmap-diff path instead of
+/// `synthetic_entry_from_substrate_event`/`synthetic_entry_from_pk_event`.
+///
 /// Mirrors `AuditBridge.verb(for:)` in Swift.
 fn verb_from_str(s: &str) -> UnifiedAuditVerb {
     match s {
@@ -655,6 +927,12 @@ fn verb_from_str(s: &str) -> UnifiedAuditVerb {
         "associate"      => UnifiedAuditVerb::Associate,
         "migrate"        => UnifiedAuditVerb::Migrate,
         "dreamCompact"   => UnifiedAuditVerb::DreamCompact,
+        "grantIssued"               => UnifiedAuditVerb::GrantIssued,
+        "grantRevoked"              => UnifiedAuditVerb::GrantRevoked,
+        "sensitivityGrantIssued"    => UnifiedAuditVerb::SensitivityGrantIssued,
+        "sensitivityGrantDenied"    => UnifiedAuditVerb::SensitivityGrantDenied,
+        "sensitivityGrantRevoked"   => UnifiedAuditVerb::SensitivityGrantRevoked,
+        "sensitivityReadUnderGrant" => UnifiedAuditVerb::SensitivityReadUnderGrant,
         _                => UnifiedAuditVerb::Mutate,
     }
 }

@@ -9,7 +9,9 @@
 //! `EideticLib.lookup` delegates to `LatticeLib.FDC.encodeAnchor`;
 //! the Rust `lookup` here mirrors that exactly: it delegates to
 //! `lattice_lib::Fdc::encode_anchor` using the same pinned artifacts
-//! embedded in the `lattice_lib` crate.
+//! embedded in the `lattice_lib` crate. For audit/maintenance paths that
+//! must not add novel tokens to the learning pool, `lookup_no_record`
+//! delegates to `Fdc::encode_anchor_no_record`.
 
 pub mod anchor;
 pub mod segmenter;
@@ -18,7 +20,7 @@ pub mod lattice_code_state;
 pub use anchor::Anchor;
 pub use lattice_code_state::{LatticeCodeGrammar, LatticeCodeState, classify_lattice_code};
 
-use lattice_lib::Fdc;
+use lattice_lib::{Fdc, FdcContentKind};
 use std::collections::HashSet;
 
 /// The EideticLib crate version.
@@ -40,6 +42,38 @@ pub const VERSION: &str = "0.1.0";
 /// that persists IS a fabricated identity" (Bob's board item 7).
 /// Panics loud; fix the build. Mirrors Swift `EideticLib.lookup(_:)`.
 pub fn lookup(term: &str) -> Anchor {
+    lookup_with_encoder(term, Fdc::encode_anchor)
+}
+
+/// Looks up the lattice anchor for a term without recording novel tokens.
+///
+/// This returns the same code/Q-ID pair as `lookup` for a fixed artifact
+/// bundle, but uses `Fdc::encode_anchor_no_record` so estate maintenance scans
+/// over memory content do not mutate the plaintext novel-token pool.
+pub fn lookup_no_record(term: &str) -> Anchor {
+    lookup_with_encoder(term, Fdc::encode_anchor_no_record)
+}
+
+/// Content-aware non-recording lookup used by capture and recalculation.
+/// `Code` is authoritative shape metadata and anchors nonempty content at
+/// FDC `005`, with a language Q-ID when detection is decisive.
+pub fn lookup_no_record_with_kind(term: &str, content_kind: FdcContentKind) -> Anchor {
+    if !Fdc::is_available() {
+        panic!(
+            "eidetic_lib: FDC artifacts failed to load — \
+             build/configuration error. The bundled canon is missing \
+             from this binary. No anchor can be produced. Fix the build."
+        );
+    }
+    anchor_from_encoded(
+        Fdc::encode_anchor_for_content_no_record(term, content_kind),
+    )
+}
+
+fn lookup_with_encoder(
+    term: &str,
+    encode: fn(&str) -> (Option<String>, Option<String>),
+) -> Anchor {
     if !Fdc::is_available() {
         panic!(
             "eidetic_lib: FDC artifacts failed to load — \
@@ -48,7 +82,12 @@ pub fn lookup(term: &str) -> Anchor {
         );
     }
 
-    let (code, qid) = Fdc::encode_anchor(term);
+    anchor_from_encoded(encode(term))
+}
+
+fn anchor_from_encoded(
+    (code, qid): (Option<String>, Option<String>),
+) -> Anchor {
     match code {
         None => {
             // UNRESOLVED: empty anchor, never a fallback code.
@@ -182,6 +221,15 @@ mod tests {
         let a = lookup("computer software programming and information science");
         let b = lookup("computer software programming and information science");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn lookup_no_record_matches_lookup_result() {
+        // The no-record path changes side effects only, not classification.
+        let term = "Biology is the scientific study of life and living organisms, \
+             including their physical structure, chemical processes, molecular \
+             interactions, physiological mechanisms, and evolution.";
+        assert_eq!(lookup_no_record(term), lookup(term));
     }
 
     #[test]

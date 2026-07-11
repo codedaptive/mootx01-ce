@@ -93,6 +93,10 @@ let package = Package(
         // Cargo.toml edits — controlled, not forbidden"
         // (DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
         .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
+        // EideticLib: maintenance FDC reclassification uses the same deterministic
+        // text->anchor seam as GeniusLocusKit capture. Declared explicitly so
+        // AriaMCP does not rely on GeniusLocusKit's transitive dependency.
+        .package(name: "EideticLib", path: "../../libs/EideticLib"),
         // ConvergenceKit: EstateStatusSyncTests import NoSyncEngine (ConvergenceKitNone)
         // to force-test the OP-1 honest sync vocabulary. The AriaMCP library reaches
         // sync state through GeniusLocusKit.syncStateToken — ConvergenceKit is a test-only
@@ -123,6 +127,8 @@ let package = Package(
                 // LatticeLib backs the governor's PoolReducer.reduce trigger
                 // (AutonomicGovernor.swift): the low-cadence novel-token merge-back.
                 .product(name: "LatticeLib", package: "LatticeLib"),
+                // EideticLib backs moot_reclassify_fdc, the estate FDC repair tool.
+                .product(name: "EideticLib", package: "EideticLib"),
                 // LoopbackHTTP backs HTTPServer.swift (the resident HTTP MCP transport).
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
             ],

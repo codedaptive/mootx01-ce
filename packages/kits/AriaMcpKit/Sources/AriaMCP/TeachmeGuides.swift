@@ -700,6 +700,7 @@ enum TeachmeGuides {
         case "moot_recall_precise":   return preciseRecallGuide
         case "moot_dream":            return dreamGuide
 
+        case "moot_reclassify_fdc":   return reclassifyFDCGuide
         case "moot_palace_import":    return palaceImportGuide
         default: return nil
         }
@@ -737,6 +738,51 @@ enum TeachmeGuides {
         """
 
     // MARK: - Maintenance
+
+    private static let reclassifyFDCGuide = """
+        moot_reclassify_fdc — audit or repair stored FDC anchors.
+
+        Recomputes each active memory drawer's FDC lattice anchor from its
+        content using the current deterministic classifier. This is the repair
+        path after classifier fixes: storage still uses the existing FDC fields,
+        but their values can be reset to the current classifier's answer.
+
+        Defaults:
+          - apply:false — dry-run only; no estate mutation.
+          - mode:suspectOnly — conservative repair candidates only.
+
+        Modes:
+          - suspectOnly (default): reports stale false positives that now become
+            000, existing 000 anchors that now classify, and stale Q-ID anchors.
+            Use this first on a live estate.
+          - all: reports every changed active drawer anchor. Use only when the
+            operator intentionally wants to reset stored FDC from content; this
+            can overwrite manually curated non-sentinel anchors.
+
+        Optional limit:
+          - limit:N scans at most N active drawers in this run.
+
+        Examples:
+          { "apply": false }
+          { "apply": true }
+          { "mode": "all", "apply": true }
+
+        Response:
+          fdc_reclassify: dry-run|applied
+          mode: suspectOnly|all
+          scanned: N active drawer(s)
+          candidates: N
+          would_update|updated: N
+          changes:
+            <drawer-id>: <old-code> [<old-qid>] -> <new-code> [<new-qid>]
+
+        Common mistakes:
+          - Running mode=all before inspecting a dry-run.
+          - Expecting the tool to change room/wing placement. It only repairs
+            the stored FDC/Q-ID lattice anchor.
+          - Treating 000 as a bug. 000 is the intentional unclassified sentinel
+            for content the classifier should not force into a knowledge class.
+        """
 
     private static let palaceImportGuide = """
         moot_palace_import — import a MemPalace directly into the estate.

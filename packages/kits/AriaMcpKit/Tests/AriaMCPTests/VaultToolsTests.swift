@@ -30,7 +30,7 @@ struct VaultToolsTests {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        return try await kit.open(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     }
 
     @discardableResult
@@ -109,8 +109,8 @@ struct VaultToolsTests {
         // moot_palace_import is also hidden when vault is off: it opens
         // arbitrary local SQLite files (same security posture as vault tools).
         #expect(!names.contains("moot_palace_import"))
-        // Vault-off removes the five moot_vault_* tools plus palace import: 57.
-        #expect(toolsOff.count == 57)
+        // Vault-off removes the five moot_vault_* tools plus palace import: 60.
+        #expect(toolsOff.count == 60)
     }
 
     /// Vault is on when MOOTX01_VAULT is absent from the environment.
@@ -118,7 +118,7 @@ struct VaultToolsTests {
         let toolsNoEnv = ToolProjection.tools(environment: [:])
         let names = Set(toolsNoEnv.map(\.name))
         #expect(names.contains("moot_vault_export"))
-        #expect(toolsNoEnv.count == 63)
+        #expect(toolsNoEnv.count == 66)
     }
 
     /// vaultEnabled(environment:) reads the env var correctly.
@@ -220,8 +220,14 @@ struct VaultToolsTests {
         #expect(pre.contains("no export manifest"))
 
         // export starts the background Task and returns a job_id immediately.
+        // CAND-032: the default scope (`exportable`) only exports drawers
+        // explicitly marked public; `capture` drawers are born private, so
+        // without `scope: believed` this export writes zero notes and the
+        // manifest honestly reports noteCount 0 (same fix as the Rust
+        // round-trip test in dispatch_tests.rs).
         let exportLaunch = try await dispatcher.dispatch(
-            name: "moot_vault_export", arguments: args(["vaultPath": vault.path]))
+            name: "moot_vault_export",
+            arguments: args(["vaultPath": vault.path, "scope": "believed"]))
         let exportJobID = try extractJobID(from: exportLaunch)
 
         // Wait until the background Task finishes writing the vault + manifest.

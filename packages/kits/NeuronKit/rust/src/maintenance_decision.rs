@@ -54,6 +54,14 @@ pub struct AuditVerdict {
     /// Epoch milliseconds of the first broken entry; `None` falls back to
     /// the `"unknown"` stable tag so a break is never lost.
     pub first_broken_at_millis: Option<i64>,
+    /// Number of entries `UnifiedAuditLog` rejected at ingress
+    /// (content-hash mismatch) while building the snapshot this verdict
+    /// is derived from. AUDIT-ALERT-RESTORE (2026-07-09): ingress
+    /// rejection means a tampered entry never reaches the chain walk, so
+    /// `valid` alone can no longer surface tampering — `decide` step 0
+    /// alerts on this count independently of `valid`. Mirrors the Swift
+    /// `MaintenanceDecision.AuditVerdict.rejectedEntryCount`.
+    pub rejected_entry_count: usize,
 }
 
 /// An id paired with an age in seconds (the actor computes `now - filedAt`
@@ -151,8 +159,16 @@ pub fn decide(input: &Inputs) -> Outcome {
         }
     }
 
-    // Step 0: audit-chain integrity.
+    // Step 0: audit-chain integrity. Two independent alert conditions,
+    // checked separately so a cycle that somehow trips both (a broken
+    // chain AND ingress rejections) gets a proposal for each — they are
+    // different failure modes with different remediation targets. Mirrors
+    // `MaintenanceDecision.decide` step 0 (Swift).
     if let Some(audit) = input.audit {
+        // (a) The walked chain itself broke (HLC reversal, or a
+        // content-hash mismatch on an entry that somehow reached the
+        // walk — defence in depth; ingress rejection normally prevents
+        // this). Pre-existing behavior, unchanged.
         if !audit.valid {
             let tag = broken_tag(audit.first_broken_at_millis);
             consider(
@@ -161,6 +177,24 @@ pub fn decide(input: &Inputs) -> Outcome {
                 &mut suppressed,
                 format!("audit_integrity|{tag}"),
                 format!("audit-break-{tag}"),
+                Category::AuditIntegrity,
+                None,
+            );
+        }
+        // (b) AUDIT-ALERT-RESTORE (2026-07-09): entries were rejected at
+        // ingress before they ever reached the walk, so `valid` alone
+        // cannot surface this. Keyed on the rejected count rather than a
+        // fixed tag: a steady/unchanged count is suppressed like any
+        // other B-4 duplicate (already alerted), but a NEW, larger count
+        // (more tampering since the last alert) gets its own key and
+        // proposes again.
+        if audit.rejected_entry_count > 0 {
+            consider(
+                &mut proposed,
+                &mut emitted,
+                &mut suppressed,
+                format!("audit_integrity_rejected|{}", audit.rejected_entry_count),
+                format!("audit-rejected-{}", audit.rejected_entry_count),
                 Category::AuditIntegrity,
                 None,
             );
@@ -292,6 +326,7 @@ mod tests {
             audit: Some(AuditVerdict {
                 valid: true,
                 first_broken_at_millis: None,
+                rejected_entry_count: 0,
             }),
             forbidden_drawer_ids: forbidden,
             aged_active: active,
@@ -366,6 +401,7 @@ mod tests {
             audit: Some(AuditVerdict {
                 valid: false,
                 first_broken_at_millis: Some(2000),
+                rejected_entry_count: 0,
             }),
             forbidden_drawer_ids: &empty,
             aged_active: &no_aged,
@@ -384,6 +420,98 @@ mod tests {
         assert_eq!(d.category, Category::AuditIntegrity);
         assert_eq!(d.target, "audit-break-2000");
         assert_eq!(d.key, "audit_integrity|2000");
+    }
+
+    // MD-2b: AUDIT-ALERT-RESTORE (2026-07-09) — a valid chain (ingress
+    // already rejected the tampered entries, so the walk itself is clean)
+    // still emits an audit-integrity decision when rejected_entry_count > 0,
+    // keyed distinctly from the broken-chain case.
+    #[test]
+    fn md2b_valid_chain_with_rejections_emits_integrity_decision() {
+        let empty: Vec<String> = vec![];
+        let no_aged: Vec<AgedRow> = vec![];
+        let no_drift: Vec<DriftRow> = vec![];
+        let seen = BTreeSet::new();
+        let input = Inputs {
+            audit: Some(AuditVerdict {
+                valid: true,
+                first_broken_at_millis: None,
+                rejected_entry_count: 1,
+            }),
+            forbidden_drawer_ids: &empty,
+            aged_active: &no_aged,
+            decay_window_seconds: 2_592_000.0,
+            aged_tombstoned: &no_aged,
+            tombstone_grace_seconds: 604_800.0,
+            fingerprint_drift: &no_drift,
+            fingerprint_drift_threshold: 0.25,
+            reference_drift: &no_drift,
+            by_reference_drift_threshold: 0.25,
+            already_proposed_keys: &seen,
+        };
+        let out = decide(&input);
+        assert_eq!(out.emitted.len(), 1, "exactly the ingress-rejection integrity proposal");
+        let d = &out.emitted[0];
+        assert_eq!(d.category, Category::AuditIntegrity);
+        assert_eq!(d.target, "audit-rejected-1");
+        assert_eq!(d.key, "audit_integrity_rejected|1");
+    }
+
+    // MD-2c: a second cycle with the SAME rejected count is suppressed as a
+    // B-4 duplicate (already alerted); a cycle with a LARGER count proposes
+    // again under a new key.
+    #[test]
+    fn md2c_same_rejected_count_suppressed_larger_count_proposes_again() {
+        let empty: Vec<String> = vec![];
+        let no_aged: Vec<AgedRow> = vec![];
+        let no_drift: Vec<DriftRow> = vec![];
+        let seen = BTreeSet::new();
+        let first = decide(&Inputs {
+            audit: Some(AuditVerdict { valid: true, first_broken_at_millis: None, rejected_entry_count: 1 }),
+            forbidden_drawer_ids: &empty,
+            aged_active: &no_aged,
+            decay_window_seconds: 2_592_000.0,
+            aged_tombstoned: &no_aged,
+            tombstone_grace_seconds: 604_800.0,
+            fingerprint_drift: &no_drift,
+            fingerprint_drift_threshold: 0.25,
+            reference_drift: &no_drift,
+            by_reference_drift_threshold: 0.25,
+            already_proposed_keys: &seen,
+        });
+        assert_eq!(first.emitted.len(), 1);
+
+        let second = decide(&Inputs {
+            audit: Some(AuditVerdict { valid: true, first_broken_at_millis: None, rejected_entry_count: 1 }),
+            forbidden_drawer_ids: &empty,
+            aged_active: &no_aged,
+            decay_window_seconds: 2_592_000.0,
+            aged_tombstoned: &no_aged,
+            tombstone_grace_seconds: 604_800.0,
+            fingerprint_drift: &no_drift,
+            fingerprint_drift_threshold: 0.25,
+            reference_drift: &no_drift,
+            by_reference_drift_threshold: 0.25,
+            already_proposed_keys: &first.updated_proposed_keys,
+        });
+        assert_eq!(second.emitted.len(), 0, "identical rejected count already alerted");
+        assert_eq!(second.suppressed_duplicates, 1);
+
+        let third = decide(&Inputs {
+            audit: Some(AuditVerdict { valid: true, first_broken_at_millis: None, rejected_entry_count: 2 }),
+            forbidden_drawer_ids: &empty,
+            aged_active: &no_aged,
+            decay_window_seconds: 2_592_000.0,
+            aged_tombstoned: &no_aged,
+            tombstone_grace_seconds: 604_800.0,
+            fingerprint_drift: &no_drift,
+            fingerprint_drift_threshold: 0.25,
+            reference_drift: &no_drift,
+            by_reference_drift_threshold: 0.25,
+            already_proposed_keys: &second.updated_proposed_keys,
+        });
+        assert_eq!(third.emitted.len(), 1, "a larger rejected count is a new, unsuppressed alert");
+        assert_eq!(third.emitted[0].key, "audit_integrity_rejected|2");
     }
 
     // MD-3: a clean chain proposes nothing for the audit category.

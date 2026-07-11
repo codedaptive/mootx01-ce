@@ -119,4 +119,39 @@ struct AnticipateTests {
         #expect(typedPrediction.count == 4)
         #expect(voicedPrediction.count == 4)
     }
+
+    // Security invariant (Codex 3269c59 verification): the recipe deliberately
+    // owns the confirmation axis (dual confirmed/unconfirmed recall computes a
+    // differentiated success rate — unconfirmed rows are the non-success
+    // signal, not a leak). But `withoutConfirmationLevel` must strip ONLY the
+    // confirmation-level filters — the caller's real access gate,
+    // `.sensitivityAtMost`, and every other scoping filter must survive so the
+    // two recalls stay bounded by the caller's clearance. This test locks it.
+    @Test("withoutConfirmationLevel preserves sensitivity and other filters")
+    func withoutConfirmationLevelPreservesSensitivity() {
+        let chain: [Filter] = [
+            .userConfirmed,
+            .sensitivityAtMost(.elevated),
+            .unconfirmed,
+            .inWing("study"),
+            .automatedConfirmedOnly,
+        ]
+        let base = Anticipate.withoutConfirmationLevel(chain)
+        // Confirmation-level filters removed.
+        #expect(!base.contains {
+            switch $0 {
+            case .userConfirmed, .automatedConfirmedOnly, .unconfirmed: return true
+            default: return false
+            }
+        })
+        // The access gate and other scoping filters survive.
+        #expect(base.contains {
+            if case .sensitivityAtMost(.elevated) = $0 { return true }
+            return false
+        }, "the caller's sensitivity ceiling must NOT be stripped alongside confirmation")
+        #expect(base.contains {
+            if case .inWing(let w) = $0 { return w == "study" }
+            return false
+        }, "wing scoping must survive the confirmation strip")
+    }
 }

@@ -12,12 +12,12 @@ import Foundation
 ///
 /// Fixture note: graphTopology runs FULL Louvain (detectFull) at the lens
 /// resolution gamma = NeuronKit.topologyResolution (0.05). At that gamma,
-/// small dense fixtures merge aggressively — two triangles joined by a
+/// small dense explicit fixtures merge aggressively — two triangles joined by a
 /// full-weight tunnel bridge become ONE community (condensed merge gain
-/// +0.078 > 0), and a lattice 3-star merges completely. Fixtures that must
-/// stay split therefore use DISJOINT components (no gamma merges across a
-/// missing edge). Expected community counts below were measured against
-/// detectFull at gamma 0.05 and asserted exactly.
+/// +0.078 > 0). Lattice overlays are emitted as edges but are not Louvain input.
+/// Fixtures that must stay split therefore use DISJOINT explicit components.
+/// Expected community counts below were measured against detectFull at gamma
+/// 0.05 and asserted exactly.
 @Suite("NeuronKit graphTopology — topology analysis contract")
 struct TopologyAnalysisTests {
 
@@ -159,12 +159,11 @@ struct TopologyAnalysisTests {
 
     // MARK: - star-of-pairs (the live-estate pathology, end-to-end)
 
-    /// The reason MISSION_LOUVAIN_PHASE2 exists: tunnel-bonded pairs sharing
-    /// a lattice address fragmented into locked pair-communities under
-    /// phase-1 Louvain. Through detectFull at the lens resolution, the
-    /// lattice star absorbs every pair — ONE community end-to-end.
-    @Test("star-of-pairs: tunnel-bonded pairs sharing a lattice address form ONE community")
-    func starOfPairsOneCommunity() throws {
+    /// Lattice overlays are visible evidence, not default clustering force:
+    /// tunnel-bonded pairs sharing a storage address remain pair communities
+    /// unless explicit/semantic structure connects them.
+    @Test("star-of-pairs: shared lattice address draws overlay edges but does not merge communities")
+    func starOfPairsLatticeOverlayDoesNotMerge() throws {
         // 8 drawers = 4 tunnel-bonded pairs, all sharing udcCode "652".
         // Lattice bonding stars every drawer to the earliest-filed hub
         // (p0a) at weight 0.2; the pair tunnels are weight 1.0.
@@ -178,14 +177,10 @@ struct TopologyAnalysisTests {
             tunnels.append(tunnel(a, b))
         }
         let topo = NeuronKit.graphTopology(drawers: drawers, tunnels: tunnels, facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
-        // Phase-1 alone locks the 4 pairs (leaving a 1.0 pair bond for a
-        // 0.2 lattice bond is strictly negative gain). At gamma 0.05 the
-        // condensed pair supernodes (k = 2.4, edge 0.4 into the hub pair)
-        // merge: absorption bound 0.4/2.4 ≈ 0.167 > 0.05.
-        #expect(topo.communityCount == 1)
-        #expect(topo.communities.count == 1)
-        #expect(topo.communities.first?.size == 8)
-        #expect(topo.communities.first?.dominantUdcCode == "652")
+        #expect(topo.edges.filter { $0.edgeType == "lattice" }.count == 7)
+        #expect(topo.communityCount == 4)
+        #expect(topo.communities.map { $0.size } == [2, 2, 2, 2])
+        #expect(topo.communities.allSatisfy { $0.dominantUdcCode == "652" })
     }
 
     // MARK: - tombstones (dissolution)
@@ -283,10 +278,8 @@ struct TopologyAnalysisTests {
     /// Contract 1: Three drawers sharing a non-empty udcCode with no tunnels
     /// produce 2 lattice edges (hub→M1, hub→M2), all weight 0.2, nil timestamps.
     ///
-    /// Community merging: at the lens resolution (gamma 0.05) the pure
-    /// 3-star collapses completely — the last node's gain, exactly 0 under
-    /// classical modularity, becomes strictly positive once gamma scales the
-    /// penalty term (0.5 − 0.05·0.5 = +0.475). One community of 3.
+    /// Community detection ignores lattice overlays, so the pure 3-star remains
+    /// three singleton communities unless explicit/semantic structure links it.
     @Test("three drawers sharing a udcCode produce lattice star edges from the earliest hub")
     func latticeStarEdges() throws {
         let t1 = Date(timeIntervalSince1970: 1_700_000_100)
@@ -309,8 +302,8 @@ struct TopologyAnalysisTests {
         // Derived bonds carry nil timestamps — no single ingest instant, live-only.
         #expect(lat.allSatisfy { $0.createdTs == nil })
         #expect(lat.allSatisfy { $0.tombstonedTs == nil })
-        // The whole star merges at the lens resolution.
-        #expect(topo.communityCount == 1)
+        #expect(topo.communityCount == 3)
+        #expect(topo.communities.map { $0.size } == [1, 1, 1])
     }
 
     /// Contract 2: Hub selection is deterministic regardless of input order.
@@ -395,9 +388,9 @@ struct TopologyAnalysisTests {
                 "explicit tunnel connections outrank derived lattice classification in centrality")
     }
 
-    /// Contract 4: Drawers with empty udcCode are never lattice-bonded;
+    /// Contract 4: Drawers with empty or "000" udcCode are never lattice-bonded;
     /// singleton groups (only one drawer with a given code) produce no edges.
-    @Test("empty udcCode and singleton groups produce zero lattice edges")
+    @Test("empty and 000 udcCode plus singleton groups produce zero lattice edges")
     func latticeEmptyCodeAndSingletons() {
         let d1 = TopologyDrawerInput(id: "a", udcCode: "",
                                      filedAt: t0, eventTime: t0,
@@ -405,12 +398,33 @@ struct TopologyAnalysisTests {
         let d2 = TopologyDrawerInput(id: "b", udcCode: "",
                                      filedAt: t0, eventTime: t0,
                                      tombstoned: false, tombstonedAt: nil)
+        let d000a = TopologyDrawerInput(id: "u0", udcCode: "000",
+                                        filedAt: t0, eventTime: t0,
+                                        tombstoned: false, tombstonedAt: nil)
+        let d000b = TopologyDrawerInput(id: "u1", udcCode: "000",
+                                        filedAt: t0, eventTime: t0,
+                                        tombstoned: false, tombstonedAt: nil)
         // "999" has only one member — no star edge.
         let d3 = TopologyDrawerInput(id: "c", udcCode: "999",
                                      filedAt: t0, eventTime: t0,
                                      tombstoned: false, tombstonedAt: nil)
-        let topo = NeuronKit.graphTopology(drawers: [d1, d2, d3], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+        let topo = NeuronKit.graphTopology(drawers: [d1, d2, d000a, d000b, d3], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
         #expect(topo.edges.filter { $0.edgeType == "lattice" }.isEmpty)
+    }
+
+    @Test("000 is ignored when selecting a community's dominant code")
+    func dominantCodeSkipsUnclassifiedSentinel() throws {
+        let topo = NeuronKit.graphTopology(
+            drawers: [
+                drawer("a", udc: "000"),
+                drawer("b", udc: "000"),
+                drawer("c", udc: "510"),
+            ],
+            tunnels: [tunnel("a", "b"), tunnel("b", "c"), tunnel("a", "c")],
+            facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+        let community = try #require(topo.communities.first)
+        #expect(community.size == 3)
+        #expect(community.dominantUdcCode == "510")
     }
 
     /// Contract 5: A tombstoned drawer sharing a udcCode with live drawers
@@ -435,5 +449,81 @@ struct TopologyAnalysisTests {
         #expect(latEdge.source == "live-1")
         #expect(latEdge.target == "live-2")
         #expect(!lat.contains { $0.source == "dead" || $0.target == "dead" })
+    }
+
+    // MARK: - udcCode carry-through (V2-P1a)
+
+    @Test("non-empty udcCode passes through to GraphTopologyNode on live and dead nodes")
+    func udcCodeCarryThrough() throws {
+        let live = TopologyDrawerInput(id: "anchor", udcCode: "615.85",
+                                       filedAt: t0, eventTime: t0,
+                                       tombstoned: false, tombstonedAt: nil)
+        let dead = TopologyDrawerInput(id: "gone", udcCode: "657",
+                                       filedAt: t0, eventTime: t0,
+                                       tombstoned: true, tombstonedAt: t0.addingTimeInterval(60))
+        let topo = NeuronKit.graphTopology(
+            drawers: [live, dead], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+
+        let liveNode = try #require(topo.nodes.first { $0.id == "anchor" })
+        #expect(liveNode.udcCode == "615.85", "non-empty code must be carried through on live node")
+
+        let deadNode = try #require(topo.nodes.first { $0.id == "gone" })
+        #expect(deadNode.udcCode == "657", "dead nodes retain their udcCode")
+    }
+
+    @Test("empty-string udcCode (unanchored sentinel) normalises to nil")
+    func udcCodeEmptyNormalisesToNil() throws {
+        let unanchored = TopologyDrawerInput(id: "x", udcCode: "",
+                                             filedAt: t0, eventTime: t0,
+                                             tombstoned: false, tombstonedAt: nil)
+        let topo = NeuronKit.graphTopology(
+            drawers: [unanchored], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+
+        let node = try #require(topo.nodes.first { $0.id == "x" })
+        #expect(node.udcCode == nil, "empty-string udcCode must normalise to nil at GraphTopologyNode boundary")
+    }
+
+    @Test("GraphTopologyNode JSON round-trip: udcCode present when set, key absent when nil, tolerates legacy JSON")
+    func graphTopologyNodeUdcCodeJsonRoundTrip() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        // GraphTopologyNode is Codable; verify the wire contract:
+        // udcCode present in JSON when set; key absent (not null) when nil;
+        // decodes without error when key is missing (tolerates pre-V2-P1a snapshots).
+        let live = TopologyDrawerInput(id: "anchored", udcCode: "510",
+                                       filedAt: t0, eventTime: t0,
+                                       tombstoned: false, tombstonedAt: nil)
+        let unanchored = TopologyDrawerInput(id: "none", udcCode: "",
+                                             filedAt: t0, eventTime: t0,
+                                             tombstoned: false, tombstonedAt: nil)
+        let topo = NeuronKit.graphTopology(
+            drawers: [live, unanchored], tunnels: [], facts: [], estate: "", now: Date(timeIntervalSince1970: 0))
+
+        let anchored = try #require(topo.nodes.first { $0.id == "anchored" })
+        let none     = try #require(topo.nodes.first { $0.id == "none" })
+
+        // Encode the anchored node and verify JSON key is present.
+        let anchoredData = try encoder.encode(anchored)
+        let anchoredJSON = try #require(
+            try? JSONSerialization.jsonObject(with: anchoredData) as? [String: Any])
+        #expect(anchoredJSON["udcCode"] as? String == "510",
+                "udcCode key must be present in JSON when code is set")
+
+        // Encode the unanchored node and verify JSON key is absent (not null).
+        let noneData = try encoder.encode(none)
+        let noneJSON = try #require(
+            try? JSONSerialization.jsonObject(with: noneData) as? [String: Any])
+        #expect(noneJSON["udcCode"] == nil,
+                "udcCode key must be absent in JSON when code is nil — not null")
+
+        // Decode a JSON snapshot that lacks udcCode — tolerate absence (older snapshots).
+        let oldSnapshotJSON = """
+            {"id":"legacy","communityId":0,"centrality":0.5,"tombstonedTs":null,\
+             "anomaly":false,"nounType":0}
+            """.data(using: .utf8)!
+        let legacy = try decoder.decode(GraphTopologyNode.self, from: oldSnapshotJSON)
+        #expect(legacy.udcCode == nil,
+                "GraphTopologyNode must decode without error when udcCode key is absent")
     }
 }

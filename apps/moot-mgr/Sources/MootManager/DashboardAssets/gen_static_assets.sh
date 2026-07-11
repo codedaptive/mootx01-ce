@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # gen_static_assets.sh — regenerate StaticAssets.swift from the editable
-# DashboardAssets/ source files (index.html, app.css, app.js).
+# DashboardAssets/ source files (index.html, app.css, app.js, semantic-zoom.mjs).
 #
 # The dashboard's HTML/CSS/JS live as readable, diffable source files in this
 # directory, but the resident host serves them as in-binary string constants
@@ -32,13 +32,14 @@ if [ -f "$out" ] && \
    [ "$out" -nt "$here/index.html" ] && \
    [ "$out" -nt "$here/app.css" ] && \
    [ "$out" -nt "$here/app.js" ] && \
+   [ "$out" -nt "$here/semantic-zoom.mjs" ] && \
    [ "$out" -nt "$here/three.min.js" ] && \
    [ "$out" -nt "$here/OrbitControls.js" ]; then
   echo "StaticAssets.swift is up to date, skipping regeneration"
   exit 0
 fi
 
-for f in index.html app.css app.js three.min.js OrbitControls.js; do
+for f in index.html app.css app.js semantic-zoom.mjs three.min.js OrbitControls.js; do
   if grep -qF '"""##' "$here/$f"; then
     echo "ERROR: $f contains the raw-string close delimiter; raise the delimiter." >&2
     exit 1
@@ -67,7 +68,7 @@ emit_asset() {
 // filesystem static-root. Because lookups go through a fixed allow-list
 // (`asset(for:)`) rather than mapping a request path onto a directory, there is
 // no path-traversal surface (§Security). The editable source
-// of truth is DashboardAssets/{index.html,app.css,app.js}.
+// of truth is DashboardAssets/{index.html,app.css,app.js,semantic-zoom.mjs}.
 
 import Foundation
 
@@ -84,6 +85,7 @@ HEADER
   emit_asset indexHTML index.html
   emit_asset appCSS app.css
   emit_asset appJS app.js
+  emit_asset semanticZoomJS semantic-zoom.mjs
   emit_asset threeJS three.min.js
   emit_asset orbitControlsJS OrbitControls.js
 
@@ -108,6 +110,8 @@ HEADER
             return Asset(body: appCSS, contentType: "text/css; charset=utf-8")
         case "/app.js":
             return Asset(body: appJS, contentType: "text/javascript; charset=utf-8")
+        case "/semantic-zoom.mjs":
+            return Asset(body: semanticZoomJS, contentType: "text/javascript; charset=utf-8")
         case "/three.min.js":
             return Asset(body: threeJS, contentType: "text/javascript; charset=utf-8")
         case "/OrbitControls.js":

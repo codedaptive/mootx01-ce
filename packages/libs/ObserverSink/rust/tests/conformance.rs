@@ -801,7 +801,7 @@ fn latest_metrics_by_names_and_dropboxes_group_count() {
             // The max ts for this group is the last row inserted for (name, dropbox).
             // Rows within one group share sequential timestamps; find the group's max.
             let all = store
-                .query_metrics_by_names(&[name], Some(dropbox))
+                .query_metrics_by_names(&[name], Some(dropbox), None)
                 .expect("group query must succeed");
             let max_ts = all.iter().map(|r| r.ts_epoch).fold(f64::NEG_INFINITY, f64::max);
             assert!(

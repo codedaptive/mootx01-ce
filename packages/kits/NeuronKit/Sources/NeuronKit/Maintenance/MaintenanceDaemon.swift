@@ -217,7 +217,8 @@ public actor MaintenanceDaemon {
                 Int64($0.timeIntervalSince1970 * 1000.0)
             }
             auditVerdict = MaintenanceDecision.AuditVerdict(
-                valid: report.valid, firstBrokenAtMillis: brokenMillis)
+                valid: report.valid, firstBrokenAtMillis: brokenMillis,
+                rejectedEntryCount: log.rejectedEntryCount)
         }
 
         // ── Steps 1–5 input gathering: read the seams and project each
@@ -263,17 +264,25 @@ public actor MaintenanceDaemon {
             byReferenceDriftThreshold: policy.byReferenceDriftThreshold,
             alreadyProposedKeys: proposedKeys
         )
-        proposedKeys = outcome.updatedProposedKeys
+        // B-4 idempotency: a key must enter the "already proposed" memory
+        // ONLY after its proposal is durably written. The previous code
+        // committed outcome.updatedProposedKeys wholesale here, before the
+        // async throwing propose loop below — so a transient sink failure on
+        // any frame left every key marked proposed while none (or only some)
+        // were persisted, permanently suppressing those findings on every
+        // later cycle. Each key is now inserted after ITS propose succeeds.
 
         // Enact the decisions: build one ProposeFrame per emitted decision
         // (in the core's scan order), choosing the ProposalKind and
         // justification from the category. The audit entry-count comes from
         // the in-scope `auditReport`; the drift fractions come from each
-        // decision's `detailValue`.
+        // decision's `detailValue`. A throw here aborts the cycle: keys whose
+        // propose has not yet run stay uncommitted and are retried next cycle.
         var emitted: [ProposeFrame] = []
         for decision in outcome.emitted {
             let frame = frame(for: decision, auditReport: auditReport)
             try await sink.propose(frame)
+            proposedKeys.insert(decision.key)
             emitted.append(frame)
         }
         let suppressed = outcome.suppressedDuplicates
@@ -522,8 +531,26 @@ public actor MaintenanceDaemon {
     ) -> ProposeFrame {
         switch decision.category {
         case .auditIntegrity:
-            // The break tag is the suffix of the audit key after the "|".
+            // The tag is the suffix of the audit key after the "|". Two key
+            // prefixes share this category: "audit_integrity|<brokenTag>"
+            // (a broken chain walk) and "audit_integrity_rejected|<count>"
+            // (AUDIT-ALERT-RESTORE, 2026-07-09: entries dropped at ingress
+            // before the walk ever saw them) — distinguish on the prefix so
+            // each gets a justification that names its own failure mode.
             let tag = decision.key.split(separator: "|", maxSplits: 1).last.map(String.init) ?? "unknown"
+            if decision.key.hasPrefix("audit_integrity_rejected|") {
+                return ProposeFrame(
+                    target: decision.target,
+                    // No typed ProposalKind case exists for audit integrity;
+                    // use the documented `.other` escape hatch rather than
+                    // adding a case to GLK's ProposalKind.
+                    kind: .other("audit_integrity"),
+                    justification:
+                        "maintenance: audit-log ingress rejected \(tag) "
+                        + "content-hash-mismatched (tampered or corrupted) "
+                        + "entr\(tag == "1" ? "y" : "ies") — chain walk itself "
+                        + "verifies clean because ingress already dropped them")
+            }
             return ProposeFrame(
                 target: decision.target,
                 // No typed ProposalKind case exists for audit integrity;

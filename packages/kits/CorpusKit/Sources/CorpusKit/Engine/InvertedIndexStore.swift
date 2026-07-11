@@ -199,6 +199,20 @@ public actor InvertedIndexStore {
         // Remove existing state for this item first (idempotent re-index).
         try await deleteFromStorage(itemID: itemID)
 
+        // ramResident cache coherence (SECURITY): the durable delete above
+        // does not touch the RAM mirror, and the re-add below only writes the
+        // NEW tokens — so a term present in the OLD tokenization but absent
+        // from the new one would linger in ramTermFreqs and still surface this
+        // item on a BM25 query for that stale term. Purge this item's prior
+        // entries from the mirror before re-adding.
+        if ramTermFreqs != nil {
+            for term in Array(ramTermFreqs?.keys ?? [:].keys) {
+                ramTermFreqs?[term]?.removeValue(forKey: itemID)
+                if ramTermFreqs?[term]?.isEmpty == true { ramTermFreqs?.removeValue(forKey: term) }
+            }
+            ramDocLengths?.removeValue(forKey: itemID)
+        }
+
         guard !tokens.isEmpty else { isDirty = true; return }
 
         var tf = [String: Int]()
@@ -252,6 +266,13 @@ public actor InvertedIndexStore {
     /// compatibility but the data is NOT copied into RAM dictionaries.
     public func foldPostings(_ items: [(itemID: String, tf: [String: Int], docLen: Int)]) {
         isDirty = true
+        // ramResident cache coherence (SECURITY): an external shard merge has
+        // written new postings to the durable iix_* tables, but the RAM mirror
+        // still holds the pre-merge maps and `buildIndex` trusts a non-nil
+        // mirror over SQLite. Drop the mirror so the next buildIndex reloads
+        // the merged data from disk (matches the remove()/deleteAll() pattern).
+        ramTermFreqs = nil
+        ramDocLengths = nil
     }
 
     /// Remove a document from the index.

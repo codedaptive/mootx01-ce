@@ -142,6 +142,25 @@ if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     chown -h "$REAL_USER" "$LOCAL_BIN/moot-mgr" 2>/dev/null
 fi
 
+# ── Restart resident services (upgrade path) ─────────────────────────────────
+# The .pkg replaces the binaries on disk, but an already-running resident
+# daemon and management console keep executing the OLD image until they are
+# restarted — an upgrade otherwise looks like it "didn't take" (stale
+# dashboard, stale daemon) until reboot. `kickstart -k` kills and restarts a
+# job only if it is loaded, so on a fresh install (nothing loaded yet) both
+# calls are silent no-ops. Daemon first, console second, matching
+# LaunchAgent.restart() so the console reconnects to the fresh daemon.
+# Labels mirror MootPaths.daemonLabel / MootPaths.launchAgentLabel in
+# apps/mootx01/Sources/MootInstallerCore/Paths.swift — keep in sync.
+# Best-effort: never fails the install.
+if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
+    REAL_UID="$(id -u "$REAL_USER" 2>/dev/null)"
+    if [ -n "$REAL_UID" ]; then
+        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.daemon" 2>/dev/null
+        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.mgr"    2>/dev/null
+    fi
+fi
+
 # ── Launch setup assistant ────────────────────────────────────────────────────
 # Best-effort. If this fails for any reason the user can always run
 # `mootx01 install` from a terminal.

@@ -85,6 +85,17 @@ public enum ToolProjection {
         vaultEnabled(environment: ProcessInfo.processInfo.environment)
     }
 
+    /// True when the Anthropic memory_20250818 adapter is enabled.
+    /// Opt-in: requires MOOTX01_MEMORY_TOOL=1 (set by `mootx01 enable memory-tool`).
+    /// Default (absent or any value ≠ "1") is OFF.
+    public static func memoryToolEnabled(environment: [String: String]) -> Bool {
+        environment["MOOTX01_MEMORY_TOOL"] == "1"
+    }
+
+    public static var memoryToolEnabled: Bool {
+        memoryToolEnabled(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// The complete advertised tool list.
     ///
     /// Order: tier 1–5 interface tools, then federation, recipe, lens, vault.
@@ -103,6 +114,11 @@ public enum ToolProjection {
     /// Production code uses `tools()` (no args).
     public static func tools(environment: [String: String]) -> [ProjectedTool] {
         var raw: [ProjectedTool] = []
+        // Anthropic memory_20250818 adapter: opt-in via MOOTX01_MEMORY_TOOL=1
+        // (mootx01 enable memory-tool sets this in the daemon env).
+        if memoryToolEnabled(environment: environment) {
+            raw.append(contentsOf: memoryAdapterTools())
+        }
         raw.append(contentsOf: coreMemoryTools())
         raw.append(contentsOf: connectionTools())
         raw.append(contentsOf: knowledgeGraphTools())
@@ -131,6 +147,12 @@ public enum ToolProjection {
                 provenance: tool.provenance
             )
         }
+    }
+
+    // MARK: - Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+
+    private static func memoryAdapterTools() -> [ProjectedTool] {
+        [memoryTool()]
     }
 
     // MARK: - Tier 1: Core Memory (8 tools)
@@ -389,7 +411,7 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Tier 5: Estate (3 tools) + Maintenance (2 tools)
+    // MARK: - Tier 5: Estate (3 tools) + Maintenance (3 tools)
 
     private static func estateTools() -> [ProjectedTool] {
         [
@@ -462,6 +484,24 @@ public enum ToolProjection {
                 description: "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state; the corpus encode drain also reports its live encoded-chunk count. Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Today the only drain is the corpus encode/ingest queue.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [:],
+                    required: []
+                )),
+                provenance: .interface
+            ),
+            // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
+            // Recomputes stored FDC lattice anchors with the current deterministic
+            // classifier. Dry-run by default. `mode: suspectOnly` restricts changes
+            // to stale false positives/empty anchors; `mode: all` intentionally
+            // rewrites every changed active drawer anchor from content.
+            ProjectedTool(
+                name: "moot_reclassify_fdc",
+                description: "Maintenance: audit or repair stored FDC lattice anchors using the current deterministic classifier. Default is a dry-run in mode \"suspectOnly\", which reports likely stale/polluted anchors without writing. Pass apply=true to write repairs. Pass mode=\"all\" only when intentionally resetting every changed active drawer's stored FDC anchor from content; this can overwrite manually curated anchors. Output reports drawer IDs and old/new anchors, not memory content.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "apply": booleanSchema("Optional. false (default) is dry-run; true writes candidate anchor changes through the audited reanchor path."),
+                        "mode": stringSchema("Optional repair scope: \"suspectOnly\" (default, conservative repair of likely stale false positives/empty anchors) or \"all\" (reset every changed active drawer anchor from content)."),
+                        "limit": integerSchema("Optional maximum active drawers to scan for this run. Omit to scan the full active estate."),
+                    ],
                     required: []
                 )),
                 provenance: .interface

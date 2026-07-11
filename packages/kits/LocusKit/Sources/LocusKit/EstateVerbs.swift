@@ -1563,6 +1563,21 @@ public extension Estate {
                 "reanchor: toWing must not be empty or whitespace-only"
             )
         }
+        // Room non-empty invariant: mirror the capture-path guard (see this
+        // file's capture() `room must not be empty`). An empty room is the
+        // ContainerFingerprintStore wing-rollup sentinel and is excluded from
+        // roomLevelEntries — a drawer reanchored to "" is skipped by pruned
+        // recall paths (hidden from recall). reanchor must not produce estate
+        // state capture would refuse.
+        if let r = toRoom, r.isEmpty {
+            throw LocusKitError.invalidContent("reanchor: toRoom must not be empty")
+        }
+        // UDC non-empty invariant (spec I-5): mirror the capture-path guard.
+        // An empty lattice code poisons lattice/audit placement state.
+        if let l = toLattice, l.udcCode.isEmpty {
+            throw LocusKitError.invalidContent(
+                "reanchor: toLattice.udcCode must not be empty (spec I-5)")
+        }
         guard try await store.getDrawer(id: rowID) != nil else {
             throw LocusKitError.drawerNotFound(id: rowID)
         }
@@ -1591,12 +1606,14 @@ public extension Estate {
     ///   - rowID: the drawer whose anchor to update.
     ///   - toLattice: the new lattice anchor (with the resolved Q-ID).
     ///   - changedBy: audit provenance — the agent driving the update.
+    ///   - reason: audit reason recorded with the anchor mutation.
     ///   - now: deterministic write timestamp.
     /// - Throws: `LocusKitError.drawerNotFound` if the row is absent.
     func reanchorAnchor(
         rowID: RowID,
         toLattice: LatticeAnchor,
         changedBy: String,
+        reason: String = "anchor Q-ID resolved via enrichment-proposal acceptance",
         now: Date
     ) async throws {
         guard try await store.getDrawer(id: rowID) != nil else {
@@ -1607,7 +1624,7 @@ public extension Estate {
             toRoom: nil,
             toLattice: toLattice,
             changedBy: changedBy,
-            reason: "anchor Q-ID resolved via enrichment-proposal acceptance",
+            reason: reason,
             now: now
         )
     }

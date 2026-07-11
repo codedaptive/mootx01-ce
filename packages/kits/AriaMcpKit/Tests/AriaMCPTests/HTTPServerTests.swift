@@ -25,18 +25,36 @@ struct HTTPServerTests {
 
     // MARK: - Harness
 
-    /// Build a dispatcher wired to a fresh in-memory estate (mirrors ServerTests).
-    private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
+    /// Build a fresh in-memory estate (mirrors ServerTests).
+    private func makeKitAndHandle() async throws -> (GeniusLocusKit, EstateHandle) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-http-tests")
         let storage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        return (kit, handle)
+    }
+
+    /// Build a dispatcher wired to a fresh in-memory estate.
+    private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
+        let (kit, handle) = try await makeKitAndHandle()
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
         let tooling = ToolDispatcher(kit: kit, handle: handle)
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
+    }
+
+    /// Build a dispatcher and keep direct access to the same estate for seeding.
+    private func makeDispatcherWithEstate() async throws -> (
+        dispatcher: ARIA_MCPDispatcher,
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) {
+        let (kit, handle) = try await makeKitAndHandle()
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let tooling = ToolDispatcher(kit: kit, handle: handle)
+        return (ARIA_MCPDispatcher(info: info, tooling: tooling), kit, handle)
     }
 
     /// Bind an HTTPServer on an OS-assigned port and serve connections on a
@@ -511,6 +529,39 @@ struct HTTPServerTests {
         let text = String(data: resp, encoding: .utf8) ?? ""
         #expect(text.hasPrefix("HTTP/1.1 200"),
                 "GET /api/graph with loopback Host must return 200; got: \(text.prefix(40))")
+    }
+
+    @Test func httpGetLatticeOmitsUnclassifiedSentinel() async throws {
+        let fixture = try await makeDispatcherWithEstate()
+
+        _ = try await fixture.kit.capture(fixture.handle, CaptureFrame(
+            content: "git status\nrm .git/index.lock",
+            channel: .importedFile,
+            room: "http-lattice",
+            latticeAnchor: .udc("000"),
+            addedBy: "http-tests",
+            embeddingModelID: "test-model"
+        ))
+        _ = try await fixture.kit.capture(fixture.handle, CaptureFrame(
+            content: "computing systems and data processing",
+            channel: .importedFile,
+            room: "http-lattice",
+            latticeAnchor: .udc("006"),
+            addedBy: "http-tests",
+            embeddingModelID: "test-model"
+        ))
+
+        let (port, stop) = try startServing(fixture.dispatcher)
+        defer { stop() }
+
+        let result = try #require(httpRequest(port: port, method: "GET", body: "", path: "/api/lattice"))
+        #expect(result.status == 200)
+
+        let json = try #require(try JSONSerialization.jsonObject(with: result.body) as? [String: Any])
+        let addresses = try #require(json["addresses"] as? [[String: Any]])
+        #expect(addresses.count == 1)
+        #expect(addresses.first?["code"] as? String == "006")
+        #expect(addresses.first?["count"] as? Int == 1)
     }
 
     /// GET /api/graph with absent Host must succeed (curl omits Host).

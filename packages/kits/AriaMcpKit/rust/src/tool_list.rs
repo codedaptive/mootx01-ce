@@ -2,13 +2,14 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition.
-//!   Tier 1 (8)  — core memory: file, search, get, update, withdraw, erase, confirm, move
+//!   Tier 1 (9)  — core memory: file, search, list, get, update, withdraw, erase, confirm, move
 //!   Tier 2 (3)  — connections: link, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
 //!   Monitoring (1) — moot_monitoring_status (ADR-025 wave 8.2, telemetry flag R/W)
-//!   Maintenance (2/3) — moot_reindex, moot_drain_status, and vault-gated moot_palace_import
+//!   Maintenance (3/4) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
+//!                       and vault-gated moot_palace_import
 //!   Federation (1) — moot_federated_search
 //!   Recipe (11) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
 //!                 recall_precise, recall_shaped, dream,
@@ -16,11 +17,12 @@
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
 //!
-//! The 8th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
+//! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 64 tools (ADR-025 wave 8.2 added moot_monitoring_status).
-//! Vault-off (MOOTX01_VAULT=0): 58 tools —
+//! Vault-on (default): 66 tools (ADR-025 wave 8.2 added moot_monitoring_status;
+//! FDC reset added moot_reclassify_fdc).
+//! Vault-off (MOOTX01_VAULT=0): 60 tools —
 //! the five moot_vault_* tools and moot_palace_import are hidden together
 //! because all open local SQLite files (filesystem import/export vector).
 //!
@@ -49,11 +51,12 @@ pub fn vault_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 64 tools when vault is enabled (the default) or 58 tools when
+/// Produces 66 tools when vault is enabled (the default) or 60 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). The filesystem-importing
 /// `moot_palace_import` tool is hidden with the vault surface (same security
 /// posture). All other non-vault tiers are always present. See ADR-015.
-/// ADR-025 wave 8.2 added `moot_monitoring_status` (count was 63/57 before).
+/// ADR-025 wave 8.2 added `moot_monitoring_status`; the FDC reset tool added
+/// `moot_reclassify_fdc`.
 pub fn build_tool_list() -> serde_json::Value {
     build_tool_list_with_vault_flag(vault_enabled())
 }
@@ -64,12 +67,11 @@ pub fn build_tool_list() -> serde_json::Value {
 /// Rust test runner). Production code uses `build_tool_list()` which reads
 /// the env var via `vault_enabled()`.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
-    // Vault-on: 64 tools (adds monitoring_status, +1 from 63 before wave 8.2).
-    // Vault-off: 58 tools (palace_import + 5 vault_* hidden; +1 from 57 before wave 8.2).
-    let capacity = if vault_on { 64 } else { 58 };
+    // Vault-on: 66 tools. Vault-off: 60 tools (palace_import + 5 vault_* hidden).
+    let capacity = if vault_on { 66 } else { 60 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
-    // Tier 1 — Core memory (8)
+    // Tier 1 — Core memory (9)
     tools.push(file_memory_tool());
     tools.push(memory_search_tool());
     tools.push(memory_list_tool());
@@ -110,6 +112,7 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // gated with the vault import/export surface (ADR-015).
     tools.push(reindex_tool());
     tools.push(drain_status_tool());
+    tools.push(reclassify_fdc_tool());
     if vault_on {
         tools.push(palace_import_tool());
     }
@@ -528,6 +531,24 @@ fn drain_status_tool() -> serde_json::Value {
     })
 }
 
+/// moot_reclassify_fdc — audit or repair stored FDC anchors with the current
+/// deterministic classifier. Dry-run by default. Mirrors Swift
+/// `ToolProjection.estateTools()` FDC maintenance entry.
+fn reclassify_fdc_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_reclassify_fdc",
+        "description": "Maintenance: audit or repair stored FDC lattice anchors using the current deterministic classifier. Default is a dry-run in mode \"suspectOnly\", which reports likely stale/polluted anchors without writing. Pass apply=true to write repairs. Pass mode=\"all\" only when intentionally resetting every changed active drawer's stored FDC anchor from content; this can overwrite manually curated anchors. Output reports drawer IDs and old/new anchors, not memory content.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "apply": boolean_schema("Optional. false (default) is dry-run; true writes candidate anchor changes through the audited reanchor path."),
+                "mode": string_schema("Optional repair scope: \"suspectOnly\" (default, conservative repair of likely stale false positives/empty anchors) or \"all\" (reset every changed active drawer anchor from content)."),
+                "limit": integer_schema("Optional maximum active drawers to scan for this run. Omit to scan the full active estate.")
+            }),
+            json!([])
+        )))
+    })
+}
+
 /// moot_palace_import — import a MemPalace directly into the estate, bypassing
 /// NoteIR. Reads three palace stores (chroma.sqlite3, tunnels.json,
 /// knowledge_graph.sqlite3) and applies all four import guards. Mirrors Swift
@@ -780,11 +801,6 @@ fn confirm_migration_tool() -> serde_json::Value {
                     "type": "array",
                     "description": "UUIDs of losing branches to discard.",
                     "items": { "type": "string" }
-                },
-                "disqualifiedBranchIDs": {
-                    "type": "array",
-                    "description": "UUIDs the run report disqualified.",
-                    "items": { "type": "string" }
                 }
             }),
             json!(["winnerBranchID"])
@@ -820,7 +836,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_contradiction" => "Reasoning lens: surface genuine semantic contradictions — drawer pairs linked by a contradicts tunnel and KG facts with conflicting objects for the same subject+predicate key.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
         "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
-        "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns.",
+        "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns. Confirmation-level filters in the recall frame (userConfirmed/unconfirmed) are ignored — the lens performs its own dual recall (confirmed = success, unconfirmed = non-success) to compute a differentiated rate; sensitivity and other scoping filters are honored.",
         "moot_lens_successors" => "Reasoning lens: suggest probable successor drawers via tunnel traversal.",
         "moot_lens_overlap" => "Reasoning lens: compute thematic overlap between two estates.",
         "moot_lens_divergence" => "Reasoning lens: measure topic divergence between two estates.",

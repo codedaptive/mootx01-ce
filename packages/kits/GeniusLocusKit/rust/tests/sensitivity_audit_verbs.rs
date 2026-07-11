@@ -105,11 +105,10 @@ fn record_sensitivity_read_under_grant_silently_skips_a_malformed_drawer_id() {
         .all(|e| e.verb != genius_locus_kit::audit::UnifiedAuditVerb::SensitivityReadUnderGrant));
 }
 
-// NOTE: no Rust equivalent of Swift's
-// `sensitivityGrantVerbsNeverReuseFederationReservedVerbs` test — Rust's
-// `UnifiedAuditVerb` has never carried the federation-reserved
-// `GrantIssued`/`GrantRevoked` cases at all (a pre-existing, unrelated
-// Swift/Rust divergence; see `audit/log.rs`'s enum doc comment and the
-// ADR-025 Blast Radius Report addendum). There is nothing to
-// accidentally reuse on this port — the type system enforces it by the
-// cases simply not existing here.
+// NOTE (RUST-AUDIT-DURABILITY, 2026-07-09): Rust's `UnifiedAuditVerb` now
+// carries `GrantIssued`/`GrantRevoked` (the FUP-C / GLK-03 grant-lifecycle
+// seam durably appends them — `EstateCoordinator::issue_grant`/
+// `revoke_grant`), so there is something to accidentally reuse. The Rust
+// equivalent of Swift's `sensitivityGrantVerbsNeverReuseFederationReservedVerbs`
+// now lives in `audit_durability_grant_sensitivity.rs`'s
+// `grant_verbs_never_collide_with_sensitivity_verbs`.

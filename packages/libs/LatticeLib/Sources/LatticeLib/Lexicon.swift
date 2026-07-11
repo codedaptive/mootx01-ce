@@ -157,10 +157,7 @@ public enum LexiconBuilder {
     // Only single-token surfaces become keys — the runtime looks up one stemmed
     // token at a time, so a multi-word surface cannot key a single entry.
     private static func singleTokenKey(_ surface: String) -> String? {
-        let tokens = Tokenizer.tokenize(surface)
-        guard tokens.count == 1 else { return nil }
-        let key = Stemmer.stem(Normalizer.normalize(tokens[0]))
-        return key.isEmpty ? nil : key
+        LexiconKeyPolicy.singleTokenBuildKey(surface)
     }
 
     // MARK: - Wikidata TSV parse

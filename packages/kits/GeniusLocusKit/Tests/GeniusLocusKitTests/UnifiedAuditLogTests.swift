@@ -351,6 +351,7 @@ struct UnifiedAuditLogTests {
         var log = UnifiedAuditLog()
         log.add(honest)
         #expect(log.count == 1, "honest entry must be inserted")
+        #expect(log.rejectedEntryCount == 0, "no rejection yet")
 
         // Construct a forged entry: steal the honest id but inject a
         // different afterValue. The recomputed SHA-256 will not match
@@ -365,6 +366,10 @@ struct UnifiedAuditLogTests {
         // add path: forged entry must be silently rejected.
         log.add(forged)
         #expect(log.count == 1, "forged entry on add must not increase count")
+        // AUDIT-ALERT-RESTORE (2026-07-09): the rejection is no longer
+        // silent-only — `rejectedEntryCount` observes it at the same
+        // ingress choke point that drops the entry.
+        #expect(log.rejectedEntryCount == 1, "rejected-entry count observes the add-boundary rejection")
 
         // The honest entry's value is retained — not overwritten by forged.
         let retained = log.entries.values.first
@@ -379,14 +384,72 @@ struct UnifiedAuditLogTests {
         var otherLog = UnifiedAuditLog()
         otherLog.add(forged)    // rejected at source log too
         #expect(otherLog.count == 0, "forged entry rejected in source log before merge")
+        #expect(otherLog.rejectedEntryCount == 1, "the source log's own ingress observes its own rejection")
         log.merge(otherLog)     // merging an empty log is a no-op
         #expect(log.count == 1, "count unchanged after merging log with forged entry")
+        // `merge` only re-adds entries that survived the SOURCE log's own
+        // ingress (otherLog.entries is empty), so the destination's
+        // rejectedEntryCount is untouched by the source's earlier
+        // rejection — merge does not double-count.
+        #expect(log.rejectedEntryCount == 1, "merge does not replay the source log's rejection into the destination's count")
         #expect(log.entries.values.first?.afterValue == .integer(42),
                 "honest entry value must be preserved after forged-merge attempt")
 
         // Idempotent add of the honest entry leaves count unchanged.
         log.add(honest)
         #expect(log.count == 1, "re-adding honest entry must remain idempotent")
+        #expect(log.rejectedEntryCount == 1, "re-adding an honest entry is not a rejection")
+    }
+
+    // MARK: - rejectedEntryCount surfacing (AUDIT-ALERT-RESTORE, 2026-07-09)
+
+    /// Feed/snapshot seam unit test: a fresh log accumulates one count per
+    /// rejected `add` call, regardless of how many honest entries are
+    /// interleaved, and structural equality (`==`) ignores the counter —
+    /// two logs holding the same entries compare equal even when one of
+    /// them observed rejections along the way. This is the property
+    /// `GeniusLocusKit.auditLog(for:)` / `currentAuditLog(in:)` relies on:
+    /// every call builds a fresh `UnifiedAuditLog()` (starting at zero) and
+    /// folds events into it via `add(contentsOf:)`, so the returned
+    /// snapshot's `rejectedEntryCount` is exactly this cycle's ingress
+    /// rejections — the maintenance daemon reads it directly off the
+    /// snapshot (`MaintenanceDaemon.runCycle` step 0).
+    @Test
+    func rejectedEntryCountAccumulatesAndIsExcludedFromEquality() {
+        let honestA = UnifiedAuditEntry(
+            tier: .locus, hlc: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1),
+            verb: .capture, rowID: rowA, fieldPath: "f",
+            beforeValue: .null, afterValue: .integer(1)
+        )
+        let honestB = UnifiedAuditEntry(
+            tier: .locus, hlc: HLC(physicalTime: 2, logicalCount: 0, nodeID: 1),
+            verb: .capture, rowID: rowB, fieldPath: "g",
+            beforeValue: .null, afterValue: .integer(2)
+        )
+        func forgedEntry(stealingIDFrom honest: UnifiedAuditEntry, hlc: HLC, row: UUID) -> UnifiedAuditEntry {
+            UnifiedAuditEntry(
+                id: honest.id, tier: .locus, hlc: hlc, verb: .capture, rowID: row,
+                fieldPath: "tampered", beforeValue: .null, afterValue: .integer(-1)
+            )
+        }
+
+        var log = UnifiedAuditLog()
+        log.add(honestA)
+        log.add(forgedEntry(stealingIDFrom: honestA,
+                             hlc: HLC(physicalTime: 3, logicalCount: 0, nodeID: 1), row: rowA))
+        log.add(honestB)
+        log.add(forgedEntry(stealingIDFrom: honestB,
+                             hlc: HLC(physicalTime: 4, logicalCount: 0, nodeID: 1), row: rowB))
+
+        #expect(log.count == 2, "two honest entries admitted")
+        #expect(log.rejectedEntryCount == 2, "two rejections counted, interleaved with honest adds")
+
+        // A fresh log built from the same honest entries alone (zero
+        // rejections observed) is structurally EQUAL to `log` — the
+        // counter is deliberately excluded from `==`.
+        let clean = UnifiedAuditLog(entries: [honestA, honestB])
+        #expect(clean.rejectedEntryCount == 0)
+        #expect(log == clean, "structural equality compares entries only, not the rejection telemetry")
     }
 
     // MARK: - Helpers

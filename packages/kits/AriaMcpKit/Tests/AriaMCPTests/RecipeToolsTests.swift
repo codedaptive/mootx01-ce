@@ -30,7 +30,7 @@ struct RecipeToolsTests {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        return try await kit.open(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
     }
 
     private func fileArgs(content: String) -> JSONValue {
@@ -469,13 +469,16 @@ struct RecipeToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "dq"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Derive a real branch so its id resolves; name it as both winner
-        // and disqualified — the C-5 guard must refuse with isError.
+        // Derive a real branch and discard it (what the benchmark run does
+        // to a disqualified plan). Confirm it as winner while OMITTING any
+        // disqualification argument — the exact reported bypass shape. The
+        // server-side C-5 verdict must refuse with isError; no
+        // client-supplied claim participates.
         let branch = try await NeuronKit.deriveBranch(
             name: "p", from: handle, in: kit)
+        try await branch.discard()
         let confirmArgs: JSONValue = .object([
             "winnerBranchID": .string(branch.branchID.uuidString),
-            "disqualifiedBranchIDs": .array([.string(branch.branchID.uuidString)]),
         ])
         let result = try await dispatcher.dispatch(
             name: "moot_confirm_migration", arguments: confirmArgs)
@@ -485,7 +488,7 @@ struct RecipeToolsTests {
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         #expect(text.contains("silentConceptLoss"))
         // Never promoted.
-        #expect(branch.status == .active)
+        #expect(branch.status == .discarded)
     }
 
     // MARK: - dream dispatch
@@ -948,7 +951,8 @@ struct RecipeToolsSecurityTests {
         _ = try await LocusKit.Estate.create(
             storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"))
         return try await kit.open(
-            storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"))
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "sec-test"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
     }
 
     @Test func preciseRecallNegativeLimitThrows() async throws {

@@ -41,4 +41,42 @@ struct ConceptBagTests {
         #expect(bag["Q146"] == 1)     // "cat" -> Q146 admitted via the Q-ID override
         #expect(bag["zxcvbnm"] == nil) // not noun/verb-kept and not a Q-ID -> dropped
     }
+
+    @Test("weak Q-ID aliases do not become concept identity")
+    func weakQIDAliasesStaySurfaceTerms() {
+        let noisy = CanonicalizationLexicon(
+            version: "t", language: "en",
+            entries: [
+                "a": "Q81454",
+                "be": "Q569",
+                "f": "Q417934",
+                "file": "Q82753",
+                "for": "Q8913",
+                "git": "Q18596004",
+                "key": "Q228039",
+                "local": "Q1149297",
+                "prune": "Q500094",
+                "valu": "Q868257",
+                "1": "Q420439"
+            ]
+        )
+
+        let admitted = BagBuilder.bag(
+            "a be f file for git key local prune value 1",
+            lexicon: noisy,
+            keep: [.noun, .verb, .other]
+        )
+
+        #expect(!admitted.keys.contains { $0.hasPrefix("Q") })
+        #expect(admitted["git"] == 1)
+        #expect(admitted["file"] == 1)
+        #expect(admitted["valu"] == 1)
+
+        let bypassOnly = BagBuilder.bag(
+            "a be f file for git key local prune value 1",
+            lexicon: noisy,
+            keep: []
+        )
+        #expect(bypassOnly.isEmpty)
+    }
 }

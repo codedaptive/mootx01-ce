@@ -48,6 +48,16 @@ extension NeuronKit {
     /// the synthetic baseline and surfaces as `MOOTx01Error.selfPairing`.
     public static let preferenceBaselineSentinel = "PREFERENCE_BASELINE"
 
+    /// Maximum number of preference records (rooms) the dense Bradley-Terry
+    /// fitter will accept. Each record becomes a competitor; the fitter
+    /// allocates O(n²) matrices and runs O(n²) sweeps, so an unbounded room
+    /// count is a CPU/memory-exhaustion vector (rooms are attacker-creatable
+    /// via capture). 200 is far above any legitimate estate's distinct-room
+    /// cardinality while keeping the dense fit bounded. `Bias.run` truncates
+    /// to the highest-signal rooms before calling; this guard also protects
+    /// direct callers. Mirrors Rust `MAX_PREFERENCE_ROOMS`.
+    public static let maxPreferenceRooms = 200
+
     /// Signed representation bias of `estate` against `reference`, per category
     /// over the UNION of both label sets. Each side's mass is normalised to a
     /// share; a category present only in the reference gets estate share 0
@@ -92,6 +102,11 @@ extension NeuronKit {
     public static func learnedPreference(records: [(label: String, endorsements: Int,
                                                     dismissals: Int)]) throws -> [PreferenceStrength] {
         guard !records.isEmpty else { return [] }
+        // Bound the dense fitter: reject an over-large competitor set rather
+        // than allocate O(n²) matrices and run O(n²) sweeps over it (DoS guard).
+        guard records.count <= maxPreferenceRooms else {
+            throw MOOTx01Error.tooManyCompetitors(count: records.count)
+        }
 
         let baseline = preferenceBaselineSentinel
 

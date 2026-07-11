@@ -113,8 +113,15 @@ fn seed_matrix_tier(
     d1: &str,
     d2: &str,
 ) -> bool {
-    coord.feed_audit_log(h).expect("feed_audit_log");
-    let log = coord.audit_log(h).expect("audit_log");
+    // Pre-existing drift fix (found while verifying the mission's cargo
+    // test baseline, AUDIT-ALERT-RESTORE 2026-07-09, unrelated to this
+    // mission's blast radius): `feed_audit_log` / the registry getter
+    // `audit_log` belong to the pre-Bug-4-fix accumulate-into-registry
+    // pattern and no longer compile against the current coordinator
+    // surface. `current_audit_log` is the live replacement — it returns
+    // the freshly-replayed snapshot directly, so the separate feed step
+    // is unnecessary.
+    let log = coord.current_audit_log(h).expect("current_audit_log");
     let mut tier = MatrixTier::full_rebuild(&log, &std::collections::HashMap::new());
     let drawers = coord.all_drawers(h).unwrap_or_default();
     let d1_op = drawers.iter().find(|d| d.id == d1).map(|d| d.operational_bitmap as u64).unwrap_or(0);

@@ -5,12 +5,16 @@
 // once per process and exposes `FDC.encode(text) -> code`. This is what
 // consumers (EideticLib and above) call to classify text.
 //
-// The bundled signatures are the *compact* form (code -> term list): the
-// matcher uses only term membership (§5.2/§6), never the source weights, so
-// the weighted FDCSignatures.json is kept only as a build/seed record (and for
-// the future SimHash fingerprint).
+// The bundled compact v2 signatures retain code-owned label, alias, title, and
+// article terms separately from inherited ancestor terms. Classifier v4 fuses
+// that hierarchy-first policy with portable integer semantic evidence.
 
 import Foundation
+
+public enum FDCContentKind: Equatable, Sendable {
+    case text
+    case code
+}
 
 public enum FDC {
 
@@ -22,15 +26,27 @@ public enum FDC {
     /// scoring (§5), not this cutoff.
     public static let stopThreshold = 1
 
-    /// Encode `text` to an FDC code, or `nil` for UNRESOLVED (or if the bundled
-    /// artifacts are unavailable). Pure over the pinned artifacts.
-    public static func encode(_ text: String) -> String? { bundle?.matcher.encode(text) }
+    /// Encode `text` to an FDC code. Nonempty text without defensible subject
+    /// evidence returns `000`; `nil` is reserved for empty input or unavailable
+    /// bundled artifacts. Pure over the pinned artifacts.
+    public static func encode(_ text: String) -> String? {
+        encodeAnchor(text).code
+    }
+
+    /// Explicit-tagger variant used by cross-runtime conformance tests and
+    /// estates that pin novel-token classification policy.
+    public static func encode(
+        _ text: String,
+        taggerChoice: NovelTokenTaggerChoice
+    ) -> String? {
+        bundle?.matcher.encode(text, taggerChoice: taggerChoice)
+    }
 
     /// Encode `text` and surface the dominant concept Q-ID of the input (see
     /// `FDCMatcher.encodeAnchor`). Returns `(nil, nil)` if the artifacts are
     /// unavailable. This is the entry point EideticLib uses to fill an Anchor.
     public static func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?) {
-        bundle?.matcher.encodeAnchor(text) ?? (nil, nil)
+        classifyAnchor(text, contentKind: .text, recordNovel: true)
     }
 
     /// Non-recording variant of `encodeAnchor` (secfix/fdc-pool).
@@ -44,7 +60,19 @@ public enum FDC {
     ///
     /// Mirrors Rust `Fdc::encode_anchor_no_record` in fdc_runtime.rs.
     public static func encodeAnchor(_ text: String, recordNovel: Bool) -> (code: String?, conceptQID: String?) {
-        bundle?.matcher.encodeAnchor(text, recordNovel: recordNovel) ?? (nil, nil)
+        classifyAnchor(text, contentKind: .text, recordNovel: recordNovel)
+    }
+
+    /// Content-aware classification used by capture and estate recalculation.
+    /// Explicit code content deterministically anchors at FDC `005`; when a
+    /// language is defensibly recognizable its pinned Wikidata Q-ID refines the
+    /// anchor without inventing a private FDC decimal extension.
+    public static func encodeAnchor(
+        _ text: String,
+        contentKind: FDCContentKind,
+        recordNovel: Bool
+    ) -> (code: String?, conceptQID: String?) {
+        classifyAnchor(text, contentKind: contentKind, recordNovel: recordNovel)
     }
 
     /// True when the bundled artifacts loaded and the engine is ready.
@@ -53,6 +81,43 @@ public enum FDC {
     /// The bundled signatures version — the pinned-artifact version that
     /// produced an encode answer. Callers record it as provenance.
     public static var dataVersion: String { bundle?.version ?? "0.0.0-unavailable" }
+
+    /// Deterministic semantic candidates from the bundled micro-ranker. This
+    /// surface exposes model evidence for diagnostics and conformance; FDC's
+    /// hierarchy policy remains responsible for the final stored code.
+    public static func semanticCandidates(
+        _ text: String,
+        limit: Int = 8
+    ) -> [FDCSemanticCandidate] {
+        bundle?.semanticRanker.rank(text, limit: limit) ?? []
+    }
+
+    public static var semanticModelVersion: String {
+        bundle?.semanticRanker.metadata.version ?? "0.0.0-unavailable"
+    }
+
+    public static var semanticModelSHA256: String {
+        bundle?.semanticRanker.metadata.modelSHA256 ?? "unavailable"
+    }
+
+    /// Confidence-gated semantic hierarchy evidence used by classifier v4.
+    public static func semanticDecision(_ text: String) -> FDCSemanticDecision? {
+        guard let bundle else { return nil }
+        return bundle.semanticRanker.hierarchyDecision(text, frame: bundle.frame)
+    }
+
+    /// Version of the deterministic classifier algorithm itself.
+    public static let classifierVersion = "4.2.0"
+
+    /// Estate-wide recalculation floor. This covers every input that can change
+    /// an assigned code: algorithm, frame, lexicon, and signatures.
+    public static var recalculationVersion: String {
+        guard let bundle else { return "fdc-unavailable" }
+        return "classifier:\(classifierVersion)|frame:\(bundle.frame.frameVersion)" +
+            "|lexicon:\(bundle.lexiconVersion)|signatures:\(bundle.version)" +
+            "|semantic:\(bundle.semanticRanker.metadata.version):" +
+            bundle.semanticRanker.metadata.modelSHA256
+    }
 
     /// Ancestor chain (root first, excluding `code` itself) for an FDC code,
     /// walked over the bundled frame's decimal hierarchy. Empty if the artifacts
@@ -75,57 +140,121 @@ public enum FDC {
     /// artifacts are unavailable). Used by dashboard surfaces to display
     /// readable names next to raw lattice address codes.
     ///
-    /// For 3-digit integer codes (no decimal subdivision), the leaf label is
-    /// often a compound of multiple subject terms joined with " + " (e.g.
-    /// "683" → "Firearms + Locksmithing"). The parent code carries a broader,
-    /// single-topic heading — walk up one level for these, so the dashboard
-    /// shows "Handicraft" (680) rather than the raw multi-term cluster.
-    /// Decimal codes retain their own specific label (e.g. "615.84" →
-    /// "Radiology, Medical").
+    /// Every code resolves to its OWN frame label — never an ancestor's.
+    /// Sibling codes must stay distinguishable when listed together: the
+    /// lattice address table shows runs of active siblings (651, 652, 657 …),
+    /// and any coarsening to a shared parent heading renders them as identical
+    /// rows that read as duplicated data. The frame ships a distinct label per
+    /// code (e.g. "651" → "Office management", "657" → "Accounting +
+    /// Bookkeeping"); multi-term compounds like "683" → "Firearms +
+    /// Locksmithing" are shown as-is.
     ///
     /// Mirrors Rust `Fdc::label()` in fdc_runtime.rs.
     public static func label(for code: String) -> String? {
         guard !code.isEmpty, let frame = bundle?.frame else { return nil }
-        // Decimal codes are already specific enough — use their own label.
-        // 3-digit integer codes walk up one parent level for a cleaner heading.
-        let lookup: String
-        if !code.contains("."), let parent = FDCFrame.decimalParent(of: code) {
-            lookup = parent
-        } else {
-            lookup = code
+        return frame.codes.first(where: { $0.code == code })?.label
+    }
+
+    private static func classifyAnchor(
+        _ text: String,
+        contentKind: FDCContentKind,
+        recordNovel: Bool
+    ) -> (code: String?, conceptQID: String?) {
+        guard let bundle,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, nil)
         }
-        return frame.codes.first(where: { $0.code == lookup })?.label
+        if contentKind == .code {
+            return ("005", FDCCodeLanguageDetector.detect(in: text)?.wikidataQID)
+        }
+        let anchor = bundle.matcher.encodeAnchor(text, recordNovel: recordNovel)
+        guard anchor.code == "005",
+              let language = FDCCodeLanguageDetector.detect(in: text) else {
+            return anchor
+        }
+        return (anchor.code, language.wikidataQID)
     }
 
     // MARK: - artifact loading (once per process)
 
     private struct SignaturesFile: Decodable {
-        struct Entry: Decodable { let code: String; let terms: [String] }
+        struct Entry: Decodable {
+            let code: String
+            let terms: [String]?
+            let labelTerms: [String]?
+            let aliasTerms: [String]?
+            let titleTerms: [String]?
+            let articleTerms: [String]?
+            let ancestorTerms: [String]?
+
+            private enum CodingKeys: String, CodingKey {
+                case code, terms
+                case labelTerms = "label_terms"
+                case aliasTerms = "alias_terms"
+                case titleTerms = "title_terms"
+                case articleTerms = "article_terms"
+                case ancestorTerms = "ancestor_terms"
+            }
+        }
         let version: String
         let codes: [Entry]
     }
 
     /// The matcher, the FDC frame (for label lookup), and the signatures
     /// version, all loaded together once per process.
-    private static let bundle: (matcher: FDCMatcher, frame: FDCFrame, version: String)? = {
+    private static let bundle: (
+        matcher: FDCMatcher,
+        semanticRanker: FDCSemanticRanker,
+        frame: FDCFrame,
+        version: String,
+        lexiconVersion: String
+    )? = {
         guard let lexicon: CanonicalizationLexicon = load("Lexicon"),
               let frame: FDCFrame = load("FDCFrame"),
-              let sigs: SignaturesFile = load("FDCSignatures") else { return nil }
+              let sigs: SignaturesFile = load("FDCSignatures"),
+              let semanticMetadata = loadData("FDCSemanticRanker", extension: "json"),
+              let semanticModel = loadData("FDCSemanticRanker", extension: "bin"),
+              let semanticRanker = FDCSemanticRanker(
+                metadataData: semanticMetadata, modelData: semanticModel) else { return nil }
         var terms: [String: Set<String>] = [:]
-        for e in sigs.codes { terms[e.code] = Set(e.terms) }
+        var sources: [String: FDCSignatureSources] = [:]
+        for e in sigs.codes {
+            var recallTerms = Set(e.terms ?? [])
+            recallTerms.formUnion(e.labelTerms ?? [])
+            recallTerms.formUnion(e.aliasTerms ?? [])
+            recallTerms.formUnion(e.titleTerms ?? [])
+            recallTerms.formUnion(e.articleTerms ?? [])
+            recallTerms.formUnion(e.ancestorTerms ?? [])
+            terms[e.code] = recallTerms
+            sources[e.code] = FDCSignatureSources(
+                label: Set(e.labelTerms ?? []),
+                alias: Set(e.aliasTerms ?? []),
+                title: Set(e.titleTerms ?? []),
+                article: Set(e.articleTerms ?? []))
+        }
         // The runtime ships `.idf` scoring (Mission #4): IDF-weighting the
         // overlap — penalizing concept terms common across many signatures,
         // rewarding distinctive ones — improved within-region code selection
         // over raw overlap (exact 31→36%, wrong-branch 63→58% on the v1.0
         // frame). The matcher default stays `.raw`; the runtime opts in here.
         let m = FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms,
-                           stopThreshold: stopThreshold, scoreMode: .idf)
-        return (m, frame, sigs.version)
+                           sourceSignatures: sources,
+                           stopThreshold: stopThreshold, scoreMode: .idf,
+                           useHierarchicalResolution: true,
+                           semanticRanker: semanticRanker)
+        return (m, semanticRanker, frame, sigs.version, lexicon.version)
     }()
 
     private static func load<T: Decodable>(_ name: String) -> T? {
         guard let url = Bundle.module.url(forResource: name, withExtension: "json"),
               let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func loadData(_ name: String, extension fileExtension: String) -> Data? {
+        guard let url = Bundle.module.url(forResource: name, withExtension: fileExtension) else {
+            return nil
+        }
+        return try? Data(contentsOf: url)
     }
 }

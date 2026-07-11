@@ -54,10 +54,10 @@ struct Mootx01: AsyncParsableCommand {
     /// Bare semver for the installed binary. Compared numerically by --check /
     /// upgrade against the latest release tag, so it must stay a pure semver.
     /// The human-facing --version string adds the date via `versionDisplay`.
-    static let currentVersion = "1.0.23"
+    static let currentVersion = "1.0.27"
 
     /// Release date stamp shown alongside the version by --version.
-    static let releaseDate = "2026-07-07"
+    static let releaseDate = "2026-07-10"
 
     /// The exact string --version prints. The Rust port must print an identical
     /// string (see apps/mootx01/rust: CURRENT_VERSION + RELEASE_DATE).
@@ -89,6 +89,9 @@ struct Mootx01: AsyncParsableCommand {
                 // ADR-025 — out-of-band sensitivity unlock / lock.
                 UnlockCommand.self,
                 LockCommand.self,
+                // Feature toggles (M-MEMTOOL-1).
+                EnableCommand.self,
+                DisableCommand.self,
             ]
         )
         #else
@@ -102,6 +105,8 @@ struct Mootx01: AsyncParsableCommand {
                 DbCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
+                EnableCommand.self,
+                DisableCommand.self,
             ]
         )
         #endif

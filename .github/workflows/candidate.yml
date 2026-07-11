@@ -49,7 +49,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -65,14 +65,31 @@ jobs:
             echo "ERROR: version '$version' is not valid semver — aborting" >&2
             exit 1
           fi
-          # Tag is <version>-prerelease.<run> with NO leading v on purpose — a
-          # v* tag would trigger release.yml and a signed public release. The
-          # `-prerelease` suffix (with the `-`) is what the installers key on to
-          # skip their v-normalization, so it installs as-is.
-          tag="${version}-prerelease.${{ github.run_number }}"
+          # The tag previews the NEXT patch release. The tree's version
+          # constant equals the last SHIPPED release between bumps, so a
+          # candidate built from it contains post-<version> work: stamping it
+          # <version>-prerelease.N reads as if it predates the release it
+          # follows (and sorts that way under semver). <next>-prerelease.N
+          # sorts correctly before the upcoming <next> tag. Known edge: in the
+          # short window after a release bump lands on this branch but before
+          # its tag is cut, candidates stamp one patch high — harmless for
+          # test builds. `version` (unbumped) stays the assertion target for
+          # install-verify: the built binary prints the SOURCE version.
+          #
+          # Tag carries NO leading v on purpose — a v* tag would trigger
+          # release.yml and a signed public release. The `-prerelease` suffix
+          # (with the `-`) is what the installers key on to skip their
+          # v-normalization, so it installs as-is.
+          # Bump from the bare numeric triple — the guard above also admits
+          # -suffixed semver, where naive last-dot splitting grabs the wrong
+          # field.
+          base="${version%%-*}"
+          patch="${base##*.}"
+          next="${base%.*}.$((patch + 1))"
+          tag="${next}-prerelease.${{ github.run_number }}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Candidate build: $tag"
+          echo "Candidate build: $tag (source version $version)"
 
   # ── macOS builds (arm64 + x86_64) — signed best-effort ───────────────────────
   # Mirrors release.yml's signing pipeline when Apple Developer ID secrets are
@@ -87,7 +104,7 @@ jobs:
         arch: [arm64, x86_64]
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -136,8 +153,9 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
           codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
 
@@ -189,7 +207,8 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
+          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
+          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
           codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
 
       - name: Import Developer ID Installer Certificate (best-effort)
@@ -270,7 +289,7 @@ jobs:
             rm -f "$KEYFILE"
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: macos-${{ matrix.arch }}
           path: |
@@ -290,7 +309,7 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -306,7 +325,7 @@ jobs:
           echo "ASSET=$asset" >> "$GITHUB_ENV"
           # Smoke: both arches are native on their runners.
           ./mootx01 --version
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: linux-${{ matrix.arch }}
           path: ${{ env.ASSET }}
@@ -326,7 +345,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
@@ -361,7 +380,7 @@ jobs:
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           "SETUP=mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}-setup.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ matrix.arch }}
           path: |
@@ -375,11 +394,11 @@ jobs:
       contents: write   # create the pre-release + prune old ones
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: artifacts
       - name: Assemble checksums (+ best-effort minisign)
@@ -452,7 +471,7 @@ jobs:
             runner: macos-26
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: candidate/1.0.x
           persist-credentials: false

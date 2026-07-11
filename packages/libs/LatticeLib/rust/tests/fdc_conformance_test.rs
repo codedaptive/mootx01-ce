@@ -37,11 +37,14 @@ struct ConformanceVector {
 fn fdc_conformance_all_vectors_match() {
     // Load the fixture.
     let fixture_bytes = include_bytes!("fixtures/fdc_conformance.json");
-    let vectors: Vec<ConformanceVector> = serde_json::from_slice(fixture_bytes)
-        .expect("conformance fixture must parse");
+    let vectors: Vec<ConformanceVector> =
+        serde_json::from_slice(fixture_bytes).expect("conformance fixture must parse");
 
     assert!(!vectors.is_empty(), "fixture must not be empty");
-    assert!(Fdc::is_available(), "Rust FDC runtime must have loaded all artifacts");
+    assert!(
+        Fdc::is_available(),
+        "Rust FDC runtime must have loaded all artifacts"
+    );
 
     let total = vectors.len();
     let mut pass = 0usize;
@@ -70,6 +73,133 @@ fn fdc_conformance_all_vectors_match() {
     println!("FDC conformance: {}/{} vectors pass (100%)", pass, total);
 }
 
+#[test]
+fn operational_fragments_use_generalities() {
+    let shell = r#"
+git worktree prune
+rm -f .git/index.lock
+read_signal() {
+  sqlite3 estate.sqlite 'select 1;'
+}
+"#;
+    let markdown = r#"
+# Monthly Canon Audit
+
+```bash
+set -euo pipefail
+git status --short
+```
+"#;
+
+    assert_eq!(Fdc::encode(shell), Some("000".to_owned()));
+    assert_eq!(Fdc::encode_anchor(shell).1, None);
+    assert_eq!(Fdc::encode(markdown), Some("000".to_owned()));
+    assert_eq!(Fdc::encode_anchor(markdown).1, None);
+}
+
+#[test]
+fn source_code_memories_use_programming_subject() {
+    let swift_source = r#"
+et nodeId: String
+public let indexType: IndexType
+public var semanticVector: [Double]
+public var graphVector: GraphVector
+public var behavioralVector: BehavioralVector
+public var temporalVector: TemporalVector
+public let createdAt: Date
+public var updatedAt: Date
+"#;
+    assert_eq!(Fdc::encode(swift_source), Some("005".to_owned()));
+    assert_eq!(Fdc::encode_anchor(swift_source).1.as_deref(), Some("Q17118377"));
+    assert_eq!(Fdc::CLASSIFIER_VERSION, "4.2.0");
+    assert_ne!(
+        Fdc::encode("Let us remember the meeting.\nLet everyone review the notes."),
+        Some("005".to_owned())
+    );
+}
+
+#[test]
+fn incidental_inherited_signature_terms_do_not_certify_narrow_headings() {
+    // These were bad v1/v2 confidence failures caused by the compact signature
+    // artifact flattening label/title/article/ancestor terms into one membership
+    // set. The runtime may use that broad set for recall, but it must not return
+    // a narrow user-facing code unless the winning code's own heading is
+    // supported by the query.
+    assert_eq!(
+        Fdc::encode("machine learning neural networks artificial intelligence"),
+        Some("004".to_owned()),
+        "machine-learning terms must classify as computer science, not acupuncture"
+    );
+    assert_eq!(
+        Fdc::encode("web development HTML programming"),
+        Some("005".to_owned()),
+        "web-development terms must classify as programming, not Great Britain"
+    );
+    assert_eq!(
+        Fdc::encode("distributed systems cloud computing"),
+        Some("004".to_owned()),
+        "distributed-systems terms must classify as computer science, not Southeast Asia"
+    );
+}
+
+#[test]
+fn partial_qualified_heading_matches_do_not_overdescend() {
+    assert_ne!(
+        Fdc::encode("art painting sculpture museum"),
+        Some("755".to_owned()),
+        "generic art/painting text must not descend into religious painting without religious evidence"
+    );
+    assert_ne!(
+        Fdc::encode("transportation automobile travel vehicles"),
+        Some("699".to_owned()),
+        "generic transportation text must not descend into railroad cars without railroad evidence"
+    );
+}
+
+#[test]
+fn own_heading_evidence_still_resolves_accessible_disability_topics() {
+    assert_eq!(
+        Fdc::encode("People with disabilities Blind Deaf"),
+        Some("362.4".to_owned())
+    );
+    assert_eq!(
+        Fdc::encode("screen reader accessibility braille deaf blind disability"),
+        Some("362.4".to_owned())
+    );
+}
+
+#[test]
+fn specific_own_heading_evidence_still_resolves_supported_topics() {
+    assert_eq!(
+        Fdc::encode("computer graphics rendering visualization"),
+        Some("006.6".to_owned())
+    );
+    assert_eq!(
+        Fdc::encode("chemistry organic reactions molecules"),
+        Some("547".to_owned())
+    );
+}
+
+#[test]
+fn query_repetition_cannot_manufacture_precision() {
+    assert_eq!(
+        Fdc::encode("railroad chemistry"),
+        Fdc::encode("railroad railroad railroad chemistry")
+    );
+    assert_ne!(Fdc::encode("blind chemistry"), Some("362.4".to_owned()));
+}
+
+#[test]
+fn recalculation_version_covers_algorithm_and_artifacts() {
+    let version = Fdc::recalculation_version();
+    assert!(version.contains("classifier:4.2.0"));
+    assert!(version.contains("frame:1.1.0"));
+    assert!(version.contains("lexicon:1.1.0"));
+    assert!(version.contains("signatures:2.0.0"));
+    assert!(version.contains("semantic:1.0.0:"));
+    assert!(version.contains(Fdc::semantic_model_sha256()));
+}
+
 /// Stemmer conformance against SnowballEnglish.json (the same corpus used by
 /// the Swift Stemmer test). Both the Swift hand-port and this Rust port MUST
 /// produce byte-identical stems for every input in that corpus.
@@ -78,9 +208,8 @@ fn stemmer_conformance_snowball_corpus() {
     use lattice_lib::stemmer::stem;
 
     // Load the bundled reference corpus.
-    const CORPUS_BYTES: &[u8] = include_bytes!(
-        "../../Sources/LatticeLib/Resources/SnowballEnglish.json"
-    );
+    const CORPUS_BYTES: &[u8] =
+        include_bytes!("../../Sources/LatticeLib/Resources/SnowballEnglish.json");
 
     #[derive(Deserialize)]
     struct Corpus {
@@ -93,8 +222,8 @@ fn stemmer_conformance_snowball_corpus() {
         expected_stem: String,
     }
 
-    let corpus: Corpus = serde_json::from_slice(CORPUS_BYTES)
-        .expect("SnowballEnglish.json must parse");
+    let corpus: Corpus =
+        serde_json::from_slice(CORPUS_BYTES).expect("SnowballEnglish.json must parse");
 
     let total = corpus.pairs.len();
     let mut pass = 0usize;
@@ -120,5 +249,8 @@ fn stemmer_conformance_snowball_corpus() {
         );
     }
 
-    println!("Stemmer conformance: {}/{} vectors pass (100%)", pass, total);
+    println!(
+        "Stemmer conformance: {}/{} vectors pass (100%)",
+        pass, total
+    );
 }

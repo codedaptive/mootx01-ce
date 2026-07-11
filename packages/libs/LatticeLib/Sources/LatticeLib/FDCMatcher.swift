@@ -27,6 +27,23 @@
 
 import Foundation
 
+/// Source-owned signature terms for one FDC code. These remain separate at
+/// runtime so label/title/article evidence can be weighted without treating
+/// inherited ancestor terms as proof for a narrow heading.
+public struct FDCSignatureSources: Sendable {
+    public let label: Set<String>
+    public let alias: Set<String>
+    public let title: Set<String>
+    public let article: Set<String>
+
+    public init(label: Set<String>, alias: Set<String>, title: Set<String>, article: Set<String>) {
+        self.label = label
+        self.alias = alias
+        self.title = title
+        self.article = article
+    }
+}
+
 public struct FDCMatcher: Sendable {
 
     /// How the per-code overlap is turned into a score. The score function
@@ -64,6 +81,15 @@ public struct FDCMatcher: Sendable {
 
     /// The active scoring scheme (default `.raw` reproduces ship behavior).
     public let scoreMode: ScoreMode
+
+    /// When true, production classification ranks source-owned evidence and
+    /// returns the deepest supported common ancestor instead of allowing
+    /// inherited/article recall terms to certify a narrow code.
+    public let useHierarchicalResolution: Bool
+
+    /// Optional portable semantic evidence. Directly constructed matchers keep
+    /// v3 behavior unless a ranker is supplied; the bundled runtime enables it.
+    private let semanticRanker: FDCSemanticRanker?
 
     private let lexicon: CanonicalizationLexicon
     private let frame: FDCFrame
@@ -111,6 +137,24 @@ public struct FDCMatcher: Sendable {
     /// pre-interning init.
     private let sigIDFNorm: [String: Double]
 
+    private struct SourceTermIDs: Sendable {
+        let label: [Int]
+        let alias: [Int]
+        let title: [Int]
+        let article: [Int]
+
+        var all: Set<Int> { Set(label).union(alias).union(title).union(article) }
+    }
+
+    /// Code-owned evidence retained from the source-separated artifact. Unlike `sigTermIDs`,
+    /// this excludes inherited ancestor terms.
+    private let sourceTermIDs: [String: SourceTermIDs]
+
+    /// IDF computed over code-owned terms only. The legacy IDF table is built
+    /// over flattened signatures and therefore cannot distinguish inherited
+    /// evidence from a code's own subject evidence.
+    private let ownIDFByID: [Int: Double]
+
     /// A term-interned bag: TermID → count. Used internally for all scoring
     /// operations. Built from a ConceptBag in `encodeFromBag` by looking up
     /// each term's dense integer id. Terms absent from the codebook have no id
@@ -121,13 +165,18 @@ public struct FDCMatcher: Sendable {
         lexicon: CanonicalizationLexicon,
         frame: FDCFrame,
         signatures: [String: Set<String>],
+        sourceSignatures: [String: FDCSignatureSources] = [:],
         stopThreshold: Int = 1,
-        scoreMode: ScoreMode = .raw
+        scoreMode: ScoreMode = .raw,
+        useHierarchicalResolution: Bool = false,
+        semanticRanker: FDCSemanticRanker? = nil
     ) {
         self.lexicon = lexicon
         self.frame = frame
         self.stopThreshold = stopThreshold
         self.scoreMode = scoreMode
+        self.useHierarchicalResolution = useHierarchicalResolution
+        self.semanticRanker = semanticRanker
 
         // 1. Collect every unique term across all signatures, sort alphabetically,
         //    and assign a dense integer id. Ascending String order → Int order ==
@@ -135,6 +184,12 @@ public struct FDCMatcher: Sendable {
         //    in the same sequence as `.sorted()` on the original Set<String>.
         var allTerms = Set<String>()
         for (_, terms) in signatures { allTerms.formUnion(terms) }
+        for (_, sources) in sourceSignatures {
+            allTerms.formUnion(sources.label)
+            allTerms.formUnion(sources.alias)
+            allTerms.formUnion(sources.title)
+            allTerms.formUnion(sources.article)
+        }
         let sortedTerms = allTerms.sorted()
         var termToID: [String: Int] = Dictionary(minimumCapacity: sortedTerms.count)
         for (id, term) in sortedTerms.enumerated() { termToID[term] = id }
@@ -197,6 +252,28 @@ public struct FDCMatcher: Sendable {
         }
         self.sigNorm = normMap
         self.sigIDFNorm = idfNormMap
+
+        var sourceIDs: [String: SourceTermIDs] = Dictionary(minimumCapacity: frame.codes.count)
+        for (code, sources) in sourceSignatures {
+            sourceIDs[code] = SourceTermIDs(
+                label: sources.label.compactMap { termToID[$0] }.sorted(),
+                alias: sources.alias.compactMap { termToID[$0] }.sorted(),
+                title: sources.title.compactMap { termToID[$0] }.sorted(),
+                article: sources.article.compactMap { termToID[$0] }.sorted())
+        }
+
+        var ownDF: [Int: Int] = [:]
+        for sources in sourceIDs.values {
+            for id in sources.all { ownDF[id, default: 0] += 1 }
+        }
+        let ownN = Double(max(sourceIDs.count, 1))
+        var ownIDF: [Int: Double] = Dictionary(minimumCapacity: ownDF.count)
+        for (id, count) in ownDF {
+            ownIDF[id] = count > 0 ? Foundation.log(ownN / Double(count)) : 0
+        }
+        self.sourceTermIDs = sourceIDs
+        self.ownIDFByID = ownIDF
+
     }
 
     /// Score `code`'s overlap with the interned `bag` under the active
@@ -245,6 +322,174 @@ public struct FDCMatcher: Sendable {
         return o
     }
 
+    private struct OwnedEvidence {
+        let code: String
+        let score: Double
+        let distinctTerms: Int
+        let trustedTerms: Int
+        let sourceCount: Int
+    }
+
+    /// Score code-owned source evidence using term presence, not query term
+    /// frequency. Repeating one word cannot increase either score or coverage.
+    private func ownedEvidence(code: String, bag: InternedBag) -> OwnedEvidence {
+        guard let sources = sourceTermIDs[code] else {
+            return OwnedEvidence(
+                code: code, score: 0, distinctTerms: 0, trustedTerms: 0, sourceCount: 0)
+        }
+        var score = 0.0
+        var matched: Set<Int> = []
+        var trusted: Set<Int> = []
+        var matchedSources = 0
+
+        func add(_ ids: [Int], weight sourceWeight: Double, trusted isTrusted: Bool) -> Bool {
+            var found = false
+            for id in ids where bag[id] != nil {
+                let weight = ownIDFByID[id] ?? 0
+                guard weight > 0 else { continue }
+                score += sourceWeight * weight
+                matched.insert(id)
+                if isTrusted { trusted.insert(id) }
+                found = true
+            }
+            return found
+        }
+
+        if add(sources.label, weight: 6, trusted: true) { matchedSources += 1 }
+        if add(sources.alias, weight: 4, trusted: true) { matchedSources += 1 }
+        if add(sources.title, weight: 3, trusted: true) { matchedSources += 1 }
+        if add(sources.article, weight: 0.25, trusted: false) { matchedSources += 1 }
+        return OwnedEvidence(
+            code: code,
+            score: score,
+            distinctTerms: matched.count,
+            trustedTerms: trusted.count,
+            sourceCount: matchedSources)
+    }
+
+    private static func isMainClass(_ code: String) -> Bool {
+        let chars = Array(code)
+        return chars.count == 3
+            && chars.allSatisfy { $0.isASCII && $0.isNumber }
+            && chars[1] == "0" && chars[2] == "0"
+    }
+
+    private func precisionIsSupported(_ evidence: OwnedEvidence) -> Bool {
+        let depth = frame.ancestors(of: evidence.code).count
+        if depth <= 2 {
+            return evidence.trustedTerms >= 1
+                || evidence.distinctTerms >= 2
+                || (Self.isMainClass(evidence.code) && evidence.distinctTerms >= 1)
+        }
+        return evidence.distinctTerms >= 2
+            && evidence.trustedTerms >= 1
+            && evidence.score >= Self.minimumTrustedEvidenceScore
+    }
+
+    private func broadFallback(for code: String) -> String {
+        frame.ancestors(of: code)
+            .reversed()
+            .first(where: Self.isMainClass) ?? "000"
+    }
+
+    private func commonAncestor(_ lhs: String, _ rhs: String) -> String {
+        let left = frame.ancestors(of: lhs) + [lhs]
+        let right = frame.ancestors(of: rhs) + [rhs]
+        var common = "000"
+        for (a, b) in zip(left, right) {
+            guard a == b else { break }
+            common = a
+        }
+        return common
+    }
+
+    /// Fuse v3's source-owned lexical result with the semantic hierarchy
+    /// decision. Agreement preserves v3's defensible precision. A confident
+    /// disagreement replaces the result with the semantic safe ancestor and
+    /// clears the QID so provenance from the rejected branch cannot leak into
+    /// the stored anchor.
+    private func fuseSemantic(
+        _ result: (code: String?, conceptQID: String?),
+        text: String,
+        conceptBag: ConceptBag
+    ) -> (code: String?, conceptQID: String?) {
+        guard useHierarchicalResolution,
+              let semanticRanker else {
+            return result
+        }
+        let lexicalCode = result.code ?? "000"
+        if lexicalCode != "000", hasReviewedAliasEvidence(for: lexicalCode, in: conceptBag) {
+            return result
+        }
+        let candidates = semanticRanker.rank(text, limit: semanticRanker.metadata.codeCount)
+        guard let decision = semanticRanker.hierarchyDecision(candidates, frame: frame) else {
+            return result
+        }
+        let lexicalMain = Self.isMainClass(lexicalCode)
+            ? lexicalCode
+            : frame.ancestors(of: lexicalCode).reversed().first(where: Self.isMainClass) ?? "000"
+        if lexicalCode != "000", lexicalMain == decision.mainClass {
+            return result
+        }
+        if lexicalCode != "000",
+           let top = candidates.first,
+           let lexicalCandidate = candidates.first(where: { $0.code == lexicalCode }),
+           lexicalCandidate.score * 3 >= top.score * 2 {
+            return result
+        }
+        return (decision.code, nil)
+    }
+
+    private func hasReviewedAliasEvidence(for code: String, in bag: ConceptBag) -> Bool {
+        guard let aliases = sourceTermIDs[code]?.alias, !aliases.isEmpty else { return false }
+        for term in bag.keys {
+            if let id = termToID[term], aliases.contains(id) { return true }
+        }
+        return false
+    }
+
+    /// Production v3 resolution: rank only code-owned evidence, require more
+    /// than one distinct term before returning a narrow code, and fall back to
+    /// the shared/supported parent when evidence is ambiguous or shallow.
+    private func hierarchicalResolution(
+        candidates: [String],
+        bag: InternedBag,
+        conceptBag: ConceptBag
+    ) -> (code: String?, conceptQID: String?) {
+        let ranked = candidates
+            .map { ownedEvidence(code: $0, bag: bag) }
+            .filter { $0.score > 0 }
+            .sorted {
+                if $0.trustedTerms != $1.trustedTerms { return $0.trustedTerms > $1.trustedTerms }
+                if $0.distinctTerms != $1.distinctTerms { return $0.distinctTerms > $1.distinctTerms }
+                if $0.sourceCount != $1.sourceCount { return $0.sourceCount > $1.sourceCount }
+                if $0.score != $1.score { return $0.score > $1.score }
+                return $0.code < $1.code
+            }
+
+        guard let winner = ranked.first else { return ("000", nil) }
+        var chosen: String
+        if precisionIsSupported(winner) {
+            chosen = winner.code
+        } else if winner.trustedTerms == 0 {
+            chosen = "000"
+        } else {
+            chosen = broadFallback(for: winner.code)
+        }
+
+        if ranked.count > 1 {
+            let runnerUp = ranked[1]
+            if winner.trustedTerms == runnerUp.trustedTerms,
+               winner.distinctTerms == runnerUp.distinctTerms,
+               winner.score < runnerUp.score * Self.minimumBranchDominanceRatio {
+                chosen = commonAncestor(winner.code, runnerUp.code)
+            }
+        }
+
+        guard chosen != "000" else { return ("000", nil) }
+        return (chosen, dominantQID(conceptBag, supporting: chosen, internedBag: bag))
+    }
+
     /// Maximum number of codes that may share the argmax score while still
     /// yielding a classifiable result. When more codes than this are tied at
     /// the top IDF score, the query bag is dominated by common cross-domain
@@ -267,20 +512,163 @@ public struct FDCMatcher: Sendable {
     /// code. Mirrors Rust `FdcMatcher::MAX_TIED_WINNERS_FOR_CLASSIFICATION`.
     public static let maximumTiedWinnersForClassification: Int = 4
 
+    /// Minimum summed IDF from trusted code-owned sources required to certify
+    /// a displayable heading. This blocks one weak term such as
+    /// "engineering" from dragging software/process text into steam engineering,
+    /// while still allowing strong own-heading phrases like "blind"+"deaf" or
+    /// "computer graphics".
+    private static let minimumTrustedEvidenceScore = 2.5
 
-    /// Encode `text` to an FDC code, or `nil` for UNRESOLVED. Never guesses.
+    /// A branch must beat the next candidate by this ratio to retain its own
+    /// precision. Otherwise the classifier returns their deepest common parent.
+    private static let minimumBranchDominanceRatio = 1.15
+
+    private static let shellCommandStarts: Set<String> = [
+        "awk", "bash", "cargo", "chmod", "cp", "git", "grep", "jq", "mkdir",
+        "mv", "node", "npm", "python", "python3", "rg", "rm", "sed", "set",
+        "sh", "sqlite3", "swift", "xcodebuild", "yarn"
+    ]
+
+    private static let codeLikeSignals: [String] = [
+        "```", "#!/", ".git/", "index.lock", "read_signal", " set -",
+        "$(", "&&", "||", "==", "!=", "=>", "->", "{", "}", ";",
+        "func ", "let ", "var ", "class ", "struct ", "enum ", "import ",
+        "return ", "const ", "function "
+    ]
+
+    private static let codeSymbolCharacters: Set<Character> =
+        Set("{}[]();=$|/\\<>")
+
+    private static let sourceDeclarationModifiers: Set<String> = [
+        "fileprivate", "final", "internal", "open", "override", "private",
+        "public", "static"
+    ]
+
+    private static let sourceDeclarationStarts: [String] = [
+        "class ", "const ", "enum ", "extension ", "func ", "function ",
+        "import ", "interface ", "let ", "protocol ", "struct ",
+        "typealias ", "var "
+    ]
+
+    /// Route non-prose fragments before lexical scoring: operational commands
+    /// stay in Generalities (`000`), while recognizable source declarations use
+    /// Computer programming (`005`) instead of an incidental topical heading.
+    private static func specialClassification(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+
+        if FDCCodeLanguageDetector.detect(in: trimmed) != nil {
+            return "005"
+        }
+        if case .operational? = FDCCodeLanguageDetector.fencedHint(in: trimmed) {
+            return "000"
+        }
+
+        if lowered.contains("#!/") ||
+            lowered.contains(".git/") ||
+            lowered.contains("index.lock") ||
+            lowered.contains("read_signal") {
+            return "000"
+        }
+
+        let lines = trimmed
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var commandLineCount = 0
+        for line in lines {
+            let commandText = line.drop(while: { "$#>%".contains($0) || $0.isWhitespace })
+            guard let first = commandText.split(whereSeparator: \.isWhitespace).first else { continue }
+            let command = String(first)
+                .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+                .lowercased()
+            if shellCommandStarts.contains(command) { commandLineCount += 1 }
+        }
+        if commandLineCount >= 2 || (commandLineCount == 1 && lines.count <= 6) {
+            return "000"
+        }
+        if FDCCodeLanguageDetector.fencedHint(in: trimmed) != nil {
+            return "005"
+        }
+
+        let declarationLineCount = lines.reduce(0) { count, line in
+            var words = line.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+            while let first = words.first,
+                  sourceDeclarationModifiers.contains(
+                    first.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+                  ) {
+                words.removeFirst()
+            }
+            let body = words.joined(separator: " ")
+            guard sourceDeclarationStarts.contains(where: body.hasPrefix) else { return count }
+            let declaratorNeedsSyntax = body.hasPrefix("let ") || body.hasPrefix("var ") ||
+                body.hasPrefix("const ")
+            let functionNeedsSyntax = body.hasPrefix("func ") || body.hasPrefix("function ")
+            if declaratorNeedsSyntax && !line.contains(":") && !line.contains("=") { return count }
+            if functionNeedsSyntax && !line.contains("(") { return count }
+            return count + 1
+        }
+        if declarationLineCount >= 2 {
+            return "005"
+        }
+
+        let signalCount = codeLikeSignals.reduce(0) { count, signal in
+            lowered.contains(signal) ? count + 1 : count
+        }
+        if signalCount >= 3 { return "005" }
+
+        let nonWhitespaceCount = trimmed.reduce(0) { $1.isWhitespace ? $0 : $0 + 1 }
+        guard nonWhitespaceCount > 0 else { return nil }
+        let symbolCount = trimmed.reduce(0) { codeSymbolCharacters.contains($1) ? $0 + 1 : $0 }
+        let codeLike = lines.count >= 2 && signalCount >= 2 &&
+            Double(symbolCount) / Double(nonWhitespaceCount) > 0.08
+        return codeLike ? "005" : nil
+    }
+
+
+    /// Encode `text` to an FDC code. Hierarchy mode returns `000` for nonempty
+    /// unresolved text; legacy matcher instances retain the `nil` behavior.
     public func encode(_ text: String) -> String? {
         encodeAnchor(text).code
     }
 
+    public func encode(_ text: String, taggerChoice: NovelTokenTaggerChoice) -> String? {
+        encodeAnchor(text, taggerChoice: taggerChoice).code
+    }
+
     /// Encode `text` and also surface the dominant concept of the input.
-    /// `code` is the FDC code (`nil` = UNRESOLVED). `conceptQID` is the
+    /// `code` is the FDC code (`000` = Generalities/unclassified in hierarchy
+    /// mode). `conceptQID` is the
     /// highest-weighted Wikidata Q-ID in the concept bag — "what the text is
     /// most about" — or `nil` if the bag carries no Q-ID concept. One pass,
     /// so EideticLib fills an Anchor's code + wikidataQID without re-bagging.
     public func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, nil)
+        }
+        if let specialCode = Self.specialClassification(text) {
+            return useHierarchicalResolution ? (specialCode, nil) : (nil, nil)
+        }
         let bag = BagBuilder.bag(text, lexicon: lexicon)
-        return encodeFromBag(bag)
+        let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
+        return useHierarchicalResolution && result.code == nil ? ("000", nil) : result
+    }
+
+    public func encodeAnchor(
+        _ text: String,
+        taggerChoice: NovelTokenTaggerChoice
+    ) -> (code: String?, conceptQID: String?) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, nil)
+        }
+        if let specialCode = Self.specialClassification(text) {
+            return useHierarchicalResolution ? (specialCode, nil) : (nil, nil)
+        }
+        let bag = BagBuilder.bag(text, lexicon: lexicon, taggerChoice: taggerChoice)
+        let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
+        return useHierarchicalResolution && result.code == nil ? ("000", nil) : result
     }
 
     /// Non-recording variant of `encodeAnchor` (secfix/fdc-pool).
@@ -300,10 +688,17 @@ public struct FDCMatcher: Sendable {
             // Delegate to the recording path — identical behaviour, no duplication.
             return encodeAnchor(text)
         }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, nil)
+        }
+        if let specialCode = Self.specialClassification(text) {
+            return useHierarchicalResolution ? (specialCode, nil) : (nil, nil)
+        }
         // Non-recording: build bag via the non-recording BagBuilder overload so
         // novel user-memory tokens never accumulate in sharedNovelCache.
         let bag = BagBuilder.bag(text, lexicon: lexicon, recordNovel: false)
-        return encodeFromBag(bag)
+        let result = fuseSemantic(encodeFromBag(bag), text: text, conceptBag: bag)
+        return useHierarchicalResolution && result.code == nil ? ("000", nil) : result
     }
 
     /// Score a pre-built concept bag against the FDC signatures (Steps 4–5) and
@@ -321,11 +716,9 @@ public struct FDCMatcher: Sendable {
     /// interned bag — they cannot match any signature, identical to the
     /// pre-interning `index[term] == nil` skip.
     private func encodeFromBag(_ bag: ConceptBag) -> (code: String?, conceptQID: String?) {
-        // dominantQID scans for "Q"-prefixed keys in the String bag and is
-        // independent of the interning structures — compute it first from the
-        // original bag before building the interned projection.
-        let qid = dominantQID(bag)
-        guard !bag.isEmpty else { return (nil, qid) }
+        guard !bag.isEmpty else {
+            return useHierarchicalResolution ? ("000", nil) : (nil, nil)
+        }
 
         // Convert the String-keyed concept bag to an Int-keyed interned bag.
         // Terms absent from the codebook have no TermID and are silently
@@ -335,7 +728,9 @@ public struct FDCMatcher: Sendable {
         for (term, count) in bag {
             if let id = termToID[term] { internedBag[id, default: 0] += count }
         }
-        guard !internedBag.isEmpty else { return (nil, qid) }
+        guard !internedBag.isEmpty else {
+            return useHierarchicalResolution ? ("000", nil) : (nil, nil)
+        }
 
         // Step 4 — match + score (§5.2/§5.3). The Int-keyed inverted index
         // gives the set of candidate codes (any code sharing ≥1 bag term); each
@@ -347,7 +742,9 @@ public struct FDCMatcher: Sendable {
             guard let codes = indexByID[termID] else { continue }
             for code in codes { candidateSet.insert(code) }
         }
-        guard !candidateSet.isEmpty else { return (nil, qid) }   // §5.2.3 — UNRESOLVED, no guess
+        guard !candidateSet.isEmpty else {
+            return useHierarchicalResolution ? ("000", nil) : (nil, nil)
+        }
 
         // Sorted so the scan order is deterministic regardless of Set hashing.
         // This matters for the normalized modes: two codes can carry equal (or
@@ -356,11 +753,20 @@ public struct FDCMatcher: Sendable {
         // ties here exactly as the `code < node` rule intends.
         let candidates = candidateSet.sorted()
 
+        if useHierarchicalResolution {
+            return hierarchicalResolution(candidates: candidates, bag: internedBag, conceptBag: bag)
+        }
+
+        var scoreByCode: [String: Double] = Dictionary(minimumCapacity: candidates.count)
+        for code in candidates {
+            scoreByCode[code] = score(code: code, bag: internedBag)
+        }
+
         // argmax: highest score, ties broken by lowest code lexicographically.
         var node = ""
         var nodeScore = -Double.greatestFiniteMagnitude
         for code in candidates {
-            let s = score(code: code, bag: internedBag)
+            let s = scoreByCode[code] ?? 0
             if s > nodeScore || (s == nodeScore && code < node) {
                 node = code; nodeScore = s
             }
@@ -373,9 +779,9 @@ public struct FDCMatcher: Sendable {
         // grounded one — a confidently-wrong specific code is worse than the
         // honest "000" unclassified sentinel. UNRESOLVED when tied codes
         // exceed the allowed maximum.
-        let tiedCount = candidates.filter { score(code: $0, bag: internedBag) == nodeScore }.count
+        let tiedCount = candidates.filter { (scoreByCode[$0] ?? 0) == nodeScore }.count
         guard tiedCount <= Self.maximumTiedWinnersForClassification else {
-            return (nil, qid)   // too many tied winners — no discriminating signal
+            return (nil, nil)   // too many tied winners — no discriminating signal
         }
 
         // Step 5 — frame descent (§6.1). A child must clear the (raw) overlap
@@ -396,19 +802,29 @@ public struct FDCMatcher: Sendable {
             guard let next = best else { break }
             node = next
         }
-        return (node, qid)
+        return (node, dominantQID(bag, supporting: node, internedBag: internedBag))
     }
 
-    /// The highest-count Wikidata Q-ID in `bag` (ties broken by lowest Q-ID
-    /// lexicographically, so the result is deterministic regardless of the
-    /// bag's dictionary iteration order). `nil` if the bag holds no Q-ID key.
+    /// The highest-count Wikidata Q-ID in `bag` that also supports the winning
+    /// code (ties broken by lowest Q-ID lexicographically, so the result is
+    /// deterministic regardless of the bag's dictionary iteration order). `nil`
+    /// if the winner was not supported by a Q-ID term.
     ///
-    /// Uses the original String-keyed ConceptBag — Q-ID extraction is
-    /// independent of the term interning structures.
-    private func dominantQID(_ bag: ConceptBag) -> String? {
+    /// This keeps concept provenance aligned with classification evidence:
+    /// unresolved text returns no Q-ID, and a code never borrows an incidental
+    /// Q-ID from another part of the bag.
+    private func dominantQID(
+        _ bag: ConceptBag,
+        supporting code: String,
+        internedBag: InternedBag
+    ) -> String? {
+        guard let supportingIDs = sigTermIDs[code] else { return nil }
         var best: String?
         var bestN = 0
         for (k, n) in bag where k.hasPrefix("Q") {
+            guard let id = termToID[k],
+                  supportingIDs.contains(id),
+                  internedBag[id] != nil else { continue }
             if n > bestN || (n == bestN && (best == nil || k < best!)) {
                 best = k; bestN = n
             }

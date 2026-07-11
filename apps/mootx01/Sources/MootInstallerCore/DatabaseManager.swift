@@ -227,21 +227,6 @@ public enum DatabaseManager {
         #endif
     }
 
-    /// Delete the default estate database files (SQLite + WAL/SHM).
-    ///
-    /// Used by `mootx01 uninstall --purge`. Does not remove the data directory itself.
-    ///
-    /// - Parameter dataDirectory: resolved data directory.
-    /// - Throws: filesystem errors.
-    public static func purgeDefaultEstate(in dataDirectory: URL) throws {
-        let base = MootPaths.estateURL(in: dataDirectory)
-        for suffix in ["", "-wal", "-shm"] {
-            let path = base.path + suffix
-            if FileManager.default.fileExists(atPath: path) {
-                try FileManager.default.removeItem(atPath: path)
-            }
-        }
-    }
 }
 
 // MARK: - Error types
