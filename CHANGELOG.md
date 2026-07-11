@@ -5,6 +5,30 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.30 — 2026-07-11
+
+Installer trust release: two small features that keep an install honest
+about what will actually run.
+
+- **PATH shadow warnings.** install.sh and install.ps1 now walk PATH after
+  placing the binaries and warn when a DIFFERENT `mootx01` or `moot-mgr`
+  sits earlier on PATH and shadows the fresh install (a stale copy from an
+  old install dir, Homebrew, or a prior custom location) — naming the
+  shadowing copy, the installed copy, and the fix. Previously the stale
+  copy silently won and `mootx01 --version` disagreed with what was just
+  installed.
+- **Public upgrade path.** `mootx01 upgrade` now downloads the latest
+  release (SHA-256 verified, typed confirmation unless `--yes`), installs
+  it, converges plugin packages and tool permissions, and restarts the
+  background services. `--from <path>` remains the local-build path; the
+  implicit `.build/` search is gone. `upgrade --check` now queries the
+  public repo (it pointed at an inaccessible internal repo — dead for
+  every public user); `MOOTX01_REPO` overrides it, matching install.sh.
+- **Restart reminder.** When an install or upgrade refreshes Claude Code's
+  plugin cache, the success output now says to restart Claude Code — the
+  refresh updates the on-disk cache only, and a running session keeps the
+  old plugin loaded until restarted. Both language verticals.
+
 ## v1.0.29 — 2026-07-11
 
 First-run reliability release. Same-day follow-up to v1.0.28 driven by a
