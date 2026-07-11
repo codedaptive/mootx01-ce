@@ -5,6 +5,60 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.28 — 2026-07-11
+
+Security-hardening and substrate-robustness release. A full sweep of the
+Codex security findings plus a resource-bounds, access-enforcement, and
+privacy pass across the kits. No user-facing feature changes — all
+correctness and hardening, both legs where a kit is dual-language.
+
+- **Resource bounds (DoS resistance).** Every unbounded fan-out or matrix
+  now has a cap: float recall is bounded to a top-k scan; the moot-mgr read
+  API caps dropboxes and per-dropbox rows; Bradley-Terry preference
+  competitors and latent-theme matrices are bounded; the migration
+  benchmark caps its plan/entry fan-out; and the branch registry enforces
+  an active-branch quota and releases a terminal branch's copied rows and
+  parent estate to close a derive→discard memory-growth vector.
+- **Sensitivity and access enforcement.** Tunnel (graph-edge) reads are
+  gated by endpoint sensitivity; the memory-tool opt-out is enforced at
+  dispatch, not just at projection; the memory tool honors the no-claims
+  sensitivity posture on both legs.
+- **Server-side authority.** Migration-promotion verdicts are decided
+  server-side (no client-controlled disqualification); confirmation-strip
+  and mutate-confirm noun-binding invariants are pinned so a stripped or
+  mis-bound confirmation cannot slip a destructive op through; `--yes` no
+  longer skips the interactive replace confirmation.
+- **Privacy.** MindOverlap is gated on k-anonymity (k=3, not emptiness) and
+  reports per-side k-sufficiency instead of exact drawer counts, so a
+  federated overlap query discloses no per-estate structure beyond the
+  differentially-private score.
+- **Prompt-injection.** Untrusted FDC content is sanitized before it can
+  enter the dashboard AI prompt.
+- **Correctness / integrity.** RAM-resident caches invalidate on every
+  mutation path; maintenance commits proposed keys per-key after a
+  successful write; reanchor rejects an empty room or empty UDC;
+  synthetic-audit hydration paginates with an HLC cursor; the BM25 rebuild
+  is guarded against actor reentrancy; the memory adapter enforces the
+  `/memories` path-segment boundary; version-skew parsing handles
+  prerelease components.
+- **Resident governor.** The graph-centrality and topology-snapshot duties
+  now detect standalone tunnel and knowledge-fact changes — previously they
+  could serve stale centrality or a stale topology snapshot after a
+  graph-only edit — bringing the Swift watermark in line with the Rust
+  governor.
+- **Build hygiene.** Vendored SQLCipher amalgamation warnings are silenced
+  on the SQLCipher target only (no first-party code touched); redundant
+  access modifiers removed across GeniusLocusKit and LocusKit; the
+  transaction-isolation invariant is documented at the persistence boundary.
+- **Release / CI.** Trusted PyPI publishing with SHA-pinned actions, pinned
+  winget submission, a data-retention-aware uninstall with reuse/replace
+  reinstall, and permission classification for the newer memory tools.
+
+Deferred to their own tracked follow-ups: audit-event coverage for
+standalone tunnel/fact writes; the PostgreSQL backend NULL/JSON fidelity
+pass (dormant backend); the Rust GLK zoom-window manifest read; and the
+MindOverlap differential-privacy budget ledger.
+
 ## v1.0.18 — 2026-07-05
 
 moot-mgr fix release. With monitoring now on by default (v1.0.17), the
