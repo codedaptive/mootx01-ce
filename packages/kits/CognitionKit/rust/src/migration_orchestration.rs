@@ -184,6 +184,25 @@ pub fn run_migration_benchmark<S: RecipeSubstrate>(
         }
         .into());
     }
+    // DoS bounds (see MAX_MIGRATION_PLANS / MAX_MIGRATION_ORIGIN_ENTRIES):
+    // refuse an over-large fan-out before deriving any branch. The Rust path
+    // is serial, but an unbounded plans/entries product still holds the
+    // coordinator lock for an unbounded span (and the MCP tool caps these
+    // too); enforcing here protects every caller of the recipe.
+    if plans.len() > crate::error::MAX_MIGRATION_PLANS {
+        return Err(RecipeError::TooManyPlans {
+            count: plans.len(),
+            maximum: crate::error::MAX_MIGRATION_PLANS,
+        }
+        .into());
+    }
+    if origin.len() > crate::error::MAX_MIGRATION_ORIGIN_ENTRIES {
+        return Err(RecipeError::TooManyOriginEntries {
+            count: origin.len(),
+            maximum: crate::error::MAX_MIGRATION_ORIGIN_ENTRIES,
+        }
+        .into());
+    }
     let names: Vec<String> = plans.iter().map(|p| p.name.clone()).collect();
     if let Some(dup) = crate::migration_ranking::first_duplicate(&names) {
         return Err(RecipeError::DuplicatePlanName(dup).into());
@@ -360,6 +379,35 @@ mod tests {
                 content: content.to_string(),
             })
             .collect()
+    }
+
+    // DoS bounds — over-cap plans / entries are refused before any derive.
+    #[test]
+    fn over_cap_plans_returns_too_many_plans() {
+        let mut fake = FakeSubstrate::new(&[]);
+        let plans: Vec<PlanInput> = (0..=crate::error::MAX_MIGRATION_PLANS)
+            .map(|i| plan(&format!("p{i}"), &format!("r{i}"), "000"))
+            .collect();
+        let err = run_migration_benchmark(&mut fake, &plans, &origin(&[("a", "alpha")]))
+            .unwrap_err();
+        assert!(
+            matches!(err, RecipeRunError::Recipe(RecipeError::TooManyPlans { .. })),
+            "expected TooManyPlans, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn over_cap_origin_entries_returns_too_many_entries() {
+        let mut fake = FakeSubstrate::new(&[]);
+        let entries: Vec<OriginEntry> = (0..=crate::error::MAX_MIGRATION_ORIGIN_ENTRIES)
+            .map(|i| OriginEntry { id: format!("e{i}"), content: format!("c{i}") })
+            .collect();
+        let err = run_migration_benchmark(&mut fake, &[plan("only", "r1", "000")], &entries)
+            .unwrap_err();
+        assert!(
+            matches!(err, RecipeRunError::Recipe(RecipeError::TooManyOriginEntries { .. })),
+            "expected TooManyOriginEntries, got {err:?}"
+        );
     }
 
     // SEAM-1 — clean, two plans: full sequence + tie-break ranking

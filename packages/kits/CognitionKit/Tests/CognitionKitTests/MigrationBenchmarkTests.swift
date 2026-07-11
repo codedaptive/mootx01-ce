@@ -143,6 +143,41 @@ struct MigrationBenchmarkTests {
         }
     }
 
+    @Test("over-cap plan count throws tooManyPlans before deriving")
+    func overCapPlanCountThrows() async throws {
+        let (kit, handle) = try await makeEstate()
+        let origin = ExternalCorpus(name: "src", entries: [
+            ExternalEntry(id: "a", content: "anything", tags: []),
+        ])
+        let plans = (0...MigrationBenchmark.maxPlans).map {
+            plan("plan-\($0)", room: "r\($0)", code: "000")
+        }
+        let input = MigrationBenchmark.Input(origin: origin, plans: plans)
+        await #expect {
+            _ = try await MigrationBenchmark().run(input: input, estate: handle, kit: kit)
+        } throws: { error in
+            guard case RecipeError.tooManyPlans = error else { return false }
+            return true
+        }
+    }
+
+    @Test("over-cap origin entries throws tooManyOriginEntries before deriving")
+    func overCapOriginEntriesThrows() async throws {
+        let (kit, handle) = try await makeEstate()
+        let entries = (0...MigrationBenchmark.maxOriginEntries).map {
+            ExternalEntry(id: "e\($0)", content: "c\($0)", tags: [])
+        }
+        let origin = ExternalCorpus(name: "src", entries: entries)
+        let input = MigrationBenchmark.Input(
+            origin: origin, plans: [plan("only", room: "r1", code: "000")])
+        await #expect {
+            _ = try await MigrationBenchmark().run(input: input, estate: handle, kit: kit)
+        } throws: { error in
+            guard case RecipeError.tooManyOriginEntries = error else { return false }
+            return true
+        }
+    }
+
     @Test("empty plans throws insufficientBranches")
     func emptyPlansThrowsInsufficientBranches() async throws {
         let (kit, handle) = try await makeEstate()

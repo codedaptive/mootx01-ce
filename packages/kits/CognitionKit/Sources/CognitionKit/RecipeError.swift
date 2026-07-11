@@ -56,6 +56,18 @@ public enum RecipeError: Error, Sendable, Equatable, CustomStringConvertible {
     /// (spec B-3). `action` names the step that needs confirmation.
     case userConfirmationRequired(action: String)
 
+    /// More migration plans than the recipe admits. Each plan derives a
+    /// retained COW branch and runs concurrent heavy work, so an unbounded
+    /// plan count is a resource-exhaustion vector. Refused before any
+    /// branch is derived. Mirrors Rust `RecipeError::TooManyPlans`.
+    case tooManyPlans(count: Int, maximum: Int)
+
+    /// More origin entries than the recipe admits. Each entry is captured
+    /// into every plan's branch, so an unbounded corpus is O(plans ×
+    /// entries) work. Refused before any branch is derived. Mirrors Rust
+    /// `RecipeError::TooManyOriginEntries`.
+    case tooManyOriginEntries(count: Int, maximum: Int)
+
     public var description: String {
         switch self {
         case .missingCapability(let cap):
@@ -70,6 +82,10 @@ public enum RecipeError: Error, Sendable, Equatable, CustomStringConvertible {
             return "RecipeError.tournamentNoWinner: no rankable survivor (\(disqualifiedCount) branch(es) disqualified)."
         case .userConfirmationRequired(let action):
             return "RecipeError.userConfirmationRequired: '\(action)' requires explicit human confirmation."
+        case .tooManyPlans(let count, let maximum):
+            return "RecipeError.tooManyPlans: \(count) plans exceeds the maximum of \(maximum)."
+        case .tooManyOriginEntries(let count, let maximum):
+            return "RecipeError.tooManyOriginEntries: \(count) origin entries exceeds the maximum of \(maximum)."
         }
     }
 }

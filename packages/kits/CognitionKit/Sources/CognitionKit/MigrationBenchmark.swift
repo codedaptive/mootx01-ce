@@ -186,6 +186,25 @@ public struct MigrationBenchmark: Recipe {
 
     public init() {}
 
+    /// DoS bounds on attacker-influenceable input. Each plan derives a COW
+    /// branch (recall + copy of all parent rows, retained in the kit
+    /// registry) and benchmarks it; each origin entry is captured into every
+    /// branch. Unbounded plans → a burst of concurrent heavy work + O(plans)
+    /// retained branches; unbounded entries → O(plans × entries) captures.
+    /// The MCP decoders also cap these, but enforcing here protects every
+    /// caller of the recipe. Real migrations run a handful of candidate
+    /// plans over a bounded corpus; these ceilings are far above that.
+    public static let maxPlans = 20
+    public static let maxOriginEntries = 5000
+
+    /// Bounded concurrency for the per-plan fan-out. Each task is heavy
+    /// (branch derivation = registry mutation + full row copy; captures =
+    /// actor-serialized writes; benchmark = recall scan), so an unbounded
+    /// task-per-plan burst is a resource spike even under maxPlans. A small
+    /// sliding window keeps peak concurrency bounded. Mirrors the
+    /// classifyContentsInParallel window pattern in AriaMcpKit.
+    public static let maxPlanConcurrency = 4
+
     public let name = "migration_benchmark"
     public let version = "1.0.0"
     public let description =
@@ -207,6 +226,16 @@ public struct MigrationBenchmark: Recipe {
         try verifyCapabilities(required: requiredCapabilities)
         guard !input.plans.isEmpty else {
             throw RecipeError.insufficientBranches(minimum: 1, provided: 0)
+        }
+        // DoS bounds (see maxPlans/maxOriginEntries): refuse an over-large
+        // fan-out before deriving any branch, so a large plans/entries array
+        // cannot spike CPU/memory or fill the branch registry.
+        guard input.plans.count <= Self.maxPlans else {
+            throw RecipeError.tooManyPlans(count: input.plans.count, maximum: Self.maxPlans)
+        }
+        guard input.origin.entries.count <= Self.maxOriginEntries else {
+            throw RecipeError.tooManyOriginEntries(
+                count: input.origin.entries.count, maximum: Self.maxOriginEntries)
         }
         // Plan names key the branch map and the confirm step; a duplicate
         // would silently collide (last wins) and leak a derived branch.
@@ -273,16 +302,35 @@ public struct MigrationBenchmark: Recipe {
         // the serial merge, not in the concurrent tasks).
         var resultsByName: [String: PlanResult] = [:]
         resultsByName.reserveCapacity(input.plans.count)
+        let plans = input.plans
+        let window = min(Self.maxPlanConcurrency, plans.count)
         try await withThrowingTaskGroup(of: PlanResult.self) { group in
-            for plan in input.plans {
+            // Sliding window: prime `window` tasks, then admit the next as
+            // each completes — peak concurrency stays ≤ window regardless of
+            // plan count. Determinism is unaffected: the ranking is a pure
+            // sort over the collected results in INPUT order below, not task
+            // completion order.
+            var next = 0
+            while next < window {
+                let plan = plans[next]
                 group.addTask {
                     try await Self.processPlan(
                         plan, migratable: migratable, dropped: dropped,
                         originName: originName, estate: estate, kit: kit, now: now)
                 }
+                next += 1
             }
-            for try await result in group {
+            while let result = try await group.next() {
                 resultsByName[result.planName] = result
+                if next < plans.count {
+                    let plan = plans[next]
+                    group.addTask {
+                        try await Self.processPlan(
+                            plan, migratable: migratable, dropped: dropped,
+                            originName: originName, estate: estate, kit: kit, now: now)
+                    }
+                    next += 1
+                }
             }
         }
 
