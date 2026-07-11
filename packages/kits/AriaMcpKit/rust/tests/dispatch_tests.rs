@@ -4657,7 +4657,6 @@ fn confirm_migration_success_end_to_end() {
     let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
     a.insert("winnerBranchID".into(), JsonValue::from(serde_json::json!(winner_bid)));
     a.insert("discardBranchIDs".into(), JsonValue::from(serde_json::json!([])));
-    a.insert("disqualifiedBranchIDs".into(), JsonValue::from(serde_json::json!([])));
 
     let result = dispatch_tool("moot_confirm_migration", &a, &registry, &SurfacedRecallLedger::new())
         .expect("moot_confirm_migration must not throw");

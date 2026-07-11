@@ -342,6 +342,20 @@ public struct MigrationBenchmark: Recipe {
             rankings: rankings,
             disqualified: disqualified)
 
+        // C-5 enforcement is SERVER-SIDE, at the source: a plan the C-13
+        // gate disqualified has no legitimate future, so its branch is
+        // discarded here, before any confirm step can address it. The GLK
+        // promote/merge verbs refuse non-active branches, so a stateless
+        // caller replaying the disqualified id (with or without any
+        // client-supplied claim about disqualification) cannot promote it.
+        // Rows are retained for audit (I-15); the report above still
+        // carries the lost-concept detail.
+        for d in ranked.disqualified {
+            if let branch = resultsByName[d.name]?.branch {
+                try await branch.discard()
+            }
+        }
+
         // Emit cognitionkit.recipe.run with status "complete". The step_count
         // is input.plans.count — the number of plans benchmarked during this
         // recipe invocation. Byte-identical output regardless of monitoring
@@ -473,35 +487,44 @@ public struct MigrationBenchmark: Recipe {
     /// (`GeniusLocusKit.branchHandle(for:)`) and performs the same
     /// promote-winner + discard-losers sequence.
     ///
-    /// C-5 across the boundary: the run report surfaced the disqualified
-    /// branch ids to the conscious caller (MCP↔CognitionKit is the R/W
-    /// teaching channel — a human or agent is in the loop and saw the
-    /// report). The caller echoes that set back as `disqualifiedBranchIDs`
-    /// so the guard is still enforced server-side: promoting a branch the
-    /// report disqualified raises `silentConceptLoss`, exactly as the
-    /// in-process path does. An empty set means the caller asserts no
-    /// disqualification applies.
+    /// C-5 across the boundary is enforced AUTHORITATIVELY server-side:
+    /// `run` discards every disqualified branch before returning, and this
+    /// confirm refuses any branch that is not `.active`. No client-supplied
+    /// claim participates — an earlier revision accepted a caller-echoed
+    /// `disqualifiedBranchIDs` set (defaulting to empty), which let a
+    /// caller omit the set and promote a branch the report had
+    /// disqualified. The verdict now lives where the branches live.
     ///
     /// - Throws:
-    ///   - `RecipeError.silentConceptLoss` if `winnerBranchID` is in
-    ///     `disqualifiedBranchIDs` (spec C-5).
+    ///   - `RecipeError.silentConceptLoss` if `winnerBranchID` resolves to
+    ///     a discarded branch (spec C-5 — the C-13 gate disqualified it,
+    ///     or a prior confirm discarded it; either way it is dead history).
     ///   - `RecipeError.userConfirmationRequired` if `winnerBranchID` does
-    ///     not resolve to a branch tracked by `kit`.
+    ///     not resolve to a branch tracked by `kit`, or resolves to a
+    ///     branch that already won or merged.
     public func confirmPromotion(
         winnerBranchID: BranchID,
         discardBranchIDs: [BranchID],
-        disqualifiedBranchIDs: Set<BranchID> = [],
         estate: EstateHandle,
         kit: GeniusLocusKit
     ) async throws {
-        // C-5: never promote a branch the report disqualified.
-        if disqualifiedBranchIDs.contains(winnerBranchID) {
-            throw RecipeError.silentConceptLoss(
-                branchID: winnerBranchID, lostConcepts: [])
-        }
         guard let winner = await kit.branchHandle(for: winnerBranchID) else {
             throw RecipeError.userConfirmationRequired(
                 action: "promote unknown branch \(winnerBranchID)")
+        }
+        // C-5: never promote a branch that is no longer active. Discarded
+        // is exactly the disqualified case across this boundary (run
+        // discards disqualified branches; confirm discards losers). The
+        // GLK verb enforces the same invariant one layer down.
+        switch winner.status {
+        case .active:
+            break
+        case .discarded:
+            throw RecipeError.silentConceptLoss(
+                branchID: winnerBranchID, lostConcepts: [])
+        case .won, .merged:
+            throw RecipeError.userConfirmationRequired(
+                action: "promote branch \(winnerBranchID) in terminal status \(winner.status.rawValue)")
         }
         // Promote the winner; writes descend through the GLK branch verb.
         try await NeuronKit.promoteBranch(winner, replacing: estate, in: kit)

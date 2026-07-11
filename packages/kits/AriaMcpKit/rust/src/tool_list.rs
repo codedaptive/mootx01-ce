@@ -801,11 +801,6 @@ fn confirm_migration_tool() -> serde_json::Value {
                     "type": "array",
                     "description": "UUIDs of losing branches to discard.",
                     "items": { "type": "string" }
-                },
-                "disqualifiedBranchIDs": {
-                    "type": "array",
-                    "description": "UUIDs the run report disqualified.",
-                    "items": { "type": "string" }
                 }
             }),
             json!(["winnerBranchID"])

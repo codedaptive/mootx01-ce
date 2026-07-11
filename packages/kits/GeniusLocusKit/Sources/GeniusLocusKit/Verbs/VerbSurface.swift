@@ -1178,6 +1178,14 @@ public extension GeniusLocusKit {
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
         }
+        // Lifecycle guard: the doc contract above ("Must be in `.active`
+        // status") was previously unenforced, which let a DISCARDED branch —
+        // e.g. one the migration benchmark disqualified for silent concept
+        // loss — be promoted by any caller holding its id (C-5 bypass).
+        guard concreteBranch.status == .active else {
+            throw GeniusLocusKitError.branchNotActive(
+                branchID: concreteBranch.branchID, status: concreteBranch.status)
+        }
         // Validate the handle before the E-2 guard: estate(for:) throws
         // .estateNotOpen for a stale handle, surfacing the error before the
         // promotion-target check. The estate itself is not used directly here
@@ -1284,6 +1292,13 @@ public extension GeniusLocusKit {
         // pass the type cast but are not tracked by this actor.
         guard branches[concreteBranch.branchID] != nil else {
             throw GeniusLocusKitError.branchNotTracked(branchID: concreteBranch.branchID)
+        }
+        // Lifecycle guard: same invariant as glkPromoteBranch — terminal
+        // branches (won/merged/discarded) are read-only history and cannot
+        // cherry-pick content into the parent.
+        guard concreteBranch.status == .active else {
+            throw GeniusLocusKitError.branchNotActive(
+                branchID: concreteBranch.branchID, status: concreteBranch.status)
         }
         // Validate the handle before the E-2 guard: estate(for:) throws
         // .estateNotOpen for a stale handle, surfacing the error before the

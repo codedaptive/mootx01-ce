@@ -97,6 +97,16 @@ pub enum BranchError {
     /// path (encode queue, Corpus feed) can be used instead of the bare
     /// `Estate::capture` bypass (Finding #9 fix).
     VerbDispatch(VerbDispatchError),
+    /// A promote/merge call addressed a branch that is no longer `Active`
+    /// (already won, merged, or discarded). Terminal branches are read-only
+    /// history: promoting a discarded branch would resurrect content a
+    /// prior decision rejected — the migration benchmark relies on this to
+    /// keep disqualified branches unpromotable across the stateless MCP
+    /// boundary (C-5). Parity of `GeniusLocusKitError.branchNotActive`.
+    NotActive {
+        branch_id: BranchId,
+        status: BranchStatus,
+    },
 }
 
 impl From<EstateError> for BranchError {
@@ -484,6 +494,14 @@ impl EstateCoordinator {
                 .branches
                 .get(&branch_id)
                 .ok_or(BranchError::NotTracked { branch_id })?;
+            // Lifecycle guard: the Swift doc contract ("Must be in `.active`
+            // status") was previously unenforced on either leg, which let a
+            // DISCARDED branch — e.g. one the migration benchmark
+            // disqualified for silent concept loss — be promoted by any
+            // caller holding its id (C-5 bypass).
+            if branch.status() != BranchStatus::Active {
+                return Err(BranchError::NotActive { branch_id, status: branch.status() });
+            }
             if branch.parent_estate_uuid() != target_uuid {
                 return Err(BranchError::PromotionTargetMismatch { branch_id });
             }
@@ -552,6 +570,12 @@ impl EstateCoordinator {
             .branches
             .get_mut(&branch_id)
             .ok_or(BranchError::NotTracked { branch_id })?;
+        // Lifecycle guard: same invariant as glk_promote_branch — terminal
+        // branches (won/merged/discarded) are read-only history and cannot
+        // cherry-pick content into the parent.
+        if branch.status() != BranchStatus::Active {
+            return Err(BranchError::NotActive { branch_id, status: branch.status() });
+        }
         if branch.parent_estate_uuid() != target_uuid {
             return Err(BranchError::PromotionTargetMismatch { branch_id });
         }
