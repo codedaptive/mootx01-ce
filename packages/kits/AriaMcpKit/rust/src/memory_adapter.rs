@@ -19,6 +19,16 @@ pub fn dispatch_memory(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    // Guard: the memory tool is opt-in (MOOTX01_MEMORY_TOOL == "1"). The flag
+    // gated only tool projection (the tool is absent from tools/list), so a
+    // hard-coded tools/call to `memory` still reached this read/write surface.
+    // Enforce the flag at dispatch too, mirroring the vault disabled-refusal.
+    let enabled = std::env::var("MOOTX01_MEMORY_TOOL").map(|v| v == "1").unwrap_or(false);
+    if !enabled {
+        return Ok(error_result(
+            "memory tool is disabled; run `mootx01 enable memory-tool` to activate it",
+        ));
+    }
     let command = require_string(args, "command")?;
     match command {
         "view" => memory_view(args, registry),

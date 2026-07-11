@@ -20,6 +20,9 @@ import PersistenceKitInMemory
 @Suite("Anthropic memory tool sensitivity gate", .serialized)
 struct MemoryToolAdapterSensitivityTests {
     private func makeHarness() async throws -> (GeniusLocusKit, EstateHandle, ToolDispatcher) {
+        // The memory tool is opt-in; enable it for these dispatch-behavior
+        // tests. This suite is .serialized, so the env mutation is ordered.
+        setenv("MOOTX01_MEMORY_TOOL", "1", 1)
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "memory-tool-sensitivity-tests")
         let storage = InMemoryStorage(
@@ -106,5 +109,30 @@ struct MemoryToolAdapterSensitivityTests {
         let active = drawers.first { $0.content == "elevated new text" && $0.tombstonedAt == nil }
         #expect(active?.adjectiveSensitivity == .elevated,
                 "str_replace re-capture must carry the source tier, not downgrade to .normal")
+    }
+
+    /// Security (Codex b5716d8): the memory tool is opt-in. With the flag
+    /// disabled, a hard-coded tools/call to `memory` must be REFUSED at
+    /// dispatch — not merely hidden from tools/list — mirroring the vault
+    /// disabled-refusal. (Runs in a .serialized suite so the env toggle is
+    /// ordered relative to the enabled tests.)
+    @Test("disabled memory tool refuses dispatch")
+    func disabledMemoryToolRefusesDispatch() async throws {
+        setenv("MOOTX01_MEMORY_TOOL", "0", 1)
+        defer { setenv("MOOTX01_MEMORY_TOOL", "1", 1) }
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "memory-tool-disabled-test")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = text(of: try await dispatcher.dispatch(
+            name: "memory",
+            arguments: .object(["command": .string("view"), "path": .string("/memories")])))
+        #expect(result.contains("disabled"),
+                "a disabled memory tool must refuse a direct tools/call")
     }
 }
