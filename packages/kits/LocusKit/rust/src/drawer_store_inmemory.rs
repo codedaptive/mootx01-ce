@@ -3587,6 +3587,28 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
+    fn count_tunnel_rows(&self) -> Result<usize, LocusKitError> {
+        // O(1) COUNT(*) on the tunnels table — including tombstoned tunnels.
+        // Used by the composite topology-change signature so the governor detects
+        // standalone tunnel writes that produce no audit event.
+        // Mirrors Swift `DrawerStore.countTunnelRows()`.
+        self.storage
+            .row_store()
+            .count(T_TUNNELS, None)
+            .map_err(map_storage_err)
+    }
+
+    fn count_kg_fact_rows(&self) -> Result<usize, LocusKitError> {
+        // O(1) COUNT(*) on the kg_facts table — including retired facts.
+        // Used by the composite topology-change signature so the governor detects
+        // standalone KG-fact writes that produce no audit event.
+        // Mirrors Swift `DrawerStore.countKGFactRows()`.
+        self.storage
+            .row_store()
+            .count(T_KG_FACTS, None)
+            .map_err(map_storage_err)
+    }
+
     // -----------------------------------------------------------------
     // Audit reads
     // -----------------------------------------------------------------
@@ -4686,6 +4708,12 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
         self.inner.count_drawer_rows()
+    }
+    fn count_tunnel_rows(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_tunnel_rows()
+    }
+    fn count_kg_fact_rows(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_kg_fact_rows()
     }
     fn audit_events_for_row(
         &self,
