@@ -1411,7 +1411,10 @@ public actor VectorStore {
         // cannot tombstone selectively here; a lazy rebuild is correct and is
         // paid once on next search. Other models' indices are untouched
         // (dropping the map entry is the invalidation).
-        // ADR-026: float index is no longer cached; no invalidation needed.
+        // ramResident float coherence (SECURITY): drop this model's cached
+        // FloatBruteForceIndex so a subsequent findNearestFloat cannot return
+        // the just-deleted vectors from memory.
+        floatIndices.removeValue(forKey: modelID)
         // Tombstone every resident slot for this (itemID, modelID) pair.
         // Only if the index has been built — if not, the delete is already
         // reflected in the table and will be absent on first build.
@@ -1493,7 +1496,10 @@ public actor VectorStore {
 
         // 2. Rebuild the resident binary index ONCE from the durable table (O(n)),
         //    and drop this model's Lane D float index so it lazily rebuilds too.
-        // ADR-026: float index is no longer cached; no invalidation needed.
+        // ramResident float coherence (SECURITY): the model's vectors were
+        // replaced, so drop its cached FloatBruteForceIndex — otherwise
+        // findNearestFloat would search the pre-replace vectors.
+        floatIndices.removeValue(forKey: modelID)
         try await _rebuildBinaryIndexFromTable()
     }
 
@@ -1560,9 +1566,11 @@ public actor VectorStore {
         deferredPendingRecords = []
         // Reset the Lane D float indices as well — every float row was just
         // deleted, so every per-modelID resident float array must be cleared.
-        // Dropping all map entries clears every model's index; each rebuilds
-        // lazily (and empty) on the next findNearestFloat for that model.
-        // ADR-026: float index is no longer cached; no invalidation needed.
+        // ramResident float coherence (SECURITY): destroyAllVectors is a
+        // recall-index destroy, so every model's cached FloatBruteForceIndex
+        // must be dropped or findNearestFloat would still return matches from
+        // memory after the durable rows are gone.
+        floatIndices.removeAll()
         log.info("VectorStore.destroyAllVectors: all rows deleted, resident array reset")
     }
 
@@ -1681,8 +1689,29 @@ public actor VectorStore {
             internCache[s] = s
             return s
         }
-        var scored: [(distance: Float, key: VectorRecordKey)] = []
-        scored.reserveCapacity(rows.count)
+        // Bounded top-k (DoS fix): retain only the k best-scoring rows while
+        // scanning rather than materializing + sorting every float row. `top`
+        // is kept ordered best-first and capped at k, so memory is O(k) and
+        // the cost is O(n log k) — independent of estate size. Previously this
+        // reserved rows.count and sorted the full result on every recall, so a
+        // large estate could exhaust CPU/memory from a normal MCP search.
+        let nearest = (direction == .nearest)  // nearest keeps SMALLEST distances
+        var top: [(distance: Float, key: VectorRecordKey)] = []
+        top.reserveCapacity(min(k, 64))
+        // Insert `e` into `top` keeping it ordered best-first, capped at k.
+        func consider(_ e: (distance: Float, key: VectorRecordKey)) {
+            if k <= 0 { return }
+            // Better = smaller distance for nearest, larger for farthest.
+            func better(_ a: Float, _ b: Float) -> Bool { nearest ? a < b : a > b }
+            if top.count >= k, !better(e.distance, top[top.count - 1].distance) {
+                return  // worse than the current worst; skip
+            }
+            // Linear insertion (k is small and caller-clamped).
+            var i = top.count
+            while i > 0, better(e.distance, top[i - 1].distance) { i -= 1 }
+            top.insert(e, at: i)
+            if top.count > k { top.removeLast() }
+        }
         for row in rows {
             guard case let .text(itemID) = row["item_id"] ?? .null,
                   case let .int(vectorIndex) = row["vector_index"] ?? .null,
@@ -1724,16 +1753,10 @@ public actor VectorStore {
                 modelID: intern(rawModelID),
                 modelVersion: intern(rawModelVersion)
             )
-            scored.append((distance: dist, key: key))
+            consider((distance: dist, key: key))
         }
-        // Sort and take top-k.
-        switch direction {
-        case .nearest:
-            scored.sort { $0.distance < $1.distance }
-        case .farthest:
-            scored.sort { $0.distance > $1.distance }
-        }
-        return Array(scored.prefix(k))
+        // `top` is already ordered best-first and capped at k.
+        return top
     }
 
     enum FloatSearchDirection { case nearest, farthest }
@@ -1937,10 +1960,15 @@ public actor VectorStore {
         // rebuilds from the table. (See deleteAllVectors: the delete carries no
         // kind, so a lazy rebuild is the correct coherence path for the float
         // lane.) Other models' indices are untouched.
-        // ADR-026: float index is no longer cached; no invalidation needed.
-        // Only touch the resident array if it has been built. If not, the
-        // table delete is already authoritative and the entry will be absent
-        // when the array is first built on the next findNearest call.
+        // ramResident float coherence (SECURITY): the float lane's per-model
+        // FloatBruteForceIndex IS cached in ramResident mode, so the durable
+        // delete above must invalidate it or a subsequent findNearestFloat
+        // returns the deleted vector from memory. Drop this model's float
+        // index; it rebuilds lazily from the (now-updated) table on next use.
+        floatIndices.removeValue(forKey: modelID)
+        // Only touch the resident BINARY array if it has been built. If not,
+        // the table delete is already authoritative and the entry will be
+        // absent when the array is first built on the next findNearest call.
         guard indexBuilt else { return }
 
         // Scan ALL slots in the brute-force array for this logical position.

@@ -60,6 +60,15 @@ extension ToolProjection {
 extension ToolDispatcher {
 
     func runMemoryTool(_ args: [String: JSONValue]) async throws -> JSONValue {
+        // Guard: the memory tool is opt-in (MOOTX01_MEMORY_TOOL). The feature
+        // flag gated only tool PROJECTION (tools/list), so a disabled tool was
+        // merely hidden — a hard-coded tools/call to `memory` still dispatched
+        // here, reaching the read/write /memories surface. Enforce the flag at
+        // dispatch too, mirroring the vault surface's disabled-refusal guard.
+        guard ToolProjection.memoryToolEnabled else {
+            return Self.errorResult(
+                "memory tool is disabled; run `mootx01 enable memory-tool` to activate it")
+        }
         guard case .string(let command) = args["command"] else {
             return Self.textResult("Error: missing or invalid 'command' parameter")
         }

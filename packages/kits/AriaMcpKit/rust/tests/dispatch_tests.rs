@@ -6821,9 +6821,40 @@ fn seed_memory_wing_with_sensitivity(
         .expect("sensitivity-tiered capture must succeed");
 }
 
+/// Serializes the env-sensitive memory-tool tests so their MOOTX01_MEMORY_TOOL
+/// mutations do not race each other under the parallel test runner.
+fn memory_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Security (Codex b5716d8): the memory tool is opt-in. With the flag unset,
+/// a hard-coded tools/call to `memory` must be REFUSED at dispatch (not merely
+/// hidden from tools/list), mirroring the vault disabled-refusal.
+#[test]
+fn memory_tool_disabled_refuses_dispatch() {
+    let _env = memory_env_lock();
+    std::env::remove_var("MOOTX01_MEMORY_TOOL");
+    let registry = EstateRegistry::new_inmemory_bare();
+    let result = dispatch_tool(
+        "memory",
+        &args! {"command" => "view", "path" => "/memories"},
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch returns a tool result, not a transport error");
+    let text = content_text(&result);
+    assert!(text.contains("disabled"), "expected a disabled refusal, got: {text}");
+    // Re-enable so it does not disturb other memory tests holding the lock next.
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
+}
+
 #[test]
 fn memory_tool_excludes_restricted_and_secret_drawers() {
     use locus_kit::adjectives::AdjectiveSensitivity;
+    let _env = memory_env_lock();
+    // The memory tool is opt-in; enable it for this dispatch-behavior test.
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
     let registry = EstateRegistry::new_inmemory_bare();
     seed_memory_wing_with_sensitivity(&registry, "visible normal", "normal.txt", AdjectiveSensitivity::Normal);
     seed_memory_wing_with_sensitivity(&registry, "visible elevated", "elevated.txt", AdjectiveSensitivity::Elevated);
@@ -6861,6 +6892,8 @@ fn memory_tool_excludes_restricted_and_secret_drawers() {
 #[test]
 fn memory_tool_edit_preserves_elevated_sensitivity() {
     use locus_kit::adjectives::AdjectiveSensitivity;
+    let _env = memory_env_lock();
+    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
     let registry = EstateRegistry::new_inmemory_bare();
     seed_memory_wing_with_sensitivity(&registry, "elevated old text", "elevated.txt", AdjectiveSensitivity::Elevated);
 
