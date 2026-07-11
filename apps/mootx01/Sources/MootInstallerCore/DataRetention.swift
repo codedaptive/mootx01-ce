@@ -99,6 +99,11 @@ public enum DataRetention {
         choose: () -> Bool,
         confirm: () -> Bool
     ) -> DbDecision {
+        // Was replace requested EXPLICITLY (--replace-db), or chosen at the
+        // interactive prompt? `--yes` skips the typed destruction gate ONLY
+        // for the explicit-flag automation path — a user who typed "replace"
+        // at the prompt must still confirm, even under --yes.
+        let explicitReplace = (flag == .replace)
         let replace: Bool
         switch flag {
         case .reuse:
@@ -118,7 +123,10 @@ public enum DataRetention {
         if !replace {
             return .reuse
         }
-        if yes {
+        // Explicit --replace-db + --yes is the only path that skips the typed
+        // destruction confirmation. An interactively-chosen replace always
+        // requires it, regardless of --yes.
+        if yes && explicitReplace {
             return .replace
         }
         guard interactive else {

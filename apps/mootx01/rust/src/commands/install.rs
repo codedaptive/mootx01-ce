@@ -652,6 +652,11 @@ pub(crate) fn decide_existing_db(
     choose: impl FnOnce() -> bool,
     confirm: impl FnOnce() -> bool,
 ) -> DbDecision {
+    // Was replace requested EXPLICITLY (--replace-db), or chosen at the
+    // interactive prompt? `--yes` skips the typed destruction gate ONLY for
+    // the explicit-flag automation path — a user who typed "replace" at the
+    // prompt must still confirm, even under --yes.
+    let explicit_replace = matches!(flag, Some(ExistingDbArg::Replace));
     let replace = match flag {
         Some(ExistingDbArg::Reuse) => false,
         Some(ExistingDbArg::Replace) => true,
@@ -668,7 +673,10 @@ pub(crate) fn decide_existing_db(
     if !replace {
         return DbDecision::Reuse;
     }
-    if yes {
+    // Explicit --replace-db + --yes is the only path that skips the typed
+    // destruction confirmation. An interactively-chosen replace always
+    // requires it, regardless of --yes.
+    if yes && explicit_replace {
         return DbDecision::Replace;
     }
     if !interactive {
@@ -1292,6 +1300,23 @@ mod tests {
         assert_eq!(d, DbDecision::Replace);
         let d = decide_existing_db(None, false, true, || true, || false);
         assert_eq!(d, DbDecision::Aborted);
+    }
+
+    // Security (Codex 7441be4c): --yes must NOT skip the typed destruction
+    // confirmation for an INTERACTIVELY-chosen replace — only for the explicit
+    // --replace-db automation path. A user who types "replace" at the prompt
+    // under --yes still gets the destruction gate.
+    #[test]
+    fn yes_does_not_skip_confirm_for_interactively_chosen_replace() {
+        // Interactive prompt chooses replace; --yes is set; confirm() DENIES.
+        let d = decide_existing_db(None, true, true, || true, || false);
+        assert_eq!(d, DbDecision::Aborted, "interactive replace under --yes must still confirm");
+        // And when the user does confirm, it proceeds.
+        let d = decide_existing_db(None, true, true, || true, || true);
+        assert_eq!(d, DbDecision::Replace);
+        // The explicit-flag path is unchanged: --replace-db --yes skips confirm.
+        let d = decide_existing_db(Some(ExistingDbArg::Replace), true, true, never, never);
+        assert_eq!(d, DbDecision::Replace);
     }
 
     #[test]
