@@ -672,8 +672,10 @@ pub fn dispatch(
             let out = run_mind_overlap(&coord, &estate.handle, &estate_b.handle, make_frame, now)
                 .map_err(lens_error)?;
             Ok(text_result(&format!(
-                "mind_overlap: {} (a={}, b={} drawer(s))",
-                out.overlap, out.a_count, out.b_count
+                "mind_overlap: {} (a: {} data, b: {} data)",
+                out.overlap,
+                if out.a_sufficient { "sufficient" } else { "insufficient" },
+                if out.b_sufficient { "sufficient" } else { "insufficient" }
             )))
         }
 
