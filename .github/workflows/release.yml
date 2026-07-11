@@ -1010,12 +1010,19 @@ jobs:
 
   # ── Publish moot-memory to PyPI ─────────────────────────────────────────
   # pip install moot-memory for Messages API users.
-  # Requires PYPI_API_TOKEN secret (scoped to the moot-memory project).
+  # Uses PyPI Trusted Publishing (OIDC); configure the moot-memory PyPI project
+  # to trust this repository, workflow, and release environment.
   publish-pypi:
     name: Publish moot-memory to PyPI
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     needs: [release]
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/moot-memory
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
@@ -1023,21 +1030,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build and publish
-        env:
-          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Build distribution
         run: |
-          if [ -z "$PYPI_TOKEN" ]; then
-            echo "::warning::PYPI_API_TOKEN missing — skipping PyPI publish"
-            exit 0
-          fi
           cd apps/moot-memory-adapter
           # Sync version from release tag
           VERSION="${GITHUB_REF_NAME#v}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-          pip install build twine
+          python -m pip install --upgrade build
           python -m build
-          twine upload dist/* --username __token__ --password "$PYPI_TOKEN" --non-interactive
+
+      - name: Publish distribution to PyPI
+        # Pinned by commit SHA like every other action in this workflow —
+        # `release/v1` is a mutable branch and this step holds the OIDC
+        # publish credential.
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: apps/moot-memory-adapter/dist/
 
   # ── Submit to winget-pkgs (Microsoft community repository) ──────────────
   # Opens a PR against microsoft/winget-pkgs so `winget install/upgrade`
