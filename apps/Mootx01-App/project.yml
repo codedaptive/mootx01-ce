@@ -75,6 +75,14 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.codedaptive.mootx01
+        # M-ING-4 courier sync (Scenario A): CloudKit private DB as the
+        # transport for vault export/import. Inert until the container is
+        # provisioned in the developer account — CloudSyncCoordinator no-ops
+        # when accountStatus != available, so this never fabricates a sync.
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.codedaptive.mootx01
+        com.apple.developer.icloud-services:
+          - CloudKit
     # A5: register the mootx01:// URL scheme so MootURLRouter receives
     # x-callback-url calls from other apps. CFBundleURLName is reverse-DNS
     # for uniqueness; CFBundleURLSchemes is what the system matches on.
@@ -142,6 +150,13 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.codedaptive.mootx01
+        # M-ING-4 courier sync (Scenario A) — see the macOS target. Inert
+        # until the iCloud container is provisioned; the coordinator no-ops
+        # without an available account.
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.codedaptive.mootx01
+        com.apple.developer.icloud-services:
+          - CloudKit
     # A5: register the mootx01:// URL scheme so MootURLRouter receives
     # x-callback-url calls from other apps. CFBundleURLName is reverse-DNS
     # for uniqueness; CFBundleURLSchemes is what the system matches on.
