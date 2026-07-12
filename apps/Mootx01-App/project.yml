@@ -17,6 +17,11 @@ options:
 packages:
   Mootx01:
     path: .
+  # Same package identity the app package's Package.swift uses — the Share
+  # Extension targets link MootIntentKit (spool + CaptureSink) directly and
+  # never touch GatewayUI/MootGateway (they must not host the estate).
+  MootIntentKit:
+    path: ../../packages/apple/MootIntentKit
 
 targets:
   Mootx01-macOS:
@@ -36,6 +41,9 @@ targets:
     dependencies:
       - package: Mootx01
         product: GatewayUI
+      # A4b: the Share-Sheet capture target (spools into the app group;
+      # the app drains at launch/tick).
+      - target: Mootx01-Share-macOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -88,6 +96,9 @@ targets:
     dependencies:
       - package: Mootx01
         product: GatewayUI
+      # A4b: the Share-Sheet capture target (spools into the app group;
+      # the app drains at launch/foreground/refresh).
+      - target: Mootx01-Share-iOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -103,6 +114,14 @@ targets:
         # read; the readers themselves only run from attended sessions.
         INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads upcoming events to file them into your private, on-device memory estate."
         INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact birthdays to file them into your private, on-device memory estate."
+    # A4b: the iOS app joins the same app group as the Share Extension so
+    # ShareInboxDrain can read the spool the extension writes. (The macOS
+    # target already carries the group for ADR-014 estate SIP defense.)
+    entitlements:
+      path: App/Mootx01-iOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
     # A5: register the mootx01:// URL scheme so MootURLRouter receives
     # x-callback-url calls from other apps. CFBundleURLName is reverse-DNS
     # for uniqueness; CFBundleURLSchemes is what the system matches on.
@@ -117,6 +136,74 @@ targets:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
               - mootx01
+
+  # A4b Share-Sheet capture targets — UI-less NSExtension shells over
+  # ShareInboxSpool (MootIntentKit). One estate, one host: these processes
+  # never open the estate; they spool and the app drains.
+  Mootx01-Share-iOS:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: ShareExtension/Mootx01-Share-iOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.share
+        PRODUCT_NAME: Mootx01Share
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Share-iOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          # Bare (unprefixed) class name resolves via @objc(ShareViewController).
+          NSExtensionPrincipalClass: ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+
+  Mootx01-Share-macOS:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: ShareExtension
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: ShareExtension/Mootx01-Share-macOS.entitlements
+      properties:
+        # Extensions run sandboxed on macOS; the group grants spool access.
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.macos.share
+        PRODUCT_NAME: Mootx01Share
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Share-macOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
 
   Mootx01-AppIntentsTests:
     type: bundle.ui-testing

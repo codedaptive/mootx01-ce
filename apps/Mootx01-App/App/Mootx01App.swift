@@ -32,6 +32,7 @@ struct Mootx01App: App {
     #if os(macOS)
     @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var delegate
     #endif
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model = AppModel()
 
     // M-MXA-7: menu-bar headless mode is a user setting (default ON — the
@@ -60,10 +61,18 @@ struct Mootx01App: App {
                 .frame(minWidth: 900, minHeight: 600)
                 .task { await model.start() }
                 .task { Mootx01Shortcuts.updateAppShortcutParameters() }
+                .task { await ShareInboxDrain.drainNow() }
             #else
             ContentView(model: model)
                 .task { await model.start() }
                 .task { Mootx01Shortcuts.updateAppShortcutParameters() }
+                .task { await ShareInboxDrain.drainNow() }
+                // A4b: content shared while the app was backgrounded drains
+                // on the next foregrounding, not only at launch.
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    Task { await ShareInboxDrain.drainNow() }
+                }
             #endif
         }
 
@@ -99,6 +108,8 @@ private enum IOSMiningBackgroundTasks {
                 do {
                     let caller = try await GatewayRuntime.shared.bridge()
                     _ = await MinerRunLoop.liveLoop().tick(now: Date(), caller: caller)
+                    // A4b: the refresh window also drains any spooled shares.
+                    await ShareInboxDrain.drainNow()
                     handle.task.setTaskCompleted(success: !Task.isCancelled)
                 } catch {
                     handle.task.setTaskCompleted(success: false)
@@ -143,6 +154,8 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
                 if let bridge = try? await GatewayRuntime.shared.bridge() {
                     _ = await loop.tick(now: Date(), caller: bridge)
                 }
+                // A4b: headless menu-bar mode still drains spooled shares.
+                await ShareInboxDrain.drainNow()
                 try? await Task.sleep(for: .seconds(3_600))
             }
         }

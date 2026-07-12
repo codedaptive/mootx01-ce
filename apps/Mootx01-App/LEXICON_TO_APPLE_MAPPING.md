@@ -171,9 +171,12 @@ verb set never changes — the lexicon is fixed; only its Apple projection moves
 
 **Closed since last audit (2026-06-13):** CaptureView exportability Picker (A), DrawerEntity
 structured recall via gateway-layer text parse (B), `updateAppShortcutParameters()` at launch
-and `CFBundleURLTypes` declared in `project.yml` (C).
+and `CFBundleURLTypes` declared in `project.yml` (C), typed `[DrawerEntity]` recall results (D),
+and the `NSExtension` Share-Sheet capture targets (E — `Mootx01-Share-iOS`/`-macOS`, UI-less:
+the extension spools to the app-group `ShareInbox`, the host app drains via `ShareInboxDrain`
+at launch/foreground/tick; the extension process never opens the estate).
 
-**Remaining:** `NSExtension` Share-Sheet target; Bonjour/LAN discovery and Local Network
+**Remaining:** Bonjour/LAN discovery and Local Network
 entitlement (the remaining A2 gap; loopback `HTTPTransport` is implemented); iCloud sync;
 graduating `MootGateway` into `ARIA_MacOS`/`ARIA_iOS`. System activation of A4/A5/A6 requires
 running `xcodegen generate` then building the Xcode project — that Xcode build step is outside
