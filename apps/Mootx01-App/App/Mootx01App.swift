@@ -63,20 +63,23 @@ struct Mootx01App: App {
                 .task { Mootx01Shortcuts.updateAppShortcutParameters() }
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
+                .task { await MootSyncDriver.shared.syncNow() }
             #else
             ContentView(model: model)
                 .task { await model.start() }
                 .task { Mootx01Shortcuts.updateAppShortcutParameters() }
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
+                .task { await MootSyncDriver.shared.syncNow() }
                 // A4b: content shared while the app was backgrounded drains
                 // on the next foregrounding, not only at launch; the widget
-                // projection refreshes on the same beat.
+                // projection and CloudKit sync run on the same beat.
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
                     Task {
                         await ShareInboxDrain.drainNow()
                         await WidgetSnapshotRefresher.refreshNow()
+                        await MootSyncDriver.shared.syncNow()
                     }
                 }
             #endif
@@ -114,10 +117,11 @@ private enum IOSMiningBackgroundTasks {
                 do {
                     let caller = try await GatewayRuntime.shared.bridge()
                     _ = await MinerRunLoop.liveLoop().tick(now: Date(), caller: caller)
-                    // A4b: the refresh window also drains any spooled shares
-                    // and re-projects the widget snapshot.
+                    // A4b: the refresh window also drains any spooled shares,
+                    // re-projects the widget snapshot, and runs a sync pass.
                     await ShareInboxDrain.drainNow()
                     await WidgetSnapshotRefresher.refreshNow()
+                    await MootSyncDriver.shared.syncNow()
                     handle.task.setTaskCompleted(success: !Task.isCancelled)
                 } catch {
                     handle.task.setTaskCompleted(success: false)
@@ -162,10 +166,11 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
                 if let bridge = try? await GatewayRuntime.shared.bridge() {
                     _ = await loop.tick(now: Date(), caller: bridge)
                 }
-                // A4b: headless menu-bar mode still drains spooled shares
-                // and keeps the widget projection fresh.
+                // A4b: headless menu-bar mode still drains spooled shares,
+                // keeps the widget projection fresh, and runs a sync pass.
                 await ShareInboxDrain.drainNow()
                 await WidgetSnapshotRefresher.refreshNow()
+                await MootSyncDriver.shared.syncNow()
                 try? await Task.sleep(for: .seconds(3_600))
             }
         }
