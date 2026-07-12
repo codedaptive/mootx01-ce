@@ -206,10 +206,18 @@ public struct DrawerMapping: Sendable {
 
         // Fetch tunnels once per distinct source wing, not once per drawer.
         // Wing names are resolved from the node tree (ADR-017).
+        //
+        // CAND-EXP-PROV: the tunnel read mirrors the drawer-side tier rule —
+        // the private-scope opt-in (`includesPrivateTier`) also carries
+        // provenance tunnels to restricted drawers, so the exported vault
+        // keeps its lineage. The default scopes keep the Normal-tier
+        // ceiling, and secret-tier edges never export regardless of scope
+        // (enforced inside the LocusKit gate, exactly like drawers).
         var tunnelsByWing: [String: [Tunnel]] = [:]
         let resolvedWings = Set(drawers.compactMap { allNodeNames[$0.parentNodeId]?.wing })
         for wing in resolvedWings {
-            tunnelsByWing[wing] = try await kit.recallTunnels(handle, wing: wing)
+            tunnelsByWing[wing] = try await kit.recallTunnels(
+                handle, wing: wing, includingRestricted: scope.includesPrivateTier)
         }
 
         // Query all KG facts once for the estate, then group by sourceDrawerID

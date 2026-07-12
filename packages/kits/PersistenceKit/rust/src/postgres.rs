@@ -223,7 +223,10 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   PRIMARY KEY ("event_id", "hlc")
 )"#;
 
-const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
+// Chronological ordering index on the full-precision HLC columns; the packed
+// `hlc` column is the PK dedup component only (HLC_PACKED_ORDER_UNSOUND).
+const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_chrono" ON "_storagekit_audit" ("row_id", "physical_time", "logical_count", "node_id")"#;
+const AUDIT_DROP_PACKED_INDEX: &str = r#"DROP INDEX IF EXISTS "_storagekit_audit_row_hlc""#;
 
 const REJECT_MUTATION_FN: &str = r#"CREATE OR REPLACE FUNCTION "_storagekit_reject_mutation"()
 RETURNS trigger AS $$
@@ -907,6 +910,7 @@ fn apply_schema(
     // Upgrade migration (#102): old estates lack the reason column.
     // ADD COLUMN IF NOT EXISTS avoids errors on new estates.
     batch(client, r#"ALTER TABLE "_storagekit_audit" ADD COLUMN IF NOT EXISTS "reason" TEXT"#)?;
+    batch(client, AUDIT_DROP_PACKED_INDEX)?;
     batch(client, AUDIT_INDEX)?;
     batch(client, BLOB_TABLE)?;
     batch(client, REJECT_MUTATION_FN)?;
@@ -1757,8 +1761,19 @@ impl AuditLog for TxAuditLog {
         let mut binds: Vec<PgParam> = Vec::new();
         let mut clauses: Vec<String> = Vec::new();
         if let Some(h) = after {
-            binds.push(Box::new(h.packed() as i64));
-            clauses.push(format!("\"hlc\" > ${}", binds.len()));
+            // Cursor on the full-precision HLC columns, not the packed
+            // integer: packed comparison mis-orders same-millisecond bursts
+            // (HLC_PACKED_ORDER_UNSOUND). Row-value comparison keeps the
+            // cursor exclusive across ties. Mirrors the SQLite backends.
+            binds.push(Box::new(h.physical_time));
+            binds.push(Box::new(h.logical_count as i64));
+            binds.push(Box::new(h.node_id as i64));
+            clauses.push(format!(
+                "(\"physical_time\", \"logical_count\", \"node_id\") > (${}, ${}, ${})",
+                binds.len() - 2,
+                binds.len() - 1,
+                binds.len()
+            ));
         }
         if let Some(r) = row_id {
             binds.push(Box::new(r.to_string().to_uppercase()));
@@ -1773,9 +1788,11 @@ impl AuditLog for TxAuditLog {
             limit as i64
         };
         if lim >= 0 {
-            sql.push_str(&format!(" ORDER BY \"hlc\" ASC LIMIT {lim}"));
+            sql.push_str(&format!(
+                " ORDER BY \"physical_time\" ASC, \"logical_count\" ASC, \"node_id\" ASC LIMIT {lim}"
+            ));
         } else {
-            sql.push_str(" ORDER BY \"hlc\" ASC");
+            sql.push_str(" ORDER BY \"physical_time\" ASC, \"logical_count\" ASC, \"node_id\" ASC");
         }
         let rows = guard
             .get_mut()
@@ -1807,7 +1824,7 @@ impl AuditLog for TxAuditLog {
         // row_id is stored as uppercase UUID TEXT (matching audit_params).
         // This is the read-side of the LEFT JOIN that
         // tombstoned_rows_without_expunge_audit uses to avoid N per-row
-        // events_for_row calls. The idx_storagekit_audit_row_hlc index covers
+        // events_for_row calls. The _storagekit_audit_row_chrono index covers
         // the row_id filter; the verb filter is a cheap post-scan predicate.
         let mut binds: Vec<PgParam> = row_ids
             .iter()
@@ -2444,8 +2461,19 @@ impl AuditLog for PgAuditLog {
         let mut binds: Vec<PgParam> = Vec::new();
         let mut clauses: Vec<String> = Vec::new();
         if let Some(h) = after {
-            binds.push(Box::new(h.packed() as i64));
-            clauses.push(format!("\"hlc\" > ${}", binds.len()));
+            // Cursor on the full-precision HLC columns, not the packed
+            // integer: packed comparison mis-orders same-millisecond bursts
+            // (HLC_PACKED_ORDER_UNSOUND). Row-value comparison keeps the
+            // cursor exclusive across ties. Mirrors the SQLite backends.
+            binds.push(Box::new(h.physical_time));
+            binds.push(Box::new(h.logical_count as i64));
+            binds.push(Box::new(h.node_id as i64));
+            clauses.push(format!(
+                "(\"physical_time\", \"logical_count\", \"node_id\") > (${}, ${}, ${})",
+                binds.len() - 2,
+                binds.len() - 1,
+                binds.len()
+            ));
         }
         if let Some(r) = row_id {
             binds.push(Box::new(r.to_string().to_uppercase()));
@@ -2460,9 +2488,11 @@ impl AuditLog for PgAuditLog {
             limit as i64
         };
         if lim >= 0 {
-            sql.push_str(&format!(" ORDER BY \"hlc\" ASC LIMIT {lim}"));
+            sql.push_str(&format!(
+                " ORDER BY \"physical_time\" ASC, \"logical_count\" ASC, \"node_id\" ASC LIMIT {lim}"
+            ));
         } else {
-            sql.push_str(" ORDER BY \"hlc\" ASC");
+            sql.push_str(" ORDER BY \"physical_time\" ASC, \"logical_count\" ASC, \"node_id\" ASC");
         }
         let rows = conn
             .get_mut()
@@ -2493,7 +2523,7 @@ impl AuditLog for PgAuditLog {
         // row_id is stored as uppercase UUID TEXT (matching audit_params).
         // This is the read-side of the LEFT JOIN that
         // tombstoned_rows_without_expunge_audit uses to avoid N per-row
-        // events_for_row calls. The idx_storagekit_audit_row_hlc index covers
+        // events_for_row calls. The _storagekit_audit_row_chrono index covers
         // the row_id filter; the verb filter is a cheap post-scan predicate.
         let mut binds: Vec<PgParam> = row_ids
             .iter()

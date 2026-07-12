@@ -12,8 +12,8 @@ import PersistenceKitInMemory
 /// JSON-RPC requests through `ARIA_MCPDispatcher.handle(_:)`.
 ///
 /// `.serialized`: every case opens a live in-memory estate and drives
-/// the dispatcher end-to-end; preserve the one-at-a-time execution the
-/// suite ran under XCTest.
+/// the dispatcher end-to-end; concurrent estates contend under parallel
+/// execution, so the suite runs one case at a time.
 @Suite("Server dispatch", .serialized)
 struct ServerTests {
 

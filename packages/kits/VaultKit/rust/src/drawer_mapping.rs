@@ -337,8 +337,13 @@ impl DrawerMapping {
         let mut tunnels_by_wing: std::collections::HashMap<String, Vec<Tunnel>> =
             std::collections::HashMap::new();
         for wing in &wings {
+            // CAND-EXP-PROV: the tunnel read mirrors the drawer-side tier
+            // rule — the private-scope opt-in also carries provenance
+            // tunnels to restricted drawers so the exported vault keeps its
+            // lineage. Secret-tier edges never export regardless of scope
+            // (enforced inside the LocusKit gate, exactly like drawers).
             let tunnels = coordinator
-                .recall_tunnels(handle, wing)
+                .recall_tunnels_with_ceiling(handle, wing, scope.includes_private_tier())
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
             tunnels_by_wing.insert(wing.clone(), tunnels);
         }

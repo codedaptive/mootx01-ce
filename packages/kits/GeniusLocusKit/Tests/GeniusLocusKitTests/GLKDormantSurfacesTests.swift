@@ -22,23 +22,6 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import GeniusLocusKit
 
-// MARK: - Test-only audit-log injection helper
-
-// Adds a synthetic UnifiedAuditEntry directly into GLK's in-memory
-// audit log without going through the LocusKit storage tier. This
-// allows deterministic lag-pair tests with precise physicalTime values.
-// ADR-026: the in-memory auditLogs dictionary was removed. Tests
-// that need to inject synthetic audit entries must write through
-// the durable storage.auditLog.append() path. This stub preserves
-// test compilation; the entries are no-ops until the test is
-// rewritten to use AuditEvent (PersistenceKit) instead of
-// UnifiedAuditEntry (GLK).
-private extension GeniusLocusKit {
-    func injectAuditEntry(_ entry: UnifiedAuditEntry, for handle: EstateHandle) {
-        // No-op: in-memory audit log removed. See ADR-026.
-    }
-}
-
 // MARK: - Shared fixture constants (identical to Rust dormant_surfaces.rs)
 
 // Physicals are ms-since-Unix-epoch; seconds = physical / 1000.
@@ -99,39 +82,37 @@ struct GLKDormantSurfacesTests {
         )
     }
 
-    // MARK: - glkEventLagPairs: five-event fixture
+    // MARK: - eventLagPairs pure core: five-event fixture
+    //
+    // These call the pure core `GeniusLocusKit.eventLagPairs(entries:...)`
+    // directly with synthetic UnifiedAuditEntry values — exactly as the Rust
+    // twin calls `event_lag_pairs(&entries, lower, upper)`. The durable audit
+    // path only carries bitmap and lattice-anchor coordinates, so the
+    // fixture's string/integer/bytes values cannot ride a real estate; the
+    // pure core is the shared cross-leg seam.
 
     @Test("lag pair fixture: 5 capture/expunge entries produce 5 temporal entries")
     func lagPairFiveEntryCount() async throws {
-        let (kit, handle) = try await makeKit()
+        // Five entries covering different value types (same fixture as Rust port),
+        // plus a noise entry (verb=recall) that should produce empty coords.
+        let input = [
+            makeEntry(physicalTime: Fixture.tBase,
+                      verb: .capture, field: "alpha", value: .bitmap(0xAB)),
+            makeEntry(physicalTime: Fixture.tPlusOne,
+                      verb: .capture, field: "beta", value: .string("hello")),
+            makeEntry(physicalTime: Fixture.tPlusOne + 1,
+                      verb: .recall, field: "beta", value: .string("hello")),
+            makeEntry(physicalTime: Fixture.tPlusThree,
+                      verb: .capture, field: "gamma", value: .integer(42)),
+            makeEntry(physicalTime: Fixture.tPlusTen,
+                      verb: .expunge, field: "alpha", value: .bitmap(0xAB)),
+            makeEntry(physicalTime: Fixture.tPlusTwoHundred,
+                      verb: .capture, field: "delta", value: .bytes([1, 2, 3])),
+        ]
 
-        // Five entries covering different value types (same fixture as Rust port).
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tBase,
-            verb: .capture, field: "alpha", value: .bitmap(0xAB)), for: handle)
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusOne,
-            verb: .capture, field: "beta", value: .string("hello")), for: handle)
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusThree,
-            verb: .capture, field: "gamma", value: .integer(42)), for: handle)
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusTen,
-            verb: .expunge, field: "alpha", value: .bitmap(0xAB)), for: handle)
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusTwoHundred,
-            verb: .capture, field: "delta", value: .bytes([1, 2, 3])), for: handle)
-
-        // Also inject a noise entry (verb=recall) that should produce empty coords.
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusOne + 1,
-            verb: .recall, field: "beta", value: .string("hello")), for: handle)
-
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = Date(timeIntervalSince1970: Double(Fixture.tPlusTwoHundred) / 1_000.0 + 1.0)
-        let window   = baseDate...topDate
-
-        let entries = try await kit.glkEventLagPairs(in: handle, window: window)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input,
+            lowerMs: Fixture.tBase, upperMs: Fixture.tPlusTwoHundred + 1_000)
 
         // 6 entries in window (5 capture/expunge + 1 recall), all returned.
         #expect(entries.count == 6)
@@ -139,22 +120,20 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: HLC-ascending order")
     func lagPairOrdering() async throws {
-        let (kit, handle) = try await makeKit()
+        // Input sorted ascending (orderedEntries guarantees this for callers);
+        // output must preserve that order. Mirrors the Rust twin.
+        let input = [
+            makeEntry(physicalTime: Fixture.tBase,
+                      verb: .capture, field: "alpha", value: .bitmap(0xAB)),
+            makeEntry(physicalTime: Fixture.tPlusOne,
+                      verb: .capture, field: "beta", value: .string("hello")),
+            makeEntry(physicalTime: Fixture.tPlusTen,
+                      verb: .capture, field: "gamma", value: .integer(42)),
+        ]
 
-        // Insert in non-ascending order to test sort stability.
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusTen,
-            verb: .capture, field: "gamma", value: .integer(42)), for: handle)
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tBase,
-            verb: .capture, field: "alpha", value: .bitmap(0xAB)), for: handle)
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusOne,
-            verb: .capture, field: "beta", value: .string("hello")), for: handle)
-
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = Date(timeIntervalSince1970: Double(Fixture.tPlusTen) / 1_000.0 + 1.0)
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input,
+            lowerMs: Fixture.tBase, upperMs: Fixture.tPlusTen + 1_000)
 
         #expect(entries.count == 3)
         // Must be HLC-ascending.
@@ -165,14 +144,12 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: bitmap coord encoding")
     func lagPairBitmapCoord() async throws {
-        let (kit, handle) = try await makeKit()
-        await kit.injectAuditEntry(makeEntry(
+        let input = [makeEntry(
             physicalTime: Fixture.tBase,
-            verb: .capture, field: "alpha", value: .bitmap(0xAB)), for: handle)
+            verb: .capture, field: "alpha", value: .bitmap(0xAB))]
 
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = baseDate.addingTimeInterval(1.0)
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input, lowerMs: Fixture.tBase, upperMs: Fixture.tBase + 1_000)
 
         #expect(entries.count == 1)
         #expect(entries[0].fieldCoords.count == 1)
@@ -183,14 +160,12 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: string coord encoding")
     func lagPairStringCoord() async throws {
-        let (kit, handle) = try await makeKit()
-        await kit.injectAuditEntry(makeEntry(
+        let input = [makeEntry(
             physicalTime: Fixture.tBase,
-            verb: .capture, field: "beta", value: .string("hello")), for: handle)
+            verb: .capture, field: "beta", value: .string("hello"))]
 
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = baseDate.addingTimeInterval(1.0)
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input, lowerMs: Fixture.tBase, upperMs: Fixture.tBase + 1_000)
 
         #expect(entries.count == 1)
         #expect(entries[0].fieldCoords[0].valueRepr == "string:hello")
@@ -198,14 +173,12 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: integer coord encoding")
     func lagPairIntegerCoord() async throws {
-        let (kit, handle) = try await makeKit()
-        await kit.injectAuditEntry(makeEntry(
+        let input = [makeEntry(
             physicalTime: Fixture.tBase,
-            verb: .capture, field: "gamma", value: .integer(42)), for: handle)
+            verb: .capture, field: "gamma", value: .integer(42))]
 
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = baseDate.addingTimeInterval(1.0)
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input, lowerMs: Fixture.tBase, upperMs: Fixture.tBase + 1_000)
 
         #expect(entries.count == 1)
         #expect(entries[0].fieldCoords[0].valueRepr == "integer:42")
@@ -213,14 +186,12 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: bytes coord encoding uses byte count")
     func lagPairBytesCoord() async throws {
-        let (kit, handle) = try await makeKit()
-        await kit.injectAuditEntry(makeEntry(
+        let input = [makeEntry(
             physicalTime: Fixture.tBase,
-            verb: .capture, field: "delta", value: .bytes([1, 2, 3])), for: handle)
+            verb: .capture, field: "delta", value: .bytes([1, 2, 3]))]
 
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = baseDate.addingTimeInterval(1.0)
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input, lowerMs: Fixture.tBase, upperMs: Fixture.tBase + 1_000)
 
         #expect(entries.count == 1)
         #expect(entries[0].fieldCoords[0].valueRepr == "bytes:3")
@@ -228,14 +199,12 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: null after-value produces empty coord list")
     func lagPairNullCoord() async throws {
-        let (kit, handle) = try await makeKit()
-        await kit.injectAuditEntry(makeEntry(
+        let input = [makeEntry(
             physicalTime: Fixture.tBase,
-            verb: .capture, field: "epsilon", value: .null), for: handle)
+            verb: .capture, field: "epsilon", value: .null)]
 
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = baseDate.addingTimeInterval(1.0)
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input, lowerMs: Fixture.tBase, upperMs: Fixture.tBase + 1_000)
 
         #expect(entries.count == 1)
         // Null after-value: entry present but no field coordinates.
@@ -244,14 +213,12 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: non-capture/expunge verb produces empty coord list")
     func lagPairNonCaptureVerb() async throws {
-        let (kit, handle) = try await makeKit()
-        await kit.injectAuditEntry(makeEntry(
+        let input = [makeEntry(
             physicalTime: Fixture.tBase,
-            verb: .recall, field: "beta", value: .string("hello")), for: handle)
+            verb: .recall, field: "beta", value: .string("hello"))]
 
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = baseDate.addingTimeInterval(1.0)
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input, lowerMs: Fixture.tBase, upperMs: Fixture.tBase + 1_000)
 
         // recall verb is included in results (it advances the fold watermark)
         // but produces an empty coord list.
@@ -261,19 +228,16 @@ struct GLKDormantSurfacesTests {
 
     @Test("lag pair fixture: window filter excludes out-of-range entries")
     func lagPairWindowFilter() async throws {
-        let (kit, handle) = try await makeKit()
+        let input = [
+            makeEntry(physicalTime: Fixture.tBase,
+                      verb: .capture, field: "alpha", value: .bitmap(1)),
+            makeEntry(physicalTime: Fixture.tPlusTwoHundred,
+                      verb: .capture, field: "beta", value: .bitmap(2)),
+        ]
 
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tBase,
-            verb: .capture, field: "alpha", value: .bitmap(1)), for: handle)
-        await kit.injectAuditEntry(makeEntry(
-            physicalTime: Fixture.tPlusTwoHundred,
-            verb: .capture, field: "beta", value: .bitmap(2)), for: handle)
-
-        // Window that only includes the first entry.
-        let baseDate = Date(timeIntervalSince1970: Double(Fixture.tBase) / 1_000.0)
-        let topDate  = baseDate.addingTimeInterval(60.0)  // +1 min
-        let entries = try await kit.glkEventLagPairs(in: handle, window: baseDate...topDate)
+        // Window that only includes the first entry (+1 min).
+        let entries = GeniusLocusKit.eventLagPairs(
+            entries: input, lowerMs: Fixture.tBase, upperMs: Fixture.tBase + 60_000)
 
         #expect(entries.count == 1)
         #expect(entries[0].fieldCoords[0].valueRepr == "bitmap:1")

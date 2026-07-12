@@ -5,9 +5,6 @@
 // Algorithm-specific tests live in dedicated per-type suites
 // (Fingerprint256CombinatorsTests, HammingTests, …) or in the
 // conformance harness at docs/validation/substrate_math_performance/.
-//
-// swift-testing (import Testing); the package test leg is swift-testing
-// only — no XCTest remains.
 
 import Foundation
 import Testing

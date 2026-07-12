@@ -236,7 +236,7 @@ swift test --package-path packages/libs/AriaLexiconLib
 ```
 
 (Run with the Xcode toolchain: point `DEVELOPER_DIR` at your Xcode
-toolchain so XCTest / swift-testing resolve. Suite: `AriaLexiconLibTests`.)
+toolchain so swift-testing resolves. Suite: `AriaLexiconLibTests`.)
 
 **Rust:**
 
