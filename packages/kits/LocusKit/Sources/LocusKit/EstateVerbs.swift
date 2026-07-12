@@ -514,15 +514,20 @@ public extension Estate {
         }
 
         let now = Date()
-        // Encode originClass into bits 6–8 of the tunnel operational bitmap.
-        // The decoder (`Tunnel.originClass` in TunnelOperational.swift) uses
-        // `BitField.extractField(operationalBitmap, shift:6, width:3)`, so
-        // this write is the exact inverse. Default `.userExplicit` (raw 0)
-        // produces 0, preserving byte-identical all-zero defaults for
-        // existing callers (spec § 5.6 / cookbook §2.4).
-        let opBitmap = BitField.writeField(
+        // Encode originClass into bits 6–8 and lifecycle into bits 3–5 of
+        // the tunnel operational bitmap. The decoders (`Tunnel.originClass`
+        // / `Tunnel.lifecycle` in TunnelOperational.swift) use
+        // `BitField.extractField` with the same shift/width, so these
+        // writes are the exact inverse. Defaults (`.userExplicit`,
+        // `.active` — both raw 0) produce 0, preserving byte-identical
+        // all-zero bitmaps for existing callers (spec § 5.6 / cookbook §2.4).
+        var opBitmap = BitField.writeField(
             Int64(frame.originClass.rawValue),
             into: 0, shift: 6, width: 3
+        )
+        opBitmap = BitField.writeField(
+            Int64(frame.lifecycle.rawValue),
+            into: opBitmap, shift: 3, width: 3
         )
         let tunnel = Tunnel(
             id: UUID().uuidString,
@@ -549,6 +554,21 @@ public extension Estate {
             ts: now.timeIntervalSince1970
         ))
         return tunnel
+    }
+
+    /// Review a `.proposed` tunnel: accept → `.active`, reject → `.withdrawn`.
+    /// Estate-level surface over `DrawerStore.respondToTunnel` — the review
+    /// verb the ARIA `moot_review_tunnel` tool and the dreaming pipeline call.
+    /// See the store method for the lifecycle guard and audit contract.
+    func respondToTunnel(
+        id: String,
+        accept: Bool,
+        changedBy: String,
+        reason: String? = nil,
+        now: Date = Date()
+    ) async throws {
+        try await store.respondToTunnel(
+            id: id, accept: accept, changedBy: changedBy, reason: reason, now: now)
     }
 
     /// Internal test peek used to verify a captured tunnel after a verb

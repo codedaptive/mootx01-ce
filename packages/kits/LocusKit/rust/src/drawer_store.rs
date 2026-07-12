@@ -820,6 +820,28 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Review a `Proposed` tunnel: accept moves lifecycle (bits 3–5 of
+    /// `operational_bitmap`) to `Active`; reject moves it to `Withdrawn`.
+    ///
+    /// Only tunnels currently in `Proposed` lifecycle are reviewable —
+    /// reviewing a settled tunnel returns `InvalidContent`. Like
+    /// `retire_tunnel`, this performs only the bitmap update; the caller
+    /// records who reviewed and why.
+    ///
+    /// Mirrors Swift `DrawerStore.respondToTunnel(id:accept:changedBy:reason:now:)`.
+    fn respond_to_tunnel(
+        &self,
+        _tunnel_id: &str,
+        _accept: bool,
+        _changed_by: &str,
+        _reason: Option<&str>,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "respond_to_tunnel not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // -----------------------------------------------------------------
     // Outline helpers (ADR-017 §11, NT-L5)
     // -----------------------------------------------------------------

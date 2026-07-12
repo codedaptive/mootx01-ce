@@ -376,3 +376,112 @@ struct CaptureTunnelTests {
         #expect(drawer.operationalBitmap & 0xFFF000 == 0x9000)
     }
 }
+
+// MARK: - Proposed-lifecycle capture + review (contradiction-hunter substrate)
+
+/// Lifecycle at capture and the `respondToTunnel` review verb: a
+/// `.proposed` tunnel (the hunter's review state) accepts to `.active`
+/// or rejects to `.withdrawn`; settled tunnels are not reviewable.
+@Suite("ProposedTunnelLifecycleTests")
+struct ProposedTunnelLifecycleTests {
+
+    private func makeEstate() async throws -> Estate {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("locuskit-prop-tunnel-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("estate.sqlite3")
+        return try await Estate.create(
+            storage: TestStorage.sqlite(path),
+            owner: OwnerCredentials(ownerIdentifier: "test-owner")
+        )
+    }
+
+    private func proposedFrame() -> TunnelCaptureFrame {
+        TunnelCaptureFrame(
+            sourceWing: "wing_a", sourceRoom: "room_1",
+            targetWing: "wing_b", targetRoom: "room_2",
+            label: "hunter: negation cue 0.91",
+            addedBy: "dreaming-hunter",
+            kind: .contradicts,
+            originClass: .derived,
+            lifecycle: .proposed
+        )
+    }
+
+    @Test("capture stamps lifecycle bits 3–5; default stays .active with zero bitmap")
+    func captureStampsLifecycle() async throws {
+        let estate = try await makeEstate()
+
+        let proposed = try await estate.capture(proposedFrame())
+        #expect(proposed.lifecycle == .proposed)
+        #expect(proposed.originClass == .derived)
+        #expect(proposed.kind == .contradicts)
+        // .proposed raw 1 << 3 | .derived raw 1 << 6 = 0x48 (matches Rust).
+        #expect(proposed.operationalBitmap == 0x48)
+
+        // Default-lifecycle capture is byte-identical to the pre-lifecycle
+        // frame: all-zero operational bitmap.
+        var plain = proposedFrame()
+        plain.lifecycle = .active
+        plain.originClass = .userExplicit
+        let active = try await estate.capture(plain)
+        #expect(active.lifecycle == .active)
+        #expect(active.operationalBitmap == 0)
+    }
+
+    @Test("accept moves .proposed to .active and persists")
+    func acceptActivates() async throws {
+        let estate = try await makeEstate()
+        let proposed = try await estate.capture(proposedFrame())
+
+        try await estate.respondToTunnel(
+            id: proposed.id, accept: true, changedBy: "bob",
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+
+        let reviewed = try await estate.store.getTunnel(id: proposed.id)
+        #expect(reviewed?.lifecycle == .active)
+        // Only the lifecycle field changed; originClass survives the rewrite.
+        #expect(reviewed?.originClass == .derived)
+        #expect(reviewed?.kind == .contradicts)
+    }
+
+    @Test("reject moves .proposed to .withdrawn and the pair stays reviewable-never")
+    func rejectWithdraws() async throws {
+        let estate = try await makeEstate()
+        let proposed = try await estate.capture(proposedFrame())
+
+        try await estate.respondToTunnel(
+            id: proposed.id, accept: false, changedBy: "bob",
+            reason: "not actually in conflict",
+            now: Date(timeIntervalSince1970: 1_700_000_000))
+
+        let reviewed = try await estate.store.getTunnel(id: proposed.id)
+        #expect(reviewed?.lifecycle == .withdrawn)
+
+        // A settled (withdrawn) tunnel is no longer reviewable.
+        await #expect(throws: LocusKitError.self) {
+            try await estate.respondToTunnel(
+                id: proposed.id, accept: true, changedBy: "bob",
+                now: Date(timeIntervalSince1970: 1_700_000_001))
+        }
+    }
+
+    @Test("reviewing an .active tunnel throws; unknown id throws tunnelNotFound")
+    func reviewGuards() async throws {
+        let estate = try await makeEstate()
+        var frame = proposedFrame()
+        frame.lifecycle = .active
+        let active = try await estate.capture(frame)
+
+        await #expect(throws: LocusKitError.self) {
+            try await estate.respondToTunnel(
+                id: active.id, accept: true, changedBy: "bob",
+                now: Date(timeIntervalSince1970: 1_700_000_000))
+        }
+        await #expect(throws: LocusKitError.self) {
+            try await estate.respondToTunnel(
+                id: "no-such-tunnel", accept: true, changedBy: "bob",
+                now: Date(timeIntervalSince1970: 1_700_000_000))
+        }
+    }
+}

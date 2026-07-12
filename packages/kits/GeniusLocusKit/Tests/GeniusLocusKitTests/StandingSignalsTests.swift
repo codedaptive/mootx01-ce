@@ -7,7 +7,7 @@ import PersistenceKitInMemory
 import SubstrateTypes
 @testable import GeniusLocusKit
 
-/// Firing tests for the nine default standing signals — architecture
+/// Firing tests for the default standing signals — architecture
 /// spec §11.2 / mission GLK-05 + ADR-018 F1 (TrainingSignal).
 ///
 /// Every test follows the same template:
@@ -437,20 +437,21 @@ struct StandingSignalsTests {
     // MARK: - Registration helper
 
     @Test
-    func registerDefaultStandingSignalsRegistersAllNine() async throws {
+    func registerDefaultStandingSignalsRegistersAll() async throws {
         let (kit, handle) = try await openOneEstate()
         let emptyStore = try await makeEmptyVectorStore()
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, vectorStore: emptyStore, now: t0)
 
-        // ADR-018 F1 added TrainingSignal as signal 9. Any future addition
+        // ADR-018 F1 added TrainingSignal as signal 9; the contradiction
+        // scout (hunter background half) is signal 10. Any future addition
         // must update this count and extend defaultStandingSignalNames.
-        #expect(registered.count == 9, "all nine v1 signals register")
+        #expect(registered.count == 10, "all ten standing signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 9)
+        #expect(reports.count == 10)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")

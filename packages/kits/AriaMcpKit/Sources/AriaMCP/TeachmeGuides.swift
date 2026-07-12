@@ -725,7 +725,16 @@ enum TeachmeGuides {
              loaded estate scores 0 on the `matrix` recall lane until this
              runs.
           2. Runs one DREAMING CYCLE: mines latent co-occurrence alignments
-             into Tunnel proposals and writes one cycle diary entry.
+             into proposals and writes one cycle diary entry.
+
+        HONEST SCOPE — dreaming proposals are USAGE-DRIVEN: they are mined
+        from recall co-occurrence (which memories the estate recalls
+        together, accumulated over use), NOT from memory content. A freshly
+        imported estate that has not been recalled against yet will
+        legitimately report 0 proposals — that is expected, not a fault;
+        the matrix rebuild (effect 1) is still immediately valuable.
+        Dreaming does not read memory text for semantic conflicts or
+        insights.
 
         When to use:
           - After bulk-loading an estate, before relying on matrix /
@@ -817,8 +826,10 @@ enum TeachmeGuides {
         encode/index work, the encode drain turns it into the BM25 + vector
         lanes, and then it retrains the corpus embedding-basis on the WHOLE
         import; the resident daemon's dreaming duty builds the association matrix
-        on its cadence. Poll moot_drain_status to watch the encode queue
-        converge.
+        on its cadence. (Dreaming's consolidation proposals themselves are
+        usage-driven — they accrue as the estate is recalled against, not
+        from the imported content itself.) Poll moot_drain_status to watch
+        the encode queue converge.
 
         RECALL LIGHTS UP IN STAGES — this matters for what you can trust right
         after an import: keyword (exact-term) and structured (wing/room) recall
