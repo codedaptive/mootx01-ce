@@ -428,15 +428,17 @@ actor FederationStateActor {
         for peer in peers {
             let envelopes = peer.relay.drain(for: localIdentity.publicKey)
             for envelope in envelopes {
-                // Only accept envelopes from explicitly paired peers. A valid
-                // signature alone does not prove pairing authorization
-                // (ADR-013): an attacker could craft a self-signed envelope
-                // and inject records without completing the pairing handshake.
-                // This check enforces the authorization boundary before any
-                // further processing. Mirrors Rust federation.rs pull().
+                // SECURITY (F-3 class): `envelope.senderPublicKey` is a field
+                // the sender controls and must never be trusted as the
+                // verification key. The authoritative trust anchor is the key
+                // registered at pairing time (`peer.publicKey`). Require the
+                // envelope's claimed sender key to equal the registered key;
+                // any mismatch is a federation-auth rejection. All trust in
+                // the verification chain derives from the pairing registry,
+                // not from the envelope's own fields. Mirrors Rust pull().
                 guard envelope.senderPublicKey == peer.publicKey else {
                     conflicts += 1
-                    logger.error("envelope from unpaired sender \(envelope.senderPublicKey.base64EncodedString()) rejected")
+                    logger.error("federation-auth: senderPublicKey \(envelope.senderPublicKey.base64EncodedString()) does not match registered peer key \(peer.publicKey.base64EncodedString()) — rejected")
                     continue
                 }
 
@@ -451,9 +453,13 @@ actor FederationStateActor {
 
                 // Verify signature over canonical bytes (not raw payload).
                 // The sender signed envelopeSigningBytes(...); we reproduce
-                // the same bytes here for verification.
+                // the same bytes here. SECURITY: use the REGISTERED peer key
+                // (`peer.publicKey`) as the sender key in the canonical bytes
+                // and as the verification key — not `envelope.senderPublicKey`.
+                // The guard above confirms they are equal, but trust derives
+                // from the pairing registry, not from the envelope's claim.
                 let signingBytes = envelopeSigningBytes(
-                    senderPublicKey: envelope.senderPublicKey,
+                    senderPublicKey: peer.publicKey,          // registered key, not envelope claim
                     payloadKind: envelope.payloadKind,
                     payload: envelope.payload,
                     hlc: envelope.hlc
@@ -461,10 +467,10 @@ actor FederationStateActor {
                 guard FederationSignature.verify(
                     envelope.signature,
                     of: signingBytes,
-                    by: envelope.senderPublicKey
+                    by: peer.publicKey                        // registered key, not envelope claim
                 ) else {
                     conflicts += 1
-                    logger.error("signature verification failed from \(envelope.senderPublicKey.base64EncodedString())")
+                    logger.error("federation-auth: signature verification failed for registered peer \(peer.publicKey.base64EncodedString())")
                     continue
                 }
 
