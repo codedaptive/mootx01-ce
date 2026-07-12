@@ -978,7 +978,7 @@ fn lens_schema(name: &str) -> serde_json::Value {
         ),
         "moot_lens_anticipate" => object_schema(
             json!({
-                "targetKind": string_schema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly."),
+                "targetKind": string_schema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly, dataset (dataset targeting arrives in MX-TAB-6 — passing it returns an error for now)."),
                 "k": integer_schema("How many actions to return (default 5)."),
                 "minObservations": integer_schema("Minimum observations per action (default 1)."),
                 "filter": filter,

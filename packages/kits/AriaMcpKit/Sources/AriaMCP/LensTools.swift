@@ -203,7 +203,7 @@ enum LensTools {
                 description: "Reasoning lens: learn which capture actions tend to reach a target outcome, ranked by conservative success rate. Confirmation-level filters in the recall frame (userConfirmed/unconfirmed) are ignored — the lens performs its own dual recall (confirmed = success, unconfirmed = non-success) to compute a differentiated rate; sensitivity and other scoping filters are honored.",
                 inputSchema: objectSchema(
                     properties: [
-                        "targetKind": stringSchema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly."),
+                        "targetKind": stringSchema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly, dataset (dataset targeting arrives in MX-TAB-6 — passing it returns an error for now)."),
                         "k": integerSchema("How many actions to return (default 5)."),
                         "minObservations": integerSchema("Minimum observations per action (default 1)."),
                         "filter": filterSchema,
@@ -617,6 +617,14 @@ enum LensTools {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
                     message: "targetKind is not a content kind name")
+            }
+            // dataset targeting is not yet supported — dataset-handle creation
+            // and lens integration arrive in MX-TAB-6. Reject early with a
+            // clear message so the caller understands the future-arrival intent.
+            if kind == .dataset {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "dataset targeting is not yet supported (arrives in MX-TAB-6)")
             }
             let predictions = try await Anticipate.run(
                 kit: kit, handle: handle, frame: try frame(args),
@@ -1100,6 +1108,7 @@ enum LensTools {
         case "structuredJSON": return .structuredJSON
         case "imageCaption": return .imageCaption
         case "fingerprintOnly": return .fingerprintOnly
+        case "dataset": return .dataset
         default: return nil
         }
     }

@@ -608,6 +608,15 @@ pub fn dispatch(
                     "targetKind is not a content kind name",
                 )
             })?;
+            // dataset targeting is not yet supported — dataset-handle creation
+            // and lens integration arrive in MX-TAB-6. Reject early with a
+            // clear message so the caller understands the future-arrival intent.
+            if target_kind == ContentKind::Dataset {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    "dataset targeting is not yet supported (arrives in MX-TAB-6)",
+                ));
+            }
             let k = opt_integer(args, "k", 5)?.max(0) as usize;
             let min_obs = opt_integer(args, "minObservations", 1)? as u32;
             let frame = recall_frame(args)?;
@@ -1072,6 +1081,7 @@ fn decode_content_kind(name: &str) -> Option<ContentKind> {
         "structuredJSON" => Some(ContentKind::StructuredJson),
         "imageCaption" => Some(ContentKind::ImageCaption),
         "fingerprintOnly" => Some(ContentKind::FingerprintOnly),
+        "dataset" => Some(ContentKind::Dataset),
         _ => None,
     }
 }

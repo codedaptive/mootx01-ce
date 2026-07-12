@@ -16,7 +16,7 @@
 //!
 //! ```text
 //! bits 0–5    capture_channel        (contiguous, 6 cases at raw 0..5)
-//! bits 6–11   content_kind           (contiguous, 7 cases at raw 0..6)
+//! bits 6–11   content_kind           (contiguous, 8 cases at raw 0..7)
 //! bits 12–23  feature_flags          (bitset, 7 named bits 12..18)
 //! bit  24     state_extension flag
 //! bit  25     lineage_clustering flag (NEW in v0.6)
@@ -90,12 +90,13 @@ impl CaptureChannel {
 // MARK: - ContentKind
 
 /// Content kind — the shape of the drawer's content. Lives in bits 6–11
-/// of `Drawer::operational_bitmap` (6 bits, 64 values; 7 used, 57
+/// of `Drawer::operational_bitmap` (6 bits, 64 values; 8 used, 56
 /// reserved). Per cookbook §2.4.
 ///
 /// F12 cascade (2026-05-27): added `FingerprintOnly = 6` per cookbook
 /// v0.6 (the AmbientSample noun type uses fingerprint-only rows;
-/// see §2.5).
+/// see §2.5). MX-TAB-3 (2026-07-11): added `Dataset = 7` per cookbook
+/// §2.4 (dataset handle rows; contiguous per the cookbook §2.4 rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
 pub enum ContentKind {
@@ -106,7 +107,8 @@ pub enum ContentKind {
     StructuredJson = 4,
     ImageCaption = 5,
     FingerprintOnly = 6, // NEW in v0.6 per cookbook §2.4 / §2.5
-                         // Raw values 7–63 are reserved for future kinds.
+    Dataset = 7,         // NEW per MX-TAB-3 / cookbook §2.4 (contiguous, raw 7)
+                         // Raw values 8–63 are reserved for future kinds.
 }
 
 impl ContentKind {
@@ -126,6 +128,7 @@ impl ContentKind {
             4 => ContentKind::StructuredJson,
             5 => ContentKind::ImageCaption,
             6 => ContentKind::FingerprintOnly,
+            7 => ContentKind::Dataset,
             _ => ContentKind::Prose,
         }
     }
@@ -381,19 +384,20 @@ mod tests {
         assert_eq!(ContentKind::StructuredJson.raw_value(), 4);
         assert_eq!(ContentKind::ImageCaption.raw_value(), 5);
         assert_eq!(ContentKind::FingerprintOnly.raw_value(), 6); // NEW in v0.6
+        assert_eq!(ContentKind::Dataset.raw_value(), 7); // NEW per MX-TAB-3
     }
 
     #[test]
-    fn content_kind_roundtrip_7_cases() {
-        for v in 0i64..=6 {
+    fn content_kind_roundtrip_8_cases() {
+        for v in 0i64..=7 {
             assert_eq!(ContentKind::from_raw(v).raw_value(), v);
         }
     }
 
     #[test]
     fn content_kind_reserved_falls_back_to_prose() {
-        // Raws 7–63 are reserved per cookbook §2.4.
-        assert_eq!(ContentKind::from_raw(7), ContentKind::Prose);
+        // Raws 8–63 are reserved per cookbook §2.4.
+        assert_eq!(ContentKind::from_raw(8), ContentKind::Prose);
         assert_eq!(ContentKind::from_raw(63), ContentKind::Prose);
     }
 
