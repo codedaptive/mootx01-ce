@@ -14,6 +14,9 @@ let package = Package(
     dependencies: [
         .package(name: "MootIntentKit", path: "../MootIntentKit"),
         .package(name: "AriaMcpKit", path: "../../kits/AriaMcpKit"),
+        .package(name: "GeniusLocusKit", path: "../../kits/GeniusLocusKit"),
+        .package(name: "LocusKit", path: "../../kits/LocusKit"),
+        .package(name: "PersistenceKit", path: "../../kits/PersistenceKit"),
     ],
     targets: [
         .target(
@@ -29,6 +32,13 @@ let package = Package(
                 "MootFoundationModelsKit",
                 .product(name: "MootIntentKit", package: "MootIntentKit"),
                 .product(name: "AriaMCP", package: "AriaMcpKit"),
+                // The eval suite (Phase 6.6) runs the FM tools against a live
+                // in-memory estate — same TestBridge wiring MootIntentKitTests
+                // uses (schema → coordinator → dispatcher).
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ]
         ),
     ]

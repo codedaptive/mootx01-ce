@@ -85,9 +85,21 @@ public struct MootRecallTool: Tool {
         }
         return """
         BEGIN_UNTRUSTED_MOOT_DATA
-        \(result.text)
+        \(Self.defangBoundarySentinels(in: result.text))
         END_UNTRUSTED_MOOT_DATA
         """
+    }
+
+    /// Estate content is attacker-influenceable (anything ever captured can
+    /// come back through recall). A drawer containing the boundary sentinel
+    /// text could otherwise terminate the untrusted block early and smuggle
+    /// instructions after it — so any sentinel occurrence INSIDE the data is
+    /// rewritten to a hyphenated form the instructions do not treat as a
+    /// boundary. The wrapper's own pair stays the only real pair.
+    static func defangBoundarySentinels(in text: String) -> String {
+        text
+            .replacingOccurrences(of: "BEGIN_UNTRUSTED_MOOT_DATA", with: "BEGIN-UNTRUSTED-MOOT-DATA")
+            .replacingOccurrences(of: "END_UNTRUSTED_MOOT_DATA", with: "END-UNTRUSTED-MOOT-DATA")
     }
 }
 
