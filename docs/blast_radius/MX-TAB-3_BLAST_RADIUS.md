@@ -12,6 +12,21 @@ LocusKit operational-bitmap content_kind field (bits 6–11).
 
 ---
 
+## Step 0 — Baseline
+
+LocusKit Swift suite at mission start: 799 tests, **3 pre-existing
+failures** introduced at commit `39c274fe` (files last touched there;
+unrelated to ContentKind — verified by Adams post-flight). The mission's
+pass criterion is therefore "no NEW failures," with the 3 known failures
+carried unchanged. All other touched packages started green.
+
+Post-flight amendments (Adams findings, applied same-day): stale
+`content_kind (contiguous raw 0…6)` range comments updated to `0…7` in
+`packages/kits/LocusKit/Sources/LocusKit/EstateVerbs.swift` and
+`packages/kits/LocusKit/rust/src/estate_verbs.rs` (two sites) — these
+files switch over `MutationKind`, not `ContentKind`, so they carried no
+code change, only the bitmap-layout comment.
+
 ## Files Modified
 
 ### Enum definition — both legs
@@ -48,6 +63,7 @@ LocusKit operational-bitmap content_kind field (bits 6–11).
 |---|---|---|
 | `packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift` | `decodeContentKind(_:)` non-exhaustive switch | Add `case "dataset": return .dataset`; add rejection guard at `moot_lens_anticipate` call site with MX-TAB-6 message |
 | `packages/kits/AriaMcpKit/rust/src/lens_tools.rs` | `decode_content_kind()` non-exhaustive match | Add `"dataset" => Some(ContentKind::Dataset)`; add rejection guard at `moot_lens_anticipate` arm with MX-TAB-6 message |
+| `packages/kits/AriaMcpKit/rust/src/tool_list.rs` | `moot_lens_anticipate` `targetKind` schema description | Add "dataset" to the enumerated kinds — mirrors the `LensTools.swift` schema-description update for cross-leg tool-schema parity |
 
 ### Conformance parity anchors
 

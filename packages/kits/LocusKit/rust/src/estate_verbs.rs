@@ -198,7 +198,7 @@ impl Estate {
     ///
     /// Operational bitmap (cookbook §2.4 v0.6 layout):
     ///   - bits 0–5:   `capture_channel` (contiguous raw 0..5)
-    ///   - bits 6–11:  `content_kind`    (contiguous raw 0..6)
+    ///   - bits 6–11:  `content_kind`    (contiguous raw 0..7)
     ///   - bits 12–23: `feature_flags`   (DrawerFeatureFlags bitset, pre-shifted)
     ///
     /// Adjective bitmap:
@@ -244,7 +244,7 @@ impl Estate {
 
         // Operational bitmap assembly (cookbook §2.4 v0.6 layout):
         //   bits 0–5   capture_channel (contiguous raw 0..5)
-        //   bits 6–11  content_kind    (contiguous raw 0..6)
+        //   bits 6–11  content_kind    (contiguous raw 0..7)
         //   bits 12–23 feature_flags   (DrawerFeatureFlags bitset)
         // Per DrawerOperational.swift / spec § 5.6.
         //
