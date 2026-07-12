@@ -13,6 +13,7 @@ import AppKit
 
 struct EngineView: View {
     @Bindable var model: AppModel
+    @State private var discovery = DiscoveryController()
     #if os(macOS)
     @State private var daemon = DaemonController()
     #endif
@@ -32,8 +33,58 @@ struct EngineView: View {
                 } icon: { Image(systemName: "ipad.and.iphone") }
                 .font(.caption).foregroundStyle(.secondary)
                 #endif
+
+                discoveryPanel
             }
             .padding(20)
+        }
+        .onDisappear { discovery.stop() }
+    }
+
+    private var discoveryPanel: some View {
+        GroupBox(String(localized: "LAN daemons (discovery)")) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(String(localized: "Browse the local network for MOOT resident daemons advertising _mootx01._tcp. Daemon-side advertisement is an engine mission that has not shipped — until it does, an empty result here is the honest answer, not a failure."))
+                    .font(.caption).foregroundStyle(.secondary)
+
+                HStack {
+                    Button(discovery.isBrowsing
+                           ? String(localized: "Stop browsing")
+                           : String(localized: "Browse for daemons")) {
+                        discovery.toggleBrowsing()
+                    }
+                    Spacer()
+                    Circle().fill(discovery.isBrowsing ? Color.green : Color.secondary)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Text(discovery.isBrowsing
+                         ? String(localized: "browsing")
+                         : String(localized: "idle"))
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+
+                if discovery.isBrowsing && discovery.serviceNames.isEmpty {
+                    Text(String(localized: "No daemons found yet."))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                ForEach(discovery.serviceNames, id: \.self) { name in
+                    HStack {
+                        Text(name).font(.caption.monospaced())
+                        Spacer()
+                        if let endpoint = discovery.resolved[name] {
+                            Text(endpoint).font(.caption2.monospaced())
+                                .foregroundStyle(.secondary).textSelection(.enabled)
+                        } else {
+                            Button(String(localized: "Resolve")) {
+                                Task { await discovery.resolve(name) }
+                            }
+                            .font(.caption)
+                        }
+                    }
+                }
+            }
+            .padding(6)
         }
     }
 
