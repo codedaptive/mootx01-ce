@@ -80,6 +80,14 @@ public enum LocusKitError: Error, Sendable, Equatable {
     /// the P1 mandate: fail-loud unsupported is required when the
     /// producing data does not exist.
     case notSupported(String)
+
+    /// A dataset handle exists for `datasetId` but its belief state is
+    /// in cluster B (withdrawn, superseded, decayed, or expired) — the
+    /// dataset is no longer actively believed. The backing table is NOT
+    /// dropped by the withdrawal; it persists until the handle is erased
+    /// via `VerbSurface.expunge`. Thrown by
+    /// `Estate.resolveActiveDatasetHandle(datasetId:)` (MX-TAB-4).
+    case withdrawnDatasetHandle(datasetId: UUID)
 }
 
 extension LocusKitError: CustomStringConvertible {
@@ -117,6 +125,8 @@ extension LocusKitError: CustomStringConvertible {
             return "corrupt stored value in \(table).\(column): '\(storedText)'"
         case .notSupported(let msg):
             return "not supported: \(msg)"
+        case .withdrawnDatasetHandle(let datasetId):
+            return "dataset handle withdrawn: \(datasetId.uuidString)"
         }
     }
 }

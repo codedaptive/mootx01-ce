@@ -2642,7 +2642,12 @@ extension ToolDispatcher {
         let priorFloor = try await estate.meta(key: Self.fdcRecalcedDataVersionMetaKey)
         let drawers = try await estate.allDrawers()
         let active = drawers.filter {
+            // Dataset handles (contentKind == .dataset) carry structured JSON,
+            // not classifiable free text. The FDC classifier must never reclassify
+            // them — doing so would corrupt the DatasetHandleContent payload.
+            // MX-TAB-4 locked decision: FDC classifier boundary.
             $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal
+                && $0.contentKind != .dataset
         }
         let scannedDrawers = limit.map { Array(active.prefix($0)) } ?? active
 

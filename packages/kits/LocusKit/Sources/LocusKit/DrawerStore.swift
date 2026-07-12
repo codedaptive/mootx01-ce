@@ -1455,6 +1455,24 @@ public actor DrawerStore {
         try await storage.auditLog.append(event)
     }
 
+    /// Append an arbitrary audit event to this estate's audit log.
+    ///
+    /// Exposes the same `storage.auditLog.append` path as
+    /// `sealExpungeAudit` under a semantically distinct name so callers
+    /// that are recording supplementary events (e.g. the dataset table-drop
+    /// audit appended by GLK's `VerbSurface.expunge` cascade) can express
+    /// their intent at the call site rather than borrowing the expunge-sealing
+    /// name. The storage operation is identical in both cases.
+    ///
+    /// Used by `Estate.appendAuditEvent(_:)`, which exposes this through the
+    /// Estate actor boundary to GeniusLocusKit (MX-TAB-4).
+    ///
+    /// Deterministic: the caller threads the same `now` the verb received;
+    /// never calls Date() here.
+    public func appendAuditEvent(_ event: AuditEvent) async throws {
+        try await storage.auditLog.append(event)
+    }
+
     /// Seal a cross-kit-orphan audit event for a partially-completed expunge.
     ///
     /// Called by GLK's `VerbSurface.expunge` when the storage half (step 1)

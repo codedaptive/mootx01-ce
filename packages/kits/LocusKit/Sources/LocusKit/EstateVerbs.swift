@@ -433,7 +433,10 @@ public extension Estate {
     /// everywhere — stale set bits are a harmless over-approximation
     /// (spec § 11.5 / ContainerFingerprintStore header). Tightening is
     /// done by `containerFP.rebuildAll` at estate open.
-    private func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {
+    // Internal rather than private so extensions in other LocusKit source files
+    // (e.g. DatasetHandle.swift) can call this without duplicating the container-
+    // fingerprint OR-in logic. Access stays module-internal; no public API change.
+    func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {
         try await store.addDrawer(drawer, now: now)
         // Resolve wing/room display names from the node tree for the
         // container fingerprint aggregate.

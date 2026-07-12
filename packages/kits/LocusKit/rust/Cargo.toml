@@ -33,7 +33,7 @@ substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }  # serde feature required for DatasetHandleContent.dataset_id (MX-TAB-4)
 # Ed25519 keypair generation for the federation signing identity minted at
 # first open. Mirrors Swift's CryptoKit Curve25519.Signing.PrivateKey().
 # Authority: DECISION_SYNCKIT_DESIGN_2026-05-19 §8.
@@ -55,9 +55,18 @@ lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 # unicode-normalization provides NFC normalization for lookup_name derivation
 # (ADR-017 §8). Already a transitive dependency via the idna crate.
 unicode-normalization = "0.1"
+# serde + serde_json for DatasetHandleContent JSON encode/decode (MX-TAB-4).
+# DatasetHandleContent is stored as JSON in Drawer.content and must be decoded
+# by the GLK expunge cascade and by find_dataset_handles. The derive feature
+# enables #[derive(Serialize, Deserialize)] on DatasetHandleContent and
+# DatasetColumnSummary with #[serde(rename_all = "camelCase")] for Swift parity.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 # JSON parsing for LP-0 conformance vectors. Only used in tests/lp0_vectors.rs.
+# serde_json is also a production dependency (MX-TAB-4); listing here keeps
+# test-vector code able to pull the same version without a separate resolution.
 serde_json = "1"
 # rusqlite is used in corrupt_readback_tests.rs to corrupt stored values via
 # raw SQL (bypassing the kit's codec). Identical test strategy to
