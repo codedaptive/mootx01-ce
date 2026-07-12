@@ -6,7 +6,7 @@
 
 import Testing
 import Foundation
-import SubstrateLib
+@testable import SubstrateLib
 import SubstrateTypes
 
 /// The test UUID used across conformance vectors.

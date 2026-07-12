@@ -56,6 +56,18 @@ def audit_swift(name: str, root: Path) -> tuple[int, list[str]]:
     # Verify every test has a @testable import of this package
     for tf in test_files:
         t = tf.read_text()
+        # Support files (no @Suite/@Test/XCTestCase declarations) are test
+        # INFRASTRUCTURE, not tests — e.g. GlobalTestLock.swift, the
+        # process-wide telemetry-lock helper copied verbatim across kits.
+        # They import only what they need and legitimately carry no
+        # @testable import; the invariant applies to files that declare
+        # tests. Comments are stripped first so prose mentioning "@Test"
+        # (the lock helper's doc header does) cannot misclassify a helper
+        # as a test file.
+        code = re.sub(r'//[^\n]*', '', t)
+        code = re.sub(r'/\*[\s\S]*?\*/', '', code)
+        if not re.search(r'@Suite|@Test|XCTestCase', code):
+            continue
         if "@testable import" not in t:
             warnings.append(f"  test file lacks @testable import: {tf.name}")
             continue
