@@ -52,15 +52,27 @@ compiler (exhaustive switch/match failures) plus a hand inspection of
 every defaulted switch at the swept sites, recorded in that mission's
 Blast Radius Report.
 
-## Queued follow-up: MX-TAB-Q1
+## MX-TAB-Q1 — RESOLVED 2026-07-12
 
-Found during MX-TAB-1, needs its own blast radius (whole RowStore
-surface): `TypedValueComparator.compare` orders text Unicode-canonically
-on the Swift InMemory backend, while the SQLite backend (BINARY
-collation) and the Rust leg compare bytes. Dataset-path comparators were
-fixed to byte order in MX-TAB-1 itself; the residual is the pre-existing
-InMemory RowStore orderBy/predicate surface. Must land before any parity
-harness compares InMemory orderings.
+Found during MX-TAB-1: `TypedValueComparator.compare` ordered text
+Unicode-canonically (Swift String `<`) on the Swift InMemory backend,
+while the SQLite backend (BINARY collation) and the Rust leg compared
+bytes. Dataset-path comparators were fixed to byte order in MX-TAB-1;
+the residual was the pre-existing InMemory RowStore orderBy/predicate
+surface (`queryRows` sort and lt/lte/gt/gte predicate evaluation).
+
+Resolution (prototype, MX-TAB-Q1, 2026-07-12):
+- `TypedValueComparator.compare` text arm changed from Swift String `<`
+  to `utf8.lexicographicallyPrecedes` / `utf8.elementsEqual` (strict
+  byte-order semantics, no Unicode normalization equivalence).
+- Surfaces fixed: `InMemoryStorage.queryRows` orderBy (line ~434) and
+  `PredicateEvaluator` lt/lte/gt/gte predicates (lines ~19-25).
+- Rust leg `compare_typed_values` (`String::cmp`, byte-lexicographic)
+  already correct — no Rust change needed.
+- Parity verified by new `DatasetStoreTests` tests:
+  `binaryCollation_textOrdering_inMemory` and
+  `binaryCollation_textOrdering_parity_inMemoryVsSQLite` (non-ASCII
+  fixture: "Z" / "a" / "É").
 
 One spec correction feeding MX-TAB-3: `ContentKind` already carries
 `fingerprintOnly = 6` (F12 cascade, cookbook v0.6), which the spec's

@@ -15,16 +15,17 @@
 //   TypedValue Equatable conformance drives distinct-count via a Set; ordering
 //   uses `compareTypedValuesForSort` (the same helper used for SQLite PK pre-sort).
 //
-//   ORDERING / COLLATION: `compareTypedValuesForSort` (PK pre-sort and
-//   columnStats min/max) compares text by UTF-8 byte order, matching SQLite
-//   BINARY collation and the Rust leg. KNOWN RESIDUAL: `queryRows` orderBy
-//   delegates to the pre-existing `InMemoryStateActor.queryRows`, whose
-//   `TypedValueComparator.compare` is Unicode-aware for text — a pre-existing
-//   RowStore-wide divergence from the SQLite backend, queued 2026-07-11 as
-//   follow-up MX-TAB-Q1 (TypedValueComparator byte-order parity; recorded in
-//   docs/findings/MX_TAB_0_BRANCH_AND_EE_CHECK.md). The BINARY collation
-//   discipline tests in DatasetStoreTests assert byte order against the
-//   SQLite backend.
+//   ORDERING / COLLATION: all text comparison paths use UTF-8 byte order —
+//   matching SQLite BINARY collation and the Rust leg's `String::cmp`
+//   (byte-lexicographic). Surfaces covered:
+//     • `compareTypedValuesForSort`: PK pre-sort, columnStats min/max
+//     • `TypedValueComparator.compare`: `queryRows` orderBy (InMemoryStorage
+//       line ~434) and predicate lt/lte/gt/gte (PredicateEvaluator)
+//   MX-TAB-Q1 RESOLVED 2026-07-12: the pre-existing `TypedValueComparator`
+//   text arm (Swift String `<`, Unicode-canonical) was changed to
+//   `utf8.lexicographicallyPrecedes` / `utf8.elementsEqual` for strict
+//   byte-order semantics across every RowStore ordering and comparison surface.
+//   Cross-backend parity is verified by DatasetStoreTests `binaryCollation_*`.
 //
 //   COLUMN VALIDATION: every user-supplied column name passes
 //   `validateDatasetColumnIdentifier` before any table mutation. Same rule

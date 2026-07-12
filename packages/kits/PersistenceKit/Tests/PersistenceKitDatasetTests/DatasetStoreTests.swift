@@ -549,21 +549,22 @@ struct DatasetStoreTests {
         #expect(stats.max == .null)
     }
 
-    // MARK: - BINARY collation — TEXT ordering (SQLite backend only)
+    // MARK: - BINARY collation — TEXT ordering
     //
     // Discipline: dataset DDL never adds a COLLATE clause to TEXT columns, so
     // SQLite's default BINARY collation is preserved. ORDER BY on a TEXT column
-    // uses byte order, not Unicode locale order.
+    // uses byte order, not Unicode locale order. `TypedValueComparator.compare`
+    // was changed in MX-TAB-Q1 (2026-07-12) to use `utf8.lexicographicallyPrecedes`
+    // so ALL InMemory ordering paths now match SQLite BINARY and the Rust leg.
     //
-    //   BINARY byte order (UTF-8): uppercase letters < lowercase letters.
+    //   BINARY byte order (UTF-8): uppercase letters (0x41-0x5A) < lowercase (0x61-0x7A).
     //   "B" = 0x42, "C" = 0x43, "a" = 0x61, "d" = 0x64
     //   → "Banana" < "Cherry" < "apple" < "date"
     //
-    //   Unicode locale order (Swift String <): case-insensitive fold
-    //   → "apple" < "Banana" < "Cherry" < "date"
-    //
-    // This test asserts BINARY order and is SQLite-only by design.
-    // InMemory uses Swift String < (Unicode) — see MX-TABULAR spec §Parity.
+    // `binaryCollation_textOrdering_sqlite`: asserts byte order on the SQLite backend.
+    // `binaryCollation_textOrdering_inMemory`: asserts the same byte order on InMemory.
+    // `binaryCollation_textOrdering_parity`: cross-backend parity with non-ASCII
+    //   fixture strings ("Z" / "a" / "É") — both backends must return identical order.
     @Test func binaryCollation_textOrdering_sqlite() async throws {
         let storage = try makeSQLite()
         let ds = storage.datasetStore
@@ -596,6 +597,116 @@ struct DatasetStoreTests {
         #expect(results[1]["label"] == .text("Cherry"))
         #expect(results[2]["label"] == .text("apple"))
         #expect(results[3]["label"] == .text("date"))
+    }
+
+    /// InMemory ORDER BY on a TEXT column must use UTF-8 byte order — same as
+    /// SQLite BINARY collation and the Rust leg. `TypedValueComparator.compare`
+    /// (MX-TAB-Q1) was changed to `utf8.lexicographicallyPrecedes`, so the same
+    /// byte-order discipline now applies to every InMemory ordering surface.
+    ///
+    /// Fixture: "Banana" / "Cherry" / "apple" / "date" — same as the SQLite test
+    /// above, expected in byte order: B(0x42) < C(0x43) < a(0x61) < d(0x64).
+    @Test func binaryCollation_textOrdering_inMemory() async throws {
+        let storage = makeInMemory()
+        let ds = storage.datasetStore
+        let id = UUID()
+
+        let schema = DatasetSchema(columns: [
+            ColumnDeclaration(name: "label", type: .text, nullable: false)
+        ])
+        try await ds.createDataset(id: id, schema: schema, indexes: [])
+
+        let rows: [[String: TypedValue]] = [
+            ["label": .text("apple")],
+            ["label": .text("Banana")],
+            ["label": .text("Cherry")],
+            ["label": .text("date")],
+        ]
+        try await ds.appendRows(id: id, rows: rows)
+
+        let results = try await ds.queryRows(
+            id: id,
+            predicate: nil,
+            orderBy: [OrderClause(column: Column(table: "", name: "label"), direction: .ascending)],
+            limit: nil,
+            offset: nil,
+            columns: nil
+        )
+        #expect(results.count == 4)
+        // Byte order: uppercase (B=0x42, C=0x43) before lowercase (a=0x61, d=0x64).
+        // Before MX-TAB-Q1, Swift String `<` gave Unicode-canonical order ("apple"
+        // before "Banana"). After the fix, byte order matches SQLite BINARY.
+        #expect(results[0]["label"] == .text("Banana"))
+        #expect(results[1]["label"] == .text("Cherry"))
+        #expect(results[2]["label"] == .text("apple"))
+        #expect(results[3]["label"] == .text("date"))
+    }
+
+    /// Cross-backend TEXT ordering parity with non-ASCII fixture strings.
+    ///
+    /// Fixture: "Z" (0x5A) / "a" (0x61) / "É" (0xC3 0x89 in UTF-8).
+    /// UTF-8 byte order: "Z" < "a" < "É".
+    ///
+    /// Both InMemory (via `TypedValueComparator.compare`) and SQLite (BINARY
+    /// collation) must return rows in the same byte-lexicographic order.
+    /// "É" is U+00C9, UTF-8: [0xC3, 0x89]; its first byte (0xC3 = 195) is
+    /// above all ASCII chars, so it sorts after ASCII "Z" and "a" in byte order.
+    ///
+    /// MX-TAB-Q1 resolution: this test verifies the parity property that the
+    /// TypedValueComparator fix was designed to guarantee.
+    @Test func binaryCollation_textOrdering_parity_inMemoryVsSQLite() async throws {
+        let inMemoryStorage = makeInMemory()
+        let sqliteStorage   = try makeSQLite()
+        let inMemoryDS = inMemoryStorage.datasetStore
+        let sqliteDS   = sqliteStorage.datasetStore
+
+        let schema = DatasetSchema(columns: [
+            ColumnDeclaration(name: "label", type: .text, nullable: false)
+        ])
+        // Non-ASCII fixture strings:
+        //   "Z" = 0x5A (ASCII uppercase)
+        //   "a" = 0x61 (ASCII lowercase)
+        //   "É" = U+00C9, UTF-8: [0xC3, 0x89] — two-byte multi-byte sequence
+        // Byte order: "Z" (0x5A) < "a" (0x61) < "É" (0xC3...).
+        let rows: [[String: TypedValue]] = [
+            ["label": .text("É")],   // multi-byte, highest byte value — insert first
+            ["label": .text("a")],   // ASCII lowercase
+            ["label": .text("Z")],   // ASCII uppercase — lowest byte value
+        ]
+
+        let inMemoryID = UUID()
+        let sqliteID   = UUID()
+        try await inMemoryDS.createDataset(id: inMemoryID, schema: schema, indexes: [])
+        try await sqliteDS.createDataset(id: sqliteID,     schema: schema, indexes: [])
+        try await inMemoryDS.appendRows(id: inMemoryID, rows: rows)
+        try await sqliteDS.appendRows(id: sqliteID,     rows: rows)
+
+        let orderClause = [OrderClause(column: Column(table: "", name: "label"), direction: .ascending)]
+
+        let inMemoryResults = try await inMemoryDS.queryRows(
+            id: inMemoryID, predicate: nil, orderBy: orderClause,
+            limit: nil, offset: nil, columns: nil
+        )
+        let sqliteResults = try await sqliteDS.queryRows(
+            id: sqliteID, predicate: nil, orderBy: orderClause,
+            limit: nil, offset: nil, columns: nil
+        )
+
+        #expect(inMemoryResults.count == 3)
+        #expect(sqliteResults.count == 3)
+
+        // Both backends must agree on the order.
+        #expect(inMemoryResults[0]["label"] == sqliteResults[0]["label"],
+            "InMemory/SQLite first-rank mismatch — collation parity broken")
+        #expect(inMemoryResults[1]["label"] == sqliteResults[1]["label"],
+            "InMemory/SQLite second-rank mismatch — collation parity broken")
+        #expect(inMemoryResults[2]["label"] == sqliteResults[2]["label"],
+            "InMemory/SQLite third-rank mismatch — collation parity broken")
+
+        // And the order must be byte order: "Z" < "a" < "É".
+        #expect(inMemoryResults[0]["label"] == .text("Z"))
+        #expect(inMemoryResults[1]["label"] == .text("a"))
+        #expect(inMemoryResults[2]["label"] == .text("É"))
     }
 
     // MARK: - f64 wire rule: REAL columnStats min/max (SQLite backend)

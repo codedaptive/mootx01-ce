@@ -92,7 +92,17 @@ enum TypedValueComparator {
         case (.float(let x), .float(let y)):
             return x == y ? 0 : (x < y ? -1 : 1)
         case (.text(let x), .text(let y)):
-            return x == y ? 0 : (x < y ? -1 : 1)
+            // UTF-8 byte order — matching SQLite BINARY collation and the Rust leg's
+            // `String::cmp` (byte-lexicographic). Do NOT use Swift String `<` or `==`:
+            // Swift compares after Unicode canonical normalization, so two byte-inequal
+            // strings (e.g. precomposed "é" vs decomposed "e\u{0301}") may compare
+            // equal or in different order than their bytes. The byte-equality check
+            // preserves strict three-way semantics: 0 only when bytes are identical,
+            // not merely when strings are canonically equivalent.
+            // Collation locked to byte order for cross-backend/cross-leg parity
+            // (MX-TAB-Q1 — resolved 2026-07-12).
+            if x.utf8.elementsEqual(y.utf8) { return 0 }
+            return x.utf8.lexicographicallyPrecedes(y.utf8) ? -1 : 1
         case (.timestamp(let x), .timestamp(let y)):
             return x == y ? 0 : (x < y ? -1 : 1)
         case (.uuid(let x), .uuid(let y)):
