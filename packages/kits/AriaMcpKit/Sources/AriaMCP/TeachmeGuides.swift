@@ -282,9 +282,20 @@ enum TeachmeGuides {
           - moot_file_fact — for structured subject–predicate–object assertions
           - moot_connection_search — to see what a memory already points to
 
+        Proposed links: pass "proposed": true to file the link as a
+        PROPOSED (agent-derived, unreviewed) edge instead of an active one
+        — use this when adjudicating borderline candidates returned by
+        moot_hunt_contradictions. The user settles proposed edges with
+        moot_review_tunnel.
+
         Example:
           { "from_id": "abc-123", "to_id": "def-456",
             "kind": "supports", "label": "Evidence for the decision" }
+
+        Adjudication example (borderline contradiction judged genuine):
+          { "from_id": "abc-123", "to_id": "def-456",
+            "kind": "contradicts", "proposed": true,
+            "label": "conflicting timeout values" }
 
         Response:
           linked abc-123 → def-456 via supports (<tunnel-uuid>)
@@ -293,6 +304,81 @@ enum TeachmeGuides {
           - Using the wrong kind. "contradicts" is structural; "relates" is generic.
           - Linking to ids that do not exist. Verify both ids with moot_memory_search.
           - Creating duplicate connections; use moot_connection_search first.
+          - Filing an ACTIVE contradicts edge for a pair you merely suspect
+            conflicts — use proposed: true so the user gets to review it.
+        """
+
+    private static let reviewTunnelGuide = """
+        moot_review_tunnel — Settle a PROPOSED connection: accept or reject.
+
+        Proposed edges come from the contradiction hunter (background scout,
+        moot_dream sweep, or moot_hunt_contradictions) and from agent-filed
+        moot_link_memories proposed:true links. Accept activates the edge;
+        reject withdraws it PERMANENTLY — a rejected pair is never
+        re-proposed by the hunter.
+
+        Only tunnels currently in the proposed lifecycle are reviewable;
+        reviewing an already-settled edge is refused.
+
+        When to use vs siblings:
+          - moot_lens_contradiction — to list proposed edges awaiting review
+          - moot_link_memories — to create a new edge (proposed or active)
+
+        Examples:
+          { "tunnel_id": "<tunnel-uuid>", "verdict": "accept" }
+          { "tunnel_id": "<tunnel-uuid>", "verdict": "reject",
+            "reason": "not a real conflict — different services" }
+
+        Response:
+          moot_review_tunnel: <tunnel-uuid> accepted — the contradicts link is now active.
+
+        Common mistakes:
+          - Rejecting to "snooze" a finding. Rejection is durable; the pair
+            will never be re-proposed.
+          - Reviewing an active or withdrawn tunnel; only proposed ones qualify.
+        """
+
+    private static let huntContradictionsGuide = """
+        moot_hunt_contradictions — Hunt memory content for contradictions.
+
+        One bounded sweep: finds semantically-near memory pairs via the
+        vector index (kNN over embedding engrams), screens each pair with a
+        cheap lexical conflict cue (negation asymmetry, same-template value
+        divergence, revision markers), then:
+          - STRONG findings are persisted as PROPOSED contradicts links
+            (agent-derived, unreviewed) — the user settles them with
+            moot_review_tunnel.
+          - BORDERLINE pairs are RETURNED with content snippets for YOU to
+            judge; nothing is persisted for them. If a pair genuinely
+            conflicts, record it with moot_link_memories kind=contradicts
+            proposed=true.
+
+        Precision over recall by design: the lexical screen only fires on
+        clear surface conflict. Paraphrased contradictions surface as
+        borderline candidates (or not at all) — your judgment is the
+        second stage.
+
+        Requires the vector index — run moot_reindex after bulk import.
+        The same sweep runs inside moot_dream and hourly in the resident
+        daemon's contradiction scout; this tool is the on-demand form.
+        Rejected and already-linked pairs are deduplicated (never
+        re-proposed).
+
+        Example (full sweep, deterministic):
+          { "probe_limit": 2000, "now": "2026-06-11T00:00:00Z" }
+
+        Response:
+          moot_hunt_contradictions: probesScanned=N pairsScreened=N
+          PROPOSED <n>: <src-id> contradicts <tgt-id> [cue score] (tunnel <uuid>)
+          CANDIDATE <n>: <src-id> vs <tgt-id> [cue score]
+            a: <snippet>
+            b: <snippet>
+
+        Common mistakes:
+          - Running before moot_reindex on a fresh import; the report will
+            say the vector index is unavailable and scan nothing.
+          - Treating borderline candidates as findings. They are unjudged;
+            adjudicate before recording.
         """
 
     private static let connectionSearchGuide = """
@@ -680,6 +766,7 @@ enum TeachmeGuides {
         case "moot_link_memories":     return linkMemoriesGuide
         case "moot_connection_search": return connectionSearchGuide
         case "moot_connection_map":    return connectionMapGuide
+        case "moot_review_tunnel":     return reviewTunnelGuide
         // Tier 3
         case "moot_file_fact":     return fileFactGuide
         case "moot_fact_search":   return factSearchGuide
@@ -699,6 +786,7 @@ enum TeachmeGuides {
         // Recipe (Tier 6) — precise recall has its own guide.
         case "moot_recall_precise":   return preciseRecallGuide
         case "moot_dream":            return dreamGuide
+        case "moot_hunt_contradictions": return huntContradictionsGuide
 
         case "moot_reclassify_fdc":   return reclassifyFDCGuide
         case "moot_palace_import":    return palaceImportGuide
@@ -707,10 +795,10 @@ enum TeachmeGuides {
     }
 
     private static let dreamGuide = """
-        moot_dream — Dream the estate: build the association matrix.
+        moot_dream — Dream the estate: matrix, dreaming cycle, and a
+        contradiction-hunt sweep.
 
-        Two effects, both required before the matrix-driven recall lanes
-        carry any signal:
+        Three effects:
           1. Rebuilds the co-occurrence/temporal MATRIX TIER from the
              estate's audit log and registers it for recall scoring. The
              matrix is built by dreaming, NOT by capture — so a freshly
@@ -718,22 +806,28 @@ enum TeachmeGuides {
              runs.
           2. Runs one DREAMING CYCLE: mines latent co-occurrence alignments
              into proposals and writes one cycle diary entry.
+          3. Runs one CONTRADICTION-HUNT sweep over memory CONTENT: finds
+             semantically-near pairs via the vector index, screens them for
+             lexical conflict, and persists strong findings as PROPOSED
+             contradicts links (review with moot_lens_contradiction,
+             settle with moot_review_tunnel).
 
-        HONEST SCOPE — dreaming proposals are USAGE-DRIVEN: they are mined
-        from recall co-occurrence (which memories the estate recalls
-        together, accumulated over use), NOT from memory content. A freshly
-        imported estate that has not been recalled against yet will
-        legitimately report 0 proposals — that is expected, not a fault;
-        the matrix rebuild (effect 1) is still immediately valuable.
-        Dreaming does not read memory text for semantic conflicts or
-        insights.
+        HONEST SCOPE — dreaming-cycle proposals (effect 2) are
+        USAGE-DRIVEN: mined from recall co-occurrence (which memories the
+        estate recalls together, accumulated over use), NOT from memory
+        content. A freshly imported estate that has not been recalled
+        against yet will legitimately report 0 cycle proposals — that is
+        expected, not a fault. Content is examined only by the
+        contradiction-hunt sweep (effect 3), which needs the vector index
+        (run moot_reindex after bulk import).
 
         When to use:
           - After bulk-loading an estate, before relying on matrix /
             association recall (moot_recall_precise composition=matrix,
-            text+matrix, weighted-all).
-          - To trigger an association-mining pass on demand rather than
-            waiting for the resident governor's schedule.
+            text+matrix, weighted-all). Run moot_reindex first so the
+            hunt sweep has vectors to mine.
+          - To trigger an association-mining + contradiction-hunt pass on
+            demand rather than waiting for the resident governor's schedule.
 
         Example (deterministic run):
           { "now": "2026-06-11T00:00:00Z" }
@@ -744,6 +838,8 @@ enum TeachmeGuides {
           proposalsEmitted: N
           suppressedDuplicates: N
           belowThreshold: N
+          contradictionsProposed: N
+          contradictionCandidatesBorderline: N
         """
 
     // MARK: - Maintenance

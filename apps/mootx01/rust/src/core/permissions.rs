@@ -103,6 +103,12 @@ const MUTATION_TOOLS: &[&str] = &[
     // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
     // Mirrors Swift PermissionsWriter.mutationTools (parity required).
     "moot_monitoring_status",
+    // Contradiction hunter: estate-wide sweep that persists PROPOSED
+    // contradicts tunnels (same sweep runs inside moot_dream, already ask
+    // tier). Review settles a proposed tunnel's lifecycle — a mutation of
+    // committed state, and rejection is durable (never re-proposed).
+    // Mirrors Swift PermissionsWriter.mutationTools (parity required).
+    "moot_hunt_contradictions", "moot_review_tunnel",
 ];
 
 /// Destructive, irreversible: hard-deletes content from the estate.

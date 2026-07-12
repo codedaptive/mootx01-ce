@@ -83,10 +83,13 @@ public extension GeniusLocusKit {
     ///
     /// - Parameters:
     ///   - handle: Open estate handle.
-    ///   - modelID: Embedding-model partition to scan; must match the
-    ///     model used when vectors were filed. Defaults to the standing-
-    ///     signal registration default.
-    ///   - probeLimit: Maximum vector-indexed drawer IDs probed this
+    ///   - modelID: Embedding-model partition for the DRAWER-keyed lane;
+    ///     must match the model used when those vectors were filed.
+    ///     Defaults to the standing-signal registration default. When a
+    ///     Corpus is registered for the estate, its chunk-keyed lane is
+    ///     ALSO mined under the corpus's own modelID — that is the lane
+    ///     the production encode pipeline populates.
+    ///   - probeLimit: Maximum vector-indexed item IDs probed this
     ///     pass. The incremental (signal/THETA) callers keep this small;
     ///     the on-demand sweep passes a larger bound.
     ///   - filedAfter: When non-nil, only probes whose drawer was filed
@@ -113,8 +116,14 @@ public extension GeniusLocusKit {
                 proposed: [], borderline: [], deduplicated: 0)
         }
 
-        // Probe sample: vector-indexed drawer IDs (the only rows kNN can
+        // Probe sample: vector-indexed item IDs (the only rows kNN can
         // reach). Empty-keyword query matches all rows, item_id ascending.
+        // Two row populations exist: DRAWER-keyed rows (bespoke lanes such
+        // as the distillation lane, and test-planted vectors) and
+        // CHUNK-keyed rows (the production encode pipeline — EstateLifecycle
+        // registers `corpus.sharedVectorStore`, and the drain writes
+        // itemID = chunk UUID under the corpus's own modelID). Both lanes
+        // are mined below.
         let probeIDs = try await vectorStore.findByKeyword("", limit: probeLimit)
         guard !probeIDs.isEmpty else {
             return ContradictionHuntReport(
@@ -132,6 +141,9 @@ public extension GeniusLocusKit {
         }
 
         // kNN candidate mining, canonical-pair deduplicated.
+        //
+        // Lane 1 — drawer-keyed rows under the caller's `modelID`. Rows
+        // whose item is not in this lane fail `getVector` and fall through.
         var candidatePairs: [(a: String, b: String)] = []
         var seenPairs: Set<String> = []
         for probeID in probeIDs {
@@ -146,6 +158,47 @@ public extension GeniusLocusKit {
                 guard seenPairs.insert(key).inserted else { continue }
                 candidatePairs.append((min(probeID, match.itemID),
                                        max(probeID, match.itemID)))
+            }
+        }
+
+        // Lane 2 — chunk-keyed corpus rows. On a production estate this is
+        // the ONLY populated lane: the encode drain keys every vector row by
+        // chunk UUID under the corpus provider's modelID, so lane 1 finds
+        // nothing there. Mine the same probe set on the corpus lane and map
+        // chunk hits back to their owning drawers (chunk → source_id via the
+        // corpus's warm map). Chunk pairs from the SAME drawer collapse;
+        // `seenPairs` keys on drawer IDs, so the two lanes dedupe together.
+        if let corpus = corpusKits[handle] {
+            let corpusModelID = await corpus.modelID
+            var chunkMatches: [(a: String, b: String)] = []
+            var involvedChunkIDs: Set<UUID> = []
+            for probeID in probeIDs {
+                guard let probeUUID = UUID(uuidString: probeID),
+                      let probeEngram = try? await vectorStore.getVector(
+                          itemID: probeID, modelID: corpusModelID) else { continue }
+                guard let matches = try? await vectorStore.findNearest(
+                    probe: probeEngram, modelID: corpusModelID, limit: 5) else { continue }
+                for match in matches {
+                    guard match.itemID != probeID,
+                          match.distance <= proximityThreshold,
+                          let matchUUID = UUID(uuidString: match.itemID) else { continue }
+                    involvedChunkIDs.insert(probeUUID)
+                    involvedChunkIDs.insert(matchUUID)
+                    chunkMatches.append((probeID, match.itemID))
+                }
+            }
+            if !chunkMatches.isEmpty {
+                let owners = await corpus.sourceIDs(forChunkIDs: Array(involvedChunkIDs))
+                for pair in chunkMatches {
+                    guard let ua = UUID(uuidString: pair.a),
+                          let ub = UUID(uuidString: pair.b),
+                          let sourceA = owners[ua], let sourceB = owners[ub],
+                          sourceA != sourceB else { continue }
+                    let key = Self.pairKey(sourceA, sourceB)
+                    guard seenPairs.insert(key).inserted else { continue }
+                    candidatePairs.append((min(sourceA, sourceB),
+                                           max(sourceA, sourceB)))
+                }
             }
         }
 

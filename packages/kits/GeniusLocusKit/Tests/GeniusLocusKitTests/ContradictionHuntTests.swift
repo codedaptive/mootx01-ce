@@ -9,6 +9,7 @@ import Testing
 import Foundation
 import LocusKit
 import VectorKit
+import CorpusKit
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitInMemory
@@ -179,6 +180,68 @@ struct ContradictionHuntTests {
         let bareHandle = try await bare.open(storage: storage, owner: owner)
         let bareReport = try await bare.huntContradictions(in: bareHandle, now: Self.t0)
         #expect(!bareReport.vectorStoreAvailable)
+    }
+
+    @Test("corpus lane: chunk-keyed production rows map back to drawer pairs")
+    func corpusLaneFindsContradictions() async throws {
+        // Production estates never hold drawer-keyed vectors: EstateLifecycle
+        // registers corpus.sharedVectorStore and the encode pipeline keys
+        // every row by CHUNK UUID under the corpus's own modelID. This test
+        // reproduces that wiring shape and proves the hunter's corpus-lane
+        // mining maps chunk kNN hits back to the owning drawers.
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "hunt-tests-corpus")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Token-bag provider: sums a per-token deterministic vector, so
+        // sentences sharing most tokens land near each other in engram
+        // space — the semantic property the corpus lane's kNN relies on
+        // (production's distributional ensemble provides it; the default
+        // `.deterministic` whole-text hash does not, and would leave every
+        // distinct sentence ~128 bits apart).
+        let tokenBag: @Sendable (String) async throws -> [Float] = { text in
+            var acc = [Float](repeating: 0, count: 32)
+            let tokens = text.lowercased().split(
+                whereSeparator: { !$0.isLetter && !$0.isNumber })
+            for token in tokens {
+                var h: UInt64 = 14_695_981_039_346_656_037
+                for byte in token.utf8 {
+                    h = (h ^ UInt64(byte)) &* 1_099_511_628_211
+                }
+                for i in 0..<32 {
+                    h = h &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                    acc[i] += (Float(h >> 40) / Float(1 << 24)) * 2 - 1
+                }
+            }
+            return acc
+        }
+        let provider = FloatSimHashEmbeddingProvider(
+            modelID: "hunt-token-bag-v1", modelVersion: "1.0",
+            projectionSeed: 0xC0FF_EE00, inference: tokenBag)
+        let corpus = try await Corpus(
+            storage: storage, model: .randomIndexing(provider: provider))
+        await kit.registerCorpus(corpus, for: handle)
+        await kit.registerVectorStore(corpus.sharedVectorStore, for: handle)
+
+        let a = try await kit.capture(
+            handle, captureFrame(content: "the api timeout is 30 seconds", room: "study"))
+        let b = try await kit.capture(
+            handle, captureFrame(content: "the api timeout is 90 seconds", room: "study"))
+        let filler = try await kit.capture(
+            handle, captureFrame(content: "grocery list apples and oranges", room: "study"))
+        for drawer in [a, b, filler] {
+            try await corpus.ingest(drawer.content, sourceID: drawer.id, now: Self.t0)
+        }
+
+        let report = try await kit.huntContradictions(in: handle, now: Self.t0)
+        #expect(report.vectorStoreAvailable)
+        #expect(report.proposed.count == 1)
+        let proposal = try #require(report.proposed.first)
+        #expect(proposal.cueKind == "value_divergence")
+        #expect(Set([proposal.sourceDrawerID, proposal.targetDrawerID]) == Set([a.id, b.id]))
     }
 
     @Test("watermark skips pairs where both sides predate filedAfter")

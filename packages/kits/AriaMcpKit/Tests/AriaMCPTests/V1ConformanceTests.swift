@@ -67,7 +67,7 @@ struct V1ConformanceTests {
     /// response payload exceeds macOS's 16 KiB default pipe buffer.
     ///
     /// The deadlock pattern that caused the hang (MX-TAB-7 regression, 2026-07-12):
-    ///   1. `server.run()` writes the `tools/list` response (69 tools ≈ 30+ KiB)
+    ///   1. `server.run()` writes the `tools/list` response (71 tools ≈ 30+ KiB)
     ///      to `outPipe.fileHandleForWriting` via a blocking `write(2)` syscall.
     ///   2. `write(2)` fills the 16 KiB pipe buffer and stalls — the kernel blocks
     ///      the write until the read side drains some bytes.
@@ -158,14 +158,15 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 69 tools.
+    /// VC-2: `tools/list` returns exactly 71 tools.
     ///
     /// The count is a snapshot of the v1.1 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
     /// and commit the reason with the change.
-    /// MX-TAB-7: +3 dataset tools (moot_file_dataset, moot_dataset_query,
-    /// moot_dataset_stats) → 66 → 69.
-    @Test func v1ToolsListReturns66Tools() async throws {
+    /// 66 → 71: +2 contradiction-hunter tools (moot_hunt_contradictions,
+    /// moot_review_tunnel) and +3 dataset tools (moot_file_dataset,
+    /// moot_dataset_query, moot_dataset_stats).
+    @Test func v1ToolsListReturns71Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -181,14 +182,16 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 69 = prior 66 + 3 dataset tools (MX-TAB-7):
-        //   moot_file_dataset, moot_dataset_query, moot_dataset_stats.
+        // 71 = prior 66 + 2 contradiction-hunter tools + 3 dataset tools.
+        //   Contradiction hunter: moot_hunt_contradictions (recipe, on-demand
+        //     content sweep) + moot_review_tunnel (Tier 2, settle a PROPOSED tunnel).
+        //   Dataset (MX-TAB-7): moot_file_dataset, moot_dataset_query, moot_dataset_stats.
         // Prior 66 = interface + federation + recipe + lens + vault + maintenance:
         //   20th interface = moot_memory_get (Tier 1, fetch-drawer-by-ID).
         //   23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
         //   11th recipe = moot_recollect (DA1 distillation).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
-        #expect(tools.count == 69, "tools/list must return exactly 69 tools; got \(tools.count)")
+        #expect(tools.count == 71, "tools/list must return exactly 71 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────
