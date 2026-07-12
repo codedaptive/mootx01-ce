@@ -21,15 +21,15 @@
 //   SCHEMA CACHE: DatasetSchema is stored in PostgreSQLBackend.datasetSchemas
 //   (actor-isolated, keyed by table name) when createDatasetTable succeeds.
 //   queryDatasetRows and datasetColumnStats look it up to know column types for
-//   row decoding. If the cache is missing (process restart without re-calling
-//   createDataset), a clear error is thrown — production would add an
-//   information_schema introspection fallback.
+//   row decoding.
 //
-//   NOTE — Rust leg divergence on cache miss: postgres.rs falls back to SELECT *
-//   rather than throwing. This means the Rust leg exposes __ds_pk in results and
-//   loses column-type hints for DOUBLE PRECISION on a cache miss. Swift is stricter
-//   (throw) and the two legs are intentionally divergent here pending the
-//   information_schema hardening mission.
+//   SCHEMA RECOVERY (D8): on a schema-cache miss (process restart without
+//   re-calling createDataset), queryDatasetRows and datasetColumnStats derive
+//   the DatasetSchema from information_schema.columns + key_column_usage via
+//   deriveDatasetSchema(_:connection:), populate the cache, and proceed correctly.
+//   Fail closed (BackendError) only if derivation itself fails — table not found,
+//   unrecognised data_type string, or SQL error. Both legs (Rust and Swift) now
+//   behave identically: no SELECT * fallback, no silent type-hint loss.
 //
 //   IDENTIFIER VALIDATION: every user-supplied column name passes
 //   validateDatasetColumnIdentifier (PersistenceKit core) before any DDL or
@@ -290,13 +290,15 @@ extension PostgreSQLBackend {
 
     /// Column-projecting predicate query over dataset rows.
     ///
-    /// Builds an explicit SELECT column list from the cached schema, which
+    /// Builds an explicit SELECT column list from the resolved schema, which
     /// excludes `__ds_pk` (schema-driven projection contains only user-declared
-    /// columns). Throws BackendError when the cache is missing — no SELECT *
-    /// fallback; the Rust leg diverges here (see header note). Applies predicate
-    /// (parameterized via PostgreSQLPredicateCompiler) and ORDER BY (column names
-    /// validated via validatePSQLIdentifier). Decodes each row using the schema's
-    /// ColumnDeclaration types via `decodeRow` (PostgreSQLConnection.swift).
+    /// columns). Schema is resolved from the actor-isolated cache; on a cache miss
+    /// (process restart) it is derived from information_schema (D8) via
+    /// `deriveDatasetSchema(_:connection:)` and the cache is populated before
+    /// the main query runs. Fail closed (BackendError) if derivation fails.
+    /// Applies predicate (parameterized via PostgreSQLPredicateCompiler) and
+    /// ORDER BY (column names validated via validatePSQLIdentifier). Decodes each
+    /// row using the resolved ColumnDeclaration types via `decodeRow`.
     func queryDatasetRows(
         id: UUID,
         predicate: StoragePredicate?,
@@ -306,54 +308,63 @@ extension PostgreSQLBackend {
         columns: [String]?
     ) async throws -> [StorageRow] {
         let tableName = datasetTableName(id)
-        guard let schema = datasetSchemas[tableName] else {
-            throw StorageError.backendError(
-                underlying: "queryDatasetRows: schema for \(tableName) not cached"
-            )
-        }
 
-        // Build the projection column list from the cached schema.
-        // When columns is nil or empty, project all schema columns. __ds_pk is
-        // excluded because the cached schema's `columns` array holds only
-        // user-declared columns (schema-driven exclusion, not a hard name filter).
-        let projectedCols: [ColumnDeclaration]
-        if let requested = columns, !requested.isEmpty {
-            let requestedSet = Set(requested)
-            projectedCols = schema.columns.filter { requestedSet.contains($0.name) }
-        } else {
-            projectedCols = schema.columns
-        }
-
-        let colSelect = projectedCols.map { "\"\($0.name)\"" }.joined(separator: ", ")
-        var sql = "SELECT \(colSelect) FROM \"\(tableName)\""
-        var bindings: [TypedValue] = []
-
-        if let pred = predicate {
-            // renderDatasetPredicate validates all predicate column names
-            // through PostgreSQLPredicateCompiler (SECFIX-WS2-PK F7 seam).
-            let whereSQL = try renderDatasetPredicate(pred, startIndex: 1, bindings: &bindings)
-            sql += " WHERE \(whereSQL)"
-        }
-
-        if !orderBy.isEmpty {
-            // Validate ORDER BY column names before interpolating into SQL
-            // (SECFIX-WS2-PK F7).
-            let parts = try orderBy.map { clause -> String in
-                try validatePSQLIdentifier(clause.column.name)
-                let dir = clause.direction == .ascending ? "ASC" : "DESC"
-                // No COLLATE needed: TEXT columns carry COLLATE "C" in their
-                // column definition, so ORDER BY inherits the column collation.
-                return "\"\(clause.column.name)\" \(dir)"
-            }
-            sql += " ORDER BY " + parts.joined(separator: ", ")
-        }
-
-        if let lim = limit { sql += " LIMIT \(lim)" }
-        if let off = offset { sql += " OFFSET \(off)" }
-
+        // Acquire the connection at the top so that the schema derivation path
+        // (D8 cache miss) can reuse the same connection for the information_schema
+        // queries rather than checking out a second connection from the pool.
         let conn = try await pool.acquire()
-        // Structured release mirrors PostgreSQLBlobStore.withConnection (#55).
         do {
+            // Schema resolution (D8): check actor-isolated cache first; on miss,
+            // derive from information_schema using the already-acquired connection,
+            // populate the cache, and proceed identically to the cache-hit path.
+            let schema: DatasetSchema
+            if let cached = datasetSchemas[tableName] {
+                schema = cached
+            } else {
+                let derived = try await deriveDatasetSchema(tableName: tableName, connection: conn)
+                datasetSchemas[tableName] = derived
+                schema = derived
+            }
+
+            // Build the projection column list. When `columns` is non-nil and
+            // non-empty, filter to the requested subset (in schema order); otherwise
+            // project all user-declared columns. `__ds_pk` is never in the schema's
+            // `columns` array, so it is excluded by construction — no hard filter needed.
+            let projectedCols: [ColumnDeclaration]
+            if let requested = columns, !requested.isEmpty {
+                let requestedSet = Set(requested)
+                projectedCols = schema.columns.filter { requestedSet.contains($0.name) }
+            } else {
+                projectedCols = schema.columns
+            }
+
+            let colSelect = projectedCols.map { "\"\($0.name)\"" }.joined(separator: ", ")
+            var sql = "SELECT \(colSelect) FROM \"\(tableName)\""
+            var bindings: [TypedValue] = []
+
+            if let pred = predicate {
+                // renderDatasetPredicate validates all predicate column names
+                // through PostgreSQLPredicateCompiler (SECFIX-WS2-PK F7 seam).
+                let whereSQL = try renderDatasetPredicate(pred, startIndex: 1, bindings: &bindings)
+                sql += " WHERE \(whereSQL)"
+            }
+
+            if !orderBy.isEmpty {
+                // Validate ORDER BY column names before interpolating into SQL
+                // (SECFIX-WS2-PK F7).
+                let parts = try orderBy.map { clause -> String in
+                    try validatePSQLIdentifier(clause.column.name)
+                    let dir = clause.direction == .ascending ? "ASC" : "DESC"
+                    // No COLLATE needed: TEXT columns carry COLLATE "C" in their
+                    // column definition, so ORDER BY inherits the column collation.
+                    return "\"\(clause.column.name)\" \(dir)"
+                }
+                sql += " ORDER BY " + parts.joined(separator: ", ")
+            }
+
+            if let lim = limit { sql += " LIMIT \(lim)" }
+            if let off = offset { sql += " OFFSET \(off)" }
+
             let pgRows = try await conn.executeParameterized(
                 sql, bindings: bindings, logger: logger
             )
@@ -361,7 +372,8 @@ extension PostgreSQLBackend {
             for try await row in pgRows {
                 // decodeRow (PostgreSQLConnection.swift) maps column names to
                 // TypedValues using the declared ColumnType — correct for TEXT,
-                // DOUBLE PRECISION, UUID, TIMESTAMPTZ, etc.
+                // DOUBLE PRECISION, UUID, TIMESTAMPTZ, etc. The type is always
+                // available (cache hit or D8 recovery above).
                 let decoded = decodeRow(row, columns: projectedCols)
                 out.append(StorageRow(values: decoded))
             }
@@ -378,39 +390,49 @@ extension PostgreSQLBackend {
     /// Per-column aggregate statistics: COUNT, COUNT(DISTINCT), NULL count,
     /// MIN, MAX — computed in one SQL round-trip.
     ///
-    /// MIN/MAX values are decoded using the column's declared ColumnType
-    /// (from the cached schema) via `decodeCell` (PostgreSQLConnection.swift),
-    /// so DOUBLE PRECISION columns return `TypedValue.float(Double)` — f64
-    /// only — satisfying the cross-leg f64 wire rule. NULL MIN/MAX (empty or
-    /// all-null dataset) maps to `TypedValue.null`.
+    /// The column's declared ColumnType is resolved from the actor-isolated cache;
+    /// on a cache miss (D8) it is derived from information_schema. MIN/MAX values
+    /// are decoded using the resolved ColumnType via `decodeCell`, so DOUBLE
+    /// PRECISION columns return `TypedValue.float(Double)` — f64 only — satisfying
+    /// the cross-leg f64 wire rule. NULL MIN/MAX (empty or all-null dataset) maps
+    /// to `TypedValue.null`.
     func datasetColumnStats(id: UUID, column: String) async throws -> ColumnStats {
         let tableName = datasetTableName(id)
-        guard let schema = datasetSchemas[tableName] else {
-            throw StorageError.backendError(
-                underlying: "datasetColumnStats: schema for \(tableName) not cached"
-            )
-        }
-        guard let colDecl = schema.columns.first(where: { $0.name == column }) else {
-            throw StorageError.backendError(
-                underlying: "datasetColumnStats: column \"\(column)\" not found in schema "
-                    + "for \(tableName)"
-            )
-        }
 
-        // Single SELECT — five aggregates in one round-trip.
-        // Aliased so decoding can use random-access by name.
-        let sql = """
-        SELECT
-            COUNT("\(column)") AS cnt,
-            COUNT(DISTINCT "\(column)") AS dcnt,
-            COUNT(*) - COUNT("\(column)") AS ncnt,
-            MIN("\(column)") AS min_val,
-            MAX("\(column)") AS max_val
-        FROM "\(tableName)"
-        """
-
+        // Acquire connection at the top so the D8 recovery path can reuse it
+        // for information_schema queries before the aggregate query.
         let conn = try await pool.acquire()
         do {
+            // Schema resolution (D8): check actor-isolated cache first; on miss,
+            // derive from information_schema and populate the cache.
+            let schema: DatasetSchema
+            if let cached = datasetSchemas[tableName] {
+                schema = cached
+            } else {
+                let derived = try await deriveDatasetSchema(tableName: tableName, connection: conn)
+                datasetSchemas[tableName] = derived
+                schema = derived
+            }
+
+            guard let colDecl = schema.columns.first(where: { $0.name == column }) else {
+                throw StorageError.backendError(
+                    underlying: "datasetColumnStats: column \"\(column)\" not found in "
+                        + "recovered schema for \(tableName)"
+                )
+            }
+
+            // Single SELECT — five aggregates in one round-trip.
+            // Aliased so decoding can use random-access by name.
+            let sql = """
+            SELECT
+                COUNT("\(column)") AS cnt,
+                COUNT(DISTINCT "\(column)") AS dcnt,
+                COUNT(*) - COUNT("\(column)") AS ncnt,
+                MIN("\(column)") AS min_val,
+                MAX("\(column)") AS max_val
+            FROM "\(tableName)"
+            """
+
             let pgRows = try await conn.executeParameterized(
                 sql, bindings: [], logger: logger
             )
@@ -419,9 +441,9 @@ extension PostgreSQLBackend {
                 let count = (try? access["cnt"].decode(Int64.self, context: .default)) ?? 0
                 let distinctCount = (try? access["dcnt"].decode(Int64.self, context: .default)) ?? 0
                 let nullCount = (try? access["ncnt"].decode(Int64.self, context: .default)) ?? 0
-                // MIN/MAX: decoded using the column's declared ColumnType so
-                // DOUBLE PRECISION → TypedValue.float(Double) (f64 wire rule).
-                // NULL (empty column or all-null rows) → TypedValue.null.
+                // MIN/MAX: decoded using the recovered ColumnType so DOUBLE PRECISION
+                // → TypedValue.float(Double) (f64 wire rule). The type is always
+                // available (cache hit or D8 recovery above). NULL → TypedValue.null.
                 let minVal = decodeCell(access["min_val"], type: colDecl.type)
                 let maxVal = decodeCell(access["max_val"], type: colDecl.type)
                 await pool.release(conn)
@@ -441,6 +463,99 @@ extension PostgreSQLBackend {
             await pool.release(conn)
             throw error
         }
+    }
+
+    // MARK: deriveDatasetSchema (D8)
+
+    /// Derive a `DatasetSchema` from the Postgres catalog for a table that is
+    /// absent from the in-process schema cache (e.g. after process restart).
+    ///
+    /// Queries `information_schema.columns` (excluding the synthetic `__ds_pk`
+    /// identity column) to recover column names, types, and nullability. Queries
+    /// `information_schema.key_column_usage` to recover the declared PRIMARY KEY
+    /// column, if any. The `__ds_pk` PK column name signals a synthetic key
+    /// (`primaryKeyColumn = nil`); any other name is the user-declared key.
+    ///
+    /// Uses the caller-supplied connection so schema derivation and the subsequent
+    /// main query share one connection checkout from the pool.
+    ///
+    /// Fail-closed semantics:
+    /// - Throws `backendError` if the table has no user columns (table absent).
+    /// - Throws `backendError` for any unrecognised `data_type` string — signals
+    ///   a schema mismatch (we never emit unknown type strings ourselves).
+    private func deriveDatasetSchema(
+        tableName: String,
+        connection: PostgresConnection
+    ) async throws -> DatasetSchema {
+        // Step 1 — fetch ordered user columns, excluding the synthetic PK column.
+        // `current_schema()` scopes to the estate's own PG schema (each estate
+        // lives in a `pk_<hex>` schema), so we never cross estate boundaries.
+        let colSQL = """
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = $1
+          AND column_name != '__ds_pk'
+        ORDER BY ordinal_position
+        """
+        let colRows = try await connection.executeParameterized(
+            colSQL, bindings: [.text(tableName)], logger: logger
+        )
+
+        var columns: [ColumnDeclaration] = []
+        for try await row in colRows {
+            let access = row.makeRandomAccess()
+            let name = (try? access["column_name"].decode(String.self, context: .default)) ?? ""
+            let dataType = (try? access["data_type"].decode(String.self, context: .default)) ?? ""
+            let isNullable = (try? access["is_nullable"].decode(String.self, context: .default)) ?? "NO"
+
+            guard let colType = pgTypeToColumnType(dataType) else {
+                throw StorageError.backendError(
+                    underlying: "deriveDatasetSchema: unrecognised data_type \"\(dataType)\" "
+                        + "for column \"\(name)\" in \(tableName)"
+                )
+            }
+            columns.append(ColumnDeclaration(
+                name: name,
+                type: colType,
+                nullable: isNullable == "YES"
+            ))
+        }
+
+        guard !columns.isEmpty else {
+            throw StorageError.backendError(
+                underlying: "deriveDatasetSchema: table \(tableName) not found or "
+                    + "has no user columns (information_schema returned empty)"
+            )
+        }
+
+        // Step 2 — recover the declared PRIMARY KEY column, if any.
+        // PK column name `__ds_pk` → synthetic key → primaryKeyColumn = nil.
+        // Any other name → user-declared PK → primaryKeyColumn = name.
+        let pkSQL = """
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema    = kcu.table_schema
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema    = current_schema()
+          AND tc.table_name      = $1
+        """
+        let pkRows = try await connection.executeParameterized(
+            pkSQL, bindings: [.text(tableName)], logger: logger
+        )
+
+        var primaryKeyColumn: String? = nil
+        for try await row in pkRows {
+            let access = row.makeRandomAccess()
+            let pkCol = (try? access["column_name"].decode(String.self, context: .default)) ?? ""
+            // Synthetic key: __ds_pk → no declared PK column.
+            if pkCol != "__ds_pk" { primaryKeyColumn = pkCol }
+            break
+        }
+
+        return DatasetSchema(columns: columns, primaryKeyColumn: primaryKeyColumn)
     }
 
     // MARK: dropDatasetTable
@@ -485,6 +600,37 @@ func datasetPGTypeSQL(_ t: ColumnType) -> String {
     case .json:        return "JSONB"
     case .hlc:         return "BIGINT"
     case .fingerprint: return "BYTEA"
+    }
+}
+
+/// Map an `information_schema.columns.data_type` string back to a `ColumnType`.
+///
+/// Exact inverse of `datasetPGTypeSQL`. Used by `PostgreSQLBackend.deriveDatasetSchema`
+/// (D8) to rebuild `DatasetSchema` from the live Postgres catalog when the in-process
+/// cache is empty after a process restart.
+///
+/// Mapping limits (all acceptable — DDL is only emitted by this codebase):
+/// - BIGINT covers `.int`, `.bitmap`, and `.hlc` — information_schema does not
+///   distinguish them. `.int` is returned; dataset callers use Int for arithmetic columns.
+/// - BYTEA covers `.blob` and `.fingerprint` — same reasoning; `.blob` is returned.
+/// - `COLLATE "C"` on TEXT is not in `information_schema.data_type` (it appears in
+///   `collation_name`); acceptable because collation is a DDL attribute emitted only
+///   by us — we never need to re-derive it from the catalog.
+/// - Unknown strings return `nil` — the caller throws a BackendError (fail-closed).
+///
+/// Module-internal (not private) so `PostgreSQLDatasetStoreTests` can exercise the
+/// pure mapping function without a live server.
+func pgTypeToColumnType(_ dataType: String) -> ColumnType? {
+    switch dataType.lowercased() {
+    case "text":                     return .text
+    case "uuid":                     return .uuid
+    case "bigint":                   return .int
+    case "timestamp with time zone": return .timestamp
+    case "double precision":         return .float
+    case "boolean":                  return .bool
+    case "bytea":                    return .blob
+    case "jsonb":                    return .json
+    default:                         return nil
     }
 }
 

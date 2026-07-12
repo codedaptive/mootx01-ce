@@ -2628,12 +2628,19 @@ impl StorageObserver for PgObserver {
 //
 //   SYNTHETIC PRIMARY KEY: when `DatasetSchema.primary_key_column` is None, the
 //   table receives `"__ds_pk" BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`.
-//   This column is excluded from schema-driven SELECT projection lists (those are
-//   built from the cached schema's `columns` field, which never includes `__ds_pk`)
-//   and from INSERT column lists (Postgres assigns sequence values automatically).
-//   On a schema-cache miss, `query_rows` falls back to SELECT * — in that path
-//   `__ds_pk` IS present in the result set; see the cache-miss note in
-//   `query_rows` below for the full divergence details.
+//   This column is excluded from schema-driven SELECT projection lists (built from
+//   the cached schema's `columns` field, which never includes `__ds_pk`) and from
+//   INSERT column lists (Postgres assigns sequence values automatically). On a
+//   schema-cache miss, `query_rows` recovers the schema from `information_schema`
+//   (D8) before building the SELECT list, so `__ds_pk` remains excluded.
+//
+//   SCHEMA RECOVERY (D8): on a schema-cache miss (process restart without
+//   re-calling `create_dataset`), `query_rows` and `column_stats` derive
+//   `DatasetSchema` from `information_schema.columns` + `key_column_usage` via
+//   `recover_dataset_schema_from_pg`, populate the cache, and proceed correctly.
+//   Fail closed (StorageError::BackendError) only if derivation itself fails
+//   (table not found, unrecognised type string, SQL error). Both legs now behave
+//   identically — no SELECT * fallback, no silent type-hint loss.
 //
 //   PK PRE-SORT: `append_rows` sorts rows ascending by the declared PK column
 //   before INSERT using `compare_typed_values_for_sort` (same function as the
@@ -2641,8 +2648,8 @@ impl StorageObserver for PgObserver {
 //
 //   COLUMN STATS DECODING: `column_stats` calls `read_value(row, idx, Some(col_type))`
 //   with the column's declared `ColumnType` so DOUBLE PRECISION MIN/MAX decodes
-//   as `TypedValue::Float(f64)` — satisfying the f64 wire rule. The cached
-//   schema is the only source of this type hint (Postgres doesn't have PRAGMA).
+//   as `TypedValue::Float(f64)` — satisfying the f64 wire rule. On a cache miss
+//   the type is recovered from information_schema (D8) before the aggregate query.
 // ─────────────────────────────────────────────────────────────────────
 
 use crate::dataset_store::{
@@ -2650,6 +2657,7 @@ use crate::dataset_store::{
     DatasetStore, compare_typed_values_for_sort, dataset_index_name, dataset_table_name,
     validate_dataset_column_identifier,
 };
+use crate::schema::ColumnDeclaration;
 
 /// PostgreSQL conformance for `DatasetStore` (MX-TAB-2).
 ///
@@ -2685,6 +2693,137 @@ fn pg_dataset_type_sql(t: ColumnType) -> &'static str {
         ColumnType::Blob | ColumnType::Fingerprint => "BYTEA",
         ColumnType::Json => "JSONB",
     }
+}
+
+/// Map an `information_schema.columns.data_type` string back to a `ColumnType`.
+///
+/// This is the exact inverse of `pg_dataset_type_sql`. Used by
+/// `recover_dataset_schema_from_pg` (D8) to re-derive a `DatasetSchema` from
+/// the live Postgres catalog when the in-process cache is empty.
+///
+/// Mapping limits (all acceptable — DDL is only emitted by this codebase):
+/// - BIGINT covers `Int`, `Bitmap`, and `Hlc` — the information_schema
+///   `data_type` column does not distinguish them. Callers always receive `Int`;
+///   for dataset use-cases `Int` is the correct wire choice (Bitmap and Hlc are
+///   schema primitives, not dataset column types).
+/// - BYTEA covers `Blob` and `Fingerprint` — same reasoning; `Blob` is returned.
+/// - `COLLATE "C"` on TEXT is not surfaced in `information_schema.data_type`
+///   (it appears in `collation_name` which we don't query). This is acceptable:
+///   collation is a DDL attribute emitted by `pg_dataset_type_sql`; we never
+///   need to re-derive it from the catalog, only the type.
+/// - Unknown strings return `None` — the caller fails closed.
+fn pg_type_to_column_type(data_type: &str) -> Option<ColumnType> {
+    match data_type {
+        "text"                     => Some(ColumnType::Text),
+        "uuid"                     => Some(ColumnType::Uuid),
+        "bigint"                   => Some(ColumnType::Int),
+        "timestamp with time zone" => Some(ColumnType::Timestamp),
+        "double precision"         => Some(ColumnType::Float),
+        "boolean"                  => Some(ColumnType::Bool),
+        "bytea"                    => Some(ColumnType::Blob),
+        "jsonb"                    => Some(ColumnType::Json),
+        _                          => None,
+    }
+}
+
+/// Derive a `DatasetSchema` from the Postgres catalog for the given table.
+///
+/// Called by `query_rows` and `column_stats` (D8) when the in-process schema
+/// cache is empty — e.g. after a process restart where `create_dataset` was
+/// not re-called. Queries `information_schema.columns` for user columns
+/// (excluding the synthetic `__ds_pk` identity column), then
+/// `information_schema.key_column_usage` for the declared PRIMARY KEY column.
+///
+/// Fail-closed semantics:
+/// - Returns `BackendError` if the table has no columns (table does not exist).
+/// - Returns `BackendError` if any column has an unrecognised `data_type` string
+///   (signals a schema mismatch; we never emit unknown type strings ourselves).
+/// - SQL errors propagate as `BackendError`.
+///
+/// The derived schema is identical to the schema that `create_dataset` would
+/// have cached, with the caveat that Bitmap/Hlc → Int and Fingerprint → Blob
+/// (see `pg_type_to_column_type` mapping-limits comment above).
+fn recover_dataset_schema_from_pg(
+    pool: &Arc<Pool>,
+    table_name: &str,
+) -> StorageResult<DatasetSchema> {
+    let mut conn = pool.checkout()?;
+    let client = conn.get_mut();
+
+    // Step 1 — fetch ordered user columns, excluding the synthetic PK column.
+    // `current_schema()` scopes the query to the estate's own PG schema
+    // (each estate lives in a `pk_<hex>` schema), so we never cross estates.
+    let col_rows = client
+        .query(
+            "SELECT column_name, data_type, is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = $1 \
+               AND column_name != '__ds_pk' \
+             ORDER BY ordinal_position",
+            &[&table_name],
+        )
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("recover_dataset_schema: column query failed for {:?}: {}", table_name, e),
+        })?;
+
+    if col_rows.is_empty() {
+        return Err(StorageError::BackendError {
+            underlying: format!(
+                "recover_dataset_schema: table {:?} not found or has no user columns",
+                table_name
+            ),
+        });
+    }
+
+    let mut columns: Vec<ColumnDeclaration> = Vec::with_capacity(col_rows.len());
+    for row in &col_rows {
+        let name: String = row.get(0);
+        let data_type: String = row.get(1);
+        let is_nullable: String = row.get(2);
+
+        let col_type = pg_type_to_column_type(&data_type).ok_or_else(|| StorageError::BackendError {
+            underlying: format!(
+                "recover_dataset_schema: unrecognised data_type {:?} for column {:?} in {:?}",
+                data_type, name, table_name
+            ),
+        })?;
+
+        let decl = if is_nullable == "YES" {
+            ColumnDeclaration::new(name, col_type).nullable()
+        } else {
+            ColumnDeclaration::new(name, col_type)
+        };
+        columns.push(decl);
+    }
+
+    // Step 2 — recover the declared PRIMARY KEY column, if any.
+    // If the PK column is `__ds_pk` it was the synthetic identity key
+    // (`DatasetSchema.primary_key_column == None`), so we set `None`.
+    // Any other PK column name is the user-declared key.
+    let pk_rows = client
+        .query(
+            "SELECT kcu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name \
+              AND tc.table_schema    = kcu.table_schema \
+             WHERE tc.constraint_type = 'PRIMARY KEY' \
+               AND tc.table_schema    = current_schema() \
+               AND tc.table_name      = $1",
+            &[&table_name],
+        )
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("recover_dataset_schema: PK query failed for {:?}: {}", table_name, e),
+        })?;
+
+    let primary_key_column: Option<String> = pk_rows.first().and_then(|row| {
+        let pk_col: String = row.get(0);
+        // Synthetic key → treat as None (schema has no declared PK).
+        if pk_col == "__ds_pk" { None } else { Some(pk_col) }
+    });
+
+    Ok(DatasetSchema { columns, primary_key_column })
 }
 
 impl DatasetStore for PgDatasetStore {
@@ -2733,9 +2872,8 @@ impl DatasetStore for PgDatasetStore {
             // exists. Excluded from schema-driven SELECT and INSERT column lists:
             // the cached schema's `columns` field never includes `__ds_pk`, so
             // `query_rows` and `append_rows` do not reference it — Postgres assigns
-            // sequence values automatically. A schema-cache miss bypasses this
-            // exclusion (SELECT * exposes __ds_pk); see `query_rows` cache-miss
-            // comment for the full divergence.
+            // sequence values automatically. `recover_dataset_schema_from_pg` (D8)
+            // also excludes it via the `column_name != '__ds_pk'` filter.
             parts.push(r#""__ds_pk" BIGINT GENERATED ALWAYS AS IDENTITY"#.to_string());
         }
 
@@ -2873,63 +3011,49 @@ impl DatasetStore for PgDatasetStore {
             }
         }
 
-        // Build the projection column list from the cached schema.
-        // When the cache is populated (the normal path), `__ds_pk` is excluded
-        // from the SELECT list because the cached schema's `columns` field holds
-        // only user-declared columns.
+        // Schema resolution (D8): check cache first (brief lock), recover on miss.
         //
-        // On a schema-cache miss (process restart without re-calling create_dataset)
-        // the code falls back to `SELECT *`, which DOES expose `__ds_pk` to row
-        // decoding and loses column-type hints (no ColumnDeclaration available to
-        // tell read_value the column's declared type). Two concrete effects:
-        //   • `__ds_pk` appears as a key in returned StorageRow maps (not user-visible
-        //     in production because the schema cache is always populated, but
-        //     observable in tests or after unexpected restarts).
-        //   • DOUBLE PRECISION columns fall back to the integer decode path in
-        //     read_value, returning TypedValue::Null for MIN/MAX in column_stats.
-        //
-        // Swift divergence: PostgreSQLDatasetStore.swift throws BackendError on a
-        // schema-cache miss (no SELECT * fallback). A production hardening path
-        // would add information_schema introspection here to rebuild the cache.
-        let (col_select, schema_cols) = {
-            let guard = self.schemas.lock().unwrap();
-            match guard.get(&table_name) {
-                Some(schema) => {
-                    let projected: Vec<_> = match columns {
-                        Some(requested) if !requested.is_empty() => {
-                            let requested_set: std::collections::HashSet<&str> =
-                                requested.iter().map(|s| s.as_str()).collect();
-                            schema.columns.iter()
-                                .filter(|c| requested_set.contains(c.name.as_str()))
-                                .cloned()
-                                .collect()
-                        }
-                        _ => schema.columns.clone(),
-                    };
-                    let select = projected
-                        .iter()
-                        .map(|c| format!("\"{}\"", c.name))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    (select, projected)
-                }
+        // On a cache hit, `__ds_pk` is excluded from the SELECT list because the
+        // cached schema's `columns` field holds only user-declared columns. On a
+        // cache miss (process restart without re-calling create_dataset), we derive
+        // the schema from information_schema via `recover_dataset_schema_from_pg`,
+        // populate the cache, and proceed identically to the cache-hit path.
+        // Fail closed (BackendError) only if derivation itself fails — table absent,
+        // unrecognised type string, or SQL error.
+        let schema: DatasetSchema = {
+            let maybe_cached = {
+                let guard = self.schemas.lock().unwrap();
+                guard.get(&table_name).cloned()
+            };
+            match maybe_cached {
+                Some(s) => s,
                 None => {
-                    // Schema-cache miss: SELECT * with no type hints for row decoding.
-                    // This path is reached on process restart before create_dataset is
-                    // called again. Two known issues (vs. the cache-hit path):
-                    //   1. `__ds_pk` is included in the result rows (internal column
-                    //      leaks into the StorageRow map for no-declared-PK tables).
-                    //   2. Column type hints are absent (empty schema_cols below) so
-                    //      read_value defaults to the integer decode path, returning
-                    //      TypedValue::Null for DOUBLE PRECISION MIN/MAX in column_stats.
-                    // Swift's PostgreSQLDatasetStore throws BackendError on a cache miss
-                    // rather than falling back here. A follow-up hardening mission would
-                    // rebuild the schema via information_schema introspection instead of
-                    // returning SELECT *.
-                    ("*".to_string(), Vec::new())
+                    let recovered = recover_dataset_schema_from_pg(&self.pool, &table_name)?;
+                    self.schemas.lock().unwrap().insert(table_name.clone(), recovered.clone());
+                    recovered
                 }
             }
         };
+
+        // Build the projected column list. When `columns` is Some and non-empty,
+        // filter to the requested subset (in schema order); otherwise project all.
+        let projected: Vec<ColumnDeclaration> = match columns {
+            Some(requested) if !requested.is_empty() => {
+                let requested_set: std::collections::HashSet<&str> =
+                    requested.iter().map(|s| s.as_str()).collect();
+                schema.columns.iter()
+                    .filter(|c| requested_set.contains(c.name.as_str()))
+                    .cloned()
+                    .collect()
+            }
+            _ => schema.columns.clone(),
+        };
+
+        let col_select = projected
+            .iter()
+            .map(|c| format!("\"{}\"", c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let mut sql = format!("SELECT {col_select} FROM \"{table_name}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
@@ -2980,21 +3104,13 @@ impl DatasetStore for PgDatasetStore {
             .iter()
             .map(|row| {
                 let mut map: BTreeMap<String, TypedValue> = BTreeMap::new();
-                for (idx, col) in schema_cols.iter().enumerate() {
+                for (idx, col) in projected.iter().enumerate() {
                     // Use the declared ColumnType as the type hint so DOUBLE
                     // PRECISION decodes as TypedValue::Float(f64) (f64 wire rule).
+                    // The type hint is always present — schema is always resolved
+                    // (either from cache or recovered via information_schema, D8).
                     let val = read_value(row, idx, Some(col.column_type));
                     map.insert(col.name.clone(), val);
-                }
-                // When schema is not cached (fallback SELECT *), map all columns
-                // without type hints using the column index and column name from
-                // the row descriptor.
-                if schema_cols.is_empty() {
-                    for i in 0..row.len() {
-                        let col_name = row.columns()[i].name().to_string();
-                        let val = read_value(row, i, None);
-                        map.insert(col_name, val);
-                    }
                 }
                 StorageRow::new(map)
             })
@@ -3011,13 +3127,37 @@ impl DatasetStore for PgDatasetStore {
 
         let table_name = dataset_table_name(id);
 
-        // Look up the column's declared type from the cached schema so we can
-        // decode the aggregate MIN/MAX with the correct TypedValue variant.
-        let col_type: Option<ColumnType> = {
-            let guard = self.schemas.lock().unwrap();
-            guard.get(&table_name)
-                .and_then(|s| s.columns.iter().find(|c| c.name == column))
-                .map(|c| c.column_type)
+        // Schema resolution (D8): look up the column type from the cache, recover
+        // on miss. The declared ColumnType is required to decode MIN/MAX correctly —
+        // DOUBLE PRECISION must yield TypedValue::Float(f64), not Null (f64 wire rule).
+        // On a cache miss we derive the full schema from information_schema, populate
+        // the cache, and extract the column type. Fail closed if the column is absent
+        // from the recovered schema (schema mismatch — should never occur in practice
+        // since the table exists, but signals a data integrity issue if it does).
+        let col_type: ColumnType = {
+            let maybe = {
+                let guard = self.schemas.lock().unwrap();
+                guard.get(&table_name)
+                    .and_then(|s| s.columns.iter().find(|c| c.name == column))
+                    .map(|c| c.column_type)
+            };
+            match maybe {
+                Some(ct) => ct,
+                None => {
+                    let recovered = recover_dataset_schema_from_pg(&self.pool, &table_name)?;
+                    let ct = recovered.columns.iter()
+                        .find(|c| c.name == column)
+                        .map(|c| c.column_type)
+                        .ok_or_else(|| StorageError::BackendError {
+                            underlying: format!(
+                                "column_stats: column {:?} not found in recovered schema for {:?}",
+                                column, table_name
+                            ),
+                        })?;
+                    self.schemas.lock().unwrap().insert(table_name.clone(), recovered);
+                    ct
+                }
+            }
         };
 
         // Single aggregate query — five values in one round trip.
@@ -3053,11 +3193,12 @@ impl DatasetStore for PgDatasetStore {
                     .unwrap_or(0);
                 let null_count: i64 = row.try_get::<_, i64>("ncnt")
                     .unwrap_or(0);
-                // MIN/MAX: use the declared ColumnType as the type hint so
+                // MIN/MAX: pass the recovered ColumnType as the type hint so
                 // DOUBLE PRECISION decodes as TypedValue::Float(f64) — satisfying
                 // the cross-leg f64 wire rule. TypedValue::Null when no non-null rows.
-                let min = read_value(row, 3, col_type);
-                let max = read_value(row, 4, col_type);
+                // The type is always available (cache hit or D8 recovery above).
+                let min = read_value(row, 3, Some(col_type));
+                let max = read_value(row, 4, Some(col_type));
                 Ok(DatasetColumnStats {
                     count,
                     distinct_count,
@@ -3536,5 +3677,118 @@ mod decode_audit_tests {
             }),
         };
         assert_eq!(version.unwrap(), 0, "absent row must yield version 0 (fresh estate)");
+    }
+}
+
+// ── D8: pg_type_to_column_type inverse-mapping tests ─────────────────────────
+//
+// Pure-function tests for the information_schema data_type → ColumnType mapping.
+// No PG server required. These verify the exact inverse of `pg_dataset_type_sql`
+// and run unconditionally in `cargo test` (not skip-gated).
+//
+// Mapping limits tested:
+// - "bigint" → Int  (covers Bitmap + Hlc at the wire level; acceptable for datasets)
+// - "bytea"  → Blob (covers Fingerprint at the wire level)
+// - COLLATE "C" is not surfaced in information_schema.data_type; not testable here.
+#[cfg(test)]
+mod pg_type_mapping_tests {
+    use super::pg_type_to_column_type;
+    use crate::ColumnType;
+
+    #[test]
+    fn text_maps_to_text() {
+        assert_eq!(pg_type_to_column_type("text"), Some(ColumnType::Text));
+    }
+
+    #[test]
+    fn uuid_maps_to_uuid() {
+        assert_eq!(pg_type_to_column_type("uuid"), Some(ColumnType::Uuid));
+    }
+
+    #[test]
+    fn bigint_maps_to_int() {
+        // Covers Int, Bitmap, and Hlc — information_schema cannot distinguish them.
+        // Returning ColumnType::Int is the correct wire choice for dataset columns.
+        assert_eq!(pg_type_to_column_type("bigint"), Some(ColumnType::Int));
+    }
+
+    #[test]
+    fn timestamp_with_time_zone_maps_to_timestamp() {
+        assert_eq!(
+            pg_type_to_column_type("timestamp with time zone"),
+            Some(ColumnType::Timestamp)
+        );
+    }
+
+    #[test]
+    fn double_precision_maps_to_float() {
+        assert_eq!(pg_type_to_column_type("double precision"), Some(ColumnType::Float));
+    }
+
+    #[test]
+    fn boolean_maps_to_bool() {
+        assert_eq!(pg_type_to_column_type("boolean"), Some(ColumnType::Bool));
+    }
+
+    #[test]
+    fn bytea_maps_to_blob() {
+        // Covers Blob and Fingerprint — information_schema cannot distinguish them.
+        assert_eq!(pg_type_to_column_type("bytea"), Some(ColumnType::Blob));
+    }
+
+    #[test]
+    fn jsonb_maps_to_json() {
+        assert_eq!(pg_type_to_column_type("jsonb"), Some(ColumnType::Json));
+    }
+
+    #[test]
+    fn unknown_type_returns_none() {
+        // Unrecognised strings must return None so the caller can fail closed.
+        assert_eq!(pg_type_to_column_type("integer"), None);
+        assert_eq!(pg_type_to_column_type("numeric"), None);
+        assert_eq!(pg_type_to_column_type("character varying"), None);
+        assert_eq!(pg_type_to_column_type(""), None);
+    }
+
+    /// Coverage of all ColumnTypes against their information_schema.data_type strings.
+    ///
+    /// Verifies that `pg_type_to_column_type` maps the catalog string to the
+    /// expected ColumnType for every type that `pg_dataset_type_sql` can emit.
+    ///
+    /// Note: the information_schema.data_type string differs from the DDL fragment
+    /// emitted by `pg_dataset_type_sql` — e.g. DDL uses "TIMESTAMPTZ" but the
+    /// catalog stores "timestamp with time zone"; DDL uses "TEXT COLLATE \"C\"" but
+    /// the catalog stores "text". They are not the same strings; this test maps
+    /// the catalog strings, not the DDL fragments.
+    ///
+    /// Mapping limits: Bitmap/Hlc both map to "bigint" → Int; Fingerprint maps
+    /// to "bytea" → Blob. These are the documented limits (acceptable — DDL is
+    /// only emitted by this codebase).
+    #[test]
+    fn round_trip_all_column_types() {
+        // (original ColumnType, expected round-trip result, information_schema data_type string)
+        let cases: &[(ColumnType, ColumnType, &str)] = &[
+            (ColumnType::Text,        ColumnType::Text,      "text"),
+            (ColumnType::Uuid,        ColumnType::Uuid,      "uuid"),
+            (ColumnType::Int,         ColumnType::Int,       "bigint"),
+            (ColumnType::Bitmap,      ColumnType::Int,       "bigint"),  // limit: maps to Int
+            (ColumnType::Hlc,         ColumnType::Int,       "bigint"),  // limit: maps to Int
+            (ColumnType::Timestamp,   ColumnType::Timestamp, "timestamp with time zone"),
+            (ColumnType::Float,       ColumnType::Float,     "double precision"),
+            (ColumnType::Bool,        ColumnType::Bool,      "boolean"),
+            (ColumnType::Blob,        ColumnType::Blob,      "bytea"),
+            (ColumnType::Fingerprint, ColumnType::Blob,      "bytea"),   // limit: maps to Blob
+            (ColumnType::Json,        ColumnType::Json,      "jsonb"),
+        ];
+
+        for (original, expected_rt, data_type_str) in cases {
+            let rt = pg_type_to_column_type(data_type_str);
+            assert_eq!(
+                rt,
+                Some(*expected_rt),
+                "pg_type_to_column_type({:?}) should be {:?} (for ColumnType::{:?})",
+                data_type_str, expected_rt, original
+            );
+        }
     }
 }

@@ -25,6 +25,9 @@ import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitPostgreSQL
+// @testable import for pgTypeToColumnType (internal module-level function
+// used in the pure-function D8 mapping test).
+@testable import PersistenceKitPostgreSQL
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -54,6 +57,17 @@ private func pgTestURL() -> String? {
 private func makeStorage(_ cs: String) -> PostgreSQLStorage {
     PostgreSQLStorage(configuration: EstateConfiguration(
         estateID: UUID(),
+        backend: .postgresql(connectionString: cs, poolSize: 2)
+    ))
+}
+
+/// Fresh PostgreSQLStorage for a CALLER-SUPPLIED estate ID.
+/// Use this to open a second storage over the same estate (same PG schema /
+/// same table names) with a fresh, empty dataset schema cache — simulating
+/// what happens after a process restart where `createDataset` was not re-called.
+private func makeStorageWithID(_ cs: String, estateID: UUID) -> PostgreSQLStorage {
+    PostgreSQLStorage(configuration: EstateConfiguration(
+        estateID: estateID,
         backend: .postgresql(connectionString: cs, poolSize: 2)
     ))
 }
@@ -520,5 +534,153 @@ struct PostgreSQLDatasetStoreTests {
         #expect(results.count == 1)
         #expect(results[0]["col_a"] == .text("hello"))
         #expect(results[0]["col_b"] == nil)  // excluded by projection
+    }
+
+    // MARK: - D8: Schema recovery (cache-miss round-trip)
+
+    /// D8: queryRows on a fresh-cache storage derives the schema from
+    /// information_schema and returns correct rows without `__ds_pk`.
+    ///
+    /// Storage1 creates the dataset (cache populated); storage2 opens the same
+    /// estate (fresh empty cache). queryRows on ds2 triggers D8 recovery.
+    @Test func schemaRecovery_queryRows_afterCacheMiss() async throws {
+        guard let cs = pgTestURL() else { return }  // POSTGRES_TEST_URL not set
+
+        let estateID = UUID()
+        let storage1 = makeStorageWithID(cs, estateID: estateID)
+        defer { Task { await storage1.close() } }
+
+        let ds1 = try storage1.datasetStore
+        let id = UUID()
+
+        let schema = DatasetSchema(columns: [
+            ColumnDeclaration(name: "name",  type: .text,  nullable: true),
+            ColumnDeclaration(name: "score", type: .float, nullable: true),
+        ])
+        try await ds1.createDataset(id: id, schema: schema, indexes: [])
+        try await ds1.appendRows(id: id, rows: [
+            ["name": .text("Alice"), "score": .float(1.0)],
+            ["name": .text("Bob"),   "score": .float(2.0)],
+        ])
+
+        // Simulate process restart: fresh storage over the same estate / DB, empty cache.
+        let storage2 = makeStorageWithID(cs, estateID: estateID)
+        defer { Task { await storage2.close() } }
+
+        let ds2 = try storage2.datasetStore
+
+        // D8 recovery path: schema cache is empty → derived from information_schema.
+        let results = try await ds2.queryRows(
+            id: id, predicate: nil, orderBy: [], limit: nil, offset: nil, columns: nil
+        )
+
+        #expect(results.count == 2, "expected 2 rows after D8 schema recovery")
+
+        for row in results {
+            // The synthetic __ds_pk column must NOT appear in results.
+            #expect(
+                row["__ds_pk"] == nil,
+                "D8 recovery must exclude __ds_pk; got keys: \(Array(row.values.keys))"
+            )
+            // User columns must be present.
+            #expect(row["name"] != nil, "expected 'name' column after D8 recovery")
+            #expect(row["score"] != nil, "expected 'score' column after D8 recovery")
+        }
+
+        try await ds1.dropDataset(id: id)
+    }
+
+    /// D8: columnStats on a fresh-cache storage derives the schema and decodes
+    /// DOUBLE PRECISION MIN/MAX as TypedValue.float(Double) — f64 wire rule.
+    ///
+    /// This is the specific failure mode D8 fixes: without a type hint from
+    /// the cache, the decode path defaulted to integer, returning TypedValue.null
+    /// for DOUBLE PRECISION aggregates.
+    @Test func schemaRecovery_columnStats_f64AfterCacheMiss() async throws {
+        guard let cs = pgTestURL() else { return }  // POSTGRES_TEST_URL not set
+
+        let estateID = UUID()
+        let storage1 = makeStorageWithID(cs, estateID: estateID)
+        defer { Task { await storage1.close() } }
+
+        let ds1 = try storage1.datasetStore
+        let id = UUID()
+
+        let schema = DatasetSchema(columns: [
+            ColumnDeclaration(name: "value", type: .float, nullable: true),
+        ])
+        try await ds1.createDataset(id: id, schema: schema, indexes: [])
+        try await ds1.appendRows(id: id, rows: [
+            ["value": .float(1.5)],
+            ["value": .float(3.14)],
+        ])
+
+        // Simulate process restart.
+        let storage2 = makeStorageWithID(cs, estateID: estateID)
+        defer { Task { await storage2.close() } }
+
+        let ds2 = try storage2.datasetStore
+        let stats = try await ds2.columnStats(id: id, column: "value")
+
+        #expect(stats.count == 2, "expected count=2 after D8 recovery")
+
+        // f64 wire rule: MIN/MAX must be TypedValue.float, never .null or .int.
+        switch stats.min {
+        case .float(let v):
+            #expect(abs(v - 1.5) < 1e-10, "D8-recovered min should be 1.5, got \(v)")
+        default:
+            Issue.record("D8-recovered column_stats min for DOUBLE PRECISION must be .float, got \(stats.min)")
+        }
+        switch stats.max {
+        case .float(let v):
+            #expect(abs(v - 3.14) < 1e-10, "D8-recovered max should be 3.14, got \(v)")
+        default:
+            Issue.record("D8-recovered column_stats max for DOUBLE PRECISION must be .float, got \(stats.max)")
+        }
+
+        try await ds1.dropDataset(id: id)
+    }
+
+    // MARK: - D8: Pure-function mapping test (no server required)
+
+    /// Verify `pgTypeToColumnType` is the exact inverse of `datasetPGTypeSQL`.
+    /// No PostgreSQL server required — pure function. Always runs.
+    ///
+    /// Mapping limits tested:
+    /// - "bigint" → .int  (covers .bitmap and .hlc at the wire level)
+    /// - "bytea"  → .blob (covers .fingerprint at the wire level)
+    @Test func pgTypeToColumnType_inverseMapping() {
+        // Known mappings: information_schema.data_type string → expected ColumnType.
+        let cases: [(String, ColumnType)] = [
+            ("text",                     .text),
+            ("uuid",                     .uuid),
+            ("bigint",                   .int),       // .bitmap + .hlc also map to BIGINT
+            ("timestamp with time zone", .timestamp),
+            ("double precision",         .float),
+            ("boolean",                  .bool),
+            ("bytea",                    .blob),      // .fingerprint also maps to BYTEA
+            ("jsonb",                    .json),
+        ]
+        for (dataType, expected) in cases {
+            #expect(
+                pgTypeToColumnType(dataType) == expected,
+                "pgTypeToColumnType(\"\(dataType)\") should be \(expected)"
+            )
+        }
+
+        // Unknown types must return nil (fail-closed).
+        let unknowns = ["integer", "numeric", "character varying", "real", ""]
+        for u in unknowns {
+            #expect(
+                pgTypeToColumnType(u) == nil,
+                "pgTypeToColumnType(\"\(u)\") should be nil for unknown type"
+            )
+        }
+
+        // Case-insensitivity: information_schema returns lowercase, but verify
+        // that uppercase variants (from some PG drivers) also work.
+        #expect(pgTypeToColumnType("TEXT") == .text)
+        #expect(pgTypeToColumnType("BIGINT") == .int)
+        #expect(pgTypeToColumnType("DOUBLE PRECISION") == .float)
     }
 }

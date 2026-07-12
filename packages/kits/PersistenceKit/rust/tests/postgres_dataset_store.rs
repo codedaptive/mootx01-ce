@@ -482,3 +482,148 @@ fn projection_returns_subset_of_columns() {
 
     ds.drop_dataset(id).expect("drop_dataset");
 }
+
+// ---------------------------------------------------------------------------
+// D8: Schema recovery tests (cache-miss round-trip)
+// ---------------------------------------------------------------------------
+//
+// These tests simulate process restart by creating TWO separate PostgresStorage
+// instances that point at the same DB with the SAME estate UUID but independent
+// in-process schema caches. Dataset created via storage1 (cache populated);
+// queried via storage2 (cache empty → D8 recovery path exercised).
+//
+// Skip gate: PERSISTENCEKIT_PG_URL must be set. These tests require a live server.
+
+/// Create a PostgresStorage with a caller-supplied estate ID instead of a
+/// random one. Use this to produce a second storage over the same estate
+/// after dataset creation, simulating a process restart with an empty cache.
+fn make_storage_with_id(cs: &str, estate_id: Uuid) -> PostgresStorage {
+    let config = EstateConfiguration::new(
+        estate_id,
+        BackendConfiguration::Postgresql {
+            connection_string: cs.to_string(),
+            pool_size: 2,
+            connection_timeout_secs: 5.0,
+            idle_timeout_secs: 30.0,
+        },
+    );
+    PostgresStorage::new(config).expect("connect postgres")
+}
+
+/// D8: schema recovery on query_rows cache miss.
+///
+/// Creates a dataset via storage1 (cache populated), then opens a second
+/// storage over the same estate + DB (fresh empty cache), and calls
+/// query_rows. D8 recovery must:
+///   - derive the schema from information_schema
+///   - project only user columns (no `__ds_pk` in results)
+///   - return the correct row count
+#[test]
+fn schema_recovery_query_rows_after_cache_miss() {
+    let Some(url) = pg_test_url() else {
+        eprintln!("schema_recovery_query_rows_after_cache_miss: skipped (PERSISTENCEKIT_PG_URL not set)");
+        return;
+    };
+
+    let estate_id = Uuid::new_v4();
+    let storage1 = make_storage_with_id(&url, estate_id);
+    let ds1 = storage1.dataset_store().expect("dataset_store() on storage1");
+
+    let id = Uuid::new_v4();
+    let schema = DatasetSchema {
+        columns: vec![text_col("name"), float_col("score")],
+        primary_key_column: None,
+    };
+    ds1.create_dataset(id, &schema, &[]).expect("create_dataset");
+
+    ds1.append_rows(id, &vec![
+        row(&[("name", TypedValue::Text("Alice".to_string())), ("score", TypedValue::Float(1.0))]),
+        row(&[("name", TypedValue::Text("Bob".to_string())),   ("score", TypedValue::Float(2.0))]),
+    ]).expect("append_rows");
+
+    // Simulate process restart: fresh storage over the same DB + estate, empty cache.
+    let storage2 = make_storage_with_id(&url, estate_id);
+    let ds2 = storage2.dataset_store().expect("dataset_store() on storage2");
+
+    // D8 recovery path: schema cache is empty; must derive from information_schema.
+    let results = ds2.query_rows(id, None, &[], None, None, None)
+        .expect("query_rows via recovered schema");
+
+    assert_eq!(results.len(), 2, "expected 2 rows after schema recovery");
+
+    for r in &results {
+        // The synthetic `__ds_pk` column must NOT appear in the returned rows.
+        assert!(
+            !r.values.contains_key("__ds_pk"),
+            "D8 recovery must exclude __ds_pk from results; got keys: {:?}",
+            r.values.keys().collect::<Vec<_>>()
+        );
+        // User columns must be present.
+        assert!(r.values.contains_key("name"), "expected 'name' column in recovered result");
+        assert!(r.values.contains_key("score"), "expected 'score' column in recovered result");
+    }
+
+    ds1.drop_dataset(id).expect("drop_dataset");
+}
+
+/// D8: schema recovery on column_stats cache miss — f64 wire rule.
+///
+/// Verifies that MIN/MAX for a DOUBLE PRECISION column decode as
+/// TypedValue::Float(f64) even when the schema is recovered via D8
+/// (not populated from create_dataset). This is the specific failure
+/// mode that D8 fixes: without a type hint, read_value defaults to
+/// the integer path and returns TypedValue::Null for f64 aggregates.
+#[test]
+fn schema_recovery_column_stats_f64_after_cache_miss() {
+    let Some(url) = pg_test_url() else {
+        eprintln!("schema_recovery_column_stats_f64_after_cache_miss: skipped (PERSISTENCEKIT_PG_URL not set)");
+        return;
+    };
+
+    let estate_id = Uuid::new_v4();
+    let storage1 = make_storage_with_id(&url, estate_id);
+    let ds1 = storage1.dataset_store().expect("dataset_store() on storage1");
+
+    let id = Uuid::new_v4();
+    let schema = DatasetSchema {
+        columns: vec![float_col("value")],
+        primary_key_column: None,
+    };
+    ds1.create_dataset(id, &schema, &[]).expect("create_dataset");
+
+    ds1.append_rows(id, &vec![
+        row(&[("value", TypedValue::Float(1.5))]),
+        row(&[("value", TypedValue::Float(3.14))]),
+    ]).expect("append_rows");
+
+    // Simulate process restart.
+    let storage2 = make_storage_with_id(&url, estate_id);
+    let ds2 = storage2.dataset_store().expect("dataset_store() on storage2");
+
+    let stats = ds2.column_stats(id, "value")
+        .expect("column_stats via recovered schema");
+
+    assert_eq!(stats.count, 2, "expected count=2 after D8 recovery");
+
+    // f64 wire rule: MIN/MAX must be TypedValue::Float, never Null or Int.
+    match stats.min {
+        TypedValue::Float(v) => assert!(
+            (v - 1.5).abs() < 1e-10,
+            "D8-recovered column_stats min should be 1.5, got {v}"
+        ),
+        other => panic!(
+            "D8-recovered column_stats min for DOUBLE PRECISION must be TypedValue::Float, got {other:?}"
+        ),
+    }
+    match stats.max {
+        TypedValue::Float(v) => assert!(
+            (v - 3.14).abs() < 1e-10,
+            "D8-recovered column_stats max should be 3.14, got {v}"
+        ),
+        other => panic!(
+            "D8-recovered column_stats max for DOUBLE PRECISION must be TypedValue::Float, got {other:?}"
+        ),
+    }
+
+    ds1.drop_dataset(id).expect("drop_dataset");
+}
