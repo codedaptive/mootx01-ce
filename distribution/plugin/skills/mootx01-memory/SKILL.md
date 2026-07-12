@@ -1,6 +1,6 @@
 ---
 name: mootx01-memory
-description: Use proactively before answering when a task involves memory, "last time", "remember", prior decisions, user preferences, project history, source material, continuity/resume, grounded synthesis, contradiction checks, corpus import, durable writeback, or post-import dreaming through MOOTx01.
+description: Use proactively before answering when a task involves memory, "last time", "remember", prior decisions, user preferences, project history, source material, continuity/resume, grounded synthesis, cross-checking recorded links and facts, corpus import, durable writeback, or post-import indexing through MOOTx01.
 ---
 
 # MOOTx01 Memory Skill
@@ -59,7 +59,7 @@ Use this skill for prompts containing or implying:
 
 3. Analyze:
    - `moot_list_lenses` to discover available cognition tools.
-   - Use relevant `moot_lens_*` tools for graph, theme, drift, contradiction, trust, cue, prediction, temporal, and information-theoretic analysis.
+   - Use relevant `moot_lens_*` tools for graph, theme, distribution-drift, recorded-contradiction, trust, cue, prediction, temporal, and information-theoretic analysis. (`moot_lens_contradiction` reports recorded contradicts-links and conflicting facts; it does not scan memory content — record a conflict you find with `moot_link_memories` kind=contradicts.)
    - Use `moot_synthesize` for grounded summaries.
 
 4. Write back:
@@ -70,7 +70,7 @@ Use this skill for prompts containing or implying:
    - `moot_write_journal` for session continuity.
 
 5. Dream:
-   - Run `moot_reindex` after batch import, then `moot_dream` after bulk import, major filing, or substantial memory growth.
+   - Run `moot_reindex` after batch import, then `moot_dream` after bulk import, major filing, or substantial memory growth. `moot_dream` builds the association matrix that matrix-aware recall scores against; its consolidation proposals are usage-driven and accrue as the estate is recalled against, so 0 proposals on a freshly imported estate is expected.
 
 ## Cost Rule
 

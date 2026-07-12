@@ -3,7 +3,7 @@
     "name" : "Codedaptive",
     "url" : "https://mootx01.ai"
   },
-  "description" : "Long-term memory for your AI: recall, analyze, contradiction-check, and write back durable knowledge. Requires the mootx01 binary (brew install codedaptive/mootx01-ce/mootx01).",
+  "description" : "Long-term memory for your AI: recall, analyze, cross-check linked facts, and write back durable knowledge. Requires the mootx01 binary (brew install codedaptive/mootx01-ce/mootx01).",
   "displayName" : "MOOTx01 Memory",
   "homepage" : "https://mootx01.ai",
   "keywords" : [

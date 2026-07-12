@@ -26,7 +26,7 @@ That something is your subconscious. It runs cheap deterministic processes on ye
 
 Your AI doesn't have a subconscious.
 
-That's the gap. That's why the rage. Every time you re-explain, every time you re-introduce yourself, every time you watch your AI search the basement for the same answer it gave you yesterday. What's missing is the layer between the context window and the archive. The layer that consolidates. The layer that prepares. The layer that already knows what mattered before you ask.
+That's the gap. That's why the rage. Every time you re-explain, every time you re-introduce yourself, every time you watch your AI search the basement for the same answer it gave you yesterday. What's missing is the layer between the context window and the archive. The layer that consolidates. The layer that prepares. The layer that knows what mattered — because it watched what you and your AI actually used.
 
 And whatever fills the gap has to be yours. Not parked in someone else's cloud, rented by the month, readable by whoever owns the servers, gone if the vendor changes their mind. Your memory belongs where you put it: on your laptop, your phone, your home server, a machine in a closet, a tenant you run yourself. Wherever you say. Always under your control.
 
@@ -34,7 +34,7 @@ And whatever fills the gap has to be yours. Not parked in someone else's cloud, 
 
 It captures every conversation exactly as it happened, in the words it happened in. Verbatim. What you said stays said, in the words you said it, without paraphrase or summary or silent rewriting.
 
-While you sleep, it consolidates. Themes surface from your week. Connections strengthen between things that turned out to matter. The matrix of what-connects-to-what reweighs itself against what actually happened. By morning, the answer to tomorrow's question is already prepared.
+While you sleep, it consolidates. The matrix of what-connects-to-what reweighs itself against how your memory actually got used — connections strengthen between things you recalled together, themes surface from the co-occurrence of your week, the unimportant fades. By morning, recall is ranked by what mattered.
 
 When you ask, it remembers. It returns ranked, filtered, theme-aware signal that the subconscious already organized while you weren't looking.
 
@@ -78,7 +78,7 @@ The interface is called ARIA. It is consistent across implementations, across co
 
 ## Tomorrow
 
-You open your AI. It already knows who you are. Last night, while you slept, MOOTx01 consolidated everything you and your AI worked on this week. The themes surfaced. The decisions ranked. The recall is prepared the moment you sit down.
+You open your AI. It already knows who you are. Last night, while you slept, MOOTx01 consolidated the week's use of your memory. Themes surfaced from what you and your AI actually touched; the connections you leaned on grew stronger. The recall is prepared the moment you sit down.
 
 You ask a question. The AI doesn't ask you to re-explain. It doesn't search the basement. It reads from your MOOT through ARIA, the shared language every AI tool and application uses to talk to your memory. What comes back is ordered thought, not chaotic data. Your AI reasons on signal instead of noise. Faster. More accurate. Cheaper per call. And tomorrow's recall is better than today's, because the subconscious kept working overnight.
 

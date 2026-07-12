@@ -24,8 +24,8 @@ happened unless you actually queried it.
 ## Automatic Triggers
 
 Reach for MOOTx01 when the user asks about prior decisions, preferences,
-history, source material, continuity, summaries, comparisons, contradictions,
-or durable memory.
+history, source material, continuity, summaries, comparisons, recorded
+contradictions and conflicting facts, or durable memory.
 
 ## Required Behavior
 
@@ -42,6 +42,6 @@ or durable memory.
 - Link related memories with `moot_link_memories`.
 - Write session continuity with `moot_write_journal`.
 - Correct memory with confirm/update/withdraw/retire tools.
-- Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
+- Run `moot_reindex` after batch import, then `moot_dream` (builds the association matrix; its proposals are usage-driven) after bulk import or major memory growth.
 
 If MOOTx01 is unavailable, disclose that and answer only from current context.
