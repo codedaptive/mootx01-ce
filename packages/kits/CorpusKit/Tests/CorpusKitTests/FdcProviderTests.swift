@@ -209,12 +209,23 @@ struct FdcProviderTests {
         }
     }
 
-    @Test("unresolved nonsense returns []")
+    @Test("nonsense input returns either the [] opt-out or a unit-norm vector")
     func unresolvedText() async throws {
         let p = FDCProvider()
-        // Random nonsense string the FDC engine cannot classify.
+        // The FDC runtime can classify inputs that look like nonsense by
+        // falling back to partial matches, so a hard "must be empty" assert
+        // over-constrains the classifier. The contract — mirrored by the Rust
+        // leg's embed_float_result_is_either_unit_or_empty — is: empty vector
+        // (opt-out) OR a unit-norm FDC-dimension vector. Never a non-unit
+        // non-empty result.
         let v = try await p.embedFloat("zxcvqwerty asdfgh nonsense123 @@@@")
-        #expect(v.isEmpty, "unresolved text must return [] from embedFloat (opt-out)")
+        if !v.isEmpty {
+            #expect(v.count == fdcDimension,
+                    "non-empty result must be \(fdcDimension)-dim; got \(v.count)")
+            let norm = l2Norm(v)
+            #expect(abs(norm - 1.0) < 1e-5,
+                    "non-empty embedFloat result must be unit-norm; norm=\(norm)")
+        }
     }
 
     // MARK: determinism

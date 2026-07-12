@@ -967,10 +967,18 @@ mod tests {
     }
 
     fn uuid_str() -> String {
-        // Simple unique ID without uuid crate — time-based enough for tests.
+        // Unique ID without the uuid crate. Timestamp alone is NOT enough:
+        // cargo runs tests on parallel threads, and two temp_vault() calls in
+        // the same clock tick collide — the tests then share one directory
+        // and the first remove_dir_all deletes the other's vault mid-run
+        // (intermittent importer_skips_* / from_ir_emits_* failures under
+        // load). A process-wide counter makes every call distinct.
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        format!("{}{}", t.as_secs(), t.subsec_nanos())
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{}{}-{}", t.as_secs(), t.subsec_nanos(), n)
     }
 
     fn write_note(vault: &std::path::Path, rel: &str, content: &str) {

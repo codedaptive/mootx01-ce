@@ -125,9 +125,28 @@ public extension GeniusLocusKit {
         let lowerMs = Int64(window.lowerBound.timeIntervalSince1970 * 1_000)
         let upperMs = Int64(window.upperBound.timeIntervalSince1970 * 1_000)
 
-        // `orderedEntries` is sorted HLC-ascending (physicalTime ASC,
+        return Self.eventLagPairs(
+            entries: log.orderedEntries,
+            lowerMs: lowerMs, upperMs: upperMs,
+            allowedRowIDs: allowedRowIDs)
+    }
+
+    /// Pure core of `glkEventLagPairs`: window filter + field-coordinate
+    /// mapping over an already-loaded, HLC-ascending entry list. Split from
+    /// the estate-loading wrapper so it mirrors the Rust leg's free function
+    /// `event_lag_pairs(entries, lower_ms, upper_ms)` — both legs run the
+    /// shared dormant-surfaces fixture through this seam directly, without
+    /// an estate round-trip (the durable audit path cannot represent the
+    /// fixture's synthetic string/integer/bytes coordinate values).
+    internal static func eventLagPairs(
+        entries: [UnifiedAuditEntry],
+        lowerMs: Int64,
+        upperMs: Int64,
+        allowedRowIDs: Set<String>? = nil
+    ) -> [TemporalAuditEntry] {
+        // `entries` is sorted HLC-ascending (physicalTime ASC,
         // then logicalCount ASC, then nodeID ASC) — SQL ORDER BY preserved.
-        let temporalEntries: [TemporalAuditEntry] = log.orderedEntries
+        let temporalEntries: [TemporalAuditEntry] = entries
             .filter { entry in
                 // HLC window gate: retain entries whose ingest clock falls
                 // within the requested window.

@@ -155,12 +155,45 @@ enum SQLiteSchema {
     )
     """
 
+    // Audit ordering indexes are on the full-precision HLC columns
+    // (physical_time, logical_count, node_id) — the chronological key every
+    // audit read orders by. The packed `hlc` column is NOT an ordering key:
+    // its field layout (node in the top byte, logical above physical) does
+    // not preserve HLC order (HLC_PACKED_ORDER_UNSOUND finding); it remains
+    // only as the PK dedup component. The old packed-column indexes are
+    // dropped at open (no query uses them).
     static let auditIndexSQL = """
-    CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")
+    CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_chrono" ON "_storagekit_audit" ("row_id", "physical_time", "logical_count", "node_id")
     """
 
     static let auditHLCIndexSQL = """
-    CREATE INDEX IF NOT EXISTS "_storagekit_audit_hlc" ON "_storagekit_audit" ("hlc")
+    CREATE INDEX IF NOT EXISTS "_storagekit_audit_chrono" ON "_storagekit_audit" ("physical_time", "logical_count", "node_id")
+    """
+
+    static let auditDropPackedIndexesSQL = [
+        "DROP INDEX IF EXISTS \"_storagekit_audit_row_hlc\"",
+        "DROP INDEX IF EXISTS \"_storagekit_audit_hlc\"",
+    ]
+
+    /// One-time backfill for estates whose audit rows predate the
+    /// full-precision HLC columns: reconstruct the three columns from the
+    /// packed value so the chronological ORDER BY covers old rows. The
+    /// packed form truncates physicalTime to 40 bits and nodeID to its low
+    /// byte, so backfilled values carry exactly what `HLC(packed:)` would
+    /// recover — the best available for pre-migration rows. Idempotent: a
+    /// row whose columns are already populated fails the WHERE guard, and
+    /// re-deriving a legitimately-zero physical_time row from its packed
+    /// value writes back identical values. SQLite `>>` sign-extends
+    /// negative integers; the `& 0xFFFF` / `& 0xFF` masks make the shifts
+    /// layout-exact regardless of sign.
+    static let auditBackfillFullHLCSQL = """
+    UPDATE "_storagekit_audit"
+    SET "physical_time" = ("hlc" & 0xFFFFFFFFFF),
+        "logical_count" = (("hlc" >> 40) & 0xFFFF),
+        "node_id" = CASE WHEN (("hlc" >> 56) & 0xFF) >= 128
+                         THEN (("hlc" >> 56) & 0xFF) - 256
+                         ELSE (("hlc" >> 56) & 0xFF) END
+    WHERE "physical_time" = 0 AND "hlc" != 0
     """
 
     /// Blob storage table.

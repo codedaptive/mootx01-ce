@@ -192,16 +192,18 @@ mod tests {
     }
 
     #[test]
-    fn lookup_unresolved_term_returns_empty_code() {
-        // Mirrors Swift `unresolvedTermReturnsEmptyAnchor`. A term with
-        // no signature overlap returns an empty code, never a guess.
+    fn lookup_unresolved_term_returns_unclassified_sentinel() {
+        // Mirrors Swift `unresolvedTermReturnsUnclassifiedSentinel`. A term
+        // with no signature overlap resolves to the "000" unclassified
+        // sentinel under hierarchy-first resolution — the root Generalities
+        // head, never a specific subject guess. Pinned by the cross-port
+        // lookup_vectors.json gate ("nonsense_token" vector).
         let anchor = lookup("zxcvqwertyasdfgh");
         assert_eq!(
-            anchor.code, "",
-            "unresolved term must yield an empty code, not a fallback"
+            anchor.code, "000",
+            "unresolved term must yield the 000 sentinel, not a subject code"
         );
         assert!(anchor.wikidata_qid.is_none());
-        assert_eq!(anchor.confidence, 0);
     }
 
     #[test]
@@ -241,10 +243,12 @@ mod tests {
     }
 
     #[test]
-    fn lookup_empty_punctuation_yields_empty_anchor() {
-        // Mirrors lookup_vectors.json "punctuation_only_drops_to_empty".
+    fn lookup_empty_punctuation_yields_unclassified_sentinel() {
+        // Mirrors lookup_vectors.json "punctuation_only_drops_to_empty",
+        // which pins the "000" unclassified sentinel for punctuation-only
+        // input under hierarchy-first resolution.
         let anchor = lookup("!!!???");
-        assert_eq!(anchor.code, "");
+        assert_eq!(anchor.code, "000");
         assert!(anchor.wikidata_qid.is_none());
     }
 

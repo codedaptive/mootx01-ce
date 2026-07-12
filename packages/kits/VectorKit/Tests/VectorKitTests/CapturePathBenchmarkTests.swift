@@ -59,13 +59,13 @@ import Foundation
 /// The deviation is intentional and documented in the VEC-05 decision record.
 ///
 /// **Execution model.** These four suites assert wall-clock latency
-/// budgets (P99 / median). Under XCTest the methods ran serially, so
-/// each benchmark had the machine to itself while measuring. swift-
-/// testing runs `@Test` functions in parallel by default, which lets
-/// the four heavy benchmarks contend for CPU and inflates the measured
+/// budgets (P99 / median) that were calibrated with each benchmark
+/// having the machine to itself while measuring. swift-testing runs
+/// `@Test` functions in parallel by default, which would let the four
+/// heavy benchmarks contend for CPU and inflate the measured
 /// percentiles past their calibrated ceilings. The `.serialized` trait
-/// restores the serial execution the budgets were calibrated under —
-/// it changes scheduling only, not a single assertion.
+/// keeps the serial execution the budgets were calibrated under — it
+/// changes scheduling only, not a single assertion.
 ///
 /// **P99 threshold assertions are load-sensitive and gated behind `MOOTX01_PERF=1`.**
 /// Calibrated ceilings (P99 < 100 ms, < 5 ms, < 75 ms; median < 50 ms) can be exceeded

@@ -37,15 +37,16 @@ struct EideticLibTests {
         )
     }
 
-    @Test("single-word lookup for broad term returns UNRESOLVED (honest guard)")
-    func singleWordBroadTermReturnsUnresolved() {
-        // "chemistry" maps to Q2329, which appears in 111 signatures →
-        // 111 tied codes → tie-count guard fires → UNRESOLVED (empty code).
-        // This is the honest result: there is no discriminating signal.
+    @Test("single-word lookup for broad term resolves to the common ancestor")
+    func singleWordBroadTermResolvesToAncestor() {
+        // "chemistry" maps to Q2329, which appears in 111 signatures. The
+        // hierarchy-first classifier resolves the tie to the candidates'
+        // common ancestor — the 540 (Chemistry) head — instead of refusing:
+        // the tied codes agree about the discipline, only not the subfield.
         let anchor = EideticLib.lookup("chemistry")
         #expect(
-            anchor.code.isEmpty,
-            "broad single-word term with 100+ tied candidates must return UNRESOLVED; got: '\(anchor.code)'"
+            anchor.code == "540",
+            "broad single-word term with tied subfield candidates must resolve to the common ancestor head; got: '\(anchor.code)'"
         )
     }
 

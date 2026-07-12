@@ -12,38 +12,39 @@
 // Mirror of the Rust dispatcher tests in
 // glref-rust-kernel.rs::tests.
 
-import XCTest
+import Testing
 @testable import Harness
 import GeniusLocusReference
 
-final class DispatcherTests: XCTestCase {
+@Suite("PortableKernel dispatcher")
+struct DispatcherTests {
 
     // MARK: - Explicit selector
 
-    func testOfKindScalarReturnsScalar() {
+    @Test func ofKindScalarReturnsScalar() {
         let k = PortableKernel.kernel(of: .scalar)
-        XCTAssertEqual(k.kind, .scalar,
-                       "kernel(of: .scalar) must return a ScalarKernel")
+        #expect(k.kind == .scalar,
+                "kernel(of: .scalar) must return a ScalarKernel")
     }
 
-    func testOfKindSimdReturnsSimd() {
+    @Test func ofKindSimdReturnsSimd() {
         let k = PortableKernel.kernel(of: .simd)
-        XCTAssertEqual(k.kind, .simd,
-                       "kernel(of: .simd) must return a SimdKernel")
+        #expect(k.kind == .simd,
+                "kernel(of: .simd) must return a SimdKernel")
     }
 
-    func testOfKindNeonReturnsNeon() {
+    @Test func ofKindNeonReturnsNeon() {
         let k = PortableKernel.kernel(of: .neon)
         #if canImport(simd)
-        XCTAssertEqual(k.kind, .neon,
-                       "on platforms where `import simd` is available, kernel(of: .neon) must return a NeonKernel; got \(k.kind)")
+        #expect(k.kind == .neon,
+                "on platforms where `import simd` is available, kernel(of: .neon) must return a NeonKernel; got \(k.kind)")
         #else
-        XCTAssertEqual(k.kind, .scalar,
-                       "on platforms without simd, kernel(of: .neon) must fall through to ScalarKernel; got \(k.kind)")
+        #expect(k.kind == .scalar,
+                "on platforms without simd, kernel(of: .neon) must fall through to ScalarKernel; got \(k.kind)")
         #endif
     }
 
-    func testOfKindMetalReturnsMetalOrFallsThrough() {
+    @Test func ofKindMetalReturnsMetalOrFallsThrough() {
         let k = PortableKernel.kernel(of: .metal)
         #if canImport(Metal)
         // On hosts with a usable GPU, kernel(of: .metal) must
@@ -51,24 +52,24 @@ final class DispatcherTests: XCTestCase {
         // it falls through to scalar. Either is acceptable; the
         // test asserts the dispatcher does NOT return some
         // unrelated kind.
-        XCTAssertTrue(k.kind == .metal || k.kind == .scalar,
-                      "kernel(of: .metal) must return .metal or .scalar; got \(k.kind)")
+        #expect(k.kind == .metal || k.kind == .scalar,
+                "kernel(of: .metal) must return .metal or .scalar; got \(k.kind)")
         #else
-        XCTAssertEqual(k.kind, .scalar,
-                       "on platforms without Metal, kernel(of: .metal) must fall through to ScalarKernel; got \(k.kind)")
+        #expect(k.kind == .scalar,
+                "on platforms without Metal, kernel(of: .metal) must fall through to ScalarKernel; got \(k.kind)")
         #endif
     }
 
     // MARK: - Auto-selector (current platform)
 
-    func testForCurrentPlatformPicksSimdOnAarch64() {
+    @Test func forCurrentPlatformPicksSimdOnAarch64() {
         let k = PortableKernel.kernelForCurrentPlatform()
         #if arch(arm64)
-        XCTAssertEqual(k.kind, .simd,
-                       "on aarch64, kernelForCurrentPlatform must return SimdKernel; got \(k.kind)")
+        #expect(k.kind == .simd,
+                "on aarch64, kernelForCurrentPlatform must return SimdKernel; got \(k.kind)")
         #else
-        XCTAssertEqual(k.kind, .scalar,
-                       "off aarch64, kernelForCurrentPlatform must return ScalarKernel; got \(k.kind)")
+        #expect(k.kind == .scalar,
+                "off aarch64, kernelForCurrentPlatform must return ScalarKernel; got \(k.kind)")
         #endif
     }
 
@@ -78,7 +79,7 @@ final class DispatcherTests: XCTestCase {
     // with a buggy override), these tests catch it independent of
     // the type assertion above.
 
-    func testDispatcherOrReduceMatchesScalar() {
+    @Test func dispatcherOrReduceMatchesScalar() {
         let scalar = ScalarKernel()
         let dispatched = PortableKernel.kernelForCurrentPlatform()
         let fingerprints: [Fingerprint256] = (0..<32).map { i in
@@ -90,11 +91,11 @@ final class DispatcherTests: XCTestCase {
         }
         let s = scalar.orReduce256(fingerprints)
         let d = dispatched.orReduce256(fingerprints)
-        XCTAssertEqual(s, d,
-                       "dispatcher's orReduce256 must produce scalar-identical output; scalar=\(s) dispatched=\(d) kind=\(dispatched.kind)")
+        #expect(s == d,
+                "dispatcher's orReduce256 must produce scalar-identical output; scalar=\(s) dispatched=\(d) kind=\(dispatched.kind)")
     }
 
-    func testDispatcherHammingDistanceMatchesScalar() {
+    @Test func dispatcherHammingDistanceMatchesScalar() {
         let scalar = ScalarKernel()
         let dispatched = PortableKernel.kernelForCurrentPlatform()
         let a = Fingerprint256(block0: 0xCAFEBABE,
@@ -105,7 +106,7 @@ final class DispatcherTests: XCTestCase {
                                block1: 0x9ABCDEF0,
                                block2: 0x0F0F0F0F0F0F0F0F,
                                block3: 0xF0F0F0F0F0F0F0F0)
-        XCTAssertEqual(scalar.hammingDistance256(a, b),
-                       dispatched.hammingDistance256(a, b))
+        #expect(scalar.hammingDistance256(a, b) ==
+                dispatched.hammingDistance256(a, b))
     }
 }

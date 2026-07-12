@@ -627,20 +627,38 @@ public actor Estate {
     /// structural reasoning lenses build their drawer graph from. A wing
     /// with no outgoing tunnels reads empty rather than throwing.
     /// Peer of the Rust `Estate::tunnels_from_wing`.
-    public func tunnelsFromWing(_ wing: String) async throws -> [Tunnel] {
-        // Sensitivity gate: the store query filters only by source wing +
-        // tombstone, so it would return restricted/secret tunnel edges
-        // (endpoint ids, free-form labels, adjective bitmaps) that the drawer
-        // recall pipeline excludes by default. Apply the same no-claims
-        // sensitivity ceiling BitmapEvaluator inserts for drawers — Normal
-        // tier (normal + elevated) visible, restricted/secret excluded — so a
-        // reasoning lens reading the graph never sees an edge above the
-        // default recall ceiling. Synthetic containment edges carry
-        // adjectiveBitmap 0 (Normal) and always pass. Mirrors the Rust
-        // `Estate::tunnels_from_wing` gate; enforced at the source so every
-        // caller is covered.
+    ///
+    /// Sensitivity gate: the store query filters only by source wing +
+    /// tombstone, so it would return restricted/secret tunnel edges
+    /// (endpoint ids, free-form labels, adjective bitmaps) that the drawer
+    /// recall pipeline excludes by default. Apply the same no-claims
+    /// sensitivity ceiling BitmapEvaluator inserts for drawers — Normal
+    /// tier (normal + elevated) visible, restricted/secret excluded — so a
+    /// reasoning lens reading the graph never sees an edge above the
+    /// default recall ceiling. Synthetic containment edges carry
+    /// adjectiveBitmap 0 (Normal) and always pass. Mirrors the Rust
+    /// `Estate::tunnels_from_wing` gate; enforced at the source so every
+    /// caller is covered.
+    ///
+    /// `includingRestricted` is the ONE sanctioned widening: the vault
+    /// export's `.believedIncludingPrivate` scope — the owner's explicit
+    /// opt-in for Private-tier bulk export (ADR-007 Decision 2) — must carry
+    /// provenance tunnels to restricted drawers, mirroring the drawer-side
+    /// tier rule (`VaultExportScope.includesPrivateTier`). Secret-tier edges
+    /// are excluded UNCONDITIONALLY — no parameter widens past restricted,
+    /// matching the drawer side where secret never bulk-exports.
+    public func tunnelsFromWing(
+        _ wing: String,
+        includingRestricted: Bool = false
+    ) async throws -> [Tunnel] {
         try await store.tunnelsFrom(wing: wing)
-            .filter { $0.adjectiveSensitivity.isBulkExportable }
+            .filter {
+                switch $0.adjectiveSensitivity {
+                case .normal, .elevated: return true
+                case .restricted: return includingRestricted
+                case .secret: return false
+                }
+            }
     }
 
     // MARK: - Dreaming substrate reads

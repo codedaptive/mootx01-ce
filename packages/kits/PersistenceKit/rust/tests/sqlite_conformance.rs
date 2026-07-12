@@ -334,3 +334,64 @@ fn migrate_preserves_primary_schema_timestamp_columns() {
         assert_eq!(*ts, now_secs, "Timestamp round-trip must be exact");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Audit chronological ordering (HLC_PACKED_ORDER_UNSOUND).
+//
+// Audit reads must return CHRONOLOGICAL (physical_time, logical_count,
+// node_id) order. The packed `hlc` integer's field layout (node in the
+// top byte, logical above physical) does not preserve that order, so a
+// read keyed on the packed column mis-orders a same-millisecond burst
+// (logical > 0) against a later write (logical 0). Mirrors the Swift
+// SQLiteAuditChronologicalOrderTests.
+// ─────────────────────────────────────────────────────────────────────
+
+fn chrono_event(row_id: Uuid, hlc: HLC, verb: &str) -> AuditEvent {
+    AuditEvent {
+        event_id: Uuid::new_v4(),
+        estate_uuid: Uuid::new_v4(),
+        row_id,
+        hlc,
+        verb: verb.into(),
+        before_adjective: None,
+        before_operational: None,
+        before_provenance: None,
+        after_adjective: 1,
+        after_operational: 2,
+        after_provenance: 3,
+        before_lattice_anchor: None,
+        after_lattice_anchor: 0,
+        before_lattice_qid: None,
+        after_lattice_qid: 0,
+        actor: "chrono-test".into(),
+        reason: None,
+    }
+}
+
+#[test]
+fn sqlite_audit_same_millisecond_burst_orders_chronologically() {
+    let storage = make_sqlite_audit_storage();
+    let log = storage.audit_log();
+    let row_id = Uuid::new_v4();
+    // Node low byte 0xB1 (negative as i8) exercises the packed sign flip;
+    // logical 1 at time T vs logical 0 at T+3 exercises the
+    // logical-above-physical field-order defect.
+    let burst = HLC { physical_time: 1_783_833_507_371, logical_count: 1, node_id: 0xB1 };
+    let later = HLC { physical_time: 1_783_833_507_374, logical_count: 0, node_id: 0x08 };
+    log.append(chrono_event(row_id, burst, "capture")).unwrap();
+    log.append(chrono_event(row_id, later, "mutate")).unwrap();
+
+    let all = log.iterate(None, None, 10).unwrap();
+    let verbs: Vec<&str> = all.iter().map(|e| e.verb.as_str()).collect();
+    assert_eq!(verbs, ["capture", "mutate"], "iterate must return chronological order");
+
+    let for_row = log.iterate(None, Some(row_id), 10).unwrap();
+    let row_verbs: Vec<&str> = for_row.iter().map(|e| e.verb.as_str()).collect();
+    assert_eq!(row_verbs, ["capture", "mutate"], "per-row read must be chronological");
+
+    // The cursor is exclusive and chronological: after the burst event,
+    // only the later event remains.
+    let tail = log.iterate(Some(burst), None, 10).unwrap();
+    let tail_verbs: Vec<&str> = tail.iter().map(|e| e.verb.as_str()).collect();
+    assert_eq!(tail_verbs, ["mutate"], "after-cursor must resume chronologically");
+}
