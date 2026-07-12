@@ -1,7 +1,14 @@
 <!-- Tunnel sensitivity gate vs private-scope vault export — conflict finding
-     from the 2026-07-12 fast-lane stabilization session. One VaultKit test
-     (PrivacyTierAndReceiptTests CAND-EXP-PROV private-scope case) is
-     intentionally left red as the tripwire for this finding. -->
+     from the 2026-07-12 fast-lane stabilization session. STATUS: FIXED same
+     day via the scope-aware seam described below: tunnelsFromWing /
+     tunnels_from_wing gained an includingRestricted widening (secret still
+     excluded unconditionally), forwarded through recallTunnels /
+     recall_tunnels_with_ceiling, and passed by the vault export ONLY when
+     scope.includesPrivateTier. Both former tripwires are green; the
+     default-scope gate behavior is unchanged and its tests still pass. The
+     two import-dedup tunnel reads (VaultBridge / PalaceBridge
+     existingTunnelSignatures) deliberately stay at the default ceiling —
+     widening an import read was not part of this contract. -->
 
 FINDING: TUNNEL_GATE_VS_PRIVATE_EXPORT — the unconditional tunnel sensitivity gate breaks the private-scope export's documented opt-in
 
