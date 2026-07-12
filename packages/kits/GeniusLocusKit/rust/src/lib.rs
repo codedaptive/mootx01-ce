@@ -45,6 +45,11 @@
 
 pub mod audit;
 pub mod brain;
+// dataset_signatures.rs — MX-TAB-5 layered dataset signatures.
+// Tier-1 table SHA-256 + tier-2 per-column SHA-256 fingerprints computed from
+// schema + sampled content. Byte-identical mirror of
+// GeniusLocusKit/Sources/GeniusLocusKit/Intake/DatasetSignatures.swift.
+pub mod dataset_signatures;
 pub mod branches;
 pub mod coordinator;
 // telemetry.rs — per-estate rollup metrics (GLK_ROLLUPS_001). Metric name

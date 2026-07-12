@@ -366,6 +366,91 @@ public extension Estate {
         }
     }
 
+    // MARK: patchDatasetHandleSignatures (MX-TAB-5)
+
+    /// Write computed table and column signatures into an existing dataset
+    /// handle drawer without re-running `captureDatasetHandle`.
+    ///
+    /// Decodes the current `DatasetHandleContent` from `rowID`, replaces the
+    /// `tableSignature` and `columnSignatures` fields with the supplied values,
+    /// re-encodes to JSON, and writes the updated JSON back via
+    /// `DrawerStore.updateDatasetContent`. The update is a direct column write
+    /// — no audit event is appended and no supersession cascade fires.
+    ///
+    /// Signature computation is a deterministic annotation: the same
+    /// schema, stats, and sampled rows always produce the same hex strings,
+    /// so writing the signatures twice is idempotent.
+    ///
+    /// Dreaming / matrix safety: the handle drawer remains an ordinary drawer
+    /// in the estate's bitmap index. Updating `content` does not feed the
+    /// association matrix or trigger distillation / dreaming — the matrix tier
+    /// reads adjective and operational bitmaps, not the JSON content blob.
+    ///
+    /// Called by `GeniusLocusKit.computeDatasetSignatures` (MX-TAB-5); the
+    /// MX-TAB-7 tool layer calls that function.
+    ///
+    /// Mirrors Rust `Estate::patch_dataset_handle_signatures` in
+    /// `locus_kit::dataset_handle`.
+    ///
+    /// - Parameters:
+    ///   - rowID: The drawer id of the existing dataset handle (`Drawer.id`).
+    ///   - tableSignature: Hex-encoded SHA-256 over the schema + sampled
+    ///     content preimage (domain tag 0x10).
+    ///   - columnSignatures: Map from column name to hex-encoded SHA-256 over
+    ///     the column sketch preimage (domain tag 0x11). Empty dict is valid
+    ///     when the dataset has no declared columns.
+    ///   - now: Caller-supplied timestamp (deterministic-engine rule — callers
+    ///     must not call `Date()` inside engine or store methods).
+    /// - Returns: The updated `Drawer` read back from storage, reflecting
+    ///   the new content JSON with signature fields populated.
+    /// - Throws:
+    ///   - `LocusKitError.drawerNotFound` when `rowID` does not exist in
+    ///     storage or when the update affects zero rows.
+    ///   - `LocusKitError.invalidContent` when the stored content JSON fails
+    ///     to decode as `DatasetHandleContent`.
+    func patchDatasetHandleSignatures(
+        rowID: String,
+        tableSignature: String,
+        columnSignatures: [String: String],
+        now: Date
+    ) async throws -> Drawer {
+        // Read the current drawer to confirm existence and preserve other fields.
+        guard let existing = try await store.getDrawer(id: rowID) else {
+            throw LocusKitError.drawerNotFound(id: rowID)
+        }
+        let current = try DatasetHandleContent.decode(from: existing.content)
+
+        // Build the updated payload with signatures populated.
+        // All other fields (datasetId, columns, rowCount, sourceDescription)
+        // are preserved verbatim — this patch touches only the signature fields.
+        let updated = DatasetHandleContent(
+            datasetId: current.datasetId,
+            columns: current.columns,
+            rowCount: current.rowCount,
+            sourceDescription: current.sourceDescription,
+            tableSignature: tableSignature,
+            columnSignatures: columnSignatures
+        )
+        let newJSON = try updated.encode()
+
+        // Write the updated content to the drawers table.
+        // A zero count means the row disappeared between the read and the
+        // update (concurrent expunge); treat as DrawerNotFound.
+        let updatedCount = try await store.updateDatasetContent(
+            drawerId: rowID,
+            content: newJSON
+        )
+        guard updatedCount > 0 else {
+            throw LocusKitError.drawerNotFound(id: rowID)
+        }
+
+        // Read back the drawer so the caller has the current storage state.
+        guard let refreshed = try await store.getDrawer(id: rowID) else {
+            throw LocusKitError.drawerNotFound(id: rowID)
+        }
+        return refreshed
+    }
+
     // MARK: resolveActiveDatasetHandle
 
     /// Return the active dataset handle for `datasetId`, or throw.

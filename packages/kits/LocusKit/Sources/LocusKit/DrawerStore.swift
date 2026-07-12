@@ -4068,6 +4068,39 @@ public actor DrawerStore {
         ])
     }
 
+    // MARK: - Dataset content update (MX-TAB-5)
+
+    /// Overwrite the `content` column of a dataset handle drawer with a new
+    /// JSON string.
+    ///
+    /// Used exclusively by `Estate.patchDatasetHandleSignatures` to persist
+    /// MX-TAB-5 table and column signatures into the stored
+    /// `DatasetHandleContent` JSON without re-running `captureDatasetHandle`.
+    ///
+    /// The update is a direct column write — no audit event is appended and
+    /// no supersession cascade fires. Signature computation is a deterministic
+    /// annotation of existing data, not a belief-state change. Writing the
+    /// same content twice produces the same JSON (DatasetHandleContent is
+    /// deterministic), so the operation is idempotent.
+    ///
+    /// Mirrors Rust `Estate::patch_dataset_handle_content` in
+    /// `locus_kit::dataset_handle`.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The drawer row id (`Drawer.id`) of the dataset handle.
+    ///   - content: The new JSON-encoded `DatasetHandleContent` string.
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    internal func updateDatasetContent(
+        drawerId: String,
+        content: String
+    ) async throws -> Int {
+        try await storage.rowStore.update(
+            table: "drawers",
+            values: ["content": .text(content)],
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
+    }
+
     // MARK: - Validation
 
     private static func validateNonEmpty(_ value: String, label: String) throws {

@@ -22,7 +22,13 @@
 //! in the schema now; the reserved MX-TAB-5 fields (`tableSignature`,
 //! `columnSignatures`) are always `None` in v1.
 
+use crate::drawer::Drawer;
+use crate::error::LocusKitError;
+use crate::estate::Estate;
+use persistence_kit::predicate::StoragePredicate;
+use persistence_kit::types::{Column, TypedValue};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 // MARK: - DatasetColumnSummary
@@ -122,6 +128,114 @@ impl DatasetHandleContent {
 ///
 /// Mirrors Swift `datasetHandleEmbeddingModelID` in `DatasetHandle.swift`.
 pub const DATASET_HANDLE_EMBEDDING_MODEL_ID: &str = "dataset-handle";
+
+// ---------------------------------------------------------------------------
+// Estate extension — dataset handle signature patch (MX-TAB-5)
+// ---------------------------------------------------------------------------
+
+/// Drawers table name, local to this module (matches DrawerStoreCore constant).
+const T_DRAWERS: &str = "drawers";
+
+impl Estate {
+    /// Overwrite the `content` column of a dataset handle drawer with a new
+    /// JSON string.
+    ///
+    /// Used by `patch_dataset_handle_signatures` to persist MX-TAB-5 table and
+    /// column signatures into the stored `DatasetHandleContent` JSON without
+    /// re-running `capture_dataset_handle`.
+    ///
+    /// No audit event is appended; no supersession cascade fires. Signature
+    /// computation is a deterministic annotation — writing the same content
+    /// twice produces the same JSON, so the operation is idempotent.
+    ///
+    /// Mirrors Swift `DrawerStore.updateDatasetContent(drawerId:content:)` in
+    /// `LocusKit/Sources/LocusKit/DrawerStore.swift`.
+    ///
+    /// - Returns `()` on success.
+    /// - Errors:
+    ///   - `LocusKitError::DatabaseUnavailable` when `storage()` returns `None`.
+    ///   - `LocusKitError::DrawerNotFound` when `drawer_id` does not exist
+    ///     (update affected zero rows).
+    ///   - `LocusKitError::DatabaseUnavailable` wrapping a `StorageResult` error
+    ///     from the row_store `update` call.
+    pub fn patch_dataset_handle_content(
+        &self,
+        drawer_id: &str,
+        content: &str,
+    ) -> Result<(), LocusKitError> {
+        let storage = self.store.storage().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "patch_dataset_handle_content: storage not available".into(),
+            )
+        })?;
+        let row_store = storage.row_store();
+        let pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        let mut values = BTreeMap::new();
+        values.insert("content".to_string(), TypedValue::Text(content.to_string()));
+        let count = row_store
+            .update(T_DRAWERS, values, &pred)
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        if count == 0 {
+            return Err(LocusKitError::DrawerNotFound {
+                id: drawer_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Write computed table and column signatures into an existing dataset
+    /// handle drawer without re-running `capture_dataset_handle`.
+    ///
+    /// Decodes the current `DatasetHandleContent` from `drawer_id`, replaces
+    /// `table_signature` and `column_signatures` with the supplied values,
+    /// re-encodes to JSON, and writes via `patch_dataset_handle_content`.
+    ///
+    /// Mirrors Swift `Estate.patchDatasetHandleSignatures(rowID:tableSignature:
+    /// columnSignatures:now:)` in `LocusKit/Sources/LocusKit/DatasetHandle.swift`.
+    ///
+    /// - Returns the refreshed `Drawer` read back after the write.
+    /// - Errors:
+    ///   - `LocusKitError::DrawerNotFound` when `drawer_id` does not exist.
+    ///   - `LocusKitError::InvalidContent` when the stored JSON fails to decode
+    ///     as `DatasetHandleContent`.
+    ///   - `LocusKitError::DatabaseUnavailable` on storage failures.
+    pub fn patch_dataset_handle_signatures(
+        &self,
+        drawer_id: &str,
+        table_signature: &str,
+        column_signatures: std::collections::HashMap<String, String>,
+    ) -> Result<Drawer, LocusKitError> {
+        // Read the current drawer to confirm existence and preserve other fields.
+        let existing = self
+            .store
+            .get_drawer(drawer_id)?
+            .ok_or_else(|| LocusKitError::DrawerNotFound {
+                id: drawer_id.to_string(),
+            })?;
+        let mut current = DatasetHandleContent::decode(&existing.content)
+            .map_err(LocusKitError::InvalidContent)?;
+
+        // Replace the signature fields; all other fields (dataset_id, columns,
+        // row_count, source_description) are preserved verbatim.
+        current.table_signature = Some(table_signature.to_string());
+        current.column_signatures = Some(column_signatures);
+
+        let new_json = current
+            .encode()
+            .map_err(LocusKitError::InvalidContent)?;
+        self.patch_dataset_handle_content(drawer_id, &new_json)?;
+
+        // Read back the drawer so the caller has the current storage state.
+        self.store
+            .get_drawer(drawer_id)?
+            .ok_or_else(|| LocusKitError::DrawerNotFound {
+                id: drawer_id.to_string(),
+            })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests
