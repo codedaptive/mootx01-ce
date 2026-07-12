@@ -50,6 +50,8 @@ review the seam: it is a deliberate bypass parameter on a security gate,
 both legs (LocusKit Swift + Rust), plus the GLK `recallTunnels` forwarding
 and the three VaultKit call sites.
 
-**Tripwire:** the CAND-EXP-PROV private-scope test is left failing on
-purpose — it asserts the documented opt-in contract. Do not weaken the
-test; add the scope-aware seam.
+**Tripwire (both legs):** the CAND-EXP-PROV private-scope tests are left
+failing on purpose — Swift `PrivacyTierAndReceiptTests` and Rust
+`charter_and_provenance::provenance_tunnel_to_restricted_drawer_scope_gated`
+fail identically, confirming the conflict is cross-leg. Do not weaken the
+tests; add the scope-aware seam.
