@@ -65,7 +65,7 @@ extension ToolDispatcher {
         // merely hidden — a hard-coded tools/call to `memory` still dispatched
         // here, reaching the read/write /memories surface. Enforce the flag at
         // dispatch too, mirroring the vault surface's disabled-refusal guard.
-        guard ToolProjection.memoryToolEnabled else {
+        guard ToolProjection.memoryToolEnabled(environment: environment) else {
             return Self.errorResult(
                 "memory tool is disabled; run `mootx01 enable memory-tool` to activate it")
         }

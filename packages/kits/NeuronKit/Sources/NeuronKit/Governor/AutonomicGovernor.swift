@@ -1290,6 +1290,16 @@ public struct TopologyInputsToken: Sendable, Equatable {
             String(inputsDigest),
         ].joined(separator: ":")
     }
+
+    /// Fingerprint equality, not field equality: the skip-path token carries
+    /// the prior fingerprint verbatim with zeroed count fields, and it must
+    /// compare equal to the full computed token for the same estate state.
+    /// The fingerprint embeds every input field, so this loses no distinction
+    /// between computed tokens. Mirrors the Rust leg, whose duty returns the
+    /// fingerprint string itself.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.fingerprint == rhs.fingerprint
+    }
 }
 
 // MARK: - Topology snapshot wire-shape types

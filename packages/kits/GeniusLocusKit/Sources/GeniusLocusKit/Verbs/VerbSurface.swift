@@ -228,8 +228,16 @@ public extension GeniusLocusKit {
     /// tunnels — existing behaviour is unchanged (no-provider path is
     /// identical to pre-.nodeTreeNative behaviour).
     ///
+    /// `includingRestricted` forwards to the LocusKit tunnel sensitivity
+    /// gate's one sanctioned widening: the vault export's private-scope
+    /// opt-in. Default keeps the no-claims Normal-tier ceiling; secret-tier
+    /// edges are excluded unconditionally either way.
+    ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    func recallTunnels(_ handle: EstateHandle, wing: String) async throws -> [Tunnel] {
+    func recallTunnels(
+        _ handle: EstateHandle, wing: String,
+        includingRestricted: Bool = false
+    ) async throws -> [Tunnel] {
         let estate = try estate(for: handle)
 
         // G1 — read-once-and-freeze. Call treeEdges exactly once here;
@@ -271,7 +279,8 @@ public extension GeniusLocusKit {
         }
 
         // Read stored tunnels from the estate.
-        let storedTunnels = try await estate.tunnelsFromWing(wing)
+        let storedTunnels = try await estate.tunnelsFromWing(
+            wing, includingRestricted: includingRestricted)
 
         // No tree edges → return stored tunnels only (identical to pre-registration
         // behaviour; proved unchanged by test nodeTreeNative_noProvider_behaviorUnchanged).

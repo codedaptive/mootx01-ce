@@ -17,8 +17,9 @@ import PersistenceKitInMemory
 @testable import AriaMCP
 
 /// `.serialized`: every dispatch case opens a live in-memory estate and
-/// runs multi-step capture/run/confirm sequences; preserve the
-/// one-at-a-time execution the suite ran under XCTest.
+/// runs multi-step capture/run/confirm sequences; concurrent estates
+/// contend under parallel execution, so the suite runs one case at a
+/// time.
 @Suite("Recipe tools", .serialized)
 struct RecipeToolsTests {
 

@@ -164,12 +164,17 @@ struct InstallManagerTelemetryTests {
     @Test("installManagerTelemetry: Intellectus is not enabled when store flag is off")
     func intellectusNotEnabledWhenStoreFlagOff() async throws {
         try await intellectusGlobalGate.withLock {
-            // The store seeds monitoring="0" on first open. installManagerTelemetry
-            // builds the observer, whose enable decision is store-flag OR the
-            // ARIA_MCP_OBSERVER env opt-in. Inject an empty env so this asserts the
-            // store-flag-off path deterministically (independent of the test
-            // runner's own environment).
+            // A fresh store seeds monitoring="1" (ON by default, wave 8.1), so
+            // flip the persisted flag off first — the operator's explicit
+            // opt-out, which the seed migration must respect. Then wire
+            // telemetry with an empty env so the enable decision (store flag
+            // OR the ARIA_MCP_OBSERVER env opt-in) is driven by the store's
+            // off flag alone, independent of the test runner's environment.
             let storeURL = makeTempStoreURL()
+            let seeded = try StatsStore(url: storeURL)
+            try await seeded.open()
+            try await seeded.setMonitoringEnabled(false)
+            await seeded.close()
 
             let wiring = await AriaResident.installManagerTelemetry(storePath: storeURL.path, env: [:])
             let returnedStore = try #require(wiring).store
@@ -179,7 +184,7 @@ struct InstallManagerTelemetryTests {
                 Task { await returnedStore.close() }
             }
 
-            // Store flag default "0" + env opt-in absent → Intellectus.isEnabled false.
+            // Store flag off + env opt-in absent → Intellectus.isEnabled false.
             #expect(Intellectus.isEnabled == false,
                     "Intellectus must not be enabled when the store flag is off and ARIA_MCP_OBSERVER is unset")
         }

@@ -189,8 +189,12 @@ public actor GeniusLocusKit {
     public func associate(_ handle: EstateHandle, _ frame: AssociateFrame) async throws
 
     // Association-graph read (VerbSurface.swift) — the edges the structural
-    // reasoning-lens recipes read; parallels `recall`, read-only:
-    public func recallTunnels(_ handle: EstateHandle, wing: String) async throws -> [Tunnel]
+    // reasoning-lens recipes read; parallels `recall`, read-only. The default
+    // keeps the Normal-tier sensitivity ceiling; includingRestricted is the
+    // one sanctioned widening (the vault export's private-scope opt-in) and
+    // secret-tier edges are excluded unconditionally either way:
+    public func recallTunnels(_ handle: EstateHandle, wing: String,
+                              includingRestricted: Bool = false) async throws -> [Tunnel]
 
     // KGFact verb surface (VerbSurface.swift):
     // captureKGFact files a triple into the estate; sourceDrawerID = "" is the
@@ -288,7 +292,9 @@ public actor GeniusLocusKit {
 ```
 **Rust:** the surface is split across synchronous types — `EstateCoordinator`
 (`open` / `close` / `handles` / `open_estate_count` / `state_for`, plus the
-association-graph read `recall_tunnels(handle, wing) -> Result<Vec<Tunnel>, VerbDispatchError>`,
+association-graph read `recall_tunnels(handle, wing) -> Result<Vec<Tunnel>, VerbDispatchError>`
+and its `recall_tunnels_with_ceiling(handle, wing, including_restricted)` widening
+(the vault export's private-scope opt-in; secret always excluded),
 and the write-path methods):
 
 ```rust

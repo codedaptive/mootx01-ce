@@ -45,14 +45,18 @@ struct PrecedenceTests {
     @Test("recipe result matches direct lens call on same shaped input")
     func recipeResultMatchesDirectLensCall() async throws {
         let (kit, handle) = try await openEstate()
-        let now = Date()
 
         // Capture a few drawers in the room field so audit entries exist.
         for i in 0..<3 {
             _ = try await capture(kit, handle, content: "prec-\(i)", room: "lab")
         }
 
-        let window = Date(timeIntervalSinceNow: -3600)...now
+        // Window bounds taken AFTER the captures: each capture stamps its
+        // eventTime at capture instant, so a `now` taken before the loop can
+        // precede those stamps by a clock tick — the recipe's eventTime-window
+        // filter then excludes every drawer and the recipe returns empty.
+        let now = Date()
+        let window = now.addingTimeInterval(-3600)...now
 
         // Read lag pairs directly via the no-allowedRowIDs overload. Precedence.run
         // also builds an eventTime-windowed allowed-ID set via

@@ -204,6 +204,9 @@ let package = Package(
                 "SQLCipher",
                 // IntellectusLib for telemetry isolation tests (GlobalTestLock + CapturingSink).
                 "IntellectusLib",
+                // InMemoryStorage: TransactionBoundaryTests contrasts the SQLite
+                // transaction seam against the in-memory backend's no-op path.
+                "PersistenceKitInMemory",
             ],
             path: "Tests/PersistenceKitSQLiteTests"
         ),

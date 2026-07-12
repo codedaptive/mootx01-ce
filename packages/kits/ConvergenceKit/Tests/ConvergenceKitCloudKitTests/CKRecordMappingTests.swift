@@ -203,6 +203,12 @@ struct LWWDurableHLCTests {
             indices: [],
             migrations: []
         ))
+        // applyInbound reads/writes the _ck_sync_meta side table, which
+        // production creates in the engine's start path (startSync →
+        // ensureSyncMetaTable). These tests call applyInbound directly, so
+        // create the table the same way production does rather than
+        // redeclaring its schema here and risking drift.
+        try await CloudKitStateActor.ensureSyncMetaTable(storage: storage)
         return storage
     }
 
@@ -275,25 +281,18 @@ struct LWWDurableHLCTests {
         let engine = CloudKitStateActor(containerIdentifier: nil)
         let rowID = UUID()
 
-        // Write a row at T=2000 — _syncHLC must be stored durably.
+        // Write a row at T=2000. The sync HLC persists in the _ck_sync_meta
+        // side table (not on the row), so durability is proven behaviorally:
+        // a FRESH actor — the restart — must still see T=2000 through storage.
         let first = makeDecoded(id: rowID, note: "local-at-T2000", hlcTime: 2000)
         try await engine.applyInbound(first, syncedTable: syncedTable, storage: storage)
 
-        // Re-query to confirm _syncHLC is present (the fix's core invariant).
-        let stored = try await storage.rowStore.query(
-            table: "items",
-            where: .eq(Column(table: "items", name: "id"), .uuid(rowID))
-        )
-        #expect(stored.count == 1)
-        guard case .hlc(_) = stored[0]["_syncHLC"] ?? .null else {
-            Issue.record("_syncHLC not persisted in row after first write — LWW cannot guard on next inbound")
-            return
-        }
-
-        // Simulate a stale second inbound at T=1500 — must be rejected
-        // because the persisted _syncHLC (T=2000) is newer.
+        // Simulate a restart: a new actor holds no in-memory HLC state. A
+        // stale second inbound at T=1500 must still be rejected — the guard
+        // can only fire if the first write's HLC was persisted.
+        let restarted = CloudKitStateActor(containerIdentifier: nil)
         let stale = makeDecoded(id: rowID, note: "stale-at-T1500", hlcTime: 1500)
-        try await engine.applyInbound(stale, syncedTable: syncedTable, storage: storage)
+        try await restarted.applyInbound(stale, syncedTable: syncedTable, storage: storage)
 
         let finalRows = try await storage.rowStore.query(
             table: "items",
@@ -301,6 +300,6 @@ struct LWWDurableHLCTests {
         )
         #expect(finalRows.count == 1)
         #expect(finalRows[0]["note"] == .text("local-at-T2000"),
-                "persisted HLC must guard against stale second inbound")
+                "persisted HLC must guard against stale inbound after restart")
     }
 }

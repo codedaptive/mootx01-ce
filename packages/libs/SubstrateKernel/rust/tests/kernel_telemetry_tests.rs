@@ -216,6 +216,10 @@ fn current_arch_tag_compile_time_value_is_correct() {
 /// the kernel's mathematical behavior.
 #[test]
 fn factory_kernel_hamming_distance_matches_scalar() {
+    // set_enabled mutates the process-global gate: without the lock this
+    // test disables monitoring mid-flight for whichever locked telemetry
+    // test currently holds the gate open ("no metric emitted" flakes).
+    let _guard = global_lock();
     Intellectus::set_enabled(false);
 
     use substrate_kernel::kernel::ScalarKernel;
@@ -235,6 +239,8 @@ fn factory_kernel_hamming_distance_matches_scalar() {
 /// OR-reduce conformance with telemetry disabled.
 #[test]
 fn factory_kernel_or_reduce_matches_scalar() {
+    // Same global-gate mutation as the hamming twin above — must serialize.
+    let _guard = global_lock();
     Intellectus::set_enabled(false);
 
     use substrate_kernel::kernel::ScalarKernel;
