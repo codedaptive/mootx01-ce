@@ -44,6 +44,8 @@ targets:
       # A4b: the Share-Sheet capture target (spools into the app group;
       # the app drains at launch/tick).
       - target: Mootx01-Share-macOS
+      # Tier 3: the recall widget (reads the app-group projection).
+      - target: Mootx01-Widget-macOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -99,6 +101,8 @@ targets:
       # A4b: the Share-Sheet capture target (spools into the app group;
       # the app drains at launch/foreground/refresh).
       - target: Mootx01-Share-iOS
+      # Tier 3: the recall widget (reads the app-group projection).
+      - target: Mootx01-Widget-iOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -136,6 +140,62 @@ targets:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
               - mootx01
+
+  # Recall widget targets (Tier 3) — WidgetKit extensions rendering the
+  # derived projection (WidgetSnapshotStore) from the app group. One estate,
+  # one host: the widget process reads the projection file, never the estate.
+  Mootx01-Widget-iOS:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: RecallWidget
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: RecallWidget/Mootx01-Widget-iOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.widget
+        PRODUCT_NAME: Mootx01Widget
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Widget-iOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  Mootx01-Widget-macOS:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: RecallWidget
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: RecallWidget/Mootx01-Widget-macOS.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.macos.widget
+        PRODUCT_NAME: Mootx01Widget
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Widget-macOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
   # A4b Share-Sheet capture targets — UI-less NSExtension shells over
   # ShareInboxSpool (MootIntentKit). One estate, one host: these processes

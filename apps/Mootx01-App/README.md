@@ -56,6 +56,12 @@ The managed-daemon panel (Engine tab, macOS) needs the real server binary; build
 - Core Spotlight donation is a derived projection, never canonical storage. Only explicitly
   public, normal/elevated memories are indexed; private, restricted, and secret content is
   excluded. `SpotlightSearchTool` is enabled on Apple Silicon.
+- The recall widget renders the same kind of derived projection (`WidgetSnapshotStore` in the
+  app group, refreshed from a publicOnly recall at launch/foreground/tick) — the widget process
+  never opens the estate. RelevantEntities donation is deliberately unwired: the shipping SDK
+  offers only an audio `AppEntityContext`, which does not fit memory drawers.
+- The Share Sheet captures through the same one-host discipline: the extension spools to the
+  app-group `ShareInbox`; the app drains via `CaptureSink` at launch/foreground/tick.
 - Calendar and birthday miners are disabled by default. Only Mine Now may request consent;
   unattended macOS ticks and opportunistic iOS background refreshes use existing grants only.
 
