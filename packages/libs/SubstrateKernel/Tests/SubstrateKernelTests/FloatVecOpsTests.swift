@@ -15,7 +15,7 @@
 //      ports must agree on every entry in the canonical table below.
 
 import Testing
-import SubstrateKernel
+@testable import SubstrateKernel
 
 @Suite("FloatVecOps")
 struct FloatVecOpsTests {

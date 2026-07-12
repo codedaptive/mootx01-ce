@@ -1,8 +1,9 @@
 // src/primitives/merkle_commitment.rs
 //
 // Canonical Merkle/commitment vectors for NT-P0. Mirrors the Swift
-// MerkleCommitmentPrimitive and validates the byte contract in
-// substrate-kernel.
+// MerkleCommitmentPrimitive and validates the harness-local bakeoff
+// contract (merkle_commitment_spike — the recovered NT-P0 spike; the
+// substrate's production Merkle is SubstrateLib merkle_hash, NT-F2).
 
 use std::collections::BTreeMap;
 
@@ -16,8 +17,15 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kernel::merkle_commitment::{
-    self, MerkleChild, MerkleVectorPayload,
+// The bakeoff Merkle contract is HARNESS-LOCAL (merkle_commitment_spike),
+// aliased so the bakeoff-era body below stays verbatim. It was never a CE
+// kernel module: this file arrived via the EE SHARED mirror importing
+// `substrate_kernel::merkle_commitment`, which exists only in EE. The
+// SpikeWireBytes trait supplies the spike-era `.wire_bytes()`/`.as_bytes()`
+// spellings on the production MerkleRoot/ContentHash types — the Rust
+// analogue of the Swift recovery's compatibility extensions (296a4c74).
+use crate::primitives::merkle_commitment_spike::{
+    self as merkle_commitment, MerkleChild, MerkleVectorPayload, SpikeWireBytes,
 };
 use substrate_types::MerkleRoot;
 

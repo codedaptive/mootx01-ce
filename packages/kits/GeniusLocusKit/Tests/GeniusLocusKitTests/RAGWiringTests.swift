@@ -317,4 +317,99 @@ struct VectorSimilaritySignalProximityTests {
         #expect(associateCount == 0,
             "no AssociateFrames expected for vectors beyond the threshold")
     }
+
+    // MARK: - T7: corpus lane — chunk-keyed production rows associate DRAWERS
+
+    /// Production estates never hold drawer-keyed vectors: the estate
+    /// lifecycle registers the corpus's shared VectorStore and the encode
+    /// pipeline keys every row by CHUNK UUID under the corpus's own modelID.
+    /// This test reproduces that wiring shape and proves the signal's
+    /// corpus-lane mining emits AssociateFrames carrying DRAWER ids —
+    /// verified structurally via `estate.allAssociations()`, because the
+    /// `associate` verb throws `drawerNotFound` for anything that is not a
+    /// real drawer id (a chunk UUID could never persist).
+    @Test
+    func corpusLaneEmitsDrawerLevelAssociations() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-corpus-lane")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Token-bag provider: sums a per-token deterministic vector so
+        // sentences sharing most tokens land near each other in engram
+        // space — the semantic property production's distributional
+        // ensemble provides (the whole-text `.deterministic` hash does not).
+        let tokenBag: @Sendable (String) async throws -> [Float] = { text in
+            var acc = [Float](repeating: 0, count: 32)
+            let tokens = text.lowercased().split(
+                whereSeparator: { !$0.isLetter && !$0.isNumber })
+            for token in tokens {
+                var h: UInt64 = 14_695_981_039_346_656_037
+                for byte in token.utf8 {
+                    h = (h ^ UInt64(byte)) &* 1_099_511_628_211
+                }
+                for i in 0..<32 {
+                    h = h &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                    acc[i] += (Float(h >> 40) / Float(1 << 24)) * 2 - 1
+                }
+            }
+            return acc
+        }
+        let provider = FloatSimHashEmbeddingProvider(
+            modelID: "assoc-token-bag-v1", modelVersion: "1.0",
+            projectionSeed: 0xC0FF_EE01, inference: tokenBag)
+        let corpus = try await Corpus(
+            storage: storage, model: .randomIndexing(provider: provider))
+
+        // Two near-identical drawers + one far filler, ingested the way the
+        // encode pipeline does: chunk rows under the corpus's modelID.
+        let frameA = CaptureFrame(
+            content: "the api timeout is 30 seconds", channel: .typed,
+            room: "study", latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "corpus-lane-test", embeddingModelID: "assoc-token-bag-v1")
+        var frameB = frameA
+        frameB.content = "the api timeout is 90 seconds"
+        var frameC = frameA
+        frameC.content = "grocery list apples and oranges"
+        let a = try await kit.capture(handle, frameA)
+        let b = try await kit.capture(handle, frameB)
+        let c = try await kit.capture(handle, frameC)
+        for drawer in [a, b, c] {
+            try await corpus.ingest(drawer.content, sourceID: drawer.id, now: t0)
+        }
+
+        // "test-v1" matches no corpus row — the drawer-keyed lane is empty
+        // by construction; only the corpus lane can find the pair.
+        let spec = VectorSimilaritySignal.spec(
+            vectorStore: await corpus.sharedVectorStore,
+            modelID: "test-v1",
+            corpus: corpus)
+        let signalID = try await kit.registerStandingSignal(spec, in: handle, now: t0)
+        try await kit.signalTick(
+            in: handle,
+            now: t0.addingTimeInterval(VectorSimilaritySignal.defaultCadenceSeconds + 1))
+
+        let reports = try await kit.signalStatus(in: handle)
+        let report = try #require(reports.first(where: { $0.signalID == signalID }))
+        let associateCount = report.recentOutcomes.filter { outcome in
+            switch outcome {
+            case .routed(let v), .routedButVerbStubbed(let v): return v == "associate"
+            default: return false
+            }
+        }.count
+        #expect(associateCount >= 1,
+            "corpus lane must emit at least one AssociateFrame for the near pair")
+
+        // The persisted association's endpoints are the OWNING DRAWERS —
+        // the chunk → source mapping happened before emission.
+        let estate = try await kit.estate(for: handle)
+        let associations = try await estate.allAssociations()
+        let pairEndpointSets = associations.map {
+            Set([$0.sourceDrawerId, $0.targetDrawerId].compactMap { $0 })
+        }
+        #expect(pairEndpointSets.contains(Set([a.id, b.id])),
+            "association must link the two owning drawers; got \(pairEndpointSets)")
+    }
 }

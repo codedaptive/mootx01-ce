@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.12.0
+version: 1.13.0
 status: active
-date: 2026-07-09
+date: 2026-07-12
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -957,19 +957,29 @@ retrieval always routes through CorpusKit per the kit-roles doctrine.
 
 ### VectorSimilaritySignal real VectorKit queries
 
-`VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:)`
+`VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:corpus:)`
 produces the production signal spec. The emit closure captures the
-`VectorStore` and on each five-minute fire:
+`VectorStore` (and the estate's `Corpus`, when one is registered) and on
+each five-minute fire:
 
 1. Calls `VectorStore.findByKeyword("", limit: 50)` to sample up to
-   50 candidate drawer IDs.
-2. For each candidate, retrieves its engram via
-   `VectorStore.getVector(drawerID:modelID:)`.
-3. Calls `VectorStore.findNearest(probe:modelID:limit:5)` to find
-   nearby rows.
-4. Deduplicates pairs and emits one `AssociateFrame` per pair whose
-   Hamming distance ≤ `proximityThreshold` (default 64 = 25% of 256
-   bits). Weight = 1 − distance / 256.
+   50 candidate item IDs.
+2. Lane 1 — drawer-keyed rows: for each candidate, retrieves its engram
+   via `VectorStore.getVector(itemID:modelID:)` under the caller's
+   `modelID` and calls `VectorStore.findNearest(probe:modelID:limit:5)`
+   to find nearby rows.
+3. Lane 2 — chunk-keyed corpus rows (when `corpus` is supplied): the same
+   probe sample is mined under the corpus's own modelID, and chunk hits
+   map back to their owning drawers via `Corpus.sourceIDs(forChunkIDs:)`;
+   same-drawer chunk pairs collapse. This is the ONLY vector-row
+   population a production estate holds (the estate lifecycle registers
+   `corpus.sharedVectorStore`; the encode drain keys every row by chunk
+   UUID) — without this lane the signal finds nothing on a real install.
+4. Deduplicates pairs across both lanes on DRAWER-pair keys and emits one
+   `AssociateFrame` per pair whose Hamming distance ≤
+   `proximityThreshold` (default 64 = 25% of 256 bits).
+   Weight = 1 − distance / 256. Every emitted frame carries drawer ids —
+   the `associate` verb rejects anything else (`drawerNotFound`).
 5. Always emits a scan-summary `DiagnosticReport` with the candidate
    pair count.
 
@@ -977,15 +987,20 @@ The sentinel-only `defaultSpec()` factory is removed. The production
 factory requires an injected `VectorStore` and `modelID`.
 
 `DefaultStandingSignals.registerDefaultStandingSignals(in:vectorStore:
-modelID:now:)` forwards the VectorStore to `VectorSimilaritySignal.spec`.
+modelID:now:)` forwards the VectorStore AND the estate's registered
+Corpus (`corpusKits[handle]`) to `VectorSimilaritySignal.spec`. The Rust
+governor does the same via `EstateCoordinator::corpus_for` →
+`default_standing_signal_specs(vector_store, model_id, corpus)`.
 
 **Import domain:** `VectorSimilaritySignal.swift` imports `VectorKit`.
 GLK may orchestrate VectorKit directly for non-RAG vector work per the
 kit-roles doctrine; row-similarity is Brain math, not RAG.
 
 **Rust parity:** `VectorSimilaritySignal::spec(vector_store, model_id,
-proximity_threshold)` mirrors the Swift factory. `default_standing_signal_specs`
-now accepts an `Arc<VectorStore>` and forwards it to the signal.
+proximity_threshold, corpus)` mirrors the Swift factory (the fourth
+parameter is `Option<Arc<Corpus>>` — `None` scans only the drawer-keyed
+lane). `default_standing_signal_specs` accepts an `Arc<VectorStore>` plus
+the optional corpus and forwards both to the signal.
 `ExternalCorpus::hybrid_recall` routes through `corpus_kit::Corpus::recall`.
 
 ## § RECALL_GRAPH — Graph cache + preference store cold-path signals
@@ -1712,6 +1727,27 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.13.0 -- 2026-07-12
+VectorSimilaritySignal corpus lane (both ports at parity): the signal spec
+gains an optional `corpus` parameter
+(`spec(vectorStore:modelID:proximityThreshold:corpus:)` /
+`spec(vector_store, model_id, proximity_threshold, corpus)`). When the
+estate has a registered Corpus, the five-minute pass ALSO mines the
+chunk-keyed corpus vector lane — the only row population production
+estates hold — mapping chunk kNN hits back to owning drawers via
+`Corpus.sourceIDs(forChunkIDs:)` / `source_ids_for_chunks` and collapsing
+same-drawer chunk pairs, so every `AssociateFrame` carries drawer ids.
+Previously the signal scanned only drawer-keyed rows under its modelID and
+silently emitted nothing on real installs (same defect class as the
+contradiction hunter's corpus-lane fix, ad0b215b).
+`registerDefaultStandingSignals` forwards `corpusKits[handle]`; the Rust
+governor forwards `EstateCoordinator::corpus_for` (promoted to `pub`)
+through `default_standing_signal_specs` (new third parameter). Tests:
+Swift `corpusLaneEmitsDrawerLevelAssociations` (asserts the persisted
+association endpoints are the owning drawers) ↔ Rust
+`corpus_lane_emits_drawer_level_associations` (asserts same-drawer chunk
+pairs collapse to exactly one cross-drawer associate).
 
 ### 1.12.0 -- 2026-07-09
 AUDIT-ALERT-RESTORE (Bob's option-1 ruling). `UnifiedAuditLog` gained
