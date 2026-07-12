@@ -168,7 +168,7 @@ enum LensTools {
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_contradiction",
-                description: "Reasoning lens: surface genuine contradictions — drawer pairs connected by a contradicts tunnel, and KG facts with conflicting objects for the same subject+predicate.",
+                description: "Reasoning lens: surface recorded contradictions — drawer pairs connected by a contradicts tunnel, and KG facts with conflicting objects for the same subject+predicate. Reports existing structural links only; it does NOT scan memory content for semantic conflicts (link conflicting memories with moot_link_memories kind=contradicts to record one).",
                 inputSchema: objectSchema(
                     properties: [
                         "estateID": estateIDSchema,
