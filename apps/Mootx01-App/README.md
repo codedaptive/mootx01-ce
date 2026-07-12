@@ -66,6 +66,14 @@ The managed-daemon panel (Engine tab, macOS) needs the real server binary; build
   offers only an audio `AppEntityContext`, which does not fit memory drawers.
 - The Share Sheet captures through the same one-host discipline: the extension spools to the
   app-group `ShareInbox`; the app drains via `CaptureSink` at launch/foreground/tick.
+- **Portable LAN MCP server** (`Sources/MootGateway/LANServer/`): the app hosts an `NWListener`
+  that serves its own estate to MCP clients on the LAN over credentialed HTTP/JSON-RPC, bridged
+  to the same in-process dispatcher (ARIA is still the server; the parity boundary is untouched).
+  Remote callers present a bearer token (`LANCredential`), are restricted to a read-only tool
+  allowlist, and see only public/exportable memory (`LANRequestGate`). The listener advertises
+  `_mootx01._tcp` (discoverable by `LANDaemonBrowser`) and, by default, serves only while the
+  device is on power (`PowerState`). On iOS it runs only while the app is active — "on power"
+  narrows when it serves, it does not grant background longevity.
 - Calendar and birthday miners are disabled by default. Only Mine Now may request consent;
   unattended macOS ticks and opportunistic iOS background refreshes use existing grants only.
 

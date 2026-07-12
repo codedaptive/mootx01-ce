@@ -14,6 +14,7 @@ import AppKit
 struct EngineView: View {
     @Bindable var model: AppModel
     @State private var discovery = DiscoveryController()
+    @State private var portable = PortableServerController()
     #if os(macOS)
     @State private var daemon = DaemonController()
     #endif
@@ -34,11 +35,78 @@ struct EngineView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 #endif
 
+                portableServerPanel
+
                 discoveryPanel
             }
             .padding(20)
         }
-        .onDisappear { discovery.stop() }
+        .onDisappear {
+            discovery.stop()
+            Task { await portable.stop() }
+        }
+    }
+
+    private var portableServerPanel: some View {
+        GroupBox(String(localized: "Portable LAN server (MCP)")) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(String(localized: "Serve this estate to MCP clients on your local network over a credentialed connection. Remote callers are read-only and see only public (exportable) memory — the same serve-out gate as callback recall. This device stays the one host; the server bridges to the same in-process engine."))
+                    .font(.caption).foregroundStyle(.secondary)
+
+                Toggle(String(localized: "Only serve while on power"), isOn: $portable.onPowerOnly)
+                    .font(.caption)
+                    .disabled(portable.isServing)
+
+                HStack {
+                    Button(portable.isServing
+                           ? String(localized: "Stop server")
+                           : String(localized: "Start server")) {
+                        Task { await portable.toggle() }
+                    }
+                    Spacer()
+                    Circle().fill(portable.listeningPort != nil ? Color.green : Color.secondary)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Text(portable.statusText).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+
+                if let port = portable.listeningPort {
+                    Text(String(localized: "Listening on port \(String(port)) · advertised as \(portable.serviceName)"))
+                        .font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(String(localized: "Bearer token")).font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text(portable.token).font(.caption2.monospaced())
+                            .lineLimit(1).truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button(String(localized: "Regenerate")) { portable.regenerateToken() }
+                            .font(.caption)
+                    }
+                    Text(String(localized: "Clients send this as “Authorization: Bearer <token>”. Regenerating invalidates every existing client."))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                if !portable.connectionLog.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "Recent connections")).font(.caption).foregroundStyle(.secondary)
+                        ForEach(Array(portable.connectionLog.prefix(6).enumerated()), id: \.offset) { _, line in
+                            Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                #if os(iOS)
+                Label {
+                    Text(String(localized: "On iPhone/iPad the server runs only while the app is active — “on power” narrows when it serves, it does not keep it alive in the background."))
+                } icon: { Image(systemName: "bolt.badge.clock") }
+                .font(.caption2).foregroundStyle(.secondary)
+                #endif
+            }
+            .padding(6)
+        }
     }
 
     private var discoveryPanel: some View {

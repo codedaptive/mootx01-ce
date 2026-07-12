@@ -85,7 +85,7 @@ targets:
               - mootx01
         # A2 discovery: browse for LAN resident daemons. Both keys are
         # required for NWBrowser — the OS denies undeclared service types.
-        NSLocalNetworkUsageDescription: "MOOTx01 browses your local network to find a MOOT resident daemon to connect to."
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
         NSBonjourServices:
           - _mootx01._tcp
 
@@ -147,7 +147,7 @@ targets:
               - mootx01
         # A2 discovery: browse for LAN resident daemons. Both keys are
         # required for NWBrowser — iOS denies undeclared service types.
-        NSLocalNetworkUsageDescription: "MOOTx01 browses your local network to find a MOOT resident daemon to connect to."
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
         NSBonjourServices:
           - _mootx01._tcp
 
