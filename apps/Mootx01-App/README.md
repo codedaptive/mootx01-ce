@@ -70,7 +70,10 @@ The managed-daemon panel (Engine tab, macOS) needs the real server binary; build
   that serves its own estate to MCP clients on the LAN over credentialed HTTP/JSON-RPC, bridged
   to the same in-process dispatcher (ARIA is still the server; the parity boundary is untouched).
   Remote callers present a bearer token (`LANCredential`), are restricted to a read-only tool
-  allowlist, and see only public/exportable memory (`LANRequestGate`). The listener advertises
+  allowlist, and see only public/exportable memory (`LANRequestGate`). The token is bound to the
+  device owner: it lives behind a `.userPresence` Keychain item (`BiometricLANCredentialStore`),
+  so starting the server or revealing the token triggers the device unlock system (Face ID /
+  Touch ID / passcode) — the credential is validated against the phone's owner, not just compared. The listener advertises
   `_mootx01._tcp` (discoverable by `LANDaemonBrowser`) and, by default, serves only while the
   device is on power (`PowerState`). On iOS it runs only while the app is active — "on power"
   narrows when it serves, it does not grant background longevity.

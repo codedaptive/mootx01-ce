@@ -14,13 +14,21 @@
       SQLCipher amalgamation stat/fstat/lstat on the estate DB and sidecars;
       QueueKit.cleanStaleTmpFiles reads .modificationDate of queue tmp files;
       AriaMCP ToolDispatch.deriveBuildSerial reads the bundled executable's
-      own mtime.
+      own mtime; ShareInboxSpool/WidgetSnapshotStore write to the app group.
   - DiskSpace (E174.1 — check space before writing):
       SQLCipher amalgamation statfs/fstatvfs before/while writing the estate.
+  - UserDefaults (CA92.1 — access info only accessible to the app itself):
+      MinerRunLoop / MinerSourceConfig / MenuBarPolicy store per-source
+      mining settings (enabled, cadence, lastRun) and app UI state in the
+      app's own defaults; no App Group defaults are shared with third parties.
 
-  No data is collected (nothing leaves the device: the estate is local,
-  transports are loopback-only), and no tracking occurs, so
-  NSPrivacyCollectedDataTypes and NSPrivacyTrackingDomains are empty.
+  Data handling: the estate is the user's own, stored locally (SQLCipher).
+  No data is collected by the developer and no tracking occurs, so
+  NSPrivacyCollectedDataTypes and NSPrivacyTrackingDomains are empty. The
+  optional portable LAN server serves the user's own memory to the user's
+  own MCP clients on their local network under an owner-authenticated,
+  read-only, public-only gate — this is user-directed local sharing, not
+  developer data collection, so it does not populate CollectedDataTypes.
 -->
 <plist version="1.0">
 <dict>
@@ -46,6 +54,14 @@
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>E174.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
 			</array>
 		</dict>
 	</array>

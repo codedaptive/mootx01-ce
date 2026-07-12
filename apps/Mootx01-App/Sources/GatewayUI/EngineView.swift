@@ -78,14 +78,22 @@ struct EngineView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(String(localized: "Bearer token")).font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        Text(portable.token).font(.caption2.monospaced())
-                            .lineLimit(1).truncationMode(.middle)
-                            .textSelection(.enabled)
-                        Spacer()
-                        Button(String(localized: "Regenerate")) { portable.regenerateToken() }
-                            .font(.caption)
+                        if portable.token.isEmpty {
+                            Text(String(localized: "•••• (authenticate to reveal)"))
+                                .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            Spacer()
+                            Button(String(localized: "Reveal")) { Task { await portable.revealToken() } }
+                                .font(.caption)
+                        } else {
+                            Text(portable.token).font(.caption2.monospaced())
+                                .lineLimit(1).truncationMode(.middle)
+                                .textSelection(.enabled)
+                            Spacer()
+                            Button(String(localized: "Regenerate")) { portable.regenerateToken() }
+                                .font(.caption)
+                        }
                     }
-                    Text(String(localized: "Clients send this as “Authorization: Bearer <token>”. Regenerating invalidates every existing client."))
+                    Text(String(localized: "The token lives behind the device unlock system (Face ID / Touch ID / passcode); starting the server and revealing the token both require it. Clients send it as “Authorization: Bearer <token>”. Regenerating invalidates every existing client."))
                         .font(.caption2).foregroundStyle(.secondary)
                 }
 

@@ -26,10 +26,15 @@ public final class PortableServerController {
 
     private var server: MootLANServer?
     private let power: PowerConditionSource = PlatformPowerSource()
+    /// Owner-presence store: reading the token triggers the device unlock
+    /// system (Face ID / Touch ID / passcode) — Bob's credential model.
+    private let credentials = BiometricLANCredentialStore()
     private var pollTask: Task<Void, Never>?
 
     public init() {
-        token = (try? LANCredentialStore.groupStore().loadOrCreate().token) ?? ""
+        // Deliberately no token read here: init runs when the tab appears,
+        // and reading the biometric-gated item would prompt the owner just
+        // for opening the Engine tab. Reveal is an explicit action.
     }
 
     public func toggle() async {
@@ -37,22 +42,29 @@ public final class PortableServerController {
     }
 
     public func start() async {
-        guard let credential = try? LANCredentialStore.groupStore().loadOrCreate() else {
-            statusText = String(localized: "server.status.noGroup", defaultValue: "app-group container unavailable")
-            return
-        }
         guard let bridge = try? await GatewayRuntime.shared.bridge() else {
             statusText = String(localized: "server.status.noBridge", defaultValue: "estate not ready")
             return
         }
         let server = MootLANServer(
-            bridge: bridge, credential: credential, power: power,
+            bridge: bridge, credentialProvider: credentials, power: power,
             config: .init(serviceName: serviceName, onPowerOnly: onPowerOnly))
         self.server = server
         await server.start()
         isServing = true
         await refresh()
         startPowerPolling()
+    }
+
+    /// Explicit owner action: authenticate and show the token (for pairing
+    /// a client). The unlock prompt IS the validation.
+    public func revealToken() async {
+        do {
+            token = try await credentials.resolve().token
+        } catch {
+            statusText = String(localized: "server.status.authFailed",
+                                defaultValue: "owner authentication failed")
+        }
     }
 
     public func stop() async {
@@ -65,8 +77,12 @@ public final class PortableServerController {
     }
 
     public func regenerateToken() {
-        guard let store = try? LANCredentialStore.groupStore() else { return }
-        token = store.regenerate().token
+        guard let rotated = try? credentials.regenerate() else {
+            statusText = String(localized: "server.status.authFailed",
+                                defaultValue: "owner authentication failed")
+            return
+        }
+        token = rotated.token
         // A running server holds the old credential; restart to adopt the new
         // one. Surfacing this to the user beats silently serving a stale token.
         if isServing {
@@ -99,6 +115,10 @@ public final class PortableServerController {
         case .listening(let port):
             listeningPort = port
             statusText = String(localized: "server.status.listening", defaultValue: "listening")
+        case .denied(let reason):
+            statusText = String(localized: "server.status.denied",
+                                defaultValue: "owner authentication required: \(reason)")
+            listeningPort = nil
         case .failed(let reason):
             statusText = String(localized: "server.status.failed", defaultValue: "failed: \(reason)")
             listeningPort = nil

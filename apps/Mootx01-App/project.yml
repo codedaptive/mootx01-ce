@@ -38,6 +38,7 @@ targets:
           - PrivacyInfo.xcprivacy
       - path: App/PrivacyInfo.xcprivacy
         buildPhase: resources
+      - path: Assets.xcassets
     dependencies:
       - package: Mootx01
         product: GatewayUI
@@ -50,6 +51,7 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.macos
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_NAME: Mootx01
         MARKETING_VERSION: "1.0.18"
         CURRENT_PROJECT_VERSION: "1"
@@ -83,9 +85,16 @@ targets:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
               - mootx01
+        # Export compliance: the app uses only exempt encryption — SQLCipher
+        # (data protection), CryptoKit (owner-credential hashing), and HTTPS/
+        # TLS via the OS. No proprietary or non-standard cryptography ships,
+        # so ITSAppUsesNonExemptEncryption is false. This lets App Store
+        # Connect accept uploads without the per-build compliance prompt.
+        ITSAppUsesNonExemptEncryption: false
         # A2 discovery: browse for LAN resident daemons. Both keys are
         # required for NWBrowser — the OS denies undeclared service types.
         NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
         NSBonjourServices:
           - _mootx01._tcp
 
@@ -100,6 +109,7 @@ targets:
           - PrivacyInfo.xcprivacy
       - path: App/PrivacyInfo.xcprivacy
         buildPhase: resources
+      - path: Assets.xcassets
     dependencies:
       - package: Mootx01
         product: GatewayUI
@@ -112,6 +122,7 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_NAME: Mootx01
         MARKETING_VERSION: "1.0.18"
         CURRENT_PROJECT_VERSION: "1"
@@ -145,9 +156,13 @@ targets:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
               - mootx01
+        # Export compliance: only exempt encryption ships (SQLCipher,
+        # CryptoKit, OS TLS) — see the macOS target for the rationale.
+        ITSAppUsesNonExemptEncryption: false
         # A2 discovery: browse for LAN resident daemons. Both keys are
         # required for NWBrowser — iOS denies undeclared service types.
         NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
         NSBonjourServices:
           - _mootx01._tcp
 

@@ -1,7 +1,33 @@
 import Testing
 import Foundation
 import AriaMCP
+import MootIntentKit
 @testable import MootGateway
+
+// MARK: - Owner-presence credential provider (test doubles)
+
+/// Counts resolutions so tests can assert the owner was NOT prompted when
+/// serving is impossible (e.g. on battery under on-power-only).
+private actor CountingCredentialProvider: LANCredentialProviding {
+    let credential: LANCredential
+    let shouldThrow: Bool
+    private var count = 0
+
+    init(credential: LANCredential = .generate(), shouldThrow: Bool = false) {
+        self.credential = credential
+        self.shouldThrow = shouldThrow
+    }
+
+    func resolve() async throws -> LANCredential {
+        count += 1
+        if shouldThrow {
+            throw LANCredentialError.ownerAuthenticationFailed("mock denied")
+        }
+        return credential
+    }
+
+    func resolveCount() async -> Int { count }
+}
 
 // MARK: - Power gate
 
@@ -168,5 +194,45 @@ struct LANRequestGateTests {
         #expect(!LANRequestGate.isRemotelyPermitted(call("moot_reindex")), "no remote heavy verbs")
         #expect(LANRequestGate.isRemotelyPermitted(JSONRPCRequest(id: nil, method: "tools/list", params: nil)))
         #expect(!LANRequestGate.isRemotelyPermitted(JSONRPCRequest(id: nil, method: "resources/read", params: nil)))
+    }
+}
+
+// MARK: - Server owner-presence gating
+
+@Suite("MootLANServer — owner-presence and power gating")
+struct MootLANServerGateTests {
+
+    @Test("on battery under on-power-only: waits for power AND never prompts the owner")
+    func batteryDefersWithoutPrompt() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let provider = CountingCredentialProvider()
+        let server = MootLANServer(
+            bridge: bridge, credentialProvider: provider,
+            power: FixedPowerSource(.onBattery),
+            config: .init(onPowerOnly: true))
+
+        await server.start()
+
+        #expect(await server.currentState() == .waitingForPower)
+        #expect(await provider.resolveCount() == 0,
+            "the owner must NOT be asked to unlock for a server that cannot serve on battery")
+    }
+
+    @Test("on power but owner authentication fails: denied, not listening")
+    func ownerDenialBlocksServing() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        let provider = CountingCredentialProvider(shouldThrow: true)
+        let server = MootLANServer(
+            bridge: bridge, credentialProvider: provider,
+            power: FixedPowerSource(.onPower),
+            config: .init(onPowerOnly: true))
+
+        await server.start()
+
+        guard case .denied = await server.currentState() else {
+            Issue.record("expected .denied when the owner does not authenticate")
+            return
+        }
+        #expect(await provider.resolveCount() == 1, "resolution was attempted exactly once")
     }
 }

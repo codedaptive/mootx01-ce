@@ -40,24 +40,28 @@ public actor MootLANServer {
     public enum ServerState: Sendable, Equatable {
         case stopped
         case waitingForPower           // on-power-only, currently on battery
+        case denied(String)            // owner authentication failed/canceled
         case listening(port: UInt16)
         case failed(String)
     }
 
     private let bridge: MootBridge
-    private let credential: LANCredential
+    private let credentialProvider: any LANCredentialProviding
     private let power: PowerConditionSource
     private var config: Config
     private let log = Logger(subsystem: "com.codedaptive.mootx01", category: "lan-server")
 
+    /// Resolved at start() via the owner-presence prompt; held only while
+    /// the server is up so every serve session re-validates the owner.
+    private var credential: LANCredential?
     private var listener: NWListener?
     private(set) var state: ServerState = .stopped
     private var connectionLog: [String] = []
 
-    public init(bridge: MootBridge, credential: LANCredential,
+    public init(bridge: MootBridge, credentialProvider: any LANCredentialProviding,
                 power: PowerConditionSource, config: Config) {
         self.bridge = bridge
-        self.credential = credential
+        self.credentialProvider = credentialProvider
         self.power = power
         self.config = config
     }
@@ -66,23 +70,40 @@ public actor MootLANServer {
     public func recentConnections() -> [String] { connectionLog }
 
     /// Start serving if the power gate allows; otherwise wait for power.
-    public func start() {
+    /// Order matters: the power precheck runs BEFORE credential resolution,
+    /// so the owner is never prompted to unlock for a server that cannot
+    /// serve anyway. Resolution triggers the device unlock system
+    /// (Face ID / Touch ID / passcode) — Bob's owner-presence validation.
+    public func start() async {
         if config.onPowerOnly && !power.current().allowsServing {
             state = .waitingForPower
             log.info("LAN server deferred: on battery, on-power-only is set")
+            return
+        }
+        do {
+            credential = try await credentialProvider.resolve()
+        } catch {
+            state = .denied("\(error)")
+            log.error("LAN server denied: \(String(describing: error), privacy: .public)")
             return
         }
         startListening()
     }
 
     /// Re-evaluate the power gate (call when the power condition changes):
-    /// start if newly on power, stop if newly on battery.
-    public func powerConditionChanged() {
+    /// start if newly on power, stop if newly on battery. A resume with no
+    /// held credential re-runs start() — i.e. the owner re-authenticates;
+    /// power loss does not become a way to inherit a stale authorization.
+    public func powerConditionChanged() async {
         guard config.onPowerOnly else { return }
         let serving = listener != nil
         let allowed = power.current().allowsServing
-        if allowed && !serving && state != .stopped {
-            startListening()
+        if allowed && !serving && state == .waitingForPower {
+            if credential != nil {
+                startListening()
+            } else {
+                await start()
+            }
         } else if !allowed && serving {
             log.info("LAN server pausing: no longer on power")
             teardownListener()
@@ -92,6 +113,7 @@ public actor MootLANServer {
 
     public func stop() {
         teardownListener()
+        credential = nil   // next start re-validates the owner
         state = .stopped
     }
 
@@ -166,6 +188,11 @@ public actor MootLANServer {
     /// false when the request is incomplete and more bytes are needed.
     private func tryRespond(_ connection: NWConnection, accumulated: Data) async -> Bool {
         guard let parsed = LANRequestGate.parse(accumulated) else { return false }
+        guard let credential else {
+            // No owner-validated credential in hand — refuse, never guess.
+            write(connection, status: 503, jsonBody: errorBody("Server has no validated credential"))
+            return true
+        }
 
         let admission = LANRequestGate.admit(parsed, credential: credential)
         switch admission {
@@ -244,6 +271,7 @@ public actor MootLANServer {
         case 401: return "Unauthorized"
         case 403: return "Forbidden"
         case 405: return "Method Not Allowed"
+        case 503: return "Service Unavailable"
         default: return "Error"
         }
     }
