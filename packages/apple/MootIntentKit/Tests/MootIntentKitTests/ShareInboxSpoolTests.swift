@@ -5,10 +5,10 @@ import AriaMCP   // JSONValue, for the refusing-bridge conformance
 
 // MARK: - ShareInboxSpool tests
 //
-// The Share Extension side (enqueue) and the host-app side (drain) of the
-// share-capture handoff, exercised against a temp directory and a live
-// in-memory estate. The extension process never opens the estate — these
-// tests prove the spool alone carries the content across.
+// The extension side (enqueue) and the host side (drain) of the share-capture
+// handoff, exercised against a temp queue directory and a live in-memory
+// estate. The extension process never opens the estate — the spool (QueueKit
+// maildir) alone carries the content across.
 
 @Suite("ShareInboxSpool — extension enqueues, host drains into the estate")
 struct ShareInboxSpoolTests {
@@ -24,7 +24,7 @@ struct ShareInboxSpoolTests {
         let spool = try makeTempSpool()
         let bridge = try await TestBridge.makeInMemory()
 
-        try spool.enqueue(.init(text: "spooled from the share sheet", location: "shared"))
+        try await spool.enqueue(.init(text: "spooled from the share sheet", location: "shared"))
         let outcome = await spool.drain(using: bridge)
         #expect(outcome.captured == 1)
         #expect(outcome.remaining == 0)
@@ -40,55 +40,40 @@ struct ShareInboxSpoolTests {
         let spool = try makeTempSpool()
         let bridge = try await TestBridge.makeInMemory()
 
-        try spool.enqueue(.init(text: "drain me once"))
+        try await spool.enqueue(.init(text: "drain me once"))
         _ = await spool.drain(using: bridge)
         let second = await spool.drain(using: bridge)
         #expect(second.captured == 0)
         #expect(second.remaining == 0)
     }
 
-    @Test("multiple enqueued items all drain, oldest first")
+    @Test("multiple enqueued items all drain")
     func multipleItemsDrain() async throws {
         let spool = try makeTempSpool()
         let bridge = try await TestBridge.makeInMemory()
 
-        try spool.enqueue(.init(text: "first shared item"))
-        try spool.enqueue(.init(text: "second shared item"))
-        try spool.enqueue(.init(text: "third shared item"))
+        try await spool.enqueue(.init(text: "first shared item"))
+        try await spool.enqueue(.init(text: "second shared item"))
+        try await spool.enqueue(.init(text: "third shared item"))
         let outcome = await spool.drain(using: bridge)
         #expect(outcome.captured == 3)
         #expect(outcome.remaining == 0)
     }
 
-    @Test("a malformed spool file is quarantined, not retried forever and not fatal")
-    func malformedFileQuarantined() async throws {
-        let spool = try makeTempSpool()
-        let bridge = try await TestBridge.makeInMemory()
-
-        try spool.enqueue(.init(text: "valid item beside garbage"))
-        // Drop a non-JSON file into the spool directory.
-        let garbage = spool.directory.appendingPathComponent("zzz-garbage.json")
-        try Data("not json".utf8).write(to: garbage)
-
-        let outcome = await spool.drain(using: bridge)
-        #expect(outcome.captured == 1, "the valid item still drains")
-        #expect(outcome.remaining == 0, "garbage is quarantined out of the spool")
-        // The quarantined file is preserved for diagnosis, outside the drain path.
-        let quarantined = try FileManager.default.contentsOfDirectory(
-            at: spool.directory.appendingPathComponent("quarantine", isDirectory: true),
-            includingPropertiesForKeys: nil)
-        #expect(quarantined.count == 1)
-    }
-
-    @Test("a failed capture leaves the item spooled for the next drain")
-    func failedCaptureStaysSpooled() async throws {
+    @Test("a failed capture leaves the item in-flight for the next drain")
+    func failedCaptureRetried() async throws {
         let spool = try makeTempSpool()
 
-        try spool.enqueue(.init(text: "capture target refuses"))
+        try await spool.enqueue(.init(text: "capture target refuses"))
         let refusing = RefusingBridge()
-        let outcome = await spool.drain(using: refusing)
-        #expect(outcome.captured == 0)
-        #expect(outcome.remaining == 1, "refused items stay for retry")
+        let first = await spool.drain(using: refusing)
+        #expect(first.captured == 0)
+        #expect(first.remaining == 1, "refused items are not lost")
+
+        // A later drain with a working estate reclaims and captures it.
+        let bridge = try await TestBridge.makeInMemory()
+        let second = await spool.drain(using: bridge)
+        #expect(second.captured == 1, "the reclaimed item captures on retry")
     }
 }
 

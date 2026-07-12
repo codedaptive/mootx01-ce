@@ -56,7 +56,7 @@ final class ShareViewController: PlatformViewController {
         }
         do {
             let spool = try ShareInboxSpool.groupSpool()
-            try spool.enqueue(.init(text: text, location: "shared"))
+            try await spool.enqueue(.init(text: text, location: "shared"))
             extensionContext?.completeRequest(returningItems: nil)
         } catch {
             cancel(reason: "\(error)")
