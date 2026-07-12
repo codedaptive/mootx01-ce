@@ -16,6 +16,14 @@ import MootIntentKit
 // tests inject a mock. The plaintext app-group LANCredentialStore remains
 // only as the explicit fallback for environments with no Keychain UI
 // (headless tests); production resolution goes through the biometric store.
+//
+// Why not PersistenceKit.KeychainKeyStore (validated 2026-07-11): that store
+// (MootBridge uses it for the SQLCipher estate key) has access-group support
+// and is the right generic keychain wrapper, but it — and every keychain
+// store in the tree, incl. LocusKit.EstateIdentityKeyStore — is SILENT
+// after-first-unlock. Bob's ruling requires the `.userPresence` gate that no
+// kit store provides, so this biometric variant is genuinely new, not a
+// reinvention of KeychainKeyStore.
 
 /// Resolves the LAN credential, performing whatever owner validation the
 /// implementation requires. Throwing means the owner did not authenticate.

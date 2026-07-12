@@ -23,6 +23,20 @@ import OSLog
 // onPower. A transition to battery tears the listener down. Honest iOS truth:
 // the listener also requires the app to be alive — "on power" narrows when it
 // serves, it does not buy background longevity.
+//
+// Why NWListener and not the kit's LoopbackHTTP (validated 2026-07-11): the
+// kit's HTTP transport is `AriaMCP.HTTPServer` over `LoopbackHTTP.POSIXSocket`,
+// which is hard-pinned to `INADDR_LOOPBACK` ("never INADDR_ANY") BY SECURITY
+// DESIGN and whose `HTTPRequest.read`/`HTTPResponse.send` are fd-coupled
+// (they recv/send on a POSIX fd). This server is deliberately OFF-loopback
+// (LAN bind + `_mootx01._tcp` Bonjour advertisement + iOS, where app-sandbox
+// listen sockets favour NWListener), driven by NWConnection which yields
+// `Data`, not an fd. So the loopback/fd primitives cannot compose here; only
+// the transport-neutral pieces are reused — `ARIA_MCPDispatcher.handle` (the
+// dispatch seam) and `JSONRPCRequest.decode` / `JSONRPCResponse` (the wire
+// types, via LANRequestGate). The LAN-bind + auth posture extends the CE
+// transport off loopback — see the decision record annotating
+// ADR-LOOPBACKHTTP-001.
 
 public actor MootLANServer {
 

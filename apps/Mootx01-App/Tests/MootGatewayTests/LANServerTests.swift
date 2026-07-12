@@ -166,7 +166,7 @@ struct LANRequestGateTests {
     func exportPostureForced() {
         let body = #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"moot_memory_search","arguments":{"query":"x","filter":"unconfirmed"}}}"#
         let value = try! JSONValue.parse(Data(body.utf8))
-        let rpc = try! #require(LANRequestGate.decodeJSONRPCRequest(value))
+        let rpc = try! #require(JSONRPCRequest.decode(value))
         let posted = LANRequestGate.enforceRemoteExportPosture(rpc)
         let filter = posted.params?.objectValue?["arguments"]?.objectValue?["filter"]?.stringValue
         #expect(filter == "exportable", "remote caller cannot escape the public-only gate")
@@ -175,7 +175,7 @@ struct LANRequestGateTests {
     @Test("non-recall calls pass through export posture unchanged")
     func exportPostureIgnoresNonRecall() {
         let body = #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
-        let rpc = try! #require(LANRequestGate.decodeJSONRPCRequest(try! JSONValue.parse(Data(body.utf8))))
+        let rpc = try! #require(JSONRPCRequest.decode(try! JSONValue.parse(Data(body.utf8))))
         #expect(LANRequestGate.enforceRemoteExportPosture(rpc).method == "tools/list")
     }
 

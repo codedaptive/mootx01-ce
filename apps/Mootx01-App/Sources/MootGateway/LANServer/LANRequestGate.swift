@@ -91,7 +91,7 @@ public enum LANRequestGate {
             return .rejected(status: 401, reason: "Invalid bearer token")
         }
         guard let value = try? JSONValue.parse(request.body),
-              let rpc = decodeJSONRPCRequest(value) else {
+              let rpc = JSONRPCRequest.decode(value) else {
             return .rejected(status: 400, reason: "Body is not a valid JSON-RPC 2.0 request")
         }
         return .authorized(rpc)
@@ -138,13 +138,5 @@ public enum LANRequestGate {
         default:
             return false
         }
-    }
-
-    /// Decode a JSON-RPC request from a parsed JSONValue (the client's POST body).
-    static func decodeJSONRPCRequest(_ value: JSONValue) -> JSONRPCRequest? {
-        guard let object = value.objectValue,
-              object["jsonrpc"]?.stringValue == "2.0",
-              let method = object["method"]?.stringValue else { return nil }
-        return JSONRPCRequest(id: object["id"], method: method, params: object["params"])
     }
 }
