@@ -53,10 +53,9 @@ The managed-daemon panel (Engine tab, macOS) needs the real server binary; build
   and one-shot-authorized capture tools. Recalled text is explicitly bounded as untrusted data.
 - The Intelligence tab uses `SystemLanguageModel` today; the session factory accepts any
   OS-27 `LanguageModel`, including compatible PCC or Core AI providers.
-- `MootEmbeddingProvider` (MootFoundationModelsKit) is the replaceable on-device embedding
-  seam: `ContextualEmbeddingProvider` (NLContextualEmbedding, ANE) is live; a CoreAI
-  `.aimodel` provider plugs in once a real model asset exists. Providers produce vectors
-  only — persistence and the estate's vector lane remain engine-side (Swift/Rust parity).
+- The estate's embedding seam is `VectorKit.EmbeddingProvider` (with a Rust parity twin); a
+  real on-device Apple provider (NLContextualEmbedding / CoreAI `.aimodel`) belongs there as a
+  conformer authored in the substrate lane, not as an app-side type.
 - Core Spotlight donation is a derived projection, never canonical storage. Only explicitly
   public, normal/elevated memories are indexed; private, restricted, and secret content is
   excluded. `SpotlightSearchTool` is enabled on Apple Silicon.
