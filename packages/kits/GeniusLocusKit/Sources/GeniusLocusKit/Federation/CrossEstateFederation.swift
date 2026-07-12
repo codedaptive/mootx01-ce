@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OSLog
 import LocusKit
@@ -110,6 +111,14 @@ public extension GeniusLocusKit {
     ///      aged out of all access and throws `.custodyRefused`. Otherwise the
     ///      read proceeds and step 8 gates content with the attenuated level.
     ///    - Any unrecognized custody mode: fail-closed, throw `.custodyRefused`.
+    /// 4.5. Grant signature verification (D9 hardening): verify the grant's
+    ///    Ed25519 signature against the GRANTER's registered identity public
+    ///    key. Trust derives from the estate registry, not from any field in
+    ///    the grant blob (same registered-key trust anchor as ConvergenceKit
+    ///    `FederationSyncEngine.pull()`, F-3). Migration posture: an empty
+    ///    signature is allowed with a logged warning (local I-13 path, legacy
+    ///    pre-signing grants carry no cross-estate exposure). A non-empty
+    ///    signature that fails verification throws `.invalidGrantSignature`.
     /// 6. InferenceRemainingBudget gate: read the current budget for the
     ///    authorizing grant from the store (re-read to capture concurrent
     ///    debits). If budget <= 0, throw `.budgetExhausted`. Otherwise
@@ -193,6 +202,64 @@ public extension GeniusLocusKit {
                 requester: requester.estateUUID,
                 reason: .grantExpired
             )
+        }
+
+        // 4.5. Federation-auth: grant signature verification (D9 hardening,
+        // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+        //
+        // Verify the grant's Ed25519 signature against the GRANTER's registered
+        // identity public key. Trust derives from the estate registry (the key
+        // held in-memory by sourceEstate since Estate.open) — NOT from any field
+        // in the grant blob — the same registered-key trust anchor as the F-3
+        // pull() hardening in ConvergenceKit FederationSyncEngine.
+        //
+        // Migration posture (D9): federatedRecall is strictly local in-process
+        // (I-13 invariant — both estates open in the same kit instance, no
+        // network crossing). Grants issued before the Ed25519 signing scheme was
+        // introduced carry an empty signature. An empty signature is allowed with
+        // a logged warning because local grants carry no cross-estate exposure.
+        // A non-empty signature that fails verification against the granter's
+        // registered key is always rejected.
+        if authorizingGrant.signature.isEmpty {
+            Self.federationLog.warning("""
+                federation-auth: grant \(authorizingGrant.id) carries no signature \
+                — legacy pre-signing grant; allowed on local I-13 path \
+                (no cross-estate exposure)
+                """)
+        } else {
+            let granterPublicKey = try await estateSigningPublicKey(for: sourceEstate)
+            // Signatures are always produced by issueGrant with
+            // inferenceRemainingBudget: 1.0 (the full initial allotment).
+            // The GrantStore's debitBudget mutates the stored grant's
+            // inferenceRemainingBudget in place, so authorizingGrant.signingPayload
+            // would encode the current debited budget — different bytes from
+            // what was originally signed. Reconstruct the canonical payload
+            // with the initial budget to match the signing-time bytes exactly.
+            let payload = Grant.canonicalPayload(
+                id: authorizingGrant.id,
+                granteeEstateID: authorizingGrant.granteeEstateID,
+                scope: authorizingGrant.scope,
+                contentLevel: authorizingGrant.contentLevel,
+                lifetime: authorizingGrant.lifetime,
+                custodyMode: authorizingGrant.custodyMode,
+                reSharePermission: authorizingGrant.reSharePermission,
+                inferenceRemainingBudget: 1.0,
+                issuedAt: authorizingGrant.issuedAt
+            )
+            guard let publicKey = try? Curve25519.Signing.PublicKey(
+                rawRepresentation: granterPublicKey
+            ), publicKey.isValidSignature(authorizingGrant.signature, for: payload) else {
+                Self.federationLog.error("""
+                    federation-auth: grant \(authorizingGrant.id) signature \
+                    verification failed against granter \(source.estateUUID) \
+                    registered identity key — rejected
+                    """)
+                throw GeniusLocusKitError.crossEstateReadRefused(
+                    source: source.estateUUID,
+                    requester: requester.estateUUID,
+                    reason: .invalidGrantSignature
+                )
+            }
         }
 
         // 5. CustodyMode gate. Each mode's recall-path semantics:

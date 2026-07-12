@@ -69,6 +69,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # C-1 rationale: crypto hygiene companion to the approved aes-gcm crate.
 # See DECISION_RUST_AEAD_CRATE_2026-06-05.
 zeroize = "1"
+# D9 grant signature verification: decode the source estate's base64-encoded
+# Ed25519 public key from the manifest before calling convergence_kit::verify_signature.
+# Version matches the base64 = "0.22" used by locus-kit (same transitive dep, made
+# explicit here per Rust best practice — don't rely on transitive deps in own code).
+base64 = "0.22"
 # IntellectusLib is the zero-dependency telemetry floor (GLK_ROLLUPS_001).
 # GeniusLocusKit emits per-estate rollup metrics at open/close/provision/quiesce/drain
 # and at the verb-error boundary. Off-path cost: single AtomicBool::load(Acquire) +
@@ -136,6 +141,14 @@ locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
 # only; not linked into the production binary. Layering: GLK → corpus-kit-providers
 # is acyclic — providers depend on corpus-kit core, not on GLK.
 corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
+# FED-SIG-01 grant-signature tests: LocalIdentity::from_secret / ::sign /
+# ::public_key_bytes to build and verify Ed25519-signed grants for D9 tests.
+# convergence-kit is already a production dep; the dev-dep makes it directly
+# nameable in tests/ without requiring the caller to route through
+# genius_locus_kit's public surface. No layering inversion.
+convergence-kit = { path = "../../ConvergenceKit/rust" }
+# FED-SIG-01 tests: base64 decode in the test harness (matches production dep version).
+base64 = "0.22"
 
 # These integration-test binaries call EstateCoordinator seams gated behind
 # `#[cfg(any(test, feature = "test-seams"))]`: recall_scored_parity uses

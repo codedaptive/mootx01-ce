@@ -118,4 +118,21 @@ public enum FederatedReadRefusalReason: Sendable, Equatable {
     ///     to 0 (only reachable with a floor of 0) — the capability has aged
     ///     out of all access. A grant with a positive floor never raises this.
     case custodyRefused
+
+    /// The grant's Ed25519 signature does not verify against the GRANTER's
+    /// registered identity public key (D9 hardening,
+    /// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+    ///
+    /// Trust derives from the estate registry (the key material stored at
+    /// `Estate.open` time), not from any field in the grant blob itself —
+    /// the same registered-key trust anchor as the F-3 `pull()` hardening
+    /// in ConvergenceKit `FederationSyncEngine`.
+    ///
+    /// Migration posture: `federatedRecall` is strictly local in-process
+    /// (I-13 invariant — both estates open in the same kit instance, no
+    /// network crossing). An empty signature is allowed with a logged
+    /// warning because local grants that predate the signing scheme carry
+    /// no cross-estate exposure. A non-empty signature that fails
+    /// verification is always rejected, regardless of path.
+    case invalidGrantSignature
 }

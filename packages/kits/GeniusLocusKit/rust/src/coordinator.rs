@@ -218,6 +218,19 @@ pub enum FederatedReadRefusalReason {
     ///   - `TimeAging` (mode 4): effective content level decayed to 0 (floor 0).
     CustodyRefused,
 
+    /// The grant's Ed25519 signature does not verify against the GRANTER's
+    /// registered identity public key (D9 hardening,
+    /// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+    ///
+    /// Trust derives from the estate registry (the manifest-persisted public key),
+    /// not from any field in the grant blob — same registered-key trust anchor
+    /// as the F-3 `pull()` hardening in ConvergenceKit `FederationSyncEngine`.
+    ///
+    /// Migration posture: `federated_recall` is local in-process (I-13 invariant).
+    /// An empty signature is allowed with a logged warning; a non-empty signature
+    /// that fails verification is always rejected. Mirrors Swift
+    /// `FederatedReadRefusalReason.invalidGrantSignature`.
+    InvalidGrantSignature,
 }
 
 /// The outcome of a successful grant-gated cross-estate federated read.
@@ -4815,6 +4828,60 @@ impl EstateCoordinator {
         // mode except time-aging this is the grant's persisted content_level;
         // mode 4 attenuates it by its decay policy in the custody gate below.
         let mut effective_content_level = authorizing_grant.content_level;
+
+        // 4.5. Federation-auth: grant signature verification (D9 hardening,
+        // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+        //
+        // Verify the grant's Ed25519 signature against the GRANTER's registered
+        // identity public key. Trust derives from the registry — the manifest-persisted
+        // public key for the source estate — NOT from any field in the grant blob.
+        // Same registered-key trust anchor as the F-3 pull() hardening in
+        // ConvergenceKit FederationSyncEngine.
+        //
+        // Migration posture (D9): this path is strictly local in-process (I-13
+        // invariant — no network crossing, both estates open in the same coordinator).
+        // An empty signature is allowed with a logged warning because local grants
+        // that predate the signing scheme carry no cross-estate exposure. A non-empty
+        // signature that fails verification against the granter's registered key is
+        // always rejected. Mirrors Swift CrossEstateFederation step 4.5.
+        if !authorizing_grant.signature.is_empty() {
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD;
+            // Retrieve the source estate's registered public key from its manifest.
+            // estate_for() is an immutable borrow on registry — safe here because
+            // the mutable borrow on grant_stores (step 3 block) has been released.
+            let source_estate = self.estate_for(source)
+                .map_err(|_| GeniusLocusKitError::EstateNotOpen { estate_uuid: source.estate_uuid })?;
+            let manifest = source_estate.manifest()
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("manifest read failed during grant signature check: {e:?}"),
+                })?;
+            let pub_key_b64 = manifest.ed25519_public_key.ok_or_else(|| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: "source estate has no Ed25519 public key in manifest \
+                             — cannot verify grant signature"
+                        .to_string(),
+                }
+            })?;
+            let pub_key_bytes = b64.decode(&pub_key_b64)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("Ed25519 public key base64 decode failed: {e:?}"),
+                })?;
+            let signing_payload = authorizing_grant.signing_payload();
+            if !convergence_kit::verify_signature(
+                &authorizing_grant.signature,
+                &signing_payload,
+                &pub_key_bytes,
+            ) {
+                return Err(GeniusLocusKitError::CrossEstateReadRefused {
+                    source: source_uuid,
+                    requester: requester_uuid,
+                    reason: FederatedReadRefusalReason::InvalidGrantSignature,
+                });
+            }
+        }
+        // Empty signature: legacy pre-signing grant. Allowed on this local
+        // in-process path (I-13 invariant). No cross-estate exposure.
 
         // 5. CustodyMode gate. Each mode's recall-path semantics.
         {
