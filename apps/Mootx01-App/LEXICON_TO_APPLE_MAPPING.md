@@ -176,8 +176,9 @@ and the `NSExtension` Share-Sheet capture targets (E — `Mootx01-Share-iOS`/`-m
 the extension spools to the app-group `ShareInbox`, the host app drains via `ShareInboxDrain`
 at launch/foreground/tick; the extension process never opens the estate).
 
-**Remaining:** Bonjour/LAN discovery and Local Network
-entitlement (the remaining A2 gap; loopback `HTTPTransport` is implemented); iCloud sync;
-graduating `MootGateway` into `ARIA_MacOS`/`ARIA_iOS`. System activation of A4/A5/A6 requires
-running `xcodegen generate` then building the Xcode project — that Xcode build step is outside
-SPM and is the final activation gate.
+**Remaining:** daemon-side Bonjour advertisement (the last A2 gap — an engine-lane Swift/Rust
+parity mission; the app-side browse client `LANDaemonDiscovery` and the `NSBonjourServices` /
+`NSLocalNetworkUsageDescription` plumbing are done, and loopback `HTTPTransport` is implemented);
+iCloud sync; graduating `MootGateway` into `ARIA_MacOS`/`ARIA_iOS`. System activation of
+A4/A5/A6 requires running `xcodegen generate` then building the Xcode project — that Xcode
+build step is outside SPM and is the final activation gate.
