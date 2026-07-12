@@ -1000,7 +1000,7 @@ Recurring sanctioned shapes:
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---------|--------------|-------------|------------|------------|---------------------|--------|
 | Capture frame | `CaptureFrame` (Frames.swift:25) | `CaptureFrame` (frames.rs:25) | public / pub | identical | `FrameTests.swift` ↔ `lp0_vectors.rs` (capture path) | Confirmed |
-| Tunnel capture frame | `TunnelCaptureFrame` (Frames.swift:138) | `TunnelCaptureFrame` (frames.rs:147) | public / pub | identical | `CaptureTunnelTests.swift` ↔ `capture_tunnel_tests.rs` | Confirmed |
+| Tunnel capture frame | `TunnelCaptureFrame` (Frames.swift:138) | `TunnelCaptureFrame` (frames.rs:147) | public / pub | identical | `CaptureTunnelTests.swift` ↔ `capture_tunnel_tests.rs` | Confirmed | carries `originClass` (bits 6–8) and `lifecycle` (bits 3–5, default `.active`); `.proposed` is the agent-derived review state reviewed via `Estate.respondToTunnel` / `Estate::respond_to_tunnel` (accept → `.active`, reject → `.withdrawn`; only `.proposed` is reviewable) — `ProposedTunnelLifecycleTests.swift` ↔ `capture_tunnel_tests.rs` proposed-lifecycle block |
 | Recall frame | `RecallFrame` (Frames.swift:197) | `RecallFrame` (filter.rs:194) | public / pub | identical (different source file per port) | `RecallPaginationTests.swift` ↔ `lp0_vectors.rs::lp0_recall_stream` | Confirmed |
 | Mutation kind | `MutationKind` (Frames.swift:236) | `MutationKind` (frames.rs:213) | public / pub | identical | `MutateMutationKindTests.swift` | Confirmed |
 | Learn frame | `LearnFrame` (Frames.swift:267) | `LearnFrame` (frames.rs:244) | public / pub | identical | `FrameTests.swift` | Confirmed |
