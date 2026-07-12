@@ -14,7 +14,7 @@
 //! backend owns no vector-search engine; it accommodates vector workloads'
 //! storage needs through RowStore/BlobStore (ADR-008).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -838,6 +838,13 @@ pub struct PostgresStorage {
     pool: Arc<Pool>,
     schema: Arc<Mutex<SharedSchema>>,
     observers: Arc<ObserverRegistry>,
+    /// Dataset schema cache — keyed by `dataset_table_name(id)` (MX-TAB-2).
+    ///
+    /// Populated by `PgDatasetStore::create_dataset`; consumed by `append_rows`
+    /// (PK pre-sort), `query_rows` (projection + row decoding), and
+    /// `column_stats` (column type for aggregate decoding). Mirrors the
+    /// `datasetSchemas` actor-isolated dict in `PostgreSQLBackend` (Swift).
+    dataset_schemas: Arc<Mutex<HashMap<String, crate::dataset_store::DatasetSchema>>>,
 }
 
 impl PostgresStorage {
@@ -882,6 +889,7 @@ impl PostgresStorage {
             )),
             schema: Arc::new(Mutex::new(SharedSchema { schema: None })),
             observers: Arc::new(ObserverRegistry::default()),
+            dataset_schemas: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -1146,6 +1154,20 @@ impl Storage for PostgresStorage {
                 Err(block_err)
             }
         }
+    }
+
+    /// Dataset store override: returns a `PgDatasetStore` that shares the
+    /// connection pool and dataset schema cache with this `PostgresStorage`.
+    ///
+    /// Overrides the default `FeatureGated` throw from the `Storage` trait's
+    /// default implementation. PostgreSQL has full DatasetStore conformance
+    /// (MX-TAB-2). The store is cheap to create — no connection is acquired
+    /// here; connections are checked out per operation from the shared pool.
+    fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
+        Ok(Arc::new(PgDatasetStore {
+            pool: self.pool.clone(),
+            schemas: self.dataset_schemas.clone(),
+        }))
     }
 }
 
@@ -2585,6 +2607,478 @@ impl StorageObserver for PgObserver {
     ) -> StorageResult<Receiver<TableChange>> {
         Ok(self.observers.observe(table, events))
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DatasetStore PostgreSQL conformance — PgDatasetStore (MX-TAB-2)
+//
+// Shares `Arc<Pool>` with `PostgresStorage` (one connection per operation,
+// checked out and returned on each method call). The dataset schema cache
+// (`Arc<Mutex<HashMap<String, DatasetSchema>>>`) is shared so `append_rows`
+// can recover the PK column for pre-sort, and `column_stats` can decode
+// aggregate MIN/MAX with the correct column type.
+//
+// Key Postgres-specific behaviours (compared to the SQLite shim):
+//
+//   TEXT COLLATION: TEXT columns are declared with COLLATE "C" in CREATE TABLE
+//   DDL so ORDER BY on TEXT columns uses byte order, matching SQLite's BINARY
+//   default and the Rust InMemory leg's String < comparison. The COLLATE "C"
+//   qualifier is emitted by `pg_dataset_type_sql` below (not by
+//   `dataset_native_type`, which is the SQLite mapping).
+//
+//   SYNTHETIC PRIMARY KEY: when `DatasetSchema.primary_key_column` is None, the
+//   table receives `"__ds_pk" BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`.
+//   This column is never included in SELECT projection lists (those are built
+//   from the cached schema's `columns` field, which never includes `__ds_pk`).
+//   INSERT statements also omit it; Postgres assigns sequence values
+//   automatically.
+//
+//   PK PRE-SORT: `append_rows` sorts rows ascending by the declared PK column
+//   before INSERT using `compare_typed_values_for_sort` (same function as the
+//   SQLite shim). The PK column name comes from the cached schema.
+//
+//   COLUMN STATS DECODING: `column_stats` calls `read_value(row, idx, Some(col_type))`
+//   with the column's declared `ColumnType` so DOUBLE PRECISION MIN/MAX decodes
+//   as `TypedValue::Float(f64)` — satisfying the f64 wire rule. The cached
+//   schema is the only source of this type hint (Postgres doesn't have PRAGMA).
+// ─────────────────────────────────────────────────────────────────────
+
+use crate::dataset_store::{
+    ColumnStats as DatasetColumnStats, DatasetIndexDeclaration, DatasetSchema,
+    DatasetStore, compare_typed_values_for_sort, dataset_index_name, dataset_table_name,
+    validate_dataset_column_identifier,
+};
+
+/// PostgreSQL conformance for `DatasetStore` (MX-TAB-2).
+///
+/// Shares `Arc<Pool>` with `PostgresStorage` so every operation
+/// checks out a connection, executes, and returns it — the same pattern
+/// as `PgRowStore` and `PgBlobStore`. The dataset schema cache is shared via
+/// `Arc<Mutex<HashMap<String, DatasetSchema>>>` so `append_rows` and
+/// `column_stats` can reference the schema without a separate introspection
+/// round-trip to PostgreSQL.
+pub struct PgDatasetStore {
+    pool: Arc<Pool>,
+    /// Dataset schema cache — keyed by `dataset_table_name(id)`.
+    /// Populated by `create_dataset`; consumed by `append_rows` and
+    /// `column_stats`. Mirrors `PostgreSQLBackend.datasetSchemas` (Swift actor).
+    schemas: Arc<Mutex<HashMap<String, DatasetSchema>>>,
+}
+
+/// Map `ColumnType` to a PostgreSQL type fragment for dataset table DDL.
+///
+/// TEXT gets `COLLATE "C"` — the key Postgres-specific addition versus
+/// `dataset_native_type` (which returns SQLite types). The COLLATE "C"
+/// qualifier locks byte-order TEXT ordering to match SQLite BINARY collation
+/// and the Rust InMemory leg's String < comparison. All other types use the
+/// same PG types as the application schema emitter (`native_type`).
+fn pg_dataset_type_sql(t: ColumnType) -> &'static str {
+    match t {
+        ColumnType::Text => "TEXT COLLATE \"C\"",
+        ColumnType::Uuid => "UUID",
+        ColumnType::Bitmap | ColumnType::Int | ColumnType::Hlc => "BIGINT",
+        ColumnType::Timestamp => "TIMESTAMPTZ",
+        ColumnType::Float => "DOUBLE PRECISION",
+        ColumnType::Bool => "BOOLEAN",
+        ColumnType::Blob | ColumnType::Fingerprint => "BYTEA",
+        ColumnType::Json => "JSONB",
+    }
+}
+
+impl DatasetStore for PgDatasetStore {
+
+    // MARK: create_dataset
+
+    fn create_dataset(
+        &self,
+        id: uuid::Uuid,
+        schema: &DatasetSchema,
+        indexes: &[DatasetIndexDeclaration],
+    ) -> StorageResult<()> {
+        // Validate all user-supplied column names BEFORE acquiring a connection.
+        for col in &schema.columns {
+            validate_dataset_column_identifier(&col.name)?;
+        }
+        for idx in indexes {
+            validate_dataset_column_identifier(&idx.column)?;
+        }
+
+        let table_name = dataset_table_name(id);
+        let mut conn = self.pool.checkout()?;
+        let client = conn.get_mut();
+
+        // Build CREATE TABLE DDL.
+        //
+        // Shape — no declared PK (`schema.primary_key_column == None`):
+        //   CREATE TABLE IF NOT EXISTS "ds_<hex>" (
+        //     "__ds_pk" BIGINT GENERATED ALWAYS AS IDENTITY,
+        //     "col1" TEXT COLLATE "C" NOT NULL,
+        //     "col2" DOUBLE PRECISION,
+        //     PRIMARY KEY ("__ds_pk")
+        //   )
+        //
+        // Shape — declared PK "rank":
+        //   CREATE TABLE IF NOT EXISTS "ds_<hex>" (
+        //     "rank" BIGINT NOT NULL,
+        //     "name" TEXT COLLATE "C",
+        //     PRIMARY KEY ("rank")
+        //   )
+        let mut parts: Vec<String> = Vec::new();
+        let has_declared_pk = schema.primary_key_column.is_some();
+
+        if !has_declared_pk {
+            // Hidden identity column carries the PK when no user-declared PK
+            // exists. Never included in SELECT column lists or INSERT column lists
+            // — Postgres assigns values automatically.
+            parts.push(r#""__ds_pk" BIGINT GENERATED ALWAYS AS IDENTITY"#.to_string());
+        }
+
+        for col in &schema.columns {
+            let type_sql = pg_dataset_type_sql(col.column_type);
+            let nullable = if col.nullable { "" } else { " NOT NULL" };
+            parts.push(format!("\"{}\" {}{}", col.name, type_sql, nullable));
+        }
+
+        if let Some(pk) = &schema.primary_key_column {
+            parts.push(format!("PRIMARY KEY (\"{pk}\")"));
+        } else {
+            parts.push(r#"PRIMARY KEY ("__ds_pk")"#.to_string());
+        }
+
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)",
+            table_name,
+            parts.join(",\n  ")
+        );
+        client.batch_execute(&create_sql).map_err(|e| StorageError::BackendError {
+            underlying: format!("create_dataset DDL: {}", pg_err_text(&e)),
+        })?;
+
+        // Secondary indexes. Names are generated (`dsi_<hex>_<col>`) — not
+        // user-supplied — so no additional quoting is required beyond what
+        // `dataset_index_name` returns.
+        for idx in indexes {
+            let unique = if idx.unique { "UNIQUE " } else { "" };
+            let idx_name = dataset_index_name(id, &idx.column);
+            let idx_sql = format!(
+                "CREATE {unique}INDEX IF NOT EXISTS \"{idx_name}\" \
+                 ON \"{table_name}\" (\"{}\")",
+                idx.column
+            );
+            client.batch_execute(&idx_sql).map_err(|e| StorageError::BackendError {
+                underlying: format!("create_dataset index DDL: {}", pg_err_text(&e)),
+            })?;
+        }
+
+        // Cache schema for subsequent operations.
+        self.schemas.lock().unwrap().insert(table_name, schema.clone());
+        Ok(())
+    }
+
+    // MARK: append_rows
+
+    fn append_rows(
+        &self,
+        id: uuid::Uuid,
+        rows: &[BTreeMap<String, TypedValue>],
+    ) -> StorageResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let table_name = dataset_table_name(id);
+
+        // Validate column names from the first row.
+        if let Some(first) = rows.first() {
+            for key in first.keys() {
+                validate_dataset_column_identifier(key)?;
+            }
+        }
+
+        // Recover PK column from the cached schema for pre-sort.
+        let pk_column: Option<String> = {
+            let guard = self.schemas.lock().unwrap();
+            guard.get(&table_name).and_then(|s| s.primary_key_column.clone())
+        };
+
+        // Pre-sort ascending by declared PK column before INSERT so rowid
+        // assignment tracks key order. No pre-sort when PK is None (identity
+        // column gets insertion-order assignment).
+        let mut sorted_rows: Vec<BTreeMap<String, TypedValue>> = rows.to_vec();
+        if let Some(ref pk) = pk_column {
+            sorted_rows.sort_by(|a, b| {
+                let av = a.get(pk).unwrap_or(&TypedValue::Null);
+                let bv = b.get(pk).unwrap_or(&TypedValue::Null);
+                if compare_typed_values_for_sort(av, bv) {
+                    std::cmp::Ordering::Less
+                } else if compare_typed_values_for_sort(bv, av) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+        }
+
+        // Check out one connection for the entire transaction — GLK_BATCH1 pattern.
+        // BEGIN / INSERT all rows / COMMIT. ROLLBACK + discard connection on error.
+        let mut conn = self.pool.checkout()?;
+
+        let result: StorageResult<()> = (|| {
+            conn.get_mut().batch_execute("BEGIN").map_err(|e| StorageError::BackendError {
+                underlying: format!("append_rows BEGIN: {}", pg_err_text(&e)),
+            })?;
+            for row in &sorted_rows {
+                pg_dataset_insert_row(conn.get_mut(), &table_name, row)?;
+            }
+            conn.get_mut().batch_execute("COMMIT").map_err(|e| StorageError::BackendError {
+                underlying: format!("append_rows COMMIT: {}", pg_err_text(&e)),
+            })?;
+            Ok(())
+        })();
+
+        if let Err(ref _e) = result {
+            // Best-effort ROLLBACK. If ROLLBACK fails, discard the connection
+            // so a broken transaction is never recycled back to the pool.
+            if conn.get_mut().batch_execute("ROLLBACK").is_err() {
+                conn.discard();
+                return result;
+            }
+        }
+        result
+    }
+
+    // MARK: query_rows
+
+    fn query_rows(
+        &self,
+        id: uuid::Uuid,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        columns: Option<&[String]>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        let table_name = dataset_table_name(id);
+
+        // Validate user-supplied projection column names.
+        if let Some(cols) = columns {
+            for name in cols {
+                validate_dataset_column_identifier(name)?;
+            }
+        }
+
+        // Build the projection column list from the cached schema.
+        // Never includes `__ds_pk` — that column is internal and not
+        // part of the user-visible schema.
+        let (col_select, schema_cols) = {
+            let guard = self.schemas.lock().unwrap();
+            match guard.get(&table_name) {
+                Some(schema) => {
+                    let projected: Vec<_> = match columns {
+                        Some(requested) if !requested.is_empty() => {
+                            let requested_set: std::collections::HashSet<&str> =
+                                requested.iter().map(|s| s.as_str()).collect();
+                            schema.columns.iter()
+                                .filter(|c| requested_set.contains(c.name.as_str()))
+                                .cloned()
+                                .collect()
+                        }
+                        _ => schema.columns.clone(),
+                    };
+                    let select = projected
+                        .iter()
+                        .map(|c| format!("\"{}\"", c.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (select, projected)
+                }
+                None => {
+                    // Schema not cached — fall back to SELECT * (no type hints for decoding).
+                    ("*".to_string(), Vec::new())
+                }
+            }
+        };
+
+        let mut sql = format!("SELECT {col_select} FROM \"{table_name}\"");
+        let mut binds: Vec<TypedValue> = Vec::new();
+
+        if let Some(pred) = predicate {
+            let where_sql = compile_predicate(pred, &mut binds)?;
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql);
+        }
+
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|clause| -> StorageResult<String> {
+                    validate_sql_identifier(&clause.column.name)?;
+                    let dir = if clause.direction == OrderDirection::Ascending {
+                        "ASC"
+                    } else {
+                        "DESC"
+                    };
+                    // No explicit COLLATE needed: TEXT columns carry COLLATE "C"
+                    // in their column definition, so ORDER BY inherits it.
+                    Ok(format!("\"{}\" {}", clause.column.name, dir))
+                })
+                .collect::<StorageResult<_>>()?;
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&parts.join(", "));
+        }
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {lim}"));
+        }
+        if let Some(off) = offset {
+            sql.push_str(&format!(" OFFSET {off}"));
+        }
+
+        let params: Vec<PgParam> = binds.iter().map(to_param).collect();
+
+        let mut conn = self.pool.checkout()?;
+        let pg_rows = conn
+            .get_mut()
+            .query(&sql, &param_refs(&params))
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("query_rows: {}", pg_err_text(&e)),
+            })?;
+
+        let result: Vec<StorageRow> = pg_rows
+            .iter()
+            .map(|row| {
+                let mut map: BTreeMap<String, TypedValue> = BTreeMap::new();
+                for (idx, col) in schema_cols.iter().enumerate() {
+                    // Use the declared ColumnType as the type hint so DOUBLE
+                    // PRECISION decodes as TypedValue::Float(f64) (f64 wire rule).
+                    let val = read_value(row, idx, Some(col.column_type));
+                    map.insert(col.name.clone(), val);
+                }
+                // When schema is not cached (fallback SELECT *), map all columns
+                // without type hints using the column index and column name from
+                // the row descriptor.
+                if schema_cols.is_empty() {
+                    for i in 0..row.len() {
+                        let col_name = row.columns()[i].name().to_string();
+                        let val = read_value(row, i, None);
+                        map.insert(col_name, val);
+                    }
+                }
+                StorageRow::new(map)
+            })
+            .collect();
+
+        Ok(result)
+    }
+
+    // MARK: column_stats
+
+    fn column_stats(&self, id: uuid::Uuid, column: &str) -> StorageResult<DatasetColumnStats> {
+        // Validate user-supplied column name before it enters any SQL.
+        validate_dataset_column_identifier(column)?;
+
+        let table_name = dataset_table_name(id);
+
+        // Look up the column's declared type from the cached schema so we can
+        // decode the aggregate MIN/MAX with the correct TypedValue variant.
+        let col_type: Option<ColumnType> = {
+            let guard = self.schemas.lock().unwrap();
+            guard.get(&table_name)
+                .and_then(|s| s.columns.iter().find(|c| c.name == column))
+                .map(|c| c.column_type)
+        };
+
+        // Single aggregate query — five values in one round trip.
+        let sql = format!(
+            r#"SELECT COUNT("{col}") AS cnt, COUNT(DISTINCT "{col}") AS dcnt,
+                      COUNT(*) - COUNT("{col}") AS ncnt,
+                      MIN("{col}") AS min_val, MAX("{col}") AS max_val
+               FROM "{table}""#,
+            col = column,
+            table = table_name
+        );
+
+        let mut conn = self.pool.checkout()?;
+        let rows = conn
+            .get_mut()
+            .query(&sql, &[])
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("column_stats query: {}", pg_err_text(&e)),
+            })?;
+
+        match rows.first() {
+            None => Ok(DatasetColumnStats {
+                count: 0,
+                distinct_count: 0,
+                null_count: 0,
+                min: TypedValue::Null,
+                max: TypedValue::Null,
+            }),
+            Some(row) => {
+                let count: i64 = row.try_get::<_, i64>("cnt")
+                    .unwrap_or(0);
+                let distinct_count: i64 = row.try_get::<_, i64>("dcnt")
+                    .unwrap_or(0);
+                let null_count: i64 = row.try_get::<_, i64>("ncnt")
+                    .unwrap_or(0);
+                // MIN/MAX: use the declared ColumnType as the type hint so
+                // DOUBLE PRECISION decodes as TypedValue::Float(f64) — satisfying
+                // the cross-leg f64 wire rule. TypedValue::Null when no non-null rows.
+                let min = read_value(row, 3, col_type);
+                let max = read_value(row, 4, col_type);
+                Ok(DatasetColumnStats {
+                    count,
+                    distinct_count,
+                    null_count,
+                    min,
+                    max,
+                })
+            }
+        }
+    }
+
+    // MARK: drop_dataset
+
+    fn drop_dataset(&self, id: uuid::Uuid) -> StorageResult<()> {
+        let table_name = dataset_table_name(id);
+        let mut conn = self.pool.checkout()?;
+        conn.get_mut()
+            .batch_execute(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("drop_dataset: {}", pg_err_text(&e)),
+            })?;
+        // Remove from schema cache so a subsequent create_dataset starts clean.
+        self.schemas.lock().unwrap().remove(&table_name);
+        Ok(())
+    }
+}
+
+// ── Dataset INSERT helper (module-private) ─────────────────────────────────
+
+/// Insert one row into a dataset table. Column names are sorted (BTreeMap
+/// key iteration is in sorted order) for consistent placeholder numbering.
+/// Validates each column name via `validate_sql_identifier` before it enters
+/// the INSERT column list.
+fn pg_dataset_insert_row(
+    client: &mut Client,
+    table: &str,
+    row: &BTreeMap<String, TypedValue>,
+) -> StorageResult<()> {
+    if row.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<&String> = row.keys().collect();
+    for k in &keys {
+        validate_sql_identifier(k)?;
+    }
+    let cols = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
+    let ph = (1..=keys.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+    let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
+    let params: Vec<PgParam> = keys.iter().map(|k| to_param(&row[*k])).collect();
+    client.execute(&sql, &param_refs(&params)).map_err(|e| StorageError::BackendError {
+        underlying: format!("pg_dataset_insert_row: {}", pg_err_text(&e)),
+    })?;
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────
