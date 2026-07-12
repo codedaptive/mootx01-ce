@@ -109,8 +109,14 @@ class MootMemoryHandler:
             raise ValueError(f"URL-encoded traversal: {path}")
         if ".." in path:
             raise ValueError(f"Path traversal: {path}")
-        if not path.startswith(MEMORIES_ROOT):
-            raise ValueError(f"Must start with {MEMORIES_ROOT}: {path}")
+        # Enforce a path-SEGMENT boundary, not a bare string prefix: a plain
+        # startswith("/memories") also accepts siblings like "/memories2/x" or
+        # "/memoriesxvictim.txt", which would forward outside the intended tree.
+        if path != MEMORIES_ROOT and not path.startswith(MEMORIES_ROOT + "/"):
+            raise ValueError(f"Must be {MEMORIES_ROOT} or start with {MEMORIES_ROOT}/: {path}")
+        # No hidden files (README security policy): reject any dotfile component.
+        if any(part.startswith(".") for part in path.split("/") if part):
+            raise ValueError(f"Hidden path components not allowed: {path}")
         return path
 
     # ── MCP HTTP transport ───────────────────────────────────────────

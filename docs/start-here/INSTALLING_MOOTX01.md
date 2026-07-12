@@ -306,5 +306,7 @@ the trash. For scripted removal use `mootx01 uninstall --purge --yes`.
 
 Reinstalling over an existing database prompts to **reuse** it (adopt it as
 the default estate) or **replace** it (previous database moves to the trash;
-a fresh one is created on first start). Non-interactive installs leave an
-existing database untouched unless `--reuse-db` or `--replace-db` is passed.
+a fresh one is created on first start). With `--yes` the prompt is skipped
+and the existing database is **reused** — replacing always requires the
+explicit `--replace-db` flag. Non-interactive installs leave an existing
+database untouched unless `--reuse-db` or `--replace-db` is passed.

@@ -218,8 +218,23 @@ pub fn version_skew_advisory(plugin_id: &str, binary_version: &str, home: &Path)
 /// trailing components are treated as 0. Returns `false` on parse failure or
 /// equality. Mirrors Swift `VersionSkewAdvisory.versionGreaterThan`.
 fn version_greater_than(a: &str, b: &str) -> bool {
+    // Parse each component by its LEADING decimal digits, ignoring any trailing
+    // prerelease/build suffix ("15-rc1" -> 15). A plain `p.parse().ok()` drops
+    // the whole "15-rc1" component, collapsing "1.0.15-rc1" to [1, 0] and
+    // misordering it against "1.0.11" — the advisory would recommend the wrong
+    // side. A fully non-numeric component still yields None (dropped), matching
+    // the Swift leg's `leadingInt`.
     let parse = |s: &str| -> Vec<u64> {
-        s.split('.').filter_map(|p| p.parse().ok()).collect()
+        s.split('.')
+            .filter_map(|p| {
+                let digits: String = p.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if digits.is_empty() {
+                    None
+                } else {
+                    digits.parse().ok()
+                }
+            })
+            .collect()
     };
     let a_parts = parse(a);
     let b_parts = parse(b);

@@ -696,7 +696,9 @@ enum LensTools {
                 handleB: handleB,
                 frame: try frame(args))
             return ToolDispatcher.textResult(
-                "mind_overlap: \(out.overlap) (a=\(out.aCount), b=\(out.bCount) drawer(s))")
+                "mind_overlap: \(out.overlap) "
+                + "(a: \(out.aSufficient ? "sufficient" : "insufficient") data, "
+                + "b: \(out.bSufficient ? "sufficient" : "insufficient") data)")
 
         case "moot_lens_divergence":
             // resolvePeer is used here (not resolveHandle) because estateIDB

@@ -1882,7 +1882,7 @@ public extension Estate {
     ///   - reason: optional human-readable reason written into the audit row.
     ///   - now: deterministic write timestamp.
     /// - Throws: `LocusKitError.drawerNotFound` if the row is absent.
-    public func mutateProvenance(
+    func mutateProvenance(
         rowID: RowID,
         newProvenance: Int64,
         changedBy: String,
@@ -2006,7 +2006,7 @@ public extension Estate {
     ///   - now: deterministic write timestamp threaded from the provision call.
     /// - Throws: `LocusKitError.invalidContent` if `wingName` is empty;
     ///   substrate errors from the underlying write.
-    public func seedWing(
+    func seedWing(
         _ wingName: String,
         hint hintText: String,
         addedBy: String,

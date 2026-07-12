@@ -194,6 +194,15 @@ impl Storage for InMemoryStorage {
         // `in_transaction = false` and empty pending event lists. On rollback,
         // restoring the snapshot automatically resets those fields — no
         // separate cleanup needed on the error path.
+        //
+        // ISOLATION INVARIANT: this method does not self-serialize concurrent
+        // callers, and — unlike the SQLite backend — there is no connection
+        // write lock to fall back on. Rollback restores the whole
+        // pre-transaction snapshot, which would REVERT any concurrent
+        // non-transactional write that completed during the block. Callers must
+        // guarantee no other caller holds the same InMemoryStorage concurrently
+        // during a transaction block; production provides this by serializing
+        // all estate access behind the coordinator lock.
         let snapshot = self.state.lock().unwrap().clone();
         // Mark transaction open: writes will buffer notifications.
         {

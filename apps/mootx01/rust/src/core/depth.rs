@@ -62,13 +62,46 @@ impl ClaudeCliRunning for ProcessClaudeCliRunner {
             .find(|p| p.is_file())
             .cloned()
             .unwrap_or_else(|| std::path::PathBuf::from("claude"));
-        std::process::Command::new(bin)
+        // stdin is EXPLICITLY nulled and the run is bounded by a deadline.
+        // Both are load-bearing: with the installer's stdout/stderr as the
+        // only visible output, a `claude` that decides to prompt (first-run
+        // onboarding, consent, an update question) would otherwise read from
+        // the inherited terminal with its question invisible — the install
+        // appears to hang forever (observed on a brew-migrated macOS machine,
+        // 2026-07-11, in the Swift twin of this runner). Nulled stdin turns
+        // any prompt into immediate EOF; the deadline catches non-prompt
+        // stalls (network, lock). Both surface as `false`, which callers
+        // treat exactly like a nonzero exit: print the run-it-yourself
+        // fallback and continue the install.
+        let mut child = match std::process::Command::new(bin)
             .args(args)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // 60s: `claude plugin update` normally finishes in seconds; this
+        // leaves room for a slow network fetch while guaranteeing return.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
     }
 }
 
@@ -392,7 +425,9 @@ fn install_plugin(
     // at install time and is never refreshed by rewriting this directory —
     // ask the live CLI to refresh it if the plugin was already installed.
     if host.id == "claude-code" {
-        refresh_stranded_plugin_cache(home, claude_cli);
+        if let Some(line) = refresh_stranded_plugin_cache(home, claude_cli) {
+            println!("{line}");
+        }
     }
 
     Ok(DepthOutcome::Plugin(dest.display().to_string()))
@@ -417,20 +452,36 @@ const CLAUDE_CODE_PLUGIN_ID: &str = "mootx01@mootx01";
 ///
 /// If it IS already installed, ask the live `claude` CLI to refresh its
 /// cached copy (`claude plugin update <id>`, default scope `user`). Never
-/// fails the install over this: a missing CLI or a nonzero exit only prints
+/// fails the install over this: a missing CLI or a nonzero exit only yields
 /// a one-line instruction asking the user to run the refresh themselves,
 /// then restart Claude Code.
-fn refresh_stranded_plugin_cache(home: &Path, claude_cli: &dyn ClaudeCliRunning) {
+///
+/// Returns the user-facing line the CALLER prints, or None when the plugin
+/// was never installed (nothing to say). The success line exists because
+/// `claude plugin update` refreshes the ON-DISK cache only — a running
+/// Claude Code session keeps the previous plugin snapshot loaded until it
+/// is restarted, so a silent success left users testing against the old
+/// plugin while the upgrade reported clean (MOOT-INSTALL-E defect 1;
+/// mirrors the Swift `refreshStrandedPluginCache`). Returning the message
+/// keeps the line unit-testable via the fake runner.
+fn refresh_stranded_plugin_cache(
+    home: &Path,
+    claude_cli: &dyn ClaudeCliRunning,
+) -> Option<String> {
     if !crate::core::mcp_ownership::is_plugin_installed(CLAUDE_CODE_PLUGIN_ID, home) {
-        return;
+        return None;
     }
     if claude_cli.run(&["plugin", "update", CLAUDE_CODE_PLUGIN_ID]) {
-        return;
+        return Some(
+            "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new \
+             session) to load the updated plugin."
+                .to_string(),
+        );
     }
-    println!(
+    Some(format!(
         "  ⓘ Could not refresh the cached mootx01 plugin automatically — run \
          `claude plugin update {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
-    );
+    ))
 }
 
 /// ADR-024 Wave 3, Defect 2 ("dead vault env on HTTP entry"): inject
@@ -802,8 +853,14 @@ mod tests {
         let home = tmp_home("stranded-installed");
         write_installed_plugins(&home, "1.0.11");
         let fake = FakeClaudeCliRunner::new(true);
-        refresh_stranded_plugin_cache(&home, &fake);
+        let line = refresh_stranded_plugin_cache(&home, &fake);
         assert_eq!(fake.invocations(), vec![vec!["plugin".to_string(), "update".to_string(), "mootx01@mootx01".to_string()]]);
+        // MOOT-INSTALL-E defect 1: the SUCCESS path must tell the user to
+        // restart Claude Code — the CLI refreshed the on-disk cache only;
+        // a running session keeps the old snapshot until restarted.
+        let line = line.expect("success must yield a user-facing line");
+        assert!(line.contains("restart Claude Code"), "success line must say restart: {line}");
+        assert!(line.contains('✓'));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -811,8 +868,24 @@ mod tests {
     fn stranded_cache_refresh_noop_when_not_installed() {
         let home = tmp_home("stranded-absent");
         let fake = FakeClaudeCliRunner::new(true);
-        refresh_stranded_plugin_cache(&home, &fake);
+        let line = refresh_stranded_plugin_cache(&home, &fake);
         assert!(fake.invocations().is_empty(), "no stale cache to refresh when the plugin was never installed");
+        assert!(line.is_none(), "nothing to say when the plugin was never installed");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn stranded_cache_refresh_failure_yields_instruction() {
+        let home = tmp_home("stranded-fail-msg");
+        write_installed_plugins(&home, "1.0.11");
+        let fake = FakeClaudeCliRunner::new(false);
+        let line = refresh_stranded_plugin_cache(&home, &fake)
+            .expect("failure must yield a user-facing line");
+        assert!(
+            line.contains("claude plugin update mootx01@mootx01"),
+            "failure line must name the exact command: {line}"
+        );
+        assert!(line.contains("restart Claude Code"));
         let _ = std::fs::remove_dir_all(&home);
     }
 

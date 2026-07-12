@@ -57,10 +57,15 @@ public extension GeniusLocusKit {
     ///     `LocusKit.Estate.open` unchanged.
     ///   - identityKeyStore: the key store used to persist and retrieve the
     ///     estate's Ed25519 private signing key (secfix/ed25519-keychain,
-    ///     ADR-007). Defaults to `KeychainEstateIdentityKeyStore` which
-    ///     stores the key in the macOS/iOS Keychain. Tests supply
-    ///     `InMemoryEstateIdentityKeyStore` to avoid Keychain entitlement
-    ///     requirements and cross-test pollution.
+    ///     ADR-007). When nil (the default) `LocusKit.Estate.open` resolves
+    ///     it from the storage backend — Keychain for durable backends,
+    ///     in-memory for `.inMemory` storage — so ephemeral estates never
+    ///     persist identity keys to the login keychain. Pass
+    ///     `KeychainEstateIdentityKeyStore()` explicitly when serving a
+    ///     DURABLE estate from hydrated in-memory storage (the hydrate
+    ///     launch path does); tests may inject
+    ///     `InMemoryEstateIdentityKeyStore` explicitly for temp-dir SQLite
+    ///     estates.
     /// - Returns: a fresh `EstateHandle` the caller uses to address
     ///   this estate.
     /// - Throws:
@@ -73,7 +78,7 @@ public extension GeniusLocusKit {
     func open(
         storage: any Storage,
         owner: OwnerCredentials,
-        identityKeyStore: any EstateIdentityKeyStore = KeychainEstateIdentityKeyStore()
+        identityKeyStore: (any EstateIdentityKeyStore)? = nil
     ) async throws -> EstateHandle {
         let estate: LocusKit.Estate
         do {
@@ -266,7 +271,7 @@ public extension GeniusLocusKit {
     /// not mediate verb calls; it only routes by handle.
     ///
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
-    public func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
+    func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
         guard let estate = registry[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }

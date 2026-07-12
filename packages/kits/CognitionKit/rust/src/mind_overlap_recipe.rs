@@ -32,8 +32,14 @@ use crate::error::{RecipeRunError, SubstrateError};
 #[derive(Debug, Clone, PartialEq)]
 pub struct MindOverlap {
     pub overlap: f64,
-    pub a_count: usize,
-    pub b_count: usize,
+    /// Whether each estate met the k-anonymity floor (>= k recalled drawers).
+    /// Exact per-estate drawer counts are deliberately NOT exposed — only this
+    /// coarse sufficiency signal — so no per-estate structure crosses the recipe
+    /// boundary alongside the DP-noised `overlap`. `false` on either side forces
+    /// `overlap` to 0 (which distinguishes insufficient data from a genuine
+    /// divergent 0).
+    pub a_sufficient: bool,
+    pub b_sufficient: bool,
 }
 
 /// Default differential-privacy budget for the aggregate. epsilon high enough
@@ -93,18 +99,31 @@ where
     let (summary_a, ac) = summarize(handle_a)?;
     let (summary_b, bc) = summarize(handle_b)?;
 
-    if ac == 0 || bc == 0 {
+    // k-sufficiency is computed from the raw recalled counts but the raw counts
+    // themselves are NOT returned — only whether each side cleared the
+    // k-anonymity floor. This keeps exact per-estate drawer counts from leaving
+    // the recipe (the summary already crosses the boundary DP-noised; the counts
+    // must not undo that).
+    let a_sufficient = ac >= K_ANONYMITY;
+    let b_sufficient = bc >= K_ANONYMITY;
+
+    // Below k-anonymity, no fingerprint bit can reach the DP-OR threshold, so
+    // both summaries collapse to identical all-zero/noise-only aggregates and
+    // summary_overlap returns a false 1.0 for unrelated tiny estates. Treat < k
+    // recalled drawers as insufficient data => 0 overlap (subsumes the
+    // empty-estate case, since 0 < K_ANONYMITY).
+    if !a_sufficient || !b_sufficient {
         return Ok(MindOverlap {
             overlap: 0.0,
-            a_count: ac,
-            b_count: bc,
+            a_sufficient,
+            b_sufficient,
         });
     }
 
     Ok(MindOverlap {
         overlap: summary_overlap(summary_a, summary_b),
-        a_count: ac,
-        b_count: bc,
+        a_sufficient,
+        b_sufficient,
     })
 }
 

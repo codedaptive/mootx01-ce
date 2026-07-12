@@ -44,11 +44,21 @@ extension NeuronKit {
     /// clamped to the label count. Each label gets a soft loading vector and its
     /// dominant theme (argmax). Deterministic for a fixed `seed`. No labels or
     /// `k <= 0` ⇒ empty factorization (C-16).
+    /// Upper bound on distinct labels the dense n×n factorization will accept.
+    /// n=4096 ⇒ a 4096² × 8B ≈ 128 MB matrix worst case; beyond this the O(n²)
+    /// allocation becomes a local-DoS vector, so an over-cap input degrades to
+    /// an empty factorization. Mirrors the Rust `MAX_LATENT_THEME_LABELS`.
+    public static let maxLatentThemeLabels = 4096
+
     public static func latentThemes(labels: [String],
                                     cooccurrence: [(labelA: String, labelB: String, weight: Double)],
                                     k: Int, seed: UInt64) -> LatentThemes {
         let n = labels.count
-        guard n > 0, k > 0 else { return LatentThemes(k: 0, loadings: [], reconstructionError: 0) }
+        // DoS ceiling (see maxLatentThemeLabels): over-cap label counts degrade
+        // to an empty factorization, consistent with the n==0 / k==0 C-16 path.
+        guard n > 0, k > 0, n <= Self.maxLatentThemeLabels else {
+            return LatentThemes(k: 0, loadings: [], reconstructionError: 0)
+        }
 
         let effectiveK = min(k, n)
 

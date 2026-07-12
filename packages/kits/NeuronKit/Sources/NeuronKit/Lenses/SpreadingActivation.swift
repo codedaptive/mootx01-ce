@@ -28,12 +28,27 @@ extension NeuronKit {
     public static func spreadingActivation(adjacency: [[(node: Int, weight: Double)]],
                                            seed: Int, walkLength: Int, restartProb: Double,
                                            rngSeed: UInt64, k: Int) -> [Activation] {
-        guard adjacency.indices.contains(seed), walkLength > 0, k > 0 else { return [] }
+        // restartProb is forwarded to RandomWalks.walk, whose precondition
+        // aborts for anything outside [0, 1). Validate at this public boundary
+        // rather than trap: the substrate is the trusted layer, the lens is the
+        // untrusted-caller edge.
+        guard adjacency.indices.contains(seed), walkLength > 0, k > 0,
+              restartProb >= 0.0, restartProb < 1.0 else { return [] }
 
         // The gated walk consumes `(neighbor, weight)` tuples; the lens surface
-        // names the field `node`. Relabel only — no transformation.
+        // names the field `node`. Relabel and drop structurally-invalid edges:
+        // RandomWalks.walk preconditions every neighbor index into [0, n), so an
+        // out-of-range node from a caller would abort the process. Filtering
+        // (not rejecting the whole call) keeps every valid edge.
+        let n = adjacency.count
         let walkGraph: SubstrateML.RandomWalks.Adjacency =
-            adjacency.map { $0.map { (neighbor: $0.node, weight: $0.weight) } }
+            adjacency.map { row in
+                row.compactMap { edge in
+                    (edge.node >= 0 && edge.node < n)
+                        ? (neighbor: edge.node, weight: edge.weight)
+                        : nil
+                }
+            }
 
         let visits = SubstrateML.RandomWalks.walk(
             adjacency: walkGraph, start: seed, length: walkLength,

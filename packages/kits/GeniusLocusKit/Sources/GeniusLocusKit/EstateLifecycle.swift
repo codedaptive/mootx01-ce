@@ -269,7 +269,7 @@ public extension GeniusLocusKit {
     ///     is acceptable). Pass a specific value in tests for determinism.
     /// - Throws: `GeniusLocusKitError.estateNotFound` if `handle` is stale;
     ///   substrate errors if a `seedWing` write fails.
-    public func seedDefaultWings(for handle: EstateHandle, now: Date) async throws {
+    func seedDefaultWings(for handle: EstateHandle, now: Date) async throws {
         let locusEstate = try estate(for: handle)
 
         // Read the existing drawers once — `allDrawers()` is a full corpus scan

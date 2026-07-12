@@ -54,8 +54,17 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
     private(set) var branchEstate: LocusKit.Estate
 
     /// The parent estate this branch was derived from. Used by
-    /// `compareToParent`. Never written to; I-15 invariant.
-    let parentEstate: LocusKit.Estate
+    /// `compareToParent` and the E-2 promotion/merge-target check. Never
+    /// written to (I-15 invariant).
+    ///
+    /// `private(set) var` (not `let`) so a terminal transition can release it
+    /// via `releaseRows()`. A branch-of-branch's `parentEstate` references its
+    /// parent branch's `branchEstate` actor; without releasing it, a terminal
+    /// child keeps that whole parent estate alive — the derive→discard
+    /// memory-exhaustion vector the active-branch quota is meant to close. Only
+    /// read on Active branches (compareToParent / promotion validation), which
+    /// the coordinator serializes strictly before any terminal transition.
+    private(set) var parentEstate: LocusKit.Estate
 
     /// Branch-estate IDs of rows copied from the parent at derivation.
     /// Any ID NOT in this set was captured after derivation and is
@@ -100,6 +109,11 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         // A fresh in-memory estate per branch keeps each branch's rows
         // fully isolated. The estateID is a new UUID; the owner
         // identifier encodes the branchID for traceability in logs.
+        // Identity keys: Estate.open resolves the key store from the
+        // backend, so this `.inMemory` estate mints its Ed25519 identity
+        // into an in-memory store — a branch is ephemeral and must never
+        // leave a permanent com.mootx01.estate.identity item in the login
+        // keychain (one per derive/discard cycle, unbounded growth).
         let branchID = self.branchID
         let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let storage = InMemoryStorage(configuration: config)
@@ -215,6 +229,19 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         let empty = try await LocusKit.Estate.open(storage: storage, owner: credentials)
         self.branchEstate = empty
         self.snapshotIDs = []
+        // Also drop the reference to the parent estate. A branch-of-branch's
+        // parentEstate is its parent branch's branchEstate actor; without this,
+        // a terminal child keeps that whole parent estate alive (the
+        // derive→discard memory-exhaustion vector). parentEstate is only read on
+        // Active branches, strictly before this terminal transition, so an empty
+        // sentinel is safe. Mirrors the Rust release_rows parent-estate release.
+        let parentConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let parentStorage = InMemoryStorage(configuration: parentConfig)
+        let parentCredentials = OwnerCredentials(
+            ownerIdentifier: "branch-\(branchID.uuidString)-parent-released")
+        _ = try await LocusKit.Estate.create(storage: parentStorage, owner: parentCredentials)
+        self.parentEstate = try await LocusKit.Estate.open(
+            storage: parentStorage, owner: parentCredentials)
     }
 
     /// Compare the current branch state to the parent.

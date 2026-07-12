@@ -5,6 +5,120 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.30 — 2026-07-11
+
+Installer trust release: two small features that keep an install honest
+about what will actually run.
+
+- **PATH shadow warnings.** install.sh and install.ps1 now walk PATH after
+  placing the binaries and warn when a DIFFERENT `mootx01` or `moot-mgr`
+  sits earlier on PATH and shadows the fresh install (a stale copy from an
+  old install dir, Homebrew, or a prior custom location) — naming the
+  shadowing copy, the installed copy, and the fix. Previously the stale
+  copy silently won and `mootx01 --version` disagreed with what was just
+  installed.
+- **Public upgrade path.** `mootx01 upgrade` now downloads the latest
+  release (SHA-256 verified, typed confirmation unless `--yes`), installs
+  it, converges plugin packages and tool permissions, and restarts the
+  background services. `--from <path>` remains the local-build path; the
+  implicit `.build/` search is gone. `upgrade --check` now queries the
+  public repo (it pointed at an inaccessible internal repo — dead for
+  every public user); `MOOTX01_REPO` overrides it, matching install.sh.
+- **Restart reminder.** When an install or upgrade refreshes Claude Code's
+  plugin cache, the success output now says to restart Claude Code — the
+  refresh updates the on-disk cache only, and a running session keeps the
+  old plugin loaded until restarted. Both language verticals.
+
+## v1.0.29 — 2026-07-11
+
+First-run reliability release. Same-day follow-up to v1.0.28 driven by a
+fresh-machine install shakeout: every fix targets the out-of-box experience
+or per-machine hygiene.
+
+- **Install no longer hangs wiring Claude Code.** The plugin-refresh step
+  shells out to the `claude` CLI; it now runs with stdin closed and a hard
+  60-second deadline, so a CLI that decides to prompt (first-run onboarding,
+  consent) or stall can never freeze the installer — it falls back to a
+  printed instruction and the launchd services always get registered.
+- **`install --yes` takes the safe default.** With an existing database and
+  no explicit flag, `--yes` now adopts it (reuse) without prompting instead
+  of blocking on a hidden question. Replacing still requires the explicit
+  `--replace-db` flag — destruction is never a silent default.
+- **Fresh sessions no longer show a spurious stop-hook error.** The
+  writeback reminder matched its own banner text as "memory tools were
+  used", then drove a tool call in sessions whose MCP connection wasn't up
+  ("MCP server not connected"). It now recognizes genuine tool invocations
+  only, and finishes quietly when the tools are unavailable.
+- **Keychain hygiene.** Ephemeral estates (branch copies, in-memory serving
+  modes, test estates) no longer persist their identity keys to the login
+  Keychain — identity persistence now follows storage durability. A
+  long-running install previously accumulated one orphaned
+  `com.mootx01.estate.identity` item per throwaway estate, unboundedly.
+- **Homebrew flow reworked.** The formula no longer runs a sandboxed
+  post-install step that could neither write user config nor answer
+  prompts; setup is one caveat-printed command, and stale `~/.local/bin`
+  shadows from earlier script installs are called out explicitly.
+- **winget manifests move to schema 1.12.0** (1.6.0 was deprecated and
+  blocked submission validation). This release's winget submission is the
+  first to carry the current schema.
+- **Test integrity.** Restored the GLK audit-mining test fixtures that a
+  refactor had silently disconnected, and pinned the transaction-isolation
+  invariants at the persistence boundary.
+
+## v1.0.28 — 2026-07-11
+
+Security-hardening and substrate-robustness release. A full sweep of the
+Codex security findings plus a resource-bounds, access-enforcement, and
+privacy pass across the kits. No user-facing feature changes — all
+correctness and hardening, both legs where a kit is dual-language.
+
+- **Resource bounds (DoS resistance).** Every unbounded fan-out or matrix
+  now has a cap: float recall is bounded to a top-k scan; the moot-mgr read
+  API caps dropboxes and per-dropbox rows; Bradley-Terry preference
+  competitors and latent-theme matrices are bounded; the migration
+  benchmark caps its plan/entry fan-out; and the branch registry enforces
+  an active-branch quota and releases a terminal branch's copied rows and
+  parent estate to close a derive→discard memory-growth vector.
+- **Sensitivity and access enforcement.** Tunnel (graph-edge) reads are
+  gated by endpoint sensitivity; the memory-tool opt-out is enforced at
+  dispatch, not just at projection; the memory tool honors the no-claims
+  sensitivity posture on both legs.
+- **Server-side authority.** Migration-promotion verdicts are decided
+  server-side (no client-controlled disqualification); confirmation-strip
+  and mutate-confirm noun-binding invariants are pinned so a stripped or
+  mis-bound confirmation cannot slip a destructive op through; `--yes` no
+  longer skips the interactive replace confirmation.
+- **Privacy.** MindOverlap is gated on k-anonymity (k=3, not emptiness) and
+  reports per-side k-sufficiency instead of exact drawer counts, so a
+  federated overlap query discloses no per-estate structure beyond the
+  differentially-private score.
+- **Prompt-injection.** Untrusted FDC content is sanitized before it can
+  enter the dashboard AI prompt.
+- **Correctness / integrity.** RAM-resident caches invalidate on every
+  mutation path; maintenance commits proposed keys per-key after a
+  successful write; reanchor rejects an empty room or empty UDC;
+  synthetic-audit hydration paginates with an HLC cursor; the BM25 rebuild
+  is guarded against actor reentrancy; the memory adapter enforces the
+  `/memories` path-segment boundary; version-skew parsing handles
+  prerelease components.
+- **Resident governor.** The graph-centrality and topology-snapshot duties
+  now detect standalone tunnel and knowledge-fact changes — previously they
+  could serve stale centrality or a stale topology snapshot after a
+  graph-only edit — bringing the Swift watermark in line with the Rust
+  governor.
+- **Build hygiene.** Vendored SQLCipher amalgamation warnings are silenced
+  on the SQLCipher target only (no first-party code touched); redundant
+  access modifiers removed across GeniusLocusKit and LocusKit; the
+  transaction-isolation invariant is documented at the persistence boundary.
+- **Release / CI.** Trusted PyPI publishing with SHA-pinned actions, pinned
+  winget submission, a data-retention-aware uninstall with reuse/replace
+  reinstall, and permission classification for the newer memory tools.
+
+Deferred to their own tracked follow-ups: audit-event coverage for
+standalone tunnel/fact writes; the PostgreSQL backend NULL/JSON fidelity
+pass (dormant backend); the Rust GLK zoom-window manifest read; and the
+MindOverlap differential-privacy budget ledger.
+
 ## v1.0.18 — 2026-07-05
 
 moot-mgr fix release. With monitoring now on by default (v1.0.17), the

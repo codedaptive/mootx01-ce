@@ -98,7 +98,9 @@ struct MindOverlapLensTests {
             kit: kit, handleA: a, handleB: b, frame: unconfirmed)
 
         #expect(out.overlap == 0)
-        #expect(out.aCount == 1)
-        #expect(out.bCount == 0)
+        // a has 1 drawer, b is empty — both below the k-anonymity floor, so
+        // both report insufficient (exact counts are no longer exposed).
+        #expect(out.aSufficient == false)
+        #expect(out.bSufficient == false)
     }
 }

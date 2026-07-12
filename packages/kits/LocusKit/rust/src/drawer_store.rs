@@ -1276,6 +1276,40 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Count all rows in the `tunnels` table using `COUNT(*)` — O(1), no
+    /// row-decode. Used by the composite topology-change signature
+    /// (`GeniusLocusKit.topologyChangeSignature`) so the autonomic governor
+    /// detects standalone tunnel writes that produce no audit event. Mirrors
+    /// Swift `DrawerStore.countTunnelRows()`.
+    ///
+    /// ## Default impl — fail-loud, never silently zero
+    ///
+    /// A backend that does not override this returns `DatabaseUnavailable`
+    /// rather than silently reporting zero tunnels, which would mask a
+    /// tunnel-rich estate as unchanged to the governor.
+    fn count_tunnel_rows(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_tunnel_rows not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Count all rows in the `kg_facts` table using `COUNT(*)` — O(1), no
+    /// row-decode. Used by the composite topology-change signature
+    /// (`GeniusLocusKit.topologyChangeSignature`) so the autonomic governor
+    /// detects standalone KG-fact writes that produce no audit event. Mirrors
+    /// Swift `DrawerStore.countKGFactRows()`.
+    ///
+    /// ## Default impl — fail-loud, never silently zero
+    ///
+    /// A backend that does not override this returns `DatabaseUnavailable`
+    /// rather than silently reporting zero facts, which would mask a
+    /// fact-rich estate as unchanged to the governor.
+    fn count_kg_fact_rows(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_kg_fact_rows not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // -----------------------------------------------------------------
     // Audit reads
     // -----------------------------------------------------------------

@@ -20,6 +20,11 @@
 // from tools/moot-packager and embedded by EmbeddedArtifacts.
 
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Abstraction over invoking the `claude` CLI (ADR-024 Wave 3, Defect 1:
 /// "stranded cache"). Real callers use `ProcessClaudeCLIRunner`, which shells
@@ -42,8 +47,24 @@ public protocol ClaudeCLIRunning: Sendable {
 /// `env` resolves PATH binaries only — a shell alias or function named
 /// `claude` (no PATH binary) is invisible to it, so an alias-only setup
 /// falls into this same CLI-absent `false` fallback.
+///
+/// The child runs with stdin, stdout, AND stderr nulled, and is bounded by
+/// `timeoutSeconds`. Both are load-bearing: the installer's own output is
+/// the only thing the user sees, so a `claude` that decides to prompt
+/// (first-run onboarding, consent, an update question) would otherwise read
+/// from the inherited terminal with its question invisible — the install
+/// appears to hang forever (observed on a brew-migrated machine, 2026-07-11).
+/// Nulled stdin turns any such prompt into immediate EOF, and the timeout
+/// catches non-prompt stalls (network, lock). Both surface as `false`,
+/// which callers treat exactly like a nonzero exit: print the
+/// run-`claude plugin update`-yourself fallback and continue the install.
 public struct ProcessClaudeCLIRunner: ClaudeCLIRunning {
     public init() {}
+
+    /// Upper bound on one `claude` invocation. `claude plugin update`
+    /// normally finishes in seconds; 60s leaves room for a slow network
+    /// fetch while still guaranteeing the installer returns.
+    static let timeoutSeconds: TimeInterval = 60
 
     public func run(arguments: [String]) -> Bool {
         let proc = Process()
@@ -51,13 +72,26 @@ public struct ProcessClaudeCLIRunner: ClaudeCLIRunning {
         proc.arguments = ["claude"] + arguments
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
+        proc.standardInput = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in finished.signal() }
         do {
             try proc.run()
-            proc.waitUntilExit()
-            return proc.terminationStatus == 0
         } catch {
             return false
         }
+        if finished.wait(timeout: .now() + Self.timeoutSeconds) == .timedOut {
+            // SIGTERM first; escalate to SIGKILL for a child that ignores it.
+            // The short waits let terminationHandler fire so the process is
+            // reaped rather than left as a zombie for the installer's lifetime.
+            proc.terminate()
+            if finished.wait(timeout: .now() + 5) == .timedOut {
+                kill(proc.processIdentifier, SIGKILL)
+                _ = finished.wait(timeout: .now() + 2)
+            }
+            return false
+        }
+        return proc.terminationStatus == 0
     }
 }
 
@@ -393,7 +427,10 @@ public enum DepthInstaller {
         // their package payloads; this step is Claude Code specific.)
         if host.id == "claude-code" {
             try registerClaudeCodeMarketplace(pluginDir: dest)
-            refreshStrandedPluginCache(homeDirectory: homeDirectory, claudeCLIRunner: claudeCLIRunner)
+            if let line = refreshStrandedPluginCache(
+                homeDirectory: homeDirectory, claudeCLIRunner: claudeCLIRunner) {
+                print(line)
+            }
         }
 
         return .plugin(path: dest.path)
@@ -423,25 +460,34 @@ public enum DepthInstaller {
     /// If it IS already installed, ask the live `claude` CLI to refresh its
     /// cached copy (`claude plugin update <id>`, default scope `user` —
     /// matches where `registerClaudeCodeMarketplace` registers). Never fails
-    /// the install over this: a missing CLI or a nonzero exit only prints a
+    /// the install over this: a missing CLI or a nonzero exit only yields a
     /// one-line instruction asking the user to run the refresh themselves,
     /// then restart Claude Code.
+    ///
+    /// Returns the user-facing line the CALLER prints, or nil when the
+    /// plugin was never installed (nothing to say). The success line exists
+    /// because `claude plugin update` refreshes the ON-DISK cache only — a
+    /// running Claude Code session keeps the previous plugin snapshot
+    /// loaded until it is restarted, so a silent success left users testing
+    /// against the old plugin while the upgrade reported clean
+    /// (MOOT-INSTALL-E defect 1). Returning the message instead of printing
+    /// it here keeps the line unit-testable via the fake runner.
     ///
     /// - Parameter claudeCLIRunner: injectable seam so this is testable
     ///   without shelling out to a real `claude` binary.
     static func refreshStrandedPluginCache(
         homeDirectory: URL,
         claudeCLIRunner: ClaudeCLIRunning
-    ) {
+    ) -> String? {
         guard PluginDetector.isPluginInstalled(
             pluginID: claudeCodePluginID, homeDirectory: homeDirectory
         ) else {
-            return
+            return nil
         }
         guard claudeCLIRunner.run(arguments: ["plugin", "update", claudeCodePluginID]) else {
-            print("  ⓘ Could not refresh the cached mootx01 plugin automatically — run `claude plugin update \(claudeCodePluginID)` yourself, then restart Claude Code.")
-            return
+            return "  ⓘ Could not refresh the cached mootx01 plugin automatically — run `claude plugin update \(claudeCodePluginID)` yourself, then restart Claude Code."
         }
+        return "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new session) to load the updated plugin."
     }
 
     /// Register the just-materialised plugin dir as a local (directory-source)

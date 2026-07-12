@@ -9,12 +9,18 @@ import SubstrateTypes
 /// divergent.
 public struct MindOverlap: Sendable, Equatable {
     public let overlap: Double
-    public let aCount: Int
-    public let bCount: Int
-    public init(overlap: Double, aCount: Int, bCount: Int) {
+    /// Whether each estate met the k-anonymity floor (≥ k recalled drawers).
+    /// Exact per-estate drawer counts are deliberately NOT exposed — only
+    /// this coarse sufficiency signal — so no per-estate structure crosses
+    /// the recipe boundary alongside the DP-noised `overlap`. A `false` on
+    /// either side forces `overlap` to 0 (insufficient data), which is what
+    /// distinguishes "insufficient data" from a genuine 0 (divergent).
+    public let aSufficient: Bool
+    public let bSufficient: Bool
+    public init(overlap: Double, aSufficient: Bool, bSufficient: Bool) {
         self.overlap = overlap
-        self.aCount = aCount
-        self.bCount = bCount
+        self.aSufficient = aSufficient
+        self.bSufficient = bSufficient
     }
 }
 
@@ -89,12 +95,25 @@ public enum MindOverlapLens {
         let (summaryA, aCount) = try await summarize(handleA)
         let (summaryB, bCount) = try await summarize(handleB)
 
-        guard aCount > 0, bCount > 0 else {
-            return MindOverlap(overlap: 0, aCount: aCount, bCount: bCount)
+        // k-sufficiency is computed from the raw recalled counts but the raw
+        // counts themselves are NOT returned — only whether each side cleared
+        // the k-anonymity floor. This keeps exact per-estate drawer counts from
+        // leaving the recipe (the summary already crosses the boundary DP-noised;
+        // the counts must not undo that).
+        let aSufficient = aCount >= kAnonymity
+        let bSufficient = bCount >= kAnonymity
+
+        // Below k-anonymity, no fingerprint bit can reach the DP-OR threshold,
+        // so both summaries collapse to identical all-zero/noise-only aggregates
+        // and summaryOverlap returns a false 1.0 for unrelated tiny estates.
+        // Treat < k recalled drawers as insufficient data ⇒ 0 overlap (this also
+        // subsumes the empty-estate case, since 0 < kAnonymity).
+        guard aSufficient, bSufficient else {
+            return MindOverlap(overlap: 0, aSufficient: aSufficient, bSufficient: bSufficient)
         }
 
         return MindOverlap(
             overlap: NeuronKit.summaryOverlap(summaryA, summaryB),
-            aCount: aCount, bCount: bCount)
+            aSufficient: aSufficient, bSufficient: bSufficient)
     }
 }

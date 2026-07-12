@@ -382,6 +382,20 @@ impl EstateBranch {
             self.branch_estate = empty;
             self.snapshot_ids.clear();
         }
+        // Also drop the branch's Arc to its parent estate's store. A
+        // branch-of-branch's `parent_estate` is an Arc share of its parent
+        // branch's in-memory store (derive: `parent_branch.branch_estate().clone()`),
+        // so a terminal child would otherwise keep that entire parent store
+        // alive — the derive→discard memory-exhaustion vector the active-branch
+        // quota is meant to close. Every `parent_estate` read (E-2 uuid
+        // validation, merge capture) happens on an Active branch strictly before
+        // this runs; promoted/merged rows live in the shared store, which the
+        // coordinator/parent holds independently, so they survive. Replaced with
+        // an empty estate (not lowered to Option) so `parent_estate` accessors
+        // stay total.
+        if let Ok(empty) = Self::new_branch_estate(self.branch_id, now) {
+            self.parent_estate = empty;
+        }
     }
 
     /// Compare the current branch state to the derivation snapshot.

@@ -2983,6 +2983,38 @@ public actor DrawerStore {
         try await storage.rowStore.count(table: "drawers", where: nil)
     }
 
+    /// Count all rows in the `tunnels` table using a SQL `COUNT(*)` query.
+    ///
+    /// O(1) index scan — returns the total row count including tombstoned tunnels.
+    /// Unlike `allTunnels().count`, this bypasses row-decode entirely so no row
+    /// data is loaded and the call is safe over arbitrarily large estates.
+    ///
+    /// Used by the composite topology-change signature
+    /// (`GeniusLocusKit.topologyChangeSignature(for:)`) so the autonomic governor
+    /// detects standalone tunnel writes — which produce no audit event — between
+    /// cadences. Mirrors Rust `DrawerStore::count_tunnel_rows`.
+    ///
+    /// - Complexity: O(1) — single `SELECT COUNT(*) FROM tunnels`.
+    public func countTunnelRows() async throws -> Int {
+        try await storage.rowStore.count(table: "tunnels", where: nil)
+    }
+
+    /// Count all rows in the `kg_facts` table using a SQL `COUNT(*)` query.
+    ///
+    /// O(1) index scan — returns the total row count including retired facts.
+    /// Unlike `allKGFacts().count`, this bypasses row-decode entirely so no row
+    /// data is loaded and the call is safe over arbitrarily large estates.
+    ///
+    /// Used by the composite topology-change signature
+    /// (`GeniusLocusKit.topologyChangeSignature(for:)`) so the autonomic governor
+    /// detects standalone KG-fact writes — which produce no audit event — between
+    /// cadences. Mirrors Rust `DrawerStore::count_kg_fact_rows`.
+    ///
+    /// - Complexity: O(1) — single `SELECT COUNT(*) FROM kg_facts`.
+    public func countKGFactRows() async throws -> Int {
+        try await storage.rowStore.count(table: "kg_facts", where: nil)
+    }
+
     // MARK: - Summary surface
 
     /// Wing-level taxonomy: one WingSummary per active wing node.
