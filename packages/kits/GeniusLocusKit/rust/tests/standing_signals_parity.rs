@@ -139,7 +139,7 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
 #[test]
 fn default_standing_signal_specs_returns_nine_specs_with_interval_triggers() {
     let store = make_empty_vector_store();
-    let specs = default_standing_signal_specs(store, "test-model");
+    let specs = default_standing_signal_specs(store, "test-model", None);
     // ADR-018 F1 added signals 7–9; any future addition must update this count.
     assert_eq!(specs.len(), 9);
     for spec in &specs {
@@ -241,6 +241,7 @@ fn vector_similarity_signal_emits_only_diagnostic_when_store_is_empty() {
         store,
         "test-model".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        None,
     );
     let report = fire(spec);
     assert_eq!(report.name, "vector-similarity");
@@ -341,7 +342,7 @@ fn registering_all_nine_default_specs_produces_nine_reports() {
     // ADR-018 F1: nine signals now. Any future addition must update this count.
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
-    for spec in default_standing_signal_specs(store, "test-model") {
+    for spec in default_standing_signal_specs(store, "test-model", None) {
         scheduler.register(spec, T0_NANOS);
     }
     let reports = scheduler.report();

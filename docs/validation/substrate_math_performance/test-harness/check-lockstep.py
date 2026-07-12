@@ -73,6 +73,23 @@ EXCEPTIONS = {
     # top-level Swift mirror is correct or desirable — the nested
     # Swift form is the intentional choice on the Apple/Swift side.
     "RowId",
+    # Avx512HammingKernel (SubstrateKernel kernel_avx512.rs): x86_64-only
+    # SIMD kernel (AVX-512 VPOPCNTQ paths; the file compiles only on
+    # x86_64 per its lib.rs module declaration). The Swift leg runs the
+    # Apple-Silicon kernels (scalar / Metal / NEON) and the 4-way
+    # conformance model never includes an x86 Swift kernel, so a Swift
+    # mirror is intentionally absent — this is a Rust-only optimization
+    # type by design.
+    "Avx512HammingKernel",
+    # FeatureExtractor (SubstrateML distillation_pipeline.rs): Rust
+    # top-level `pub type FeatureExtractor = fn(...)`. The Swift mirror
+    # EXISTS but is nested by design — `DistillationPipeline.FeatureExtractor`
+    # (a @Sendable closure typealias inside the pipeline's namespace enum),
+    # which this audit's column-0 declaration scan cannot see. Same shape
+    # as the RowId precedent above: Rust module scoping isolates the name
+    # at top level; Swift nests it in the owning namespace. Both are the
+    # intentional idiomatic choice for their leg.
+    "FeatureExtractor",
 }
 
 USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
@@ -158,14 +175,22 @@ def audit_package(name: str, root: Path) -> tuple[int, int]:
     print(dim(f"  Rust public types: {len(rust_types)}"))
     print(dim(f"  Swift public types: {len(swift_types)}"))
 
+    # Acronym-fold view of the Swift names: Rust idiom CamelCases acronyms
+    # (RFC 430: JacobiSvd, SvdResult) while Swift idiom keeps them all-caps
+    # (API Design Guidelines: JacobiSVD, SVDResult). Both legs are correctly
+    # named, so the audit must treat the two spellings as the same type —
+    # a case-insensitive fold does that without weakening real-drift
+    # detection (a genuinely absent type has no fold to hide behind).
+    swift_types_folded = {s.lower() for s in swift_types}
+
     n_ok = n_miss = 0
     for kind, rust_name in sorted(rust_types):
         if rust_name in EXCEPTIONS:
             continue
         # candidates: rust_name as-is, or any snake_to_camel of it.
         # Rust public type names are already CamelCase so they should match
-        # 1:1 to Swift in most cases.
-        if rust_name in swift_types:
+        # 1:1 to Swift in most cases; acronym-cased pairs match via the fold.
+        if rust_name in swift_types or rust_name.lower() in swift_types_folded:
             n_ok += 1
         else:
             # Allow common Rust-only patterns to be flagged with hints

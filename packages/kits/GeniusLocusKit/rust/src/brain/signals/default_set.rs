@@ -70,16 +70,22 @@ pub fn default_standing_signal_names() -> [&'static str; 10] {
 pub fn default_standing_signal_specs(
     vector_store: Arc<VectorStore>,
     model_id: impl Into<String>,
+    corpus: Option<Arc<corpus_kit::corpus::Corpus>>,
 ) -> Vec<SignalSpec> {
     vec![
         // No-op daemon cycle: returns zero proposals. Callers that have a live
         // DreamingDaemon should pass a real closure via DreamingSignal::spec.
         DreamingSignal::spec(Arc::new(|| vec![])),
         MaintenanceSignal::default_spec(),
+        // The estate's Corpus (when registered) enables the signal's
+        // chunk-keyed corpus lane — the only vector-row population
+        // production estates hold. Without it, the signal scans only
+        // drawer-keyed `model_id` rows and finds nothing on a real install.
         VectorSimilaritySignal::spec(
             vector_store,
             model_id.into(),
             VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+            corpus,
         ),
         // Signal 10: ContradictionScoutSignal registered with its no-op
         // spec — the generic helper cannot supply the estate-specific hunt

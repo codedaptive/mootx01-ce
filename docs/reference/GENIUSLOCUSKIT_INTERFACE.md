@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-07-12
-version: 1.17.0
+version: 1.18.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -793,10 +793,14 @@ role, source file. Full signatures live in the cited file.
   `maintenance-daemon`, `vector-similarity`, `contradiction-scout`,
   `decay-sweep`, `by-reference-validity`, `end-of-day-tournament`,
   `temporal-causality-fold`, `distillation-sweep`, `training-daemon`.
-  `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:)` —
-  production factory; captures `VectorStore`, scans
-  row embeddings via `findNearest` on each 5-minute pass, emits
-  `AssociateFrames` for pairs within Hamming threshold (default 64).
+  `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:corpus:)` —
+  production factory; captures `VectorStore` (and the estate's `Corpus`
+  when registered), scans row embeddings via `findNearest` on each
+  5-minute pass across two lanes — drawer-keyed rows under `modelID`,
+  and chunk-keyed corpus rows mapped back to owning drawers via
+  `Corpus.sourceIDs(forChunkIDs:)` (the lane production estates actually
+  populate) — and emits `AssociateFrames` carrying drawer ids for pairs
+  within Hamming threshold (default 64).
 - **Recall cold-path signals:** `GraphCache`,
   `PreferenceStore` — public protocols defined in `GeniusLocusKit.swift`.
   Registered via `registerGraphCache(_:for:)` and `registerPreferenceStore(_:for:)`.
@@ -1472,7 +1476,7 @@ aliases. Foundation `UUID` on the Swift side is a `[u8;16]` newtype alias
 |---|---|---|---|---|---|---|
 | Dreaming signal | `DreamingSignal` (`Brain/Signals/DreamingSignal.swift`) | `DreamingSignal` (`rust/src/brain/signals/dreaming.rs`) | public / pub | identical spec factory | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | Maintenance signal | `MaintenanceSignal` (`Brain/Signals/MaintenanceSignal.swift`) | `MaintenanceSignal` (`rust/src/brain/signals/maintenance.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
-| Vector-similarity signal | `VectorSimilaritySignal` (`Brain/Signals/VectorSimilaritySignal.swift`) | `VectorSimilaritySignal` (`rust/src/brain/signals/vector_similarity.rs`) | public / pub | identical; Hamming threshold default 64 | `standing_signals_parity.rs`, `rag_wiring_parity.rs` / `RAGWiringTests.swift` | Confirmed |
+| Vector-similarity signal | `VectorSimilaritySignal` (`Brain/Signals/VectorSimilaritySignal.swift`) | `VectorSimilaritySignal` (`rust/src/brain/signals/vector_similarity.rs`) | public / pub | identical; Hamming threshold default 64; two-lane mining (drawer-keyed `modelID` rows + chunk-keyed corpus rows mapped to owning drawers via `Corpus.sourceIDs(forChunkIDs:)` / `source_ids_for_chunks` when a Corpus is supplied) | `standing_signals_parity.rs`, `rag_wiring_parity.rs` (incl. corpus-lane test) / `RAGWiringTests.swift` | Confirmed |
 | Contradiction-scout signal | `ContradictionScoutSignal` (`Brain/Signals/ContradictionScoutSignal.swift`) | `ContradictionScoutSignal` (`rust/src/brain/signals/contradiction_scout.rs`) | public / pub | identical; hourly cadence, closure-injected hunt cycle (single-write invariant: the hunt persists, the signal emits one diagnostic) | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | Decay-sweep signal | `DecaySweepSignal` (`Brain/Signals/DecaySweepSignal.swift`) | `DecaySweepSignal` (`rust/src/brain/signals/decay_sweep.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | By-reference validity signal | `ByReferenceValiditySignal` (`Brain/Signals/ByReferenceValiditySignal.swift`) | `ByReferenceValiditySignal` (`rust/src/brain/signals/by_reference_validity.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
@@ -1873,6 +1877,16 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-07-12
+VectorSimilaritySignal corpus lane (both ports): `spec` gains an optional
+`corpus` parameter (Swift default `nil`; Rust `Option<Arc<Corpus>>` as a
+required fourth argument). With a corpus supplied, the five-minute pass
+also mines the chunk-keyed corpus vector lane and maps hits to owning
+drawers — see GENIUSLOCUSKIT_SPEC.md 1.13.0 for the behavioral contract.
+`registerDefaultStandingSignals` / `default_standing_signal_specs` forward
+the estate's registered corpus; Rust `EstateCoordinator::corpus_for`
+promoted `pub(crate)` → `pub` for the governor's cross-crate bootstrap.
 
 ### 1.17.0 -- 2026-07-12
 Contradiction hunter (both ports at parity): new Tier-1 kit pass

@@ -117,7 +117,14 @@ public extension GeniusLocusKit {
         let specs: [SignalSpec] = [
             DreamingSignal.spec(daemonCycle: dreamingCycle),
             MaintenanceSignal.defaultSpec(),
-            VectorSimilaritySignal.spec(vectorStore: vectorStore, modelID: modelID),
+            // The estate's Corpus (when registered) enables the signal's
+            // chunk-keyed corpus lane — the only vector-row population
+            // production estates hold. Without it, the signal scans only
+            // drawer-keyed `modelID` rows and finds nothing on a real
+            // install.
+            VectorSimilaritySignal.spec(
+                vectorStore: vectorStore, modelID: modelID,
+                corpus: corpusKits[handle]),
             // Contradiction scout — the hunter's background half. The caller
             // wraps kit.huntContradictions with the estate's handle/model;
             // the no-op default is appropriate for tests without a wired

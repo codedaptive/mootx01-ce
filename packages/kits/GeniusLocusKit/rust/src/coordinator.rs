@@ -1533,9 +1533,13 @@ impl EstateCoordinator {
     /// The `Corpus` registered for `handle`, if any (a cheap `Arc` clone).
     ///
     /// Used by the Dual-Path Intake composition (`intake.rs`) to ingest a
-    /// captured drawer into the estate's BM25/vector lanes. Mirrors the Swift
-    /// actor's `corpusKits[handle]` lookup.
-    pub(crate) fn corpus_for(&self, handle: &EstateHandle) -> Option<Arc<Corpus>> {
+    /// captured drawer into the estate's BM25/vector lanes, and (cross-crate,
+    /// hence `pub`) by the autonomic governor to pass the corpus into
+    /// `default_standing_signal_specs` so the vector-similarity signal can
+    /// mine the chunk-keyed corpus lane — the vector-row population
+    /// production estates actually hold. Mirrors the Swift actor's
+    /// `corpusKits[handle]` lookup.
+    pub fn corpus_for(&self, handle: &EstateHandle) -> Option<Arc<Corpus>> {
         self.corpus_kits.get(handle).map(Arc::clone)
     }
 
