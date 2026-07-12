@@ -115,6 +115,83 @@ struct ReleaseDownloaderTests {
         }
     }
 
+    /// A matching SHA-256 line is not enough on Linux/POSIX: checksums.txt must
+    /// also have a detached minisign signature. This prevents a tampered release
+    /// endpoint from supplying a malicious tarball plus a matching checksum file.
+    @Test func downloadRequiresMinisignSignatureWhenChecksumMatches() async throws {
+        #if !os(macOS)
+        let tag = "v1.1.0"
+
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "x86_64"
+        #endif
+        let os = "linux"
+        let tarball  = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
+        let base     = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
+
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mootx01-minisig-required-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let contentDir = tmpDir.appendingPathComponent("contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contentDir, withIntermediateDirectories: true)
+        let fakeBinary = contentDir.appendingPathComponent("mootx01")
+        try Data("#!/bin/sh\necho tampered\n".utf8).write(to: fakeBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBinary.path)
+
+        let tarballURL = tmpDir.appendingPathComponent(tarball)
+        let pack = Process()
+        pack.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        pack.arguments = ["-czf", tarballURL.path, "-C", contentDir.path, "."]
+        pack.standardError = Pipe()
+        try pack.run()
+        pack.waitUntilExit()
+        guard pack.terminationStatus == 0 else {
+            Issue.record("Test setup: tar -czf exited \(pack.terminationStatus) — cannot continue")
+            return
+        }
+
+        let tarballData = try Data(contentsOf: tarballURL)
+        let digestProcess = Process()
+        digestProcess.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        digestProcess.arguments = ["-a", "256", tarballURL.path]
+        let digestPipe = Pipe()
+        digestProcess.standardOutput = digestPipe
+        try digestProcess.run()
+        let digestOutput = digestPipe.fileHandleForReading.readDataToEndOfFile()
+        digestProcess.waitUntilExit()
+        guard digestProcess.terminationStatus == 0,
+              let digest = String(decoding: digestOutput, as: UTF8.self).split(separator: " ").first
+        else {
+            Issue.record("Test setup: shasum -a 256 exited \(digestProcess.terminationStatus)")
+            return
+        }
+        let checksum = "\(digest)  \(tarball)\n"
+
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.0.0",
+            fetchData: mockFetch([
+                ok("\(base)/\(tarball)", tarballData),
+                ok("\(base)/checksums.txt", checksum),
+                // No checksums.txt.minisig fixture: the downloader must request
+                // it and fail closed rather than extracting the matching-checksum tarball.
+            ]))
+
+        do {
+            _ = try await downloader.download(tag: tag)
+            Issue.record("Expected failure before extraction without checksums.txt.minisig")
+        } catch let e as URLError {
+            #expect(e.code == .badURL, "mockFetch should fail on the required minisig URL")
+        } catch {
+            Issue.record("Unexpected error type when minisig is absent: \(error)")
+        }
+        #endif
+    }
+
     // MARK: unsafeMemberReason — zip-slip path safety predicate
 
     /// Absolute paths (starting with /) in a tar archive member allow overwriting
