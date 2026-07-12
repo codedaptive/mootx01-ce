@@ -139,6 +139,11 @@ public enum ToolProjection {
         } else {
             raw.removeAll { $0.name == "moot_palace_import" }
         }
+        // Dataset tools (MX-TAB-7): file, query, stats. Always visible when the
+        // estate supports datasets. Not vault-gated (dataset tables are a core storage
+        // surface, not a VaultKit feature). Added after vault so the existing
+        // tool-count and tier ordering tests stay stable with a simple +3 increment.
+        raw.append(contentsOf: DatasetTools.tools())
         return raw.map { tool in
             ProjectedTool(
                 name: tool.name,

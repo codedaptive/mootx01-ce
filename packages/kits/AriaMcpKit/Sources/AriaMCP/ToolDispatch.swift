@@ -339,7 +339,7 @@ public struct ToolDispatcher: Sendable {
     /// JSON-RPC error: the call did reach the substrate, the substrate
     /// said no, the client should see why.
     ///
-    /// Dispatch order: teachme pre-check → federation → recipe → lens → vault → interface → methodNotFound → hint injection.
+    /// Dispatch order: teachme pre-check → federation → recipe → lens → vault → dataset → interface → methodNotFound → hint injection.
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
         let args = arguments.objectValue ?? [:]
         do {
@@ -372,6 +372,14 @@ public struct ToolDispatcher: Sendable {
                 runnerResult = try await VaultTools.dispatch(
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle, jobRegistry: jobRegistry)
+            } else if DatasetTools.isDatasetTool(name) {
+                // User-defined tabular dataset tools (MX-TAB-7): file, query, stats.
+                // Dispatched between vault and the five-tier interface; each tool
+                // targets an estate and resolves the handle via the standard gate.
+                runnerResult = try await DatasetTools.dispatch(
+                    name: name, args: args, kit: kit,
+                    resolveHandle: resolveHandle,
+                    serverIdentity: serverIdentity)
             } else if InterfaceTools.isInterfaceTool(name) {
                 // Five-tier AI-client interface tools dispatched by name.
                 runnerResult = try await InterfaceTools.dispatch(

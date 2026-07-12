@@ -130,11 +130,13 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 66 tools.
+    /// VC-2: `tools/list` returns exactly 69 tools.
     ///
-    /// The count is a snapshot of the v1.0 ARIA lexicon surface. If the count
+    /// The count is a snapshot of the v1.1 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
     /// and commit the reason with the change.
+    /// MX-TAB-7: +3 dataset tools (moot_file_dataset, moot_dataset_query,
+    /// moot_dataset_stats) → 66 → 69.
     @Test func v1ToolsListReturns66Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
@@ -154,17 +156,14 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 66 = current ToolProjection snapshot: interface + federation + recipe
-        // + lens + vault + maintenance (including moot_reclassify_fdc). 3 new
-        // distillation recipe tools added (DA1): moot_consolidate, moot_recall_distilled,
-        // moot_recollect.
-        // 20th core ARIA = moot_memory_get (Tier 1, fetch-drawer-by-ID, build-now
-        // per Bob's ruling).
-        // 23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
-        // moot_palace_import (PAR-PB-1): direct palace → substrate import.
-        // moot_drain_status: AI-queryable background drain progress.
-        // moot_reclassify_fdc: AI-queryable FDC anchor audit/repair/reset.
-        #expect(tools.count == 66, "tools/list must return exactly 66 tools; got \(tools.count)")
+        // 69 = prior 66 + 3 dataset tools (MX-TAB-7):
+        //   moot_file_dataset, moot_dataset_query, moot_dataset_stats.
+        // Prior 66 = interface + federation + recipe + lens + vault + maintenance:
+        //   20th interface = moot_memory_get (Tier 1, fetch-drawer-by-ID).
+        //   23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
+        //   11th recipe = moot_recollect (DA1 distillation).
+        //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
+        #expect(tools.count == 69, "tools/list must return exactly 69 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────
