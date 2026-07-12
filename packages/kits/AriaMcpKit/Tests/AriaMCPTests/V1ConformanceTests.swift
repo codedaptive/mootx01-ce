@@ -60,11 +60,42 @@ struct V1ConformanceTests {
         try pipe.fileHandleForWriting.close()
     }
 
-    /// Read all output bytes from the pipe and split on newlines into separate
-    /// JSON-RPC response objects. Throws if any line does not parse as a JSON object.
-    private func readResponses(from pipe: Pipe) throws -> [[String: JSONValue]] {
-        let data = try pipe.fileHandleForReading.readToEnd() ?? Data()
-        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+    /// Run the server and collect all JSON-RPC responses from its output pipe.
+    ///
+    /// Drains the output pipe in a concurrent Task before `server.run()` begins
+    /// writing, preventing a pipe-buffer deadlock that manifests when the
+    /// response payload exceeds macOS's 16 KiB default pipe buffer.
+    ///
+    /// The deadlock pattern that caused the hang (MX-TAB-7 regression, 2026-07-12):
+    ///   1. `server.run()` writes the `tools/list` response (69 tools ≈ 30+ KiB)
+    ///      to `outPipe.fileHandleForWriting` via a blocking `write(2)` syscall.
+    ///   2. `write(2)` fills the 16 KiB pipe buffer and stalls — the kernel blocks
+    ///      the write until the read side drains some bytes.
+    ///   3. `readToEnd()` (the only consumer) was called AFTER `server.run()` in
+    ///      the old sequential pattern, so it was never reached.
+    ///   4. Neither side could make progress: permanent deadlock.
+    ///
+    /// Fix: launch a drain Task that calls `readToEnd()` before the server starts,
+    /// so the write never accumulates more than ~16 KiB of unread bytes. The drain
+    /// Task returns when the write side is closed (EOF), which happens immediately
+    /// after `server.run()` exits normally.
+    private func collectResponses(
+        server: StdioServer,
+        input inPipe: Pipe,
+        output outPipe: Pipe
+    ) async throws -> [[String: JSONValue]] {
+        // Start draining BEFORE the server starts writing so the pipe buffer
+        // never fills. readToEnd() blocks until outPipe.fileHandleForWriting
+        // is closed (see below), so this Task lives for exactly the right duration.
+        let drain = Task {
+            (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+        }
+        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
+        // Closing the write side signals EOF to drain's readToEnd(), causing it to
+        // return with whatever bytes the server wrote.
+        try outPipe.fileHandleForWriting.close()
+        let raw = await drain.value
+        let lines = raw.split(separator: 0x0A, omittingEmptySubsequences: true)
         return try lines.map { line in
             let parsed = try JSONValue.parse(Data(line))
             guard let obj = parsed.objectValue else {
@@ -105,10 +136,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         #expect(responses.count == 1, "one request must produce one response")
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
@@ -149,10 +177,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
@@ -188,10 +213,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
 
         // Must be a result (not a JSON-RPC error).
@@ -229,10 +251,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
 
         // A bad schema_version must produce a JSON-RPC error response.
@@ -265,10 +284,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
 
         // A conforming schema_version must not produce a JSON-RPC error.
@@ -302,10 +318,7 @@ struct V1ConformanceTests {
         ])
         try sendFrames([resourcesFrame, promptsFrame], to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         #expect(responses.count == 2, "two requests must produce two responses")
 
         for response in responses {
