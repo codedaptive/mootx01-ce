@@ -2662,6 +2662,26 @@ public actor Corpus {
         try await bundleStore.allSourceIDs()
     }
 
+    /// Resolve chunk IDs to the source (drawer) IDs that own them.
+    ///
+    /// Reads the warm in-memory `chunkSourceMap` (chunk id → source_id) that
+    /// `open()` loads and every ingest maintains — no table scan, no body
+    /// decode. IDs with no mapping (never ingested, or from another estate)
+    /// are simply absent from the result.
+    ///
+    /// Used by `GeniusLocusKit.huntContradictions` to map vector rows —
+    /// which the encode pipeline keys by CHUNK UUID — back to the drawers
+    /// whose content they embed, so kNN hits on the corpus lane become
+    /// drawer-pair candidates.
+    public func sourceIDs(forChunkIDs ids: [UUID]) -> [UUID: String] {
+        var out: [UUID: String] = [:]
+        out.reserveCapacity(ids.count)
+        for id in ids {
+            if let source = chunkSourceMap[id] { out[id] = source }
+        }
+        return out
+    }
+
     // MARK: - Merkle attestation (NT-C1)
 
     /// Per-corpus Merkle root for a given source.

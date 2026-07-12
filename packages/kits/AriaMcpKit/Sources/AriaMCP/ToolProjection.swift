@@ -296,8 +296,22 @@ public enum ToolProjection {
                         "to_id": stringSchema("Target memory row identifier."),
                         "kind": stringSchema("Relationship kind (default: relates). Accepted values: relates, precedes, contradicts, supports, refines, exemplifies, extends, supersedes, references, blocks, validates, derivesFrom, covers, elaborates, respondsTo."),
                         "label": stringSchema("Optional free-form label for the connection. Defaults to the kind string."),
+                        "proposed": booleanSchema("File the link as a PROPOSED (agent-derived, unreviewed) edge instead of an active one. Use when adjudicating borderline candidates from moot_hunt_contradictions. The user settles it via moot_review_tunnel. Default false."),
                     ],
                     required: ["from_id", "to_id", "kind"]
+                )),
+                provenance: .interface
+            ),
+            ProjectedTool(
+                name: "moot_review_tunnel",
+                description: "Settle a PROPOSED connection (e.g. an agent-derived contradiction from the hunter): accept activates it, reject withdraws it. Rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "tunnel_id": stringSchema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
+                        "verdict": stringSchema("\"accept\" to activate the link, \"reject\" to withdraw it permanently."),
+                        "reason": stringSchema("Optional note explaining the verdict."),
+                    ],
+                    required: ["tunnel_id", "verdict"]
                 )),
                 provenance: .interface
             ),

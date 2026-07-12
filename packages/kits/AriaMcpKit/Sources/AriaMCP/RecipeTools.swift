@@ -83,6 +83,11 @@ enum RecipeTools {
     /// _distilled_from tunnel graph. Returns full episodic content from the M
     /// source memories that produced the factoid. Full spec: DISTILLATION_ARIA_TOOLS.md §3.
     static let recollectToolName = "moot_recollect"
+    /// On-demand contradiction hunt: one bounded sweep of the content-driven
+    /// contradiction detector (kNN candidates + ConflictCue screen). Strong
+    /// findings persist as proposed contradicts tunnels; borderline pairs are
+    /// returned for the calling agent to adjudicate.
+    static let huntContradictionsToolName = "moot_hunt_contradictions"
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
     static func isRecipeTool(_ name: String) -> Bool {
@@ -97,6 +102,7 @@ enum RecipeTools {
             || name == consolidateToolName
             || name == recallDistilledToolName
             || name == recollectToolName
+            || name == huntContradictionsToolName
     }
 
     // MARK: - tools/list projection
@@ -117,6 +123,7 @@ enum RecipeTools {
             consolidateTool(),
             recallDistilledTool(),
             recollectTool(),
+            huntContradictionsTool(),
         ]
     }
 
@@ -289,10 +296,40 @@ enum RecipeTools {
     private static func dreamTool() -> ProjectedTool {
         ProjectedTool(
             name: dreamToolName,
-            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against) and run one dreaming cycle (latent-alignment proposals + cycle diary). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary.",
+            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over semantically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
             inputSchema: objectSchema(
                 properties: [
                     "now": stringSchema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
+                ],
+                required: []),
+            provenance: .recipe)
+    }
+
+    // MARK: - hunt-contradictions descriptor
+
+    /// The on-demand contradiction hunt. One bounded sweep of the
+    /// content-driven detector: kNN candidate mining over the estate's
+    /// vector index, then the deterministic ConflictCue screen. Strong
+    /// findings persist as `contradicts` tunnels with lifecycle PROPOSED
+    /// (reviewable via `moot_review_tunnel`, surfaced by
+    /// `moot_lens_contradiction`); borderline pairs are returned with
+    /// content snippets so the CALLING AGENT judges them — the
+    /// adjudication feed for paraphrased conflicts the lexical screen
+    /// cannot settle.
+    private static func huntContradictionsTool() -> ProjectedTool {
+        ProjectedTool(
+            name: huntContradictionsToolName,
+            description: "Hunt for contradictions in memory content: one bounded sweep that finds semantically-near memory pairs via the vector index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the vector index (run moot_reindex after bulk import).",
+            inputSchema: objectSchema(
+                properties: [
+                    "probe_limit": .object([
+                        "type": .string("integer"),
+                        "description": .string(
+                            "Maximum vector-indexed memories probed this sweep (default 500). "
+                                + "Repeated calls converge: settled pairs are skipped."),
+                    ]),
+                    "now": stringSchema("Optional ISO8601 instant for deterministic runs. Omit to use the current wall clock."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
                 ],
                 required: []),
@@ -435,6 +472,8 @@ enum RecipeTools {
             return try await runRecallDistilled(args, kit: kit, handle: handle)
         case recollectToolName:
             return try await runRecollect(args, kit: kit, handle: handle)
+        case huntContradictionsToolName:
+            return try await runHuntContradictions(args, kit: kit, handle: handle)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -895,14 +934,101 @@ enum RecipeTools {
             policyStore: InMemoryDreamingPolicyStore())
         let report = try await daemon.triggerDreamingCycle(now: now)
 
-        let body = """
+        // Step 3 — the content-driven phase: one contradiction-hunt sweep
+        // (kNN candidates + ConflictCue screen; strong findings persist as
+        // proposed contradicts tunnels; dedup is durable, so re-running
+        // moot_dream never re-proposes). This is what makes post-import
+        // dreaming produce content results on a never-recalled estate.
+        // Bounded probe budget per call; repeated calls stay cheap because
+        // settled pairs are skipped.
+        let hunt = try await kit.huntContradictions(
+            in: handle, probeLimit: 500, now: now)
+
+        var body = """
         moot_dream: matrix rebuilt, dreaming cycle complete
         consideredCandidates: \(report.candidatesConsidered)
         proposalsEmitted: \(report.proposalsEmitted.count)
         suppressedDuplicates: \(report.suppressedDuplicates)
         belowThreshold: \(report.belowThreshold)
+        contradictionsProposed: \(hunt.proposed.count)
+        contradictionCandidatesBorderline: \(hunt.borderline.count)
         """
+        if !hunt.vectorStoreAvailable {
+            body += "\n(contradiction hunt skipped: no vector index for this estate — run moot_reindex first)"
+        }
+        if !hunt.proposed.isEmpty {
+            body += "\nReview proposed contradictions with moot_lens_contradiction, then accept/reject via moot_review_tunnel."
+        }
         return ToolDispatcher.textResult(body)
+    }
+
+    // MARK: - hunt contradictions
+
+    /// Run `moot_hunt_contradictions`: one bounded contradiction-hunt sweep.
+    /// Strong findings persist as proposed contradicts tunnels (the hunt does
+    /// its own writes); borderline candidates come back with snippets for the
+    /// calling agent to adjudicate.
+    private static func runHuntContradictions(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let now: Date
+        if let raw = try optionalString(args["now"], argument: "now") {
+            guard let parsed = ISO8601DateFormatter().date(from: raw) else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "now is not a valid ISO8601 instant: \(raw)")
+            }
+            now = parsed
+        } else {
+            now = Date()
+        }
+        var probeLimit = 500
+        if let raw = args["probe_limit"] {
+            guard case .integer(let n) = raw, n > 0, n <= 10_000 else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "probe_limit must be an integer in 1...10000")
+            }
+            probeLimit = Int(n)
+        }
+
+        let report = try await kit.huntContradictions(
+            in: handle, probeLimit: probeLimit, now: now)
+
+        guard report.vectorStoreAvailable else {
+            return ToolDispatcher.textResult(
+                "moot_hunt_contradictions: no vector index for this estate — "
+                    + "run moot_reindex first, then hunt again.")
+        }
+
+        var lines: [String] = [
+            "moot_hunt_contradictions: sweep complete",
+            "probesScanned: \(report.probesScanned)",
+            "pairsScreened: \(report.pairsScreened)",
+            "alreadySettled: \(report.deduplicated)",
+            "proposed: \(report.proposed.count)",
+        ]
+        for p in report.proposed {
+            lines.append("  PROPOSED \(p.sourceDrawerID) contradicts \(p.targetDrawerID) "
+                + "(\(p.cueKind), score \(p.score), tunnel \(p.tunnelID))")
+        }
+        if !report.proposed.isEmpty {
+            lines.append("Review with moot_lens_contradiction; accept/reject via moot_review_tunnel.")
+        }
+        lines.append("borderlineCandidates: \(report.borderline.count)")
+        for c in report.borderline {
+            lines.append("  CANDIDATE \(c.sourceDrawerID) vs \(c.targetDrawerID) "
+                + "(\(c.cueKind), score \(c.score))")
+            lines.append("    a: \(c.sourceSnippet)")
+            lines.append("    b: \(c.targetSnippet)")
+        }
+        if !report.borderline.isEmpty {
+            lines.append("Judge each CANDIDATE pair: if the two memories genuinely conflict, "
+                + "record it with moot_link_memories kind=contradicts proposed=true; otherwise ignore it.")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
     // MARK: - consolidate

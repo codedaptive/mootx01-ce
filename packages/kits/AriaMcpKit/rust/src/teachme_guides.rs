@@ -25,6 +25,7 @@ pub fn guide(tool_name: &str) -> &'static str {
         "moot_move_memory" => GUIDE_MOVE_MEMORY,
         // Tier 2 — Connections
         "moot_link_memories" => GUIDE_LINK_MEMORIES,
+        "moot_review_tunnel" => GUIDE_REVIEW_TUNNEL,
         "moot_connection_search" => GUIDE_CONNECTION_SEARCH,
         "moot_connection_map" => GUIDE_CONNECTION_MAP,
         // Tier 3 — Knowledge graph
@@ -45,6 +46,8 @@ pub fn guide(tool_name: &str) -> &'static str {
         "moot_federated_search" => GUIDE_FEDERATED_SEARCH,
         // Maintenance
         "moot_palace_import" => GUIDE_PALACE_IMPORT,
+        // Recipe — contradiction hunter (on-demand sweep)
+        "moot_hunt_contradictions" => GUIDE_HUNT_CONTRADICTIONS,
         // Generic fallbacks for prefixed groups
         _ if tool_name.starts_with("moot_lens_") => GUIDE_LENS_GENERIC,
         _ if matches!(
@@ -222,6 +225,12 @@ Required args:
   kind    (string) one of: references, supersedes, blocks, validates,
                    contradicts, derivesFrom, covers, elaborates, respondsTo
 
+Optional args:
+  proposed (bool) file the link as a PROPOSED (agent-derived, unreviewed)
+                  edge instead of an active one — use when adjudicating
+                  borderline candidates from moot_hunt_contradictions.
+                  The user settles it via moot_review_tunnel. Default false.
+
 Example:
   { \"from_id\": \"<uuid-a>\", \"to_id\": \"<uuid-b>\", \"kind\": \"elaborates\" }
 
@@ -229,7 +238,50 @@ Response: \"linked <from_id> → <to_id> via <kind> (<tunnel_id>)\"
 
 Mistakes:
   — Both from_id and to_id must exist in the estate.
-  — Unknown kind strings default to references.";
+  — Unknown kind strings are rejected (invalidParams), not defaulted.
+  — Filing an ACTIVE contradicts edge for a merely-suspected conflict;
+    use proposed:true so the user gets to review it.";
+
+const GUIDE_REVIEW_TUNNEL: &str = "\
+moot_review_tunnel — settle a PROPOSED connection: accept or reject
+
+Proposed edges come from the contradiction hunter (background scout,
+moot_dream sweep, or moot_hunt_contradictions) and from agent-filed
+moot_link_memories proposed:true links. Accept activates the edge;
+reject withdraws it PERMANENTLY — a rejected pair is never re-proposed.
+
+Required args:
+  tunnel_id (string) tunnel ID (shown by moot_lens_contradiction)
+  verdict   (string) \"accept\" or \"reject\"
+
+Optional args:
+  reason (string) note explaining the verdict
+
+Example:
+  { \"tunnel_id\": \"<uuid>\", \"verdict\": \"accept\" }
+
+Mistakes:
+  — Rejecting to \"snooze\" a finding: rejection is durable.
+  — Reviewing an active or withdrawn tunnel; only proposed ones qualify.";
+
+const GUIDE_HUNT_CONTRADICTIONS: &str = "\
+moot_hunt_contradictions — hunt memory content for contradictions
+
+One bounded sweep: finds semantically-near memory pairs via the vector
+index, screens each pair with a lexical conflict cue (negation asymmetry,
+value divergence, revision markers), then:
+  — STRONG findings persist as PROPOSED contradicts links; settle them
+    with moot_review_tunnel.
+  — BORDERLINE pairs are RETURNED with snippets for YOU to judge; if a
+    pair genuinely conflicts, record it with moot_link_memories
+    kind=contradicts proposed=true.
+
+Optional args:
+  probe_limit (int)    max vector-indexed memories probed (default 500)
+  now         (string) ISO8601 instant for deterministic runs
+
+Requires the vector index — run moot_reindex after bulk import.
+Rejected and already-linked pairs are deduplicated (never re-proposed).";
 
 const GUIDE_CONNECTION_SEARCH: &str = "\
 moot_connection_search — list outgoing tunnels from a memory

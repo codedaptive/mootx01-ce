@@ -9,7 +9,7 @@ import Testing
 /// `.recipe`; vault tools carry `.vault`. There are no `.lexicon` tools.
 ///
 /// Every test projects with `tools(environment: [:])` — an explicit empty
-/// environment — so the contract (66 tools: vault on by default, opt-in
+/// environment — so the contract (68 tools: vault on by default, opt-in
 /// memory tool off) holds regardless of what the test runner's process
 /// environment or a concurrently running suite has set.
 @Suite("Tool projection")
@@ -44,7 +44,7 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 66.
+    /// Hard contract gate: the total tool count must be exactly 68.
     /// Snapshot includes the interface, federation, recipe, lens, vault, and
     /// maintenance surfaces exposed by ToolProjection.
     /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory
@@ -58,13 +58,16 @@ struct ToolProjectionTests {
     /// moot_drain_status (background drain progress), moot_reclassify_fdc
     /// (FDC anchor repair/reset), and moot_palace_import (PAR-PB-1,
     /// direct palace import).
+    /// The contradiction hunter adds two: moot_hunt_contradictions (recipe —
+    /// on-demand content sweep for conflicts) and moot_review_tunnel
+    /// (interface Tier 2 — accept/reject a PROPOSED tunnel).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools(environment: [:]).count == 66,
-                "tools() must return exactly 66 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        #expect(ToolProjection.tools(environment: [:]).count == 68,
+                "tools() must return exactly 68 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
-    /// All 20 interface tools must be present.
+    /// All 21 interface tools must be present.
     @Test func testInterfaceToolsArePresent() {
         let names = Set(ToolProjection.tools(environment: [:]).map(\.name))
         let expected: [String] = [
@@ -74,6 +77,7 @@ struct ToolProjectionTests {
             "moot_confirm_memory", "moot_move_memory",
             // Tier 2
             "moot_link_memories", "moot_connection_search", "moot_connection_map",
+            "moot_review_tunnel",
             // Tier 3
             "moot_file_fact", "moot_fact_search", "moot_retire_fact",
             "moot_fact_timeline",
@@ -236,7 +240,7 @@ struct ToolProjectionTests {
     /// membership gate — the two sets must stay in sync. This catches the class
     /// of bug where a case is added to the switch but omitted from `names`.
     ///
-    /// The expected set is the canonical 20 Tier 1–5 tools plus maintenance
+    /// The expected set is the canonical 21 Tier 1–5 tools plus maintenance
     /// tools (`moot_reindex`, `moot_drain_status`, `moot_reclassify_fdc`,
     /// `moot_palace_import`). If a new tool is added to the switch, add it here too.
     @Test func testMembershipGateCoversAllDispatchCases() {
@@ -248,6 +252,7 @@ struct ToolProjectionTests {
             "moot_confirm_memory", "moot_move_memory",
             // Tier 2
             "moot_link_memories", "moot_connection_search", "moot_connection_map",
+            "moot_review_tunnel",
             // Tier 3
             "moot_file_fact", "moot_fact_search", "moot_retire_fact",
             "moot_fact_timeline",

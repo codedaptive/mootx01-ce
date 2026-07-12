@@ -1087,6 +1087,7 @@ enum InterfaceTools {
         "moot_confirm_memory", "moot_move_memory",
         // Tier 2 — Connections
         "moot_link_memories", "moot_connection_search", "moot_connection_map",
+        "moot_review_tunnel",
         // Tier 3 — Knowledge Graph
         "moot_file_fact", "moot_fact_search", "moot_retire_fact",
         "moot_fact_timeline",
@@ -1128,6 +1129,7 @@ enum InterfaceTools {
         case "moot_link_memories":     return try await dispatcher.runLinkMemories(args)
         case "moot_connection_search": return try await dispatcher.runConnectionSearch(args)
         case "moot_connection_map":    return try await dispatcher.runConnectionMap(args)
+        case "moot_review_tunnel":     return try await dispatcher.runReviewTunnel(args)
         // Tier 3
         case "moot_file_fact":         return try await dispatcher.runFileFact(args, now: Date())
         case "moot_fact_search":       return try await dispatcher.runFactSearch(args)
@@ -1878,6 +1880,20 @@ extension ToolDispatcher {
             parentNodeIds: [source.parentNodeId, target.parentNodeId])
         let sourceNames = linkNodeNames[source.parentNodeId] ?? (wing: "", room: "")
         let targetNames = linkNodeNames[target.parentNodeId] ?? (wing: "", room: "")
+        // `proposed: true` files the link in the PROPOSED lifecycle — the
+        // agent-adjudication path: the caller judged a borderline candidate
+        // from moot_hunt_contradictions and records the verdict as a
+        // reviewable proposal instead of an immediately-active edge. The
+        // user settles it via moot_review_tunnel.
+        var proposed = false
+        if let raw = args["proposed"] {
+            guard case .bool(let flag) = raw else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "proposed must be a boolean")
+            }
+            proposed = flag
+        }
         let frame = TunnelCaptureFrame(
             sourceWing: sourceNames.wing,
             sourceRoom: sourceNames.room,
@@ -1888,10 +1904,45 @@ extension ToolDispatcher {
             sourceDrawerId: fromID,
             targetDrawerId: toID,
             kind: kind,
-            originClass: .derived
+            originClass: .derived,
+            lifecycle: proposed ? .proposed : .active
         )
         let tunnel = try await estate.capture(frame)
-        return Self.textResult("linked \(fromID) → \(toID) via \(label) (\(tunnel.id))")
+        let stateNote = proposed ? " [proposed — review via moot_review_tunnel]" : ""
+        return Self.textResult("linked \(fromID) → \(toID) via \(label) (\(tunnel.id))\(stateNote)")
+    }
+
+    /// `moot_review_tunnel` — settle a PROPOSED tunnel: accept activates it,
+    /// reject withdraws it. Only tunnels in the proposed lifecycle (the
+    /// contradiction hunter's findings and agent-filed proposed links) are
+    /// reviewable; a settled edge cannot be rewritten by a stale review.
+    /// Rejected pairs are never re-proposed by the hunter (durable dedup).
+    func runReviewTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let tunnelID = try requireString(args, "tunnel_id")
+        let verdict = try requireString(args, "verdict")
+        guard verdict == "accept" || verdict == "reject" else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "verdict must be \"accept\" or \"reject\"")
+        }
+        let reason = try optionalString(args["reason"], argument: "reason")
+        let estate = try await kit.estate(for: handle)
+        do {
+            try await estate.respondToTunnel(
+                id: tunnelID,
+                accept: verdict == "accept",
+                changedBy: serverIdentity,
+                reason: reason)
+        } catch let error as LocusKitError {
+            // Not-found and not-proposed are caller errors, surfaced as clean
+            // tool-level messages rather than opaque failures.
+            return Self.errorResult("moot_review_tunnel: \(error)")
+        }
+        let outcome = verdict == "accept"
+            ? "accepted — the contradicts link is now active"
+            : "rejected — the link is withdrawn and this pair will never be re-proposed"
+        return Self.textResult("moot_review_tunnel: \(tunnelID) \(outcome).")
     }
 
     /// `moot_connection_search` — find connections going out from a memory.

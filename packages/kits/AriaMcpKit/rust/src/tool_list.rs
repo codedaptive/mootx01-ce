@@ -3,7 +3,7 @@
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition.
 //!   Tier 1 (9)  — core memory: file, search, list, get, update, withdraw, erase, confirm, move
-//!   Tier 2 (3)  — connections: link, search, map
+//!   Tier 2 (4)  — connections: link, review_tunnel, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
@@ -11,8 +11,8 @@
 //!   Maintenance (3/4) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
 //!                       and vault-gated moot_palace_import
 //!   Federation (1) — moot_federated_search
-//!   Recipe (11) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
-//!                 recall_precise, recall_shaped, dream,
+//!   Recipe (12) — list_lenses, list_recipes, synthesize, run_migration, confirm_migration,
+//!                 recall_precise, recall_shaped, dream, hunt_contradictions,
 //!                 consolidate, recall_distilled, recollect
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
@@ -20,9 +20,10 @@
 //! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 66 tools (ADR-025 wave 8.2 added moot_monitoring_status;
-//! FDC reset added moot_reclassify_fdc).
-//! Vault-off (MOOTX01_VAULT=0): 60 tools —
+//! Vault-on (default): 68 tools (ADR-025 wave 8.2 added moot_monitoring_status;
+//! FDC reset added moot_reclassify_fdc; the contradiction hunter added
+//! moot_hunt_contradictions + moot_review_tunnel).
+//! Vault-off (MOOTX01_VAULT=0): 62 tools —
 //! the five moot_vault_* tools and moot_palace_import are hidden together
 //! because all open local SQLite files (filesystem import/export vector).
 //!
@@ -51,7 +52,7 @@ pub fn vault_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 66 tools when vault is enabled (the default) or 60 tools when
+/// Produces 68 tools when vault is enabled (the default) or 62 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). The filesystem-importing
 /// `moot_palace_import` tool is hidden with the vault surface (same security
 /// posture). All other non-vault tiers are always present. See ADR-015.
@@ -67,8 +68,8 @@ pub fn build_tool_list() -> serde_json::Value {
 /// Rust test runner). Production code uses `build_tool_list()` which reads
 /// the env var via `vault_enabled()`.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
-    // Vault-on: 66 tools. Vault-off: 60 tools (palace_import + 5 vault_* hidden).
-    let capacity = if vault_on { 66 } else { 60 };
+    // Vault-on: 68 tools. Vault-off: 62 tools (palace_import + 5 vault_* hidden).
+    let capacity = if vault_on { 68 } else { 62 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Tier 1 — Core memory (9)
@@ -82,8 +83,9 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     tools.push(confirm_memory_tool());
     tools.push(move_memory_tool());
 
-    // Tier 2 — Connections (3)
+    // Tier 2 — Connections (4)
     tools.push(link_memories_tool());
+    tools.push(review_tunnel_tool());
     tools.push(connection_search_tool());
     tools.push(connection_map_tool());
 
@@ -120,7 +122,7 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     // Federation (1)
     tools.push(federated_search_tool());
 
-    // Recipe (11)
+    // Recipe (12)
     tools.push(list_lenses_tool());
     tools.push(list_recipes_catalog_tool());
     tools.push(synthesize_tool());
@@ -142,6 +144,12 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     tools.push(consolidate_tool());
     tools.push(recall_distilled_tool());
     tools.push(recollect_tool());
+    // moot_hunt_contradictions: on-demand contradiction-hunt sweep — the
+    // same core pass that runs inside moot_dream and the resident scout
+    // signal, surfaced as its own tool per Bob's ruling ("it also has to be
+    // an on demand item the user can call"). Appended last to mirror the
+    // Swift RecipeTools.tools() ordering.
+    tools.push(hunt_contradictions_tool());
 
     // Lens (23)
     for lens_name in crate::lens_tools::LENS_TOOLS {
@@ -325,9 +333,25 @@ fn link_memories_tool() -> serde_json::Value {
                 "from_id": string_schema("UUID of the source memory."),
                 "to_id": string_schema("UUID of the target memory."),
                 "kind": string_schema("Tunnel kind (default: relates). Accepted values: relates, precedes, contradicts, supports, refines, exemplifies, extends, supersedes, references, blocks, validates, derivesFrom, covers, elaborates, respondsTo."),
-                "label": string_schema("Optional human-readable label for the connection.")
+                "label": string_schema("Optional human-readable label for the connection."),
+                "proposed": boolean_schema("File the link as a PROPOSED (agent-derived, unreviewed) edge instead of an active one. Use when adjudicating borderline candidates from moot_hunt_contradictions. The user settles it via moot_review_tunnel. Default false.")
             }),
             json!(["from_id", "to_id", "kind"])
+        )))
+    })
+}
+
+fn review_tunnel_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_review_tunnel",
+        "description": "Settle a PROPOSED connection (e.g. an agent-derived contradiction from the hunter): accept activates it, reject withdraws it. Rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "tunnel_id": string_schema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
+                "verdict": string_schema("\"accept\" to activate the link, \"reject\" to withdraw it permanently."),
+                "reason": string_schema("Optional note explaining the verdict.")
+            }),
+            json!(["tunnel_id", "verdict"])
         )))
     })
 }
@@ -728,10 +752,29 @@ fn recall_shaped_tool() -> serde_json::Value {
 fn dream_tool() -> serde_json::Value {
     json!({
         "name": "moot_dream",
-        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against) and run one dreaming cycle (latent-alignment proposals + cycle diary). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary.",
+        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over semantically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock.")
+            }),
+            json!([])
+        )))
+    })
+}
+
+/// On-demand contradiction hunt — mirrors Swift
+/// `RecipeTools.huntContradictionsTool()`. One bounded sweep: kNN candidate
+/// mining over the vector index, conflict-cue screen, strong findings persist
+/// as PROPOSED contradicts tunnels, borderline pairs return with snippets for
+/// the calling agent to adjudicate.
+fn hunt_contradictions_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_hunt_contradictions",
+        "description": "Hunt for contradictions in memory content: one bounded sweep that finds semantically-near memory pairs via the vector index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the vector index (run moot_reindex after bulk import).",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "probe_limit": integer_schema("Maximum vector-indexed memories probed this sweep (default 500). Repeated calls converge: settled pairs are skipped."),
+                "now": string_schema("Optional ISO8601 instant for deterministic runs. Omit to use the current wall clock.")
             }),
             json!([])
         )))
@@ -837,7 +880,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_drift" => "Reasoning lens: measure distribution drift across a temporal split point.",
         "moot_lens_node_motion" => "Reasoning lens (diffusion, node layer): how a single memory has MOVED over time — its mutation volatility (decay-weighted recent-churn mass), its topic trajectory (the UDC anchors it has occupied), whether it reanchored, and a write-time anomaly verdict (churning / reanchored / stable). Reads the memory's fresh audit history.",
         "moot_lens_cohesion" => "Reasoning lens: surface drawers that are statistical outliers in content cohesion with their peers (the odd-ones-out).",
-        "moot_lens_contradiction" => "Reasoning lens: surface genuine semantic contradictions — drawer pairs linked by a contradicts tunnel and KG facts with conflicting objects for the same subject+predicate key.",
+        "moot_lens_contradiction" => "Reasoning lens: surface recorded contradictions — drawer pairs connected by a contradicts tunnel (confirmed edges plus PROPOSED agent-derived findings from the contradiction hunter, flagged unreviewed), and KG facts with conflicting objects for the same subject+predicate. Reports recorded links only; to scan memory CONTENT for new conflicts run moot_hunt_contradictions (or moot_dream, which includes a hunt sweep). Settle proposed edges with moot_review_tunnel.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
         "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
         "moot_lens_anticipate" => "Reasoning lens: predict next-likely actions based on historical patterns. Confirmation-level filters in the recall frame (userConfirmed/unconfirmed) are ignored — the lens performs its own dual recall (confirmed = success, unconfirmed = non-success) to compute a differentiated rate; sensitivity and other scoping filters are honored.",
