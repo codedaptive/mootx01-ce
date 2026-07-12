@@ -81,9 +81,10 @@ struct StatusCommand: AsyncParsableCommand {
     // MARK: - Helpers
 
     private func processIsRunning(pid: Int32) -> Bool {
-        // kill(pid, 0) returns 0 if the process exists and the caller may signal
-        // it, or -1 (ESRCH: no such process; EPERM: exists but not signallable).
-        return kill(pid, 0) == 0
+        // Identity-verified liveness: PIDs recycle across reboots, so a bare
+        // kill(pid, 0) on a stale PID file reports an unrelated process as a
+        // "running" server. The PID counts only if it is a mootx01 binary.
+        ProcessIdentity.isLiveProcess(pid)
     }
 
     /// True if something accepts a TCP connection on 127.0.0.1:port. Used as the
