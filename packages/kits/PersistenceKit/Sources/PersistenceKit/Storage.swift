@@ -24,6 +24,19 @@ public protocol Storage: Sendable {
     var auditLog: any AuditLog { get }
     var observer: any StorageObserver { get }
 
+    /// Dataset store for user-defined tabular data (MX-TAB-1).
+    ///
+    /// Throws `StorageError.featureGated(feature: "datasetStore")` by default
+    /// so existing `Storage` conformers (including deferred Postgres, MX-TAB-2)
+    /// keep compiling without modification.
+    ///
+    /// Why throwing: a plain non-throwing `var` would require every conformer
+    /// to unconditionally supply a value; the throwing-accessor shape lets the
+    /// default protocol-extension implementation propagate `featureGated` so
+    /// unimplemented backends fail at the call site instead of at compile time.
+    /// Mirrors Rust's `fn dataset_store(&self) -> StorageResult<Arc<dyn DatasetStore>>`.
+    var datasetStore: any DatasetStore { get throws }
+
     /// Open the backend (creates files, establishes connections,
     /// runs migrations up to the declared schema version).
     func open(schema: SchemaDeclaration) async throws
@@ -61,5 +74,18 @@ public extension Storage {
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T {
         try await transaction(isolation: .readCommitted, block)
+    }
+
+    /// Default `datasetStore` implementation throws `featureGated("datasetStore")`.
+    ///
+    /// Backends that implement the DatasetStore surface (SQLiteStorage,
+    /// InMemoryStorage) override this with a concrete implementation. All
+    /// other conformers — including Postgres (deferred per MX-TAB-2) and
+    /// any third-party conformers — inherit this default, which fails loudly
+    /// at call time instead of silently at compile time.
+    var datasetStore: any DatasetStore {
+        get throws {
+            throw StorageError.featureGated(feature: "datasetStore")
+        }
     }
 }

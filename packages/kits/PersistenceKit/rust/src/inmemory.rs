@@ -155,6 +155,15 @@ impl Storage for InMemoryStorage {
         })
     }
 
+    /// Dataset store override: returns an `InMemoryDatasetStore` with its own
+    /// `Arc<Mutex<_>>` state. Note: InMemory dataset state is separate from
+    /// `InMemoryStorage.state` (it does not participate in `transaction()`
+    /// rollbacks). This is acceptable for a test double — individual operation
+    /// correctness is what MX-TAB-1 tests verify.
+    fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
+        Ok(Arc::new(crate::dataset_store::InMemoryDatasetStore::new()))
+    }
+
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         let mut state = self.state.lock().unwrap();
         // Gate on per-kit version so a second kit opening on this storage

@@ -30,6 +30,15 @@ public final class InMemoryStorage: Storage, Sendable {
     public let auditLog: any AuditLog
     public let observer: any StorageObserver
 
+    /// Dataset store for user-defined tabular data (MX-TAB-1).
+    ///
+    /// Stored as a `let` — satisfies the `{ get throws }` protocol requirement
+    /// with a non-throwing stored property (valid in Swift: non-throwing is a
+    /// sub-type of throwing). Shares `stateActor` so dataset tables and row-
+    /// store tables live in the same in-memory state snapshot — rolling back a
+    /// transaction reverts both.
+    public let datasetStore: any DatasetStore
+
     let stateActor: InMemoryStateActor
     let observerRegistry: ObserverRegistry
 
@@ -54,6 +63,9 @@ public final class InMemoryStorage: Storage, Sendable {
         self.blobStore = InMemoryBlobStore(stateActor: actor)
         self.auditLog = InMemoryAuditLog(stateActor: actor)
         self.observer = InMemoryObserver(registry: registry)
+        // Dataset store — same stateActor, so dataset tables participate in
+        // transaction snapshots and rollbacks alongside row-store tables.
+        self.datasetStore = InMemoryDatasetStore(stateActor: actor)
     }
 
     public func open(schema: SchemaDeclaration) async throws {
