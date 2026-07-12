@@ -709,6 +709,72 @@ struct DatasetStoreTests {
         #expect(inMemoryResults[2]["label"] == .text("É"))
     }
 
+    /// Equality predicate (.eq) uses byte-exact comparison (BINARY collation parity),
+    /// NOT Unicode canonical equality.
+    ///
+    /// Fixture: insert NFC "É" (U+00C9, UTF-8: [0xC3, 0x89]); query with NFD
+    /// "E\u{0301}" (UTF-8: [0x45, 0xCC, 0x81]). These are canonically equal under
+    /// Unicode normalisation (Swift String == returns true) but byte-inequal — so
+    /// both InMemory and SQLite must return 0 rows.
+    ///
+    /// Without the MX-TAB-Q1 fix (PredicateEvaluator .eq used TypedValue ==), the
+    /// InMemory backend would return 1 row (wrong), while SQLite BINARY correctly
+    /// returned 0. This test proves the backends now agree.
+    @Test func binaryCollation_equality_NFCvsNFD_inMemoryAndSQLite() async throws {
+        let nfcE    = "\u{00C9}"       // precomposed É — 2 UTF-8 bytes: 0xC3 0x89
+        let nfdE    = "E\u{0301}"      // decomposed E + combining accent — 3 bytes: 0x45 0xCC 0x81
+
+        // Sanity: Swift String == considers them equal (canonical NFC), confirming
+        // why TypedValue == was wrong for byte-exact collation.
+        #expect(nfcE == nfdE, "precondition: Swift String == canonicalises NFC/NFD as equal")
+        // Byte sequences must differ so the predicate test is meaningful.
+        let nfcBytes = Array(nfcE.utf8)
+        let nfdBytes = Array(nfdE.utf8)
+        #expect(nfcBytes != nfdBytes, "precondition: UTF-8 bytes must differ for this test to be valid")
+
+        let schema = DatasetSchema(columns: [
+            ColumnDeclaration(name: "label", type: .text, nullable: false)
+        ])
+
+        // ── InMemory ──────────────────────────────────────────────────────────
+        let inMemoryDS = makeInMemory().datasetStore
+        let inMemoryID = UUID()
+        try await inMemoryDS.createDataset(id: inMemoryID, schema: schema, indexes: [])
+        try await inMemoryDS.appendRows(id: inMemoryID, rows: [["label": .text(nfcE)]])
+
+        let inMemoryResults = try await inMemoryDS.queryRows(
+            id: inMemoryID,
+            predicate: .eq(Column(table: "", name: "label"), .text(nfdE)),
+            orderBy: [], limit: nil, offset: nil, columns: nil
+        )
+        #expect(
+            inMemoryResults.count == 0,
+            "InMemory .eq must use byte-exact comparison: NFC É ≠ NFD E+combining"
+        )
+
+        // ── SQLite ────────────────────────────────────────────────────────────
+        let sqliteDS = try makeSQLite().datasetStore
+        let sqliteID = UUID()
+        try await sqliteDS.createDataset(id: sqliteID, schema: schema, indexes: [])
+        try await sqliteDS.appendRows(id: sqliteID, rows: [["label": .text(nfcE)]])
+
+        let sqliteResults = try await sqliteDS.queryRows(
+            id: sqliteID,
+            predicate: .eq(Column(table: "", name: "label"), .text(nfdE)),
+            orderBy: [], limit: nil, offset: nil, columns: nil
+        )
+        #expect(
+            sqliteResults.count == 0,
+            "SQLite BINARY .eq must return 0 rows: NFC É ≠ NFD E+combining under BINARY collation"
+        )
+
+        // ── Cross-backend agreement ───────────────────────────────────────────
+        #expect(
+            inMemoryResults.count == sqliteResults.count,
+            "InMemory and SQLite must agree on equality result (BINARY parity)"
+        )
+    }
+
     // MARK: - f64 wire rule: REAL columnStats min/max (SQLite backend)
     //
     // SQLite REAL columns return SQLITE_FLOAT → TypedValue.float(Double).

@@ -12,10 +12,11 @@
 //
 //   SYNTHETIC PRIMARY KEY: when DatasetSchema.primaryKeyColumn is nil, the
 //   table receives a hidden column `__ds_pk BIGINT GENERATED ALWAYS AS IDENTITY`
-//   that carries the PRIMARY KEY constraint. This column is never exposed in
-//   queryRows results — the SELECT column list is built from the cached schema
-//   (user columns only). When a PK column is declared, no hidden column is
-//   added; the named column carries PRIMARY KEY.
+//   that carries the PRIMARY KEY constraint. This column is excluded from
+//   schema-driven SELECT and INSERT column lists — the SELECT list is built from
+//   the cached schema (user columns only); INSERT omits it so Postgres assigns
+//   sequence values automatically. When a PK column is declared, no hidden column
+//   is added; the named column carries PRIMARY KEY.
 //
 //   SCHEMA CACHE: DatasetSchema is stored in PostgreSQLBackend.datasetSchemas
 //   (actor-isolated, keyed by table name) when createDatasetTable succeeds.
@@ -23,6 +24,12 @@
 //   row decoding. If the cache is missing (process restart without re-calling
 //   createDataset), a clear error is thrown — production would add an
 //   information_schema introspection fallback.
+//
+//   NOTE — Rust leg divergence on cache miss: postgres.rs falls back to SELECT *
+//   rather than throwing. This means the Rust leg exposes __ds_pk in results and
+//   loses column-type hints for DOUBLE PRECISION on a cache miss. Swift is stricter
+//   (throw) and the two legs are intentionally divergent here pending the
+//   information_schema hardening mission.
 //
 //   IDENTIFIER VALIDATION: every user-supplied column name passes
 //   validateDatasetColumnIdentifier (PersistenceKit core) before any DDL or
@@ -283,10 +290,12 @@ extension PostgreSQLBackend {
 
     /// Column-projecting predicate query over dataset rows.
     ///
-    /// Builds an explicit SELECT column list from the cached schema (never
-    /// includes `__ds_pk`). Applies predicate (parameterized via
-    /// PostgreSQLPredicateCompiler) and ORDER BY (column names validated via
-    /// validatePSQLIdentifier). Decodes each row using the schema's
+    /// Builds an explicit SELECT column list from the cached schema, which
+    /// excludes `__ds_pk` (schema-driven projection contains only user-declared
+    /// columns). Throws BackendError when the cache is missing — no SELECT *
+    /// fallback; the Rust leg diverges here (see header note). Applies predicate
+    /// (parameterized via PostgreSQLPredicateCompiler) and ORDER BY (column names
+    /// validated via validatePSQLIdentifier). Decodes each row using the schema's
     /// ColumnDeclaration types via `decodeRow` (PostgreSQLConnection.swift).
     func queryDatasetRows(
         id: UUID,
@@ -304,7 +313,9 @@ extension PostgreSQLBackend {
         }
 
         // Build the projection column list from the cached schema.
-        // When columns is nil or empty, project all schema columns (never __ds_pk).
+        // When columns is nil or empty, project all schema columns. __ds_pk is
+        // excluded because the cached schema's `columns` array holds only
+        // user-declared columns (schema-driven exclusion, not a hard name filter).
         let projectedCols: [ColumnDeclaration]
         if let requested = columns, !requested.isEmpty {
             let requestedSet = Set(requested)

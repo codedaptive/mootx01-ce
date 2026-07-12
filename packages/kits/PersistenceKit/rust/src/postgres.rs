@@ -2628,10 +2628,12 @@ impl StorageObserver for PgObserver {
 //
 //   SYNTHETIC PRIMARY KEY: when `DatasetSchema.primary_key_column` is None, the
 //   table receives `"__ds_pk" BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY`.
-//   This column is never included in SELECT projection lists (those are built
-//   from the cached schema's `columns` field, which never includes `__ds_pk`).
-//   INSERT statements also omit it; Postgres assigns sequence values
-//   automatically.
+//   This column is excluded from schema-driven SELECT projection lists (those are
+//   built from the cached schema's `columns` field, which never includes `__ds_pk`)
+//   and from INSERT column lists (Postgres assigns sequence values automatically).
+//   On a schema-cache miss, `query_rows` falls back to SELECT * — in that path
+//   `__ds_pk` IS present in the result set; see the cache-miss note in
+//   `query_rows` below for the full divergence details.
 //
 //   PK PRE-SORT: `append_rows` sorts rows ascending by the declared PK column
 //   before INSERT using `compare_typed_values_for_sort` (same function as the
@@ -2728,8 +2730,12 @@ impl DatasetStore for PgDatasetStore {
 
         if !has_declared_pk {
             // Hidden identity column carries the PK when no user-declared PK
-            // exists. Never included in SELECT column lists or INSERT column lists
-            // — Postgres assigns values automatically.
+            // exists. Excluded from schema-driven SELECT and INSERT column lists:
+            // the cached schema's `columns` field never includes `__ds_pk`, so
+            // `query_rows` and `append_rows` do not reference it — Postgres assigns
+            // sequence values automatically. A schema-cache miss bypasses this
+            // exclusion (SELECT * exposes __ds_pk); see `query_rows` cache-miss
+            // comment for the full divergence.
             parts.push(r#""__ds_pk" BIGINT GENERATED ALWAYS AS IDENTITY"#.to_string());
         }
 
@@ -2868,8 +2874,23 @@ impl DatasetStore for PgDatasetStore {
         }
 
         // Build the projection column list from the cached schema.
-        // Never includes `__ds_pk` — that column is internal and not
-        // part of the user-visible schema.
+        // When the cache is populated (the normal path), `__ds_pk` is excluded
+        // from the SELECT list because the cached schema's `columns` field holds
+        // only user-declared columns.
+        //
+        // On a schema-cache miss (process restart without re-calling create_dataset)
+        // the code falls back to `SELECT *`, which DOES expose `__ds_pk` to row
+        // decoding and loses column-type hints (no ColumnDeclaration available to
+        // tell read_value the column's declared type). Two concrete effects:
+        //   • `__ds_pk` appears as a key in returned StorageRow maps (not user-visible
+        //     in production because the schema cache is always populated, but
+        //     observable in tests or after unexpected restarts).
+        //   • DOUBLE PRECISION columns fall back to the integer decode path in
+        //     read_value, returning TypedValue::Null for MIN/MAX in column_stats.
+        //
+        // Swift divergence: PostgreSQLDatasetStore.swift throws BackendError on a
+        // schema-cache miss (no SELECT * fallback). A production hardening path
+        // would add information_schema introspection here to rebuild the cache.
         let (col_select, schema_cols) = {
             let guard = self.schemas.lock().unwrap();
             match guard.get(&table_name) {
@@ -2893,7 +2914,18 @@ impl DatasetStore for PgDatasetStore {
                     (select, projected)
                 }
                 None => {
-                    // Schema not cached — fall back to SELECT * (no type hints for decoding).
+                    // Schema-cache miss: SELECT * with no type hints for row decoding.
+                    // This path is reached on process restart before create_dataset is
+                    // called again. Two known issues (vs. the cache-hit path):
+                    //   1. `__ds_pk` is included in the result rows (internal column
+                    //      leaks into the StorageRow map for no-declared-PK tables).
+                    //   2. Column type hints are absent (empty schema_cols below) so
+                    //      read_value defaults to the integer decode path, returning
+                    //      TypedValue::Null for DOUBLE PRECISION MIN/MAX in column_stats.
+                    // Swift's PostgreSQLDatasetStore throws BackendError on a cache miss
+                    // rather than falling back here. A follow-up hardening mission would
+                    // rebuild the schema via information_schema introspection instead of
+                    // returning SELECT *.
                     ("*".to_string(), Vec::new())
                 }
             }
