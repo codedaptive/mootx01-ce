@@ -47,8 +47,11 @@ final class Mootx01AppIntentsTests: XCTestCase {
             publicOnly: false
         )
         let result = try await recall.run()
-        let recalled: String = try result.value
-        XCTAssertTrue(recalled.contains(marker))
+        // RecallDrawerIntent returns a typed [DrawerEntity] value; the test
+        // process sees each entity as AnyAppEntity with dynamic properties.
+        let recalled: [AnyAppEntity] = try result.value
+        let contents: [String] = try recalled.map { try $0.content }
+        XCTAssertTrue(contents.contains { $0.contains(marker) })
     }
 
     func testDrawerEntityIdentifierResolution() async throws {

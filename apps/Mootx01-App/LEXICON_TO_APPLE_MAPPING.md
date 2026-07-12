@@ -86,8 +86,9 @@ those lines at the gateway layer — no new ARIA tool needed.
 - `DrawerEntityQuery.entities(for:)` resolves by running a recall with the UUID as the query
   and exact-id filtering; best-effort but no fabrication.
 - `DrawerEntityQuery.suggestedEntities()` returns the 20 most-recent drawers.
-- `RecallDrawerIntent` still returns text today; a typed `[DrawerEntity]` result from the intent
-  itself is a future upgrade (requires App Intents returning a value, currently returning dialog).
+- `RecallDrawerIntent` returns a typed `[DrawerEntity]` value plus the full response text as
+  dialog — Shortcuts chains the entities into a next step; Siri reads the dialog. One
+  `moot_memory_search` call feeds both (composition: `RecallDrawerIntent.entities(from:)`).
 
 Content in `DrawerEntity` is a 120-char preview from the search response; full-body content is
 not returned in the search path.
@@ -157,7 +158,7 @@ turns "Apple dropped a change" into "complete the slot."
 | **Apple Intelligence dials out as an MCP client** | `Sources/MootGateway/Transport/GatewayTransport.swift` — adapt `HTTPTransport` to Apple's transport/auth; the resident daemon supplies the listener. No verb/tool change. | Small |
 | **App Intents exported outward as MCP** | Nothing new to author — the A4 intents in `packages/apple/MootIntentKit/` are the on-ramp; register them in an Xcode bundle (`AppIntentsPackage`). | Medium (bundle) |
 | **FM v2 / on-device "Core AI" tool-calling** | New `FMToolAdapter` beside MootIntentKit exposing `recall`/`capture` as a model `Tool`; reuse `MootBridge`. | Small |
-| **App Intents 2.0 (richer entities / streaming)** | `packages/apple/MootIntentKit/Sources/MootIntentKit/DrawerEntity.swift` — adopt the new entity/result types; wire the typed `[DrawerEntity]` result that the text-result edge blocks today. | Enhance |
+| **App Intents 2.0 (richer entities / streaming)** | `packages/apple/MootIntentKit/Sources/MootIntentKit/DrawerEntity.swift` — adopt the new entity/result types. The typed `[DrawerEntity]` recall result is wired (RecallDrawerIntent returns entities + dialog); remaining upgrades are streaming results and richer entity properties. | Enhance |
 | **A memory/knowledge assistant schema** | `packages/apple/MootIntentKit/Sources/MootIntentKit/CaptureDrawerIntent.swift` + `RecallDrawerIntent.swift` — conform to the schema for the deep treatment; update §1 candidacy. | Opportunistic |
 | **Personal Context APIs open** | New scope doc + an `A3` reader in `MCPClient/` consuming Personal Context; fold in via `capture`/`learn`. | Investigate |
 

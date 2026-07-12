@@ -16,10 +16,11 @@ import AriaMCP   // JSONValue, for building tool arguments
 // to promote an existing private drawer. Both ports are live; `filter:exportable`
 // returns correctly populated results after either write path is used.
 //
-// Return type: the intent returns recall results as dialog text. A typed
-// [DrawerEntity] result requires a structured recall-by-id tool on the ARIA
-// surface (currently tool results are text content blocks). The slot is here
-// for that future upgrade.
+// Return type: the intent returns a typed [DrawerEntity] value (parsed from
+// the moot_memory_search response lines via MootToolCalling.parseDrawerLines)
+// plus the full response text as dialog. Shortcuts can chain the entities
+// into a next step (act-on-drawer); Siri reads the dialog. One tool call
+// feeds both — the parse is gateway-layer, no extra ARIA round-trip.
 
 public struct RecallDrawerIntent: MootEstateIntent {
 
@@ -54,7 +55,7 @@ public struct RecallDrawerIntent: MootEstateIntent {
     }
 
     @MainActor
-    public func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<String> {
+    public func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<[DrawerEntity]> {
         let c = try await resolvedCaller()
         var arguments: [String: JSONValue] = ["query": .string(query)]
         if publicOnly {
@@ -63,7 +64,19 @@ public struct RecallDrawerIntent: MootEstateIntent {
         }
         let result = await c.callTool("moot_memory_search", arguments: arguments)
         if result.isError { throw IntentToolError.substrateRefused(result.text) }
-        return .result(value: result.text, dialog: IntentDialog(stringLiteral: result.text))
+        // One tool call feeds both outputs: the typed entities Shortcuts
+        // chains on, and the verbatim response text Siri speaks.
+        let drawers = Self.entities(from: result)
+        return .result(value: drawers, dialog: IntentDialog(stringLiteral: result.text))
+    }
+
+    /// The typed-result composition perform() delegates to: parse the
+    /// moot_memory_search response into DrawerEntity values. Split out so the
+    /// headless package tests can exercise it (perform() needs the App
+    /// Intents runtime).
+    public static func entities(from result: IntentCallResult) -> [DrawerEntity] {
+        guard !result.isError else { return [] }
+        return DrawerLineParser.parse(result.text)
     }
 
     @MainActor

@@ -67,7 +67,7 @@ public enum GatewayEdges {
         ),
         EdgeFinding(
             title: "DrawerEntity recall wired via gateway-layer text parse",
-            detail: "moot_memory_search response lines carry the format \"<uuid>  [<room>]  <content preview>\". MootToolCalling.parseDrawerLines extracts typed DrawerEntity values from these lines at the gateway layer — no new ARIA tool needed. DrawerEntityQuery.entities(for:) and suggestedEntities() are now wired. Content is a preview (up to 120 chars from the tool); full content is not yet returned in the search path."
+            detail: "moot_memory_search response lines carry the format \"<uuid>  [<room>]  <content preview>\". DrawerLineParser extracts typed DrawerEntity values from these lines at the gateway layer — no new ARIA tool needed. DrawerEntityQuery.entities(for:) and suggestedEntities() are wired, and RecallDrawerIntent returns a typed [DrawerEntity] value (plus dialog) that Shortcuts can chain. Content is a preview (up to 120 chars from the tool); full content is not yet returned in the search path."
         ),
         EdgeFinding(
             title: "propose / associate have no caller path by design",
