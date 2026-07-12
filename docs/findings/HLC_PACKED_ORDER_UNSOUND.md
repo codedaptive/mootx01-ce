@@ -1,6 +1,18 @@
 <!-- HLC packed-form ordering — root-cause finding from the 2026-07-12 fast-lane
-     stabilization session. One LocusKit test (ProvenanceTests.mutateHappyPath)
-     is intentionally left red as the tripwire for this finding. -->
+     stabilization session. STATUS: FIXED same day via Option A (audit ordering
+     re-keyed on the full-precision HLC columns, both legs, SQLite + Postgres,
+     with an open-time backfill for pre-migration Swift estates). The former
+     tripwire (ProvenanceTests.mutateHappyPath) is green and two dedicated
+     regression suites pin the contract (Swift SQLiteAuditChronologicalOrderTests,
+     Rust sqlite_conformance chronological tests).
+
+     RESIDUAL, deliberately unfixed: user-declared .hlc COLUMNS in SQL
+     backends still store the packed integer as their value, so SQL-side
+     range predicates on such columns compare packed order. No current
+     caller issues them (in-memory evaluator and all struct-level compares
+     use true HLC order); fixing it means changing the column storage
+     format = the full Option B migration. Revisit if a caller ever needs
+     SQL range queries over an hlc column. -->
 
 FINDING: HLC_PACKED_ORDER_UNSOUND — `HLC.packed` does not preserve HLC order, and it is the audit log's ordering key
 
