@@ -52,6 +52,16 @@ compiler (exhaustive switch/match failures) plus a hand inspection of
 every defaulted switch at the swept sites, recorded in that mission's
 Blast Radius Report.
 
+## Queued follow-up: MX-TAB-Q1
+
+Found during MX-TAB-1, needs its own blast radius (whole RowStore
+surface): `TypedValueComparator.compare` orders text Unicode-canonically
+on the Swift InMemory backend, while the SQLite backend (BINARY
+collation) and the Rust leg compare bytes. Dataset-path comparators were
+fixed to byte order in MX-TAB-1 itself; the residual is the pre-existing
+InMemory RowStore orderBy/predicate surface. Must land before any parity
+harness compares InMemory orderings.
+
 One spec correction feeding MX-TAB-3: `ContentKind` already carries
 `fingerprintOnly = 6` (F12 cascade, cookbook v0.6), which the spec's
 case list omits. `dataset` therefore lands at raw value 7 —

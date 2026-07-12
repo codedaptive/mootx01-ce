@@ -20,9 +20,11 @@
 //   BINARY collation and the Rust leg. KNOWN RESIDUAL: `queryRows` orderBy
 //   delegates to the pre-existing `InMemoryStateActor.queryRows`, whose
 //   `TypedValueComparator.compare` is Unicode-aware for text — a pre-existing
-//   RowStore-wide divergence from the SQLite backend, queued as its own
-//   blast-radius item. The BINARY collation discipline tests in
-//   DatasetStoreTests assert byte order against the SQLite backend.
+//   RowStore-wide divergence from the SQLite backend, queued 2026-07-11 as
+//   follow-up MX-TAB-Q1 (TypedValueComparator byte-order parity; recorded in
+//   docs/findings/MX_TAB_0_BRANCH_AND_EE_CHECK.md). The BINARY collation
+//   discipline tests in DatasetStoreTests assert byte order against the
+//   SQLite backend.
 //
 //   COLUMN VALIDATION: every user-supplied column name passes
 //   `validateDatasetColumnIdentifier` before any table mutation. Same rule
@@ -89,8 +91,12 @@ final class InMemoryDatasetStore: DatasetStore, Sendable {
 
     func appendRows(id: UUID, rows: [[String: TypedValue]]) async throws {
         guard !rows.isEmpty else { return }
-        if let first = rows.first {
-            for key in first.keys {
+        // Validate EVERY row's keys before any mutation — the spec's
+        // "rejection fails the whole operation" applies to the batch as a
+        // unit, so a bad key in row N must not depend on later insert-time
+        // validation to be caught.
+        for row in rows {
+            for key in row.keys {
                 try validateDatasetColumnIdentifier(key)
             }
         }
@@ -106,8 +112,21 @@ final class InMemoryDatasetStore: DatasetStore, Sendable {
                 compareTypedValuesForSort(a[pk] ?? .null, b[pk] ?? .null)
             }
         }
-        for row in sortedRows {
-            _ = try await stateActor.insertRow(table: tableName, values: row)
+        // Single-transaction discipline (spec §1: appendRows is one
+        // transaction): mirror InMemoryStorage.transaction()'s seam —
+        // buffer notifications, snapshot, insert all rows, then commit; a
+        // mid-batch throw (e.g. unique-index violation) rolls back to the
+        // snapshot so no partial batch is ever visible.
+        await stateActor.beginNotificationBuffering()
+        let snapshot = await stateActor.snapshot()
+        do {
+            for row in sortedRows {
+                _ = try await stateActor.insertRow(table: tableName, values: row)
+            }
+            await stateActor.commitNotifications()
+        } catch {
+            await stateActor.rollback(to: snapshot)
+            throw error
         }
     }
 
