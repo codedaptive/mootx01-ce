@@ -66,18 +66,30 @@ public actor MootBridge {
     /// in-memory estate (nothing on disk to share).
     public nonisolated let databasePath: String?
 
-    private init(dispatcher: ARIA_MCPDispatcher, serverName: String, databasePath: String?) {
+    /// The estate's live Storage — the SAME instance the ARIA verbs read and
+    /// write through. Retained so ConvergenceKit's SyncEngine can observe the
+    /// exact rows the estate mutates (opening a second SQLiteStorage on the
+    /// same file would give a distinct observer that never sees those writes).
+    private let storage: any Storage
+
+    private init(dispatcher: ARIA_MCPDispatcher, storage: any Storage,
+                 serverName: String, databasePath: String?) {
         self.dispatcher = dispatcher
+        self.storage = storage
         self.serverName = serverName
         self.databasePath = databasePath
     }
+
+    /// The estate's live Storage, for wiring a ConvergenceKit SyncEngine
+    /// (`engine.enable(manifest:storage:)`). Same instance the verbs use.
+    public func estateStorage() -> any Storage { storage }
 
     // MARK: Attachment
 
     /// The three-step wiring (schema → coordinator → dispatcher) over an
     /// already-constructed storage backend. Mirrors `MootSidecar.attach`.
     private static func makeDispatcher(
-        storage: some Storage,
+        storage: any Storage,
         owner: OwnerCredentials,
         serverName: String
     ) async throws -> ARIA_MCPDispatcher {
@@ -102,7 +114,7 @@ public actor MootBridge {
         let configuration = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let storage = InMemoryStorage(configuration: configuration)
         let dispatcher = try await makeDispatcher(storage: storage, owner: owner, serverName: serverName)
-        return MootBridge(dispatcher: dispatcher, serverName: serverName, databasePath: nil)
+        return MootBridge(dispatcher: dispatcher, storage: storage, serverName: serverName, databasePath: nil)
     }
 
     /// Attach a durable SQLite-backed MOOT at `url`. The cross-process edge
@@ -144,7 +156,7 @@ public actor MootBridge {
         )
         let storage = try SQLiteStorage(configuration: configuration)
         let dispatcher = try await makeDispatcher(storage: storage, owner: owner, serverName: serverName)
-        return MootBridge(dispatcher: dispatcher, serverName: serverName, databasePath: url.path)
+        return MootBridge(dispatcher: dispatcher, storage: storage, serverName: serverName, databasePath: url.path)
     }
 
     // MARK: JSON-RPC drive

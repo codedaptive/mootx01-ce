@@ -14,6 +14,15 @@ import Foundation
 // `quarantine/` — preserved for diagnosis, never retried, never fatal. A
 // file whose CAPTURE fails (estate locked, substrate refusal) stays in the
 // spool for the next drain.
+//
+// Why not QueueKit (validated 2026-07-11): QueueKit is the fleet's durable
+// maildir queue and would otherwise be the reuse target, but its target
+// hard-links PersistenceKit (SQLCipher) + IntellectusLib. This spool is
+// linked into the Share Extension, which per ADR-005 must stay thin and must
+// NOT carry the estate's storage/crypto stack. QueueKit's claim/reply/HLC/
+// session model is also more than a one-way inbox needs. So this minimal,
+// dependency-free atomic-file inbox is a deliberate app-specific choice, not
+// an un-checked reinvention of QueueKit.
 
 public struct ShareInboxSpool: Sendable {
 
