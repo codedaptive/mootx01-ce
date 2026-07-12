@@ -11,18 +11,20 @@
 # (`irm ... | iex`): that executes remote code before you can review it or
 # verify its integrity. Download it, then run it locally. The TLS 1.2 line is
 # required on Windows PowerShell 5.1, which otherwise negotiates TLS 1.0/1.1
-# and is refused by GitHub's CDN:
+# and is refused by GitHub's CDN. The -ExecutionPolicy Bypass flag is required
+# because Windows blocks script files by default (Restricted policy); it
+# applies to that one run only and changes no system setting:
 #   [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
 #   irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
 #   # review install.ps1, then:
-#   .\install.ps1
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #
 # Uninstall (removes the binaries + PATH entry, and delegates client-wiring and
 # scheduled-task cleanup to `mootx01 uninstall`):
-#   .\install.ps1 -Uninstall
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 #
 # Or clone the repo and run directly:
-#   .\install.ps1 [-Uninstall] [-Version v1.2.3]
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-Uninstall] [-Version v1.2.3]
 #
 # Environment variables (override defaults):
 #   MOOTX01_VERSION      release tag to install (default: latest)
