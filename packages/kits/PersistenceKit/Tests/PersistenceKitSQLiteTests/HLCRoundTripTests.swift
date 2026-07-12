@@ -19,6 +19,9 @@ import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitSQLite
+// SQLCipher: the chronological-ordering backfill test manipulates the raw DB
+// file via the C API (same vendored engine as CorruptReadBackTests).
+import SQLCipher
 
 // MARK: - SQLite HLC column round-trip
 
@@ -270,5 +273,131 @@ struct SQLiteAuditReasonRoundTripTests {
                 "reason should be nil when not supplied; got \(String(describing: events[0].reason))")
 
         await storage.close()
+    }
+}
+
+// MARK: - SQLite audit chronological ordering (HLC_PACKED_ORDER_UNSOUND)
+
+/// Audit reads must return CHRONOLOGICAL (physicalTime, logicalCount, nodeID)
+/// order. The packed `hlc` integer's field layout (node in the top byte,
+/// logical above physical) does not preserve that order, so any read keyed on
+/// the packed column mis-orders a same-millisecond burst (logical > 0)
+/// against a later write (logical 0) — the regression these tests pin.
+@Suite("SQLite audit chronological ordering")
+struct SQLiteAuditChronologicalOrderTests {
+
+    func makeStorage() throws -> (SQLiteStorage, URL) {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audit-chrono-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        let dbURL = tmpDir.appendingPathComponent("chrono.sqlite")
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: dbURL, busyTimeout: 5.0)
+        ))
+        return (storage, dbURL)
+    }
+
+    /// Raw SQL against the file, bypassing the kit — used only to simulate a
+    /// pre-migration estate (full-precision columns zeroed).
+    private func rawExec(_ dbURL: URL, _ sql: String) throws {
+        var db: OpaquePointer?
+        let rc = sqlite3_open(dbURL.path, &db)
+        defer { sqlite3_close(db) }
+        guard rc == SQLITE_OK, let db else {
+            throw StorageError.backendError(underlying: "rawExec open failed: \(rc)")
+        }
+        var errMsg: UnsafeMutablePointer<CChar>?
+        let rc2 = sqlite3_exec(db, sql, nil, nil, &errMsg)
+        if rc2 != SQLITE_OK {
+            let msg = errMsg.map { String(cString: $0) } ?? "exec failed"
+            sqlite3_free(errMsg)
+            throw StorageError.backendError(underlying: msg)
+        }
+    }
+
+    private func makeEvent(rowID: UUID, hlc: HLC, verb: String) -> AuditEvent {
+        AuditEvent(
+            estateUuid: UUID(),
+            rowId: rowID,
+            hlc: hlc,
+            verb: verb,
+            beforeBitmaps: nil,
+            afterBitmaps: (1, 2, 3),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: LatticeAnchor(udcCode: 0),
+            actor: "chrono-test"
+        )
+    }
+
+    @Test("same-millisecond burst orders before a later write")
+    func sameMillisecondBurstOrdersChronologically() async throws {
+        let (storage, _) = try makeStorage()
+        try await storage.open(schema: SchemaDeclaration(
+            kitID: "ChronoTest", version: 1, tables: []
+        ))
+        let rowID = UUID()
+        // Node low byte 0xB1 (negative as Int8) exercises the packed sign
+        // flip; logical 1 at time T vs logical 0 at T+3 exercises the
+        // logical-above-physical field-order defect.
+        let burst = HLC(physicalTime: 1_783_833_507_371, logicalCount: 1, nodeID: 0xB1)
+        let later = HLC(physicalTime: 1_783_833_507_374, logicalCount: 0, nodeID: 0x08)
+        try await storage.auditLog.append(makeEvent(rowID: rowID, hlc: burst, verb: "capture"))
+        try await storage.auditLog.append(makeEvent(rowID: rowID, hlc: later, verb: "mutate"))
+
+        let all = try await storage.auditLog.iterate(after: nil, rowID: nil, limit: 10)
+        #expect(all.map(\.verb) == ["capture", "mutate"],
+                "iterate must return chronological order; got \(all.map(\.verb))")
+
+        let forRow = try await storage.auditLog.iterate(after: nil, rowID: rowID, limit: 10)
+        #expect(forRow.map(\.verb) == ["capture", "mutate"],
+                "per-row read must return chronological order; got \(forRow.map(\.verb))")
+
+        // The cursor is exclusive and chronological: after the burst event,
+        // only the later event remains.
+        let tail = try await storage.auditLog.iterate(after: burst, rowID: nil, limit: 10)
+        #expect(tail.map(\.verb) == ["mutate"],
+                "after-cursor must resume chronologically; got \(tail.map(\.verb))")
+
+        await storage.close()
+    }
+
+    @Test("backfill reconstructs full-precision columns from the packed value")
+    func backfillReconstructsFromPacked() async throws {
+        let (storage, dbURL) = try makeStorage()
+        try await storage.open(schema: SchemaDeclaration(
+            kitID: "ChronoTest", version: 1, tables: []
+        ))
+        let rowID = UUID()
+        let burst = HLC(physicalTime: 507_371, logicalCount: 1, nodeID: 0xB1)
+        let later = HLC(physicalTime: 507_374, logicalCount: 0, nodeID: 0x08)
+        try await storage.auditLog.append(makeEvent(rowID: rowID, hlc: burst, verb: "capture"))
+        try await storage.auditLog.append(makeEvent(rowID: rowID, hlc: later, verb: "mutate"))
+        await storage.close()
+
+        // Simulate a pre-migration estate: zero out the full-precision
+        // columns, leaving only the packed value, then reopen. The open-time
+        // backfill must reconstruct the columns so chronological reads work.
+        try rawExec(dbURL, """
+            UPDATE "_storagekit_audit"
+            SET "physical_time" = 0, "logical_count" = 0, "node_id" = 0
+            """)
+
+        let reopened = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: dbURL, busyTimeout: 5.0)
+        ))
+        try await reopened.open(schema: SchemaDeclaration(
+            kitID: "ChronoTest", version: 1, tables: []
+        ))
+        let all = try await reopened.auditLog.iterate(after: nil, rowID: nil, limit: 10)
+        #expect(all.map(\.verb) == ["capture", "mutate"],
+                "backfilled rows must read chronologically; got \(all.map(\.verb))")
+        // The packed form keeps only the node id's low byte (recovered as a
+        // signed Int8), so the backfilled HLC equals HLC(packed:) recovery,
+        // not the original full-width node id.
+        #expect(all.first?.hlc == HLC(packed: burst.packed),
+                "backfill must reconstruct exactly what the packed value carries")
+        await reopened.close()
     }
 }

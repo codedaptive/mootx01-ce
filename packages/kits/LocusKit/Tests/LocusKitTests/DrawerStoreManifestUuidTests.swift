@@ -125,17 +125,12 @@ struct DrawerStoreManifestUuidTests {
         try await store2.addDrawer(sampleDrawer(id: "valid-d2"), now: t(1_700_000_100))
         let events = try await store2.auditEventsForRow(UUID(uuidString: drawerID)!)
         let genesis = try #require(events.first)
-        // The audit HLC round-trips through the 8-bit packed node field
-        // (HLC.packed keeps only the low byte of nodeID, recovered as a
-        // signed Int8). So the read-back node id is the low byte of the
-        // full maker node id, not the full 31-bit value. Assert against
-        // that truncation — proving the stamped id is derived from the
-        // persisted uuid (stable, deterministic) and not the fresh node 0.
-        // `expectedNode != 0` is asserted above on the full 31-bit value;
-        // here we confirm the stamped (truncated) id matches that exact
-        // derivation, so the node id provably came from the persisted uuid.
-        let expectedLowByte = Int32(Int8(truncatingIfNeeded: expectedNode))
-        #expect(genesis.hlc.nodeID == expectedLowByte)
+        // Audit HLCs persist at full precision (physical_time / logical_count /
+        // node_id columns; the packed value is only the ordering key), so the
+        // read-back node id is the full 31-bit maker node id — proving the
+        // stamped id is derived from the persisted uuid (stable,
+        // deterministic) and not the fresh node 0.
+        #expect(genesis.hlc.nodeID == expectedNode)
     }
 
     /// ABSENT manifest value (fresh estate, row never written) → opening

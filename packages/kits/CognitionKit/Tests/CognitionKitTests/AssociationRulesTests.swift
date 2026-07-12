@@ -16,8 +16,8 @@ import PersistenceKitInMemory
 @testable import CognitionKit
 
 /// `.serialized`: each test opens a fresh estate and runs captures
-/// sequentially; preserve the one-at-a-time execution the suite ran
-/// under XCTest.
+/// sequentially; concurrent estates contend under parallel execution,
+/// so the suite runs one case at a time.
 @Suite("AssociationRulesTests", .serialized)
 struct AssociationRulesTests {
 

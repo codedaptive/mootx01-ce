@@ -53,6 +53,10 @@ struct QueueKitTelemetryFailClosedTests {
 
     /// Install a capturing sink, run reportQueueStats, return the emitted
     /// metric names. Restores the no-op sink + disabled gate afterward.
+    /// The Intellectus facade is process-global and `.serialized` only
+    /// orders THIS suite — concurrent suites also emit queue metrics while
+    /// the spy is installed, so the capture is filtered to a per-call
+    /// unique estate tag to pin the assertion to this run's emissions.
     private func capturedMetricNames(failPending: Bool) async -> [String] {
         let sink = RecentWindowSink(capacity: 64)
         Intellectus.install(sink: sink)
@@ -62,6 +66,7 @@ struct QueueKitTelemetryFailClosedTests {
             Intellectus.install(sink: NoOpSink.shared)
         }
 
+        let estateTag = "test-estate-\(UUID().uuidString)"
         let window = QueueLatencyWindowBox(capacity: 16)
         let backend = PendingFaultBackend(failPending: failPending, pending: 3)
         await reportQueueStats(
@@ -69,12 +74,13 @@ struct QueueKitTelemetryFailClosedTests {
             drained: [],            // nothing drained this cycle
             drainStart: 1000.0,
             now: 1000.5,
-            estateTag: "test-estate",
+            estateTag: estateTag,
             window: window
         )
 
         return sink.snapshot().compactMap { sample in
-            if case let .metric(name, _, _, _) = sample { return name }
+            if case let .metric(name, _, tags, _) = sample,
+               tags["estate"] == estateTag { return name }
             return nil
         }
     }

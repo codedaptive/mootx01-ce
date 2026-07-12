@@ -392,7 +392,13 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   PRIMARY KEY ("event_id", "hlc")
 )"#;
 
-const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
+// Ordering index on the full-precision HLC columns — the chronological key
+// audit reads order by. The packed `hlc` column is NOT an ordering key: its
+// field layout (node in the top byte, logical above physical) does not
+// preserve HLC order (HLC_PACKED_ORDER_UNSOUND finding); it remains only as
+// the PK dedup component. The old packed-column index is dropped at open.
+const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_chrono" ON "_storagekit_audit" ("row_id", "physical_time", "logical_count", "node_id")"#;
+const AUDIT_DROP_PACKED_INDEX: &str = r#"DROP INDEX IF EXISTS "_storagekit_audit_row_hlc""#;
 
 fn create_table_sql(decl: &TableDeclaration) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -845,6 +851,7 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     // need ALTER TABLE. CREATE TABLE IF NOT EXISTS does not add columns.
     // "duplicate column name" on new estates is expected — ignore it.
     let _ = exec(r#"ALTER TABLE "_storagekit_audit" ADD COLUMN "reason" TEXT"#);
+    exec(AUDIT_DROP_PACKED_INDEX)?;
     exec(AUDIT_INDEX)?;
     exec(BLOB_TABLE)?;
     for table in &schema.tables {
@@ -2280,8 +2287,16 @@ impl AuditLog for SqliteAuditLog {
         let mut binds: Vec<SqlValue> = Vec::new();
         let mut clauses: Vec<String> = Vec::new();
         if let Some(h) = after {
-            clauses.push("\"hlc\" > ?".into());
-            binds.push(SqlValue::Integer(h.packed() as i64));
+            // Cursor on the full-precision HLC columns, not the packed
+            // integer: packed comparison mis-orders same-millisecond bursts
+            // (HLC_PACKED_ORDER_UNSOUND). Row-value comparison keeps the
+            // cursor exclusive across ties. Mirrors the Swift leg.
+            clauses.push(
+                "(\"physical_time\", \"logical_count\", \"node_id\") > (?, ?, ?)".into(),
+            );
+            binds.push(SqlValue::Integer(h.physical_time));
+            binds.push(SqlValue::Integer(h.logical_count as i64));
+            binds.push(SqlValue::Integer(h.node_id as i64));
         }
         if let Some(r) = row_id {
             clauses.push("\"row_id\" = ?".into());
@@ -2298,7 +2313,9 @@ impl AuditLog for SqliteAuditLog {
         } else {
             limit as i64
         };
-        sql.push_str(&format!(" ORDER BY \"hlc\" ASC LIMIT {lim}"));
+        sql.push_str(&format!(
+            " ORDER BY \"physical_time\" ASC, \"logical_count\" ASC, \"node_id\" ASC LIMIT {lim}"
+        ));
         let mut stmt = guard
             .conn
             .prepare(&sql)

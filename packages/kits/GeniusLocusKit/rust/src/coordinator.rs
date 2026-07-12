@@ -2226,6 +2226,20 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         wing: &str,
     ) -> Result<Vec<Tunnel>, VerbDispatchError> {
+        self.recall_tunnels_with_ceiling(handle, wing, false)
+    }
+
+    /// `including_restricted` forwards to the LocusKit tunnel sensitivity
+    /// gate's one sanctioned widening: the vault export's private-scope
+    /// opt-in. The default keeps the no-claims Normal-tier ceiling;
+    /// secret-tier edges are excluded unconditionally either way. Mirrors
+    /// Swift `recallTunnels(_:wing:includingRestricted:)`.
+    pub fn recall_tunnels_with_ceiling(
+        &self,
+        handle: &EstateHandle,
+        wing: &str,
+        including_restricted: bool,
+    ) -> Result<Vec<Tunnel>, VerbDispatchError> {
         // G1 — read-once-and-freeze. Call tree_edges exactly once here;
         // no provider method is called again during this recall or by any
         // consumer of the returned Vec.
@@ -2240,7 +2254,7 @@ impl EstateCoordinator {
 
         let estate = self.estate_for_verb(handle)?;
         let stored_tunnels: Vec<Tunnel> = estate
-            .tunnels_from_wing(wing)
+            .tunnels_from_wing_with_ceiling(wing, including_restricted)
             .map_err(|e| VerbDispatchError::from(remap("recall_tunnels", "", e)))?;
 
         // No tree edges → return stored tunnels only (identical to pre-registration

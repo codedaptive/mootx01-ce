@@ -1152,9 +1152,11 @@ public actor Corpus {
     /// Idempotent. Rust: `mount_ingest_queue(self: &Arc<Self>)`.
     public func mountIngestQueue() async throws
 
-    /// Tear down the ingest queue and cancel the drain worker. Idempotent.
-    /// Rust: `drop_ingest_queue(&self)`.
-    public func dropIngestQueue()
+    /// Tear down the ingest queue: cancel the drain workers, await their
+    /// exit (a cancelled pass can be mid-SQLite-transaction; a successor
+    /// mounting the same estate file must not race it), then release the
+    /// leases. Idempotent. Rust: `drop_ingest_queue(&self)`.
+    public func dropIngestQueue() async
 
     /// Enqueue text for asynchronous ingest (lazily mounts the queue). Empty
     /// text is skipped. `sourceID` is the stable source handle (drawer id in the

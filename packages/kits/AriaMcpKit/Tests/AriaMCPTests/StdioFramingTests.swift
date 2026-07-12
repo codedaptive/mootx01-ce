@@ -15,8 +15,8 @@ import PersistenceKitInMemory
 /// bytes that would have been written.
 ///
 /// `.serialized`: each case drives a real `Pipe()` pair and the stdio
-/// read loop end-to-end; preserve the one-at-a-time execution the suite
-/// ran under XCTest.
+/// read loop end-to-end; concurrent cases would contend on the pipe
+/// plumbing, so the suite runs one case at a time.
 @Suite("Stdio framing", .serialized)
 struct StdioFramingTests {
 

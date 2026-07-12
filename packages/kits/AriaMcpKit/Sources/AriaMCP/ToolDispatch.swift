@@ -118,6 +118,14 @@ public struct ToolDispatcher: Sendable {
     /// a stale plugin or stale binary is visible without a separate check.
     public let versionSkewAdvisory: String?
 
+    /// Environment the dispatch-time feature-flag guards read
+    /// (`MOOTX01_MEMORY_TOOL`, `MOOTX01_VAULT`). Injected at construction —
+    /// defaulting to the process environment — so tests can enable or disable
+    /// opt-in surfaces per dispatcher instance instead of mutating the
+    /// process-global environment with `setenv`, which races concurrently
+    /// running suites under swift-testing's parallel executor.
+    public let environment: [String: String]
+
     /// Construct a single-estate dispatcher. `handle` is registered as
     /// the sole addressable estate and is the default target for calls
     /// that omit `estateID`. This is the v1.0 path; every existing
@@ -136,7 +144,8 @@ public struct ToolDispatcher: Sendable {
                 buildSerial: String = Self.deriveBuildSerial(),
                 serverIdentity: String = "aria-mcp-server",
                 versionSkewAdvisory: String? = nil,
-                monitoringControl: (any MonitoringControl)? = nil) {
+                monitoringControl: (any MonitoringControl)? = nil,
+                environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.kit = kit
         self.handle = handle
         self.estates = [handle.estateUUID: handle]
@@ -147,6 +156,7 @@ public struct ToolDispatcher: Sendable {
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
         self.monitoringControl = monitoringControl
+        self.environment = environment
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -165,7 +175,8 @@ public struct ToolDispatcher: Sendable {
                               sensitivityUnlockLedger: sensitivityUnlockLedger,
                               monitoringControl: monitoringControl,
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
-                              versionSkewAdvisory: versionSkewAdvisory)
+                              versionSkewAdvisory: versionSkewAdvisory,
+                              environment: environment)
     }
 
     /// Return a copy of this dispatcher with `control` wired as the monitoring
@@ -179,7 +190,8 @@ public struct ToolDispatcher: Sendable {
                        sensitivityUnlockLedger: sensitivityUnlockLedger,
                        monitoringControl: control,
                        buildSerial: buildSerial, serverIdentity: serverIdentity,
-                       versionSkewAdvisory: versionSkewAdvisory)
+                       versionSkewAdvisory: versionSkewAdvisory,
+                       environment: environment)
     }
 
     /// Private designated initializer carrying an explicit estate map,
@@ -194,7 +206,8 @@ public struct ToolDispatcher: Sendable {
         recallLedger: SurfacedRecallLedger,
         sensitivityUnlockLedger: SensitivityGrantLedger,
         monitoringControl: (any MonitoringControl)?,
-        buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?
+        buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?,
+        environment: [String: String]
     ) {
         self.kit = kit
         self.handle = handle
@@ -206,6 +219,7 @@ public struct ToolDispatcher: Sendable {
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
+        self.environment = environment
     }
 
     // MARK: - Build serial derivation
@@ -371,7 +385,8 @@ public struct ToolDispatcher: Sendable {
                 // VaultKit control-surface tools dispatched by name.
                 runnerResult = try await VaultTools.dispatch(
                     name: name, args: args, kit: kit, defaultHandle: handle,
-                    resolveHandle: resolveHandle, jobRegistry: jobRegistry)
+                    resolveHandle: resolveHandle, jobRegistry: jobRegistry,
+                    environment: environment)
             } else if DatasetTools.isDatasetTool(name) {
                 // User-defined tabular dataset tools (MX-TAB-7): file, query, stats.
                 // Dispatched between vault and the five-tier interface; each tool
@@ -2879,7 +2894,7 @@ extension ToolDispatcher {
     /// potential path-traversal vector if the caller is untrusted). Disabled
     /// installs (MOOTX01_VAULT=0) return a clear tool-level refusal.
     func runPalaceImport(_ args: [String: JSONValue]) async throws -> JSONValue {
-        guard ToolProjection.vaultEnabled else {
+        guard ToolProjection.vaultEnabled(environment: environment) else {
             return Self.errorResult(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             )

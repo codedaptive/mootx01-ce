@@ -305,6 +305,23 @@ struct GLKTelemetrySuite {
     @Suite("§3 GLKTelemetry — provision emissions")
     struct ProvisionTests {
 
+        /// Provision metrics tagged with `handle`'s estate UUID. The
+        /// Intellectus facade is process-global and `withIntellectusLock`
+        /// only covers suites that take it — concurrent tests in OTHER
+        /// suites also provision estates while the spy sink is installed,
+        /// so unfiltered counts race. Filtering by estate_id pins each
+        /// assertion to the estate this test provisioned.
+        private func provisionMetrics(
+            in sink: CapturingSink, for handle: EstateHandle
+        ) -> [StatSample] {
+            sink.metrics(named: "geniuslocus.estate.provision").filter {
+                if case let .metric(_, _, tags, _) = $0 {
+                    return tags["estate_id"] == handle.estateUUID.uuidString
+                }
+                return false
+            }
+        }
+
         /// provision(.locusOnly) emits exactly one provision metric
         /// tagged with kind=LocusOnly.
         @Test("provision emits provision metric with correct kind tag")
@@ -323,7 +340,7 @@ struct GLKTelemetrySuite {
                     params: locusOnlyParams()
                 )
 
-                let provisions = sink.metrics(named: "geniuslocus.estate.provision")
+                let provisions = provisionMetrics(in: sink, for: handle)
                 #expect(provisions.count == 1,
                     "provision() must emit exactly 1 provision metric; got \(provisions.count)")
 
@@ -347,13 +364,13 @@ struct GLKTelemetrySuite {
 
                 let kit = GeniusLocusKit()
                 let storage = makeStorage()
-                _ = try await kit.provision(
+                let handle = try await kit.provision(
                     storage: storage,
                     owner: testOwner,
                     params: glkParams()
                 )
 
-                let provisions = sink.metrics(named: "geniuslocus.estate.provision")
+                let provisions = provisionMetrics(in: sink, for: handle)
                 #expect(provisions.count == 1,
                     "provision(.glk) must emit exactly 1 provision metric")
 
@@ -376,20 +393,21 @@ struct GLKTelemetrySuite {
                 let kit = GeniusLocusKit()
                 let storageA = makeStorage()
                 let storageB = makeStorage()
-                _ = try await kit.provision(
+                let handleA = try await kit.provision(
                     storage: storageA,
                     owner: testOwner,
                     params: locusOnlyParams(name: "EstateA")
                 )
-                _ = try await kit.provision(
+                let handleB = try await kit.provision(
                     storage: storageB,
                     owner: testOwner,
                     params: locusOnlyParams(name: "EstateB")
                 )
 
-                let provisions = sink.metrics(named: "geniuslocus.estate.provision")
-                #expect(provisions.count == 2,
-                    "two provision calls must emit 2 provision metrics; got \(provisions.count)")
+                #expect(provisionMetrics(in: sink, for: handleA).count == 1,
+                    "EstateA's provision must emit exactly 1 provision metric")
+                #expect(provisionMetrics(in: sink, for: handleB).count == 1,
+                    "EstateB's provision must emit exactly 1 provision metric")
             }
         }
     }

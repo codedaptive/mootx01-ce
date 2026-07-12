@@ -204,6 +204,24 @@ actor SQLiteBackend {
         } catch {
             // "duplicate column name: reason" on new estates — expected.
         }
+        // Upgrade migration (HLC_PACKED_ORDER_UNSOUND): estates created before
+        // the full-precision HLC columns joined the audit DDL need ALTER TABLE
+        // (same idempotent duplicate-column pattern as `reason` above), then a
+        // backfill from the packed value so the chronological ORDER BY —
+        // (physical_time, logical_count, node_id) — covers pre-migration rows.
+        for column in ["\"physical_time\"", "\"logical_count\"", "\"node_id\""] {
+            do {
+                try connection.exec("""
+                    ALTER TABLE "_storagekit_audit" ADD COLUMN \(column) INTEGER NOT NULL DEFAULT 0
+                """)
+            } catch {
+                // "duplicate column name" on estates that already have it — expected.
+            }
+        }
+        try connection.exec(SQLiteSchema.auditBackfillFullHLCSQL)
+        for drop in SQLiteSchema.auditDropPackedIndexesSQL {
+            try connection.exec(drop)
+        }
         try connection.exec(SQLiteSchema.auditIndexSQL)
         try connection.exec(SQLiteSchema.auditHLCIndexSQL)
         try connection.exec(SQLiteSchema.blobTableSQL)
@@ -1236,8 +1254,19 @@ actor SQLiteBackend {
         var conditions: [String] = []
         var bindings: [TypedValue] = []
         if let after {
-            conditions.append("\"hlc\" > ?")
-            bindings.append(.int(Int64(bitPattern: after.packed)))
+            // Cursor and ORDER BY key on the full-precision HLC columns, NOT
+            // the packed `hlc` column: HLC order is (physicalTime, logical,
+            // node) but the packed integer's field order is (node, logical,
+            // physical), so packed-integer comparison mis-orders any
+            // same-millisecond burst (logical > 0) against a later write
+            // (HLC_PACKED_ORDER_UNSOUND finding). The packed column stays as
+            // the PK dedup component only. Row-value comparison keeps the
+            // cursor exclusive across ties.
+            conditions.append(
+                "(\"physical_time\", \"logical_count\", \"node_id\") > (?, ?, ?)")
+            bindings.append(.int(after.physicalTime))
+            bindings.append(.int(Int64(after.logicalCount)))
+            bindings.append(.int(Int64(after.nodeID)))
         }
         if let rowID {
             conditions.append("\"row_id\" = ?")
@@ -1246,7 +1275,7 @@ actor SQLiteBackend {
         if !conditions.isEmpty {
             sql += " WHERE " + conditions.joined(separator: " AND ")
         }
-        sql += " ORDER BY \"hlc\" ASC LIMIT \(limit)"
+        sql += " ORDER BY \"physical_time\" ASC, \"logical_count\" ASC, \"node_id\" ASC LIMIT \(limit)"
 
         // prepareCached: SQL for a given (table, shape) is identical across a
         // bulk loop — parse once, replay from the connection's statement cache
@@ -1270,8 +1299,11 @@ actor SQLiteBackend {
     }
 
     func auditEventsForRow(_ rowID: UUID) throws -> [AuditEvent] {
+        // Chronological (full-precision HLC) order — see iterateAudit for why
+        // the packed `hlc` column must not be the ordering key.
         let stmt = try connection.prepare("""
-            SELECT * FROM "_storagekit_audit" WHERE "row_id" = ? ORDER BY "hlc" ASC
+            SELECT * FROM "_storagekit_audit" WHERE "row_id" = ?
+            ORDER BY "physical_time" ASC, "logical_count" ASC, "node_id" ASC
             """)
         defer { stmt.finalize() }
         try stmt.bind(.text(rowID.uuidString), at: 1)

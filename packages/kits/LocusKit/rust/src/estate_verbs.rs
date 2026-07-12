@@ -1205,11 +1205,33 @@ impl Estate {
     /// Swift `Estate.tunnelsFromWing` gate and the AriaMcpKit MCP-boundary
     /// filter, now enforced at the source so every caller is covered.
     pub fn tunnels_from_wing(&self, wing: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.tunnels_from_wing_with_ceiling(wing, false)
+    }
+
+    /// `including_restricted` is the ONE sanctioned widening of the tunnel
+    /// sensitivity gate: the vault export's `believed-including-private`
+    /// scope — the owner's explicit opt-in for Private-tier bulk export
+    /// (ADR-007 Decision 2) — must carry provenance tunnels to restricted
+    /// drawers, mirroring the drawer-side tier rule
+    /// (`VaultExportScope::includes_private_tier`). Secret-tier edges are
+    /// excluded UNCONDITIONALLY — no parameter widens past restricted,
+    /// matching the drawer side where secret never bulk-exports. Mirrors
+    /// Swift `Estate.tunnelsFromWing(_:includingRestricted:)`.
+    pub fn tunnels_from_wing_with_ceiling(
+        &self,
+        wing: &str,
+        including_restricted: bool,
+    ) -> Result<Vec<Tunnel>, LocusKitError> {
+        use crate::adjectives::AdjectiveSensitivity;
         Ok(self
             .store
             .tunnels_from_wing(wing)?
             .into_iter()
-            .filter(|t| t.adjective_sensitivity().is_bulk_exportable())
+            .filter(|t| match t.adjective_sensitivity() {
+                AdjectiveSensitivity::Normal | AdjectiveSensitivity::Elevated => true,
+                AdjectiveSensitivity::Restricted => including_restricted,
+                AdjectiveSensitivity::Secret => false,
+            })
             .collect())
     }
 
