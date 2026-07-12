@@ -172,11 +172,14 @@ winget install Codedaptive.MOOTx01
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
 irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
 # Review install.ps1 before running it, then:
-.\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 (Downloads the script to disk so you can review it before running it.
-The TLS line is required on Windows PowerShell 5.1.)
+The TLS line is required on Windows PowerShell 5.1. The
+`-ExecutionPolicy Bypass` flag is needed because Windows blocks script
+files by default; it applies to this one run only and changes no
+system setting.)
 
 Script and tarball installs land in:
 
