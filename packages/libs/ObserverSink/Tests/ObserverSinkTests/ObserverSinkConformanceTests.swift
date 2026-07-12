@@ -141,11 +141,14 @@ struct ObserverSinkConformanceTests {
             ts: ts
         ))
 
-        // Allow the async Task in PersistenceStatsSink to complete.
-        // The task dispatches async I/O; we yield briefly before querying.
-        try await Task.sleep(nanoseconds: 100_000_000)   // 100 ms
-
-        let rows = try await store.queryMetrics(dropboxID: dropboxID)
+        // PersistenceStatsSink persists via a detached async task; poll with
+        // a deadline rather than one fixed sleep — a loaded machine (the
+        // full test lane) can hold the persist task past any single interval.
+        var rows = try await store.queryMetrics(dropboxID: dropboxID)
+        for _ in 0..<50 where rows.isEmpty {   // up to ~5 s
+            try await Task.sleep(nanoseconds: 100_000_000)
+            rows = try await store.queryMetrics(dropboxID: dropboxID)
+        }
         #expect(rows.count == 1, "Expected exactly one metric row")
 
         let row = try #require(rows.first)
@@ -184,9 +187,12 @@ struct ObserverSinkConformanceTests {
             ts: ts
         ))
 
-        try await Task.sleep(nanoseconds: 100_000_000)   // 100 ms
-
-        let rows = try await store.queryEvents(dropboxID: dropboxID)
+        // Deadline poll — same rationale as the metric readback above.
+        var rows = try await store.queryEvents(dropboxID: dropboxID)
+        for _ in 0..<50 where rows.isEmpty {   // up to ~5 s
+            try await Task.sleep(nanoseconds: 100_000_000)
+            rows = try await store.queryEvents(dropboxID: dropboxID)
+        }
         #expect(rows.count == 1, "Expected exactly one event row")
 
         let row = try #require(rows.first)
