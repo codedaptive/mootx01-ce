@@ -23,9 +23,11 @@
 //!   parse memory. Larger files should be pre-split or streamed (v2 path).
 //!
 //!   PATH SECURITY: csv_path is canonicalized (resolving symlinks) to get the REAL
-//!   path, then checked that it is a regular file (no directories, devices, non-file
-//!   symlink targets). The resolved path is recorded in the handle's sourceDescription
-//!   so it is stored durably and included in the audit trail via capture_dataset_handle.
+//!   path, then checked that it lies within the allowed import root (HOME by default;
+//!   MX-TAB-SEC-1 A1 confinement), then checked that it is a regular file (no
+//!   directories, devices, non-file symlink targets). The handle's sourceDescription
+//!   stores only the basename (MX-TAB-SEC-1 A2 redaction); the full resolved path
+//!   goes to the server-side audit channel (stderr) only.
 //!
 //!   TYPE INFERENCE: try Int64 → try f64 → text. Applies to both CSV cells and
 //!   JSON object scalar values. Empty string → null (TypedValue::Null).
@@ -180,9 +182,21 @@ fn run_file_dataset(
         };
         match parse_csv(&resolved, &column_specs) {
             Ok(r) => {
-                // sourceDescription carries the RESOLVED path (canonical filesystem path)
-                // so provenance records the canonical location per the security gate.
-                source_description = format!("csv_path:{}", resolved);
+                // A2: Provenance path redaction (MX-TAB-SEC-1 A2).
+                //
+                // source_description is stored in the handle drawer and visible to the
+                // client. To avoid leaking the full canonical filesystem path (which can
+                // reveal personal directory layout to a prompt-injected client),
+                // source_description carries only the basename.
+                //
+                // The full resolved path goes to the server-side audit channel (stderr)
+                // ONLY — never to the client-facing response body or stored drawer content.
+                eprintln!("csv_import: audit resolved={}", resolved);
+                let basename = std::path::Path::new(&resolved)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| resolved.clone());
+                source_description = format!("csv:{}", basename);
                 parse_result = r;
             }
             Err(msg) => return Ok(error_result(&msg)),
@@ -645,6 +659,39 @@ fn resolve_csv_path(raw: &str) -> Result<String, String> {
         )
     })?;
     let resolved = canonical.to_string_lossy().into_owned();
+
+    // 1.5. Import-root confinement (MX-TAB-SEC-1 A1).
+    //
+    // After canonicalization (symlinks resolved, relative components collapsed),
+    // the path MUST lie inside the allowed import root. This prevents a
+    // prompt-injected client from reading arbitrary filesystem locations such as
+    // /etc/passwd by supplying a relative path or a symlink that escapes the
+    // intended directory.
+    //
+    // Root resolution (D11): the user's HOME directory is the default import root.
+    // The comparison is component-safe: the root has "/" appended before the
+    // starts_with check so that "/home/evil" cannot match a "/home" root.
+    //
+    // Future: make the root configurable via estate configuration if a per-estate
+    // config surface is added; see MX-TAB-SEC-1 D11.
+    {
+        let home_raw = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let import_root = std::fs::canonicalize(&home_raw)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&home_raw));
+        let canonical_root = import_root.to_string_lossy().into_owned();
+        let root_with_sep = if canonical_root.ends_with('/') {
+            canonical_root.clone()
+        } else {
+            format!("{}/", canonical_root)
+        };
+        if !resolved.starts_with(&root_with_sep) && resolved != canonical_root {
+            return Err(format!(
+                "moot_file_dataset: csv_path must be inside the allowed import \
+                root ({}): {}",
+                canonical_root, resolved
+            ));
+        }
+    }
 
     // 2. Check that the resolved path is a regular file.
     let meta = std::fs::metadata(&canonical).map_err(|e| {
@@ -1253,6 +1300,27 @@ fn parse_predicate(
             )
         })?;
 
+    // A3: MCP-layer identifier validation (MX-TAB-SEC-1 A3).
+    //
+    // Validate the column name at parse time before it reaches the backend.
+    // This is an independent first gate against prompt injection — a hostile
+    // client supplying col: "name; DROP TABLE x" is rejected here with a
+    // clean invalid-params error rather than reaching SQL generation.
+    //
+    // The backend guard at query execution is the second independent layer;
+    // two checks exist by design (belt-and-suspenders; comment this intent
+    // on the backend side too per the security review spec).
+    if let Err(e) = validate_dataset_column_identifier(col_str) {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!(
+                "moot_dataset_query: invalid column identifier in where condition \
+                'col': \"{}\". Column names must match [A-Za-z_][A-Za-z0-9_]*. ({})",
+                col_str, e
+            ),
+        ));
+    }
+
     let column = Column::new(table_name, col_str);
 
     // Null checks (no value needed).
@@ -1347,6 +1415,22 @@ pub(crate) fn parse_order_by(
                 ))
             }
         };
+        // A3: MCP-layer identifier validation in order_by (MX-TAB-SEC-1 A3).
+        //
+        // Same two-layer intent as the where-predicate guard: reject hostile column
+        // names at the MCP parse boundary before they reach the backend. The backend
+        // guard is the second independent layer.
+        if let Err(e) = validate_dataset_column_identifier(col_str) {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "moot_dataset_query: invalid column identifier in order_by \
+                    'col': \"{}\". Column names must match [A-Za-z_][A-Za-z0-9_]*. ({})",
+                    col_str, e
+                ),
+            ));
+        }
+
         result.push(OrderClause::new(Column::new(table_name, col_str), direction));
     }
     Ok(result)

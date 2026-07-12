@@ -584,4 +584,275 @@ struct DatasetToolsTests {
         #expect(DatasetTools.csvPathSizeCapBytes == 100 * 1_048_576,
             "csvPathSizeCapBytes must be exactly 100 MiB (104,857,600 bytes)")
     }
+
+    // MARK: - MX-TAB-SEC-1 A1: import-root confinement
+
+    @Test func csvPathOutsideImportRootRejected() async throws {
+        // A1 (MX-TAB-SEC-1): after canonicalization the resolved path must lie
+        // inside the allowed import root (home directory). A real regular CSV
+        // file in the system temp directory (outside home) must be rejected with
+        // a JSONRPCError naming the import-root violation.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ds-a1-outside"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Create a real, valid CSV file outside the home directory.
+        let outsidePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ds-a1-outside-\(UUID().uuidString).csv")
+        try "name,score\napple,1\n".write(to: outsidePath, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outsidePath) }
+
+        await #expect(throws: JSONRPCError.self,
+            "csv_path outside the import root must throw JSONRPCError") {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_dataset",
+                arguments: .object([
+                    "name":     .string("outside"),
+                    "csv_path": .string(outsidePath.path),
+                    "location": .string("lab"),
+                ]))
+        }
+    }
+
+    @Test func csvPathSymlinkEscapingImportRootRejected() async throws {
+        // A1 (MX-TAB-SEC-1): a symlink whose canonical target is OUTSIDE the
+        // import root is rejected even if the symlink itself lives inside home.
+        // Verifies the check operates on the canonicalized path, not the raw one.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ds-a1-symesc"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Real CSV in temp (outside home).
+        let outsideCSV = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ds-a1-target-\(UUID().uuidString).csv")
+        try "col\n1\n".write(to: outsideCSV, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outsideCSV) }
+
+        // Symlink inside home directory pointing at the outside file.
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let symlink = homeDir.appendingPathComponent(".ds-a1-link-\(UUID().uuidString).csv")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: outsideCSV)
+        defer { try? FileManager.default.removeItem(at: symlink) }
+
+        // After resolveCSVPath resolves the symlink, the canonical path is
+        // outside home — A1 must reject it.
+        await #expect(throws: JSONRPCError.self,
+            "symlink escaping import root must throw JSONRPCError after canonicalization") {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_dataset",
+                arguments: .object([
+                    "name":     .string("escape"),
+                    "csv_path": .string(symlink.path),
+                    "location": .string("lab"),
+                ]))
+        }
+    }
+
+    // MARK: - MX-TAB-SEC-1 A2: provenance basename redaction
+
+    @Test func csvPathSourceDescriptionIsBasenameOnly() async throws {
+        // A2 (MX-TAB-SEC-1): sourceDescription stored in the handle must be
+        // "csv:<basename>" only — the full canonical path must not appear.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ds-a2-basename"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // CSV must be inside the home directory to pass A1 confinement.
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let subdir = homeDir.appendingPathComponent(".ds-a2-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: subdir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: subdir) }
+
+        let csvFile = subdir.appendingPathComponent("fruits.csv")
+        try "name,score\napple,1\nbanana,2\n".write(to: csvFile, atomically: true, encoding: .utf8)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_dataset",
+            arguments: .object([
+                "name":     .string("a2-test"),
+                "csv_path": .string(csvFile.path),
+                "location": .string("lab/a2"),
+            ]))
+        let body = try text(result)
+        // The response body contains "source: csv:<something>" — verify it exists
+        // and contains only the basename (no directory separators after "csv:").
+        let sourceLine = try #require(
+            extractValue(key: "source", from: body),
+            "response must contain a 'source:' line; got: \(body)")
+        #expect(sourceLine.hasPrefix("csv:"),
+            "source must start with 'csv:'; got: \(sourceLine)")
+        let afterPrefix = sourceLine.dropFirst("csv:".count)
+        #expect(!afterPrefix.contains("/"),
+            "source must not contain path separators — got: \(sourceLine)")
+        #expect(afterPrefix == "fruits.csv",
+            "source basename must be the actual filename; got: \(sourceLine)")
+    }
+
+    // MARK: - MX-TAB-SEC-1 A3: MCP-layer column identifier validation
+
+    @Test func parseLayerBadColumnInWhereRejectedWithInvalidParams() async throws {
+        // A3 (MX-TAB-SEC-1): parse_where_predicate / parseWherePredicate validates
+        // column identifiers at the MCP layer before they reach SQL generation.
+        // A hostile col value like "name; DROP TABLE x" must be rejected with
+        // JSONRPCError (not silently truncated by the backend).
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ds-a3-where"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // First create a dataset to query against.
+        let fileArgs = datasetArgs(
+            name: "a3-where",
+            columns: [(name: "name", type: "text")],
+            rows: [["name": .string("alice")]],
+            location: "lab/a3"
+        )
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_dataset", arguments: .object(fileArgs))
+        let fileBody = try text(fileResult)
+        let datasetId = try #require(extractValue(key: "id", from: fileBody))
+
+        // Inject a bad column name in the where clause.
+        // NOTE: the where argument is a SINGLE JSON object (a simple condition),
+        // not an array. Arrays in the where field are treated as "absent predicate"
+        // by parseWherePredicate — only object or JSON-string inputs are parsed.
+        // Compound conditions use {"and": [...]} or {"or": [...]} wrappers.
+        let badWhere = JSONValue.object([
+            "col": .string("name; DROP TABLE x"),
+            "op":  .string("eq"),
+            "val": .string("alice"),
+        ])
+        await #expect(throws: JSONRPCError.self,
+            "bad column identifier in where 'col' must throw JSONRPCError at parse layer") {
+            _ = try await dispatcher.dispatch(
+                name: "moot_dataset_query",
+                arguments: .object([
+                    "id":    .string(datasetId),
+                    "where": badWhere,
+                ]))
+        }
+    }
+
+    @Test func parseLayerBadColumnInOrderByRejectedWithInvalidParams() async throws {
+        // A3 (MX-TAB-SEC-1): same two-layer guard applies in parseOrderBy.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ds-a3-order"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let fileArgs = datasetArgs(
+            name: "a3-order",
+            columns: [(name: "score", type: "int")],
+            rows: [["score": .integer(1)]],
+            location: "lab/a3o"
+        )
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_dataset", arguments: .object(fileArgs))
+        let fileBody = try text(fileResult)
+        let datasetId = try #require(extractValue(key: "id", from: fileBody))
+
+        let badOrderBy = JSONValue.array([
+            JSONValue.object([
+                "col": .string("score; DROP TABLE x"),
+                "dir": .string("asc"),
+            ])
+        ])
+        await #expect(throws: JSONRPCError.self,
+            "bad column identifier in order_by 'col' must throw JSONRPCError at parse layer") {
+            _ = try await dispatcher.dispatch(
+                name: "moot_dataset_query",
+                arguments: .object([
+                    "id":       .string(datasetId),
+                    "order_by": badOrderBy,
+                ]))
+        }
+    }
+
+    // MARK: - MX-TAB-SEC-1 A4: vault export sensitivity gate
+
+    @Test func restrictedDatasetHandleProducesNoCsvOnExport() async throws {
+        // A4 (MX-TAB-SEC-1): a dataset handle with sensitivity=restricted must
+        // never produce a companion .csv in the vault.
+        //
+        // Note on observable behavior: the vault bridge (VaultExportScope /
+        // ADR-007) already excludes restricted-sensitivity drawers from the
+        // note export by default. This means bridge.export does not write the
+        // .md note either, so A4's loop body never fires for this path.
+        //
+        // A4 provides defense-in-depth: if a restricted note were ever present
+        // in the vault (future scope change, direct vault write, or import path),
+        // A4 suppresses the companion CSV. This test verifies the observable
+        // safe outcome: no .csv is produced for a restricted dataset handle under
+        // any current export scope.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ds-a4-restricted"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // File a dataset with sensitivity=restricted.
+        var restrictedArgs = datasetArgs(
+            name: "sensitive-data",
+            columns: [(name: "secret", type: "text")],
+            rows: [["secret": .string("classified")]],
+            location: "vault/secure"
+        )
+        restrictedArgs["sensitivity"] = .string("restricted")
+
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_dataset", arguments: .object(restrictedArgs))
+        let fileBody = try text(fileResult)
+        #expect(fileBody.hasPrefix("dataset_filed:"),
+            "moot_file_dataset must accept a restricted dataset; got: \(fileBody)")
+
+        // Export vault (scope: believed includes unconfirmed drawers by
+        // confirmation state — sensitivity gating is independent of this).
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        try await runExportAndAwait(vault: vault, scope: "believed", via: dispatcher)
+
+        // No .csv must appear — whether suppressed by A4 directly (when the
+        // note is present) or by the vault bridge's existing sensitivity filter
+        // (when the note is absent). Either way, CSV data must not leave the estate.
+        let csvFiles = try FileManager.default.subpathsOfDirectory(
+            atPath: vault.path).filter { $0.hasSuffix(".csv") }
+        #expect(csvFiles.isEmpty,
+            "restricted dataset handle must not produce a companion .csv; found: \(csvFiles)")
+    }
+
+    @Test func normalSensitivityDatasetExportsBothNoteAndCsv() async throws {
+        // A4 (MX-TAB-SEC-1): confirms the gate does NOT block normal datasets.
+        // A normal (default) dataset must produce both a .md note and a .csv companion.
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ds-a4-normal"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let fileArgs = datasetArgs(
+            name: "normal-data",
+            columns: [(name: "item", type: "text")],
+            rows: [["item": .string("apple")]],
+            location: "vault/normal"
+        )
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_dataset", arguments: .object(fileArgs))
+        let fileBody = try text(fileResult)
+        #expect(fileBody.hasPrefix("dataset_filed:"))
+
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+        try await runExportAndAwait(vault: vault, scope: "believed", via: dispatcher)
+
+        let csvFiles = try FileManager.default.subpathsOfDirectory(
+            atPath: vault.path).filter { $0.hasSuffix(".csv") }
+        let mdFiles = try FileManager.default.subpathsOfDirectory(
+            atPath: vault.path).filter { $0.hasSuffix(".md") }
+
+        #expect(!csvFiles.isEmpty,
+            "normal dataset handle must produce a companion .csv in the vault")
+        #expect(!mdFiles.isEmpty,
+            "normal dataset handle note (.md) must be present in the vault")
+    }
 }

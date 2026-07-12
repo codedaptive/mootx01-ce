@@ -1042,6 +1042,14 @@ enum VaultTools {
     /// `writeManifest` complete. For each note with `contentKind: 7`, queries
     /// the DatasetStore and writes a companion `<slug>.csv` next to the `.md`.
     ///
+    /// ## Sensitivity gate (MX-TAB-SEC-1 A4)
+    ///
+    /// Handles with `sensitivity: restricted` or `sensitivity: secret` in their
+    /// frontmatter have their note exported (by `bridge.export`) but NO companion
+    /// CSV written. This prevents bulk CSV data from leaving the estate unprotected
+    /// alongside a sensitive handle note. A logged notice and a warning entry are
+    /// emitted for each skipped handle.
+    ///
     /// Non-fatal: individual failures are collected as warnings and returned.
     /// Returns `(csvCount, warnings)`.
     static func exportDatasetCSVs(
@@ -1061,6 +1069,31 @@ enum VaultTools {
         var warnings: [String] = []
 
         for note in datasetNotes {
+            // A4: Sensitivity gate — skip CSV for restricted/secret dataset handles
+            // (MX-TAB-SEC-1 A4).
+            //
+            // The .md handle note is already in the vault (written by bridge.export,
+            // which applies the bulk-channel tier rules). This gate prevents companion
+            // CSV data from riding alongside a sensitive handle note.
+            //
+            // Behaviour:
+            //   - normal / elevated:   note exported AND csv exported (no change)
+            //   - restricted / secret: note exported, CSV is SKIPPED with a logged notice
+            //
+            // "restricted" and "secret" map to ADR-007 tiers that are excluded from
+            // bulk data export. Their CSV content must not leave the estate unprotected.
+            let noteSensitivity = vaultSensitivityToAdjectiveSensitivity(
+                from: note.frontmatter["sensitivity"])
+            if noteSensitivity == .restricted || noteSensitivity == .secret {
+                let sensLabel = note.frontmatter["sensitivity"] ?? "restricted"
+                Logging.osLog.notice(
+                    "vault_export: sensitive dataset handle at \(note.path, privacy: .public) (sensitivity: \(sensLabel, privacy: .public)) — note exported, CSV skipped per MX-TAB-SEC-1 A4")
+                warnings.append(
+                    "vault_export: \(note.path): sensitivity=\(sensLabel) — " +
+                    "CSV skipped (handle note exported; dataset CSV withheld)")
+                continue
+            }
+
             // Decode DatasetHandleContent from the note body to get the dataset UUID.
             let handleContent: DatasetHandleContent
             do {

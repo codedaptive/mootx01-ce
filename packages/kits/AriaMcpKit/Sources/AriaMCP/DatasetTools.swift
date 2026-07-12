@@ -26,12 +26,14 @@
 //   time; peak memory during inline build is O(fileSize). Larger files should
 //   be pre-split or streamed (v2 Parquet/streaming path).
 //
-//   PATH SECURITY: csv_path is canonicalized (resolving symlinks) to get the
-//   REAL path, then checked that it is a regular file (no directories, devices,
-//   non-file symlink targets). The resolved path is recorded in the handle's
-//   sourceDescription so it is stored durably and included in the audit trail
-//   via the captureDatasetHandle call (which goes through the estate's capture
-//   path and emits an audit event).
+//   PATH SECURITY: csv_path is canonicalized (resolving symlinks) to the REAL
+//   path, checked to be a regular file, and confined to the import root
+//   (home directory) by component-wise prefix match — a canonicalized path
+//   outside the root is rejected (MX-TAB-SEC-1 A1; a prompt-injected client
+//   must not read arbitrary files). Only the basename is written to the
+//   handle's sourceDescription ("csv:<basename>", A2); the canonical path
+//   goes to the server-side audit log only, never to the client-visible
+//   handle field, so filesystem layout is not disclosed in tool responses.
 //
 //   TYPE INFERENCE: try Int64 → try Double → text. Applies to both CSV cells
 //   and JSON-lines scalar values. Empty string → null (TypedValue.null).
@@ -311,10 +313,17 @@ enum DatasetTools {
             let result = try parseCSV(at: resolved, columnHints: columnSpecs)
             schema = result.schema
             typedRows = result.rows
-            // sourceDescription carries the RESOLVED path (not the caller's original)
-            // so provenance records the canonical filesystem location (audit-trail entry
-            // for the import path per MX-TAB-7 §Security review gate).
-            sourceDescription = "csv_path:\(resolved)"
+            // A2: Provenance path redaction (MX-TAB-SEC-1 A2).
+            //
+            // sourceDescription is stored in the handle drawer and visible to the
+            // client. To avoid leaking the full canonical filesystem path (which can
+            // reveal personal directory layout to a prompt-injected client),
+            // sourceDescription carries only the basename.
+            //
+            // The full resolved path goes to the server-side audit channel (OSLog)
+            // ONLY — never to the client-facing response body or stored drawer content.
+            Logging.osLog.info("csv_import: audit resolved=\(resolved, privacy: .public)")
+            sourceDescription = "csv:\(URL(fileURLWithPath: resolved).lastPathComponent)"
         } else if let rowsValue = args["rows"] {
             guard !colNames.isEmpty else {
                 throw JSONRPCError(
@@ -672,6 +681,30 @@ enum DatasetTools {
         let url = URL(fileURLWithPath: raw).resolvingSymlinksInPath()
         let resolvedPath = url.path
 
+        // 1.5. Import-root confinement (MX-TAB-SEC-1 A1).
+        //
+        // After canonicalization (symlinks resolved, relative components collapsed),
+        // the path MUST lie inside the allowed import root. This prevents a
+        // prompt-injected client from reading arbitrary filesystem locations such
+        // as /etc/passwd by supplying a relative path or a symlink that escapes
+        // the intended directory.
+        //
+        // Root resolution (D11): the user's home directory is the default root.
+        // The comparison is component-safe: the root has a "/" appended before the
+        // hasPrefix check so that "/vault-evil/file" cannot match a "/vault" root.
+        //
+        // Future: make the root configurable via estate configuration if a per-estate
+        // config surface is added; see MX-TAB-SEC-1 D11.
+        let rawImportRoot = FileManager.default.homeDirectoryForCurrentUser.path
+        let importRoot = URL(fileURLWithPath: rawImportRoot).resolvingSymlinksInPath().path
+        let rootWithSep = importRoot.hasSuffix("/") ? importRoot : importRoot + "/"
+        guard resolvedPath.hasPrefix(rootWithSep) || resolvedPath == importRoot else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "moot_file_dataset: csv_path must be inside the allowed import " +
+                "root (\(importRoot)): \(resolvedPath)")
+        }
+
         let fm = FileManager.default
         guard fm.fileExists(atPath: resolvedPath) else {
             throw JSONRPCError(
@@ -1016,6 +1049,26 @@ enum DatasetTools {
                 message: "moot_dataset_query: where condition must have an 'op' string")
         }
 
+        // A3: MCP-layer identifier validation (MX-TAB-SEC-1 A3).
+        //
+        // Validate the column name at parse time before it reaches the backend.
+        // This is an independent first gate against prompt injection — a hostile
+        // client supplying col: "name; DROP TABLE x" is rejected here with a
+        // clean invalidParams error rather than reaching SQL generation.
+        //
+        // The backend guard at query execution is the second independent layer;
+        // two checks exist by design (belt-and-suspenders — comment this intent
+        // on the backend side too per the security review spec).
+        do {
+            try validateDatasetColumnIdentifier(colStr)
+        } catch {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "moot_dataset_query: invalid column identifier in where " +
+                "condition 'col': \"\(colStr)\". " +
+                "Column names must match [A-Za-z_][A-Za-z0-9_]*.")
+        }
+
         let column = Column(table: tableName, name: colStr)
 
         // Null checks (no value needed).
@@ -1060,6 +1113,20 @@ enum DatasetTools {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
                     message: "moot_dataset_query: each order_by element must have a 'col' string")
+            }
+            // A3: MCP-layer identifier validation in order_by (MX-TAB-SEC-1 A3).
+            //
+            // Same two-layer intent as the where-predicate guard: reject hostile
+            // column names at the MCP parse boundary before they reach the backend.
+            // The backend guard is the second independent layer.
+            do {
+                try validateDatasetColumnIdentifier(colStr)
+            } catch {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "moot_dataset_query: invalid column identifier in order_by " +
+                    "'col': \"\(colStr)\". " +
+                    "Column names must match [A-Za-z_][A-Za-z0-9_]*.")
             }
             let dir: OrderDirection
             switch (obj["dir"]?.stringValue ?? "asc").lowercased() {

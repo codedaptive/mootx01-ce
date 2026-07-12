@@ -697,6 +697,8 @@ pub(crate) fn describe_glk_error(e: &genius_locus_kit::GeniusLocusKitError) -> S
                     "the source estate's custody mode refused the read",
                 FederatedReadRefusalReason::GrantRevoked =>
                     "the grant has been revoked",
+                FederatedReadRefusalReason::InvalidGrantSignature =>
+                    "the grant signature is invalid",
             };
             format!(
                 "cross-estate read from {source} by {requester} refused: {why}"

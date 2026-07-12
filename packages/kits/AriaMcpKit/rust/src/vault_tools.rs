@@ -1432,6 +1432,14 @@ fn typed_value_to_csv_text(v: &TypedValue) -> String {
 /// queries the `DatasetStore` for all rows (capped at `DATASET_EXPORT_ROW_CAP`),
 /// and writes `<wing>/<room>/<slug>.csv` beside the handle note.
 ///
+/// ## Sensitivity gate (MX-TAB-SEC-1 A4)
+///
+/// Handles with `sensitivity: restricted` or `sensitivity: secret` in their
+/// frontmatter have their note exported (by `bridge.export`) but NO companion
+/// CSV written. This prevents bulk CSV data from leaving the estate unprotected
+/// alongside a sensitive handle note. A notice is emitted to stderr and a
+/// warning entry is appended for each skipped handle.
+///
 /// Non-fatal: individual failures are collected as warnings and included in
 /// the response; they do not fail the overall export.
 ///
@@ -1471,7 +1479,41 @@ fn export_dataset_csvs(vault_path: &Path, open: &OpenEstate) -> (usize, Vec<Stri
         }
     };
 
-    for (rel_path, _frontmatter, body) in &dataset_notes {
+    for (rel_path, frontmatter, body) in &dataset_notes {
+        // A4: Sensitivity gate — skip CSV for restricted/secret dataset handles
+        // (MX-TAB-SEC-1 A4).
+        //
+        // The .md handle note is already in the vault (written by bridge.export,
+        // which applies the bulk-channel tier rules). This gate prevents companion
+        // CSV data from riding alongside a sensitive handle note.
+        //
+        // Behaviour:
+        //   - normal / elevated:   note exported AND csv exported (no change)
+        //   - restricted / secret: note exported, CSV is SKIPPED with a notice
+        //
+        // "restricted" and "secret" map to ADR-007 tiers excluded from bulk data
+        // export. Their CSV content must not leave the estate unprotected.
+        let sensitivity_raw = vault_sensitivity_to_raw(
+            frontmatter.get("sensitivity").map(|s| s.as_str()),
+        );
+        if sensitivity_raw >= 32 {
+            // 32 = restricted; 48 = secret
+            let sens_label = frontmatter
+                .get("sensitivity")
+                .map(|s| s.as_str())
+                .unwrap_or("restricted");
+            eprintln!(
+                "vault_export: sensitive dataset handle at {} \
+                (sensitivity: {}) — note exported, CSV skipped per MX-TAB-SEC-1 A4",
+                rel_path, sens_label
+            );
+            warnings.push(format!(
+                "vault_export: {rel_path}: sensitivity={sens_label} — \
+                CSV skipped (handle note exported; dataset CSV withheld)"
+            ));
+            continue;
+        }
+
         // Decode the DatasetHandleContent JSON from the note body.
         let handle_content = match DatasetHandleContent::decode(body.trim()) {
             Ok(c) => c,
