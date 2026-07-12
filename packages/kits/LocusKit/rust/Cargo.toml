@@ -64,10 +64,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-# JSON parsing for LP-0 conformance vectors. Only used in tests/lp0_vectors.rs.
-# serde_json is also a production dependency (MX-TAB-4); listing here keeps
-# test-vector code able to pull the same version without a separate resolution.
-serde_json = "1"
+# serde_json for test-vector parsing (tests/lp0_vectors.rs) resolves from the
+# production dependency above — no separate dev-dependency entry needed.
 # rusqlite is used in corrupt_readback_tests.rs to corrupt stored values via
 # raw SQL (bypassing the kit's codec). Identical test strategy to
 # PersistenceKit/rust/tests/corrupt_readback_tests.rs. bundled = statically

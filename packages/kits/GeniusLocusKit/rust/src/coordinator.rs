@@ -2818,11 +2818,16 @@ impl EstateCoordinator {
                     // log but do NOT abort — proceed to step 3 so the
                     // tombstone audit still seals. Mirrors Swift: `do { ... }
                     // catch { Self.verbLog.error(...) }` pattern.
-                    let _ = estate.append_supplementary_audit(
+                    if let Err(e) = estate.append_supplementary_audit(
                         &unsealed_event,
                         "datasetTableDrop",
                         &format!("dataset table dropped on handle erase: {}", dataset_id),
-                    );
+                    ) {
+                        eprintln!(
+                            "[glk-expunge] datasetTableDrop audit append failed dataset_id={} error={:?}",
+                            dataset_id, e
+                        );
+                    }
                 }
             }
         }

@@ -38,7 +38,7 @@
 //!
 //! ## Call contract for MX-TAB-7
 //!
-//! ```rust
+//! ```text
 //! // Fetch the sample (at most DATASET_SIGNATURE_SAMPLE_SIZE rows).
 //! let sampled_rows = dataset_store.query_rows(
 //!     dataset_id, None, &[], Some(DATASET_SIGNATURE_SAMPLE_SIZE), None, None
