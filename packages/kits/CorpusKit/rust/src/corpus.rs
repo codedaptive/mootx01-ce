@@ -3108,6 +3108,30 @@ impl Corpus {
         self.bundle_store.all_source_ids(None)
     }
 
+    /// Resolve chunk IDs to the source (drawer) IDs that own them.
+    ///
+    /// Reads the warm in-memory `chunk_source_map` (chunk id → source_id)
+    /// that `open()` loads and every ingest maintains — no table scan, no
+    /// body decode. IDs with no mapping are simply absent from the result.
+    ///
+    /// Used by `EstateCoordinator::hunt_contradictions` to map vector rows —
+    /// which the encode pipeline keys by CHUNK UUID — back to the drawers
+    /// whose content they embed. Mirrors Swift
+    /// `CorpusKit.sourceIDs(forChunkIDs:)`.
+    pub fn source_ids_for_chunks(
+        &self,
+        ids: &[uuid::Uuid],
+    ) -> std::collections::HashMap<uuid::Uuid, String> {
+        let map = self.chunk_source_map.lock().unwrap();
+        let mut out = std::collections::HashMap::with_capacity(ids.len());
+        for id in ids {
+            if let Some(source) = map.get(id) {
+                out.insert(*id, source.clone());
+            }
+        }
+        out
+    }
+
     // -- Merkle attestation (NT-C1) --
 
     /// Per-corpus Merkle root for a given source.

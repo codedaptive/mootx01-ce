@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-25
+date: 2026-07-12
 spec_type: kit
-version: 1.13.0
+version: 1.14.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -1254,6 +1254,13 @@ public actor Corpus {
     /// Total chunks in BundleStore (does not decrease after remove).
     public func count() async throws -> Int
 
+    /// Resolve chunk IDs to the source (drawer) IDs that own them, from the
+    /// warm in-memory chunkSourceMap (no table scan; unmapped IDs absent
+    /// from the result). Consumer: GeniusLocusKit.huntContradictions maps
+    /// chunk-keyed vector rows back to drawer pairs (the contradiction
+    /// hunter's corpus lane). Rust: `source_ids_for_chunks(&[Uuid])`.
+    public func sourceIDs(forChunkIDs ids: [UUID]) -> [UUID: String]
+
     // Estate lifecycle primitive:
     /// Destroy the entire recall index. Clears BM25, chunk_source_map, all
     /// vectors, AND all persisted basis rows (no orphans). BundleStore rows
@@ -1439,6 +1446,17 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.14.0 -- 2026-07-12
+Additive (contradiction hunter corpus lane): `Corpus.sourceIDs(forChunkIDs:)`
+(Swift) / `Corpus::source_ids_for_chunks(&[Uuid])` (Rust) — resolve chunk IDs
+to their owning source (drawer) IDs from the warm in-memory chunkSourceMap.
+No table scan; unmapped IDs are absent from the result. Consumer:
+`GeniusLocusKit.huntContradictions` / `EstateCoordinator::hunt_contradictions`
+maps the encode pipeline's chunk-keyed vector rows back to drawer pairs so the
+hunter's kNN mining works on production estates (which register
+`corpus.sharedVectorStore` and hold no drawer-keyed vectors). Both ports at
+parity.
 
 ### 1.13.0 -- 2026-06-25
 T1 (encode mode + QoS throttle): new `EncodeSpeed` enum (`foreground` /

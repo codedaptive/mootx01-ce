@@ -2623,8 +2623,11 @@ impl EstateCoordinator {
     /// half of dreaming and the engine behind `moot_hunt_contradictions`.
     /// Rust mirror of Swift `GeniusLocusKit.huntContradictions`.
     ///
-    /// Shape: sample up to `probe_limit` vector-indexed drawer IDs, kNN
-    /// each probe through the registered VectorStore, canonicalize +
+    /// Shape: sample up to `probe_limit` vector-indexed item IDs, kNN
+    /// each probe through the registered VectorStore on TWO lanes —
+    /// drawer-keyed rows under `model_id`, and (when a Corpus is
+    /// registered) chunk-keyed rows under the corpus's own model_id with
+    /// chunk hits mapped back to their owning drawers — canonicalize +
     /// deduplicate pairs, screen each pair's content with SubstrateML
     /// `conflict_cue`, then:
     ///   strong cue (score ≥ STRONG_THRESHOLD)  → capture a `contradicts`
@@ -2674,8 +2677,13 @@ impl EstateCoordinator {
             }
         };
 
-        // Probe sample: vector-indexed drawer IDs (the only rows kNN can
+        // Probe sample: vector-indexed item IDs (the only rows kNN can
         // reach). Empty-keyword query matches all rows, item_id ascending.
+        // Two row populations exist: DRAWER-keyed rows (bespoke lanes and
+        // test-planted vectors) and CHUNK-keyed rows (the production encode
+        // pipeline — the estate lifecycle registers the corpus's shared
+        // vector store, and the drain writes item_id = chunk UUID under the
+        // corpus's own model_id). Both lanes are mined below.
         // A failed probe-source scan degrades to an empty pass rather than
         // failing the verb — matches the signal-layer treatment of the same
         // read (VectorSimilaritySignal's diagnostic-and-return).
@@ -2709,6 +2717,9 @@ impl EstateCoordinator {
         }
 
         // kNN candidate mining, canonical-pair deduplicated.
+        //
+        // Lane 1 — drawer-keyed rows under the caller's `model_id`. Rows
+        // whose item is not in this lane fail `get_vector` and fall through.
         let mut candidate_pairs: Vec<(String, String)> = Vec::new();
         let mut seen_pairs: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -2735,6 +2746,75 @@ impl EstateCoordinator {
                     (m.item_id.clone(), probe_id.clone())
                 };
                 candidate_pairs.push((a, b));
+            }
+        }
+
+        // Lane 2 — chunk-keyed corpus rows. On a production estate this is
+        // the ONLY populated lane: the encode drain keys every vector row by
+        // chunk UUID under the corpus provider's model_id, so lane 1 finds
+        // nothing there. Mine the same probe set on the corpus lane and map
+        // chunk hits back to their owning drawers (chunk → source_id via the
+        // corpus's warm map). Chunk pairs from the SAME drawer collapse;
+        // `seen_pairs` keys on drawer IDs, so the two lanes dedupe together.
+        // Mirrors the Swift lane-2 block in `ContradictionHunt.swift`.
+        if let Some(corpus) = self.corpus_kits.get(handle) {
+            let corpus_model_id = corpus.model_id().to_string();
+            let mut chunk_matches: Vec<(String, String)> = Vec::new();
+            let mut involved_chunk_ids: std::collections::HashSet<uuid::Uuid> =
+                std::collections::HashSet::new();
+            for probe_id in &probe_ids {
+                let probe_uuid = match uuid::Uuid::parse_str(probe_id) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let probe_engram = match vector_store.get_vector(probe_id, &corpus_model_id) {
+                    Ok(Some(e)) => e,
+                    _ => continue,
+                };
+                let matches = match vector_store.find_nearest(&probe_engram, &corpus_model_id, 5)
+                {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                for m in matches {
+                    if m.item_id == *probe_id || m.distance > proximity_threshold {
+                        continue;
+                    }
+                    let match_uuid = match uuid::Uuid::parse_str(&m.item_id) {
+                        Ok(u) => u,
+                        Err(_) => continue,
+                    };
+                    involved_chunk_ids.insert(probe_uuid);
+                    involved_chunk_ids.insert(match_uuid);
+                    chunk_matches.push((probe_id.clone(), m.item_id.clone()));
+                }
+            }
+            if !chunk_matches.is_empty() {
+                let ids: Vec<uuid::Uuid> = involved_chunk_ids.into_iter().collect();
+                let owners = corpus.source_ids_for_chunks(&ids);
+                for (chunk_a, chunk_b) in chunk_matches {
+                    let (ua, ub) = match (
+                        uuid::Uuid::parse_str(&chunk_a),
+                        uuid::Uuid::parse_str(&chunk_b),
+                    ) {
+                        (Ok(a), Ok(b)) => (a, b),
+                        _ => continue,
+                    };
+                    let (source_a, source_b) = match (owners.get(&ua), owners.get(&ub)) {
+                        (Some(a), Some(b)) if a != b => (a.clone(), b.clone()),
+                        _ => continue,
+                    };
+                    let key = pair_key(&source_a, &source_b);
+                    if !seen_pairs.insert(key) {
+                        continue;
+                    }
+                    let (a, b) = if source_a < source_b {
+                        (source_a, source_b)
+                    } else {
+                        (source_b, source_a)
+                    };
+                    candidate_pairs.push((a, b));
+                }
             }
         }
 
@@ -9042,5 +9122,97 @@ mod tests {
             .expect("hunt");
         assert!(report.proposed.is_empty());
         assert_eq!(report.pairs_screened, 0);
+    }
+
+    #[test]
+    fn hunt_corpus_lane_maps_chunk_rows_to_drawer_pairs() {
+        // Production estates never hold drawer-keyed vectors: the estate
+        // lifecycle registers the corpus's shared vector store and the encode
+        // pipeline keys every row by CHUNK UUID under the corpus's own
+        // model_id. Reproduce that wiring shape and prove lane-2 mining maps
+        // chunk kNN hits back to the owning drawers. Mirrors the Swift
+        // `corpusLaneFindsContradictions` test.
+        let (mut coord, h) = open_one();
+        let storage: Arc<dyn persistence_kit::Storage> =
+            Arc::new(persistence_kit::inmemory::InMemoryStorage::with_estate(
+                uuid::Uuid::new_v4(),
+            ));
+        // Token-bag provider: sums a per-token deterministic vector so
+        // sentences sharing most tokens land near each other in engram space
+        // — the semantic property production's distributional ensemble
+        // provides (the whole-text Deterministic hash does not; it leaves
+        // every distinct sentence ~128 bits apart).
+        let provider = vectorkit::FloatSimHashEmbeddingProvider::new(
+            "hunt-token-bag-v1",
+            "1.0",
+            0xC0FF_EE00,
+            |text: &str| {
+                let mut acc = vec![0.0f32; 32];
+                for token in text
+                    .to_lowercase()
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|t| !t.is_empty())
+                {
+                    let mut h = token.bytes().fold(14_695_981_039_346_656_037u64, |a, b| {
+                        (a ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
+                    });
+                    for slot in acc.iter_mut() {
+                        h = h
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        let mantissa = (h >> 40) as f32 / (1u64 << 24) as f32;
+                        *slot += mantissa * 2.0 - 1.0;
+                    }
+                }
+                Ok(acc)
+            },
+        );
+        // Fdc is the plain pass-through provider slot (stateless, no
+        // training) — the vehicle for injecting the token-bag provider.
+        let corpus = Arc::new(
+            Corpus::open(
+                storage,
+                EmbeddingModelConfig::Fdc { provider: Box::new(provider) },
+            )
+            .expect("open corpus"),
+        );
+        coord.register_vector_store(&h, corpus.shared_vector_store());
+        coord.register_corpus(&h, corpus.clone());
+
+        let a = coord
+            .capture(&h, cap_frame("the api timeout is 30 seconds"), NOW)
+            .expect("capture a");
+        let b = coord
+            .capture(&h, cap_frame("the api timeout is 90 seconds"), NOW)
+            .expect("capture b");
+        let filler = coord
+            .capture(&h, cap_frame("grocery list apples and oranges"), NOW)
+            .expect("capture filler");
+        for drawer in [&a, &b, &filler] {
+            corpus
+                .ingest(&drawer.content, &drawer.id, NOW)
+                .expect("ingest");
+        }
+
+        // Default model_id "minilm-v6" matches no corpus row — lane 1 is
+        // empty by construction; only the corpus lane can find the pair.
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt");
+        assert!(report.vector_store_available);
+        assert_eq!(
+            report.proposed.len(),
+            1,
+            "corpus lane must propose the value-divergent pair"
+        );
+        let p = &report.proposed[0];
+        assert_eq!(p.cue_kind, "value_divergence");
+        let got: std::collections::HashSet<&str> =
+            [p.source_drawer_id.as_str(), p.target_drawer_id.as_str()]
+                .into_iter()
+                .collect();
+        let want: std::collections::HashSet<&str> =
+            [a.id.as_str(), b.id.as_str()].into_iter().collect();
+        assert_eq!(got, want);
     }
 }
