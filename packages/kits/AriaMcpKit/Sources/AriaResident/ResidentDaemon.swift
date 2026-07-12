@@ -402,11 +402,25 @@ public enum AriaResident {
         // Best-effort: a registration failure logs and the governor still runs
         // (signalTick keeps benign-skipping, the pre-activation behaviour) — a
         // standing-signal wiring error must never stop the daemon from serving.
+        //
+        // huntCycle: the contradiction scout's live wiring — one incremental
+        // `huntContradictions` pass per hourly fire, looking back four
+        // cadences so a drawer filed between fires is never missed. The hunt
+        // persists proposed contradicts tunnels itself; the closure returns
+        // counts only (single-write invariant, same as dreamingCycle).
         if let vectorStore = await kit.registeredVectorStore(for: handle) {
             do {
                 _ = try await kit.registerDefaultStandingSignals(
                     in: handle,
                     vectorStore: vectorStore,
+                    huntCycle: { now in
+                        let report = try await kit.huntContradictions(
+                            in: handle,
+                            filedAfter: now.addingTimeInterval(
+                                -ContradictionScoutSignal.defaultCadenceSeconds * 4),
+                            now: now)
+                        return (report.proposed.count, report.borderline.count)
+                    },
                     now: Date()
                 )
                 Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults)")

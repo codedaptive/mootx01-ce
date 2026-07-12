@@ -17,6 +17,7 @@
 // conformance gate.
 
 pub mod by_reference_validity;
+pub mod contradiction_scout;
 pub mod decay_sweep;
 pub mod default_set;
 pub mod distillation;
@@ -28,6 +29,7 @@ pub mod training;
 pub mod vector_similarity;
 
 pub use by_reference_validity::ByReferenceValiditySignal;
+pub use contradiction_scout::ContradictionScoutSignal;
 pub use decay_sweep::DecaySweepSignal;
 pub use default_set::{default_standing_signal_names, default_standing_signal_specs};
 pub use distillation::DistillationSignal;

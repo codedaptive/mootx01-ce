@@ -587,6 +587,51 @@ pub struct DreamingItem {
     pub drawer_ids: Vec<String>,
 }
 
+/// Maximum characters carried per borderline snippet. Mirrors Swift
+/// `GeniusLocusKit.huntSnippetLimit`.
+pub const HUNT_SNIPPET_LIMIT: usize = 160;
+
+/// A `contradicts` tunnel the hunter proposed this pass. Rust mirror of
+/// Swift `ProposedContradiction`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProposedContradiction {
+    pub tunnel_id: String,
+    pub source_drawer_id: String,
+    pub target_drawer_id: String,
+    /// `ConflictCueKind` wire string ("negation_asymmetry", ...).
+    pub cue_kind: String,
+    pub score: f32,
+}
+
+/// A pair the screen found suspicious but below the auto-propose bar —
+/// the agent-adjudication feed. Rust mirror of Swift
+/// `BorderlineContradiction`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderlineContradiction {
+    pub source_drawer_id: String,
+    pub target_drawer_id: String,
+    pub cue_kind: String,
+    pub score: f32,
+    pub source_snippet: String,
+    pub target_snippet: String,
+}
+
+/// One hunt pass's outcome. `vector_store_available == false` means the
+/// estate has no registered VectorStore — the pass is a no-op, reported
+/// honestly rather than as a silent zero. Rust mirror of Swift
+/// `ContradictionHuntReport`.
+#[derive(Debug, Clone)]
+pub struct ContradictionHuntReport {
+    pub vector_store_available: bool,
+    pub probes_scanned: usize,
+    pub pairs_screened: usize,
+    pub proposed: Vec<ProposedContradiction>,
+    pub borderline: Vec<BorderlineContradiction>,
+    /// Pairs skipped because a `contradicts` tunnel already exists between
+    /// them (any lifecycle — includes rejected reviews).
+    pub deduplicated: usize,
+}
+
 pub struct EstateCoordinator {
     registry: HashMap<EstateHandle, Estate>,
     pub(crate) branches: HashMap<crate::branches::BranchId, crate::branches::EstateBranch>,
@@ -2583,6 +2628,221 @@ impl EstateCoordinator {
         }
 
         Ok(produced)
+    }
+
+    // MARK: - contradiction hunt
+
+    /// Run one contradiction-hunt pass over `handle` — the content-driven
+    /// half of dreaming and the engine behind `moot_hunt_contradictions`.
+    /// Rust mirror of Swift `GeniusLocusKit.huntContradictions`.
+    ///
+    /// Shape: sample up to `probe_limit` vector-indexed drawer IDs, kNN
+    /// each probe through the registered VectorStore, canonicalize +
+    /// deduplicate pairs, screen each pair's content with SubstrateML
+    /// `conflict_cue`, then:
+    ///   strong cue (score ≥ STRONG_THRESHOLD)  → capture a `contradicts`
+    ///     tunnel with lifecycle `Proposed`, origin class `Derived`
+    ///     (reviewable via `respond_to_tunnel`).
+    ///   borderline                              → returned as candidate
+    ///     pairs for the BYOAI client to adjudicate; never persisted.
+    ///
+    /// Dedup contract: a pair with ANY existing `contradicts` tunnel — any
+    /// lifecycle, including `Withdrawn` (a rejected review) — is never
+    /// proposed again. Sensitivity: `add_tunnel` stamps the tunnel with the
+    /// MAX of its endpoints' sensitivities (#57), so proposed edges touching
+    /// restricted drawers stay gated automatically.
+    ///
+    /// `filed_after` (epoch ms) is the incremental watermark: when set, a
+    /// pair is screened only if at least one side was filed after it.
+    pub fn hunt_contradictions(
+        &self,
+        handle: &EstateHandle,
+        model_id: &str,
+        probe_limit: usize,
+        filed_after: Option<i64>,
+        proximity_threshold: i32,
+        now: i64,
+    ) -> Result<ContradictionHuntReport, VerbDispatchError> {
+        use locus_kit::frames::TunnelCaptureFrame;
+        use locus_kit::tunnel_operational::{
+            TunnelKind, TunnelLifecycle, TunnelOriginClass,
+        };
+        use substrate_ml::conflict_cue;
+
+        let estate = self.estate_for_verb(handle)?;
+        let remap_err =
+            |e: locus_kit::error::LocusKitError| VerbDispatchError::from(remap("hunt_contradictions", "", e));
+
+        let vector_store = match self.vector_stores.get(handle) {
+            Some(store) => store,
+            None => {
+                return Ok(ContradictionHuntReport {
+                    vector_store_available: false,
+                    probes_scanned: 0,
+                    pairs_screened: 0,
+                    proposed: vec![],
+                    borderline: vec![],
+                    deduplicated: 0,
+                })
+            }
+        };
+
+        // Probe sample: vector-indexed drawer IDs (the only rows kNN can
+        // reach). Empty-keyword query matches all rows, item_id ascending.
+        // A failed probe-source scan degrades to an empty pass rather than
+        // failing the verb — matches the signal-layer treatment of the same
+        // read (VectorSimilaritySignal's diagnostic-and-return).
+        let probe_ids = vector_store.find_by_keyword("", probe_limit).unwrap_or_default();
+        if probe_ids.is_empty() {
+            return Ok(ContradictionHuntReport {
+                vector_store_available: true,
+                probes_scanned: 0,
+                pairs_screened: 0,
+                proposed: vec![],
+                borderline: vec![],
+                deduplicated: 0,
+            });
+        }
+
+        // Durable dedup set: every drawer pair already joined by a
+        // contradicts tunnel, any lifecycle, tombstoned included.
+        let pair_key = |a: &str, b: &str| -> String {
+            if a < b { format!("{}||{}", a, b) } else { format!("{}||{}", b, a) }
+        };
+        let mut settled_pairs: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for tunnel in estate.all_tunnels().map_err(remap_err)? {
+            if tunnel.kind == TunnelKind::Contradicts {
+                if let (Some(s), Some(t)) =
+                    (tunnel.source_drawer_id.as_deref(), tunnel.target_drawer_id.as_deref())
+                {
+                    settled_pairs.insert(pair_key(s, t));
+                }
+            }
+        }
+
+        // kNN candidate mining, canonical-pair deduplicated.
+        let mut candidate_pairs: Vec<(String, String)> = Vec::new();
+        let mut seen_pairs: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for probe_id in &probe_ids {
+            let probe_engram = match vector_store.get_vector(probe_id, model_id) {
+                Ok(Some(e)) => e,
+                _ => continue,
+            };
+            let matches = match vector_store.find_nearest(&probe_engram, model_id, 5) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            for m in matches {
+                if m.item_id == *probe_id || m.distance > proximity_threshold {
+                    continue;
+                }
+                let key = pair_key(probe_id, &m.item_id);
+                if !seen_pairs.insert(key) {
+                    continue;
+                }
+                let (a, b) = if *probe_id < m.item_id {
+                    (probe_id.clone(), m.item_id.clone())
+                } else {
+                    (m.item_id.clone(), probe_id.clone())
+                };
+                candidate_pairs.push((a, b));
+            }
+        }
+
+        // Drawer contents + node names for the surviving candidates.
+        let all_drawers: Vec<locus_kit::drawer::Drawer> =
+            estate.all_drawers().map_err(remap_err)?;
+        let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
+        let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
+            all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        let probes_scanned = probe_ids.len();
+        let mut pairs_screened = 0usize;
+        let mut deduplicated = 0usize;
+        let mut proposed: Vec<ProposedContradiction> = Vec::new();
+        let mut borderline: Vec<BorderlineContradiction> = Vec::new();
+
+        for (a_id, b_id) in candidate_pairs {
+            let (a, b) = match (drawers_by_id.get(a_id.as_str()), drawers_by_id.get(b_id.as_str())) {
+                (Some(a), Some(b)) => (*a, *b),
+                _ => continue,
+            };
+            if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
+                continue;
+            }
+            // Incremental watermark: at least one side must be new enough.
+            if let Some(watermark) = filed_after {
+                if a.filed_at <= watermark && b.filed_at <= watermark {
+                    continue;
+                }
+            }
+            if settled_pairs.contains(&pair_key(&a.id, &b.id)) {
+                deduplicated += 1;
+                continue;
+            }
+            pairs_screened += 1;
+
+            let cue = conflict_cue::evaluate(&a.content, &b.content);
+            if cue.kind == conflict_cue::ConflictCueKind::None {
+                continue;
+            }
+
+            if cue.score >= conflict_cue::STRONG_THRESHOLD {
+                // Endpoint wings/rooms come from the node tree; a pair whose
+                // endpoints cannot be resolved is skipped rather than filed
+                // with fabricated coordinates.
+                let (a_wing, a_room) = match node_names.get(&a.parent_node_id) {
+                    Some(names) => names.clone(),
+                    None => continue,
+                };
+                let (b_wing, b_room) = match node_names.get(&b.parent_node_id) {
+                    Some(names) => names.clone(),
+                    None => continue,
+                };
+                let mut frame = TunnelCaptureFrame::new(
+                    a_wing,
+                    a_room,
+                    b_wing,
+                    b_room,
+                    format!("hunter: {} score={}", cue.kind.as_str(), cue.score),
+                    "contradiction-hunter",
+                );
+                frame.source_drawer_id = Some(a.id.clone());
+                frame.target_drawer_id = Some(b.id.clone());
+                frame.kind = TunnelKind::Contradicts;
+                frame.origin_class = TunnelOriginClass::Derived;
+                frame.lifecycle = TunnelLifecycle::Proposed;
+                let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
+                settled_pairs.insert(pair_key(&a.id, &b.id));
+                proposed.push(ProposedContradiction {
+                    tunnel_id: tunnel.id,
+                    source_drawer_id: a.id.clone(),
+                    target_drawer_id: b.id.clone(),
+                    cue_kind: cue.kind.as_str().to_string(),
+                    score: cue.score,
+                });
+            } else if cue.score >= conflict_cue::BORDERLINE_THRESHOLD {
+                borderline.push(BorderlineContradiction {
+                    source_drawer_id: a.id.clone(),
+                    target_drawer_id: b.id.clone(),
+                    cue_kind: cue.kind.as_str().to_string(),
+                    score: cue.score,
+                    source_snippet: a.content.chars().take(HUNT_SNIPPET_LIMIT).collect(),
+                    target_snippet: b.content.chars().take(HUNT_SNIPPET_LIMIT).collect(),
+                });
+            }
+        }
+
+        Ok(ContradictionHuntReport {
+            vector_store_available: true,
+            probes_scanned,
+            pairs_screened,
+            proposed,
+            borderline,
+            deduplicated,
+        })
     }
 
     // MARK: - mutate
@@ -8758,5 +9018,166 @@ mod tests {
             all.iter().all(|d| d.lineage_id.to_string() != secret_id),
             "no factoid must exist for Secret source; secfix/punt-g2 violated"
         );
+    }
+
+    // ── Contradiction hunt (mirrors Swift ContradictionHuntTests) ──────
+
+    fn open_one_with_vectors() -> (EstateCoordinator, EstateHandle, Arc<VectorStore>) {
+        let (mut coord, h) = open_one();
+        let storage: Arc<dyn persistence_kit::Storage> =
+            Arc::new(persistence_kit::inmemory::InMemoryStorage::with_estate(
+                uuid::Uuid::new_v4(),
+            ));
+        storage
+            .open(&VectorStore::schema_declaration())
+            .expect("open vector schema");
+        let vs = Arc::new(VectorStore::new(storage, None));
+        coord.register_vector_store(&h, vs.clone());
+        (coord, h, vs)
+    }
+
+    fn hunt_near() -> engram_lib::Engram {
+        substrate_types::fingerprint256::Fingerprint256::new(0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD)
+    }
+
+    fn hunt_plant(
+        coord: &EstateCoordinator,
+        h: &EstateHandle,
+        vs: &VectorStore,
+        content: &str,
+        engram: &engram_lib::Engram,
+    ) -> locus_kit::drawer::Drawer {
+        let drawer = coord.capture(h, cap_frame(content), NOW).expect("capture");
+        vs.add_vector(&drawer.id, engram, "minilm-v6", "1.0", NOW)
+            .expect("add_vector");
+        drawer
+    }
+
+    #[test]
+    fn hunt_strong_cue_proposes_tunnel() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        let a = hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        let b = hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt");
+        assert!(report.vector_store_available);
+        assert_eq!(report.proposed.len(), 1);
+        let proposal = &report.proposed[0];
+        assert_eq!(proposal.cue_kind, "value_divergence");
+        let ids: std::collections::HashSet<&str> =
+            [proposal.source_drawer_id.as_str(), proposal.target_drawer_id.as_str()]
+                .into_iter()
+                .collect();
+        assert_eq!(ids, [a.id.as_str(), b.id.as_str()].into_iter().collect());
+
+        // The tunnel persisted with the hunter's review state.
+        let estate = coord.estate_for_verb(&h).unwrap();
+        let tunnels = estate.all_tunnels().unwrap();
+        let tunnel = tunnels.iter().find(|t| t.id == proposal.tunnel_id).unwrap();
+        assert_eq!(tunnel.kind, locus_kit::tunnel_operational::TunnelKind::Contradicts);
+        assert_eq!(
+            tunnel.lifecycle(),
+            locus_kit::tunnel_operational::TunnelLifecycle::Proposed
+        );
+        assert_eq!(
+            tunnel.origin_class(),
+            locus_kit::tunnel_operational::TunnelOriginClass::Derived
+        );
+        assert_eq!(tunnel.added_by, "contradiction-hunter");
+    }
+
+    #[test]
+    fn hunt_dedup_is_durable_across_rejection() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+
+        let first = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt 1");
+        assert_eq!(first.proposed.len(), 1);
+
+        let second = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt 2");
+        assert!(second.proposed.is_empty());
+        assert_eq!(second.deduplicated, 1);
+
+        // Reject the proposal — the withdrawn tunnel still settles the pair.
+        let estate = coord.estate_for_verb(&h).unwrap();
+        estate
+            .respond_to_tunnel(&first.proposed[0].tunnel_id, false, "tests", None, NOW + 1)
+            .expect("reject");
+        let third = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt 3");
+        assert!(third.proposed.is_empty());
+        assert_eq!(third.deduplicated, 1);
+    }
+
+    #[test]
+    fn hunt_borderline_is_returned_not_persisted() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant(&coord, &h, &vs, "Bob lives in Paris", &near);
+        hunt_plant(&coord, &h, &vs, "Bob does not live in Paris", &near);
+
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt");
+        assert!(report.proposed.is_empty());
+        assert_eq!(report.borderline.len(), 1);
+        assert_eq!(report.borderline[0].cue_kind, "negation_asymmetry");
+        assert!(!report.borderline[0].source_snippet.is_empty());
+
+        let estate = coord.estate_for_verb(&h).unwrap();
+        let contradicts = estate
+            .all_tunnels()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == locus_kit::tunnel_operational::TunnelKind::Contradicts)
+            .count();
+        assert_eq!(contradicts, 0);
+    }
+
+    #[test]
+    fn hunt_guards_and_missing_vector_store() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant(&coord, &h, &vs, "the deploy pipeline is green", &near);
+        hunt_plant(&coord, &h, &vs, "quarterly budget review notes", &near);
+
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt");
+        assert!(report.proposed.is_empty());
+        assert!(report.borderline.is_empty());
+        assert_eq!(report.pairs_screened, 1);
+
+        // A coordinator with no registered VectorStore reports the gap honestly.
+        let (bare, bare_h) = open_one();
+        let bare_report = bare
+            .hunt_contradictions(&bare_h, "minilm-v6", 50, None, 64, NOW)
+            .expect("bare hunt");
+        assert!(!bare_report.vector_store_available);
+    }
+
+    #[test]
+    fn hunt_watermark_skips_old_pairs() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+
+        // Watermark after both captures: nothing is new enough.
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, Some(i64::MAX), 64, NOW)
+            .expect("hunt");
+        assert!(report.proposed.is_empty());
+        assert_eq!(report.pairs_screened, 0);
     }
 }

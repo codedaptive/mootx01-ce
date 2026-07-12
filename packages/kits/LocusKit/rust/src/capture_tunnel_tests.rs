@@ -10,7 +10,7 @@ use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::estate_types::{LatticeAnchor, OwnerCredentials};
 use crate::frames::{CaptureFrame, TunnelCaptureFrame};
-use crate::tunnel_operational::{TunnelKind, TunnelOriginClass};
+use crate::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -373,4 +373,91 @@ fn feature_flags_swift_rust_parity() {
         drawer.operational_bitmap & DrawerFeatureFlags::FIELD_MASK,
         0x9000
     );
+}
+
+// ── Proposed-lifecycle capture + review (contradiction-hunter substrate) ──
+// Rust mirror of Swift `ProposedTunnelLifecycleTests`.
+
+fn proposed_frame() -> TunnelCaptureFrame {
+    let mut f = TunnelCaptureFrame::new(
+        "wing_a", "room_1", "wing_b", "room_2",
+        "hunter: negation cue 0.91", "dreaming-hunter",
+    );
+    f.kind = TunnelKind::Contradicts;
+    f.origin_class = TunnelOriginClass::Derived;
+    f.lifecycle = TunnelLifecycle::Proposed;
+    f
+}
+
+#[test]
+fn capture_stamps_lifecycle_bits_three_through_five() {
+    let (estate, _store) = make_estate_with_store();
+
+    let proposed = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+    assert_eq!(proposed.lifecycle(), TunnelLifecycle::Proposed);
+    assert_eq!(proposed.origin_class(), TunnelOriginClass::Derived);
+    assert_eq!(proposed.kind, TunnelKind::Contradicts);
+    // Proposed raw 1 << 3 | Derived raw 1 << 6 = 0x48 (matches Swift).
+    assert_eq!(proposed.operational_bitmap, 0x48);
+
+    // Default-lifecycle capture stays byte-identical: all-zero bitmap.
+    let mut plain = proposed_frame();
+    plain.lifecycle = TunnelLifecycle::Active;
+    plain.origin_class = TunnelOriginClass::UserExplicit;
+    let active = estate.capture_tunnel(plain, NOW).unwrap();
+    assert_eq!(active.lifecycle(), TunnelLifecycle::Active);
+    assert_eq!(active.operational_bitmap, 0);
+}
+
+#[test]
+fn accept_moves_proposed_to_active() {
+    let (estate, store) = make_estate_with_store();
+    let proposed = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+
+    estate
+        .respond_to_tunnel(&proposed.id, true, "bob", None, NOW + 1)
+        .unwrap();
+
+    let reviewed = store.get_tunnel(&proposed.id).unwrap().unwrap();
+    assert_eq!(reviewed.lifecycle(), TunnelLifecycle::Active);
+    // Only the lifecycle field changed; origin class survives the rewrite.
+    assert_eq!(reviewed.origin_class(), TunnelOriginClass::Derived);
+    assert_eq!(reviewed.kind, TunnelKind::Contradicts);
+}
+
+#[test]
+fn reject_moves_proposed_to_withdrawn_and_settles() {
+    let (estate, store) = make_estate_with_store();
+    let proposed = estate.capture_tunnel(proposed_frame(), NOW).unwrap();
+
+    estate
+        .respond_to_tunnel(&proposed.id, false, "bob", Some("not in conflict"), NOW + 1)
+        .unwrap();
+
+    let reviewed = store.get_tunnel(&proposed.id).unwrap().unwrap();
+    assert_eq!(reviewed.lifecycle(), TunnelLifecycle::Withdrawn);
+
+    // A settled (withdrawn) tunnel is no longer reviewable.
+    let err = estate
+        .respond_to_tunnel(&proposed.id, true, "bob", None, NOW + 2)
+        .unwrap_err();
+    assert!(matches!(err, LocusKitError::InvalidContent(_)));
+}
+
+#[test]
+fn review_guards_reject_active_and_unknown() {
+    let (estate, _store) = make_estate_with_store();
+    let mut frame = proposed_frame();
+    frame.lifecycle = TunnelLifecycle::Active;
+    let active = estate.capture_tunnel(frame, NOW).unwrap();
+
+    let err = estate
+        .respond_to_tunnel(&active.id, true, "bob", None, NOW + 1)
+        .unwrap_err();
+    assert!(matches!(err, LocusKitError::InvalidContent(_)));
+
+    let err = estate
+        .respond_to_tunnel("no-such-tunnel", true, "bob", None, NOW + 1)
+        .unwrap_err();
+    assert!(matches!(err, LocusKitError::TunnelNotFound { .. }));
 }
