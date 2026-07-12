@@ -867,21 +867,34 @@ standing-signal set.
 ### Standing-signal inventory update (§11.2)
 
 The six v1 standing signals documented in §11.2 of the architecture spec have
-been extended to seven with the addition of `TemporalCausalitySignal`:
+been extended to ten — `TemporalCausalitySignal` (7), `DistillationSignal`
+(8, DG5), `TrainingSignal` (9, ADR-018 F1), and `ContradictionScoutSignal`
+(10, the contradiction hunter's background half):
 
 | # | Signal name | Cadence | Purpose |
 |---|------------|---------|---------|
 | 1 | dreaming-daemon | 604 800 s (weekly) | NMF, eigenvalue, T-matrix cold-path |
 | 2 | maintenance | 3 600 s (hourly) | Tombstone cleanup, orphan detection |
 | 3 | vector-similarity | 300 s (5 min) | HNSW proximity clustering |
-| 4 | decay-sweep | 86 400 s (daily) | O/T matrix multiplicative decay |
-| 5 | byReference-validity | 604 800 s (weekly) | Broken reference detection |
-| 6 | end-of-day-tournament | 86 400 s (daily) | Bradley-Terry reward signal |
-| **7** | **temporal-causality-fold** | **3 600 s (hourly)** | **T-matrix population pass** |
+| 4 | contradiction-scout | 3 600 s (hourly) | Content-conflict pass: kNN candidates + ConflictCue screen → proposed contradicts tunnels |
+| 5 | decay-sweep | 86 400 s (daily) | O/T matrix multiplicative decay |
+| 6 | byReference-validity | 604 800 s (weekly) | Broken reference detection |
+| 7 | end-of-day-tournament | 86 400 s (daily) | Bradley-Terry reward signal |
+| 8 | temporal-causality-fold | 3 600 s (hourly) | T-matrix population pass |
+| 9 | distillation | 3 600 s (hourly) | Per-item factoid distillation sweep |
+| 10 | training-daemon | 3 600 s (hourly) | Training daemon tick (threshold-gated) |
 
-Signal 7 is registered via `TemporalCausalitySignal.defaultSpec()` in
-`registerDefaultStandingSignals`. Production callers replace it with
-`TemporalCausalitySignal.spec(foldCycle:)` to wire a live fold closure.
+(Table rows are ordered as `registerDefaultStandingSignals` registers them;
+the # column is registration order, not the historical signal number.)
+`TemporalCausalitySignal` is registered via its `defaultSpec()`; production
+callers replace it with `TemporalCausalitySignal.spec(foldCycle:)` to wire a
+live fold closure. `ContradictionScoutSignal` is wired live by the resident
+daemon via `huntCycle:` around `GeniusLocusKit.huntContradictions` (see
+`Brain/ContradictionHunt.swift` — kNN candidate mining, SubstrateML
+`ConflictCue` screen, strong cues captured as `contradicts` tunnels with
+lifecycle `.proposed` / originClass `.derived`, borderline pairs returned
+for BYOAI adjudication, durable dedup against every existing contradicts
+tunnel including withdrawn ones).
 
 ### Cadence decision
 
