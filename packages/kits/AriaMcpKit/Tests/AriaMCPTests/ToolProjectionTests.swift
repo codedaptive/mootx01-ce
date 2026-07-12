@@ -7,13 +7,18 @@ import Testing
 /// The five-tier interface tools carry `.interface` provenance; the
 /// federation tool carries `.federation`. Recipe and lens tools carry
 /// `.recipe`; vault tools carry `.vault`. There are no `.lexicon` tools.
+///
+/// Every test projects with `tools(environment: [:])` — an explicit empty
+/// environment — so the contract (66 tools: vault on by default, opt-in
+/// memory tool off) holds regardless of what the test runner's process
+/// environment or a concurrently running suite has set.
 @Suite("Tool projection")
 struct ToolProjectionTests {
 
     /// Every interface tool must carry `.interface` provenance. No
     /// `.lexicon` provenance should appear anywhere in the list.
     @Test func testNoLexiconProvenance() {
-        for tool in ToolProjection.tools() {
+        for tool in ToolProjection.tools(environment: [:]) {
             if case .interface = tool.provenance { continue }
             if case .federation = tool.provenance { continue }
             if case .recipe = tool.provenance { continue }
@@ -30,7 +35,7 @@ struct ToolProjectionTests {
     /// the MCP surface — approval must only ever happen via the
     /// out-of-band `mootx01 unlock`/`lock` CLI.
     @Test func testNoUnlockToolOnMCPSurface() {
-        for tool in ToolProjection.tools() {
+        for tool in ToolProjection.tools(environment: [:]) {
             let lower = tool.name.lowercased()
             #expect(!lower.contains("unlock"),
                     "ADR-025 §3 violation: '\(tool.name)' looks like an unlock verb on the MCP surface")
@@ -55,13 +60,13 @@ struct ToolProjectionTests {
     /// direct palace import).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools().count == 66,
-                "tools() must return exactly 66 tools; got \(ToolProjection.tools().count)")
+        #expect(ToolProjection.tools(environment: [:]).count == 66,
+                "tools() must return exactly 66 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 20 interface tools must be present.
     @Test func testInterfaceToolsArePresent() {
-        let names = Set(ToolProjection.tools().map(\.name))
+        let names = Set(ToolProjection.tools(environment: [:]).map(\.name))
         let expected: [String] = [
             // Tier 1
             "moot_file_memory", "moot_memory_search", "moot_memory_get",
@@ -84,7 +89,7 @@ struct ToolProjectionTests {
 
     /// Old lexicon tool names must not be present in the new surface.
     @Test func testOldToolNamesAreGone() {
-        let names = Set(ToolProjection.tools().map(\.name))
+        let names = Set(ToolProjection.tools(environment: [:]).map(\.name))
         let removed: [String] = [
             "moot_capture_drawer", "moot_drawer_recall", "moot_mutate_drawer",
             "moot_withdraw_drawer", "moot_expunge_drawer", "moot_reanchor_drawer",
@@ -98,7 +103,7 @@ struct ToolProjectionTests {
 
     /// Every tool name must start with the product namespace prefix.
     @Test func testAllToolNamesHaveProductPrefix() {
-        for tool in ToolProjection.tools() {
+        for tool in ToolProjection.tools(environment: [:]) {
             #expect(
                 tool.name.hasPrefix(ToolProjection.toolNamePrefix),
                 "\(tool.name) is missing the moot_ prefix"
@@ -114,7 +119,7 @@ struct ToolProjectionTests {
     /// list must be empty. The property is still present in the schema so
     /// callers can supply it for verification (it must match the default).
     @Test func testFederationToolIsPresentAboveTheProjection() throws {
-        let federation = ToolProjection.tools().filter { $0.provenance == .federation }
+        let federation = ToolProjection.tools(environment: [:]).filter { $0.provenance == .federation }
         #expect(federation.count == 1, "exactly one federation tool is expected")
         let tool = try #require(federation.first)
         #expect(tool.name == ToolDispatcher.federatedSearchToolName)
@@ -136,7 +141,7 @@ struct ToolProjectionTests {
     /// NOT expose internal infrastructure fields (udcCode, embeddingModelID,
     /// latticeAnchor, addedBy).
     @Test func testFileMemoryRequiredFieldsAndNoInternals() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_file_memory" }) else {
+        guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_file_memory" }) else {
             Issue.record("moot_file_memory not found")
             return
         }
@@ -154,7 +159,7 @@ struct ToolProjectionTests {
 
     /// `moot_erase_memory` must require `confirmed` (safety gate).
     @Test func testEraseMemoryRequiresConfirmed() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_erase_memory" }) else {
+        guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_erase_memory" }) else {
             Issue.record("moot_erase_memory not found")
             return
         }
@@ -165,7 +170,7 @@ struct ToolProjectionTests {
 
     /// `moot_memory_search` must require `query`.
     @Test func testMemorySearchRequiresQuery() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_memory_search" }) else {
+        guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_memory_search" }) else {
             Issue.record("moot_memory_search not found")
             return
         }
@@ -177,7 +182,7 @@ struct ToolProjectionTests {
     /// `estateID` must be optional (in properties, not in required) on every
     /// interface tool.
     @Test func testEstateIDIsOptionalOnInterfaceTools() {
-        for tool in ToolProjection.tools() {
+        for tool in ToolProjection.tools(environment: [:]) {
             guard case .interface = tool.provenance else { continue }
             let schema = tool.inputSchema.objectValue
             #expect(

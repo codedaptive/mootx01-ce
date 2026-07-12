@@ -21,8 +21,9 @@ import PersistenceKitInMemory
 struct MemoryToolAdapterSensitivityTests {
     private func makeHarness() async throws -> (GeniusLocusKit, EstateHandle, ToolDispatcher) {
         // The memory tool is opt-in; enable it for these dispatch-behavior
-        // tests. This suite is .serialized, so the env mutation is ordered.
-        setenv("MOOTX01_MEMORY_TOOL", "1", 1)
+        // tests through the dispatcher's injected environment. Never setenv:
+        // the process environment is shared with concurrently running suites
+        // (the tool-count contract gates), so a process-global toggle races them.
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "memory-tool-sensitivity-tests")
         let storage = InMemoryStorage(
@@ -30,7 +31,8 @@ struct MemoryToolAdapterSensitivityTests {
         )
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-        return (kit, handle, ToolDispatcher(kit: kit, handle: handle))
+        return (kit, handle, ToolDispatcher(kit: kit, handle: handle,
+                                            environment: ["MOOTX01_MEMORY_TOOL": "1"]))
     }
 
     @discardableResult
@@ -114,12 +116,9 @@ struct MemoryToolAdapterSensitivityTests {
     /// Security (Codex b5716d8): the memory tool is opt-in. With the flag
     /// disabled, a hard-coded tools/call to `memory` must be REFUSED at
     /// dispatch — not merely hidden from tools/list — mirroring the vault
-    /// disabled-refusal. (Runs in a .serialized suite so the env toggle is
-    /// ordered relative to the enabled tests.)
+    /// disabled-refusal.
     @Test("disabled memory tool refuses dispatch")
     func disabledMemoryToolRefusesDispatch() async throws {
-        setenv("MOOTX01_MEMORY_TOOL", "0", 1)
-        defer { setenv("MOOTX01_MEMORY_TOOL", "1", 1) }
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "memory-tool-disabled-test")
         let storage = InMemoryStorage(
@@ -127,7 +126,8 @@ struct MemoryToolAdapterSensitivityTests {
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(
             storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle,
+                                        environment: ["MOOTX01_MEMORY_TOOL": "0"])
 
         let result = text(of: try await dispatcher.dispatch(
             name: "memory",

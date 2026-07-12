@@ -141,13 +141,22 @@ public extension Corpus {
 
     /// Tear down the corpus's ingest queue and drain worker.
     ///
-    /// Cancels the background worker and drops the queue so a torn-down corpus
-    /// leaves no orphan worker task. Idempotent. Called from the lifecycle teardown
-    /// (an orchestrator's `close`) before releasing the corpus.
-    func dropIngestQueue() {
+    /// Cancels the background workers and AWAITS their exit before releasing
+    /// the leases: a cancelled drain pass can still be mid-SQLite-transaction,
+    /// and a successor that mounts the same estate file after this returns
+    /// must not race that connection (its `PRAGMA journal_mode = WAL` open
+    /// fails with "database is locked" if it does). Only after both workers
+    /// have exited are the leases released and the queues dropped, so a
+    /// torn-down corpus leaves no orphan worker task. Idempotent. Called from
+    /// the lifecycle teardown (an orchestrator's `close`) before releasing
+    /// the corpus. `deinit` keeps its cancel-only inline teardown — it cannot
+    /// await.
+    func dropIngestQueue() async {
         ingestDrainWorker?.cancel()
-        ingestDrainWorker = nil
         importDrainWorker?.cancel()
+        _ = await ingestDrainWorker?.value
+        _ = await importDrainWorker?.value
+        ingestDrainWorker = nil
         importDrainWorker = nil
         // Release the leases so another process can take over without waiting out
         // the TTL. No-op if we do not hold them (or there is no lease).
