@@ -6923,3 +6923,298 @@ fn memory_tool_edit_preserves_elevated_sensitivity() {
         "str_replace re-capture must carry the source tier, not downgrade to Normal"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dataset tool tests (MX-TAB-7b, Scope 3 — Rust leg parity)
+//
+// Rust twin of DatasetToolsTests.swift. Covers the same surfaces using the
+// in-memory registry (no filesystem I/O except csv_path security checks
+// that explicitly need real paths).
+//
+// NOTE ON ARGUMENT CONSTRUCTION
+// The `args!` macro captures values as `$v:expr` (Rust expression syntax).
+// That works for scalars but NOT for JSON object/array literals like
+// [{"name": "label", "type": "text"}] — the Rust parser rejects the `:`
+// after a string literal key inside a braced expression. For tests that
+// need nested JSON, use `json_dataset_args(serde_json::json!({...}))`:
+// `serde_json::json!` is a proc-macro that accepts JSON syntax natively,
+// and `json_dataset_args` converts the resulting `serde_json::Value` to the
+// `BTreeMap<String, JsonValue>` that `dispatch_tool` expects.
+// ---------------------------------------------------------------------------
+
+/// Convert a `serde_json::Value` object into the `BTreeMap<String, JsonValue>`
+/// that `dispatch_tool` expects. Panics if `v` is not a JSON object.
+///
+/// Required because the `args!` macro uses `$v:expr` (Rust expression
+/// matcher) which cannot accept JSON object/array literals containing `:`.
+/// `serde_json::json!` is a proc-macro and handles JSON syntax natively.
+fn json_dataset_args(v: serde_json::Value) -> BTreeMap<String, JsonValue> {
+    v.as_object()
+        .expect("json_dataset_args: value must be a JSON object")
+        .iter()
+        .map(|(k, val)| (k.clone(), JsonValue::from(val.clone())))
+        .collect()
+}
+
+/// File a 3-row, 2-column dataset with inline rows.
+/// Returns `(dataset_id, handle_id)` parsed from the `dataset_filed:` response.
+fn file_fruit_dataset(registry: &EstateRegistry) -> (String, String) {
+    let result = dispatch_tool(
+        "moot_file_dataset",
+        &json_dataset_args(serde_json::json!({
+            "name":     "fruit-scores",
+            "columns":  [{"name": "label", "type": "text"}, {"name": "score", "type": "int"}],
+            "rows":     [
+                {"label": "apple",  "score": 95},
+                {"label": "banana", "score": 80},
+                {"label": "cherry", "score": 72}
+            ],
+            "location": "lab/produce"
+        })),
+        registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_file_dataset must not throw a transport error");
+    assert!(
+        is_success(&result),
+        "moot_file_dataset must succeed; got: {result:?}"
+    );
+    let text = content_text(&result);
+    let dataset_id = text
+        .lines()
+        .find(|l| l.trim().starts_with("id:"))
+        .and_then(|l| l.trim().strip_prefix("id:").map(str::trim))
+        .expect("dataset_filed: response must include an id: line")
+        .to_string();
+    let handle_id = text
+        .lines()
+        .find(|l| l.trim().starts_with("handle_id:"))
+        .and_then(|l| l.trim().strip_prefix("handle_id:").map(str::trim))
+        .expect("dataset_filed: response must include a handle_id: line")
+        .to_string();
+    (dataset_id, handle_id)
+}
+
+/// End-to-end: moot_file_dataset (inline rows) → moot_dataset_query → moot_dataset_stats.
+/// Verifies response headers, row counts, and per-column stats blocks.
+/// Rust parity peer of DatasetToolsTests.fileDatasetQueryStatsEndToEnd.
+#[test]
+fn dataset_file_query_stats_end_to_end() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let (dataset_id, _handle_id) = file_fruit_dataset(&registry);
+
+    // Query: full scan, no predicates.
+    let query = dispatch_tool(
+        "moot_dataset_query",
+        &args!["id" => dataset_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_dataset_query must not throw");
+    assert!(is_success(&query), "moot_dataset_query must succeed; got: {query:?}");
+    let qtext = content_text(&query);
+    assert!(qtext.contains("dataset_query:"), "expected dataset_query: header; got: {qtext}");
+    assert!(qtext.contains("rows_returned: 3"), "expected 3 rows; got: {qtext}");
+    assert!(qtext.contains("apple"),  "expected apple in rows; got: {qtext}");
+    assert!(qtext.contains("banana"), "expected banana in rows; got: {qtext}");
+    assert!(qtext.contains("cherry"), "expected cherry in rows; got: {qtext}");
+
+    // Stats: all columns.
+    let stats = dispatch_tool(
+        "moot_dataset_stats",
+        &args!["id" => dataset_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_dataset_stats must not throw");
+    assert!(is_success(&stats), "moot_dataset_stats must succeed; got: {stats:?}");
+    let stext = content_text(&stats);
+    assert!(stext.contains("dataset_stats:"), "expected dataset_stats: header; got: {stext}");
+    assert!(stext.contains("label:"), "expected label: stats block; got: {stext}");
+    assert!(stext.contains("score:"), "expected score: stats block; got: {stext}");
+    assert!(stext.contains("count: 3"), "expected count: 3; got: {stext}");
+}
+
+/// Withdraw a dataset handle via moot_withdraw_memory, then verify moot_dataset_query
+/// returns isError: true (refusal, not a transport throw).
+/// Rust parity peer of DatasetToolsTests.withdrawnHandleRefusedByQuery.
+#[test]
+fn dataset_withdrawn_handle_refused_by_query() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let (dataset_id, handle_id) = file_fruit_dataset(&registry);
+
+    // Dataset handles are just drawers; moot_withdraw_memory works on any drawer id.
+    let withdraw = dispatch_tool(
+        "moot_withdraw_memory",
+        &args!["id" => handle_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_withdraw_memory must not throw");
+    assert!(is_success(&withdraw), "withdraw must succeed; got: {withdraw:?}");
+
+    let query = dispatch_tool(
+        "moot_dataset_query",
+        &args!["id" => dataset_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_dataset_query must return an isError result, not a transport throw");
+    assert!(
+        is_tool_error(&query),
+        "moot_dataset_query on a withdrawn handle must set isError: true; got: {query:?}"
+    );
+}
+
+/// Withdraw a dataset handle, then verify moot_dataset_stats returns isError: true.
+/// Rust parity peer of DatasetToolsTests.withdrawnHandleRefusedByStats.
+#[test]
+fn dataset_withdrawn_handle_refused_by_stats() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let (dataset_id, handle_id) = file_fruit_dataset(&registry);
+
+    let withdraw = dispatch_tool(
+        "moot_withdraw_memory",
+        &args!["id" => handle_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_withdraw_memory must not throw");
+    assert!(is_success(&withdraw));
+
+    let stats = dispatch_tool(
+        "moot_dataset_stats",
+        &args!["id" => dataset_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_dataset_stats must return an isError result, not a transport throw");
+    assert!(
+        is_tool_error(&stats),
+        "moot_dataset_stats on a withdrawn handle must set isError: true; got: {stats:?}"
+    );
+}
+
+/// A column name containing SQL metacharacters must be rejected before any DDL.
+/// Column validation fires before createDataset — no partial state left behind.
+/// Returns isError: true in response body (tool-level error, not transport throw).
+/// Rust parity peer of DatasetToolsTests.sqlInjectionColumnNameRejectedBeforeDDL.
+#[test]
+fn dataset_sql_injection_column_name_rejected() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let result = dispatch_tool(
+        "moot_file_dataset",
+        &json_dataset_args(serde_json::json!({
+            "name":     "bad",
+            "columns":  [{"name": "name; DROP TABLE x --", "type": "text"}],
+            "rows":     [{"name; DROP TABLE x --": "val"}],
+            "location": "lab"
+        })),
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch_tool must not throw on column validation failure");
+    assert!(
+        is_tool_error(&result),
+        "SQL-injection column name must set isError: true; got: {result:?}"
+    );
+}
+
+/// A column name whose first character is a digit must be rejected.
+/// [A-Za-z_][A-Za-z0-9_]* is enforced before any DDL.
+/// Rust parity peer of DatasetToolsTests.columnNameWithLeadingDigitRejected.
+#[test]
+fn dataset_column_name_leading_digit_rejected() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let result = dispatch_tool(
+        "moot_file_dataset",
+        &json_dataset_args(serde_json::json!({
+            "name":     "bad",
+            "columns":  [{"name": "1bad", "type": "text"}],
+            "rows":     [{"1bad": "x"}],
+            "location": "lab"
+        })),
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch_tool must not throw on column validation failure");
+    assert!(
+        is_tool_error(&result),
+        "leading-digit column name must set isError: true; got: {result:?}"
+    );
+}
+
+/// A column name containing a hyphen must be rejected.
+/// Rust parity peer of DatasetToolsTests.columnNameWithHyphenRejected.
+#[test]
+fn dataset_column_name_hyphen_rejected() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let result = dispatch_tool(
+        "moot_file_dataset",
+        &json_dataset_args(serde_json::json!({
+            "name":     "bad",
+            "columns":  [{"name": "bad-col", "type": "text"}],
+            "rows":     [{"bad-col": "x"}],
+            "location": "lab"
+        })),
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch_tool must not throw on column validation failure");
+    assert!(
+        is_tool_error(&result),
+        "hyphen in column name must set isError: true; got: {result:?}"
+    );
+}
+
+/// csv_path pointing at a directory must be rejected with isError: true.
+/// resolve_csv_path checks metadata().is_file() after canonicalization —
+/// a directory is rejected before any parse attempt.
+/// Rust parity peer of DatasetToolsTests.csvPathToDirectoryIsRejected.
+#[test]
+fn dataset_csv_path_directory_rejected() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let dir_path = std::env::temp_dir().to_str().unwrap().to_string();
+    let result = dispatch_tool(
+        "moot_file_dataset",
+        &args! {
+            "name"     => "bad",
+            "csv_path" => dir_path.as_str(),
+            "location" => "lab"
+        },
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch_tool must not throw on csv_path validation failure");
+    assert!(
+        is_tool_error(&result),
+        "directory csv_path must set isError: true; got: {result:?}"
+    );
+}
+
+/// csv_path pointing at a non-existent file must be rejected with isError: true.
+/// Rust parity peer of DatasetToolsTests.csvPathMissingFileIsRejected.
+#[test]
+fn dataset_csv_path_missing_file_rejected() {
+    let registry = EstateRegistry::new_inmemory_bare();
+    let missing = std::env::temp_dir()
+        .join(format!("nonexistent-{}.csv", uuid::Uuid::new_v4()))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let result = dispatch_tool(
+        "moot_file_dataset",
+        &args! {
+            "name"     => "bad",
+            "csv_path" => missing.as_str(),
+            "location" => "lab"
+        },
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("dispatch_tool must not throw on csv_path validation failure");
+    assert!(
+        is_tool_error(&result),
+        "missing-file csv_path must set isError: true; got: {result:?}"
+    );
+}

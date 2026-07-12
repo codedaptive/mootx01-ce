@@ -43,6 +43,10 @@ use substrate_ml::association_rule_mining::MiningThresholds;
 use substrate_ml::formal_concept_analysis::BoundedConceptMiner;
 use substrate_ml::temporal_causality_fold::TemporalFieldCoord;
 
+use crate::dataset_tools::{
+    typed_value_to_dataset_column_value, typed_value_to_label_string,
+    LensDatasetResolutionError, DATASET_LENS_ROW_CAP,
+};
 use crate::dispatch::{
     clamp_limit, error_result, opt_float, opt_integer, optional_integer, optional_string,
     recall_frame, require_string, text_result, wall_now, LIMIT_HARD_CEILING,
@@ -371,8 +375,57 @@ pub fn dispatch(
         }
 
         "moot_lens_cohesion" => {
-            // Content-cohesion outlier detector: flags recalled memories whose
-            // content cohesion with their peers is anomalously low.
+            // Dataset mode (MX-TAB-7b): when dataset_id is present, score column-value
+            // anomalies in the dataset instead of recalling estate drawers.
+            // The estate-mode path (run_contradiction) is preserved below and runs
+            // when dataset_id is absent.
+            if let Some(ds_id_str) = optional_string(args, "dataset_id")? {
+                let resolution = match crate::dataset_tools::resolve_lens_dataset(
+                    ds_id_str, "moot_lens_cohesion", args, registry,
+                ) {
+                    Ok(r) => r,
+                    Err(LensDatasetResolutionError::Refusal(v)) => return Ok(v),
+                    Err(LensDatasetResolutionError::Fault(e)) => return Err(e),
+                };
+                let top_n = opt_integer(args, "top_n", 10)?.clamp(1, 1000) as usize;
+                let rows = resolution.dataset_store.query_rows(
+                    resolution.dataset_id,
+                    None,
+                    &[],
+                    Some(DATASET_LENS_ROW_CAP),
+                    None,
+                    None,
+                ).map_err(|e| JSONRPCError::new(
+                    JSONRPCErrorCode::INTERNAL_ERROR,
+                    format!("moot_lens_cohesion: query failed: {}", e),
+                ))?;
+                // Convert each StorageRow to Vec<DatasetColumnValue> in key-sorted column order.
+                // Key sort is deterministic across Swift/Rust: BTreeMap is already sorted.
+                let matrix: Vec<Vec<cognition_kit::dataset_cohesion::DatasetColumnValue>> = rows
+                    .iter()
+                    .map(|row| {
+                        row.values
+                            .values()
+                            .map(typed_value_to_dataset_column_value)
+                            .collect()
+                    })
+                    .collect();
+                let ds_out = cognition_kit::dataset_cohesion::run_dataset_cohesion(
+                    &matrix, top_n, DATASET_LENS_ROW_CAP,
+                );
+                let mut lines = vec![format!(
+                    "dataset_cohesion: scored {} row(s) of dataset {} — top {} anomaly row(s):",
+                    ds_out.rows_scored,
+                    resolution.dataset_id,
+                    ds_out.top_anomalies.len(),
+                )];
+                for a in &ds_out.top_anomalies {
+                    lines.push(format!("  row[{}] score={}", a.row_index, a.score));
+                }
+                return Ok(text_result(&lines.join("\n")));
+            }
+
+            // Estate mode: content-cohesion outlier detector.
             // Backed by CognitionKit `run_contradiction` (the statistical
             // cohesion algorithm); renamed at the MCP surface to avoid
             // confusion with the genuine semantic contradiction detector below.
@@ -719,7 +772,73 @@ pub fn dispatch(
         }
 
         "moot_lens_associations" => {
-            // Analytics lens: recall drawers, project categorical facets into
+            // Dataset mode (MX-TAB-7b): when dataset_id is present, mine association
+            // rules over dataset column values instead of drawer categorical facets.
+            if let Some(ds_id_str) = optional_string(args, "dataset_id")? {
+                let resolution = match crate::dataset_tools::resolve_lens_dataset(
+                    ds_id_str, "moot_lens_associations", args, registry,
+                ) {
+                    Ok(r) => r,
+                    Err(LensDatasetResolutionError::Refusal(v)) => return Ok(v),
+                    Err(LensDatasetResolutionError::Fault(e)) => return Err(e),
+                };
+                // Dataset mode limit: default 1000, cap at DATASET_LENS_ROW_CAP.
+                let ds_limit = optional_integer(args, "limit")?
+                    .map(|v| (v.max(1) as usize).min(DATASET_LENS_ROW_CAP))
+                    .unwrap_or(1000);
+                let rows = resolution.dataset_store.query_rows(
+                    resolution.dataset_id,
+                    None,
+                    &[],
+                    Some(ds_limit),
+                    None,
+                    None,
+                ).map_err(|e| JSONRPCError::new(
+                    JSONRPCErrorCode::INTERNAL_ERROR,
+                    format!("moot_lens_associations: query failed: {}", e),
+                ))?;
+                // Build HashMap<String, String> rows for association mining.
+                // Non-null values only: null cells excluded from the label matrix.
+                // Mirrors Swift LensTools.typedValueToLabelString which returns nil for null.
+                let assoc_rows: Vec<std::collections::HashMap<String, String>> = rows
+                    .iter()
+                    .map(|row| {
+                        row.values
+                            .iter()
+                            .filter_map(|(col, tv)| {
+                                typed_value_to_label_string(tv)
+                                    .map(|label| (col.clone(), label))
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let min_support = opt_float(args, "minSupport", 0.0)?;
+                let min_confidence = opt_float(args, "minConfidence", 0.0)?;
+                let thresholds = MiningThresholds { min_support, min_confidence };
+                let ds_out = cognition_kit::dataset_associations::run_dataset_associations(
+                    &assoc_rows, thresholds,
+                );
+                let mut lines = vec![format!(
+                    "dataset_associations: {} rule(s) from {} row(s) (dataset {})",
+                    ds_out.rules.len(),
+                    ds_out.row_count,
+                    resolution.dataset_id,
+                )];
+                if ds_out.label_overflow {
+                    lines.push(
+                        "note: label vocabulary was capped; some labels were dropped".to_owned(),
+                    );
+                }
+                for rule in &ds_out.rules {
+                    lines.push(format!(
+                        "  {} → {}: sup={:.3} conf={:.3} lift={:.3}",
+                        rule.antecedent, rule.consequent, rule.support, rule.confidence, rule.lift
+                    ));
+                }
+                return Ok(text_result(&lines.join("\n")));
+            }
+
+            // Estate mode: recall drawers, project categorical facets into
             // a co-occurrence matrix, mine pairwise association rules.
             // Route limit through clamp_limit so negative and over-ceiling values
             // are rejected/clamped. Parity: Swift moot_lens_associations uses
@@ -996,9 +1115,82 @@ pub fn dispatch(
             let field_a = require_string(args, "fieldA")?;
             let field_b = optional_string(args, "fieldB")?;
 
-            // Validate field names before calling the recipe. The complexity recipe
-            // returns entropy=-0 for unknown fields, producing a misleading success
-            // result. Reject early with the valid list. Mirrors Swift LensTools.
+            // Dataset mode (MX-TAB-7b): when dataset_id is present, compute entropy
+            // over dataset column values. fieldA/fieldB are column names, not estate fields.
+            // Field validation (estate field whitelist) is skipped in dataset mode.
+            if let Some(ds_id_str) = optional_string(args, "dataset_id")? {
+                let resolution = match crate::dataset_tools::resolve_lens_dataset(
+                    ds_id_str, "moot_lens_complexity", args, registry,
+                ) {
+                    Ok(r) => r,
+                    Err(LensDatasetResolutionError::Refusal(v)) => return Ok(v),
+                    Err(LensDatasetResolutionError::Fault(e)) => return Err(e),
+                };
+                let rows = resolution.dataset_store.query_rows(
+                    resolution.dataset_id,
+                    None,
+                    &[],
+                    Some(DATASET_LENS_ROW_CAP),
+                    None,
+                    None,
+                ).map_err(|e| JSONRPCError::new(
+                    JSONRPCErrorCode::INTERNAL_ERROR,
+                    format!("moot_lens_complexity: query failed: {}", e),
+                ))?;
+                // Extract column A label strings; each value is Option<String>.
+                // Null cells → None (excluded from entropy computation).
+                let col_a_owned: Vec<Option<String>> = rows
+                    .iter()
+                    .map(|row| {
+                        row.values
+                            .get(field_a)
+                            .and_then(typed_value_to_label_string)
+                    })
+                    .collect();
+                let col_a_refs: Vec<Option<&str>> =
+                    col_a_owned.iter().map(|s| s.as_deref()).collect();
+
+                let col_b_owned: Option<Vec<Option<String>>> =
+                    field_b.map(|fb| {
+                        rows.iter()
+                            .map(|row| {
+                                row.values.get(fb).and_then(typed_value_to_label_string)
+                            })
+                            .collect()
+                    });
+                let col_b_refs: Option<Vec<Option<&str>>> = col_b_owned
+                    .as_ref()
+                    .map(|v| v.iter().map(|s| s.as_deref()).collect());
+
+                let ds_out = cognition_kit::dataset_complexity::run_dataset_column_entropy(
+                    &col_a_refs,
+                    col_b_refs.as_deref(),
+                );
+                // Normalize -0.0 → 0.0 for wire parity.
+                let entropy_a = if ds_out.result.entropy_a == 0.0 { 0.0f32 } else { ds_out.result.entropy_a };
+                let mut lines = vec![format!(
+                    "dataset_complexity: dataset={} rows={} nonNull={} null={}",
+                    resolution.dataset_id,
+                    rows.len(),
+                    ds_out.non_null_count,
+                    ds_out.null_count,
+                )];
+                lines.push(format!("entropyA={entropy_a}"));
+                if let Some(eb) = ds_out.result.entropy_b {
+                    let eb = if eb == 0.0 { 0.0f32 } else { eb };
+                    lines.push(format!("entropyB={eb}"));
+                }
+                if let Some(mi) = ds_out.result.mutual_information {
+                    let mi = if mi == 0.0 { 0.0f32 } else { mi };
+                    lines.push(format!("mutualInformation={mi}"));
+                }
+                return Ok(text_result(&lines.join("\n")));
+            }
+
+            // Estate mode: validate field names before calling the recipe. The
+            // complexity recipe returns entropy=-0 for unknown fields, producing
+            // a misleading success result. Reject early with the valid list.
+            // Mirrors Swift LensTools field validation.
             // ADR-017 §3 bridge consumer: "room" and "wing" are display-bridge
             // metadata field names enumerated for the complexity lens.
             const VALID_COMPLEXITY_FIELDS: &[&str] =
