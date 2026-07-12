@@ -2,10 +2,10 @@
 //
 // FloatSimHash random-hyperplane projection per cookbook § 8.6.
 // swift-testing peer suite for Sources/SubstrateML/FloatSimHash.swift,
-// mirroring rust/src/float_simhash.rs (5 #[test]). Converted from
-// the original XCTest suite; the two similarity tests now use the
-// same deterministic input vectors as the Rust mirror (no unseeded
-// RNG) so results are reproducible and comparable across legs.
+// mirroring rust/src/float_simhash.rs (5 #[test]). The two
+// similarity tests use the same deterministic input vectors as the
+// Rust mirror (no unseeded RNG) so results are reproducible and
+// comparable across legs.
 
 import Testing
 import SubstrateTypes
