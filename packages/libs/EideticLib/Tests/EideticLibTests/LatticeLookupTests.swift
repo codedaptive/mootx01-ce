@@ -78,17 +78,19 @@ struct FDCLookupTests {
         #expect(decoded.rawCode == "999.99")
     }
 
-    // 4. An UNRESOLVED term (no signature overlap) returns an empty
-    //    code, nil Q-ID, zero confidence — never a guess.
-    @Test("unresolved term returns empty anchor")
-    func unresolvedTermReturnsEmptyAnchor() {
+    // 4. An UNRESOLVED term (no signature overlap) resolves to the "000"
+    //    unclassified sentinel under hierarchy-first resolution — the root
+    //    Generalities head, never a specific subject guess. Pinned by the
+    //    cross-leg lookup_vectors.json conformance gate (nonsense_token /
+    //    punctuation_only_drops_to_empty vectors; Rust asserts the same).
+    @Test("unresolved term resolves to the 000 unclassified sentinel")
+    func unresolvedTermReturnsUnclassifiedSentinel() {
         let anchor = EideticLib.lookup("zxcvqwertyasdfgh")
         #expect(
-            anchor.code == "",
-            "an unresolved term must yield an empty code, not a fallback"
+            anchor.code == "000",
+            "an unresolved term must yield the 000 sentinel, not a subject code"
         )
         #expect(anchor.wikidataQID == nil)
-        #expect(anchor.confidence == 0)
     }
 
     // 5. Anchor shape: exposes code and no udcCode.
