@@ -2839,6 +2839,17 @@ impl EstateCoordinator {
             if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
                 continue;
             }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            if a.adjective_sensitivity().raw_value()
+                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+                || b.adjective_sensitivity().raw_value()
+                    > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            {
+                continue;
+            }
             // Incremental watermark: at least one side must be new enough.
             if let Some(watermark) = filed_after {
                 if a.filed_at <= watermark && b.filed_at <= watermark {
@@ -9085,6 +9096,31 @@ mod tests {
             .filter(|t| t.kind == locus_kit::tunnel_operational::TunnelKind::Contradicts)
             .count();
         assert_eq!(contradicts, 0);
+    }
+
+    #[test]
+    fn hunt_protected_candidates_are_excluded_by_default_ceiling() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        let normal = coord
+            .capture(&h, cap_frame("Bob lives in Paris"), NOW)
+            .expect("capture normal");
+        let mut secret_frame = cap_frame("Bob does not live in Paris SECRET-DO-NOT-ECHO");
+        secret_frame.sensitivity = locus_kit::adjectives::AdjectiveSensitivity::Secret;
+        let secret = coord
+            .capture(&h, secret_frame, NOW)
+            .expect("capture secret");
+        for drawer in [&normal, &secret] {
+            vs.add_vector(&drawer.id, &near, "minilm-v6", "1.0", NOW)
+                .expect("add vector");
+        }
+
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt");
+        assert!(report.proposed.is_empty());
+        assert!(report.borderline.is_empty());
+        assert_eq!(report.pairs_screened, 0);
     }
 
     #[test]
