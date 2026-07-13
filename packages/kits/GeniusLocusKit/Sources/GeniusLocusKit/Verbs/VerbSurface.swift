@@ -1890,6 +1890,23 @@ extension GeniusLocusKit {
         return try Curve25519.Signing.PrivateKey(rawRepresentation: raw)
     }
 
+    /// Return the estate's Ed25519 identity public key in raw-byte form.
+    ///
+    /// Used as the trust anchor for grant signature verification at the
+    /// `federatedRecall` boundary (D9 hardening). Trust derives from the
+    /// registry — the key material held in-memory by the Estate instance
+    /// since `Estate.open` — not from any field in the grant blob itself.
+    /// This matches the registered-key pattern in ConvergenceKit
+    /// `FederationSyncEngine.pull()` (F-3 hardening).
+    ///
+    /// Throws `GeniusLocusKitError.invalidManifest` when the identity key
+    /// is absent from the key store (estate opened after a Keychain wipe
+    /// or with a key store that did not contain the private key).
+    func estateSigningPublicKey(for estate: LocusKit.Estate) async throws -> Data {
+        let identity = try await signingIdentity(for: estate)
+        return identity.publicKey.rawRepresentation
+    }
+
     /// Gate the experimental custody modes at the verb boundary. Modes 1
     /// and 2 pass through. Mode 3 (decay-derived) requires confirmed IP
     /// clearance (`experimentalIPClearanceConfirmed: true`) and raises
