@@ -218,6 +218,19 @@ pub enum FederatedReadRefusalReason {
     ///   - `TimeAging` (mode 4): effective content level decayed to 0 (floor 0).
     CustodyRefused,
 
+    /// The grant's Ed25519 signature does not verify against the GRANTER's
+    /// registered identity public key (D9 hardening,
+    /// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+    ///
+    /// Trust derives from the estate registry (the manifest-persisted public key),
+    /// not from any field in the grant blob — same registered-key trust anchor
+    /// as the F-3 `pull()` hardening in ConvergenceKit `FederationSyncEngine`.
+    ///
+    /// Migration posture: `federated_recall` is local in-process (I-13 invariant).
+    /// An empty signature is allowed with a logged warning; a non-empty signature
+    /// that fails verification is always rejected. Mirrors Swift
+    /// `FederatedReadRefusalReason.invalidGrantSignature`.
+    InvalidGrantSignature,
 }
 
 /// The outcome of a successful grant-gated cross-estate federated read.
@@ -3011,6 +3024,26 @@ impl EstateCoordinator {
 
         let estate = self.estate_for_verb(handle)?;
 
+        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4).
+        //
+        // The storage expunge (step 1) zeroes the content blob, so any
+        // DatasetHandleContent JSON must be decoded BEFORE tombstoning. A
+        // pre-read failure or non-dataset kind silently yields None; step 1
+        // will surface DrawerNotFound if the row genuinely doesn't exist.
+        let dataset_id_to_erase: Option<uuid::Uuid> = estate
+            .drawer_by_id(row_id)
+            .ok()
+            .flatten()
+            .and_then(|d| {
+                // ContentKind is imported at the top of this file.
+                if d.content_kind() != ContentKind::Dataset {
+                    return None;
+                }
+                locus_kit::dataset_handle::DatasetHandleContent::decode(&d.content)
+                    .ok()
+                    .map(|h| h.dataset_id)
+            });
+
         // Step 1 — LocusKit storage expunge with deferred audit seal.
         // The gate-produced AuditEvent is returned unsealed; we hold it until
         // step 2 confirms the cross-kit delete succeeded (§B-2a ordering).
@@ -3117,6 +3150,56 @@ impl EstateCoordinator {
                     }
                 };
                 return Err(step2_err);
+            }
+        }
+
+        // Step 2.5 — Dataset table cascade (MX-TAB-4).
+        //
+        // When the erased drawer is a dataset handle (ContentKind::Dataset),
+        // drop the backing dataset table and append a supplementary
+        // "datasetTableDrop" audit event. Both the handle erase (sealed in
+        // step 3 as "tombstone") and the table drop land in the audit log for
+        // the same drawer row so the full erase is auditable.
+        //
+        // Semantics:
+        //   - `drop_dataset` uses DROP TABLE IF EXISTS — a missing table is a
+        //     no-op, not an error.
+        //   - A `DatasetStore` may not be available on all backends; if
+        //     `dataset_store()` errors the cascade is skipped silently.
+        //   - Cascade failures (non-featureGated errors) propagate so callers
+        //     learn of partial erase. Step 3 is NOT reached on cascade failure.
+        if let Some(dataset_id) = dataset_id_to_erase {
+            if let Some(storage) = self.storages.get(handle).cloned() {
+                if let Ok(ds) = storage.dataset_store() {
+                    ds.drop_dataset(dataset_id).map_err(|e| {
+                        VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
+                            row_id: row_id.to_string(),
+                            reason: format!(
+                                "dataset table drop failed for dataset_id {}: {:?}",
+                                dataset_id, e
+                            ),
+                        })
+                    })?;
+                    // Append a supplementary audit event recording the table drop.
+                    // `append_supplementary_audit` computes the SHA-256 content-ID
+                    // internally (substrate_lib is a LocusKit dep, not a GLK dep —
+                    // so AuditEvent construction stays in the LocusKit layer).
+                    //
+                    // Audit append failure after a successful table drop:
+                    // log but do NOT abort — proceed to step 3 so the
+                    // tombstone audit still seals. Mirrors Swift: `do { ... }
+                    // catch { Self.verbLog.error(...) }` pattern.
+                    if let Err(e) = estate.append_supplementary_audit(
+                        &unsealed_event,
+                        "datasetTableDrop",
+                        &format!("dataset table dropped on handle erase: {}", dataset_id),
+                    ) {
+                        eprintln!(
+                            "[glk-expunge] datasetTableDrop audit append failed dataset_id={} error={:?}",
+                            dataset_id, e
+                        );
+                    }
+                }
             }
         }
 
@@ -5089,6 +5172,60 @@ impl EstateCoordinator {
         // mode except time-aging this is the grant's persisted content_level;
         // mode 4 attenuates it by its decay policy in the custody gate below.
         let mut effective_content_level = authorizing_grant.content_level;
+
+        // 4.5. Federation-auth: grant signature verification (D9 hardening,
+        // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+        //
+        // Verify the grant's Ed25519 signature against the GRANTER's registered
+        // identity public key. Trust derives from the registry — the manifest-persisted
+        // public key for the source estate — NOT from any field in the grant blob.
+        // Same registered-key trust anchor as the F-3 pull() hardening in
+        // ConvergenceKit FederationSyncEngine.
+        //
+        // Migration posture (D9): this path is strictly local in-process (I-13
+        // invariant — no network crossing, both estates open in the same coordinator).
+        // An empty signature is allowed with a logged warning because local grants
+        // that predate the signing scheme carry no cross-estate exposure. A non-empty
+        // signature that fails verification against the granter's registered key is
+        // always rejected. Mirrors Swift CrossEstateFederation step 4.5.
+        if !authorizing_grant.signature.is_empty() {
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD;
+            // Retrieve the source estate's registered public key from its manifest.
+            // estate_for() is an immutable borrow on registry — safe here because
+            // the mutable borrow on grant_stores (step 3 block) has been released.
+            let source_estate = self.estate_for(source)
+                .map_err(|_| GeniusLocusKitError::EstateNotOpen { estate_uuid: source.estate_uuid })?;
+            let manifest = source_estate.manifest()
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("manifest read failed during grant signature check: {e:?}"),
+                })?;
+            let pub_key_b64 = manifest.ed25519_public_key.ok_or_else(|| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: "source estate has no Ed25519 public key in manifest \
+                             — cannot verify grant signature"
+                        .to_string(),
+                }
+            })?;
+            let pub_key_bytes = b64.decode(&pub_key_b64)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("Ed25519 public key base64 decode failed: {e:?}"),
+                })?;
+            let signing_payload = authorizing_grant.signing_payload();
+            if !convergence_kit::verify_signature(
+                &authorizing_grant.signature,
+                &signing_payload,
+                &pub_key_bytes,
+            ) {
+                return Err(GeniusLocusKitError::CrossEstateReadRefused {
+                    source: source_uuid,
+                    requester: requester_uuid,
+                    reason: FederatedReadRefusalReason::InvalidGrantSignature,
+                });
+            }
+        }
+        // Empty signature: legacy pre-signing grant. Allowed on this local
+        // in-process path (I-13 invariant). No cross-estate exposure.
 
         // 5. CustodyMode gate. Each mode's recall-path semantics.
         {

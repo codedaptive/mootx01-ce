@@ -82,6 +82,11 @@ pub struct InMemoryStorage {
     /// blob changes do not filter by table name — every subscriber gets every
     /// blob event (same pattern as Swift's `ObserverRegistry.notifyBlob`).
     blob_hub: Arc<BlobObserverHub>,
+    /// Single shared dataset store for this storage's lifetime. A per-call
+    /// fresh instance would hand each caller an independent empty store —
+    /// two `dataset_store()` calls must observe the same tables (parity
+    /// with Swift's stored `let datasetStore`).
+    dataset_store: Arc<crate::dataset_store::InMemoryDatasetStore>,
     /// Monotone counter of transaction rollbacks. Stored separately from
     /// `state` because `state` is snapshot/restored on rollback — putting the
     /// counter there would reset it on every rollback, losing the history.
@@ -99,6 +104,7 @@ impl InMemoryStorage {
             state: Arc::new(Mutex::new(State::default())),
             hub: Arc::new(ObserverHub::new()),
             blob_hub: Arc::new(BlobObserverHub::new()),
+            dataset_store: Arc::new(crate::dataset_store::InMemoryDatasetStore::new()),
             rollback_count: Arc::new(Mutex::new(0)),
         }
     }
@@ -153,6 +159,17 @@ impl Storage for InMemoryStorage {
             hub: self.hub.clone(),
             blob_hub: self.blob_hub.clone(),
         })
+    }
+
+    /// Dataset store override: returns the storage's single shared
+    /// `InMemoryDatasetStore` instance — every call sees the same dataset
+    /// state, mirroring the Swift leg's stored `let datasetStore` property.
+    /// Note: InMemory dataset state is separate from `InMemoryStorage.state`
+    /// (it does not participate in `transaction()` rollbacks). This is
+    /// acceptable for a test double — individual operation correctness is
+    /// what MX-TAB-1 tests verify.
+    fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
+        Ok(self.dataset_store.clone())
     }
 
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {

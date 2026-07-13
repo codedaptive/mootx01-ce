@@ -30,7 +30,7 @@ struct DrawerOperationalTests {
 
     // MARK: - ContentKind raw values (spec § 5.6)
 
-    @Test("ContentKind raw values 0…6 per cookbook §2.4 (fingerprintOnly NEW in v0.6)")
+    @Test("ContentKind raw values 0…7 per cookbook §2.4 (fingerprintOnly NEW in v0.6; dataset NEW per MX-TAB-3)")
     func contentKindRawValues() {
         #expect(ContentKind.prose.rawValue == 0)
         #expect(ContentKind.code.rawValue == 1)
@@ -39,6 +39,7 @@ struct DrawerOperationalTests {
         #expect(ContentKind.structuredJSON.rawValue == 4)
         #expect(ContentKind.imageCaption.rawValue == 5)
         #expect(ContentKind.fingerprintOnly.rawValue == 6)
+        #expect(ContentKind.dataset.rawValue == 7)
     }
 
     // MARK: - DrawerFeatureFlags bit positions (spec § 5.6)

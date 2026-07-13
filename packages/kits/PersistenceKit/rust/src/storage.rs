@@ -3,6 +3,7 @@
 use crate::audit_log::AuditLog;
 use crate::blob_store::BlobStore;
 use crate::cache_config::EstateCacheConfig;
+use crate::dataset_store::DatasetStore;
 use crate::encryption::EstateEncryptionConfig;
 use crate::error::{StorageError, StorageResult};
 use crate::observer::StorageObserver;
@@ -317,6 +318,21 @@ pub trait Storage: Send + Sync {
     fn blob_store(&self) -> Arc<dyn BlobStore>;
     fn audit_log(&self) -> Arc<dyn AuditLog>;
     fn observer(&self) -> Arc<dyn StorageObserver>;
+
+    /// Dataset store for user-defined tabular data (MX-TAB-1).
+    ///
+    /// Returns `Err(StorageError::FeatureGated { feature: "datasetStore" })` by
+    /// default so existing `Storage` conformers — including Postgres (deferred,
+    /// MX-TAB-2) and any third-party conformers — keep compiling without
+    /// modification. Only `SqliteStorage` and `InMemoryStorage` override this.
+    ///
+    /// Mirrors Swift's `var datasetStore: any DatasetStore { get throws }` with
+    /// the same default-throws protocol-extension pattern.
+    fn dataset_store(&self) -> StorageResult<Arc<dyn DatasetStore>> {
+        Err(StorageError::FeatureGated {
+            feature: "datasetStore".to_string(),
+        })
+    }
 
     /// Open the backend (run migrations up to the declared
     /// schema version).

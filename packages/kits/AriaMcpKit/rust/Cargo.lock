@@ -636,6 +636,7 @@ dependencies = [
 name = "genius-locus-kit"
 version = "0.35.0"
 dependencies = [
+ "base64",
  "convergence-kit",
  "corpus-kit",
  "eidetic-lib",
@@ -927,6 +928,8 @@ dependencies = [
  "lattice-lib",
  "persistence-kit",
  "rand_core 0.6.4",
+ "serde",
+ "serde_json",
  "substrate-kernel",
  "substrate-lib",
  "substrate-ml",

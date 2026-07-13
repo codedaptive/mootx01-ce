@@ -139,6 +139,10 @@ let package = Package(
             dependencies: [
                 "GeniusLocusKit",
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
+                // SubstrateKernel: DatasetSignatureTests calls SHA256.hash
+                // directly to verify cross-leg preimage hashes without starting
+                // a full estate. (MX-TAB-5, DatasetSignatureTests.swift)
+                .product(name: "SubstrateKernel", package: "SubstrateKernel"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "VectorKit", package: "VectorKit"),

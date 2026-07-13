@@ -69,6 +69,13 @@ Icon
 # Security-audit Finder-flag manifest (local triage sidecar)
 packages/.audit-flagged
 
+# Python build artifacts (moot-memory adapter wheel/sdist + metadata) —
+# rebuilt from source by `python3 -m build`; never committed.
+apps/moot-memory-adapter/dist/
+apps/moot-memory-adapter/*.egg-info/
+apps/moot-memory-adapter/build/
+__pycache__/
+
 # Local-only directories (any depth) — not pushed upstream
 _sandbox*/
 .claude*/

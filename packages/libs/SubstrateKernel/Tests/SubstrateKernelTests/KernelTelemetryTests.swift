@@ -47,16 +47,24 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
 }
 
 private enum IntellectusTestIsolation {
-    private static let lock = NSLock()
-
-    static func run(_ body: () throws -> Void) rethrows {
-        lock.lock()
-        defer {
-            Intellectus.setEnabled(false)
-            Intellectus.install(sink: NoOpSink.shared)
-            lock.unlock()
+    /// Run `body` holding the process-wide GlobalTestLock, restoring the
+    /// Intellectus defaults (disabled + NoOpSink) on the way out.
+    ///
+    /// The lock is the package-wide GlobalTestLock, NOT a file-private
+    /// NSLock: a file-private lock only serialises the telemetry tests
+    /// against each other, while the race is with OTHER files' tests
+    /// calling `kernelForCurrentPlatform()` (the emit site) during this
+    /// test's enabled window — those tests hold the same GlobalTestLock
+    /// (see PortableKernelTests), so the enabled window is exclusive
+    /// process-wide.
+    static func run(_ body: @Sendable () throws -> Void) async rethrows {
+        try await GlobalTestLock.shared.withLock {
+            defer {
+                Intellectus.setEnabled(false)
+                Intellectus.install(sink: NoOpSink.shared)
+            }
+            try body()
         }
-        try body()
     }
 }
 
@@ -69,8 +77,8 @@ struct KernelTelemetryDisabledTests {
     /// emit a sample. This is the default state — most callers never
     /// install a monitoring sink.
     @Test("no metric emitted when monitoring is disabled")
-    func noMetricEmittedWhenDisabled() {
-        IntellectusTestIsolation.run {
+    func noMetricEmittedWhenDisabled() async {
+        await IntellectusTestIsolation.run {
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
             // Explicitly disabled — the default state.
@@ -84,8 +92,8 @@ struct KernelTelemetryDisabledTests {
     }
 
     @Test("factory still returns the correct kernel when disabled")
-    func factoryReturnsCorrectKernelWhenDisabled() {
-        IntellectusTestIsolation.run {
+    func factoryReturnsCorrectKernelWhenDisabled() async {
+        await IntellectusTestIsolation.run {
             Intellectus.setEnabled(false)
             let kernel = PortableKernel.kernelForCurrentPlatform()
 
@@ -109,8 +117,8 @@ struct KernelTelemetryEnabledTests {
     /// When monitoring is ON, exactly one `substrate.kernel.backend_selected`
     /// metric must be received by the sink per factory call.
     @Test("backend_selected metric is emitted when monitoring is enabled")
-    func backendSelectedMetricEmittedWhenEnabled() {
-        IntellectusTestIsolation.run {
+    func backendSelectedMetricEmittedWhenEnabled() async {
+        await IntellectusTestIsolation.run {
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
             Intellectus.setEnabled(true)
@@ -134,8 +142,8 @@ struct KernelTelemetryEnabledTests {
     /// The `backend` tag must match the kind the factory actually
     /// returns. Verified against the KernelKind.rawValue contract.
     @Test("backend tag matches the selected kernel kind")
-    func backendTagMatchesSelectedKernelKind() {
-        IntellectusTestIsolation.run {
+    func backendTagMatchesSelectedKernelKind() async {
+        await IntellectusTestIsolation.run {
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
             Intellectus.setEnabled(true)
@@ -155,8 +163,8 @@ struct KernelTelemetryEnabledTests {
 
     /// Multiple factory calls each emit one metric.
     @Test("each factory call emits exactly one metric")
-    func eachFactoryCallEmitsOneMetric() {
-        IntellectusTestIsolation.run {
+    func eachFactoryCallEmitsOneMetric() async {
+        await IntellectusTestIsolation.run {
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
             Intellectus.setEnabled(true)
@@ -179,8 +187,8 @@ struct KernelTelemetryArchTagTests {
     /// The `arch` tag in the emitted metric must equal
     /// PortableKernel.currentArchTag.
     @Test("arch tag matches PortableKernel.currentArchTag")
-    func archTagMatchesCurrentArchTag() {
-        IntellectusTestIsolation.run {
+    func archTagMatchesCurrentArchTag() async {
+        await IntellectusTestIsolation.run {
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
             Intellectus.setEnabled(true)
@@ -227,8 +235,8 @@ struct KernelTelemetryConformanceTests {
     /// scalar reference — proof that adding telemetry does not affect
     /// the kernel's mathematical behavior.
     @Test("factory kernel produces scalar-identical Hamming distance")
-    func factoryKernelHammingDistanceMatchesScalar() {
-        IntellectusTestIsolation.run {
+    func factoryKernelHammingDistanceMatchesScalar() async {
+        await IntellectusTestIsolation.run {
             // Monitoring off — no side effects, no clock read.
             Intellectus.setEnabled(false)
 
@@ -247,8 +255,8 @@ struct KernelTelemetryConformanceTests {
 
     /// OR-reduce conformance with telemetry disabled.
     @Test("factory kernel produces scalar-identical OR-reduce")
-    func factoryKernelOrReduceMatchesScalar() {
-        IntellectusTestIsolation.run {
+    func factoryKernelOrReduceMatchesScalar() async {
+        await IntellectusTestIsolation.run {
             Intellectus.setEnabled(false)
 
             let factory = PortableKernel.kernelForCurrentPlatform()
@@ -270,8 +278,8 @@ struct KernelTelemetryConformanceTests {
     /// Telemetry enabled, then conformance check. Proves that even
     /// with monitoring on the math output is unaffected.
     @Test("conformance holds when monitoring is enabled")
-    func conformanceHoldsWhenMonitoringEnabled() {
-        IntellectusTestIsolation.run {
+    func conformanceHoldsWhenMonitoringEnabled() async {
+        await IntellectusTestIsolation.run {
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
             Intellectus.setEnabled(true)

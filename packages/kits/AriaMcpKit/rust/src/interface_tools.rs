@@ -2799,7 +2799,15 @@ fn run_reclassify_fdc(
     };
     let mut active: Vec<_> = drawers
         .into_iter()
-        .filter(|d| d.tombstoned_at.is_none() && d.is_currently_believed())
+        // Dataset handles (ContentKind::Dataset) carry structured JSON, not
+        // classifiable free text. The FDC classifier must never reclassify them
+        // — doing so would corrupt the DatasetHandleContent payload.
+        // MX-TAB-4 locked decision: FDC classifier boundary.
+        .filter(|d| {
+            d.tombstoned_at.is_none()
+                && d.is_currently_believed()
+                && d.content_kind() != ContentKind::Dataset
+        })
         .collect();
     if let Some(limit) = limit {
         active.truncate(limit);

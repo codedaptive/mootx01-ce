@@ -645,6 +645,17 @@ pub struct SqliteStorage {
     config: EstateConfiguration,
     inner: Arc<Mutex<Inner>>,
     observers: Arc<ObserverRegistry>,
+    /// Serializes whole `transaction` brackets against each other. There is
+    /// ONE connection per instance, and on the SAME connection a concurrent
+    /// second `BEGIN IMMEDIATE` is not SQLITE_BUSY (that applies across
+    /// connections) — it is "cannot start a transaction within a
+    /// transaction". Two in-process threads legitimately share one instance
+    /// (e.g. the corpus ingest queue's background drain loop + the
+    /// foreground `await_ingest_drain` pump; the Swift twin is
+    /// actor-serialized), so the bracket must self-serialize. Distinct from
+    /// `inner`, which is released while the block runs (holding it across
+    /// the block would deadlock the block's own sub-store calls).
+    tx_lock: Arc<Mutex<()>>,
 }
 
 impl SqliteStorage {
@@ -792,6 +803,7 @@ impl SqliteStorage {
             config,
             inner: Arc::new(Mutex::new(Inner { conn, schema: None })),
             observers: Arc::new(ObserverRegistry::default()),
+            tx_lock: Arc::new(Mutex::new(())),
         })
     }
 }
@@ -965,15 +977,25 @@ impl Storage for SqliteStorage {
         // before the block runs — the block's sub-stores re-lock per call, so
         // holding it across `block` would deadlock against them.
         //
-        // ISOLATION INVARIANT: because the `inner` mutex is released during the
-        // block, this method does not self-serialize concurrent Rust callers.
-        // Transaction isolation instead rests on SQLite's own locking: there is
-        // ONE connection per instance, and BEGIN IMMEDIATE holds the
-        // connection-wide write lock for the whole transaction, so a concurrent
-        // second BEGIN IMMEDIATE gets SQLITE_BUSY (busy-timeout serializes it)
-        // and any concurrent non-transactional write blocks behind that write
-        // lock rather than slipping into this open transaction. Production
-        // additionally serializes all estate access behind the coordinator lock.
+        // ISOLATION INVARIANT: `tx_lock` is held for the WHOLE bracket, so
+        // concurrent Rust callers on the same instance queue here instead of
+        // colliding. This is load-bearing: there is ONE connection per
+        // instance, and on the SAME connection a concurrent second
+        // BEGIN IMMEDIATE does not get SQLITE_BUSY (that is cross-connection
+        // arbitration) — it fails with "cannot start a transaction within a
+        // transaction" (observed: the corpus ingest queue's background drain
+        // loop racing the foreground await_ingest_drain pump on the shared
+        // queue.sqlite). Cross-process isolation still rests on SQLite's own
+        // file locking; non-transactional statements issued by other threads
+        // during the bracket join the open transaction as before. Production
+        // additionally serializes all estate access behind the coordinator
+        // lock, but shared side-stores (the per-estate queue.sqlite) are
+        // driven outside it — hence the self-serialization here.
+        //
+        // No re-entrancy hazard: nothing calls `transaction` from inside a
+        // transaction block — same-connection BEGIN nesting always errored,
+        // so such a caller could never have worked.
+        let _tx_guard = self.tx_lock.lock().unwrap();
         self.inner
             .lock()
             .unwrap()
@@ -996,6 +1018,16 @@ impl Storage for SqliteStorage {
                 Err(e)
             }
         }
+    }
+
+    /// Dataset store override: returns a `SqliteDatasetStoreShim` that shares
+    /// the same `Arc<Mutex<Inner>>` connection as all other SQLite stores.
+    /// This ensures dataset DDL and row operations are serialized on the same
+    /// connection and participate in the WAL write-lock protocol.
+    fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
+        Ok(Arc::new(SqliteDatasetStoreShim {
+            inner: self.inner.clone(),
+        }))
     }
 }
 
@@ -2399,6 +2431,395 @@ impl StorageObserver for SqliteObserver {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// DatasetStore SQLite conformance — SqliteDatasetStoreShim (MX-TAB-1)
+//
+// Holds the same Arc<Mutex<Inner>> as every other SQLite sub-store so
+// dataset DDL and row ops run on the same serialized connection.
+// Implements crate::dataset_store::DatasetStore by reusing `to_sql`,
+// `read_value`, `compile_predicate`, `native_type` etc. from this module.
+//
+// No explicit COLLATE clause is added to TEXT columns in CREATE TABLE DDL:
+// SQLite's BINARY collation (the default) is preserved for byte-order parity
+// with the Rust InMemory backend and with the Swift leg.
+// ─────────────────────────────────────────────────────────────────────
+
+use crate::dataset_store::{
+    ColumnStats, DatasetIndexDeclaration, DatasetSchema, DatasetStore,
+    compare_typed_values_for_sort, dataset_index_name, dataset_native_type, dataset_table_name,
+    validate_dataset_column_identifier,
+};
+
+/// SQLite conformance for `DatasetStore` (MX-TAB-1).
+///
+/// Shares `Arc<Mutex<Inner>>` with `SqliteStorage` so all dataset operations
+/// are serialized on the same SQLite connection as RowStore and BlobStore.
+/// Created by `Storage::dataset_store()` on `SqliteStorage`.
+pub struct SqliteDatasetStoreShim {
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl DatasetStore for SqliteDatasetStoreShim {
+    fn create_dataset(
+        &self,
+        id: uuid::Uuid,
+        schema: &DatasetSchema,
+        indexes: &[DatasetIndexDeclaration],
+    ) -> StorageResult<()> {
+        // Validate all user-supplied column names before touching the connection.
+        for col in &schema.columns {
+            validate_dataset_column_identifier(&col.name)?;
+        }
+        for idx in indexes {
+            validate_dataset_column_identifier(&idx.column)?;
+        }
+
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Build CREATE TABLE DDL. No COLLATE clause on TEXT columns — SQLite's
+        // BINARY collation (the default) is intentionally preserved.
+        let mut parts: Vec<String> = Vec::new();
+        for col in &schema.columns {
+            let mut line = format!("\"{}\" {}", col.name, dataset_native_type(col.column_type));
+            if !col.nullable {
+                line.push_str(" NOT NULL");
+            }
+            parts.push(line);
+        }
+        if let Some(pk) = &schema.primary_key_column {
+            parts.push(format!("PRIMARY KEY (\"{pk}\")"));
+        }
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)",
+            table_name,
+            parts.join(",\n  ")
+        );
+        guard
+            .conn
+            .execute_batch(&create_sql)
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("create_dataset DDL: {e}"),
+            })?;
+
+        // Declare secondary indexes.
+        for idx in indexes {
+            let unique = if idx.unique { "UNIQUE " } else { "" };
+            let idx_name = dataset_index_name(id, &idx.column);
+            let idx_sql = format!(
+                "CREATE {unique}INDEX IF NOT EXISTS \"{idx_name}\" ON \"{table_name}\" (\"{}\")",
+                idx.column
+            );
+            guard
+                .conn
+                .execute_batch(&idx_sql)
+                .map_err(|e| StorageError::BackendError {
+                    underlying: format!("create_dataset index DDL: {e}"),
+                })?;
+        }
+        Ok(())
+    }
+
+    fn append_rows(
+        &self,
+        id: uuid::Uuid,
+        rows: &[std::collections::BTreeMap<String, TypedValue>],
+    ) -> StorageResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Validate column names from the first row.
+        if let Some(first) = rows.first() {
+            for key in first.keys() {
+                validate_dataset_column_identifier(key)?;
+            }
+        }
+
+        // Recover the declared PK column from PRAGMA table_info for pre-sort.
+        let pk_column = dataset_pk_column_for_table(&guard.conn, &table_name)?;
+
+        // Pre-sort ascending by PK when declared.
+        let mut sorted_rows: Vec<std::collections::BTreeMap<String, TypedValue>> =
+            rows.to_vec();
+        if let Some(ref pk) = pk_column {
+            sorted_rows.sort_by(|a, b| {
+                let av = a.get(pk).unwrap_or(&TypedValue::Null);
+                let bv = b.get(pk).unwrap_or(&TypedValue::Null);
+                if compare_typed_values_for_sort(av, bv) {
+                    std::cmp::Ordering::Less
+                } else if compare_typed_values_for_sort(bv, av) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+        }
+
+        // BEGIN IMMEDIATE / INSERT all rows / COMMIT — GLK_BATCH1 pattern.
+        guard
+            .conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("append_rows BEGIN: {e}"),
+            })?;
+
+        let result = (|| -> StorageResult<()> {
+            for row in &sorted_rows {
+                dataset_insert_row(&guard.conn, &table_name, row)?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                guard
+                    .conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| StorageError::BackendError {
+                        underlying: format!("append_rows COMMIT: {e}"),
+                    })?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = guard.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    fn query_rows(
+        &self,
+        id: uuid::Uuid,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        columns: Option<&[String]>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Validate and build projection.
+        let projection = match columns {
+            Some(cols) if !cols.is_empty() => {
+                for name in cols {
+                    validate_sql_identifier(name)?;
+                }
+                cols.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ")
+            }
+            _ => "*".to_string(),
+        };
+
+        let mut sql = format!("SELECT {projection} FROM \"{table_name}\"");
+        let mut binds: Vec<SqlValue> = Vec::new();
+
+        if let Some(pred) = predicate {
+            let where_sql = compile_predicate(pred, &mut binds)?;
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql);
+        }
+
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|clause| -> StorageResult<String> {
+                    validate_sql_identifier(&clause.column.name)?;
+                    let dir = if clause.direction == OrderDirection::Ascending {
+                        "ASC"
+                    } else {
+                        "DESC"
+                    };
+                    Ok(format!("\"{}\" {}", clause.column.name, dir))
+                })
+                .collect::<StorageResult<_>>()?;
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&parts.join(", "));
+        }
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {lim}"));
+        }
+        if let Some(off) = offset {
+            if off > 0 {
+                sql.push_str(&format!(" OFFSET {off}"));
+            }
+        }
+
+        let mut stmt = guard
+            .conn
+            .prepare_cached(&sql)
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("query_rows prepare: {e}"),
+            })?;
+
+        // Read rows without a schema type hint (dataset columns are not in
+        // the accumulated schema declaration). SQLite affinity drives the
+        // TypedValue case: REAL → TypedValue::Float(f64) — f64, never f32.
+        let rows = stmt
+            .query_map(params_from_iter(binds.iter()), |row| {
+                let col_count = row.as_ref().column_count();
+                let mut map: std::collections::BTreeMap<String, TypedValue> =
+                    std::collections::BTreeMap::new();
+                for i in 0..col_count {
+                    let col_name = row
+                        .as_ref()
+                        .column_name(i)
+                        .unwrap_or("")
+                        .to_string();
+                    // kit: None → no declared-type hint; read by SQLite affinity.
+                    let val = read_value(
+                        row.get_ref(i)?,
+                        None,
+                        &table_name,
+                        &col_name,
+                    ).map_err(|_e| {
+                        // read_value is StorageError but we're inside a rusqlite closure
+                        // that only accepts rusqlite::Error. Convert: the only error case
+                        // is CorruptStoredValue, which shouldn't happen without a type hint.
+                        rusqlite::Error::InvalidColumnName(col_name.clone())
+                    })?;
+                    map.insert(col_name, val);
+                }
+                Ok(StorageRow::new(map))
+            })
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("query_rows step: {e}"),
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
+    fn column_stats(&self, id: uuid::Uuid, column: &str) -> StorageResult<ColumnStats> {
+        validate_dataset_column_identifier(column)?;
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Single aggregate query — five values in one round trip.
+        // REAL MIN/MAX → ValueRef::Real(f64) → TypedValue::Float(f64).
+        // NULL MIN/MAX (empty or all-null column) → ValueRef::Null → TypedValue::Null.
+        let sql = format!(
+            r#"SELECT COUNT("{col}"), COUNT(DISTINCT "{col}"), COUNT(*) - COUNT("{col}"), MIN("{col}"), MAX("{col}") FROM "{table}""#,
+            col = column,
+            table = table_name
+        );
+
+        guard
+            .conn
+            .query_row(&sql, [], |row| {
+                let count: i64 = row.get(0)?;
+                let distinct_count: i64 = row.get(1)?;
+                let null_count: i64 = row.get(2)?;
+                // MIN/MAX: no type hint → SQLite affinity-driven TypedValue.
+                let min = dataset_read_aggregate(row, 3)?;
+                let max = dataset_read_aggregate(row, 4)?;
+                Ok(ColumnStats {
+                    count,
+                    distinct_count,
+                    null_count,
+                    min,
+                    max,
+                })
+            })
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("column_stats: {e}"),
+            })
+    }
+
+    fn drop_dataset(&self, id: uuid::Uuid) -> StorageResult<()> {
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+        guard
+            .conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("drop_dataset: {e}"),
+            })
+    }
+}
+
+// ── Dataset SQLite helpers (module-private) ───────────────────────────────
+
+/// Recover the primary-key column name for a dataset table via PRAGMA table_info.
+/// Returns `None` when the table uses SQLite's synthetic rowid key.
+fn dataset_pk_column_for_table(
+    conn: &Connection,
+    table_name: &str,
+) -> StorageResult<Option<String>> {
+    let mut stmt = conn
+        .prepare_cached(&format!("PRAGMA table_info(\"{table_name}\")"))
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("PRAGMA table_info: {e}"),
+        })?;
+    let result = stmt
+        .query_map([], |row| {
+            let pk: i32 = row.get(5)?;
+            let name: String = row.get(1)?;
+            Ok((pk, name))
+        })
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("PRAGMA table_info query: {e}"),
+        })?
+        .find_map(|r| {
+            r.ok().and_then(|(pk, name)| {
+                if pk > 0 { Some(name) } else { None }
+            })
+        });
+    Ok(result)
+}
+
+/// Insert one row into a dataset table using the existing `to_sql` codec.
+fn dataset_insert_row(
+    conn: &Connection,
+    table_name: &str,
+    row: &std::collections::BTreeMap<String, TypedValue>,
+) -> StorageResult<()> {
+    if row.is_empty() {
+        return Ok(());
+    }
+    // BTreeMap keys are sorted — consistent column order for statement cache reuse.
+    let keys: Vec<&str> = row.keys().map(|s| s.as_str()).collect();
+    for k in &keys {
+        validate_sql_identifier(k)?;
+    }
+    let cols = keys.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+    let ph = vec!["?"; keys.len()].join(", ");
+    let sql = format!("INSERT INTO \"{table_name}\" ({cols}) VALUES ({ph})");
+
+    let binds: Vec<SqlValue> = keys
+        .iter()
+        .map(|k| to_sql(row.get(*k).unwrap_or(&TypedValue::Null)))
+        .collect();
+
+    conn.execute(&sql, params_from_iter(binds.iter()))
+        .map_err(|e| map_sql_err(e, table_name))?;
+    Ok(())
+}
+
+/// Read a MIN/MAX aggregate value from a rusqlite Row at `index`.
+/// No type hint → SQLite affinity drives TypedValue case.
+/// REAL → TypedValue::Float(f64) — f64 only, satisfying the cross-leg wire rule.
+fn dataset_read_aggregate(
+    row: &rusqlite::Row,
+    index: usize,
+) -> rusqlite::Result<TypedValue> {
+    use rusqlite::types::ValueRef;
+    Ok(match row.get_ref(index)? {
+        ValueRef::Null => TypedValue::Null,
+        ValueRef::Integer(i) => TypedValue::Int(i),
+        ValueRef::Real(f) => TypedValue::Float(f),  // f64 — never f32
+        ValueRef::Text(b) => TypedValue::Text(
+            std::str::from_utf8(b).unwrap_or("").to_string(),
+        ),
+        ValueRef::Blob(b) => TypedValue::Blob(b.to_vec()),
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────
 // HLC round-trip tests
 //
@@ -2467,6 +2888,47 @@ mod hlc_roundtrip_tests {
         );
         rs.query("events", Some(&pred), &[], None, None)
             .expect("query")
+    }
+
+    #[test]
+    fn concurrent_transactions_on_one_instance_serialize() {
+        // Regression (test-full lane, corpus queue): two in-process threads
+        // driving `transaction` on ONE SqliteStorage instance — the corpus
+        // ingest queue's background drain loop vs the foreground
+        // await_ingest_drain pump — collided with "cannot start a
+        // transaction within a transaction" (same-connection BEGIN nesting;
+        // SQLITE_BUSY arbitration only applies across connections). The
+        // tx_lock must queue the brackets instead. 2 threads × 50
+        // transactions reproduced the collision reliably pre-fix.
+        let storage = std::sync::Arc::new(make_sqlite_storage());
+        let mut handles = Vec::new();
+        for t in 0..2i64 {
+            let storage = std::sync::Arc::clone(&storage);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..50i64 {
+                    let row_id = Uuid::new_v4();
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |tx| {
+                            let mut values = std::collections::BTreeMap::new();
+                            values.insert("id".to_string(), TypedValue::Uuid(row_id));
+                            values.insert(
+                                "stamp".to_string(),
+                                TypedValue::Hlc(HLC::new(t * 1000 + i, 0, 1)),
+                            );
+                            tx.row_store().insert("events", values)?;
+                            Ok(())
+                        })
+                        .expect("concurrent transaction must serialize, not nest");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+        // All 100 rows landed (both writers made progress; nothing rolled back).
+        let rs = Storage::row_store(storage.as_ref());
+        let rows = rs.query("events", None, &[], None, None).expect("query");
+        assert_eq!(rows.len(), 100, "every transactional insert must commit");
     }
 
     #[test]

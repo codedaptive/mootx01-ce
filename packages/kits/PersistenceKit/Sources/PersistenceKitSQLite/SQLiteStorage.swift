@@ -28,6 +28,15 @@ public final class SQLiteStorage: Storage, Sendable {
     public let auditLog: any AuditLog
     public let observer: any StorageObserver
 
+    /// Dataset store for user-defined tabular data (MX-TAB-1).
+    ///
+    /// Stored as a `let` here (satisfies the `{ get throws }` protocol
+    /// requirement with a non-throwing stored property — valid in Swift because
+    /// a non-throwing getter is a sub-type of a throwing one). Initialised with
+    /// `backend` so DDL and row operations run on the same actor-serialized
+    /// connection as RowStore and BlobStore.
+    public let datasetStore: any DatasetStore
+
     let backend: SQLiteBackend
     let observerRegistry: SQLiteObserverRegistry
 
@@ -61,6 +70,8 @@ public final class SQLiteStorage: Storage, Sendable {
         self.blobStore = SQLiteBlobStore(backend: backend)
         self.auditLog = SQLiteAuditLog(backend: backend)
         self.observer = SQLiteObserver(registry: registry)
+        // Dataset store — same backend actor, no additional connection overhead.
+        self.datasetStore = SQLiteDatasetStore(backend: backend)
     }
 
     public func open(schema: SchemaDeclaration) async throws {

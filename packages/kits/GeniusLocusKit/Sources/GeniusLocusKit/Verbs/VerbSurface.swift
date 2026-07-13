@@ -680,6 +680,22 @@ public extension GeniusLocusKit {
         }
         let estate = try estate(for: handle)
 
+        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4).
+        //
+        // The storage expunge (step 1) zeroes the content blob, so any
+        // DatasetHandleContent JSON must be decoded BEFORE tombstoning.
+        // If the pre-read fails or the drawer is not a dataset handle we
+        // proceed without a cascade — step 1 will surface a drawerNotFound
+        // error if the row genuinely doesn't exist.
+        let datasetIdToErase: UUID?
+        if let preReadDrawer = try? await estate.drawerById(rowID: frame.rowID),
+           preReadDrawer.contentKind == .dataset,
+           let handleContent = try? DatasetHandleContent.decode(from: preReadDrawer.content) {
+            datasetIdToErase = handleContent.datasetId
+        } else {
+            datasetIdToErase = nil
+        }
+
         // Step 1 — LocusKit storage expunge (deferred seal).
         //
         // The audit event is NOT sealed here. It is returned for the deferred
@@ -791,6 +807,90 @@ public extension GeniusLocusKit {
                     rowID: frame.rowID,
                     reason: error.localizedDescription
                 )
+            }
+        }
+
+        // Step 2.5 — Dataset table cascade (MX-TAB-4).
+        //
+        // When the erased drawer is a dataset handle (contentKind == .dataset),
+        // drop the backing dataset table from the DatasetStore and append a
+        // supplementary "datasetTableDrop" audit event. Both the handle erase
+        // (sealed in step 3 as "tombstone") and the table drop land in the audit
+        // log for the same drawer row so the full erase is auditable.
+        //
+        // Semantics:
+        //   - `dropDataset` uses DROP TABLE IF EXISTS — a missing table is a
+        //     no-op, not an error. The table may be absent if the dataset was
+        //     created without ever populating it, or if the backing store was
+        //     separately cleared.
+        //   - The datasetStore accessor throws `featureGated` when the storage
+        //     backend does not support datasets. In that case the cascade is
+        //     skipped silently — the handle erase still completes normally.
+        //   - Failures in the cascade (non-featureGated errors) are logged at
+        //     fault level and allowed to propagate so callers learn of partial
+        //     erase. The tombstone audit (step 3) is NOT sealed when the cascade
+        //     fails, preserving the audit gap that the integrity sweep detects.
+        if let datasetId = datasetIdToErase,
+           let storage = storages[handle] {
+            let datasetStore: (any PersistenceKit.DatasetStore)?
+            do {
+                datasetStore = try storage.datasetStore
+            } catch {
+                // featureGated or other accessor error: no DatasetStore on
+                // this backend. Skip the cascade; the handle erase continues.
+                datasetStore = nil
+            }
+            if let datasetStore {
+                do {
+                    try await datasetStore.dropDataset(id: datasetId)
+                } catch {
+                    // Table drop failed after the handle was already tombstoned.
+                    // Log at fault level; propagate so callers learn of the
+                    // partial state. Step 3 (tombstone audit seal) is not reached.
+                    Self.verbLog.fault(
+                        "dataset table drop failed — rowID=\(frame.rowID, privacy: .public) datasetId=\(datasetId.uuidString, privacy: .public) estate=\(handle.estateUUID.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
+                    throw VerbError.crossKitVectorDeleteFailed(
+                        rowID: frame.rowID,
+                        reason: "dataset table drop failed for datasetId \(datasetId.uuidString): \(error.localizedDescription)"
+                    )
+                }
+                // Append a supplementary audit event recording the table drop.
+                // Uses the unsealed event's estateUuid, rowId, and lattice anchor as
+                // context so the table-drop event is traceable to the same drawer row.
+                // A missing table (IF EXISTS no-op) and a present table that dropped
+                // cleanly both produce this event — the verb string is the same in
+                // both cases, signalling "the drop intent was exercised."
+                // Build the table-drop audit event. Reuse the unsealed event's HLC
+                // and lattice anchor so the table-drop event is traceable to the
+                // same drawer row in the audit trail. The verb string "datasetTableDrop"
+                // distinguishes it from the tombstone event ("tombstone") sealed in step 3.
+                let tableDrop = AuditEvent(
+                    estateUuid: unsealedEvent.estateUuid,
+                    rowId: unsealedEvent.rowId,
+                    // Reuse the unsealed event's HLC — a new stamp is not required
+                    // here because appendAuditEvent does not enforce ordering at the
+                    // call site, and the verb string distinguishes the two events.
+                    hlc: unsealedEvent.hlc,
+                    verb: "datasetTableDrop",
+                    beforeBitmaps: nil,
+                    afterBitmaps: unsealedEvent.afterBitmaps,
+                    beforeLatticeAnchor: nil,
+                    afterLatticeAnchor: unsealedEvent.afterLatticeAnchor,
+                    actor: unsealedEvent.actor,
+                    reason: "dataset table dropped on handle erase: \(datasetId.uuidString)"
+                )
+                do {
+                    try await estate.appendAuditEvent(tableDrop)
+                } catch {
+                    // Audit append failure after a successful table drop.
+                    // Log at error level (not fault: the destructive work is done;
+                    // only the audit record is missing). Do NOT abort — proceed to
+                    // step 3 so the tombstone audit still seals.
+                    Self.verbLog.error(
+                        "datasetTableDrop audit append failed — rowID=\(frame.rowID, privacy: .public) datasetId=\(datasetId.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
             }
         }
 
@@ -1888,6 +1988,23 @@ extension GeniusLocusKit {
             )
         }
         return try Curve25519.Signing.PrivateKey(rawRepresentation: raw)
+    }
+
+    /// Return the estate's Ed25519 identity public key in raw-byte form.
+    ///
+    /// Used as the trust anchor for grant signature verification at the
+    /// `federatedRecall` boundary (D9 hardening). Trust derives from the
+    /// registry — the key material held in-memory by the Estate instance
+    /// since `Estate.open` — not from any field in the grant blob itself.
+    /// This matches the registered-key pattern in ConvergenceKit
+    /// `FederationSyncEngine.pull()` (F-3 hardening).
+    ///
+    /// Throws `GeniusLocusKitError.invalidManifest` when the identity key
+    /// is absent from the key store (estate opened after a Keychain wipe
+    /// or with a key store that did not contain the private key).
+    func estateSigningPublicKey(for estate: LocusKit.Estate) async throws -> Data {
+        let identity = try await signingIdentity(for: estate)
+        return identity.publicKey.rawRepresentation
     }
 
     /// Gate the experimental custody modes at the verb boundary. Modes 1
