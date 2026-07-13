@@ -3097,10 +3097,18 @@ impl DrawerStore for DrawerStoreCore {
             &association.lattice_anchor.udc_code,
             "latticeAnchor.udcCode",
         )?;
-        self.storage
+        match self
+            .storage
             .row_store()
             .insert(T_ASSOCIATIONS, association_values(association))
-            .map_err(map_storage_err)?;
+        {
+            Ok(_) => {}
+            // FINDING-3: natural-key uniqueness constraint (v10) blocked a
+            // duplicate edge insert — the association already exists. Treat
+            // as a successful no-op, mirroring Swift DrawerStore.addAssociation.
+            Err(persistence_kit::error::StorageError::DuplicateKey { .. }) => {}
+            Err(e) => return Err(map_storage_err(e)),
+        }
         Ok(())
     }
 

@@ -24,6 +24,16 @@ use vectorkit::VectorStore;
 
 use crate::brain::scheduler::api::*;
 
+/// Optional pre-emission check: returns `true` if an active association
+/// edge already exists between the two drawer IDs (either direction).
+/// When `Some`, pairs that return `true` are suppressed before frames are
+/// emitted — prevents VectorSimilaritySignal from churning redundant
+/// `Associate` frames every 300 seconds on an unchanged neighbourhood.
+/// Fail-open: returning `false` (e.g. on error) is safe because the
+/// DB-level uniqueness constraint (LocusKit v10) still blocks duplicate
+/// persistence. Mirrors Swift `AssociationEdgeChecker`.
+pub type AssociationEdgeChecker = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
 pub struct VectorSimilaritySignal;
 
 impl VectorSimilaritySignal {
@@ -62,11 +72,21 @@ impl VectorSimilaritySignal {
     ///   the chunk-keyed corpus lane — the row population production
     ///   estates actually hold. `None` scans only the drawer-keyed lane,
     ///   which is correct for tests that plant drawer-keyed vectors.
+    /// - `edge_checker`: optional pre-emission filter. When `Some`, each
+    ///   candidate pair is tested with `checker(a, b)` before an
+    ///   `Associate` frame is emitted; pairs that already have a persisted
+    ///   active edge are suppressed. Fail-open: a checker that returns
+    ///   `false` on error is safe because the DB-level uniqueness
+    ///   constraint (LocusKit v10, FINDING-3) still blocks duplicate
+    ///   persistence. `None` is the default — the uniqueness constraint
+    ///   alone is sufficient correctness; the checker is an optimization
+    ///   that avoids churning frames when the neighbourhood is stable.
     pub fn spec(
         vector_store: Arc<VectorStore>,
         model_id: String,
         proximity_threshold: i32,
         corpus: Option<Arc<Corpus>>,
+        edge_checker: Option<AssociationEdgeChecker>,
     ) -> SignalSpec {
         SignalSpec {
             name: Self::SIGNAL_NAME.to_string(),
@@ -82,6 +102,7 @@ impl VectorSimilaritySignal {
                     &model_id,
                     proximity_threshold,
                     corpus.as_deref(),
+                    edge_checker.as_deref(),
                     context,
                 )
             }),
@@ -92,12 +113,14 @@ impl VectorSimilaritySignal {
     ///
     /// Samples the MAX_PROBE_COUNT most recently filed item IDs via
     /// recent_item_ids, retrieves each row's engram, calls find_nearest to
-    /// locate nearby rows, deduplicates pairs, and emits AssociateFrames.
+    /// locate nearby rows, deduplicates pairs, optionally filters already-
+    /// persisted edges, and emits AssociateFrames.
     fn proximity_pass(
         vector_store: &VectorStore,
         model_id: &str,
         proximity_threshold: i32,
         corpus: Option<&Corpus>,
+        edge_checker: Option<&(dyn Fn(&str, &str) -> bool + Send + Sync)>,
         context: &SignalContext,
     ) -> Vec<SignalEmission> {
         let mut emissions = Vec::new();
@@ -250,7 +273,22 @@ impl VectorSimilaritySignal {
             }
         }
 
-        for (a, b, weight) in &candidate_pairs {
+        // FINDING-3: filter pairs that already have a persisted active edge
+        // so VectorSimilaritySignal does not churn redundant Associate frames
+        // on every 300-second pass when the vector neighbourhood is stable.
+        // Fail-open: if the checker returns false on error the DB-level
+        // uniqueness constraint (LocusKit v10) still blocks duplicate persistence.
+        let emittable_pairs: Vec<(String, String, f64)> = if let Some(check) = edge_checker {
+            candidate_pairs
+                .iter()
+                .filter(|(a, b, _)| !check(a.as_str(), b.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            candidate_pairs.clone()
+        };
+
+        for (a, b, weight) in &emittable_pairs {
             emissions.push(SignalEmission::Associate(AssociationFrame {
                 a: a.clone(),
                 b: b.clone(),
@@ -261,8 +299,9 @@ impl VectorSimilaritySignal {
         emissions.push(SignalEmission::Diagnostic(DiagnosticReport {
             title: "vector_similarity.scan.summary".into(),
             detail: format!(
-                "5-minute proximity pass found {} candidate pair(s); signal={}",
+                "5-minute proximity pass found {} candidate pair(s), emitting {}; signal={}",
                 candidate_pairs.len(),
+                emittable_pairs.len(),
                 context.signal_id.0
             ),
             observed_at_nanos: context.now_nanos,

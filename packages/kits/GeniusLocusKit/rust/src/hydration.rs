@@ -198,8 +198,10 @@ mod composite_version_tests {
         let mx = MatrixSnapshotStore::schema_declaration().version;
         let s = composite_schema();
         // Two GLK-owned addends: +1 grants, +matrix_snapshot version
+        // LocusKit v10 (FINDING-3 associations unique constraint) +
+        // VectorKit v4 + CorpusKit v3 + Grants v1 + MatrixSnapshot v1 = 19.
         assert_eq!(s.version, lk + vk + ck + 1 + mx);
-        assert_eq!(s.version, 18);
+        assert_eq!(s.version, 19);
         assert!(s.tables.iter().any(|t| t.name == "grants"));
         // matrix_snapshot must be in composite for hydration to copy it from durable storage
         assert!(s.tables.iter().any(|t| t.name == "matrix_snapshot"));

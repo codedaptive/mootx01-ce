@@ -2461,7 +2461,15 @@ public actor DrawerStore {
     /// (mirroring `addTunnel`), and the lattice anchor is required per
     /// cookbook §2.7 (I-16): an empty `udcCode` is rejected with
     /// `LocusKitError.invalidContent` before the insert, mirroring
-    /// `addProposal`. Conflicting ids surface as duplicateKey.
+    /// `addProposal`.
+    ///
+    /// INSERT-OR-IGNORE semantics (FINDING-3): if an association with
+    /// the same (sourceWing, sourceRoom, sourceDrawerId, targetWing,
+    /// targetRoom, targetDrawerId, label) already exists, the insert is
+    /// silently swallowed and this method returns successfully. The
+    /// existing edge is left unchanged. This prevents VectorSimilaritySignal
+    /// (and any other caller) from accumulating duplicate edges on every
+    /// 300-second pass.
     public func addAssociation(_ a: Association) async throws {
         try Self.validateNonEmpty(a.sourceWing, label: "sourceWing")
         try Self.validateNonEmpty(a.sourceRoom, label: "sourceRoom")
@@ -2470,8 +2478,45 @@ public actor DrawerStore {
         try Self.validateNonEmpty(a.label, label: "label")
         try Self.validateNonEmpty(a.addedBy, label: "addedBy")
         try Self.validateNonEmpty(a.latticeAnchor.udcCode, label: "latticeAnchor.udcCode")
-        _ = try await storage.rowStore.insert(
-            table: "associations", values: Self.associationValues(a))
+        do {
+            _ = try await storage.rowStore.insert(
+                table: "associations", values: Self.associationValues(a))
+        } catch StorageError.duplicateKey {
+            // Natural-key uniqueness constraint (v10) blocked a duplicate
+            // edge insert — the association already exists. Treat as a
+            // successful no-op: the caller's intent (ensure this edge
+            // exists) is satisfied by the existing row.
+            return
+        }
+    }
+
+    /// True if any non-tombstoned association exists between the two
+    /// drawer IDs in either direction. Used by VectorSimilaritySignal to
+    /// skip already-persisted pairs before emitting frames (FINDING-3
+    /// optimization — reduces churn even though the DB-level INSERT-OR-IGNORE
+    /// already guarantees correctness).
+    public func hasAssociationBetweenDrawers(
+        drawerIdA: String, drawerIdB: String
+    ) async throws -> Bool {
+        let table = "associations"
+        let srcCol = Column(table: table, name: "sourceDrawerId")
+        let tgtCol = Column(table: table, name: "targetDrawerId")
+        let tombCol = Column(table: table, name: "tombstonedAt")
+        let predicate = StoragePredicate.and([
+            .or([
+                .and([
+                    .eq(srcCol, .text(drawerIdA)),
+                    .eq(tgtCol, .text(drawerIdB))
+                ]),
+                .and([
+                    .eq(srcCol, .text(drawerIdB)),
+                    .eq(tgtCol, .text(drawerIdA))
+                ])
+            ]),
+            .isNull(tombCol)
+        ])
+        let n = try await storage.rowStore.count(table: table, where: predicate)
+        return n > 0
     }
 
     /// Fetch an association by id. Returns nil for an absent id — a routine
