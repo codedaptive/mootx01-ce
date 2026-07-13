@@ -689,13 +689,18 @@ enum DatasetTools {
         // as /etc/passwd by supplying a relative path or a symlink that escapes
         // the intended directory.
         //
-        // Root resolution (D11): the user's home directory is the default root.
+        // Root resolution (D11): the current user's home directory is the default
+        // root. `NSHomeDirectory()` is used rather than
+        // `FileManager.homeDirectoryForCurrentUser` because the latter is
+        // unavailable on iOS; `NSHomeDirectory()` is cross-platform and returns
+        // the same path on the (non-sandboxed) macOS server while returning the
+        // app's sandbox container on iOS — the correct import root per platform.
         // The comparison is component-safe: the root has a "/" appended before the
         // hasPrefix check so that "/vault-evil/file" cannot match a "/vault" root.
         //
         // Future: make the root configurable via estate configuration if a per-estate
         // config surface is added; see MX-TAB-SEC-1 D11.
-        let rawImportRoot = FileManager.default.homeDirectoryForCurrentUser.path
+        let rawImportRoot = NSHomeDirectory()
         let importRoot = URL(fileURLWithPath: rawImportRoot).resolvingSymlinksInPath().path
         let rootWithSep = importRoot.hasSuffix("/") ? importRoot : importRoot + "/"
         guard resolvedPath.hasPrefix(rootWithSep) || resolvedPath == importRoot else {
