@@ -364,6 +364,10 @@ Every kit ships in two equal-status implementations, conformance-gated against s
 
 Neither port leads. Both must agree bit for bit.
 
+## Security
+
+Security-relevant changes go through an independent adversarial review before merge, verified against the live code and gated on that pass.
+
 ## Roadmap
 
 Version 1.1.x
