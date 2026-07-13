@@ -70,8 +70,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::Arc;
 use persistence_kit::{
-    BackendConfiguration, Column, ColumnDeclaration, IndexDeclaration, OrderClause, OrderDirection,
-    SchemaDeclaration, Storage, StoragePredicate, TableDeclaration, TypedValue,
+    BackendConfiguration, Column, ColumnDeclaration, IndexDeclaration, Migration, OrderClause,
+    OrderDirection, SchemaDeclaration, SchemaOperation, Storage, StoragePredicate,
+    TableDeclaration, TypedValue,
 };
 use uuid::Uuid;
 
@@ -298,10 +299,15 @@ impl VectorStore {
     ///
     /// v3 adds the nullable `.json` `ext` forward-compat slot (ADR-012);
     /// 1.0 writes NULL and never reads it.
+    ///
+    /// v4 adds `idx_vectors_filed_at_item` on (filed_at, item_id).
+    /// Covers `recent_item_ids` ORDER BY filed_at DESC, item_id ASC so
+    /// SQLite can do an ordered index scan rather than a full-table scan +
+    /// filesort. Migrated onto existing estates by the v3→v4 migration.
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "VectorKit",
-            3,
+            4,
             vec![TableDeclaration::new(
                 "vectors",
                 vec![
@@ -348,6 +354,32 @@ impl VectorStore {
                 "vectors",
                 vec!["model_id".to_string(), "item_id".to_string()],
             ),
+            // v4: covers recent_item_ids ORDER BY filed_at DESC, item_id ASC.
+            // SQLite can traverse this index in reverse for the DESC major key,
+            // eliminating the full-table scan + filesort that fired on every
+            // recent_item_ids call before v4. With query_projected projecting
+            // only (item_id, filed_at), this also enables a covering scan —
+            // payload blobs are never read off disk. Migrated by v3→v4 below.
+            IndexDeclaration::new(
+                "idx_vectors_filed_at_item",
+                "vectors",
+                vec!["filed_at".to_string(), "item_id".to_string()],
+            ),
+        ])
+        .with_migrations(vec![
+            // v3 → v4: add idx_vectors_filed_at_item to existing estates.
+            // Idempotent: the backend's CREATE INDEX IF NOT EXISTS makes it
+            // safe to replay. SQLite backfills the index over existing rows
+            // when CREATE INDEX runs against a non-empty table.
+            Migration {
+                from_version: 3,
+                to_version: 4,
+                operations: vec![SchemaOperation::AddIndex(IndexDeclaration::new(
+                    "idx_vectors_filed_at_item",
+                    "vectors",
+                    vec!["filed_at".to_string(), "item_id".to_string()],
+                ))],
+            },
         ])
     }
 
@@ -1462,11 +1494,17 @@ impl VectorStore {
         const PAGE_SIZE: usize = 8192;
         let mut offset = 0usize;
         while out.len() < limit {
+            // Project only `item_id` — payload blobs are irrelevant here and
+            // can be enormous on rich estates. `query_projected` pushes a
+            // narrow SELECT item_id ... down into SQLite so the payload is
+            // never loaded off disk. Non-SQLite backends fall back to the full
+            // read (still correct; a superset of the requested columns).
             let rows = self
                 .storage
                 .row_store()
-                .query(
+                .query_projected(
                     "vectors",
+                    &["item_id"],
                     Some(&predicate),
                     &order,
                     Some(PAGE_SIZE),
@@ -1582,10 +1620,24 @@ impl VectorStore {
         const PAGE_SIZE: usize = 8192;
         let mut offset = 0usize;
         while out.len() < limit {
+            // Project only (item_id, filed_at) — those are the only columns
+            // this function reads. Combined with idx_vectors_filed_at_item
+            // (v4, columns: [filed_at, item_id]) this enables a covering index
+            // scan: SQLite satisfies the ORDER BY from the index and never
+            // touches the main table rows (no payload blobs loaded). Non-SQLite
+            // backends fall back to the full-row read (correct: superset of
+            // requested columns).
             let rows = self
                 .storage
                 .row_store()
-                .query("vectors", None, &order, Some(PAGE_SIZE), Some(offset))
+                .query_projected(
+                    "vectors",
+                    &["item_id", "filed_at"],
+                    None,
+                    &order,
+                    Some(PAGE_SIZE),
+                    Some(offset),
+                )
                 .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
             let page_len = rows.len();
             for row in rows {

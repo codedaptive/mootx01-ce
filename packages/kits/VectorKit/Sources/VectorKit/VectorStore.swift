@@ -2,7 +2,7 @@
 //
 // Storage layer for VectorKit, backed by PersistenceKit.
 //
-// Schema (version 3, with `ext` JSON slot added post-Lane F):
+// Schema (version 4, adds idx_vectors_filed_at_item for recentItemIDs ordered scan):
 // ```
 // vectors (
 //   id             UUID PRIMARY KEY,
@@ -19,6 +19,7 @@
 // )
 // UNIQUE(item_id, vector_index, model_id)
 // INDEX(model_id, item_id)
+// INDEX(filed_at, item_id)   -- v4: covers recentItemIDs ORDER BY filed_at DESC, item_id ASC
 // ```
 //
 // Refactored 2026-05-19 (mission 6) per
@@ -327,9 +328,18 @@ public actor VectorStore {
     /// Column changes from v2 → v3:
     ///   - Added: `ext` JSON nullable — the ADR-012 forward-compat slot.
     ///     Reserves the slot, not a shape; 1.0 writes NULL and never reads it.
+    ///
+    /// Index changes v3 → v4:
+    ///   - Added: `idx_vectors_filed_at_item` on (filed_at, item_id).
+    ///     Covers `recentItemIDs` ORDER BY filed_at DESC, item_id ASC so
+    ///     SQLite can do an ordered index scan rather than a full-table scan +
+    ///     filesort. Before v4 every `recentItemIDs` call on a large estate
+    ///     issued a full scan (10k-row probe_limit = O(N) on 109k chunks).
+    ///     Combined with `columns:` projection, this also enables an
+    ///     index-only covering scan — payload blobs never read from disk.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "VectorKit",
-        version: 3,
+        version: 4,
         tables: [
             TableDeclaration(
                 name: "vectors",
@@ -367,6 +377,36 @@ public actor VectorStore {
                 table: "vectors",
                 columns: ["model_id", "item_id"],
                 unique: false
+            ),
+            // v4: covers recentItemIDs ORDER BY filed_at DESC, item_id ASC.
+            // SQLite can traverse this index in reverse for the DESC major
+            // key, eliminating the full-scan + filesort. Combined with the
+            // `columns: ["item_id", "filed_at"]` projection in recentItemIDs,
+            // this also enables a covering scan — the main rows (payload blobs)
+            // are never read. Migrated onto existing estates by Migration v3→v4.
+            IndexDeclaration(
+                name: "idx_vectors_filed_at_item",
+                table: "vectors",
+                columns: ["filed_at", "item_id"],
+                unique: false
+            )
+        ],
+        migrations: [
+            // v3 → v4: add idx_vectors_filed_at_item to existing estates.
+            // Idempotent: SQLite's CREATE INDEX IF NOT EXISTS makes it safe to
+            // replay. The index backfill is handled automatically by SQLite when
+            // CREATE INDEX runs against a non-empty table.
+            Migration(
+                fromVersion: 3,
+                toVersion: 4,
+                operations: [
+                    .addIndex(IndexDeclaration(
+                        name: "idx_vectors_filed_at_item",
+                        table: "vectors",
+                        columns: ["filed_at", "item_id"],
+                        unique: false
+                    ))
+                ]
             )
         ]
     )
@@ -1362,6 +1402,15 @@ public actor VectorStore {
         let pageSize = 8192
         var offset = 0
         while out.count < limit {
+            // Project only `item_id` — payload blobs are irrelevant here and
+            // can be enormous on rich estates. A LIKE scan over item_id is
+            // already fast (item_id is short text); reading the full row would
+            // transfer the payload blob from disk on every scanned row.
+            // The `columns: ["item_id"]` projection pushes SELECT item_id ...
+            // down into SQLite so the payload is never loaded. On the SQLite
+            // backend this delegates to the overriding `query(columns:)` that
+            // emits a narrow SELECT; all other backends fall back to the full
+            // read, which is still correct (they return a superset of columns).
             let rows = try await storage.rowStore.query(
                 table: "vectors",
                 where: .like(Column(table: "vectors", name: "item_id"), "%\(query)%"),
@@ -1372,7 +1421,8 @@ public actor VectorStore {
                     )
                 ],
                 limit: pageSize,
-                offset: offset
+                offset: offset,
+                columns: ["item_id"]
             )
             for row in rows {
                 if case let .text(itemID) = row["item_id"] ?? .null {
@@ -1417,6 +1467,16 @@ public actor VectorStore {
         let pageSize = 8192
         var offset = 0
         while out.count < limit {
+            // Project only `item_id` and `filed_at` — those are the only
+            // columns this function needs. Combined with the composite index
+            // `idx_vectors_filed_at_item` (v4, columns: [filed_at, item_id]),
+            // SQLite can satisfy this query as a covering index scan:
+            //   SELECT item_id, filed_at FROM vectors
+            //   ORDER BY filed_at DESC, item_id ASC
+            //   LIMIT N OFFSET M
+            // The index lets SQLite avoid the full-table read + filesort that
+            // this ORDER BY previously triggered on every call. Payload blobs
+            // are never loaded off disk.
             let rows = try await storage.rowStore.query(
                 table: "vectors",
                 where: nil,
@@ -1431,7 +1491,8 @@ public actor VectorStore {
                     ),
                 ],
                 limit: pageSize,
-                offset: offset
+                offset: offset,
+                columns: ["item_id", "filed_at"]
             )
             for row in rows {
                 if case let .text(itemID) = row["item_id"] ?? .null {
