@@ -230,6 +230,10 @@ public extension GeniusLocusKit {
         // at rank #399) and a whole-partition float scan is ~3 s/probe. BM25
         // returns SOURCE (drawer) IDs directly, so no chunk→drawer remap.
         // `seenPairs` keys on drawer IDs, so both lanes dedupe together.
+        func huntDrawerVisible(_ drawer: Drawer) -> Bool {
+            drawer.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue
+        }
+
         if let corpus = corpusKits[handle] {
             // Probe drawers = the owning drawers of the recent probe chunks.
             let probeChunkUUIDs = probeIDs.compactMap { UUID(uuidString: $0) }
@@ -240,12 +244,16 @@ public extension GeniusLocusKit {
             if !probeDrawerIDs.isEmpty {
                 probeDrawers = try await estate.hydrateBodies(ids: probeDrawerIDs)
             }
-            for probeDrawer in probeDrawers where !probeDrawer.content.isEmpty {
+            for probeDrawer in probeDrawers
+                where !probeDrawer.content.isEmpty && huntDrawerVisible(probeDrawer) {
                 let query = String(probeDrawer.content.prefix(Self.huntBM25QueryCharLimit))
                 guard let hits = try? await corpus.bm25TopKBySource(
                     query: query, limit: Self.huntBM25CandidateK)
                 else { continue }
                 for hit in hits where hit.sourceID != probeDrawer.id {
+                    let hitDrawers = (try? await estate.hydrateBodies(ids: [hit.sourceID])) ?? []
+                    guard let hitDrawer = hitDrawers.first,
+                          huntDrawerVisible(hitDrawer) else { continue }
                     let key = Self.pairKey(probeDrawer.id, hit.sourceID)
                     guard seenPairs.insert(key).inserted else { continue }
                     candidatePairs.append((min(probeDrawer.id, hit.sourceID),
@@ -272,7 +280,8 @@ public extension GeniusLocusKit {
 
         for pair in candidatePairs {
             guard let a = drawersByID[pair.a], let b = drawersByID[pair.b],
-                  a.tombstonedAt == nil, b.tombstonedAt == nil else { continue }
+                  a.tombstonedAt == nil, b.tombstonedAt == nil,
+                  huntDrawerVisible(a), huntDrawerVisible(b) else { continue }
             // Incremental watermark: at least one side must be new enough.
             if let watermark = filedAfter,
                a.filedAt <= watermark, b.filedAt <= watermark { continue }

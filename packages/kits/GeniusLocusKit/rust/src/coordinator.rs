@@ -2799,6 +2799,10 @@ impl EstateCoordinator {
         let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
         let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
             all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+        let hunt_drawer_visible = |drawer: &locus_kit::drawer::Drawer| {
+            drawer.adjective_sensitivity().raw_value()
+                <= locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+        };
 
         // Lane 2 — the corpus lane, the ONLY lane a production estate populates
         // (the encode drain writes chunk-keyed rows under the corpus provider's
@@ -2828,7 +2832,7 @@ impl EstateCoordinator {
                     Some(d) => *d,
                     None => continue,
                 };
-                if pd.content.is_empty() {
+                if pd.content.is_empty() || !hunt_drawer_visible(pd) {
                     continue;
                 }
                 // Cap the query length so per-probe cost is independent of body size.
@@ -2840,6 +2844,12 @@ impl EstateCoordinator {
                 let hits = corpus.bm25_top_k_by_source(&query, HUNT_BM25_CANDIDATE_K);
                 for (source_id, _score) in hits {
                     if source_id == *pd_id {
+                        continue;
+                    }
+                    let Some(hit_drawer) = drawers_by_id.get(source_id.as_str()) else {
+                        continue;
+                    };
+                    if !hunt_drawer_visible(hit_drawer) {
                         continue;
                     }
                     let key = pair_key(pd_id, &source_id);
@@ -2867,7 +2877,11 @@ impl EstateCoordinator {
                 (Some(a), Some(b)) => (*a, *b),
                 _ => continue,
             };
-            if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
+            if a.tombstoned_at.is_some()
+                || b.tombstoned_at.is_some()
+                || !hunt_drawer_visible(a)
+                || !hunt_drawer_visible(b)
+            {
                 continue;
             }
             // Incremental watermark: at least one side must be new enough.
