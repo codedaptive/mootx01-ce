@@ -490,11 +490,24 @@ struct GLKTelemetrySuite {
 
                 let kit = GeniusLocusKit()
                 let storage = makeStorage()
-                _ = try await kit.open(storage: storage, owner: testOwner)
+                let handle = try await kit.open(storage: storage, owner: testOwner)
 
-                let nounCountMetrics = sink.metrics(named: "geniuslocus.estate.noun_count")
+                // Filter to THIS estate's noun_count by its estate_id tag.
+                // withIntellectusLock serialises tests that ENABLE monitoring,
+                // but a concurrent non-telemetry test opening its own estate
+                // during this enabled window emits its own noun_count into the
+                // shared global sink — a different estate_id. Counting only our
+                // estate's metric makes the exact-count assertion correct
+                // regardless of such leaks (the metric carries estate_id; see
+                // the sibling tag test), which is more robust than requiring
+                // every emit-crossing test in the suite to hold the lock.
+                let myEstateID = handle.estateUUID.uuidString
+                let nounCountMetrics = sink.metrics(named: "geniuslocus.estate.noun_count").filter {
+                    if case let .metric(_, _, tags, _) = $0 { return tags["estate_id"] == myEstateID }
+                    return false
+                }
                 #expect(nounCountMetrics.count == 1,
-                    "open() must emit exactly 1 noun_count metric; got \(nounCountMetrics.count)")
+                    "open() must emit exactly 1 noun_count metric for this estate; got \(nounCountMetrics.count)")
 
                 if case let .metric(_, value, _, _) = nounCountMetrics.first! {
                     #expect(value == 0.0,
@@ -516,13 +529,19 @@ struct GLKTelemetrySuite {
                 let storage = makeStorage()
                 let handle = try await kit.open(storage: storage, owner: testOwner)
 
-                if let tags = sink.metrics(named: "geniuslocus.estate.noun_count").first.flatMap({
-                    if case let .metric(_, _, tags, _) = $0 { return tags } else { return nil }
-                }) {
-                    #expect(tags["estate_id"] == handle.estateUUID.uuidString,
-                        "noun_count must be tagged with the estate UUID")
+                // Match by THIS estate's estate_id rather than taking .first,
+                // which under the parallel runner could be a concurrent test's
+                // leaked noun_count for a different estate (see the sibling
+                // count test for the full rationale).
+                let myEstateID = handle.estateUUID.uuidString
+                let mine = sink.metrics(named: "geniuslocus.estate.noun_count").first {
+                    if case let .metric(_, _, tags, _) = $0 { return tags["estate_id"] == myEstateID }
+                    return false
+                }
+                if mine != nil {
+                    #expect(Bool(true), "noun_count carries this estate's estate_id tag")
                 } else {
-                    Issue.record("no noun_count metric emitted")
+                    Issue.record("no noun_count metric emitted for this estate")
                 }
             }
         }

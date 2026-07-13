@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.18.0
+version: 1.19.0
 status: active
-date: 2026-07-05
+date: 2026-07-12
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -144,14 +144,15 @@ public enum JSONValueError: Error, Equatable { /* unsupported value, etc. */ }
 
 The lexicon-projected surface was replaced with a five-tier
 AI-client-oriented interface. `ToolProjection.tools()` assembles all
-56 tools across four provenance tiers (including the maintenance tools
-`moot_reindex`, `moot_drain_status`, and `moot_palace_import`).
+68 tools across four provenance tiers (including the maintenance tools
+`moot_reindex`, `moot_drain_status`, `moot_reclassify_fdc`, and
+`moot_palace_import`).
 
 ```swift
 public enum ToolProvenance: Sendable, Equatable {
-    case interface     // 19 five-tier AI-client tools
+    case interface     // 27 tools: 22 five-tier AI-client tools + moot_monitoring_status + 4 maintenance
     case federation    // 1 federated-search tool (moot_federated_search)
-    case recipe        // 8 recipe + 21 lens tools via CognitionKit/LensTools
+    case recipe        // 12 recipe + 23 lens tools via CognitionKit/LensTools
     case vault         // 5 vault control tools (export, import, status, reconcile, job)
 }
 public struct ProjectedTool: Sendable, Equatable {
@@ -162,17 +163,17 @@ public struct ProjectedTool: Sendable, Equatable {
 }
 public enum ToolProjection {
     public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
-    public static func tools() -> [ProjectedTool]   // all 55 tools (interface+federation+recipe+lens+vault+maintenance)
+    public static func tools() -> [ProjectedTool]   // all 68 tools (interface+federation+recipe+lens+vault+maintenance)
     public static func federationTool() -> ProjectedTool
 }
 ```
 
-#### Five-tier AI-client interface (`.interface` provenance, 20 tools)
+#### Five-tier AI-client interface (`.interface` provenance, 22 five-tier tools)
 
 | Tier | Tools |
 |------|-------|
-| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_memory_get`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` |
-| 2 — Connections | `moot_link_memories`, `moot_connection_search`, `moot_connection_map` |
+| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_memory_get`, `moot_memory_list`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` |
+| 2 — Connections | `moot_link_memories`, `moot_review_tunnel`, `moot_connection_search`, `moot_connection_map` |
 | 3 — Knowledge Graph | `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`, `moot_fact_timeline` |
 | 4 — Journal | `moot_write_journal`, `moot_read_journal` |
 | 5 — Estate | `moot_estate_status`, `moot_estate_map`, `moot_estate_ping` |
@@ -188,7 +189,14 @@ not a ranked set); `subject`, `predicate`,
 `object` for `moot_file_fact`; `entry` for `moot_write_journal` (note: `entry`,
 not `content` — mirrors the `DiaryEntry.entry` substrate field); optional `query`
 for `moot_fact_search` (substring match across subject, predicate, and object;
-omit to return all active facts).
+omit to return all active facts); `tunnel_id` + `verdict` (`"accept"` |
+`"reject"`, optional `reason`) for `moot_review_tunnel` (settles a PROPOSED
+tunnel: accept → active, reject → withdrawn — durable, the pair is never
+re-proposed by the contradiction hunter; only proposed-lifecycle tunnels are
+reviewable). `moot_link_memories` accepts an optional `proposed` (boolean,
+default `false`) that files the link in the PROPOSED lifecycle instead of
+active — the agent-adjudication path for borderline candidates returned by
+`moot_hunt_contradictions`.
 
 Optional MCP arguments use an omit-to-default contract. If a caller wants the
 default, it omits the key entirely. A present key with JSON `null` is invalid
@@ -292,14 +300,16 @@ ToolDispatcher.federatedSearchToolName   // "moot_federated_search"
 Fans across locally-open estates the requester is authorized to read.
 Required caller field: `requesterEstateID` (UUID string of the requesting estate).
 
-#### Recipe and lens tools (`.recipe` provenance, 29 tools)
+#### Recipe and lens tools (`.recipe` provenance, 35 tools)
 
-The `.recipe` provenance bucket holds 29 tools: 8 CognitionKit recipe tools plus
-the 21 reasoning-lens tools below.
+The `.recipe` provenance bucket holds 35 tools: 12 CognitionKit recipe tools plus
+the 23 reasoning-lens tools below.
 
 - `moot_list_lenses`, `moot_list_recipes`, `moot_synthesize`, `moot_recall_precise`,
-  `moot_recall_shaped`, `moot_run_migration`, `moot_confirm_migration`, `moot_dream`
-  (8 CognitionKit recipe tools)
+  `moot_recall_shaped`, `moot_run_migration`, `moot_confirm_migration`, `moot_dream`,
+  `moot_consolidate`, `moot_recall_distilled`, `moot_recollect`,
+  `moot_hunt_contradictions`
+  (12 CognitionKit recipe tools)
   - `moot_list_recipes` — browse the full recipe catalog: name, version, description,
     required capabilities per entry. No estate args required.
   - `moot_recall_precise` — coarse-grab a generous candidate pool then re-rank by
@@ -313,18 +323,40 @@ the 21 reasoning-lens tools below.
     four ARIA filtering adjectives compose orthogonally (the preset ranks, the
     `filter` arg filters). Returns the same shape as `moot_memory_search`.
   - `moot_dream` — rebuild the co-occurrence/temporal matrix tier (the Brain's
-    association layer the matrix recall lane scores against) and run one dreaming
-    cycle (latent-alignment proposals + cycle diary). The matrix is built by
-    dreaming, not by capture, so a freshly-loaded estate has an empty matrix until
-    this runs. Returns a cycle summary.
-- 21 `moot_lens_*` tools: `moot_lens_keystones`, `moot_lens_constellation`,
+    association layer the matrix recall lane scores against), run one dreaming
+    cycle (latent-alignment proposals + cycle diary), and run one
+    contradiction-hunt sweep (content screen over semantically-near memory
+    pairs; strong conflicts persist as PROPOSED contradicts links for review).
+    The matrix is built by dreaming, not by capture, so a freshly-loaded estate
+    has an empty matrix until this runs. Returns a cycle summary including
+    contradiction counts.
+  - `moot_hunt_contradictions` — one bounded on-demand contradiction-hunt
+    sweep: kNN candidate pairs from the vector index, screened by the
+    SubstrateML conflict cue (negation asymmetry, same-template value
+    divergence, revision markers). Strong findings persist as PROPOSED
+    `contradicts` tunnels (settle via `moot_review_tunnel`); borderline pairs
+    return with content snippets for the calling agent to adjudicate via
+    `moot_link_memories kind=contradicts proposed=true`. Optional
+    `probe_limit` (default 500, max 10000) and `now` (ISO8601). Requires the
+    vector index (`moot_reindex` after bulk import). Dedup against ALL
+    existing contradicts tunnels (any lifecycle) is durable — rejected pairs
+    never re-propose. The same core pass runs inside `moot_dream` and hourly
+    in the resident daemon's contradiction-scout signal.
+- 23 `moot_lens_*` tools: `moot_lens_keystones`, `moot_lens_constellation`,
   `moot_lens_free_association`, `moot_lens_theme_weather`, `moot_lens_latent_themes`,
-  `moot_lens_bias`, `moot_lens_drift`, `moot_lens_contradiction`,
+  `moot_lens_bias`, `moot_lens_drift`, `moot_lens_node_motion`,
+  `moot_lens_cohesion`, `moot_lens_contradiction`,
   `moot_lens_trust_synthesis`, `moot_lens_partial_cue`, `moot_lens_anticipate`,
   `moot_lens_successors`, `moot_lens_overlap`, `moot_lens_divergence`,
   `moot_lens_associations`, `moot_lens_concepts`,
   `moot_lens_apriori`, `moot_lens_moment`, `moot_lens_rhythm`,
   `moot_lens_precedence`, `moot_lens_complexity`
+
+`moot_lens_contradiction` reports two lifecycle tiers on its contradicts-tunnel
+output: confirmed (active) edges, and PROPOSED edges flagged
+`proposed (agent-derived, unreviewed)` — shown by default so hunter findings
+surface without an extra flag. Withdrawn (rejected) and superseded edges never
+appear.
 
 **Advanced lens tools:**
 
@@ -1122,6 +1154,24 @@ alongside `build_serial`. Computed once at server startup by the host binary
 the kit itself, which does not read `~/.claude/plugins/` or know a product
 version. `aria-mcp-server` (both ports) has no plugin concept and always
 passes the empty/nil default. Both ports at parity.
+
+### 1.19.0 -- 2026-07-12
+Contradiction hunter MCP surface (both ports at parity, tool count 66 → 68):
+`moot_hunt_contradictions` (recipe — on-demand bounded content sweep; strong
+findings persist as PROPOSED `contradicts` tunnels, borderline pairs return
+with snippets for agent adjudication) and `moot_review_tunnel` (Tier 2 —
+accept/reject a proposed tunnel via `Estate.respondToTunnel`; rejection is
+durable). `moot_link_memories` gains optional `proposed: bool` (files the
+link in the PROPOSED lifecycle). `moot_dream` now runs the hunt sweep as its
+content-driven third phase and reports `contradictionsProposed` /
+`contradictionCandidatesBorderline`. `moot_lens_contradiction` output gains
+lifecycle tiers: proposed edges shown by default flagged
+`proposed (agent-derived, unreviewed)`; withdrawn/superseded excluded.
+Permission tier: both new tools `ask` (mutation table, both installer legs).
+Teachme guides for both tools plus updated dream/link guides. Contract tests
+updated: 68 total, 62 vault-off (Swift `ToolProjectionTests` /
+`V1ConformanceTests` / `VaultToolsTests`; Rust `dispatch_tests`;
+installer `PermissionsWriter` inventories both legs).
 
 ### 1.18.0 -- 2026-07-05
 ADR-025 wave 8.2: `moot_monitoring_status` tool (§2 Tool projection, Tier 5 —

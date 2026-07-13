@@ -83,6 +83,49 @@ struct InMemoryBasicTests {
         #expect(rows[0]["verbatim"] == .text("hello"))
     }
 
+    /// MX-TAB-Q1 regression: the InMemory RowStore orders and compares TEXT
+    /// by UTF-8 byte order (SQLite BINARY collation + the Rust leg's
+    /// String::cmp), NOT Swift's Unicode-canonical String comparison. Without
+    /// this the Swift InMemory backend disagreed with SQLite and the Rust leg
+    /// on TEXT ordering and on NFC/NFD equality — a cross-backend/cross-leg
+    /// parity gap. The Rust leg was already byte-order; this pins the Swift
+    /// side to match.
+    @Test func textOrderingAndEqualityAreByteExact() async throws {
+        let storage = makeStorage()
+        try await storage.open(schema: makeSchema())
+
+        // Byte order: "Z"=0x5A < "a"=0x61 < "É"(U+00C9, UTF-8 0xC3 0x89).
+        // Swift String `<` (Unicode-canonical) does NOT produce this order.
+        for text in ["a", "É", "Z"] {
+            _ = try await storage.rowStore.insert(
+                table: "drawers",
+                values: [
+                    "row_id": .uuid(UUID()),
+                    "adjective": .bitmap(0), "operational": .bitmap(0), "provenance": .bitmap(0),
+                    "verbatim": .text(text),
+                    "captured_at": .timestamp(Date(timeIntervalSince1970: 1000))
+                ]
+            )
+        }
+        let ordered = try await storage.rowStore.query(
+            table: "drawers",
+            where: nil,
+            orderBy: [OrderClause(column: Column(table: "drawers", name: "verbatim"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        #expect(ordered.map { $0["verbatim"] } == [.text("Z"), .text("a"), .text("É")],
+                "TEXT ordering must be UTF-8 byte order, not Unicode-canonical")
+
+        // NFC/NFD equality: precomposed "É" (U+00C9) and decomposed
+        // "E\u{0301}" are canonically equivalent but byte-inequal — a
+        // byte-exact predicate must NOT match across the two forms.
+        let nfd = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "verbatim"), .text("E\u{0301}"))
+        )
+        #expect(nfd.isEmpty, "NFD query must not match the byte-inequal NFC stored value")
+    }
+
     @Test func bitmaskPredicate() async throws {
         let storage = makeStorage()
         try await storage.open(schema: makeSchema())

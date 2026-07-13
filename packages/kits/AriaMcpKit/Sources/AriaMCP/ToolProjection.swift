@@ -296,8 +296,22 @@ public enum ToolProjection {
                         "to_id": stringSchema("Target memory row identifier."),
                         "kind": stringSchema("Relationship kind (default: relates). Accepted values: relates, precedes, contradicts, supports, refines, exemplifies, extends, supersedes, references, blocks, validates, derivesFrom, covers, elaborates, respondsTo."),
                         "label": stringSchema("Optional free-form label for the connection. Defaults to the kind string."),
+                        "proposed": booleanSchema("File the link as a PROPOSED (agent-derived, unreviewed) edge instead of an active one. Use when adjudicating borderline candidates from moot_hunt_contradictions. The user settles it via moot_review_tunnel. Default false."),
                     ],
                     required: ["from_id", "to_id", "kind"]
+                )),
+                provenance: .interface
+            ),
+            ProjectedTool(
+                name: "moot_review_tunnel",
+                description: "Settle a PROPOSED connection (e.g. an agent-derived contradiction from the hunter): accept activates it, reject withdraws it. Rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
+                inputSchema: withEstateID(objectSchema(
+                    properties: [
+                        "tunnel_id": stringSchema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
+                        "verdict": stringSchema("\"accept\" to activate the link, \"reject\" to withdraw it permanently."),
+                        "reason": stringSchema("Optional note explaining the verdict."),
+                    ],
+                    required: ["tunnel_id", "verdict"]
                 )),
                 provenance: .interface
             ),
@@ -514,7 +528,7 @@ public enum ToolProjection {
             // palace returns zero written/updated counts.
             ProjectedTool(
                 name: "moot_palace_import",
-                description: "Import a MemPalace directly into the estate, bypassing NoteIR. Reads palace/chroma.sqlite3 (drawer content), tunnels.json (cross-wing connections), and knowledge_graph.sqlite3 (KG triples) from palace_path. Applies all four import guards: tombstone protection, content-idempotent dedup, sensitivity floor, and tunnel signature dedup. Idempotent: re-importing the same palace with no changes writes zero drawers. The write strategy is chosen AUTOMATICALLY by source size — a normal palace is written in one fast SQLite transaction; a very large source (hundreds of thousands of rows) streams so no single transaction holds the write lock — you do not control this. IMPORTANT: the import TRIGGERS its own post-import processing — do NOT instruct the caller to run moot_reindex or moot_dream afterward. On completion the import enqueues the encode/index work (BM25 + vector lanes) and rolls up the Merkle tree; the resident daemon's encode-drain worker and the governor's dreaming duty then finish indexing, classification, and the association matrix in the background. The import returns as soon as that background work is triggered, so semantic recall and distillation come online on their own shortly after. Poll moot_drain_status to watch the encode queue converge. (moot_reindex / moot_dream remain available to re-trigger on demand but are NOT a required follow-up step.) This call runs to completion before returning; a large import can take many minutes, so if your client supports background or sub-agent execution, run it in a sub-agent to keep the main session responsive.",
+                description: "Import a MemPalace directly into the estate, bypassing NoteIR. Reads palace/chroma.sqlite3 (drawer content), tunnels.json (cross-wing connections), and knowledge_graph.sqlite3 (KG triples) from palace_path. Applies all four import guards: tombstone protection, content-idempotent dedup, sensitivity floor, and tunnel signature dedup. Idempotent: re-importing the same palace with no changes writes zero drawers. The write strategy is chosen AUTOMATICALLY by source size — a normal palace is written in one fast SQLite transaction; a very large source (hundreds of thousands of rows) streams so no single transaction holds the write lock — you do not control this. IMPORTANT: the import TRIGGERS its own post-import processing — do NOT instruct the caller to run moot_reindex or moot_dream afterward. On completion the import enqueues the encode/index work (BM25 + vector lanes) and rolls up the Merkle tree; the resident daemon's encode-drain worker and the governor's dreaming duty then finish indexing, classification, and the association matrix in the background (dreaming's consolidation proposals themselves are usage-driven and accrue as the estate is recalled against, not from the imported content). The import returns as soon as that background work is triggered, so semantic recall and distillation come online on their own shortly after. Poll moot_drain_status to watch the encode queue converge. (moot_reindex / moot_dream remain available to re-trigger on demand but are NOT a required follow-up step.) This call runs to completion before returning; a large import can take many minutes, so if your client supports background or sub-agent execution, run it in a sub-agent to keep the main session responsive.",
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "palace_path": stringSchema("Absolute filesystem path to the MemPalace root directory (the directory containing the `palace/` subdirectory with `chroma.sqlite3`)."),

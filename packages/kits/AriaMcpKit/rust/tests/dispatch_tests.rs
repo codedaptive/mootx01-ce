@@ -1,7 +1,8 @@
 //! Dispatch-surface integration tests — 5-tier AI-client interface (MCP-RUST-ALIGN-01).
 //!
-//! Tests the 66-tool surface: 22 interface tools (Tier 1–5 + moot_monitoring_status,
-//! including moot_memory_get), 1 federation tool, 11 recipe tools, 23 lens tools
+//! Tests the 68-tool surface: 23 interface tools (Tier 1–5 + moot_monitoring_status,
+//! including moot_memory_get and moot_review_tunnel), 1 federation tool,
+//! 12 recipe tools (including moot_hunt_contradictions), 23 lens tools
 //! (including moot_lens_cohesion and moot_lens_contradiction), 5 vault tools,
 //! and 4 maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
 //! moot_palace_import).
@@ -240,11 +241,11 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 66 tools exact
+// 1. tools/list surface assertions — 68 tools exact
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_66() {
+fn tools_list_count_is_68() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -253,26 +254,29 @@ fn tools_list_count_is_66() {
     // moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001) +
     // moot_palace_import (direct palace import, PAR-PB-1) +
     // moot_memory_get (fetch-drawer-by-ID, build-now per Bob's ruling) +
-    // moot_monitoring_status (ADR-025 wave 8.2, daemon telemetry monitoring control):
-    //   22  interface tools (Tier 1–5 + monitoring_status)
+    // moot_monitoring_status (ADR-025 wave 8.2, daemon telemetry monitoring control) +
+    // the contradiction hunter (moot_review_tunnel interface tool +
+    // moot_hunt_contradictions recipe tool):
+    //   23  interface tools (Tier 1–5 + monitoring_status + review_tunnel)
     //    1  federation tool (moot_federated_search)
-    //   11  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
+    //   12  recipe tools (list_lenses, list_recipes, synthesize, run_migration,
     //                     confirm_migration, recall_precise, recall_shaped, dream,
-    //                     consolidate, recall_distilled, recollect)
+    //                     consolidate, recall_distilled, recollect,
+    //                     hunt_contradictions)
     //   23  lens tools (moot_lens_* prefix; cohesion renamed, contradiction +
     //                   node_motion added)
     //    5  vault tools (moot_vault_export, import, status, reconcile, job)
     // ----
     //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
-    //   66  total
+    //   68  total
     let tools = build_tool_list();
     let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 66, "expected 66 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 68, "expected 68 tools; got {}", arr.len());
 }
 
 #[test]
-fn tools_list_name_set_matches_expected_66_names() {
-    // Gate: all 66 expected tool names are present, no more and no less.
+fn tools_list_name_set_matches_expected_68_names() {
+    // Gate: all 68 expected tool names are present, no more and no less.
     // moot_reindex is the maintenance tool (corpus/vector backfill).
     // moot_drain_status reports background drain progress (drain-status stream).
     // moot_palace_import is the direct palace import tool (PAR-PB-1).
@@ -294,8 +298,9 @@ fn tools_list_name_set_matches_expected_66_names() {
         "moot_erase_memory",
         "moot_confirm_memory",
         "moot_move_memory",
-        // Tier 2 — Connections (3)
+        // Tier 2 — Connections (4)
         "moot_link_memories",
+        "moot_review_tunnel",
         "moot_connection_search",
         "moot_connection_map",
         // Tier 3 — Knowledge graph (4)
@@ -314,9 +319,10 @@ fn tools_list_name_set_matches_expected_66_names() {
         "moot_monitoring_status",
         // Federation (1)
         "moot_federated_search",
-        // Recipe (11) — list_lenses + list_recipes + synthesize + run_migration
+        // Recipe (12) — list_lenses + list_recipes + synthesize + run_migration
         //               + confirm_migration + recall_precise + recall_shaped + dream
         //               + consolidate + recall_distilled + recollect
+        //               + hunt_contradictions
         "moot_list_lenses",
         "moot_list_recipes",
         "moot_synthesize",
@@ -328,6 +334,7 @@ fn tools_list_name_set_matches_expected_66_names() {
         "moot_consolidate",
         "moot_recall_distilled",
         "moot_recollect",
+        "moot_hunt_contradictions",
         "moot_reindex",
         "moot_drain_status",
         "moot_reclassify_fdc",
@@ -5194,7 +5201,7 @@ fn vault_enabled_default_is_true() {
 fn build_tool_list_with_vault_on_includes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(true);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 66, "vault-on must produce 66 tools");
+    assert_eq!(arr.len(), 68, "vault-on must produce 68 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -5209,7 +5216,7 @@ fn build_tool_list_with_vault_on_includes_vault_tools() {
 fn build_tool_list_with_vault_off_excludes_vault_tools() {
     let tools = build_tool_list_with_vault_flag(false);
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 60, "vault-off must produce 60 tools (66 - 5 vault - palace import)");
+    assert_eq!(arr.len(), 62, "vault-off must produce 62 tools (68 - 5 vault - palace import)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",

@@ -19,6 +19,31 @@ from moot_memory import MootMemoryHandler
 BASE_URL = os.environ.get("MOOTX01_URL", "http://127.0.0.1:4242")
 
 
+def _live_backend_unavailable_reason():
+    """One probe deciding whether the end-to-end classes can run.
+
+    The e2e tests need a live daemon WITH the memory tool enabled. On a
+    machine without a daemon (CI), or where the operator has not run
+    `mootx01 enable memory-tool`, they must SKIP with the reason — not
+    fail — so the test lane stays green everywhere while still running
+    fully wherever the backend is actually serving. Path-validation tests
+    are client-side and always run regardless.
+    """
+    try:
+        result = MootMemoryHandler(base_url=BASE_URL).execute(
+            {"command": "view", "path": "/memories"})
+    except Exception as exc:  # connection refused, timeout, …
+        return f"no daemon reachable at {BASE_URL}: {exc}"
+    if "memory tool is disabled" in result:
+        return "daemon's memory tool is disabled (run `mootx01 enable memory-tool`)"
+    if result.startswith("Error"):
+        return f"daemon at {BASE_URL} not serving /memories: {result[:120]}"
+    return None
+
+
+_SKIP_E2E_REASON = _live_backend_unavailable_reason()
+
+
 class TestPathValidation(unittest.TestCase):
     """Path traversal protection tests."""
 
@@ -43,6 +68,7 @@ class TestPathValidation(unittest.TestCase):
         self.assertIn("unknown command", result)
 
 
+@unittest.skipIf(_SKIP_E2E_REASON, _SKIP_E2E_REASON or "")
 class TestMemoryOperations(unittest.TestCase):
     """End-to-end tests against the live daemon."""
 
@@ -163,6 +189,7 @@ class TestMemoryOperations(unittest.TestCase):
         self.assertIn("exceeds", result)
 
 
+@unittest.skipIf(_SKIP_E2E_REASON, _SKIP_E2E_REASON or "")
 class TestPoisoningQuarantine(unittest.TestCase):
     """
     The differentiator test: model-written content lands as unconfirmed

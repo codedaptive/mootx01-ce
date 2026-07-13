@@ -386,6 +386,17 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.unretire_tunnel(tunnel_id, changed_by, now)
     }
 
+    fn respond_to_tunnel(
+        &self,
+        tunnel_id: &str,
+        accept: bool,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.respond_to_tunnel(tunnel_id, accept, changed_by, reason, now)
+    }
+
     fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.0.outline_children(parent_drawer_id)
     }

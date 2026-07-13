@@ -685,6 +685,12 @@ pub(crate) fn describe_glk_error(e: &genius_locus_kit::GeniusLocusKitError) -> S
                     "the source estate's custody mode refused the read",
                 FederatedReadRefusalReason::GrantRevoked =>
                     "the grant has been revoked",
+                // F-5: a non-empty grant signature failed verification against
+                // the source estate's registered Ed25519 key (forged or
+                // key-mismatched grant). Same wording posture as the other
+                // arms: state the refusal, no key material in the message.
+                FederatedReadRefusalReason::InvalidGrantSignature =>
+                    "the grant's signature failed verification",
             };
             format!(
                 "cross-estate read from {source} by {requester} refused: {why}"

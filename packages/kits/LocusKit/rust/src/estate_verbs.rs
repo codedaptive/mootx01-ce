@@ -679,13 +679,19 @@ impl Estate {
             ));
         }
 
-        // Encode origin_class into bits 6–8 of the tunnel operational bitmap.
-        // The decoder (`Tunnel::origin_class()` in `tunnel_operational.rs`) uses
-        // `bit_field::extract_field(operational_bitmap, 6, 3)`, so this write
-        // is the exact inverse. Default `UserExplicit` (raw 0) produces 0,
-        // preserving byte-identical all-zero defaults for existing callers
-        // (spec § 5.6 / cookbook §2.4).
-        let op_bitmap = bit_field::write_field(frame.origin_class.raw_value(), 0, 6, 3);
+        // Encode origin_class into bits 6–8 and lifecycle into bits 3–5 of
+        // the tunnel operational bitmap. The decoders (`Tunnel::origin_class()`
+        // / `Tunnel::lifecycle()` in `tunnel_operational.rs`) use
+        // `bit_field::extract_field` with the same shift/width, so these
+        // writes are the exact inverse. Defaults (`UserExplicit`, `Active` —
+        // both raw 0) produce 0, preserving byte-identical all-zero defaults
+        // for existing callers (spec § 5.6 / cookbook §2.4).
+        let op_bitmap = bit_field::write_field(
+            frame.lifecycle.raw_value(),
+            bit_field::write_field(frame.origin_class.raw_value(), 0, 6, 3),
+            3,
+            3,
+        );
         let mut tunnel = Tunnel::new(
             Uuid::new_v4().to_string(),
             frame.source_wing,
@@ -1453,6 +1459,23 @@ impl Estate {
         now: i64,
     ) -> Result<(), LocusKitError> {
         self.store.unretire_tunnel(tunnel_id, changed_by, now)
+    }
+
+    /// Review a `Proposed` tunnel: accept → `Active`, reject → `Withdrawn`.
+    /// Estate-level surface over `DrawerStore::respond_to_tunnel` — the
+    /// review verb the ARIA `moot_review_tunnel` tool and the dreaming
+    /// pipeline call. Only `Proposed` tunnels are reviewable; see the store
+    /// method for the lifecycle guard and audit contract. Mirrors Swift
+    /// `Estate.respondToTunnel(id:accept:changedBy:reason:now:)`.
+    pub fn respond_to_tunnel(
+        &self,
+        tunnel_id: &str,
+        accept: bool,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.respond_to_tunnel(tunnel_id, accept, changed_by, reason, now)
     }
 
     /// Recall-trace rows whose `recalled_at` falls in `[since, now]` (both

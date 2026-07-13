@@ -120,32 +120,42 @@ struct PortableKernelDispatcherTests {
         #endif
     }
 
+    // The three tests below call kernelForCurrentPlatform() — the package's
+    // one telemetry emit site — so they hold GlobalTestLock: a concurrent
+    // KernelTelemetryTests enabled-window would otherwise receive their
+    // backend_selected emissions and fail its exact-count assertions.
     @Test("for_current_platform picks SIMD on arm64, scalar elsewhere")
-    func forCurrentPlatformPicksSimdOnArm64() {
-        #if arch(arm64)
-        #expect(PortableKernel.kernelForCurrentPlatform().kind == .simd)
-        #else
-        #expect(PortableKernel.kernelForCurrentPlatform().kind == .scalar)
-        #endif
+    func forCurrentPlatformPicksSimdOnArm64() async {
+        await GlobalTestLock.shared.withLock {
+            #if arch(arm64)
+            #expect(PortableKernel.kernelForCurrentPlatform().kind == .simd)
+            #else
+            #expect(PortableKernel.kernelForCurrentPlatform().kind == .scalar)
+            #endif
+        }
     }
 
     @Test("dispatcher OR-reduce matches the scalar reference")
-    func dispatcherOrReduceMatchesScalar() {
-        let fps = orReduceFixture()
-        let s = ScalarKernel().orReduce256(fps)
-        let d = PortableKernel.kernelForCurrentPlatform().orReduce256(fps)
-        #expect(s == d)
+    func dispatcherOrReduceMatchesScalar() async {
+        await GlobalTestLock.shared.withLock {
+            let fps = orReduceFixture()
+            let s = ScalarKernel().orReduce256(fps)
+            let d = PortableKernel.kernelForCurrentPlatform().orReduce256(fps)
+            #expect(s == d)
+        }
     }
 
     @Test("dispatcher Hamming distance matches the scalar reference")
-    func dispatcherHammingDistanceMatchesScalar() {
-        let a = Fingerprint256(block0: 0xCAFE_BABE, block1: 0xDEAD_BEEF,
-                               block2: 0x0123_4567_89AB_CDEF, block3: 0xFEDC_BA98_7654_3210)
-        let b = Fingerprint256(block0: 0x1234_5678, block1: 0x9ABC_DEF0,
-                               block2: 0x0F0F_0F0F_0F0F_0F0F, block3: 0xF0F0_F0F0_F0F0_F0F0)
-        let s = ScalarKernel().hammingDistance256(a, b)
-        let d = PortableKernel.kernelForCurrentPlatform().hammingDistance256(a, b)
-        #expect(s == d)
+    func dispatcherHammingDistanceMatchesScalar() async {
+        await GlobalTestLock.shared.withLock {
+            let a = Fingerprint256(block0: 0xCAFE_BABE, block1: 0xDEAD_BEEF,
+                                   block2: 0x0123_4567_89AB_CDEF, block3: 0xFEDC_BA98_7654_3210)
+            let b = Fingerprint256(block0: 0x1234_5678, block1: 0x9ABC_DEF0,
+                                   block2: 0x0F0F_0F0F_0F0F_0F0F, block3: 0xF0F0_F0F0_F0F0_F0F0)
+            let s = ScalarKernel().hammingDistance256(a, b)
+            let d = PortableKernel.kernelForCurrentPlatform().hammingDistance256(a, b)
+            #expect(s == d)
+        }
     }
 }
 

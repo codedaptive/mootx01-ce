@@ -12,7 +12,7 @@ use crate::drawer_operational::{CaptureChannel, ContentKind};
 use crate::estate_types::LatticeAnchor;
 use crate::filter::LineageID;
 use crate::provenance::{Channel, Confidence, Confirmation, Sensitivity, SourceType};
-use crate::tunnel_operational::{TunnelKind, TunnelOriginClass};
+use crate::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
 
 // MARK: - CaptureFrame
 
@@ -215,6 +215,16 @@ pub struct TunnelCaptureFrame {
     /// so all existing callers continue to produce a zero operational
     /// bitmap byte-identically. Mirrors Swift `TunnelCaptureFrame.originClass`.
     pub origin_class: TunnelOriginClass,
+    /// Lifecycle state stamped at capture. Encodes into bits 3–5 of the
+    /// tunnel's `operational_bitmap` (decoder is `TunnelLifecycle` in
+    /// `tunnel_operational.rs`). Defaults to `Active` (raw 0) so all
+    /// existing callers continue to produce a zero operational bitmap
+    /// byte-identically. `Proposed` is the agent-derived review state:
+    /// the contradiction hunter captures `contradicts` tunnels as
+    /// `Proposed` and `respond_to_tunnel` moves them to `Active`
+    /// (accepted) or `Withdrawn` (rejected). Mirrors Swift
+    /// `TunnelCaptureFrame.lifecycle`.
+    pub lifecycle: TunnelLifecycle,
 }
 
 impl TunnelCaptureFrame {
@@ -241,6 +251,7 @@ impl TunnelCaptureFrame {
             kind: TunnelKind::References,
             added_by: added_by.into(),
             origin_class: TunnelOriginClass::UserExplicit,
+            lifecycle: TunnelLifecycle::Active,
         }
     }
 }

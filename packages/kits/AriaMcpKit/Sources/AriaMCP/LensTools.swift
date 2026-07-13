@@ -168,7 +168,7 @@ enum LensTools {
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_contradiction",
-                description: "Reasoning lens: surface genuine contradictions — drawer pairs connected by a contradicts tunnel, and KG facts with conflicting objects for the same subject+predicate.",
+                description: "Reasoning lens: surface recorded contradictions — drawer pairs connected by a contradicts tunnel (confirmed edges plus PROPOSED agent-derived findings from the contradiction hunter, flagged unreviewed), and KG facts with conflicting objects for the same subject+predicate. Reports recorded links only; to scan memory CONTENT for new conflicts run moot_hunt_contradictions (or moot_dream, which includes a hunt sweep). Settle proposed edges with moot_review_tunnel.",
                 inputSchema: objectSchema(
                     properties: [
                         "estateID": estateIDSchema,
@@ -487,8 +487,14 @@ enum LensTools {
             // parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
             // that normal recall applies via insertDefaults. Filter at the ARIA tool
             // boundary only — allTunnels() has internal callers that need the full set.
+            // Lifecycle tiers: ACTIVE edges are confirmed; PROPOSED edges (the
+            // contradiction hunter's agent-derived findings, and agent-filed
+            // proposed links) are shown by default but flagged unreviewed.
+            // Withdrawn (rejected) and superseded edges are settled history
+            // and never surface here.
             let contradictsTunnels = allTunnels.filter {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
+                    && ($0.lifecycle == .active || $0.lifecycle == .proposed)
                     && $0.adjectiveSensitivity.isBulkExportable
             }
             // Source-ID gate: an exportable tunnel may still point at a
@@ -523,7 +529,10 @@ enum LensTools {
                     let tgt = t.targetDrawerId.map {
                         hiddenTunnelEndpointIDs.contains($0) ? "<hidden>" : $0
                     } ?? "\(t.targetWing)/\(t.targetRoom)"
-                    lines.append("  \(src) contradicts \(tgt) (tunnel \(t.id))")
+                    let tier = t.lifecycle == .proposed
+                        ? " [proposed (agent-derived, unreviewed) — accept/reject via moot_review_tunnel]"
+                        : ""
+                    lines.append("  \(src) contradicts \(tgt) (tunnel \(t.id))\(tier)")
                 }
             }
             // (b) Conflicting KG facts — apply MCP disclosure ceiling before grouping.

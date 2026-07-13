@@ -17,6 +17,7 @@ pub mod bradley_terry;
 pub mod calibration;
 pub mod community_detection;
 pub mod composite_distance;
+pub mod conflict_cue;
 pub mod eigenvalue_centrality;
 pub mod feature_extractors;
 pub mod fft;

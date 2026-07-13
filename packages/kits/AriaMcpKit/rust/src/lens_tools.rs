@@ -37,7 +37,7 @@ use cognition_kit::{
 use genius_locus_kit::{bridge_audit_event, event_lag_pairs};
 use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer_operational::ContentKind;
-use locus_kit::tunnel_operational::TunnelKind;
+use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle};
 use substrate_ml::apriori_mining::AprioriThresholds;
 use substrate_ml::association_rule_mining::MiningThresholds;
 use substrate_ml::formal_concept_analysis::BoundedConceptMiner;
@@ -401,11 +401,20 @@ pub fn dispatch(
             // Parity with the default BitmapEvaluator ceiling (SensitivityAtMost(Elevated))
             // that normal recall applies via insert_defaults. Filter at the ARIA tool boundary
             // only — all_tunnels() has internal callers that need the full set.
+            // Lifecycle tiers: ACTIVE edges are confirmed; PROPOSED edges (the
+            // contradiction hunter's agent-derived findings, and agent-filed
+            // proposed links) are shown by default but flagged unreviewed.
+            // Withdrawn (rejected) and superseded edges are settled history
+            // and never surface here. Mirrors the Swift lens.
             let contradicts_tunnels: Vec<_> = all_tunnels
                 .into_iter()
                 .filter(|t| {
                     t.kind == TunnelKind::Contradicts
                         && t.tombstoned_at.is_none()
+                        && matches!(
+                            t.lifecycle(),
+                            TunnelLifecycle::Active | TunnelLifecycle::Proposed
+                        )
                         && t.adjective_sensitivity().is_bulk_exportable()
                 })
                 .collect();
@@ -453,7 +462,15 @@ pub fn dispatch(
                         Some(id) => id,
                         None => t.target_wing.as_str(),
                     };
-                    lines.push(format!("  {} contradicts {} (tunnel {})", src, tgt, t.id));
+                    let tier = if t.lifecycle() == TunnelLifecycle::Proposed {
+                        " [proposed (agent-derived, unreviewed) — accept/reject via moot_review_tunnel]"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!(
+                        "  {} contradicts {} (tunnel {}){}",
+                        src, tgt, t.id, tier
+                    ));
                 }
             }
 

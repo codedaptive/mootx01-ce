@@ -6,7 +6,7 @@
 
 import Testing
 import Foundation
-import SubstrateLib
+@testable import SubstrateLib
 import SubstrateTypes
 
 private let testUUID = UUID(uuidString: "12345678-1234-1234-1234-123456789ABC")!

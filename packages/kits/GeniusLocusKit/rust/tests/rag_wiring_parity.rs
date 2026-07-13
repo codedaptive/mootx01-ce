@@ -172,6 +172,7 @@ fn signal_emits_real_associate_frames_for_vectors_in_proximity() {
         Arc::clone(&store),
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        None,
     );
     let report = fire_spec(spec);
 
@@ -221,6 +222,7 @@ fn signal_does_not_emit_associates_for_distant_vectors() {
         Arc::clone(&store),
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        None,
     );
     let report = fire_spec(spec);
 
@@ -242,4 +244,103 @@ fn signal_does_not_emit_associates_for_distant_vectors() {
         })
         .count();
     assert_eq!(associate_count, 0, "no associates for distant vectors");
+}
+
+// MARK: - corpus-lane parity (mirrors Swift corpusLaneEmitsDrawerLevelAssociations)
+
+/// Production estates never hold drawer-keyed vectors: the estate lifecycle
+/// registers the corpus's shared vector store and the encode pipeline keys
+/// every row by CHUNK UUID under the corpus's own model_id. This test
+/// reproduces that wiring shape and proves the signal's corpus lane maps
+/// chunk kNN hits back to owning drawers:
+///   - two near chunks from DIFFERENT drawers → exactly one associate;
+///   - two near chunks of the SAME drawer → collapsed (no self-association).
+/// Without the chunk → source mapping, the same rows would produce ≥2
+/// chunk-id pairs; with it, exactly one drawer pair survives.
+#[test]
+fn corpus_lane_emits_drawer_level_associations() {
+    // Token-bag provider: sums a per-token deterministic vector so sentences
+    // sharing most tokens land near each other in engram space — the
+    // semantic property production's distributional ensemble provides (the
+    // whole-text Deterministic hash does not).
+    let provider = vectorkit::FloatSimHashEmbeddingProvider::new(
+        "assoc-token-bag-v1",
+        "1.0",
+        0xC0FF_EE01,
+        |text: &str| {
+            let mut acc = vec![0.0f32; 32];
+            for token in text
+                .to_lowercase()
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|t| !t.is_empty())
+            {
+                let mut h = token.bytes().fold(14_695_981_039_346_656_037u64, |a, b| {
+                    (a ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
+                });
+                for slot in acc.iter_mut() {
+                    h = h
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let mantissa = (h >> 40) as f32 / (1u64 << 24) as f32;
+                    *slot += mantissa * 2.0 - 1.0;
+                }
+            }
+            Ok(acc)
+        },
+    );
+    // Fdc is the plain pass-through provider slot (stateless, no training) —
+    // the vehicle for injecting the token-bag provider.
+    let corpus = Arc::new(
+        Corpus::open(
+            make_storage(),
+            EmbeddingModelConfig::Fdc { provider: Box::new(provider) },
+        )
+        .expect("Corpus::open"),
+    );
+
+    // Cross-drawer near pair (one shared token universe) …
+    corpus
+        .ingest("the api timeout is 30 seconds", "drawer-A", T0_MILLIS)
+        .expect("ingest A");
+    corpus
+        .ingest("the api timeout is 90 seconds", "drawer-B", T0_MILLIS)
+        .expect("ingest B");
+    // … and a same-drawer near pair in a DISJOINT token universe: two
+    // chunks of drawer-C near each other but far from the A/B cluster.
+    corpus
+        .ingest("zebra quagga okapi giraffe pronghorn", "drawer-C", T0_MILLIS)
+        .expect("ingest C1");
+    corpus
+        .ingest("zebra quagga okapi giraffe wildebeest", "drawer-C", T0_MILLIS)
+        .expect("ingest C2");
+
+    // "test-v1" matches no corpus row — the drawer-keyed lane is empty by
+    // construction; only the corpus lane can find pairs.
+    let spec = VectorSimilaritySignal::spec(
+        corpus.shared_vector_store(),
+        "test-v1".to_string(),
+        VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+        Some(Arc::clone(&corpus)),
+    );
+    let report = fire_spec(spec);
+
+    let associate_count = report
+        .recent_outcomes
+        .iter()
+        .filter(|o| {
+            matches!(
+                o,
+                SignalRouteOutcome::Routed { verb }
+                | SignalRouteOutcome::RoutedButVerbStubbed { verb }
+                if verb == "associate"
+            )
+        })
+        .count();
+    assert_eq!(
+        associate_count, 1,
+        "exactly one drawer-level associate: the A/B pair emits, the same-drawer C pair collapses"
+    );
+    // 1 associate + 1 scan-summary diagnostic.
+    assert_eq!(report.emission_count, 2);
+    assert_eq!(report.recent_diagnostics.len(), 1);
 }

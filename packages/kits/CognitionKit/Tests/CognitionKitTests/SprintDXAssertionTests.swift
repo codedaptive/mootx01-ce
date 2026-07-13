@@ -9,8 +9,9 @@
 //     from Dc4: consolidate, distilled_recall, recollect; + node_motion
 //     diffusion node-layer lens).
 //
-//   • GeniusLocusKit.defaultStandingSignalNames.count == 9 — 7 baseline
-//     + DistillationSignal (Dg4) + TrainingSignal (ADR-018 F1).
+//   • GeniusLocusKit.defaultStandingSignalNames.count == 10 — 7 baseline
+//     + DistillationSignal (Dg4) + TrainingSignal (ADR-018 F1)
+//     + ContradictionScoutSignal (contradiction hunter).
 //
 // isRecipeTool assertions for the three distillation tools live in
 // AriaMcpKit/RecipeToolsTests.swift (they require AriaMcpKit scope).
@@ -35,13 +36,14 @@ struct SprintDXAssertionTests {
             "RecipeCatalog must contain exactly 30 recipes: 26 baseline + 3 distillation (Dc4) + node_motion")
     }
 
-    /// CK-DX-2: defaultStandingSignalNames contains all 9 v1 signals.
+    /// CK-DX-2: defaultStandingSignalNames contains all 10 standing signals.
     ///
-    /// Nine signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal (ADR-018 F1).
-    /// Architecture spec §11.2 defines the complete v1 set.
-    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 9 (includes TrainingSignal)")
-    func defaultStandingSignalNamesCountIsNine() {
-        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 9,
-            "defaultStandingSignalNames must contain exactly 9 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal (ADR-018 F1)")
+    /// Ten signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal
+    /// (ADR-018 F1) + ContradictionScoutSignal (contradiction hunter).
+    /// The signal inventory table in GENIUSLOCUSKIT_SPEC.md defines the set.
+    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 10 (includes ContradictionScoutSignal)")
+    func defaultStandingSignalNamesCountIsTen() {
+        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 10,
+            "defaultStandingSignalNames must contain exactly 10 signals: 7 baseline + DistillationSignal (Dg4) + TrainingSignal (ADR-018 F1) + ContradictionScoutSignal")
     }
 }
