@@ -60,10 +60,27 @@ struct V1ConformanceTests {
         try pipe.fileHandleForWriting.close()
     }
 
-    /// Read all output bytes from the pipe and split on newlines into separate
-    /// JSON-RPC response objects. Throws if any line does not parse as a JSON object.
-    private func readResponses(from pipe: Pipe) throws -> [[String: JSONValue]] {
-        let data = try pipe.fileHandleForReading.readToEnd() ?? Data()
+    /// Run the server and collect all JSON-RPC responses from its output pipe.
+    ///
+    /// Drains the output pipe in a concurrent Task BEFORE `server.run()` begins
+    /// writing. `StdioServer.write` is a blocking `write(2)`; once a response
+    /// exceeds the kernel pipe buffer (the 68-tool `tools/list` frame does),
+    /// a sequential run-then-read pattern deadlocks: the server blocks in
+    /// `write(2)` waiting for a reader, and the reader is only reached after
+    /// `server.run()` returns. The drain Task's `readToEnd()` consumes bytes
+    /// as they are written and returns on EOF, which the explicit close of
+    /// the write side delivers right after the server exits.
+    private func collectResponses(
+        server: StdioServer,
+        input inPipe: Pipe,
+        output outPipe: Pipe
+    ) async throws -> [[String: JSONValue]] {
+        let drain = Task {
+            (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+        }
+        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
+        try outPipe.fileHandleForWriting.close()
+        let data = await drain.value
         let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
         return try lines.map { line in
             let parsed = try JSONValue.parse(Data(line))
@@ -105,10 +122,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         #expect(responses.count == 1, "one request must produce one response")
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
@@ -130,12 +144,12 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 66 tools.
+    /// VC-2: `tools/list` returns exactly 68 tools.
     ///
     /// The count is a snapshot of the v1.0 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
     /// and commit the reason with the change.
-    @Test func v1ToolsListReturns66Tools() async throws {
+    @Test func v1ToolsListReturns68Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -147,14 +161,11 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 66 = current ToolProjection snapshot: interface + federation + recipe
+        // 68 = current ToolProjection snapshot: interface + federation + recipe
         // + lens + vault + maintenance (including moot_reclassify_fdc). 3 new
         // distillation recipe tools added (DA1): moot_consolidate, moot_recall_distilled,
         // moot_recollect.
@@ -164,7 +175,10 @@ struct V1ConformanceTests {
         // moot_palace_import (PAR-PB-1): direct palace → substrate import.
         // moot_drain_status: AI-queryable background drain progress.
         // moot_reclassify_fdc: AI-queryable FDC anchor audit/repair/reset.
-        #expect(tools.count == 66, "tools/list must return exactly 66 tools; got \(tools.count)")
+        // Contradiction hunter adds two: moot_hunt_contradictions (recipe,
+        // on-demand content sweep) + moot_review_tunnel (Tier 2, settle a
+        // PROPOSED tunnel).
+        #expect(tools.count == 68, "tools/list must return exactly 68 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────
@@ -189,10 +203,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
 
         // Must be a result (not a JSON-RPC error).
@@ -230,10 +241,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
 
         // A bad schema_version must produce a JSON-RPC error response.
@@ -266,10 +274,7 @@ struct V1ConformanceTests {
         ])
         try sendFrame(frame, to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         let response = try #require(responses.first)
 
         // A conforming schema_version must not produce a JSON-RPC error.
@@ -303,10 +308,7 @@ struct V1ConformanceTests {
         ])
         try sendFrames([resourcesFrame, promptsFrame], to: inPipe)
 
-        await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
-        try outPipe.fileHandleForWriting.close()
-
-        let responses = try readResponses(from: outPipe)
+        let responses = try await collectResponses(server: server, input: inPipe, output: outPipe)
         #expect(responses.count == 2, "two requests must produce two responses")
 
         for response in responses {

@@ -2,11 +2,12 @@ import Foundation
 import LocusKit
 import VectorKit
 
-/// Registration helper for the nine v1 standing signals — architecture
-/// spec §11.2.
+/// Registration helper for the ten standing signals — architecture
+/// spec §11.2 plus the contradiction scout (signal 10, the hunter's
+/// background half).
 ///
 /// Calling `registerDefaultStandingSignals(in:now:)` registers all
-/// nine default signal specs against the addressed estate's scheduler
+/// ten default signal specs against the addressed estate's scheduler
 /// at their architecture-spec cadences. The returned dictionary maps
 /// each signal's stable name to its freshly-minted `SignalID` so the
 /// application can subscribe, inspect, or unregister selectively.
@@ -35,7 +36,7 @@ import VectorKit
 /// and the gate short-circuits below the threshold.
 public extension GeniusLocusKit {
 
-    /// Names of the nine v1 standing signals, in the order they are
+    /// Names of the ten standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -44,6 +45,7 @@ public extension GeniusLocusKit {
             DreamingSignal.signalName,
             MaintenanceSignal.signalName,
             VectorSimilaritySignal.signalName,
+            ContradictionScoutSignal.signalName,
             DecaySweepSignal.signalName,
             ByReferenceValiditySignal.signalName,
             EndOfDayTournamentSignal.signalName,
@@ -85,6 +87,13 @@ public extension GeniusLocusKit {
     ///     threshold the daemon is dormant and no matrix work runs.
     ///     Defaults to a no-op that returns an empty detail string —
     ///     correct for test registration where no live daemon is available.
+    ///   - huntCycle: async closure forwarded to
+    ///     `ContradictionScoutSignal.spec(huntCycle:)`. The caller wraps
+    ///     `kit.huntContradictions` with the estate handle and model ID;
+    ///     the hunt persists proposed contradicts tunnels itself and the
+    ///     closure returns (proposed, borderline) counts. Defaults to a
+    ///     no-op returning zeros — correct for test registration where no
+    ///     live hunter is wired.
     ///   - modelID: the embedding model whose stored vectors are scanned
     ///     by the vector-similarity signal. Default `"minilm-v6"`.
     ///   - now: the deterministic clock — flowed through to the
@@ -100,13 +109,27 @@ public extension GeniusLocusKit {
         dreamingCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         distillationCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         trainingCycle: @escaping @Sendable (Date) async throws -> String = { _ in "" },
+        huntCycle: @escaping @Sendable (Date) async throws -> (proposed: Int, borderline: Int)
+            = { _ in (0, 0) },
         modelID: String = "minilm-v6",
         now: Date
     ) async throws -> [String: SignalID] {
         let specs: [SignalSpec] = [
             DreamingSignal.spec(daemonCycle: dreamingCycle),
             MaintenanceSignal.defaultSpec(),
-            VectorSimilaritySignal.spec(vectorStore: vectorStore, modelID: modelID),
+            // The estate's Corpus (when registered) enables the signal's
+            // chunk-keyed corpus lane — the only vector-row population
+            // production estates hold. Without it, the signal scans only
+            // drawer-keyed `modelID` rows and finds nothing on a real
+            // install.
+            VectorSimilaritySignal.spec(
+                vectorStore: vectorStore, modelID: modelID,
+                corpus: corpusKits[handle]),
+            // Contradiction scout — the hunter's background half. The caller
+            // wraps kit.huntContradictions with the estate's handle/model;
+            // the no-op default is appropriate for tests without a wired
+            // hunter (same convention as dreaming/distillation/training).
+            ContradictionScoutSignal.spec(huntCycle: huntCycle),
             DecaySweepSignal.defaultSpec(),
             ByReferenceValiditySignal.defaultSpec(),
             EndOfDayTournamentSignal.defaultSpec(),

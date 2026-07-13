@@ -57,6 +57,7 @@ struct RecipeToolsTests {
             "moot_confirm_migration",
             "moot_consolidate",
             "moot_dream",
+            "moot_hunt_contradictions",
             "moot_lens_anticipate",
             "moot_lens_apriori",
             "moot_lens_associations",
@@ -666,11 +667,11 @@ struct RecipeToolsTests {
 
     // MARK: - tools() count
 
-    @Test func testToolsCountIncreasedByThree() {
-        // Baseline was 8 (listRecipes, listRecipesCatalog, groundedSynthesis,
-        // preciseRecall, shapedRecall, runMigration, confirmMigration, dream).
-        // After adding consolidate, recallDistilled, recollect: 11.
-        #expect(RecipeTools.tools().count == 11)
+    @Test func testRecipeToolsCount() {
+        // 12 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
+        // preciseRecall, shapedRecall, runMigration, confirmMigration, dream,
+        // consolidate, recallDistilled, recollect, huntContradictions.
+        #expect(RecipeTools.tools().count == 12)
     }
 
     // MARK: - moot_consolidate dispatch

@@ -23,7 +23,44 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_ml::lattice_distance::UDCTreeDistance;
+/// HARNESS-LOCAL reference implementation of the §8.3 UDC tree distance,
+/// mirroring glref-swift-LatticeDistance.swift — the contract the
+/// checked-in vectors pin (the Swift harness validates the same glref
+/// reference; the Rust glref file was removed in the ce-sync structural
+/// reset, 5807002f).
+///
+/// This is deliberately NOT `substrate_ml::lattice_distance` — the
+/// production impl clamps to [0, 1] (a composite_distance precondition,
+/// arrived with the EE 06-29 mirror, 39c274fe), while the reference
+/// metric's codomain is [0, 2] (a=\"1.8.5.1.8\" vs b=\"6.1.5.5.5\" is
+/// exactly 2.0). Pointing the harness at the clamped production impl
+/// failed 8 of 32 canonical cases while the Swift twin passed — the two
+/// legs must validate the SAME reference, so the reference lives here,
+/// with the harness, like the recovered merkle spike.
+struct UDCTreeDistance;
+
+impl UDCTreeDistance {
+    fn longest_common_prefix_length(a: &str, b: &str) -> usize {
+        a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+    }
+
+    /// Reference distance: shared-prefix divergence over the longer
+    /// code's length, UNCLAMPED (codomain [0, 2]).
+    fn distance(a: &str, b: &str) -> f64 {
+        if a == b {
+            return 0.0;
+        }
+        let len_a = a.chars().count();
+        let len_b = b.chars().count();
+        let max_len = len_a.max(len_b);
+        if max_len == 0 {
+            return 0.0;
+        }
+        let lcp = Self::longest_common_prefix_length(a, b);
+        let raw = ((len_a - lcp) + (len_b - lcp)) as f64;
+        raw / max_len as f64
+    }
+}
 
 pub struct LatticePrimitive;
 

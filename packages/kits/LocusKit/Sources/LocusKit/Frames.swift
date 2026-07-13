@@ -207,6 +207,15 @@ public struct TunnelCaptureFrame: Sendable {
     /// so all existing callers continue to produce a zero operational
     /// bitmap byte-identically.
     public var originClass: TunnelOriginClass
+    /// Lifecycle state stamped at capture. Encodes into bits 3–5 of the
+    /// tunnel's `operationalBitmap` (decoder is `TunnelLifecycle` in
+    /// `TunnelOperational.swift`). Defaults to `.active` (raw 0) so all
+    /// existing callers continue to produce a zero operational bitmap
+    /// byte-identically. `.proposed` is the agent-derived review state:
+    /// the contradiction hunter captures `contradicts` tunnels as
+    /// `.proposed` and `respondToTunnel` moves them to `.active`
+    /// (accepted) or `.withdrawn` (rejected).
+    public var lifecycle: TunnelLifecycle
 
     public init(
         sourceWing: String,
@@ -218,7 +227,8 @@ public struct TunnelCaptureFrame: Sendable {
         sourceDrawerId: String? = nil,
         targetDrawerId: String? = nil,
         kind: TunnelKind = .references,
-        originClass: TunnelOriginClass = .userExplicit
+        originClass: TunnelOriginClass = .userExplicit,
+        lifecycle: TunnelLifecycle = .active
     ) {
         self.sourceWing = sourceWing
         self.sourceRoom = sourceRoom
@@ -230,6 +240,7 @@ public struct TunnelCaptureFrame: Sendable {
         self.kind = kind
         self.addedBy = addedBy
         self.originClass = originClass
+        self.lifecycle = lifecycle
     }
 }
 

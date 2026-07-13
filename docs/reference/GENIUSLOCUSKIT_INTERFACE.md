@@ -2,8 +2,8 @@
 title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-07-09
-version: 1.16.0
+date: 2026-07-12
+version: 1.18.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -783,17 +783,24 @@ role, source file. Full signatures live in the cited file.
   `SignalEmission`, `SignalReport`, `SignalID`, `SubscriptionID` are
   threaded through the Tier-1 signal methods; the rest are the
   emission/report vocabulary.)
-- **Six v1 standing signals (architecture § 11.2):** `DreamingSignal`,
-  `MaintenanceSignal`, `VectorSimilaritySignal`, `DecaySweepSignal`,
-  `ByReferenceValiditySignal`, `EndOfDayTournamentSignal` — each
+- **Ten standing signals (architecture § 11.2; inventory in
+  GENIUSLOCUSKIT_SPEC.md):** `DreamingSignal`, `MaintenanceSignal`,
+  `VectorSimilaritySignal`, `ContradictionScoutSignal`, `DecaySweepSignal`,
+  `ByReferenceValiditySignal`, `EndOfDayTournamentSignal`,
+  `TemporalCausalitySignal`, `DistillationSignal`, `TrainingSignal` — each
   `Brain/Signals/*.swift`; registered together by
   `registerDefaultStandingSignals` (Tier 1). Names: `dreaming-daemon`,
-  `maintenance-daemon`, `vector-similarity`, `decay-sweep`,
-  `by-reference-validity`, `end-of-day-tournament`.
-  `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:)` —
-  production factory; captures `VectorStore`, scans
-  row embeddings via `findNearest` on each 5-minute pass, emits
-  `AssociateFrames` for pairs within Hamming threshold (default 64).
+  `maintenance-daemon`, `vector-similarity`, `contradiction-scout`,
+  `decay-sweep`, `by-reference-validity`, `end-of-day-tournament`,
+  `temporal-causality-fold`, `distillation-sweep`, `training-daemon`.
+  `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:corpus:)` —
+  production factory; captures `VectorStore` (and the estate's `Corpus`
+  when registered), scans row embeddings via `findNearest` on each
+  5-minute pass across two lanes — drawer-keyed rows under `modelID`,
+  and chunk-keyed corpus rows mapped back to owning drawers via
+  `Corpus.sourceIDs(forChunkIDs:)` (the lane production estates actually
+  populate) — and emits `AssociateFrames` carrying drawer ids for pairs
+  within Hamming threshold (default 64).
 - **Recall cold-path signals:** `GraphCache`,
   `PreferenceStore` — public protocols defined in `GeniusLocusKit.swift`.
   Registered via `registerGraphCache(_:for:)` and `registerPreferenceStore(_:for:)`.
@@ -1463,17 +1470,20 @@ aliases. Foundation `UUID` on the Swift side is a `[u8;16]` newtype alias
 | Signal route outcome | `SignalRouteOutcome` (`Brain/SignalSchedule.swift`) | `SignalRouteOutcome` (`rust/src/brain/scheduler/api.rs`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | Signal report | `SignalReport` (`Brain/SignalSchedule.swift`) | `SignalReport` (`rust/src/brain/scheduler/api.rs`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 
-### Six v1 standing signals (+ temporal)
+### Ten standing signals
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
 | Dreaming signal | `DreamingSignal` (`Brain/Signals/DreamingSignal.swift`) | `DreamingSignal` (`rust/src/brain/signals/dreaming.rs`) | public / pub | identical spec factory | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | Maintenance signal | `MaintenanceSignal` (`Brain/Signals/MaintenanceSignal.swift`) | `MaintenanceSignal` (`rust/src/brain/signals/maintenance.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
-| Vector-similarity signal | `VectorSimilaritySignal` (`Brain/Signals/VectorSimilaritySignal.swift`) | `VectorSimilaritySignal` (`rust/src/brain/signals/vector_similarity.rs`) | public / pub | identical; Hamming threshold default 64 | `standing_signals_parity.rs`, `rag_wiring_parity.rs` / `RAGWiringTests.swift` | Confirmed |
+| Vector-similarity signal | `VectorSimilaritySignal` (`Brain/Signals/VectorSimilaritySignal.swift`) | `VectorSimilaritySignal` (`rust/src/brain/signals/vector_similarity.rs`) | public / pub | identical; Hamming threshold default 64; two-lane mining (drawer-keyed `modelID` rows + chunk-keyed corpus rows mapped to owning drawers via `Corpus.sourceIDs(forChunkIDs:)` / `source_ids_for_chunks` when a Corpus is supplied) | `standing_signals_parity.rs`, `rag_wiring_parity.rs` (incl. corpus-lane test) / `RAGWiringTests.swift` | Confirmed |
+| Contradiction-scout signal | `ContradictionScoutSignal` (`Brain/Signals/ContradictionScoutSignal.swift`) | `ContradictionScoutSignal` (`rust/src/brain/signals/contradiction_scout.rs`) | public / pub | identical; hourly cadence, closure-injected hunt cycle (single-write invariant: the hunt persists, the signal emits one diagnostic) | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | Decay-sweep signal | `DecaySweepSignal` (`Brain/Signals/DecaySweepSignal.swift`) | `DecaySweepSignal` (`rust/src/brain/signals/decay_sweep.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | By-reference validity signal | `ByReferenceValiditySignal` (`Brain/Signals/ByReferenceValiditySignal.swift`) | `ByReferenceValiditySignal` (`rust/src/brain/signals/by_reference_validity.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | End-of-day tournament signal | `EndOfDayTournamentSignal` (`Brain/Signals/EndOfDayTournamentSignal.swift`) | `EndOfDayTournamentSignal` (`rust/src/brain/signals/end_of_day_tournament.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
-| Temporal-causality signal | `TemporalCausalitySignal` (`Brain/Signals/TemporalCausalitySignal.swift`) | (T-matrix fold lives in `matrix::rebuild_temporal`; no standalone signal type) | public enum / n/a | Swift exposes a caseless `enum` namespace for the T-matrix signal helpers; Rust folds the same math into `MatrixTier::rebuild_temporal` (see matrix-rebuild concordance above) | `matrix_parity.rs` rebuild_temporal / `MatrixTierTests.swift`, `StandingSignalsTests.swift` | Confirmed |
+| Temporal-causality signal | `TemporalCausalitySignal` (`Brain/Signals/TemporalCausalitySignal.swift`) | `TemporalCausalitySignal` (`rust/src/brain/signals/temporal_causality.rs`) | public / pub | identical spec factory; the T-matrix fold math itself lives in `MatrixTier::rebuild_temporal` (see matrix-rebuild concordance above) | `matrix_parity.rs` rebuild_temporal / `MatrixTierTests.swift`, `StandingSignalsTests.swift` | Confirmed |
+| Distillation signal | `DistillationSignal` (`Brain/Signals/DistillationSignal.swift`) | `DistillationSignal` (`rust/src/brain/signals/distillation.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Training signal | `TrainingSignal` (`Brain/Signals/TrainingSignal.swift`) | `TrainingSignal` (`rust/src/brain/signals/training.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 
 ### Matrix tier (F/C/O/T model, NMF, calibration, persistence)
 
@@ -1858,12 +1868,45 @@ section above.
 | Sync-engine entry | — | `SyncEngineEntry` (`rust/src/coordinator.rs`) | — / pub struct | Rust-only coordinator state record for the sync engine; no Swift parallel (sync lifecycle managed via actor state) | coordinator tests | Confirmed (Rust-only) |
 | Distillation brain signal | `DistillationSignal` (`Brain/Signals/DistillationSignal.swift:30`, `public enum`) | `DistillationSignal` (`rust/src/brain/signals/distillation.rs:18`, `pub struct`) | public / pub | Swift uses a caseless `public enum` as a namespace; Rust uses a zero-size `pub struct` — same idiom for a type that is only a factory for `SignalSpec`. Both expose `spec(distillationCycle:)`/`spec(distillation_cycle)` (production wiring) and `defaultSpec()`/`default_spec()` (no-op diagnostic variant). Signal name `"distillation-sweep"`, hourly cadence (3 600 s). Wired in DG5. NT-DOC-1. | `DistillationSignalTests.swift` ↔ `distillation_signal_tests.rs` | Confirmed |
 | Training brain signal | `TrainingSignal` (`Brain/Signals/TrainingSignal.swift:42`, `public enum`) | `TrainingSignal` (`rust/src/brain/signals/training.rs:24`, `pub struct`) | public / pub | Same Swift-enum/Rust-struct namespace idiom as `DistillationSignal`. Both expose `spec(trainingCycle:)`/`spec(training_cycle)` and `defaultSpec()`/`default_spec()`. Signal name `"training-daemon"`, hourly cadence (3 600 s). Wired per ADR-018 F1. NT-DOC-1. | `StandingSignalsTests.swift` ↔ `distillation_signal_tests.rs` (covers both brain signals) | Confirmed |
+| Contradiction hunt pass | `GeniusLocusKit.huntContradictions(in:modelID:probeLimit:filedAfter:proximityThreshold:now:)` (`Brain/ContradictionHunt.swift`) | `EstateCoordinator::hunt_contradictions(handle, model_id, probe_limit, filed_after, proximity_threshold, now)` (`rust/src/coordinator.rs`) | public / pub | identical pass: kNN candidates from the estate's registered VectorStore (`findByKeyword("")` → `getVector` → `findNearest` limit 5, proximity ≤ 64) mined on TWO lanes — drawer-keyed rows under the caller's modelID, and (when a Corpus is registered) chunk-keyed corpus rows under `corpus.modelID` with chunk hits mapped back to owning drawers via `Corpus.sourceIDs(forChunkIDs:)` (production estates register `corpus.sharedVectorStore` and hold ONLY chunk-keyed rows) — then SubstrateML conflict-cue screen; strong cue (≥ 0.70) → `capture(TunnelCaptureFrame(kind: .contradicts, lifecycle: .proposed, originClass: .derived))`, borderline (≥ 0.45) → returned with ≤ 160-char snippets, never persisted; durable dedup vs ALL contradicts tunnels incl. withdrawn; `filedAfter` watermark; `vectorStoreAvailable` honesty flag | `ContradictionHuntTests.swift` (incl. corpus-lane test) ↔ `coordinator.rs` hunt tests | Confirmed |
+| Contradiction hunt report | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`Brain/ContradictionHunt.swift`) | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`rust/src/coordinator.rs`) | public / pub | identical field sets (vectorStoreAvailable/probesScanned/pairsScreened/proposed/borderline/deduplicated; borderline adds sourceSnippet/targetSnippet) | `ContradictionHuntTests.swift` ↔ `coordinator.rs` hunt tests | Confirmed |
+| Contradiction-scout brain signal | `ContradictionScoutSignal` (`Brain/Signals/ContradictionScoutSignal.swift`, `public enum`) | `ContradictionScoutSignal` (`rust/src/brain/signals/contradiction_scout.rs:19`, `pub struct`) | public / pub | Same namespace idiom as `DistillationSignal`. Both expose `spec(huntCycle:)`/`spec(hunt_cycle)` (production wiring; the hunt persists its own writes, the signal emits one summary diagnostic) and `defaultSpec()`/`default_spec()`. Signal name `"contradiction-scout"`, hourly cadence (3 600 s). Registered 4th in `registerDefaultStandingSignals`. | `StandingSignalsTests.swift` ↔ `standing_signals_parity.rs` | Confirmed |
 
 ---
 
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-07-12
+VectorSimilaritySignal corpus lane (both ports): `spec` gains an optional
+`corpus` parameter (Swift default `nil`; Rust `Option<Arc<Corpus>>` as a
+required fourth argument). With a corpus supplied, the five-minute pass
+also mines the chunk-keyed corpus vector lane and maps hits to owning
+drawers — see GENIUSLOCUSKIT_SPEC.md 1.13.0 for the behavioral contract.
+`registerDefaultStandingSignals` / `default_standing_signal_specs` forward
+the estate's registered corpus; Rust `EstateCoordinator::corpus_for`
+promoted `pub(crate)` → `pub` for the governor's cross-crate bootstrap.
+
+### 1.17.0 -- 2026-07-12
+Contradiction hunter (both ports at parity): new Tier-1 kit pass
+`huntContradictions(in:modelID:probeLimit:filedAfter:proximityThreshold:now:)`
+(Swift `Brain/ContradictionHunt.swift`) / `EstateCoordinator::hunt_contradictions`
+(Rust `coordinator.rs`) with `ContradictionHuntReport` /
+`ProposedContradiction` / `BorderlineContradiction` result types, and the
+`ContradictionScoutSignal` standing signal (`"contradiction-scout"`, hourly,
+closure-injected hunt cycle, registered 4th). Standing-signal inventory is
+now ten; the interface concordance table renamed from "Six v1 standing
+signals (+ temporal)" and gained scout/distillation/training rows, and the
+temporal row now points at the standalone Rust `TemporalCausalitySignal`
+type (`brain/signals/temporal_causality.rs`). Consumed by the ARIA
+`moot_hunt_contradictions` / `moot_dream` / contradiction-scout surfaces
+(ARIA_MCP_SPEC.md § contradiction hunter). The hunt mines TWO vector
+lanes: drawer-keyed rows under the caller's modelID, and chunk-keyed
+corpus rows mapped back to owning drawers via the new
+`Corpus.sourceIDs(forChunkIDs:)` / `source_ids_for_chunks` accessor
+(CORPUSKIT_INTERFACE.md 1.14.0) — the lane production estates actually
+populate.
 
 ### 1.16.0 -- 2026-07-09
 AUDIT-ALERT-RESTORE (Bob's option-1 ruling): `UnifiedAuditLog` gained a

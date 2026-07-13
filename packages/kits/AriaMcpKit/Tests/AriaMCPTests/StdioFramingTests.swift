@@ -93,13 +93,21 @@ struct StdioFramingTests {
         try inPipe.fileHandleForWriting.write(contentsOf: payload)
         try inPipe.fileHandleForWriting.close()
 
+        // Drain the output pipe concurrently: the 68-tool tools/list response
+        // exceeds the kernel pipe buffer, so `StdioServer.write`'s blocking
+        // write(2) deadlocks if nothing reads until server.run() returns.
+        // readToEnd() consumes as the server writes and returns on the EOF
+        // delivered by the explicit close below.
+        let drain = Task {
+            (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+        }
         await server.run(
             input: inPipe.fileHandleForReading,
             output: outPipe.fileHandleForWriting
         )
         try outPipe.fileHandleForWriting.close()
 
-        let response = try outPipe.fileHandleForReading.readToEnd() ?? Data()
+        let response = await drain.value
         #expect(response.last == 0x0A)
         let parsed = try JSONValue.parse(response.dropLast())
         let object = try #require(parsed.objectValue)

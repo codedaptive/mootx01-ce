@@ -54,8 +54,9 @@ At the end, run `mootx01 status` to confirm everything came up.
 
 The resident daemon is the part of MOOTx01 that runs continuously in the
 background. Think of it as the part that keeps your memory estate live and
-running maintenance — the "dreaming" work that computes patterns, updates
-connections, and prepares recall for the questions you'll ask tomorrow.
+running maintenance — the "dreaming" work that rebuilds the association
+matrix, strengthens connections between memories that get used together,
+and prepares recall for the questions you'll ask tomorrow.
 
 It listens on `http://127.0.0.1:4242` (loopback only — nothing leaves your
 machine). Supported AI clients are wired to this address so they all share

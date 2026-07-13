@@ -94,7 +94,7 @@ use crate::schema;
 use crate::source_catalog_entry::{SourceCatalogEntry, SourceKind};
 use crate::summaries::{RoomSummary, WingSummary};
 use crate::tunnel::Tunnel;
-use crate::tunnel_operational::TunnelKind;
+use crate::tunnel_operational::{TunnelKind, TunnelLifecycle};
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::storage::{IsolationLevel, Storage};
@@ -2732,6 +2732,46 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
+    fn respond_to_tunnel(
+        &self,
+        tunnel_id: &str,
+        accept: bool,
+        _changed_by: &str,
+        _reason: Option<&str>,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        let existing = self.get_tunnel(tunnel_id)?
+            .ok_or_else(|| LocusKitError::TunnelNotFound { id: tunnel_id.to_string() })?;
+        // Only a Proposed tunnel is reviewable — a settled edge cannot be
+        // silently rewritten by a stale review request.
+        if existing.lifecycle() != TunnelLifecycle::Proposed {
+            return Err(LocusKitError::InvalidContent(format!(
+                "tunnel {} is {:?} — only a proposed tunnel can be reviewed",
+                tunnel_id,
+                existing.lifecycle()
+            )));
+        }
+        let reviewed = existing.with_lifecycle(if accept {
+            TunnelLifecycle::Active
+        } else {
+            TunnelLifecycle::Withdrawn
+        });
+        let mut vals = std::collections::BTreeMap::new();
+        vals.insert("operationalBitmap".to_string(), TypedValue::Bitmap(reviewed.operational_bitmap));
+        self.storage
+            .row_store()
+            .update(
+                T_TUNNELS,
+                vals,
+                &StoragePredicate::Eq(
+                    Column::new(T_TUNNELS, "id"),
+                    TypedValue::Text(tunnel_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------
     // Outline helpers (ADR-017 §11, NT-L5)
     // -----------------------------------------------------------------
@@ -4530,6 +4570,16 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn unretire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
         self.inner.unretire_tunnel(tunnel_id, changed_by, now)
+    }
+    fn respond_to_tunnel(
+        &self,
+        tunnel_id: &str,
+        accept: bool,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.respond_to_tunnel(tunnel_id, accept, changed_by, reason, now)
     }
     fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.outline_children(parent_drawer_id)

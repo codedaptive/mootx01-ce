@@ -103,8 +103,9 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_erase_memory",
     "moot_confirm_memory",
     "moot_move_memory",
-    // Tier 2 — Connections (3)
+    // Tier 2 — Connections (4)
     "moot_link_memories",
+    "moot_review_tunnel",
     "moot_connection_search",
     "moot_connection_map",
     // Tier 3 — Knowledge graph (4)
@@ -366,6 +367,7 @@ pub fn dispatch(
         "moot_confirm_memory" => run_confirm_memory(args, registry, ledger),
         "moot_move_memory" => run_move_memory(args, registry, ledger),
         "moot_link_memories" => run_link_memories(args, registry),
+        "moot_review_tunnel" => run_review_tunnel(args, registry),
         "moot_connection_search" => run_connection_search(args, registry),
         "moot_connection_map" => run_connection_map(args, registry),
         "moot_file_fact" => run_file_fact(args, registry),
@@ -1359,6 +1361,15 @@ fn run_link_memories(
     frame.source_drawer_id = Some(from_id.to_string());
     frame.target_drawer_id = Some(to_id.to_string());
     frame.kind = tunnel_kind;
+    // `proposed: true` files the link in the PROPOSED lifecycle — the
+    // agent-adjudication path: the caller judged a borderline candidate from
+    // moot_hunt_contradictions and records the verdict as a reviewable
+    // proposal instead of an immediately-active edge. The user settles it
+    // via moot_review_tunnel. Mirrors Swift `runLinkMemories`.
+    let proposed = optional_bool(args, "proposed")?.unwrap_or(false);
+    if proposed {
+        frame.lifecycle = locus_kit::tunnel_operational::TunnelLifecycle::Proposed;
+    }
 
     // Access the estate directly for tunnel capture (not via coordinator, which
     // has no capture_tunnel wrapper — the estate_verbs surface exposes it).
@@ -1370,8 +1381,13 @@ fn run_link_memories(
 
     match locus_estate.capture_tunnel(frame, now) {
         Ok(tunnel) => {
+            let state_note = if proposed {
+                " [proposed — review via moot_review_tunnel]"
+            } else {
+                ""
+            };
             let body = format!(
-                "linked {from_id} → {to_id} via {kind_str} ({})",
+                "linked {from_id} → {to_id} via {kind_str} ({}){state_note}",
                 tunnel.id
             );
             Ok(text_result(&body))
@@ -1379,6 +1395,56 @@ fn run_link_memories(
         // LocusKitError has Display — surface the English reason without
         // leaking internal Rust enum variant names to the agent.
         Err(e) => Ok(error_result(&format!("link_memories failed: {e}"))),
+    }
+}
+
+/// Settle a PROPOSED tunnel: accept activates it, reject withdraws it.
+/// Only tunnels in the proposed lifecycle (the contradiction hunter's
+/// findings and agent-filed proposed links) are reviewable; a settled edge
+/// cannot be rewritten by a stale review. Rejected pairs are never
+/// re-proposed by the hunter (durable dedup). Mirrors Swift `runReviewTunnel`.
+fn run_review_tunnel(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    let tunnel_id = require_string(args, "tunnel_id")?;
+    let verdict = require_string(args, "verdict")?;
+    if verdict != "accept" && verdict != "reject" {
+        return Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "verdict must be \"accept\" or \"reject\"".to_string(),
+        ));
+    }
+    let reason = optional_string(args, "reason")?;
+
+    let now = wall_now();
+    let coord = estate.coord.lock().unwrap();
+    let locus_estate = coord.estate_for(&estate.handle).map_err(|e| {
+        JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, crate::dispatch::describe_glk_error(&e))
+    })?;
+
+    match locus_estate.respond_to_tunnel(
+        tunnel_id,
+        verdict == "accept",
+        registry.server_identity.as_str(),
+        reason,
+        now,
+    ) {
+        Ok(()) => {
+            let outcome = if verdict == "accept" {
+                "accepted — the contradicts link is now active"
+            } else {
+                "rejected — the link is withdrawn and this pair will never be re-proposed"
+            };
+            Ok(text_result(&format!(
+                "moot_review_tunnel: {tunnel_id} {outcome}."
+            )))
+        }
+        // Not-found and not-proposed are caller errors, surfaced as clean
+        // tool-level messages rather than opaque failures. LocusKitError has
+        // Display — mirror Swift's errorResult path.
+        Err(e) => Ok(error_result(&format!("moot_review_tunnel: {e}"))),
     }
 }
 

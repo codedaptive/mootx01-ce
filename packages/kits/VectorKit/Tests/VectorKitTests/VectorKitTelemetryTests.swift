@@ -303,24 +303,23 @@ struct VectorKitTelemetryShapeTests {
                 filedAt: Date(timeIntervalSince1970: 1_700_000_000)
             )
 
-            // Filter to vectorkit.* to exclude any substrate.* emissions.
+            // Assert the correctly-shaped metric EXISTS among the samples rather
+            // than assuming it is sink.first: telemetry delivery is async, so a
+            // lingering emission from an earlier test can land in this globally-
+            // installed sink first (GlobalTestLock serializes the test bodies but
+            // not an in-flight emission). Selecting by name+shape keeps the
+            // assertion precise — a genuinely wrong-shaped metric still fails —
+            // while being immune to that stray-sample race.
             let vkSamples = sink.samples(prefix: "vectorkit.")
-            guard let sample = vkSamples.first,
-                  case let .metric(name, value, tags, _) = sample else {
-                Issue.record("expected a vectorkit.* .metric sample; got \(String(describing: sink.samples.first))")
-                Intellectus.setEnabled(false)
-                Intellectus.install(sink: NoOpSink.shared)
-                return
+            let hasShapedInsertMetric = vkSamples.contains { s in
+                guard case let .metric(name, value, tags, _) = s else { return false }
+                return name == "vectorkit.index.insert_latency_ms"
+                    && value >= 0.0
+                    && tags["kit"] == "VectorKit"
+                    && tags["model_id"] == "minilm"
             }
-
-            #expect(name == "vectorkit.index.insert_latency_ms",
-                "insert latency metric must be named vectorkit.index.insert_latency_ms")
-            #expect(value >= 0.0,
-                "latency_ms must be non-negative; got \(value)")
-            #expect(tags["kit"] == "VectorKit",
-                "insert latency must carry kit=VectorKit tag")
-            #expect(tags["model_id"] == "minilm",
-                "insert latency must carry model_id=minilm tag")
+            #expect(hasShapedInsertMetric,
+                "addVector must emit vectorkit.index.insert_latency_ms with value>=0, kit=VectorKit, model_id=minilm")
 
             // Restore defaults.
             Intellectus.setEnabled(false)
@@ -410,20 +409,17 @@ struct VectorKitTelemetryShapeTests {
 
             _ = try await store.findByKeyword("drawer", limit: 10)
 
+            // Same async-delivery robustness as the insert-shape test above:
+            // find the keyword metric by name+shape, not by sink position.
             let vkSamples = sink.samples(prefix: "vectorkit.")
-            guard let sample = vkSamples.first,
-                  case let .metric(name, value, tags, _) = sample else {
-                Issue.record("expected a vectorkit.* .metric sample; got nothing")
-                Intellectus.setEnabled(false)
-                Intellectus.install(sink: NoOpSink.shared)
-                return
+            let hasShapedKeywordMetric = vkSamples.contains { s in
+                guard case let .metric(name, value, tags, _) = s else { return false }
+                return name == "vectorkit.search.keyword_result_count"
+                    && value == 3.0
+                    && tags["kit"] == "VectorKit"
             }
-
-            #expect(name == "vectorkit.search.keyword_result_count",
-                "keyword metric must be named vectorkit.search.keyword_result_count")
-            #expect(value == 3.0,
-                "keyword_result_count must equal 3 (one per distinct drawer); got \(value)")
-            #expect(tags["kit"] == "VectorKit")
+            #expect(hasShapedKeywordMetric,
+                "findByKeyword must emit vectorkit.search.keyword_result_count=3 with kit=VectorKit")
 
             // Restore defaults.
             Intellectus.setEnabled(false)

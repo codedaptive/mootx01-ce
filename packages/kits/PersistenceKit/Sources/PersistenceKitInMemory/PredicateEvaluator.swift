@@ -12,9 +12,17 @@ enum PredicateEvaluator {
         case .isTrue: return true
         case .isFalse: return false
         case .eq(let col, let v):
-            return (row[col.name] ?? .null) == v
+            // UTF-8 byte equality via TypedValueComparator — matches SQLite BINARY collation
+            // and the Rust leg's String::eq (byte-exact). Do NOT use TypedValue == (Swift
+            // String == applies Unicode canonical normalisation, so precomposed "É" U+00C9
+            // and decomposed "E\u{0301}" compare equal even though their byte sequences
+            // differ). ?? 1: incompatible types return nil → treat as not-equal, consistent
+            // with the prior TypedValue == behaviour for mismatched cases.
+            // MX-TAB-Q1 resolution (2026-07-12): equality paths now share the same
+            // byte-exact comparator as the ordering paths (lt/lte/gt/gte).
+            return (TypedValueComparator.compare(row[col.name] ?? .null, v) ?? 1) == 0
         case .neq(let col, let v):
-            return (row[col.name] ?? .null) != v
+            return (TypedValueComparator.compare(row[col.name] ?? .null, v) ?? 1) != 0
         case .lt(let col, let v):
             return (TypedValueComparator.compare(row[col.name] ?? .null, v) ?? 1) < 0
         case .lte(let col, let v):
@@ -29,7 +37,11 @@ enum PredicateEvaluator {
             return !(row[col.name] ?? .null).isNull
         case .in(let col, let values):
             let v = row[col.name] ?? .null
-            return values.contains(v)
+            // Closure form routes TEXT membership through byte-exact comparison
+            // (same rationale as .eq above — Swift contains(_:) uses ==, which
+            // is Unicode-canonical for String and would silently accept NFD/NFC
+            // variants as equal when BINARY collation requires byte identity).
+            return values.contains { TypedValueComparator.compare(v, $0) == 0 }
         case .like(let col, let pattern):
             guard case .text(let s) = row[col.name] ?? .null else { return false }
             return likeMatch(s, pattern: pattern)
@@ -92,7 +104,17 @@ enum TypedValueComparator {
         case (.float(let x), .float(let y)):
             return x == y ? 0 : (x < y ? -1 : 1)
         case (.text(let x), .text(let y)):
-            return x == y ? 0 : (x < y ? -1 : 1)
+            // UTF-8 byte order — matching SQLite BINARY collation and the Rust leg's
+            // `String::cmp` (byte-lexicographic). Do NOT use Swift String `<` or `==`:
+            // Swift compares after Unicode canonical normalization, so two byte-inequal
+            // strings (e.g. precomposed "é" vs decomposed "e\u{0301}") may compare
+            // equal or in different order than their bytes. The byte-equality check
+            // preserves strict three-way semantics: 0 only when bytes are identical,
+            // not merely when strings are canonically equivalent.
+            // Collation locked to byte order for cross-backend/cross-leg parity
+            // (MX-TAB-Q1 — resolved 2026-07-12).
+            if x.utf8.elementsEqual(y.utf8) { return 0 }
+            return x.utf8.lexicographicallyPrecedes(y.utf8) ? -1 : 1
         case (.timestamp(let x), .timestamp(let y)):
             return x == y ? 0 : (x < y ? -1 : 1)
         case (.uuid(let x), .uuid(let y)):

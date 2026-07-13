@@ -1,4 +1,4 @@
-// brain/signals/default_set.rs — registration helper for the nine v1
+// brain/signals/default_set.rs — registration helper for the ten
 // standing signals. Mirrors `DefaultStandingSignals.swift`.
 //
 // Signal history:
@@ -8,6 +8,8 @@
 //   Signal 8     DG2 / 2026-06-19: DistillationSignal (hourly distillation sweep).
 //   Signal 9     ADR-018 F1 / 2026-06-20: TrainingSignal (hourly training daemon,
 //                previously orphaned — zero production callers before this wire).
+//   Signal 10    Contradiction hunter / 2026-07-12: ContradictionScoutSignal
+//                (hourly content-conflict pass; the hunter's background half).
 //
 // The VectorSimilaritySignal spec is parameterized on a VectorStore (to query
 // real row embeddings on each fire). Signals 7–9 use their `default_spec()`
@@ -28,18 +30,19 @@ use vectorkit::VectorStore;
 
 use crate::brain::scheduler::api::SignalSpec;
 use crate::brain::signals::{
-    ByReferenceValiditySignal, DecaySweepSignal, DistillationSignal, DreamingSignal,
-    EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal, TrainingSignal,
-    VectorSimilaritySignal,
+    ByReferenceValiditySignal, ContradictionScoutSignal, DecaySweepSignal, DistillationSignal,
+    DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal,
+    TrainingSignal, VectorSimilaritySignal,
 };
 
-/// Stable names of the nine v1 standing signals, in registration
+/// Stable names of the ten standing signals, in registration
 /// order. Mirrors Swift's `GeniusLocusKit.defaultStandingSignalNames`.
-pub fn default_standing_signal_names() -> [&'static str; 9] {
+pub fn default_standing_signal_names() -> [&'static str; 10] {
     [
         DreamingSignal::SIGNAL_NAME,
         MaintenanceSignal::SIGNAL_NAME,
         VectorSimilaritySignal::SIGNAL_NAME,
+        ContradictionScoutSignal::SIGNAL_NAME,
         DecaySweepSignal::SIGNAL_NAME,
         ByReferenceValiditySignal::SIGNAL_NAME,
         EndOfDayTournamentSignal::SIGNAL_NAME,
@@ -67,17 +70,29 @@ pub fn default_standing_signal_names() -> [&'static str; 9] {
 pub fn default_standing_signal_specs(
     vector_store: Arc<VectorStore>,
     model_id: impl Into<String>,
+    corpus: Option<Arc<corpus_kit::corpus::Corpus>>,
 ) -> Vec<SignalSpec> {
     vec![
         // No-op daemon cycle: returns zero proposals. Callers that have a live
         // DreamingDaemon should pass a real closure via DreamingSignal::spec.
         DreamingSignal::spec(Arc::new(|| vec![])),
         MaintenanceSignal::default_spec(),
+        // The estate's Corpus (when registered) enables the signal's
+        // chunk-keyed corpus lane — the only vector-row population
+        // production estates hold. Without it, the signal scans only
+        // drawer-keyed `model_id` rows and finds nothing on a real install.
         VectorSimilaritySignal::spec(
             vector_store,
             model_id.into(),
             VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
+            corpus,
         ),
+        // Signal 10: ContradictionScoutSignal registered with its no-op
+        // spec — the generic helper cannot supply the estate-specific hunt
+        // closure. Production callers wire a live hunt via
+        // ContradictionScoutSignal::spec(hunt_cycle) around
+        // EstateCoordinator::hunt_contradictions.
+        ContradictionScoutSignal::default_spec(),
         DecaySweepSignal::default_spec(),
         ByReferenceValiditySignal::default_spec(),
         EndOfDayTournamentSignal::default_spec(),

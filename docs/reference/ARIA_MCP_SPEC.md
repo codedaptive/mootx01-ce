@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.13.0
+version: 1.14.0
 status: active
-date: 2026-07-05
+date: 2026-07-12
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -140,12 +140,12 @@ The external MCP tool surface is an AI-client-oriented interface
 organized in five tiers. This design exposes familiar, task-oriented verbs
 to AI clients rather than the substrate's internal grammar vocabulary.
 
-### Five-tier external tool surface (20 interface tools)
+### Five-tier external tool surface (22 interface tools)
 
 | Tier | Tools | Substrate operation |
 |------|-------|---------------------|
-| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_memory_get`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` | GLK capture/recall (by query or by id)/mutate/withdraw/expunge/reanchor on drawers |
-| 2 — Connections | `moot_link_memories`, `moot_connection_search`, `moot_connection_map` | GLK tunnel capture/recall |
+| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_memory_get`, `moot_memory_list`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` | GLK capture/recall (by query or by id)/mutate/withdraw/expunge/reanchor on drawers |
+| 2 — Connections | `moot_link_memories`, `moot_review_tunnel`, `moot_connection_search`, `moot_connection_map` | GLK tunnel capture/recall; `Estate.respondToTunnel` (proposed → active/withdrawn) |
 | 3 — Knowledge Graph | `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`, `moot_fact_timeline` | GLK captureKGFact/recallKGFacts/retireKGFact |
 | 4 — Journal | `moot_write_journal`, `moot_read_journal` | GLK addDiaryEntry/readDiaryEntries |
 | 5 — Estate | `moot_estate_status`, `moot_estate_map`, `moot_estate_ping` | Kit estate introspection |
@@ -153,6 +153,40 @@ to AI clients rather than the substrate's internal grammar vocabulary.
 One federation tool (`moot_federated_search`) sits above the interface tier. It performs
 a grant-authorized federated read across all locally-open estates the requester is
 authorized for.
+
+### Contradiction hunter surface
+
+Three tools plus one lens expose the content-driven contradiction hunter
+(GLK `huntContradictions` / `EstateCoordinator::hunt_contradictions`):
+
+- `moot_hunt_contradictions` (recipe) — one bounded on-demand sweep: kNN
+  candidate pairs from the vector index, screened by the SubstrateML
+  conflict cue. Strong findings persist as `contradicts` tunnels with
+  lifecycle `proposed` / origin class `derived` (sensitivity = max of the
+  endpoint tiers, stamped by `addTunnel`); borderline pairs are returned
+  with ≤160-char snippets and never persisted — the calling agent
+  adjudicates and records genuine conflicts via
+  `moot_link_memories kind=contradicts proposed=true`. Dedup is durable
+  against ALL existing contradicts tunnels including withdrawn ones: a
+  rejected pair is never re-proposed. Optional `probe_limit`
+  (default 500, max 10000) and `now` (ISO8601, deterministic runs). With
+  no vector index the report says so honestly and scans nothing.
+- `moot_review_tunnel` (Tier 2, ask tier) — settles a proposed tunnel:
+  `verdict: "accept"` → lifecycle `active`; `"reject"` → `withdrawn`.
+  Only proposed-lifecycle tunnels are reviewable; not-found and
+  not-proposed return clean tool-level errors.
+- `moot_dream` — runs the same hunt sweep as its content-driven third
+  phase (probe budget 500/call) and reports `contradictionsProposed` /
+  `contradictionCandidatesBorderline` in the cycle summary.
+- `moot_lens_contradiction` — reports lifecycle tiers on contradicts
+  edges: active (confirmed) and proposed (flagged
+  `proposed (agent-derived, unreviewed)`, shown by default);
+  withdrawn/superseded never surface.
+
+The same core pass also runs hourly in the resident daemon
+(`contradiction-scout`, standing signal 10 — see GENIUSLOCUSKIT_SPEC.md
+signal inventory), so the background and on-demand surfaces share one
+implementation and one dedup contract.
 
 ### `moot_memory_get` — fetch a drawer by id
 
@@ -822,6 +856,15 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.14.0 -- 2026-07-12
+Contradiction hunter surface (§11): `moot_hunt_contradictions` (recipe,
+on-demand bounded content sweep), `moot_review_tunnel` (Tier 2 review verb
+over `Estate.respondToTunnel`), `moot_link_memories` optional
+`proposed: bool`, `moot_dream` third phase (hunt sweep + contradiction
+counts), `moot_lens_contradiction` lifecycle tiers (proposed shown by
+default, flagged). Total tool count: 68 (was 66). Permission tier `ask`
+for both new tools. Both Swift and Rust ports at parity.
 
 ### 1.13.0 -- 2026-07-05
 ADR-025 wave 8.2: adds `moot_monitoring_status` to the interface-tool surface.

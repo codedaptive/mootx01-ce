@@ -101,13 +101,24 @@ struct ServeCommand: AsyncParsableCommand {
         // stdio is not guarded here: when a resident is live it FORWARDS to it
         // (T4, above) rather than opening a second writer, and when none is live it
         // opens the estate directly and the drain lease (T3) prevents double-drain.
+        //
+        // Liveness is IDENTITY-VERIFIED (ProcessIdentity), not a bare
+        // kill(pid, 0): PIDs recycle across reboots, so a stale PID file
+        // left by a crash can point at an unrelated live process, and a
+        // bare existence check then refuses to start forever — under
+        // launchd that is a crash loop. A recycled PID fails the identity
+        // check and its stale file is removed here so status stops
+        // reporting a phantom "running" server.
         if residentPort != nil,
            let existing = try? String(contentsOf: pidURL, encoding: .utf8),
            let existingPID = Int32(existing.trimmingCharacters(in: .whitespacesAndNewlines)),
-           existingPID != ProcessInfo.processInfo.processIdentifier,
-           kill(existingPID, 0) == 0 {
-            Logging.stderr.log("mootx01 serve fatal: estate '\(estateName)' is already served by a live process (PID \(existingPID)). One resident writer per estate — stop it first.")
-            throw ExitCode.failure
+           existingPID != ProcessInfo.processInfo.processIdentifier {
+            if ProcessIdentity.isLiveProcess(existingPID) {
+                Logging.stderr.log("mootx01 serve fatal: estate '\(estateName)' is already served by a live process (PID \(existingPID)). One resident writer per estate — stop it first.")
+                throw ExitCode.failure
+            }
+            Logging.stderr.log("mootx01 serve: stale PID file (PID \(existingPID) is not a live mootx01 process) — clearing the writer lock and starting")
+            try? FileManager.default.removeItem(at: pidURL)
         }
         // PID + served-estate markers are RESIDENT-only: together they are the
         // signal a stdio `serve` reads (T4) to decide it should forward to the

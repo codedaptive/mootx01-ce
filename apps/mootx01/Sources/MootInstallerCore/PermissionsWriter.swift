@@ -128,6 +128,11 @@ public enum PermissionsWriter {
         // Monitoring flag mutation (ADR-025 wave 8.2): sets daemon telemetry state
         // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
         "moot_monitoring_status",
+        // Contradiction hunter: estate-wide sweep that persists PROPOSED
+        // contradicts tunnels (same sweep runs inside moot_dream, already ask
+        // tier). Review settles a proposed tunnel's lifecycle — a mutation
+        // of committed state, and rejection is durable (never re-proposed).
+        "moot_hunt_contradictions", "moot_review_tunnel",
     ]
 
     /// Destructive, irreversible: hard-deletes content from the estate.

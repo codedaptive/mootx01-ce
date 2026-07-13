@@ -2144,6 +2144,53 @@ public actor DrawerStore {
         )
     }
 
+    /// Review a `.proposed` tunnel: accept moves lifecycle (bits 3–5 of
+    /// `operationalBitmap`) to `.active`; reject moves it to `.withdrawn`.
+    ///
+    /// Only tunnels currently in `.proposed` lifecycle are reviewable —
+    /// reviewing an `.active`, `.superseded`, or `.withdrawn` tunnel throws
+    /// `invalidContent` so a stale review request cannot silently rewrite a
+    /// settled edge. A `.withdrawn` tunnel stays out of active reads
+    /// permanently and its endpoint pair is the dedup memory that keeps the
+    /// contradiction hunter from re-proposing a rejected pair.
+    ///
+    /// Audit: like `retireTunnel`, this performs only the bitmap update —
+    /// the caller (the ARIA review tool / dreaming diary) records who
+    /// reviewed and why. `changedBy`/`reason` are accepted here so the
+    /// verb's signature is stable when a tunnel audit trail lands.
+    ///
+    /// - Parameters:
+    ///   - tunnelId:  id of the proposed tunnel under review.
+    ///   - accept:    true → `.active` (accepted); false → `.withdrawn` (rejected).
+    ///   - changedBy: agent or user performing the review.
+    ///   - reason:    optional reviewer note (not yet persisted; see Audit above).
+    ///   - now:       deterministic clock supplied by the caller.
+    /// - Throws: `tunnelNotFound` if the tunnel does not exist;
+    ///   `invalidContent` if it is not in `.proposed` lifecycle.
+    ///
+    /// Mirrors Rust `DrawerStore::respond_to_tunnel`.
+    public func respondToTunnel(
+        id tunnelId: String,
+        accept: Bool,
+        changedBy: String,
+        reason: String? = nil,
+        now: Date
+    ) async throws {
+        guard let existing = try await getTunnel(id: tunnelId) else {
+            throw LocusKitError.tunnelNotFound(id: tunnelId)
+        }
+        guard existing.lifecycle == .proposed else {
+            throw LocusKitError.invalidContent(
+                "tunnel \(tunnelId) is \(existing.lifecycle) — only a proposed tunnel can be reviewed")
+        }
+        let reviewed = existing.withLifecycle(accept ? .active : .withdrawn)
+        _ = try await storage.rowStore.update(
+            table: "tunnels",
+            values: ["operationalBitmap": .bitmap(reviewed.operationalBitmap)],
+            where: .eq(Column(table: "tunnels", name: "id"), .text(tunnelId))
+        )
+    }
+
     /// Clear bit 13 of `operationalBitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
     ///
     /// Reverses a prior `retireTunnel` call. The tunnel re-enters active reads

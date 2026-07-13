@@ -113,6 +113,9 @@ const RECALL_DISTILLED: &str = "moot_recall_distilled";
 /// Fan-out from a distilled factoid to its source drawers — mirrors Swift
 /// `RecipeTools.recollectToolName`.
 const RECOLLECT: &str = "moot_recollect";
+/// On-demand contradiction-hunt sweep — mirrors Swift
+/// `RecipeTools.huntContradictionsToolName`.
+const HUNT_CONTRADICTIONS: &str = "moot_hunt_contradictions";
 
 /// Preview cap for distilled prose output. Distilled factoids are compressed
 /// by definition, but `m.prose` can still be arbitrarily long. Cap at 300 chars
@@ -136,6 +139,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | CONSOLIDATE
             | RECALL_DISTILLED
             | RECOLLECT
+            | HUNT_CONTRADICTIONS
     )
 }
 
@@ -157,6 +161,7 @@ pub fn dispatch(
         CONSOLIDATE => run_consolidate_tool(args, registry),
         RECALL_DISTILLED => run_recall_distilled_tool(args, registry),
         RECOLLECT => run_recollect_tool(args, registry),
+        HUNT_CONTRADICTIONS => run_hunt_contradictions_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown recipe tool: {name}"),
@@ -852,17 +857,135 @@ fn run_dream_tool(
         format!("\nwrite_warnings: {}", sink.write_errors.join("; "))
     };
 
+    // Step 3 — the content-driven phase: one contradiction-hunt sweep
+    // (kNN candidates + conflict_cue screen; strong findings persist as
+    // proposed contradicts tunnels; dedup is durable, so re-running
+    // moot_dream never re-proposes). This is what makes post-import
+    // dreaming produce content results on a never-recalled estate.
+    // Bounded probe budget per call; repeated calls stay cheap because
+    // settled pairs are skipped. Mirrors Swift RecipeTools.runDream Step 3.
+    let hunt = coord
+        .hunt_contradictions(&estate.handle, "minilm-v6", 500, None, 64, now_epoch_ms)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                format!(
+                    "dream: contradiction hunt failed: {}",
+                    crate::interface_tools::describe_verb_dispatch_error(&e)
+                ),
+            )
+        })?;
+
     // Parity with Swift RecipeTools.runDreamTool: single-line summary
     // ("rebuilt" not "rebuild"), then newline-separated stats.
-    let body = format!(
-        "moot_dream: matrix rebuilt, dreaming cycle complete\nconsideredCandidates: {}\nproposalsEmitted: {}\nsuppressedDuplicates: {}\nbelowThreshold: {}{}",
+    let mut body = format!(
+        "moot_dream: matrix rebuilt, dreaming cycle complete\nconsideredCandidates: {}\nproposalsEmitted: {}\nsuppressedDuplicates: {}\nbelowThreshold: {}\ncontradictionsProposed: {}\ncontradictionCandidatesBorderline: {}{}",
         report.candidates_considered,
         report.proposals_emitted.len(),
         report.suppressed_duplicates,
         report.below_threshold,
+        hunt.proposed.len(),
+        hunt.borderline.len(),
         write_warn,
     );
+    if !hunt.vector_store_available {
+        body.push_str(
+            "\n(contradiction hunt skipped: no vector index for this estate — run moot_reindex first)",
+        );
+    }
+    if !hunt.proposed.is_empty() {
+        body.push_str(
+            "\nReview proposed contradictions with moot_lens_contradiction, then accept/reject via moot_review_tunnel.",
+        );
+    }
     Ok(text_result(&body))
+}
+
+/// Run `moot_hunt_contradictions`: one bounded contradiction-hunt sweep.
+/// Strong findings persist as proposed contradicts tunnels (the hunt does
+/// its own writes); borderline candidates come back with snippets for the
+/// calling agent to adjudicate. Mirrors Swift `runHuntContradictions`.
+fn run_hunt_contradictions_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+
+    // Deterministic `now` when supplied; otherwise the wall clock. Malformed
+    // ISO8601 is invalidParams, matching run_dream_tool's identical check.
+    let now_epoch_ms: i64 = if let Some(raw) = optional_string(args, "now")? {
+        parse_iso8601_to_epoch(raw).ok_or_else(|| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("now is not a valid ISO8601 instant: {raw}"),
+            )
+        })?
+    } else {
+        crate::dispatch::wall_now()
+    };
+
+    let probe_limit: usize = match optional_integer(args, "probe_limit")? {
+        None => 500,
+        Some(n) if n > 0 && n <= 10_000 => n as usize,
+        Some(_) => {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "probe_limit must be an integer in 1...10000".to_string(),
+            ))
+        }
+    };
+
+    let coord = estate.coord.lock().unwrap();
+    let report = coord
+        .hunt_contradictions(&estate.handle, "minilm-v6", probe_limit, None, 64, now_epoch_ms)
+        .map_err(|e| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+                crate::interface_tools::describe_verb_dispatch_error(&e),
+            )
+        })?;
+
+    if !report.vector_store_available {
+        return Ok(text_result(
+            "moot_hunt_contradictions: no vector index for this estate — run moot_reindex first, then hunt again.",
+        ));
+    }
+
+    let mut lines: Vec<String> = vec![
+        "moot_hunt_contradictions: sweep complete".to_string(),
+        format!("probesScanned: {}", report.probes_scanned),
+        format!("pairsScreened: {}", report.pairs_screened),
+        format!("alreadySettled: {}", report.deduplicated),
+        format!("proposed: {}", report.proposed.len()),
+    ];
+    for p in &report.proposed {
+        lines.push(format!(
+            "  PROPOSED {} contradicts {} ({}, score {}, tunnel {})",
+            p.source_drawer_id, p.target_drawer_id, p.cue_kind, p.score, p.tunnel_id
+        ));
+    }
+    if !report.proposed.is_empty() {
+        lines.push(
+            "Review with moot_lens_contradiction; accept/reject via moot_review_tunnel."
+                .to_string(),
+        );
+    }
+    lines.push(format!("borderlineCandidates: {}", report.borderline.len()));
+    for c in &report.borderline {
+        lines.push(format!(
+            "  CANDIDATE {} vs {} ({}, score {})",
+            c.source_drawer_id, c.target_drawer_id, c.cue_kind, c.score
+        ));
+        lines.push(format!("    a: {}", c.source_snippet));
+        lines.push(format!("    b: {}", c.target_snippet));
+    }
+    if !report.borderline.is_empty() {
+        lines.push(
+            "Judge each CANDIDATE pair: if the two memories genuinely conflict, record it with moot_link_memories kind=contradicts proposed=true; otherwise ignore it."
+                .to_string(),
+        );
+    }
+    Ok(text_result(&lines.join("\n")))
 }
 
 /// Parse an ISO8601 UTC instant string (e.g. "2026-06-11T00:00:00Z") to Unix

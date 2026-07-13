@@ -197,6 +197,28 @@ public extension Tunnel {
         )
     }
 
+    /// Return a copy of this tunnel with lifecycle bits 3–5 rewritten to
+    /// `lifecycle`. Used internally by `DrawerStore.respondToTunnel` (and its
+    /// Rust equivalent) to move a `.proposed` tunnel to `.active` (accepted)
+    /// or `.withdrawn` (rejected). The caller is responsible for the actual
+    /// `rowStore.update` write.
+    func withLifecycle(_ lifecycle: TunnelLifecycle) -> Tunnel {
+        Tunnel(
+            id: id,
+            sourceWing: sourceWing, sourceRoom: sourceRoom, sourceDrawerId: sourceDrawerId,
+            targetWing: targetWing, targetRoom: targetRoom, targetDrawerId: targetDrawerId,
+            label: label, kind: kind,
+            adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: BitField.writeField(
+                Int64(lifecycle.rawValue),
+                into: operationalBitmap, shift: 3, width: 3
+            ),
+            provenanceBitmap: provenanceBitmap,
+            addedBy: addedBy, filedAt: filedAt,
+            tombstonedAt: tombstonedAt, removedByBatch: removedByBatch, orderKey: orderKey
+        )
+    }
+
     /// Return a copy of this tunnel with the retired bit cleared (`isRetired = false`).
     ///
     /// Used internally by `DrawerStore.unretireTunnel` and its Rust equivalent to

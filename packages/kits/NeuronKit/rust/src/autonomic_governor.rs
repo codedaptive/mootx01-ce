@@ -956,13 +956,16 @@ impl AutonomicGovernor {
     ) -> Result<Vec<(String, SchedulerSignalID)>, String> {
         // Read the live VectorStore the same way the Swift resident does. No
         // fabricated fallback store — a missing store means "skip registration",
-        // surfaced to the caller as an error string to log.
-        let vector_store = {
+        // surfaced to the caller as an error string to log. The Corpus (when
+        // registered) rides along so the vector-similarity signal can mine
+        // the chunk-keyed corpus lane — the only vector-row population a
+        // production estate holds.
+        let (vector_store, corpus) = {
             let coord = self
                 .coord
                 .lock()
                 .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
-            coord.vector_store_for(&self.handle)
+            (coord.vector_store_for(&self.handle), coord.corpus_for(&self.handle))
         };
         let Some(vector_store) = vector_store else {
             return Err(format!(
@@ -972,7 +975,7 @@ impl AutonomicGovernor {
         };
 
         let model_id = model_id.into();
-        let specs = default_standing_signal_specs(vector_store, model_id);
+        let specs = default_standing_signal_specs(vector_store, model_id, corpus);
         let now_nanos = system_time_to_nanos(now);
         let scheduler = self.ensure_scheduler();
         let mut registered = Vec::with_capacity(specs.len());
