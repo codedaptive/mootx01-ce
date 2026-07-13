@@ -25,10 +25,9 @@
 // any lifecycle, including `.withdrawn` (a rejected review) and
 // tombstoned rows — is never proposed again. Rejection is durable.
 //
-// Sensitivity: `DrawerStore.addTunnel` stamps the tunnel with the MAX
-// of its endpoints' sensitivities (#57, both legs), so a proposed edge
-// touching a restricted drawer is gated by the tunnel sensitivity
-// ceiling automatically; the hunter adds nothing to disclose.
+// Sensitivity: the hunt uses raw vector candidates and hydrated bodies,
+// so it applies the default recall sensitivity ceiling itself. Drawers
+// above `.elevated` are skipped before cue screening or snippet creation.
 //
 // Cost: O(probeLimit · K) index lookups + one batched body hydration
 // for the surviving candidate pairs — never O(N²) over content.
@@ -168,6 +167,7 @@ public extension GeniusLocusKit {
         for pair in candidatePairs {
             guard let a = drawersByID[pair.a], let b = drawersByID[pair.b],
                   a.tombstonedAt == nil, b.tombstonedAt == nil else { continue }
+            guard Self.isHuntRecallEligible(a), Self.isHuntRecallEligible(b) else { continue }
             // Incremental watermark: at least one side must be new enough.
             if let watermark = filedAfter,
                a.filedAt <= watermark, b.filedAt <= watermark { continue }
@@ -227,6 +227,12 @@ public extension GeniusLocusKit {
             proposed: proposed,
             borderline: borderline,
             deduplicated: deduplicated)
+    }
+
+    /// Default MCP hunt disclosure ceiling, matching recall's default
+    /// `.sensitivityAtMost(.elevated)` posture.
+    internal static func isHuntRecallEligible(_ drawer: Drawer) -> Bool {
+        drawer.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue
     }
 
     /// Canonical unordered pair key — lexicographically smaller ID first.

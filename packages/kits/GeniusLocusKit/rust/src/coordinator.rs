@@ -2759,6 +2759,13 @@ impl EstateCoordinator {
             if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
                 continue;
             }
+            let max_hunt_sensitivity =
+                locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value();
+            if a.adjective_sensitivity().raw_value() > max_hunt_sensitivity
+                || b.adjective_sensitivity().raw_value() > max_hunt_sensitivity
+            {
+                continue;
+            }
             // Incremental watermark: at least one side must be new enough.
             if let Some(watermark) = filed_after {
                 if a.filed_at <= watermark && b.filed_at <= watermark {
@@ -8910,7 +8917,27 @@ mod tests {
         content: &str,
         engram: &engram_lib::Engram,
     ) -> locus_kit::drawer::Drawer {
-        let drawer = coord.capture(h, cap_frame(content), NOW).expect("capture");
+        hunt_plant_with_sensitivity(
+            coord,
+            h,
+            vs,
+            content,
+            engram,
+            locus_kit::adjectives::AdjectiveSensitivity::Normal,
+        )
+    }
+
+    fn hunt_plant_with_sensitivity(
+        coord: &EstateCoordinator,
+        h: &EstateHandle,
+        vs: &VectorStore,
+        content: &str,
+        engram: &engram_lib::Engram,
+        sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
+    ) -> locus_kit::drawer::Drawer {
+        let mut frame = cap_frame(content);
+        frame.sensitivity = sensitivity;
+        let drawer = coord.capture(h, frame, NOW).expect("capture");
         vs.add_vector(&drawer.id, engram, "minilm-v6", "1.0", NOW)
             .expect("add_vector");
         drawer
@@ -9005,6 +9032,35 @@ mod tests {
             .filter(|t| t.kind == locus_kit::tunnel_operational::TunnelKind::Contradicts)
             .count();
         assert_eq!(contradicts, 0);
+    }
+
+    #[test]
+    fn hunt_restricted_and_secret_drawers_are_excluded() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant_with_sensitivity(
+            &coord,
+            &h,
+            &vs,
+            "Bob lives in Paris",
+            &near,
+            locus_kit::adjectives::AdjectiveSensitivity::Restricted,
+        );
+        hunt_plant_with_sensitivity(
+            &coord,
+            &h,
+            &vs,
+            "Bob does not live in Paris",
+            &near,
+            locus_kit::adjectives::AdjectiveSensitivity::Secret,
+        );
+
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt");
+        assert!(report.proposed.is_empty());
+        assert!(report.borderline.is_empty());
+        assert_eq!(report.pairs_screened, 0);
     }
 
     #[test]

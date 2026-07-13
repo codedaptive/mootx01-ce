@@ -36,14 +36,19 @@ struct ContradictionHuntTests {
         return (kit, handle, vectorStore)
     }
 
-    private func captureFrame(content: String, room: String) -> CaptureFrame {
+    private func captureFrame(
+        content: String,
+        room: String,
+        sensitivity: AdjectiveSensitivity = .normal
+    ) -> CaptureFrame {
         CaptureFrame(
             content: content,
             channel: .typed,
             room: room,
             latticeAnchor: LatticeAnchor(udcCode: "004"),
             addedBy: "hunt-tests",
-            embeddingModelID: Self.modelID
+            embeddingModelID: Self.modelID,
+            sensitivity: sensitivity
         )
     }
 
@@ -55,9 +60,12 @@ struct ContradictionHuntTests {
         engram: Fingerprint256,
         kit: GeniusLocusKit,
         handle: EstateHandle,
-        vectorStore: VectorStore
+        vectorStore: VectorStore,
+        sensitivity: AdjectiveSensitivity = .normal
     ) async throws -> Drawer {
-        let drawer = try await kit.capture(handle, captureFrame(content: content, room: "study"))
+        let drawer = try await kit.capture(
+            handle,
+            captureFrame(content: content, room: "study", sensitivity: sensitivity))
         try await vectorStore.addVector(
             itemID: drawer.id, engram: engram, modelID: Self.modelID,
             modelVersion: "1.0", filedAt: Self.t0)
@@ -153,6 +161,25 @@ struct ContradictionHuntTests {
         let estate = try await kit.estate(for: handle)
         let contradicts = try await estate.allTunnels().filter { $0.kind == .contradicts }
         #expect(contradicts.isEmpty)
+    }
+
+    @Test("restricted and secret drawers are excluded before snippet disclosure")
+    func restrictedAndSecretDrawersAreExcluded() async throws {
+        let (kit, handle, vectorStore) = try await makeKit()
+        try await plant(
+            "Bob lives in Paris",
+            engram: near, kit: kit, handle: handle, vectorStore: vectorStore,
+            sensitivity: .restricted)
+        try await plant(
+            "Bob does not live in Paris",
+            engram: near, kit: kit, handle: handle, vectorStore: vectorStore,
+            sensitivity: .secret)
+
+        let report = try await kit.huntContradictions(in: handle, now: Self.t0)
+
+        #expect(report.proposed.isEmpty)
+        #expect(report.borderline.isEmpty)
+        #expect(report.pairsScreened == 0)
     }
 
     @Test("unrelated content proposes nothing; missing vector store is reported")
