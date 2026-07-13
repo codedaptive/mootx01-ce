@@ -268,7 +268,19 @@ struct F3BlobObserverIsolationTests {
 
         let blobStream = storage.observer.observeBlobs()
         let collectTask = Task<BlobChange?, Never> {
-            for await change in blobStream { return change }
+            // Wait specifically for a DELETE of this key — the event this test
+            // guards against. The pre-insert put() above emits its observer
+            // event via a fire-and-forget Task (SQLiteStorage.notifyBlobChange),
+            // which under parallel-runner load can run AFTER observeBlobs()
+            // registers and deliver that stale put into this stream. Returning
+            // on the first change of ANY kind mistakes that put for the
+            // rolled-back delete and flakes (PK-TEST-01). Filtering to
+            // .delete of this key makes the assertion test exactly its intent
+            // and remains a true guard: a real rolled-back delete firing still
+            // fails it.
+            for await change in blobStream where change.event == .delete && change.key == blobKey {
+                return change
+            }
             return nil
         }
         try await Task.sleep(nanoseconds: 50_000_000)
