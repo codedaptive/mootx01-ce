@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
-import LocusKit
+@testable import LocusKit        // @testable: accesses internal Estate.addTunnel (advisory fix)
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
@@ -27,9 +27,16 @@ struct TunnelLifecycleDisclosureTests {
     private struct TestHarness {
         let dispatcher: ARIA_MCPDispatcher
         /// The underlying LocusKit estate — used for direct tunnel insertion
-        /// via `estate.addTunnel`. Shares InMemoryStorage with the
-        /// GeniusLocusKit instance, so mutations are immediately visible.
+        /// via `estate.addTunnel` (internal, reached via @testable import LocusKit).
+        /// Shares InMemoryStorage with the GeniusLocusKit instance, so mutations
+        /// are immediately visible.
         let estate: LocusKit.Estate
+        /// The GeniusLocusKit instance — used by memory_get lifecycle tests to
+        /// capture real drawers (via `kit.capture`) before inserting lifecycle
+        /// tunnels and asserting they are hidden from MCP responses.
+        let kit: GeniusLocusKit
+        /// The estate handle — required parameter for `kit.capture`.
+        let handle: EstateHandle
     }
 
     private func makeHarness() async throws -> TestHarness {
@@ -48,7 +55,9 @@ struct TunnelLifecycleDisclosureTests {
         let tooling = ToolDispatcher(kit: kit, handle: handle)
         return TestHarness(
             dispatcher: ARIA_MCPDispatcher(info: info, tooling: tooling),
-            estate: estate
+            estate: estate,
+            kit: kit,
+            handle: handle
         )
     }
 
@@ -257,6 +266,85 @@ struct TunnelLifecycleDisclosureTests {
         #expect(
             text.contains(": 1"),
             "exactly one active tunnel must appear; proposed must be excluded; got: \(text)"
+        )
+    }
+
+    // MARK: - memory_get lifecycle gate (FIND4 residual)
+
+    /// Capture a drawer in the harness estate and return it.
+    private func captureDrawer(
+        content: String = "find4-memory-get-test",
+        room: String = "find4/mg",
+        in harness: TestHarness
+    ) async throws -> Drawer {
+        let frame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: room,
+            latticeAnchor: .udc("004"),
+            addedBy: "find4-mg-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        return try await harness.kit.capture(harness.handle, frame)
+    }
+
+    @Test("memory_get excludes proposed tunnels from linked-tunnel summary (FIND4 residual)")
+    func memoryGetExcludesProposedTunnels() async throws {
+        let harness = try await makeHarness()
+        let drawer = try await captureDrawer(in: harness)
+        let otherID = "find4-mg-proposed-other-\(UUID().uuidString)"
+        try await harness.estate.addTunnel(
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .proposed)
+        )
+
+        let text = await dispatchAndExtractText(
+            dispatcher: harness.dispatcher,
+            toolName: "moot_memory_get",
+            args: ["id": .string(drawer.id)]
+        )
+        #expect(
+            text.contains("tunnels: 0"),
+            "proposed tunnel must not appear in memory_get tunnel summary; got: \(text)"
+        )
+    }
+
+    @Test("memory_get excludes withdrawn tunnels from linked-tunnel summary (FIND4 residual)")
+    func memoryGetExcludesWithdrawnTunnels() async throws {
+        let harness = try await makeHarness()
+        let drawer = try await captureDrawer(in: harness)
+        let otherID = "find4-mg-withdrawn-other-\(UUID().uuidString)"
+        try await harness.estate.addTunnel(
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .withdrawn)
+        )
+
+        let text = await dispatchAndExtractText(
+            dispatcher: harness.dispatcher,
+            toolName: "moot_memory_get",
+            args: ["id": .string(drawer.id)]
+        )
+        #expect(
+            text.contains("tunnels: 0"),
+            "withdrawn tunnel must not appear in memory_get tunnel summary; got: \(text)"
+        )
+    }
+
+    @Test("memory_get excludes superseded tunnels from linked-tunnel summary (FIND4 residual)")
+    func memoryGetExcludesSupersededTunnels() async throws {
+        let harness = try await makeHarness()
+        let drawer = try await captureDrawer(in: harness)
+        let otherID = "find4-mg-superseded-other-\(UUID().uuidString)"
+        try await harness.estate.addTunnel(
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .superseded)
+        )
+
+        let text = await dispatchAndExtractText(
+            dispatcher: harness.dispatcher,
+            toolName: "moot_memory_get",
+            args: ["id": .string(drawer.id)]
+        )
+        #expect(
+            text.contains("tunnels: 0"),
+            "superseded tunnel must not appear in memory_get tunnel summary; got: \(text)"
         )
     }
 }

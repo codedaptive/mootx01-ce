@@ -690,9 +690,11 @@ public actor Estate {
     /// Insert a tunnel directly into the estate store.
     ///
     /// Delegates to `DrawerStore.addTunnel`. Conflicting IDs surface as
-    /// `duplicateKey`. Primarily used by tests to seed tunnels with specific
-    /// lifecycle states for disclosure-boundary verification (FIND4).
-    public func addTunnel(_ t: Tunnel) async throws {
+    /// `duplicateKey`. Declared `internal` so it is NOT part of the public
+    /// API surface — test files reach it via `@testable import LocusKit`.
+    /// This prevents MCP-layer callers from inserting tunnels that bypass the
+    /// proposed → active review cycle that `moot_link_memories` enforces.
+    internal func addTunnel(_ t: Tunnel) async throws {
         try await store.addTunnel(t)
     }
 

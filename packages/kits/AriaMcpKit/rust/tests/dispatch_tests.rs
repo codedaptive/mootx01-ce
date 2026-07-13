@@ -2320,6 +2320,83 @@ fn connection_search_returns_active_and_excludes_proposed_same_source() {
     );
 }
 
+// 5c. Lifecycle enforcement — memory_get must not surface proposed/withdrawn/
+//     superseded tunnels in its linked-tunnel summary (FIND4 residual).
+
+#[test]
+fn memory_get_excludes_proposed_tunnels_from_linked_summary() {
+    // Capture a real drawer, insert a proposed lifecycle tunnel pointing from it,
+    // then assert memory_get reports "tunnels: 0" — the proposed edge is hidden.
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "find4-mg-proposed-src", "lc/mg/proposed");
+    let tgt_id = "dummy-tgt-proposed-mg";
+    insert_lifecycle_tunnel_for_drawer(
+        &registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Proposed,
+    );
+
+    let result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_get must not throw for a real drawer");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains("tunnels: 0"),
+        "proposed tunnel must be excluded from memory_get linked summary; got: {text}"
+    );
+}
+
+#[test]
+fn memory_get_excludes_withdrawn_tunnels_from_linked_summary() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "find4-mg-withdrawn-src", "lc/mg/withdrawn");
+    let tgt_id = "dummy-tgt-withdrawn-mg";
+    insert_lifecycle_tunnel_for_drawer(
+        &registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Withdrawn,
+    );
+
+    let result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_get must not throw for a real drawer");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains("tunnels: 0"),
+        "withdrawn tunnel must be excluded from memory_get linked summary; got: {text}"
+    );
+}
+
+#[test]
+fn memory_get_excludes_superseded_tunnels_from_linked_summary() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "find4-mg-superseded-src", "lc/mg/superseded");
+    let tgt_id = "dummy-tgt-superseded-mg";
+    insert_lifecycle_tunnel_for_drawer(
+        &registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Superseded,
+    );
+
+    let result = dispatch_tool(
+        "moot_memory_get",
+        &args!["id" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("memory_get must not throw for a real drawer");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains("tunnels: 0"),
+        "superseded tunnel must be excluded from memory_get linked summary; got: {text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 6. Tier 3 — Knowledge graph
 // ---------------------------------------------------------------------------

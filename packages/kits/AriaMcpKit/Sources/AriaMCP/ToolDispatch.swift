@@ -1573,12 +1573,16 @@ extension ToolDispatcher {
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
         let names = nodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
 
-        // Linked tunnel summary: same estate.allTunnels() + tombstone-exclusion
-        // pattern moot_connection_search/moot_connection_map already use,
-        // scoped to tunnels touching this drawer on either end.
+        // Linked tunnel summary: estate-wide scan filtered to confirmed-active,
+        // non-tombstoned tunnels touching this drawer on either end.
+        // Lifecycle gate (FIND4 residual): proposed, withdrawn, and superseded
+        // tunnels are excluded at the MCP boundary so AI clients see only
+        // confirmed edges — the same gate moot_connection_search/moot_connection_map
+        // enforce.
         let allTunnels = try await estate.allTunnels()
         let linked = allTunnels.filter {
             ($0.sourceDrawerId == rowID || $0.targetDrawerId == rowID) && $0.tombstonedAt == nil
+                && $0.lifecycle == .active
         }
 
         let iso = ISO8601DateFormatter()

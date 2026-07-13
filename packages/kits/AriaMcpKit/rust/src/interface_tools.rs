@@ -956,10 +956,12 @@ fn run_memory_get(
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &[drawer.parent_node_id.clone()]);
     let (wing, room) = node_names.get(&drawer.parent_node_id).cloned().unwrap_or_default();
 
-    // Linked tunnel summary: coord.all_tunnels (the estate-wide scan, mirrors
-    // Swift estate.allTunnels()) + tombstone-exclusion pattern
-    // moot_connection_search/moot_connection_map already use, scoped to
-    // tunnels touching this drawer on either end.
+    // Linked tunnel summary: estate-wide scan filtered to confirmed-active,
+    // non-tombstoned tunnels touching this drawer on either end.
+    // Lifecycle gate (FIND4 residual): proposed, withdrawn, and superseded
+    // tunnels are excluded at the MCP boundary so AI clients see only
+    // confirmed edges — the same gate moot_connection_search/moot_connection_map
+    // enforce.
     let all_tunnels = coord
         .all_tunnels(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
@@ -974,6 +976,7 @@ fn run_memory_get(
         .filter(|t| {
             (t.source_drawer_id.as_deref() == Some(row_id) || t.target_drawer_id.as_deref() == Some(row_id))
                 && t.tombstoned_at.is_none()
+                && t.lifecycle() == locus_kit::tunnel_operational::TunnelLifecycle::Active
         })
         .collect();
 
