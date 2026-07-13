@@ -1,3 +1,12 @@
 {
-  "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "bob-codedaptive",
+      "id": 269060566,
+      "comment_id": 4963204554,
+      "created_at": "2026-07-13T22:05:37Z",
+      "repoId": 1253561576,
+      "pullRequestNo": 18
+    }
+  ]
 }
