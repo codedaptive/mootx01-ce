@@ -858,7 +858,7 @@ fn run_dream_tool(
     };
 
     // Step 3 — the content-driven phase: one contradiction-hunt sweep
-    // (kNN candidates + conflict_cue screen; strong findings persist as
+    // (BM25 lexical candidates + conflict_cue screen; strong findings persist as
     // proposed contradicts tunnels; dedup is durable, so re-running
     // moot_dream never re-proposes). This is what makes post-import
     // dreaming produce content results on a never-recalled estate.

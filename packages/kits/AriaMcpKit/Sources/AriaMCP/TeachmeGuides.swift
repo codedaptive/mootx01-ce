@@ -341,10 +341,11 @@ enum TeachmeGuides {
     private static let huntContradictionsGuide = """
         moot_hunt_contradictions — Hunt memory content for contradictions.
 
-        One bounded sweep: finds semantically-near memory pairs via the
-        vector index (kNN over embedding engrams), screens each pair with a
-        cheap lexical conflict cue (negation asymmetry, same-template value
-        divergence, revision markers), then:
+        One bounded sweep: finds lexically-near memory pairs via the
+        corpus keyword (BM25) index — contradictions are statements about
+        the same thing that disagree, so shared-term proximity is the right
+        net — screens each pair with a cheap lexical conflict cue (negation
+        asymmetry, same-template value divergence, revision markers), then:
           - STRONG findings are persisted as PROPOSED contradicts links
             (agent-derived, unreviewed) — the user settles them with
             moot_review_tunnel.
@@ -358,9 +359,9 @@ enum TeachmeGuides {
         borderline candidates (or not at all) — your judgment is the
         second stage.
 
-        Requires the vector index — run moot_reindex after bulk import.
-        The same sweep runs inside moot_dream and hourly in the resident
-        daemon's contradiction scout; this tool is the on-demand form.
+        Requires the corpus search index — run moot_reindex after bulk
+        import. The same sweep runs inside moot_dream and hourly in the
+        resident daemon's contradiction scout; this tool is the on-demand form.
         Rejected and already-linked pairs are deduplicated (never
         re-proposed).
 
@@ -807,10 +808,10 @@ enum TeachmeGuides {
           2. Runs one DREAMING CYCLE: mines latent co-occurrence alignments
              into proposals and writes one cycle diary entry.
           3. Runs one CONTRADICTION-HUNT sweep over memory CONTENT: finds
-             semantically-near pairs via the vector index, screens them for
-             lexical conflict, and persists strong findings as PROPOSED
-             contradicts links (review with moot_lens_contradiction,
-             settle with moot_review_tunnel).
+             lexically-near pairs via the corpus keyword (BM25) index,
+             screens them for lexical conflict, and persists strong findings
+             as PROPOSED contradicts links (review with
+             moot_lens_contradiction, settle with moot_review_tunnel).
 
         HONEST SCOPE — dreaming-cycle proposals (effect 2) are
         USAGE-DRIVEN: mined from recall co-occurrence (which memories the
@@ -818,8 +819,8 @@ enum TeachmeGuides {
         content. A freshly imported estate that has not been recalled
         against yet will legitimately report 0 cycle proposals — that is
         expected, not a fault. Content is examined only by the
-        contradiction-hunt sweep (effect 3), which needs the vector index
-        (run moot_reindex after bulk import).
+        contradiction-hunt sweep (effect 3), which needs the corpus search
+        index (run moot_reindex after bulk import).
 
         When to use:
           - After bulk-loading an estate, before relying on matrix /

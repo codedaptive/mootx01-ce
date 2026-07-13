@@ -267,9 +267,9 @@ Mistakes:
 const GUIDE_HUNT_CONTRADICTIONS: &str = "\
 moot_hunt_contradictions — hunt memory content for contradictions
 
-One bounded sweep: finds semantically-near memory pairs via the vector
-index, screens each pair with a lexical conflict cue (negation asymmetry,
-value divergence, revision markers), then:
+One bounded sweep: finds lexically-near memory pairs via the corpus
+keyword (BM25) index, screens each pair with a lexical conflict cue
+(negation asymmetry, value divergence, revision markers), then:
   — STRONG findings persist as PROPOSED contradicts links; settle them
     with moot_review_tunnel.
   — BORDERLINE pairs are RETURNED with snippets for YOU to judge; if a
@@ -280,7 +280,7 @@ Optional args:
   probe_limit (int)    max vector-indexed memories probed (default 500)
   now         (string) ISO8601 instant for deterministic runs
 
-Requires the vector index — run moot_reindex after bulk import.
+Requires the corpus search index — run moot_reindex after bulk import.
 Rejected and already-linked pairs are deduplicated (never re-proposed).";
 
 const GUIDE_CONNECTION_SEARCH: &str = "\

@@ -325,13 +325,14 @@ the 23 reasoning-lens tools below.
   - `moot_dream` — rebuild the co-occurrence/temporal matrix tier (the Brain's
     association layer the matrix recall lane scores against), run one dreaming
     cycle (latent-alignment proposals + cycle diary), and run one
-    contradiction-hunt sweep (content screen over semantically-near memory
+    contradiction-hunt sweep (content screen over lexically-near memory
     pairs; strong conflicts persist as PROPOSED contradicts links for review).
     The matrix is built by dreaming, not by capture, so a freshly-loaded estate
     has an empty matrix until this runs. Returns a cycle summary including
     contradiction counts.
   - `moot_hunt_contradictions` — one bounded on-demand contradiction-hunt
-    sweep: kNN candidate pairs from the vector index, screened by the
+    sweep: BM25 lexical candidate pairs from the corpus's inverted index
+    (drawer-keyed Hamming kNN on the bespoke lane), screened by the
     SubstrateML conflict cue (negation asymmetry, same-template value
     divergence, revision markers). Strong findings persist as PROPOSED
     `contradicts` tunnels (settle via `moot_review_tunnel`); borderline pairs

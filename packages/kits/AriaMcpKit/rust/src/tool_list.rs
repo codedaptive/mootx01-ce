@@ -748,7 +748,7 @@ fn recall_shaped_tool() -> serde_json::Value {
 fn dream_tool() -> serde_json::Value {
     json!({
         "name": "moot_dream",
-        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over semantically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
+        "description": "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "now": string_schema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock.")
@@ -759,14 +759,14 @@ fn dream_tool() -> serde_json::Value {
 }
 
 /// On-demand contradiction hunt — mirrors Swift
-/// `RecipeTools.huntContradictionsTool()`. One bounded sweep: kNN candidate
-/// mining over the vector index, conflict-cue screen, strong findings persist
+/// `RecipeTools.huntContradictionsTool()`. One bounded sweep: BM25 lexical
+/// candidate mining over the corpus inverted index, conflict-cue screen, strong findings persist
 /// as PROPOSED contradicts tunnels, borderline pairs return with snippets for
 /// the calling agent to adjudicate.
 fn hunt_contradictions_tool() -> serde_json::Value {
     json!({
         "name": "moot_hunt_contradictions",
-        "description": "Hunt for contradictions in memory content: one bounded sweep that finds semantically-near memory pairs via the vector index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the vector index (run moot_reindex after bulk import).",
+        "description": "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the corpus search index (run moot_reindex after bulk import).",
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "probe_limit": integer_schema("Maximum vector-indexed memories probed this sweep (default 500). Repeated calls converge: settled pairs are skipped."),

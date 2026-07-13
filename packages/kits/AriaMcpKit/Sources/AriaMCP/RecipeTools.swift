@@ -84,7 +84,7 @@ enum RecipeTools {
     /// source memories that produced the factoid. Full spec: DISTILLATION_ARIA_TOOLS.md §3.
     static let recollectToolName = "moot_recollect"
     /// On-demand contradiction hunt: one bounded sweep of the content-driven
-    /// contradiction detector (kNN candidates + ConflictCue screen). Strong
+    /// contradiction detector (BM25 lexical candidates + ConflictCue screen). Strong
     /// findings persist as proposed contradicts tunnels; borderline pairs are
     /// returned for the calling agent to adjudicate.
     static let huntContradictionsToolName = "moot_hunt_contradictions"
@@ -296,7 +296,7 @@ enum RecipeTools {
     private static func dreamTool() -> ProjectedTool {
         ProjectedTool(
             name: dreamToolName,
-            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over semantically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
+            description: "Dream the estate: rebuild the co-occurrence/temporal matrix tier (the Brain's association layer that the matrix recall lane scores against), run one dreaming cycle (latent-alignment proposals + cycle diary), and run one contradiction-hunt sweep (content screen over lexically-near memory pairs; strong conflicts persist as PROPOSED contradicts links for review). The matrix is built by dreaming, not by capture, so a freshly-loaded estate has an empty matrix until this runs. Returns a cycle summary including contradiction counts.",
             inputSchema: objectSchema(
                 properties: [
                     "now": stringSchema("Optional ISO8601 instant to run the cycle at, for deterministic runs (drives the diary timestamp and the reward window). Omit to use the current wall clock."),
@@ -320,7 +320,7 @@ enum RecipeTools {
     private static func huntContradictionsTool() -> ProjectedTool {
         ProjectedTool(
             name: huntContradictionsToolName,
-            description: "Hunt for contradictions in memory content: one bounded sweep that finds semantically-near memory pairs via the vector index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the vector index (run moot_reindex after bulk import).",
+            description: "Hunt for contradictions in memory content: one bounded sweep that finds lexically-near memory pairs via the corpus keyword (BM25) index and screens them for lexical conflict (negation asymmetry, same-template value divergence, revision markers). Strong findings are persisted as PROPOSED contradicts links (review with moot_lens_contradiction, accept/reject with moot_review_tunnel; rejected pairs are never re-proposed). Borderline pairs are RETURNED with snippets for YOU to judge — if a pair genuinely conflicts, record it with moot_link_memories kind=contradicts proposed=true. Requires the corpus search index (run moot_reindex after bulk import).",
             inputSchema: objectSchema(
                 properties: [
                     "probe_limit": .object([
