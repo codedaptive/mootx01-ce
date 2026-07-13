@@ -645,6 +645,17 @@ pub struct SqliteStorage {
     config: EstateConfiguration,
     inner: Arc<Mutex<Inner>>,
     observers: Arc<ObserverRegistry>,
+    /// Serializes whole `transaction` brackets against each other. There is
+    /// ONE connection per instance, and on the SAME connection a concurrent
+    /// second `BEGIN IMMEDIATE` is not SQLITE_BUSY (that applies across
+    /// connections) — it is "cannot start a transaction within a
+    /// transaction". Two in-process threads legitimately share one instance
+    /// (e.g. the corpus ingest queue's background drain loop + the
+    /// foreground `await_ingest_drain` pump; the Swift twin is
+    /// actor-serialized), so the bracket must self-serialize. Distinct from
+    /// `inner`, which is released while the block runs (holding it across
+    /// the block would deadlock the block's own sub-store calls).
+    tx_lock: Arc<Mutex<()>>,
 }
 
 impl SqliteStorage {
@@ -792,6 +803,7 @@ impl SqliteStorage {
             config,
             inner: Arc::new(Mutex::new(Inner { conn, schema: None })),
             observers: Arc::new(ObserverRegistry::default()),
+            tx_lock: Arc::new(Mutex::new(())),
         })
     }
 }
@@ -965,15 +977,25 @@ impl Storage for SqliteStorage {
         // before the block runs — the block's sub-stores re-lock per call, so
         // holding it across `block` would deadlock against them.
         //
-        // ISOLATION INVARIANT: because the `inner` mutex is released during the
-        // block, this method does not self-serialize concurrent Rust callers.
-        // Transaction isolation instead rests on SQLite's own locking: there is
-        // ONE connection per instance, and BEGIN IMMEDIATE holds the
-        // connection-wide write lock for the whole transaction, so a concurrent
-        // second BEGIN IMMEDIATE gets SQLITE_BUSY (busy-timeout serializes it)
-        // and any concurrent non-transactional write blocks behind that write
-        // lock rather than slipping into this open transaction. Production
-        // additionally serializes all estate access behind the coordinator lock.
+        // ISOLATION INVARIANT: `tx_lock` is held for the WHOLE bracket, so
+        // concurrent Rust callers on the same instance queue here instead of
+        // colliding. This is load-bearing: there is ONE connection per
+        // instance, and on the SAME connection a concurrent second
+        // BEGIN IMMEDIATE does not get SQLITE_BUSY (that is cross-connection
+        // arbitration) — it fails with "cannot start a transaction within a
+        // transaction" (observed: the corpus ingest queue's background drain
+        // loop racing the foreground await_ingest_drain pump on the shared
+        // queue.sqlite). Cross-process isolation still rests on SQLite's own
+        // file locking; non-transactional statements issued by other threads
+        // during the bracket join the open transaction as before. Production
+        // additionally serializes all estate access behind the coordinator
+        // lock, but shared side-stores (the per-estate queue.sqlite) are
+        // driven outside it — hence the self-serialization here.
+        //
+        // No re-entrancy hazard: nothing calls `transaction` from inside a
+        // transaction block — same-connection BEGIN nesting always errored,
+        // so such a caller could never have worked.
+        let _tx_guard = self.tx_lock.lock().unwrap();
         self.inner
             .lock()
             .unwrap()
@@ -2866,6 +2888,47 @@ mod hlc_roundtrip_tests {
         );
         rs.query("events", Some(&pred), &[], None, None)
             .expect("query")
+    }
+
+    #[test]
+    fn concurrent_transactions_on_one_instance_serialize() {
+        // Regression (test-full lane, corpus queue): two in-process threads
+        // driving `transaction` on ONE SqliteStorage instance — the corpus
+        // ingest queue's background drain loop vs the foreground
+        // await_ingest_drain pump — collided with "cannot start a
+        // transaction within a transaction" (same-connection BEGIN nesting;
+        // SQLITE_BUSY arbitration only applies across connections). The
+        // tx_lock must queue the brackets instead. 2 threads × 50
+        // transactions reproduced the collision reliably pre-fix.
+        let storage = std::sync::Arc::new(make_sqlite_storage());
+        let mut handles = Vec::new();
+        for t in 0..2i64 {
+            let storage = std::sync::Arc::clone(&storage);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..50i64 {
+                    let row_id = Uuid::new_v4();
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |tx| {
+                            let mut values = std::collections::BTreeMap::new();
+                            values.insert("id".to_string(), TypedValue::Uuid(row_id));
+                            values.insert(
+                                "stamp".to_string(),
+                                TypedValue::Hlc(HLC::new(t * 1000 + i, 0, 1)),
+                            );
+                            tx.row_store().insert("events", values)?;
+                            Ok(())
+                        })
+                        .expect("concurrent transaction must serialize, not nest");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+        // All 100 rows landed (both writers made progress; nothing rolled back).
+        let rs = Storage::row_store(storage.as_ref());
+        let rows = rs.query("events", None, &[], None, None).expect("query");
+        assert_eq!(rows.len(), 100, "every transactional insert must commit");
     }
 
     #[test]
