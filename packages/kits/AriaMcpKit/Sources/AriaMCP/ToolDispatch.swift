@@ -1953,11 +1953,15 @@ extension ToolDispatcher {
         let fromID = try requireString(args, "from_id")
         let estate = try await kit.estate(for: handle)
         let allTunnels = try await estate.allTunnels()
-        // Keep only non-tombstoned, exportable tunnels originating from this
-        // drawer. Sensitivity ceiling (#58): restricted/secret tunnels are
-        // excluded at the MCP boundary, matching the default recall ceiling.
+        // Keep only confirmed-active, non-tombstoned, exportable tunnels
+        // originating from this drawer. Lifecycle gate (FIND4): proposed,
+        // withdrawn, and superseded tunnels are excluded at the MCP boundary
+        // so AI clients see only confirmed edges. Sensitivity ceiling (#58):
+        // restricted/secret tunnels are excluded, matching the default recall
+        // ceiling.
         let outgoing = allTunnels.filter {
             $0.sourceDrawerId == fromID && $0.tombstonedAt == nil
+                && $0.lifecycle == .active
                 && $0.adjectiveSensitivity.isBulkExportable
         }
         let lines = outgoing.prefix(50).map { t -> String in
@@ -1975,10 +1979,13 @@ extension ToolDispatcher {
         let toID = try requireString(args, "to_id")
         let estate = try await kit.estate(for: handle)
         let allTunnels = try await estate.allTunnels()
-        // Keep only non-tombstoned, exportable tunnels pointing to this
-        // drawer. Sensitivity ceiling (#58): same gate as connection_search.
+        // Keep only confirmed-active, non-tombstoned, exportable tunnels
+        // pointing to this drawer. Lifecycle gate (FIND4): proposed, withdrawn,
+        // and superseded tunnels are excluded at the MCP boundary. Sensitivity
+        // ceiling (#58): same gate as connection_search.
         let incoming = allTunnels.filter {
             $0.targetDrawerId == toID && $0.tombstonedAt == nil
+                && $0.lifecycle == .active
                 && $0.adjectiveSensitivity.isBulkExportable
         }
         let lines = incoming.prefix(50).map { t -> String in

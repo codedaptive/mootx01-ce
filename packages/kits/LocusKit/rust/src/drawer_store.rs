@@ -756,12 +756,19 @@ pub trait DrawerStore: Send + Sync {
     // Tunnel retirement (T13 / ADR-021 Phase 7)
     // -----------------------------------------------------------------
 
-    /// All non-tombstoned, non-retired tunnels estate-wide, ordered by `filed_at`.
+    /// All confirmed-active, non-retired tunnels estate-wide, ordered by `filed_at`.
     ///
-    /// The active-edge view: retired tunnels (bit 13 of `operational_bitmap` set)
-    /// are excluded so that OMEGA retirement removes a tunnel from the dreaming
-    /// suppression set — allowing a later co-recall to re-propose it. Full history
-    /// (including retired tunnels) remains reachable via `all_tunnels()`.
+    /// Returns only tunnels where `lifecycle() == TunnelLifecycle::Active`
+    /// (bits 3–5 = 0) AND `is_retired() == false` (bit 13 clear). Proposed,
+    /// withdrawn, and superseded tunnels are excluded so that MCP disclosure
+    /// paths and the OMEGA dreaming pipeline see only confirmed edges. Full
+    /// history (all lifecycle states, including retired tunnels) remains
+    /// reachable via `all_tunnels()`.
+    ///
+    /// Lifecycle enforcement (FIND4): the previous implementation excluded only
+    /// retired tunnels, allowing proposed/withdrawn/superseded tunnels to appear
+    /// in the active-edge view. OMEGA must not retire a proposed tunnel that has
+    /// not been confirmed; MCP clients must not see unconfirmed edges as live.
     ///
     /// Default impl fetches `all_tunnels()` and filters in-memory: the bitmap
     /// filter is not expressible in the StoragePredicate DSL. Backends may
@@ -772,7 +779,7 @@ pub trait DrawerStore: Send + Sync {
         Ok(self
             .all_tunnels()?
             .into_iter()
-            .filter(|t| !t.is_retired())
+            .filter(|t| !t.is_retired() && t.lifecycle() == crate::tunnel_operational::TunnelLifecycle::Active)
             .collect())
     }
 

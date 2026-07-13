@@ -2092,15 +2092,19 @@ public actor DrawerStore {
 
     // MARK: - Tunnel retirement (T13 / ADR-021 Phase 7)
 
-    /// All non-tombstoned, non-retired tunnels estate-wide, ordered by filedAt.
+    /// All confirmed-active, non-retired tunnels estate-wide, ordered by filedAt.
     ///
-    /// This is the active-edge view used by the dreaming pipeline and any
-    /// consumer that needs live links only. Retired tunnels (bit 13 of
-    /// `operationalBitmap` set) are excluded so that OMEGA retirement removes
-    /// a tunnel from the dreaming suppression set — allowing a later co-recall
-    /// to re-propose it. Unreachable-by-default is the correct visibility rule
-    /// for retired edges; full history (including retired tunnels) is still
-    /// reachable via `allTunnels()`.
+    /// Returns only tunnels where `lifecycle == .active` (bits 3–5 = 0) AND
+    /// `isRetired == false` (bit 13 clear). Proposed, withdrawn, and superseded
+    /// tunnels are excluded so that MCP disclosure paths and the OMEGA dreaming
+    /// pipeline see only confirmed edges. Full history (all lifecycle states,
+    /// including retired tunnels) remains reachable via `allTunnels()`.
+    ///
+    /// Lifecycle enforcement (FIND4): the previous implementation excluded only
+    /// retired tunnels, allowing proposed/withdrawn/superseded tunnels to appear
+    /// in the active-edge view. This was incorrect — OMEGA must not retire a
+    /// proposed tunnel that has not been confirmed, and MCP clients must not see
+    /// unconfirmed edges as live connections.
     ///
     /// Mirrors Rust `DrawerStore::all_active_tunnels`.
     public func allActiveTunnels() async throws -> [Tunnel] {
@@ -2109,7 +2113,7 @@ public actor DrawerStore {
         // filter is the correct approach (consistent with recall_trace bitmap
         // filtering elsewhere in this file).
         let all = try await allTunnels()
-        return all.filter { !$0.isRetired }
+        return all.filter { !$0.isRetired && $0.lifecycle == .active }
     }
 
     /// Flip bit 13 of `operationalBitmap` to retire a tunnel (T13 / ADR-021 Phase 7).

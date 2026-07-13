@@ -2112,6 +2112,215 @@ fn connection_map_returns_incoming_tunnels() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. Lifecycle enforcement — proposed/withdrawn/superseded tunnels must not
+//     leak through moot_connection_search or moot_connection_map (FIND4).
+// ---------------------------------------------------------------------------
+
+/// Insert a tunnel with a given lifecycle (bits 3–5 of operational_bitmap)
+/// directly into the default estate's DrawerStore, bypassing the link verb.
+///
+/// The source and target wings are resolved from the drawer identified by
+/// `src_drawer_id` via `coord.resolve_drawer_node_names` so that
+/// `recall_tunnels(wing)` — which `run_connection_search` uses internally —
+/// finds the tunnel in the correct wing bucket.
+fn insert_lifecycle_tunnel_for_drawer(
+    registry: &EstateRegistry,
+    src_drawer_id: &str,
+    tgt_drawer_id: &str,
+    lifecycle: locus_kit::tunnel_operational::TunnelLifecycle,
+) {
+    use locus_kit::tunnel::Tunnel;
+    let now = aria_mcp::dispatch::wall_now();
+
+    // Resolve the source drawer's wing/room from the node tree so the tunnel
+    // lands in the right wing bucket for recall_tunnels().
+    let (src_wing, src_room) = {
+        let coord = registry.coord.lock().unwrap();
+        let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+        frame.limit = Some(256);
+        let all = coord
+            .recall(&registry.default.handle, frame, now)
+            .expect("recall for wing resolution must succeed");
+        let source = all.iter().find(|d| d.id == src_drawer_id)
+            .unwrap_or_else(|| panic!("src_drawer_id {src_drawer_id} not found — file a memory first"));
+        let node_names = coord.resolve_drawer_node_names(
+            &registry.default.handle,
+            &[source.parent_node_id.clone()],
+        );
+        node_names
+            .get(&source.parent_node_id)
+            .cloned()
+            .unwrap_or_else(|| ("unknown-wing".to_string(), "unknown-room".to_string()))
+    };
+
+    let lifecycle_bits: i64 = (lifecycle.raw_value()) << 3;
+    let t = Tunnel {
+        id: format!("lc-test-{src_drawer_id}-{}", lifecycle.raw_value()),
+        source_wing: src_wing,
+        source_room: src_room,
+        source_drawer_id: Some(src_drawer_id.to_string()),
+        target_wing: "tgt".to_string(),
+        target_room: "r2".to_string(),
+        target_drawer_id: Some(tgt_drawer_id.to_string()),
+        label: "lifecycle-test-edge".to_string(),
+        kind: locus_kit::tunnel_operational::TunnelKind::References,
+        adjective_bitmap: 0,       // Normal sensitivity — bulk-exportable
+        operational_bitmap: lifecycle_bits,
+        provenance_bitmap: 0,
+        added_by: "test".to_string(),
+        filed_at: now,
+        tombstoned_at: None,
+        removed_by_batch: None,
+        order_key: None,
+    };
+    registry.default.store.add_tunnel(&t).expect("add_tunnel must succeed");
+}
+
+#[test]
+fn connection_search_excludes_proposed_tunnels() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "lifecycle-cs-proposed-src", "lc/cs/proposed");
+    let tgt_id = "dummy-tgt-proposed-cs";
+    insert_lifecycle_tunnel_for_drawer(&registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Proposed);
+
+    let result = dispatch_tool(
+        "moot_connection_search",
+        &args!["from_id" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("connection_search must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains(": 0"),
+        "proposed tunnel must be excluded from connection_search; got: {text}"
+    );
+}
+
+#[test]
+fn connection_search_excludes_withdrawn_tunnels() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "lifecycle-cs-withdrawn-src", "lc/cs/withdrawn");
+    let tgt_id = "dummy-tgt-withdrawn-cs";
+    insert_lifecycle_tunnel_for_drawer(&registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Withdrawn);
+
+    let result = dispatch_tool(
+        "moot_connection_search",
+        &args!["from_id" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("connection_search must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains(": 0"),
+        "withdrawn tunnel must be excluded from connection_search; got: {text}"
+    );
+}
+
+#[test]
+fn connection_search_excludes_superseded_tunnels() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "lifecycle-cs-superseded-src", "lc/cs/superseded");
+    let tgt_id = "dummy-tgt-superseded-cs";
+    insert_lifecycle_tunnel_for_drawer(&registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Superseded);
+
+    let result = dispatch_tool(
+        "moot_connection_search",
+        &args!["from_id" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("connection_search must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains(": 0"),
+        "superseded tunnel must be excluded from connection_search; got: {text}"
+    );
+}
+
+#[test]
+fn connection_map_excludes_proposed_tunnels() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "lifecycle-cm-proposed-src", "lc/cm/proposed");
+    let tgt_id = "dummy-tgt-proposed-cm";
+    insert_lifecycle_tunnel_for_drawer(&registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Proposed);
+
+    let result = dispatch_tool(
+        "moot_connection_map",
+        &args!["to_id" => tgt_id],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("connection_map must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains(": 0"),
+        "proposed tunnel must be excluded from connection_map; got: {text}"
+    );
+}
+
+#[test]
+fn connection_map_excludes_withdrawn_tunnels() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "lifecycle-cm-withdrawn-src", "lc/cm/withdrawn");
+    let tgt_id = "dummy-tgt-withdrawn-cm";
+    insert_lifecycle_tunnel_for_drawer(&registry, &src_id, tgt_id, locus_kit::tunnel_operational::TunnelLifecycle::Withdrawn);
+
+    let result = dispatch_tool(
+        "moot_connection_map",
+        &args!["to_id" => tgt_id],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("connection_map must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains(": 0"),
+        "withdrawn tunnel must be excluded from connection_map; got: {text}"
+    );
+}
+
+#[test]
+fn connection_search_returns_active_and_excludes_proposed_same_source() {
+    let registry = EstateRegistry::new_inmemory();
+    let src_id = file_one_memory(&registry, "lifecycle-cs-mixed-src", "lc/cs/mixed");
+    let tgt_active = file_one_memory(&registry, "lifecycle-cs-mixed-tgt-active", "lc/cs/mixed-tgt");
+    let tgt_proposed = "dummy-tgt-proposed-mixed";
+
+    // Create one active tunnel via the MCP link verb (lifecycle = active by default).
+    dispatch_tool(
+        "moot_link_memories",
+        &args!["from_id" => src_id.as_str(), "to_id" => tgt_active.as_str(), "kind" => "references"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("moot_link_memories must succeed");
+
+    // Insert one proposed tunnel directly with the same source drawer.
+    insert_lifecycle_tunnel_for_drawer(&registry, &src_id, tgt_proposed, locus_kit::tunnel_operational::TunnelLifecycle::Proposed);
+
+    let result = dispatch_tool(
+        "moot_connection_search",
+        &args!["from_id" => src_id.as_str()],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("connection_search must not throw");
+    assert!(is_success(&result));
+    let text = content_text(&result);
+    assert!(
+        text.contains(": 1"),
+        "exactly one active tunnel must appear; proposed must be excluded; got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 6. Tier 3 — Knowledge graph
 // ---------------------------------------------------------------------------
 

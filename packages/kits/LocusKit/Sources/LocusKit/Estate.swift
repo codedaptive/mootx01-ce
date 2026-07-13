@@ -677,14 +677,23 @@ public actor Estate {
         try await store.allTunnels()
     }
 
-    /// All non-tombstoned, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
+    /// All confirmed-active, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
     ///
-    /// Active-edge view: retired tunnels (bit 13 of `operationalBitmap` set) are
-    /// excluded so that OMEGA retirement removes a tunnel from the dreaming
-    /// suppression set — enabling later co-recall to re-propose it. Delegates to
-    /// `DrawerStore.allActiveTunnels`.
+    /// Active-edge view: only tunnels with `lifecycle == .active` (bits 3–5 = 0)
+    /// and `isRetired == false` (bit 13 clear) are returned. Proposed, withdrawn,
+    /// and superseded tunnels are excluded; full history is reachable via
+    /// `allTunnels()`. Delegates to `DrawerStore.allActiveTunnels`.
     public func allActiveTunnels() async throws -> [Tunnel] {
         try await store.allActiveTunnels()
+    }
+
+    /// Insert a tunnel directly into the estate store.
+    ///
+    /// Delegates to `DrawerStore.addTunnel`. Conflicting IDs surface as
+    /// `duplicateKey`. Primarily used by tests to seed tunnels with specific
+    /// lifecycle states for disclosure-boundary verification (FIND4).
+    public func addTunnel(_ t: Tunnel) async throws {
+        try await store.addTunnel(t)
     }
 
     /// Flip bit 13 of `operationalBitmap` to retire a tunnel (T13 / ADR-021 Phase 7).

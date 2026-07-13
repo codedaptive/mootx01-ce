@@ -1492,13 +1492,16 @@ fn run_connection_search(
         .recall_tunnels(&estate.handle, &wing)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
 
-    // Sensitivity ceiling (#58): exclude restricted/secret tunnels at the
-    // MCP boundary, matching the default recall ceiling.
+    // Lifecycle gate (FIND4): exclude proposed, withdrawn, and superseded
+    // tunnels at the MCP boundary so AI clients see only confirmed edges.
+    // Sensitivity ceiling (#58): exclude restricted/secret tunnels, matching
+    // the default recall ceiling.
     let outgoing: Vec<_> = tunnels
         .iter()
         .filter(|t| {
             t.source_drawer_id.as_deref() == Some(from_id)
                 && t.tombstoned_at.is_none()
+                && t.lifecycle() == locus_kit::tunnel_operational::TunnelLifecycle::Active
                 && t.adjective_sensitivity().is_bulk_exportable()
         })
         .collect();
@@ -1550,8 +1553,12 @@ fn run_connection_map(
             .recall_tunnels(&estate.handle, wing)
             .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, describe_verb_dispatch_error(&e)))?;
         for t in tunnels {
+            // Lifecycle gate (FIND4): exclude proposed, withdrawn, and superseded
+            // tunnels at the MCP boundary. Sensitivity ceiling (#58): same as
+            // connection_search.
             if t.target_drawer_id.as_deref() == Some(to_id)
                 && t.tombstoned_at.is_none()
+                && t.lifecycle() == locus_kit::tunnel_operational::TunnelLifecycle::Active
                 && t.adjective_sensitivity().is_bulk_exportable()
             {
                 incoming.push(t);

@@ -7335,6 +7335,66 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Lifecycle enforcement in all_active_tunnels (FIND4)
+    // -----------------------------------------------------------------
+
+    /// Build a tunnel with a specific TunnelLifecycle encoded in bits 3–5.
+    fn tunnel_with_lifecycle(id: &str, lifecycle: crate::tunnel_operational::TunnelLifecycle) -> Tunnel {
+        let mut t = declared_tunnel(id);
+        t.operational_bitmap = (lifecycle.raw_value() as i64) << 3;
+        t
+    }
+
+    #[test]
+    fn all_active_tunnels_excludes_proposed_lifecycle() {
+        let store = open_store();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-active", crate::tunnel_operational::TunnelLifecycle::Active)).unwrap();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-proposed", crate::tunnel_operational::TunnelLifecycle::Proposed)).unwrap();
+
+        let active = store.all_active_tunnels().unwrap();
+        assert_eq!(active.len(), 1, "all_active_tunnels must exclude proposed-lifecycle tunnels");
+        assert_eq!(active[0].id, "lc-active");
+    }
+
+    #[test]
+    fn all_active_tunnels_excludes_withdrawn_lifecycle() {
+        let store = open_store();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-active-2", crate::tunnel_operational::TunnelLifecycle::Active)).unwrap();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-withdrawn", crate::tunnel_operational::TunnelLifecycle::Withdrawn)).unwrap();
+
+        let active = store.all_active_tunnels().unwrap();
+        assert_eq!(active.len(), 1, "all_active_tunnels must exclude withdrawn-lifecycle tunnels");
+        assert_eq!(active[0].id, "lc-active-2");
+    }
+
+    #[test]
+    fn all_active_tunnels_excludes_superseded_lifecycle() {
+        let store = open_store();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-active-3", crate::tunnel_operational::TunnelLifecycle::Active)).unwrap();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-superseded", crate::tunnel_operational::TunnelLifecycle::Superseded)).unwrap();
+
+        let active = store.all_active_tunnels().unwrap();
+        assert_eq!(active.len(), 1, "all_active_tunnels must exclude superseded-lifecycle tunnels");
+        assert_eq!(active[0].id, "lc-active-3");
+    }
+
+    #[test]
+    fn all_tunnels_returns_all_lifecycle_states() {
+        // all_tunnels is the full-history view — must return ALL lifecycle states.
+        let store = open_store();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-all-active", crate::tunnel_operational::TunnelLifecycle::Active)).unwrap();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-all-proposed", crate::tunnel_operational::TunnelLifecycle::Proposed)).unwrap();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-all-withdrawn", crate::tunnel_operational::TunnelLifecycle::Withdrawn)).unwrap();
+        store.add_tunnel(&tunnel_with_lifecycle("lc-all-superseded", crate::tunnel_operational::TunnelLifecycle::Superseded)).unwrap();
+
+        let all = store.all_tunnels().unwrap();
+        assert_eq!(all.len(), 4, "all_tunnels must return all lifecycle states");
+
+        let active_only = store.all_active_tunnels().unwrap();
+        assert_eq!(active_only.len(), 1, "all_active_tunnels must return only lifecycle==active tunnels");
+    }
+
+    // -----------------------------------------------------------------
     // Audit reads
     // -----------------------------------------------------------------
 
