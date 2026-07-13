@@ -2051,13 +2051,27 @@ extension ToolDispatcher {
         // Omitting query returns all active facts (the unfiltered case).
         let queryRaw = try optionalString(args["query"], argument: "query")
         let query = queryRaw?.lowercased()
-        let facts = query.map { q in
-            allFacts.filter {
-                $0.subject.lowercased().contains(q) ||
-                $0.predicate.lowercased().contains(q) ||
-                $0.object.lowercased().contains(q)
-            }
-        } ?? allFacts
+        let subjectExact = try optionalString(args["subject_exact"], argument: "subject_exact")
+        let predicateExact = try optionalString(args["predicate_exact"], argument: "predicate_exact")
+        let objectExact = try optionalString(args["object_exact"], argument: "object_exact")
+        let sourceExact = try optionalString(args["source_id_exact"], argument: "source_id_exact")
+        let limit = try Self.clampLimit(
+            optionalInt(args["limit"], argument: "limit"),
+            argument: "limit",
+            default: 100
+        )
+        let facts = allFacts.filter { fact in
+            let queryMatches = query.map { q in
+                fact.subject.lowercased().contains(q) ||
+                fact.predicate.lowercased().contains(q) ||
+                fact.object.lowercased().contains(q)
+            } ?? true
+            return queryMatches
+                && (subjectExact.map { fact.subject == $0 } ?? true)
+                && (predicateExact.map { fact.predicate == $0 } ?? true)
+                && (objectExact.map { fact.object == $0 } ?? true)
+                && (sourceExact.map { fact.sourceDrawerID == $0 } ?? true)
+        }
         // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
         // about to emit, check whether it references an actual drawer row in the estate.
         // If it does AND is Restricted/Secret (outside the default sensitivity ceiling),
@@ -2066,7 +2080,7 @@ extension ToolDispatcher {
         // We use getDrawers(ids:matchingFrame:hydrationLevel:) which returns both the
         // admissible set and the full loadedIDs set — the difference is the blocked set.
         // Parity with Rust run_fact_search.
-        let emittedFacts = Array(facts.prefix(100))
+        let emittedFacts = Array(facts.prefix(limit))
         let distinctSourceIDs = Array(Set(emittedFacts.map { $0.sourceDrawerID }))
         let estate = try await kit.estate(for: handle)
         let hiddenSourceIDs: Set<String>

@@ -457,6 +457,9 @@ enum TeachmeGuides {
 
         Pass a query string to filter by substring match across subject,
         predicate, and object. Omit query to return all active facts.
+        For deterministic identity checks, use subject_exact, predicate_exact,
+        object_exact, and/or source_id_exact. Exact fields are case-sensitive
+        and combine with each other and query. limit defaults to 100 (max 500).
 
         When to use vs siblings:
           - moot_fact_timeline — to see retired facts and full history
@@ -469,6 +472,11 @@ enum TeachmeGuides {
 
         Example (all facts):
           {}   (or omit entirely for default estate)
+
+        Example (exact source identity):
+          { "subject_exact": "calendar.event.ev-1",
+            "predicate_exact": "scheduled",
+            "source_id_exact": "miner:calendar" }
 
         Response:
           facts matching "Alice": N

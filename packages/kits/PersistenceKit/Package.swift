@@ -93,6 +93,11 @@ let package = Package(
             name: "SQLCipher",
             path: "Sources/SQLCipher",
             exclude: ["LICENSE.md"],
+            // Privacy manifest (M-MXA-5): declares the amalgamation's
+            // required-reason API usage (stat family → FileTimestamp C617.1,
+            // statfs/fstatvfs → DiskSpace E174.1) so Xcode's aggregated
+            // privacy report picks it up from the resource bundle.
+            resources: [.copy("PrivacyInfo.xcprivacy")],
             publicHeadersPath: "include",
             cSettings: [
                 .define("SQLITE_HAS_CODEC"),

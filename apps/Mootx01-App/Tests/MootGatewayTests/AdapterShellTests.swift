@@ -19,9 +19,9 @@ struct AdapterShellTests {
     /// so the test does not touch ~/.mootx01. Also registers the bridge with
     /// IntentRuntimeBridge so intent perform() fallback resolves correctly.
     private func freshInMemoryRuntime() async throws {
-        await GatewayRuntime.shared.configure(databaseURL: nil)
+        await GatewayRuntime.shared.configureInMemoryForTesting()
         let bridge = try await GatewayRuntime.shared.bridge()
-        await IntentRuntimeBridge.shared.register(bridge)
+        IntentRuntimeBridge.shared.register(bridge)
     }
 
     @Test("CaptureDrawerIntent.perform() files a drawer")
@@ -127,5 +127,63 @@ struct AdapterShellTests {
         await #expect(throws: GatewayTransportError.self) {
             _ = try await transport.send(.init(id: .integer(1), method: "ping", params: nil))
         }
+    }
+
+    // MARK: M-ING-1 — ingestion targeting on the capture surface
+
+    @Test("CaptureDrawerIntent routes wing and eventTime to the drawer (M-ING-1)")
+    @MainActor
+    func captureIntentWingAndEventTimeLand() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        // Fixed instant (2025-06-15T15:06:40Z): eventTime models when a mined
+        // fact was TRUE, so the test pins a date that cannot be "now".
+        let past = Date(timeIntervalSince1970: 1_750_000_000)
+        _ = try await CaptureDrawerIntent(
+            content: "m-ing-1 targeting probe",
+            location: "health",
+            wing: "Personal Life",
+            eventTime: past,
+            caller: bridge
+        ).perform()
+
+        // Recover the drawer id from the search surface, then read it back in
+        // full — the get output carries the wing and event_time lines.
+        let search = await bridge.callToolFull("moot_memory_search", arguments: [
+            "query": .string("m-ing-1 targeting probe"),
+            "wing": .string("Personal Life"),
+        ])
+        #expect(search.isError == false)
+        let hits = MootBridge.parseDrawerLines(search.text)
+        try #require(hits.count == 1)
+
+        let get = await bridge.callToolFull("moot_memory_get", arguments: [
+            "id": .string(hits[0].id),
+        ])
+        #expect(get.isError == false)
+        #expect(get.text.contains("wing: Personal Life"))
+        #expect(get.text.contains("event_time: 2025-06-15"))
+    }
+
+    @Test("CaptureDrawerIntent defaults are unchanged when targeting is omitted (M-ING-1)")
+    @MainActor
+    func captureIntentTargetingDefaultsUnchanged() async throws {
+        let bridge = try await MootBridge.attachInMemory()
+        _ = try await CaptureDrawerIntent(
+            content: "m-ing-1 default probe",
+            location: "tests",
+            caller: bridge
+        ).perform()
+        let search = await bridge.callToolFull("moot_memory_search", arguments: [
+            "query": .string("m-ing-1 default probe"),
+        ])
+        let hits = MootBridge.parseDrawerLines(search.text)
+        try #require(hits.count == 1)
+        let get = await bridge.callToolFull("moot_memory_get", arguments: [
+            "id": .string(hits[0].id),
+        ])
+        // nil wing/eventTime → server defaults: the default wing, streaming
+        // capture time (today, not a pinned past date).
+        #expect(get.text.contains("wing: Agentic Memory"))
+        #expect(!get.text.contains("event_time: 2025-06-15"))
     }
 }

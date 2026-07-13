@@ -66,18 +66,30 @@ public actor MootBridge {
     /// in-memory estate (nothing on disk to share).
     public nonisolated let databasePath: String?
 
-    private init(dispatcher: ARIA_MCPDispatcher, serverName: String, databasePath: String?) {
+    /// The estate's live Storage — the SAME instance the ARIA verbs read and
+    /// write through. Retained so ConvergenceKit's SyncEngine can observe the
+    /// exact rows the estate mutates (opening a second SQLiteStorage on the
+    /// same file would give a distinct observer that never sees those writes).
+    private let storage: any Storage
+
+    private init(dispatcher: ARIA_MCPDispatcher, storage: any Storage,
+                 serverName: String, databasePath: String?) {
         self.dispatcher = dispatcher
+        self.storage = storage
         self.serverName = serverName
         self.databasePath = databasePath
     }
+
+    /// The estate's live Storage, for wiring a ConvergenceKit SyncEngine
+    /// (`engine.enable(manifest:storage:)`). Same instance the verbs use.
+    public func estateStorage() -> any Storage { storage }
 
     // MARK: Attachment
 
     /// The three-step wiring (schema → coordinator → dispatcher) over an
     /// already-constructed storage backend. Mirrors `MootSidecar.attach`.
     private static func makeDispatcher(
-        storage: some Storage,
+        storage: any Storage,
         owner: OwnerCredentials,
         serverName: String
     ) async throws -> ARIA_MCPDispatcher {
@@ -95,15 +107,14 @@ public actor MootBridge {
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
     }
 
-    /// Attach an ephemeral in-memory MOOT. Used by tests and by the App
-    /// Intent shells when the system instantiates them without a prior
-    /// app launch (no app bundle has configured a durable estate).
+    /// Attach an ephemeral in-memory MOOT. Test-only callers select this
+    /// explicitly; production App Intents always resolve the durable estate.
     public static func attachInMemory(serverName: String = "Gateway") async throws -> MootBridge {
         let owner = OwnerCredentials(ownerIdentifier: "gateway-owner")
         let configuration = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let storage = InMemoryStorage(configuration: configuration)
         let dispatcher = try await makeDispatcher(storage: storage, owner: owner, serverName: serverName)
-        return MootBridge(dispatcher: dispatcher, serverName: serverName, databasePath: nil)
+        return MootBridge(dispatcher: dispatcher, storage: storage, serverName: serverName, databasePath: nil)
     }
 
     /// Attach a durable SQLite-backed MOOT at `url`. The cross-process edge
@@ -125,10 +136,18 @@ public actor MootBridge {
         // on a signed build.
         // Shared access group (#94): both the app and the managed server
         // must read the same Keychain item for the same SQLCipher estate.
+        #if os(iOS)
+        // iOS has no managed subprocess peer. Using the app's default access
+        // group keeps the encrypted estate available to cold App Intents
+        // without requiring a nonexistent shared-keychain entitlement.
+        let keychainAccessGroup: String? = nil
+        #else
+        let keychainAccessGroup: String? = "com.codedaptive.mootx01.shared"
+        #endif
         let key = try KeychainKeyStore(
             service: "com.codedaptive.mootx01",
             estateURL: url,
-            accessGroup: "com.codedaptive.mootx01.shared"
+            accessGroup: keychainAccessGroup
         ).loadOrCreateKey()
         let configuration = EstateConfiguration(
             estateID: UUID(),
@@ -137,7 +156,7 @@ public actor MootBridge {
         )
         let storage = try SQLiteStorage(configuration: configuration)
         let dispatcher = try await makeDispatcher(storage: storage, owner: owner, serverName: serverName)
-        return MootBridge(dispatcher: dispatcher, serverName: serverName, databasePath: url.path)
+        return MootBridge(dispatcher: dispatcher, storage: storage, serverName: serverName, databasePath: url.path)
     }
 
     // MARK: JSON-RPC drive

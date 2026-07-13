@@ -2190,6 +2190,44 @@ fn file_fact_round_trips_through_coordinator() {
 }
 
 #[test]
+fn fact_search_exact_fields_reject_substring_and_source_collisions() {
+    let registry = EstateRegistry::new_inmemory();
+    for (subject, source) in [
+        ("calendar.event.ev-1", "miner:calendar"),
+        ("calendar.event.ev-10", "miner:other"),
+    ] {
+        let filed = dispatch_tool(
+            "moot_file_fact",
+            &args![
+                "subject" => subject,
+                "predicate" => "scheduled",
+                "object" => "fixture",
+                "source_id" => source
+            ],
+            &registry,
+            &SurfacedRecallLedger::new(),
+        )
+        .expect("file fact");
+        assert!(is_success(&filed));
+    }
+    let search = dispatch_tool(
+        "moot_fact_search",
+        &args![
+            "subject_exact" => "calendar.event.ev-1",
+            "predicate_exact" => "scheduled",
+            "source_id_exact" => "miner:calendar"
+        ],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("exact fact search");
+    let text = content_text(&search);
+    assert!(text.contains("calendar.event.ev-1"));
+    assert!(!text.contains("calendar.event.ev-10"));
+    assert!(text.starts_with("facts: 1"), "unexpected exact search: {text}");
+}
+
+#[test]
 fn file_fact_missing_subject_returns_invalid_params() {
     // Arg validation runs before the not-yet-supported check.
     let registry = EstateRegistry::new_inmemory();

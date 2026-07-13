@@ -424,7 +424,11 @@ fn fact_search_tool() -> serde_json::Value {
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("Optional substring filter across subject, predicate, and object."),
-                "limit": integer_schema("Max results (default 50).")
+                "subject_exact": string_schema("Optional exact, case-sensitive subject filter."),
+                "predicate_exact": string_schema("Optional exact, case-sensitive predicate filter."),
+                "object_exact": string_schema("Optional exact, case-sensitive object filter."),
+                "source_id_exact": string_schema("Optional exact provenance source filter."),
+                "limit": integer_schema("Max results (default 100, maximum 500).")
             }),
             json!([])
         )))
