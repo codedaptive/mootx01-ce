@@ -876,7 +876,7 @@ been extended to ten — `TemporalCausalitySignal` (7), `DistillationSignal`
 | 1 | dreaming-daemon | 604 800 s (weekly) | NMF, eigenvalue, T-matrix cold-path |
 | 2 | maintenance | 3 600 s (hourly) | Tombstone cleanup, orphan detection |
 | 3 | vector-similarity | 300 s (5 min) | HNSW proximity clustering |
-| 4 | contradiction-scout | 3 600 s (hourly) | Content-conflict pass: kNN candidates + ConflictCue screen → proposed contradicts tunnels |
+| 4 | contradiction-scout | 3 600 s (hourly) | Content-conflict pass: BM25 lexical candidates (corpus lane) + drawer-keyed Hamming kNN (lane 1) + ConflictCue screen → proposed contradicts tunnels |
 | 5 | decay-sweep | 86 400 s (daily) | O/T matrix multiplicative decay |
 | 6 | byReference-validity | 604 800 s (weekly) | Broken reference detection |
 | 7 | end-of-day-tournament | 86 400 s (daily) | Bradley-Terry reward signal |
@@ -890,7 +890,8 @@ the # column is registration order, not the historical signal number.)
 callers replace it with `TemporalCausalitySignal.spec(foldCycle:)` to wire a
 live fold closure. `ContradictionScoutSignal` is wired live by the resident
 daemon via `huntCycle:` around `GeniusLocusKit.huntContradictions` (see
-`Brain/ContradictionHunt.swift` — kNN candidate mining, SubstrateML
+`Brain/ContradictionHunt.swift` — BM25 lexical candidate mining on the
+corpus lane (drawer-keyed Hamming kNN on lane 1), SubstrateML
 `ConflictCue` screen, strong cues captured as `contradicts` tunnels with
 lifecycle `.proposed` / originClass `.derived`, borderline pairs returned
 for BYOAI adjudication, durable dedup against every existing contradicts
@@ -962,8 +963,11 @@ produces the production signal spec. The emit closure captures the
 `VectorStore` (and the estate's `Corpus`, when one is registered) and on
 each five-minute fire:
 
-1. Calls `VectorStore.findByKeyword("", limit: 50)` to sample up to
-   50 candidate item IDs.
+1. Calls `VectorStore.recentItemIDs(limit: 50)` to sample the 50 most
+   recently filed candidate item IDs (newest-first — new captures are
+   what need association screening; the earlier ascending-item_id
+   enumeration was a static UUID-ordered window new content rarely
+   entered on a large estate).
 2. Lane 1 — drawer-keyed rows: for each candidate, retrieves its engram
    via `VectorStore.getVector(itemID:modelID:)` under the caller's
    `modelID` and calls `VectorStore.findNearest(probe:modelID:limit:5)`
