@@ -252,6 +252,70 @@ fn find_by_keyword_returns_matching_items() {
     assert_eq!(hits, vec!["alpha-doc".to_string()]);
 }
 
+/// `limit` counts DISTINCT item IDs, not table rows. The vectors table
+/// holds many rows per item (one binary row per model slot, plus float
+/// rows), so a row-scoped limit silently shrinks the probe window ~10× on
+/// production ensembles — the contradiction hunter and
+/// VectorSimilaritySignal both size their sweeps in ITEMS. Regression:
+/// three items under two models each (6 rows); limit 3 must return all
+/// three items, not the two items the first three rows dedupe to.
+/// Mirrors Swift testFindByKeywordLimitCountsDistinctItemsNotRows.
+#[test]
+fn find_by_keyword_limit_counts_distinct_items_not_rows() {
+    let store = fresh_store();
+    let engram = Engram::new(1, 2, 3, 4);
+    for item in ["probe-a", "probe-b", "probe-c"] {
+        for model in ["model-one", "model-two"] {
+            store
+                .add_vector(item, &engram, model, "1.0", FILED_AT_1)
+                .expect("add_vector");
+        }
+    }
+    let hits = store.find_by_keyword("probe", 3).expect("find_by_keyword");
+    assert_eq!(
+        hits,
+        vec![
+            "probe-a".to_string(),
+            "probe-b".to_string(),
+            "probe-c".to_string()
+        ],
+        "limit must count distinct items — a row-scoped limit returns only the items the first N rows cover"
+    );
+}
+
+/// `recent_item_ids` returns distinct items newest-first — the probe
+/// surface for bounded sweeps (contradiction hunter,
+/// VectorSimilaritySignal), so a bounded window always contains the
+/// latest captures. Multiple rows per item must not duplicate or
+/// displace items. Mirrors Swift testRecentItemIDsNewestFirstDistinct.
+#[test]
+fn recent_item_ids_newest_first_distinct() {
+    let store = fresh_store();
+    let engram = Engram::new(9, 9, 9, 9);
+    for (item, at) in [("old-item", FILED_AT_1), ("mid-item", FILED_AT_1 + 100), ("new-item", FILED_AT_1 + 200)] {
+        for model in ["model-one", "model-two"] {
+            store
+                .add_vector(item, &engram, model, "1.0", at)
+                .expect("add_vector");
+        }
+    }
+    let recent = store.recent_item_ids(2).expect("recent_item_ids");
+    assert_eq!(
+        recent,
+        vec!["new-item".to_string(), "mid-item".to_string()],
+        "recent_item_ids must return distinct items newest-first"
+    );
+    let all = store.recent_item_ids(10).expect("recent_item_ids");
+    assert_eq!(
+        all,
+        vec![
+            "new-item".to_string(),
+            "mid-item".to_string(),
+            "old-item".to_string()
+        ]
+    );
+}
+
 #[test]
 fn find_by_keyword_returns_empty_for_no_match() {
     let store = fresh_store();

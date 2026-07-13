@@ -159,8 +159,9 @@ authorized for.
 Three tools plus one lens expose the content-driven contradiction hunter
 (GLK `huntContradictions` / `EstateCoordinator::hunt_contradictions`):
 
-- `moot_hunt_contradictions` (recipe) — one bounded on-demand sweep: kNN
-  candidate pairs from the vector index, screened by the SubstrateML
+- `moot_hunt_contradictions` (recipe) — one bounded on-demand sweep: BM25
+  lexical candidate pairs from the corpus's inverted index (drawer-keyed
+  Hamming kNN on the bespoke lane), screened by the SubstrateML
   conflict cue. Strong findings persist as `contradicts` tunnels with
   lifecycle `proposed` / origin class `derived` (sensitivity = max of the
   endpoint tiers, stamped by `addTunnel`); borderline pairs are returned

@@ -616,10 +616,28 @@ pub struct BorderlineContradiction {
     pub target_snippet: String,
 }
 
+/// BM25 candidate count per probe on the corpus lane. Candidate generation is
+/// LEXICAL, via the corpus's persistent BM25 inverted index — a contradiction
+/// is two statements about the same thing that disagree, "about the same thing"
+/// is what BM25 answers cheaply (sub-linear WAND/BMW), and it is the same
+/// shared-term similarity the conflict-cue screen keys on. A small K suffices
+/// because BM25 ranks the shared-term twin near the top. Mirrors Swift
+/// `huntBM25CandidateK`.
+pub const HUNT_BM25_CANDIDATE_K: usize = 20;
+
+/// Character cap on the BM25 query built from a probe drawer's content. WAND
+/// cost grows with query term count, so querying an entire large body makes the
+/// per-probe cost scale with drawer size; candidate generation only needs the
+/// probe's topic, which the leading content carries (the full bodies are
+/// compared by the conflict-cue screen downstream regardless). Mirrors Swift
+/// `huntBM25QueryCharLimit`.
+pub const HUNT_BM25_QUERY_CHAR_LIMIT: usize = 240;
+
 /// One hunt pass's outcome. `vector_store_available == false` means the
 /// estate has no registered VectorStore — the pass is a no-op, reported
 /// honestly rather than as a silent zero. Rust mirror of Swift
 /// `ContradictionHuntReport`.
+
 #[derive(Debug, Clone)]
 pub struct ContradictionHuntReport {
     pub vector_store_available: bool,
@@ -2694,17 +2712,24 @@ impl EstateCoordinator {
             }
         };
 
-        // Probe sample: vector-indexed item IDs (the only rows kNN can
-        // reach). Empty-keyword query matches all rows, item_id ascending.
-        // Two row populations exist: DRAWER-keyed rows (bespoke lanes and
-        // test-planted vectors) and CHUNK-keyed rows (the production encode
-        // pipeline — the estate lifecycle registers the corpus's shared
-        // vector store, and the drain writes item_id = chunk UUID under the
-        // corpus's own model_id). Both lanes are mined below.
+        // Probe sample: the NEWEST vector-indexed item IDs (filed_at
+        // descending, distinct). Recency-first is what makes a bounded
+        // sweep converge: new memories are the ones that need screening
+        // against the existing estate, so a probe_limit window always
+        // contains the latest captures — an ascending-item_id window was a
+        // UUID lottery that new content-addressed chunk IDs almost never
+        // entered on a large estate. Neighbours may be ANY age
+        // (find_nearest searches the whole lane), so new-vs-old conflicts
+        // are found from the new side. Two row populations exist:
+        // DRAWER-keyed rows (bespoke lanes and test-planted vectors) and
+        // CHUNK-keyed rows (the production encode pipeline — the estate
+        // lifecycle registers the corpus's shared vector store, and the
+        // drain writes item_id = chunk UUID under the corpus's own
+        // model_id). Both lanes are mined below.
         // A failed probe-source scan degrades to an empty pass rather than
         // failing the verb — matches the signal-layer treatment of the same
         // read (VectorSimilaritySignal's diagnostic-and-return).
-        let probe_ids = vector_store.find_by_keyword("", probe_limit).unwrap_or_default();
+        let probe_ids = vector_store.recent_item_ids(probe_limit).unwrap_or_default();
         if probe_ids.is_empty() {
             return Ok(ContradictionHuntReport {
                 vector_store_available: true,
@@ -2766,81 +2791,70 @@ impl EstateCoordinator {
             }
         }
 
-        // Lane 2 — chunk-keyed corpus rows. On a production estate this is
-        // the ONLY populated lane: the encode drain keys every vector row by
-        // chunk UUID under the corpus provider's model_id, so lane 1 finds
-        // nothing there. Mine the same probe set on the corpus lane and map
-        // chunk hits back to their owning drawers (chunk → source_id via the
-        // corpus's warm map). Chunk pairs from the SAME drawer collapse;
-        // `seen_pairs` keys on drawer IDs, so the two lanes dedupe together.
-        // Mirrors the Swift lane-2 block in `ContradictionHunt.swift`.
-        if let Some(corpus) = self.corpus_kits.get(handle) {
-            let corpus_model_id = corpus.model_id().to_string();
-            let mut chunk_matches: Vec<(String, String)> = Vec::new();
-            let mut involved_chunk_ids: std::collections::HashSet<uuid::Uuid> =
-                std::collections::HashSet::new();
-            for probe_id in &probe_ids {
-                let probe_uuid = match uuid::Uuid::parse_str(probe_id) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
-                let probe_engram = match vector_store.get_vector(probe_id, &corpus_model_id) {
-                    Ok(Some(e)) => e,
-                    _ => continue,
-                };
-                let matches = match vector_store.find_nearest(&probe_engram, &corpus_model_id, 5)
-                {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                for m in matches {
-                    if m.item_id == *probe_id || m.distance > proximity_threshold {
-                        continue;
-                    }
-                    let match_uuid = match uuid::Uuid::parse_str(&m.item_id) {
-                        Ok(u) => u,
-                        Err(_) => continue,
-                    };
-                    involved_chunk_ids.insert(probe_uuid);
-                    involved_chunk_ids.insert(match_uuid);
-                    chunk_matches.push((probe_id.clone(), m.item_id.clone()));
-                }
-            }
-            if !chunk_matches.is_empty() {
-                let ids: Vec<uuid::Uuid> = involved_chunk_ids.into_iter().collect();
-                let owners = corpus.source_ids_for_chunks(&ids);
-                for (chunk_a, chunk_b) in chunk_matches {
-                    let (ua, ub) = match (
-                        uuid::Uuid::parse_str(&chunk_a),
-                        uuid::Uuid::parse_str(&chunk_b),
-                    ) {
-                        (Ok(a), Ok(b)) => (a, b),
-                        _ => continue,
-                    };
-                    let (source_a, source_b) = match (owners.get(&ua), owners.get(&ub)) {
-                        (Some(a), Some(b)) if a != b => (a.clone(), b.clone()),
-                        _ => continue,
-                    };
-                    let key = pair_key(&source_a, &source_b);
-                    if !seen_pairs.insert(key) {
-                        continue;
-                    }
-                    let (a, b) = if source_a < source_b {
-                        (source_a, source_b)
-                    } else {
-                        (source_b, source_a)
-                    };
-                    candidate_pairs.push((a, b));
-                }
-            }
-        }
-
-        // Drawer contents + node names for the surviving candidates.
+        // Drawer contents + node names. Loaded before lane 2 because the corpus
+        // lane needs probe-drawer content to build its BM25 query; the screen
+        // below reuses the same map.
         let all_drawers: Vec<locus_kit::drawer::Drawer> =
             estate.all_drawers().map_err(remap_err)?;
         let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
         let drawers_by_id: std::collections::HashMap<&str, &locus_kit::drawer::Drawer> =
             all_drawers.iter().map(|d| (d.id.as_str(), d)).collect();
+
+        // Lane 2 — the corpus lane, the ONLY lane a production estate populates
+        // (the encode drain writes chunk-keyed rows under the corpus provider's
+        // model_id, so lane 1's drawer-keyed `get_vector` finds nothing there).
+        // Candidate generation here is LEXICAL, via the corpus's persistent BM25
+        // inverted index — NOT vectors. A contradiction is two statements about
+        // the same thing that disagree; "about the same thing" is what BM25
+        // answers cheaply (sub-linear WAND/BMW over posting lists), and it is
+        // the same shared-term similarity the conflict-cue screen keys on. The
+        // vector lanes were unusable at estate scale — the binary SimHash space
+        // is degenerate (109k estate: 748 chunks within Hamming ≤ 2, true twin
+        // at rank #399) and a whole-partition float scan is ~3 s/probe. BM25
+        // returns SOURCE (drawer) IDs directly. `seen_pairs` keys on drawer IDs,
+        // so both lanes dedupe together. Mirrors the Swift lane-2 block.
+        if let Some(corpus) = self.corpus_kits.get(handle) {
+            // Probe drawers = the owning drawers of the recent probe chunks.
+            let probe_uuids: Vec<uuid::Uuid> = probe_ids
+                .iter()
+                .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+                .collect();
+            let probe_owners = corpus.source_ids_for_chunks(&probe_uuids);
+            let mut probe_drawer_ids: Vec<String> = probe_owners.values().cloned().collect();
+            probe_drawer_ids.sort();
+            probe_drawer_ids.dedup();
+            for pd_id in &probe_drawer_ids {
+                let pd = match drawers_by_id.get(pd_id.as_str()) {
+                    Some(d) => *d,
+                    None => continue,
+                };
+                if pd.content.is_empty() {
+                    continue;
+                }
+                // Cap the query length so per-probe cost is independent of body size.
+                let query: String = pd
+                    .content
+                    .chars()
+                    .take(HUNT_BM25_QUERY_CHAR_LIMIT)
+                    .collect();
+                let hits = corpus.bm25_top_k_by_source(&query, HUNT_BM25_CANDIDATE_K);
+                for (source_id, _score) in hits {
+                    if source_id == *pd_id {
+                        continue;
+                    }
+                    let key = pair_key(pd_id, &source_id);
+                    if !seen_pairs.insert(key) {
+                        continue;
+                    }
+                    let (a, b) = if *pd_id < source_id {
+                        (pd_id.clone(), source_id)
+                    } else {
+                        (source_id, pd_id.clone())
+                    };
+                    candidate_pairs.push((a, b));
+                }
+            }
+        }
 
         let probes_scanned = probe_ids.len();
         let mut pairs_screened = 0usize;
