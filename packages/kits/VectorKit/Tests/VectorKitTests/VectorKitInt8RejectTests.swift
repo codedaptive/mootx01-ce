@@ -47,6 +47,13 @@ struct VectorKitInt8RejectTests {
     /// addPayload with an int8 payload must throw int8QuantizationPolicyUndefined.
     /// No row must be written to the store.
     @Test func addPayload_int8_throwsRejectionError() async throws {
+        // Store writes emit insert_latency_ms via the Intellectus global
+        // singleton; hold GlobalTestLock so a concurrent telemetry test's
+        // enabled window never receives this test's samples (observed in the
+        // test-full lane: the telemetry shape test read model_id "m" — this
+        // file's model — instead of its own).
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
         let store = try await makeStore()
         let payload = int8Payload()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -86,6 +93,13 @@ struct VectorKitInt8RejectTests {
 
     /// The error message must state the reason and the remedy (not just an opaque code).
     @Test func addPayload_int8_errorMessageIsInformative() async throws {
+        // Store writes emit insert_latency_ms via the Intellectus global
+        // singleton; hold GlobalTestLock so a concurrent telemetry test's
+        // enabled window never receives this test's samples (observed in the
+        // test-full lane: the telemetry shape test read model_id "m" — this
+        // file's model — instead of its own).
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
         let store = try await makeStore()
         let payload = int8Payload()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -119,6 +133,13 @@ struct VectorKitInt8RejectTests {
     /// A batch with a single int8 payload must be rejected entirely.
     /// No rows from the batch must be written.
     @Test func addPayloads_batchContainingInt8_throwsRejectionError() async throws {
+        // Store writes emit insert_latency_ms via the Intellectus global
+        // singleton; hold GlobalTestLock so a concurrent telemetry test's
+        // enabled window never receives this test's samples (observed in the
+        // test-full lane: the telemetry shape test read model_id "m" — this
+        // file's model — instead of its own).
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
         let store = try await makeStore()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -149,6 +170,13 @@ struct VectorKitInt8RejectTests {
 
     /// A mixed batch (valid binary + int8) must be rejected entirely — no partial writes.
     @Test func addPayloads_mixedBatchWithInt8_rejectsBatchCompletely() async throws {
+        // Store writes emit insert_latency_ms via the Intellectus global
+        // singleton; hold GlobalTestLock so a concurrent telemetry test's
+        // enabled window never receives this test's samples (observed in the
+        // test-full lane: the telemetry shape test read model_id "m" — this
+        // file's model — instead of its own).
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
         let store = try await makeStore()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -193,6 +221,13 @@ struct VectorKitInt8RejectTests {
     /// float32 payloads must write and read back without error.
     /// This confirms the guard is precise (int8 only, not all non-binary).
     @Test func addPayload_float32_succeeds() async throws {
+        // Store writes emit insert_latency_ms via the Intellectus global
+        // singleton; hold GlobalTestLock so a concurrent telemetry test's
+        // enabled window never receives this test's samples (observed in the
+        // test-full lane: the telemetry shape test read model_id "m" — this
+        // file's model — instead of its own).
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
         let store = try await makeStore()
         let floatPayload = VectorPayload(floats: [1.0, 2.0, 3.0, 4.0])
         let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -219,6 +254,13 @@ struct VectorKitInt8RejectTests {
 
     /// Binary (Engram) payloads must write and read back without error.
     @Test func addPayload_binary_succeeds() async throws {
+        // Store writes emit insert_latency_ms via the Intellectus global
+        // singleton; hold GlobalTestLock so a concurrent telemetry test's
+        // enabled window never receives this test's samples (observed in the
+        // test-full lane: the telemetry shape test read model_id "m" — this
+        // file's model — instead of its own).
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
         let store = try await makeStore()
         let engram = Engram(blocks: 0xCAFE_BABE_DEAD_BEEF, 0x1234, 0x5678, 0xABCD)
         let now = Date(timeIntervalSince1970: 1_700_000_000)
