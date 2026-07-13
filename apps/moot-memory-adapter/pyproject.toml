@@ -34,3 +34,9 @@ Documentation = "https://github.com/codedaptive/mootx01-ce/tree/stable/1.0.x/app
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["moot_memory*"]
+
+[tool.pytest.ini_options]
+# Collect ONLY tests/ — a bare `python3 -m pytest` from the project root
+# (what scripts/moot-test's product-python lane runs) must not wander into
+# the moot_memory package, dist/, or egg-info build artifacts.
+testpaths = ["tests"]
