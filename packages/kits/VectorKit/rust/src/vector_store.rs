@@ -1440,25 +1440,51 @@ impl VectorStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        // `limit` counts DISTINCT item IDs — the contract every caller
+        // means ("memories probed"): the contradiction hunter's probe_limit
+        // and VectorSimilaritySignal's sample size both document items, not
+        // rows. The vectors table holds MANY rows per item (binary + float
+        // per model slot; the five-model production ensemble ⇒ ~10 rows per
+        // chunk), so applying the limit to ROWS silently shrank the probe
+        // window ~10×: on a 109k-chunk estate, probe_limit 10000 reached
+        // ~1,000 items — a static window newly-captured memories' UUIDs
+        // almost never sort into, leaving the hunter blind on large
+        // estates. Page the row query until `limit` distinct IDs are
+        // collected or the table is exhausted. Mirrors the Swift twin.
         let pattern = format!("%{}%", query);
         let predicate = StoragePredicate::Like(Column::new("vectors", "item_id"), pattern);
         let order = vec![OrderClause::new(
             Column::new("vectors", "item_id"),
             OrderDirection::Ascending,
         )];
-        let rows = self
-            .storage
-            .row_store()
-            .query("vectors", Some(&predicate), &order, Some(limit), None)
-            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        for row in rows {
-            if let Some(TypedValue::Text(item_id)) = row.get("item_id") {
-                if seen.insert(item_id.clone()) {
-                    out.push(item_id.clone());
+        const PAGE_SIZE: usize = 8192;
+        let mut offset = 0usize;
+        while out.len() < limit {
+            let rows = self
+                .storage
+                .row_store()
+                .query(
+                    "vectors",
+                    Some(&predicate),
+                    &order,
+                    Some(PAGE_SIZE),
+                    Some(offset),
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            let page_len = rows.len();
+            for row in rows {
+                if let Some(TypedValue::Text(item_id)) = row.get("item_id") {
+                    if seen.insert(item_id.clone()) && out.len() < limit {
+                        out.push(item_id.clone());
+                    }
                 }
             }
+            if page_len < PAGE_SIZE {
+                break; // table exhausted
+            }
+            offset += PAGE_SIZE;
         }
 
         let count = out.len();

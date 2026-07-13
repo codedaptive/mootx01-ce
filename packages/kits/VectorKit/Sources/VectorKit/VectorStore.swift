@@ -1346,26 +1346,43 @@ public actor VectorStore {
     ///
     /// Telemetry: emits `vectorkit.search.keyword_result_count` when enabled.
     public func findByKeyword(_ query: String, limit: Int) async throws -> [String] {
-        let rows = try await storage.rowStore.query(
-            table: "vectors",
-            where: .like(Column(table: "vectors", name: "item_id"), "%\(query)%"),
-            orderBy: [
-                OrderClause(
-                    column: Column(table: "vectors", name: "item_id"),
-                    direction: .ascending
-                )
-            ],
-            limit: limit,
-            offset: nil
-        )
+        // `limit` counts DISTINCT item IDs — the contract every caller
+        // means ("memories probed"): the contradiction hunter's probe_limit
+        // and VectorSimilaritySignal's sample size both document items, not
+        // rows. The vectors table holds MANY rows per item (binary + float
+        // per model slot; the five-model production ensemble ⇒ ~10 rows per
+        // chunk), so applying the limit to ROWS silently shrank the probe
+        // window ~10×: on a 109k-chunk estate, probe_limit 10000 reached
+        // ~1,000 items — a static window newly-captured memories' UUIDs
+        // almost never sort into, leaving the hunter blind on large
+        // estates. Page the row query until `limit` distinct IDs are
+        // collected or the table is exhausted.
         var seen = Set<String>()
         var out: [String] = []
-        for row in rows {
-            if case let .text(itemID) = row["item_id"] ?? .null {
-                if seen.insert(itemID).inserted {
-                    out.append(itemID)
+        let pageSize = 8192
+        var offset = 0
+        while out.count < limit {
+            let rows = try await storage.rowStore.query(
+                table: "vectors",
+                where: .like(Column(table: "vectors", name: "item_id"), "%\(query)%"),
+                orderBy: [
+                    OrderClause(
+                        column: Column(table: "vectors", name: "item_id"),
+                        direction: .ascending
+                    )
+                ],
+                limit: pageSize,
+                offset: offset
+            )
+            for row in rows {
+                if case let .text(itemID) = row["item_id"] ?? .null {
+                    if seen.insert(itemID).inserted, out.count < limit {
+                        out.append(itemID)
+                    }
                 }
             }
+            if rows.count < pageSize { break }  // table exhausted
+            offset += pageSize
         }
 
         let count = out.count

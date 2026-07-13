@@ -252,6 +252,37 @@ fn find_by_keyword_returns_matching_items() {
     assert_eq!(hits, vec!["alpha-doc".to_string()]);
 }
 
+/// `limit` counts DISTINCT item IDs, not table rows. The vectors table
+/// holds many rows per item (one binary row per model slot, plus float
+/// rows), so a row-scoped limit silently shrinks the probe window ~10× on
+/// production ensembles — the contradiction hunter and
+/// VectorSimilaritySignal both size their sweeps in ITEMS. Regression:
+/// three items under two models each (6 rows); limit 3 must return all
+/// three items, not the two items the first three rows dedupe to.
+/// Mirrors Swift testFindByKeywordLimitCountsDistinctItemsNotRows.
+#[test]
+fn find_by_keyword_limit_counts_distinct_items_not_rows() {
+    let store = fresh_store();
+    let engram = Engram::new(1, 2, 3, 4);
+    for item in ["probe-a", "probe-b", "probe-c"] {
+        for model in ["model-one", "model-two"] {
+            store
+                .add_vector(item, &engram, model, "1.0", FILED_AT_1)
+                .expect("add_vector");
+        }
+    }
+    let hits = store.find_by_keyword("probe", 3).expect("find_by_keyword");
+    assert_eq!(
+        hits,
+        vec![
+            "probe-a".to_string(),
+            "probe-b".to_string(),
+            "probe-c".to_string()
+        ],
+        "limit must count distinct items — a row-scoped limit returns only the items the first N rows cover"
+    );
+}
+
 #[test]
 fn find_by_keyword_returns_empty_for_no_match() {
     let store = fresh_store();

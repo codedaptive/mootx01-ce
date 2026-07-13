@@ -379,6 +379,33 @@ struct VectorStoreTests {
         }
     }
 
+    /// `limit` counts DISTINCT item IDs, not table rows. The vectors table
+    /// holds many rows per item (one binary row per model slot, plus float
+    /// rows), so a row-scoped limit silently shrinks the probe window ~10×
+    /// on production ensembles — the contradiction hunter and
+    /// VectorSimilaritySignal both size their sweeps in ITEMS. Regression:
+    /// three items under two models each (6 rows); limit 3 must return all
+    /// three items, not the two items the first three rows dedupe to.
+    @Test func testFindByKeywordLimitCountsDistinctItemsNotRows() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            for item in ["probe-a", "probe-b", "probe-c"] {
+                for model in ["model-one", "model-two"] {
+                    try await store.addVector(
+                        itemID: item,
+                        engram: Engram(blocks: 1, 2, 3, 4),
+                        modelID: model,
+                        modelVersion: "1.0",
+                        filedAt: t0)
+                }
+            }
+            let hits = try await store.findByKeyword("probe", limit: 3)
+            #expect(hits == ["probe-a", "probe-b", "probe-c"],
+                "limit must count distinct items — a row-scoped limit returns only the items the first N rows cover")
+        }
+    }
+
     /// `findByKeyword` returns the empty array when no row matches —
     /// no thrown error, no nil.
     @Test func testFindByKeywordReturnsEmptyForNoMatch() async throws {
