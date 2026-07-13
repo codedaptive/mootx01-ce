@@ -333,6 +333,11 @@ jobs:
   # ── Unsigned Windows builds (x86_64 + arm64): zip archive + Inno setup.exe ───
   windows:
     needs: meta
+    # OIDC token for azure/login (Windows code signing); contents:read for checkout.
+    # Both are required because declaring permissions drops all others to none.
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -352,27 +357,72 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - name: Build + zip
+      - name: Build binaries
         shell: pwsh
         run: |
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target ${{ matrix.target }}
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target ${{ matrix.target }}
+          # Copy both exes to the workspace root. Signing (below) rewrites them in
+          # place, and BOTH the zip and the Inno installer must embed the SIGNED
+          # exes — so the signing step is interposed before the zip and ISCC.
           Copy-Item "apps/mootx01/rust/target/${{ matrix.target }}/release/mootx01.exe"  "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/${{ matrix.target }}/release/moot-mgr.exe" "moot-mgr.exe"
           # Smoke: both arches run natively on their runners.
           .\mootx01.exe --version
+
+      # ── Windows code signing (Azure Artifact Signing) — best-effort ──────────
+      # A candidate must not fail when signing creds are absent (forks, first-time
+      # setup), so this mirrors the macOS best-effort gate: detect the OIDC creds,
+      # skip with a warning when unset, otherwise sign the two exes here and the
+      # Inno setup.exe after it is built. A stable release (release.yml) fails
+      # closed instead. Provisioning: distribution/windows/SIGNING.md.
+      - name: Azure signing preflight (best-effort)
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
+            Write-Output "::warning::AZURE_CLIENT_ID not set — skipping Windows code signing (candidate ships unsigned)."
+          } else {
+            "SIGNING_READY=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+      - name: Azure login (best-effort)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign binaries (best-effort)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          # Explicit paths (not a folder filter) so only these two exes sign here.
+          files: |
+            ${{ github.workspace }}\mootx01.exe
+            ${{ github.workspace }}\moot-mgr.exe
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          # Zips the (now-signed when creds present) exes.
           $asset = "mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}.zip"
           Compress-Archive -Path "mootx01.exe","moot-mgr.exe" -DestinationPath $asset
           "ARCHIVE=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install Inno Setup
         # windows-11-arm ships Chocolatey; Inno 6 is x86 and runs under emulation.
         run: choco install innosetup -y --no-progress
-      - name: Build setup.exe (unsigned)
+      - name: Build setup.exe
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           # BinDir must be absolute — ISCC resolves /DBinDir relative to the .iss
-          # SourceDir (distribution\windows\), not the caller's CWD.
+          # SourceDir (distribution\windows\), not the caller's CWD. The exes it
+          # embeds were signed above when signing creds are configured.
           & $iscc `
             "/DMyAppVersion=${{ needs.meta.outputs.tag }}" `
             "/DArch=${{ matrix.arch }}" `
@@ -380,6 +430,15 @@ jobs:
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           "SETUP=mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}-setup.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Sign setup.exe (best-effort)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          files: ${{ github.workspace }}\${{ env.SETUP }}
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ matrix.arch }}

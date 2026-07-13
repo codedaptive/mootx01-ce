@@ -644,6 +644,11 @@ jobs:
     name: Build Windows x86_64
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-x64' }}
     runs-on: windows-latest
+    # OIDC token for azure/login (Windows code signing); contents:read for checkout.
+    # Both are required because declaring permissions drops all others to none.
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
@@ -668,7 +673,7 @@ jobs:
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
 
-      - name: Package binaries
+      - name: Stage binaries
         shell: pwsh
         run: |
           # Tag comes from $env:RELEASE_TAG (a plain env value, never templated into shell) and is
@@ -678,13 +683,60 @@ jobs:
             Write-Error "mootx01: invalid release tag: $version"
             exit 1
           }
-          $asset = "mootx01-${version}-windows-x86_64.zip"
+          # Copy both exes to the workspace root. Signing (below) rewrites them in
+          # place before the zip and ISCC, so the archive and the installer both
+          # embed the SIGNED exes.
           Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/x86_64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
-          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
-          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
           # Export version for the Inno Setup step below (strip leading 'v').
           "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ── Windows code signing (Azure Artifact Signing) ────────────────────────
+      # Signs the two exes here and the Inno setup.exe after it is built. Gated on
+      # a real tag push (the trust boundary — matches the macOS jobs) AND on the
+      # OIDC creds being present. Until Azure is provisioned the preflight leaves
+      # SIGNING_READY unset and the release ships UNSIGNED Windows artifacts, as it
+      # does today; once the first signed release is verified, tighten the preflight
+      # to fail closed. Provisioning steps: distribution/windows/SIGNING.md.
+      - name: Azure signing preflight
+        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
+            Write-Output "::warning::AZURE_CLIENT_ID not set — Windows release artifacts will be UNSIGNED."
+          } else {
+            "SIGNING_READY=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+      - name: Azure login
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign binaries
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          # Explicit paths (not a folder filter) so only these two exes sign here.
+          files: |
+            ${{ github.workspace }}\mootx01.exe
+            ${{ github.workspace }}\moot-mgr.exe
+
+      - name: Package binaries
+        shell: pwsh
+        run: |
+          # Zips the (now-signed when creds present) exes. RELEASE_TAG was validated
+          # in Stage binaries above; the job would have failed there if malformed.
+          $asset = "mootx01-$($env:RELEASE_TAG)-windows-x86_64.zip"
+          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
+          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -729,6 +781,16 @@ jobs:
           $setupAsset = "mootx01-${versionNum}-windows-x86_64-setup.exe"
           "SETUP_ASSET=$setupAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Sign setup installer (x86_64)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          files: ${{ github.workspace }}\${{ env.SETUP_ASSET }}
+
       - name: Upload Windows setup installer (x86_64)
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -743,6 +805,11 @@ jobs:
     name: Build Windows arm64
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-arm64' }}
     runs-on: windows-11-arm
+    # OIDC token for azure/login (Windows code signing); contents:read for checkout.
+    # Both are required because declaring permissions drops all others to none.
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
@@ -767,7 +834,7 @@ jobs:
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target aarch64-pc-windows-msvc
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target aarch64-pc-windows-msvc
 
-      - name: Package binaries
+      - name: Stage binaries
         shell: pwsh
         run: |
           # Tag comes from $env:RELEASE_TAG (a plain env value, never templated into shell) and is
@@ -777,13 +844,59 @@ jobs:
             Write-Error "mootx01: invalid release tag: $version"
             exit 1
           }
-          $asset = "mootx01-${version}-windows-arm64.zip"
+          # Copy both exes to the workspace root. Signing (below) rewrites them in
+          # place before the zip and ISCC, so the archive and the installer both
+          # embed the SIGNED exes.
           Copy-Item "apps/mootx01/rust/target/aarch64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/aarch64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
-          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
-          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
           # Export version for the Inno Setup step below (strip leading 'v').
           "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # ── Windows code signing (Azure Artifact Signing) ────────────────────────
+      # Same as the x86_64 job. Gated on a real tag push AND the OIDC creds being
+      # present; ships UNSIGNED until Azure is provisioned. NOTE: the signing tool
+      # runs under x64 emulation on windows-11-arm (like Inno Setup 6, above) —
+      # the first arm64 candidate build is where to confirm it signs cleanly.
+      # Provisioning steps: distribution/windows/SIGNING.md.
+      - name: Azure signing preflight
+        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
+            Write-Output "::warning::AZURE_CLIENT_ID not set — Windows release artifacts will be UNSIGNED."
+          } else {
+            "SIGNING_READY=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+      - name: Azure login
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign binaries
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          # Explicit paths (not a folder filter) so only these two exes sign here.
+          files: |
+            ${{ github.workspace }}\mootx01.exe
+            ${{ github.workspace }}\moot-mgr.exe
+
+      - name: Package binaries
+        shell: pwsh
+        run: |
+          # Zips the (now-signed when creds present) exes. RELEASE_TAG was validated
+          # in Stage binaries above; the job would have failed there if malformed.
+          $asset = "mootx01-$($env:RELEASE_TAG)-windows-arm64.zip"
+          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
+          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -817,6 +930,16 @@ jobs:
             "distribution/windows/mootx01-setup.iss"
           $setupAsset = "mootx01-${versionNum}-windows-arm64-setup.exe"
           "SETUP_ASSET=$setupAsset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Sign setup installer (arm64)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          files: ${{ github.workspace }}\${{ env.SETUP_ASSET }}
 
       - name: Upload Windows setup installer (arm64)
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -875,9 +998,10 @@ jobs:
           # permanent URL. Added BEFORE checksum generation so the aliases are
           # sealed by checksums.txt + the minisign signature like any other
           # asset. Windows: winget is the primary web route, but the direct
-          # setup.exe link covers machines without App Installer (note: the
-          # exe is unsigned, so direct download trips SmartScreen; winget
-          # installs don't).
+          # setup.exe link covers machines without App Installer. The setup.exe is
+          # Authenticode-signed via Azure Artifact Signing when signing creds are
+          # configured (distribution/windows/SIGNING.md); an unsigned build (creds
+          # absent) still trips SmartScreen on direct download.
           for f in flat/mootx01-*-macos-arm64.pkg;          do cp "$f" flat/mootx01-macos-arm64.pkg;          done
           for f in flat/mootx01-*-macos-x86_64.pkg;         do cp "$f" flat/mootx01-macos-x86_64.pkg;         done
           for f in flat/mootx01-*-windows-arm64-setup.exe;  do cp "$f" flat/mootx01-windows-arm64-setup.exe;  done
