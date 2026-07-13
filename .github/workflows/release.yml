@@ -60,6 +60,14 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
+      - name: Authenticate git clones (raise github.com clone rate limit)
+        # macOS jobs resolve SPM dependencies by cloning from github.com. The
+        # anonymous clone rate limit intermittently returns 403 under CI load —
+        # the cached Linux/Windows cargo jobs don't clone from github, which is
+        # why only the macOS builds hit it. GITHUB_TOKEN authenticates the clones
+        # for a far higher limit.
+        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Select Swift 6.2 toolchain (latest stable Xcode)
         # macos-26 carries the Swift 6.2 OS runtime the packages require; pair it
         # with the latest stable Xcode so the build toolchain and runtime match.
@@ -308,6 +316,14 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Authenticate git clones (raise github.com clone rate limit)
+        # macOS jobs resolve SPM dependencies by cloning from github.com. The
+        # anonymous clone rate limit intermittently returns 403 under CI load —
+        # the cached Linux/Windows cargo jobs don't clone from github, which is
+        # why only the macOS builds hit it. GITHUB_TOKEN authenticates the clones
+        # for a far higher limit.
+        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - name: Select Swift 6.2 toolchain (latest stable Xcode)
         # See arm64 job: macos-26 ships the 6.2 runtime; latest-stable Xcode matches it.
@@ -1046,6 +1062,10 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: apps/moot-memory-adapter/dist/
+          # Idempotent re-runs: if this version is already on PyPI (e.g. a tag
+          # was force-moved and the workflow re-fired), skip instead of erroring
+          # — PyPI rejects re-uploading an existing version.
+          skip-existing: true
 
   # ── Submit to winget-pkgs (Microsoft community repository) ──────────────
   # Opens a PR against microsoft/winget-pkgs so `winget install/upgrade`
