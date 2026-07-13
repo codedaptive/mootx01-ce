@@ -635,6 +635,7 @@ dependencies = [
 name = "genius-locus-kit"
 version = "0.35.0"
 dependencies = [
+ "base64",
  "convergence-kit",
  "corpus-kit",
  "eidetic-lib",
