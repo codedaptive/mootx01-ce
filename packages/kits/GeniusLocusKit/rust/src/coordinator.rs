@@ -2694,17 +2694,24 @@ impl EstateCoordinator {
             }
         };
 
-        // Probe sample: vector-indexed item IDs (the only rows kNN can
-        // reach). Empty-keyword query matches all rows, item_id ascending.
-        // Two row populations exist: DRAWER-keyed rows (bespoke lanes and
-        // test-planted vectors) and CHUNK-keyed rows (the production encode
-        // pipeline — the estate lifecycle registers the corpus's shared
-        // vector store, and the drain writes item_id = chunk UUID under the
-        // corpus's own model_id). Both lanes are mined below.
+        // Probe sample: the NEWEST vector-indexed item IDs (filed_at
+        // descending, distinct). Recency-first is what makes a bounded
+        // sweep converge: new memories are the ones that need screening
+        // against the existing estate, so a probe_limit window always
+        // contains the latest captures — an ascending-item_id window was a
+        // UUID lottery that new content-addressed chunk IDs almost never
+        // entered on a large estate. Neighbours may be ANY age
+        // (find_nearest searches the whole lane), so new-vs-old conflicts
+        // are found from the new side. Two row populations exist:
+        // DRAWER-keyed rows (bespoke lanes and test-planted vectors) and
+        // CHUNK-keyed rows (the production encode pipeline — the estate
+        // lifecycle registers the corpus's shared vector store, and the
+        // drain writes item_id = chunk UUID under the corpus's own
+        // model_id). Both lanes are mined below.
         // A failed probe-source scan degrades to an empty pass rather than
         // failing the verb — matches the signal-layer treatment of the same
         // read (VectorSimilaritySignal's diagnostic-and-return).
-        let probe_ids = vector_store.find_by_keyword("", probe_limit).unwrap_or_default();
+        let probe_ids = vector_store.recent_item_ids(probe_limit).unwrap_or_default();
         if probe_ids.is_empty() {
             return Ok(ContradictionHuntReport {
                 vector_store_available: true,

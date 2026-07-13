@@ -9,9 +9,9 @@ import CorpusKit
 /// pairs whose embeddings have drifted into similarity proximity since
 /// the last pass, and emits `associate` proposals for each candidate pair.
 ///
-/// How pairs are found: the emit closure scans up to 50 stored item
-/// IDs via `VectorStore.findByKeyword("", limit:)`, retrieves each row's
-/// engram via `getVector(itemID:modelID:)`, and calls
+/// How pairs are found: the emit closure samples the 50 most recently
+/// filed item IDs via `VectorStore.recentItemIDs(limit:)`, retrieves each
+/// row's engram via `getVector(itemID:modelID:)`, and calls
 /// `VectorStore.findNearest(probe:modelID:limit:)` to locate nearby
 /// vectors. Pairs within `proximityThreshold` Hamming distance (default
 /// 64 — 25% of 256 bits) are deduplicated and emitted as
@@ -75,7 +75,7 @@ public enum VectorSimilaritySignal {
     /// Build the VectorSimilaritySignal spec for production use.
     ///
     /// The VectorStore is captured by the emit closure and queried via
-    /// `findByKeyword` + `getVector` + `findNearest` on each five-minute
+    /// `recentItemIDs` + `getVector` + `findNearest` on each five-minute
     /// pass. When the store is empty (e.g. during tests that have not
     /// filed any vectors) the pass produces zero candidate pairs and
     /// emits only a summary diagnostic.
@@ -128,12 +128,13 @@ public enum VectorSimilaritySignal {
     ) async -> [SignalEmission] {
         var emissions: [SignalEmission] = []
 
-        // Sample candidate item IDs. An empty-string keyword query
-        // matches all rows (LIKE '%%' = all strings), returning up to
-        // maxProbeCount item IDs ordered by item_id ascending.
         let itemIDs: [String]
         do {
-            itemIDs = try await vectorStore.findByKeyword("", limit: maxProbeCount)
+            // Newest-first probe sample: the 50 most recently filed items.
+            // New captures are what need association screening; the prior
+            // ascending-item_id enumeration was a static UUID-ordered window
+            // that new content rarely entered on a large estate.
+            itemIDs = try await vectorStore.recentItemIDs(limit: maxProbeCount)
         } catch {
             emissions.append(.diagnostic(DiagnosticReport(
                 title: "vector_similarity.scan.summary",

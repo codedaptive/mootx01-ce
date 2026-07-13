@@ -116,15 +116,21 @@ public extension GeniusLocusKit {
                 proposed: [], borderline: [], deduplicated: 0)
         }
 
-        // Probe sample: vector-indexed item IDs (the only rows kNN can
-        // reach). Empty-keyword query matches all rows, item_id ascending.
-        // Two row populations exist: DRAWER-keyed rows (bespoke lanes such
-        // as the distillation lane, and test-planted vectors) and
-        // CHUNK-keyed rows (the production encode pipeline — EstateLifecycle
-        // registers `corpus.sharedVectorStore`, and the drain writes
-        // itemID = chunk UUID under the corpus's own modelID). Both lanes
-        // are mined below.
-        let probeIDs = try await vectorStore.findByKeyword("", limit: probeLimit)
+        // Probe sample: the NEWEST vector-indexed item IDs (filed_at
+        // descending, distinct). Recency-first is what makes a bounded
+        // sweep converge: new memories are the ones that need screening
+        // against the existing estate, so a probe_limit window always
+        // contains the latest captures — an ascending-item_id window was a
+        // UUID lottery that new content-addressed chunk IDs almost never
+        // entered on a large estate. Neighbours may be ANY age (findNearest
+        // searches the whole lane), so new-vs-old conflicts are found from
+        // the new side. Two row populations exist: DRAWER-keyed rows
+        // (bespoke lanes such as the distillation lane, and test-planted
+        // vectors) and CHUNK-keyed rows (the production encode pipeline —
+        // EstateLifecycle registers `corpus.sharedVectorStore`, and the
+        // drain writes itemID = chunk UUID under the corpus's own modelID).
+        // Both lanes are mined below.
+        let probeIDs = try await vectorStore.recentItemIDs(limit: probeLimit)
         guard !probeIDs.isEmpty else {
             return ContradictionHuntReport(
                 vectorStoreAvailable: true, probesScanned: 0, pairsScreened: 0,

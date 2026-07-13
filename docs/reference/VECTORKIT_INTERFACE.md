@@ -1,7 +1,7 @@
 ---
 title: VectorKit Interface
 status: active
-version: 1.3.0
+version: 1.4.0
 date: 2026-06-17
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
@@ -657,7 +657,11 @@ pub fn search_farthest(&self, probe: &VectorPayload, metric: DenseMetric, k: usi
 ### `VectorStore.findByKeyword` / `find_by_keyword`
 
 Coarse substring pre-filter over `item_id`; returns distinct item ids up
-to `limit`, ascending (SPEC § 5, B-7).
+to `limit`, ascending (SPEC § 5, B-7). `limit` counts DISTINCT item ids —
+the table holds many rows per item (binary + float per model slot), so
+the query pages internally until `limit` ids are collected or the table
+is exhausted; a row-scoped limit silently shrank sweep windows ~10× on
+production ensembles.
 
 **Swift:**
 
@@ -669,6 +673,28 @@ public func findByKeyword(_ query: String, limit: Int) async throws -> [String]
 
 ```rust
 pub fn find_by_keyword(&self, query: &str, limit: usize)
+    -> Result<Vec<String>, VectorKitError>;
+```
+
+### `VectorStore.recentItemIDs` / `recent_item_ids`
+
+The most recently filed DISTINCT item ids, newest first (filed_at
+descending, item_id ascending tiebreak; same distinct-id paging as
+`findByKeyword`). The probe-enumeration surface for bounded sweep
+consumers — the contradiction hunter's probe sample and
+VectorSimilaritySignal's per-fire sample — so a bounded window always
+contains the latest captures instead of a static UUID-ordered slice.
+
+**Swift:**
+
+```swift
+public func recentItemIDs(limit: Int) async throws -> [String]
+```
+
+**Rust:**
+
+```rust
+pub fn recent_item_ids(&self, limit: usize)
     -> Result<Vec<String>, VectorKitError>;
 ```
 
@@ -896,6 +922,16 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-07-13
+findByKeyword / find_by_keyword: `limit` now counts DISTINCT item ids
+(internal row paging) — a row-scoped limit shrank sweep windows ~10× on
+production ensembles and left the contradiction hunter blind on large
+estates. NEW `recentItemIDs(limit:)` / `recent_item_ids` — newest-first
+distinct item ids (filed_at DESC, item_id ASC tiebreak), the
+probe-enumeration surface for bounded sweeps (contradiction hunter,
+VectorSimilaritySignal). Both ports at parity; regression tests pin the
+distinct-id semantics on both.
 
 ### 1.3.0 -- 2026-06-17
 Documented that both ports are backend-agnostic and persist vector state
