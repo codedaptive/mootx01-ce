@@ -283,6 +283,39 @@ fn find_by_keyword_limit_counts_distinct_items_not_rows() {
     );
 }
 
+/// `recent_item_ids` returns distinct items newest-first — the probe
+/// surface for bounded sweeps (contradiction hunter,
+/// VectorSimilaritySignal), so a bounded window always contains the
+/// latest captures. Multiple rows per item must not duplicate or
+/// displace items. Mirrors Swift testRecentItemIDsNewestFirstDistinct.
+#[test]
+fn recent_item_ids_newest_first_distinct() {
+    let store = fresh_store();
+    let engram = Engram::new(9, 9, 9, 9);
+    for (item, at) in [("old-item", FILED_AT_1), ("mid-item", FILED_AT_1 + 100), ("new-item", FILED_AT_1 + 200)] {
+        for model in ["model-one", "model-two"] {
+            store
+                .add_vector(item, &engram, model, "1.0", at)
+                .expect("add_vector");
+        }
+    }
+    let recent = store.recent_item_ids(2).expect("recent_item_ids");
+    assert_eq!(
+        recent,
+        vec!["new-item".to_string(), "mid-item".to_string()],
+        "recent_item_ids must return distinct items newest-first"
+    );
+    let all = store.recent_item_ids(10).expect("recent_item_ids");
+    assert_eq!(
+        all,
+        vec![
+            "new-item".to_string(),
+            "mid-item".to_string(),
+            "old-item".to_string()
+        ]
+    );
+}
+
 #[test]
 fn find_by_keyword_returns_empty_for_no_match() {
     let store = fresh_store();

@@ -48,7 +48,7 @@ impl VectorSimilaritySignal {
     /// Build the production VectorSimilaritySignal spec.
     ///
     /// The VectorStore is captured by the emit closure (via `Arc`) and
-    /// queried via `find_by_keyword` + `get_vector` + `find_nearest` on
+    /// queried via `recent_item_ids` + `get_vector` + `find_nearest` on
     /// each five-minute pass. An empty store produces zero candidate pairs
     /// and emits only a scan-summary diagnostic.
     ///
@@ -90,9 +90,9 @@ impl VectorSimilaritySignal {
 
     /// Execute one proximity scan pass.
     ///
-    /// Samples up to MAX_PROBE_COUNT drawer IDs via find_by_keyword(""),
-    /// retrieves each row's engram, calls find_nearest to locate nearby
-    /// rows, deduplicates pairs, and emits AssociateFrames.
+    /// Samples the MAX_PROBE_COUNT most recently filed item IDs via
+    /// recent_item_ids, retrieves each row's engram, calls find_nearest to
+    /// locate nearby rows, deduplicates pairs, and emits AssociateFrames.
     fn proximity_pass(
         vector_store: &VectorStore,
         model_id: &str,
@@ -102,9 +102,11 @@ impl VectorSimilaritySignal {
     ) -> Vec<SignalEmission> {
         let mut emissions = Vec::new();
 
-        // find_by_keyword("") matches all stored rows (LIKE '%%'), capped
-        // to MAX_PROBE_COUNT. Gives a bounded sample of probe drawer IDs.
-        let drawer_ids = match vector_store.find_by_keyword("", Self::MAX_PROBE_COUNT) {
+        // Newest-first probe sample: the MAX_PROBE_COUNT most recently
+        // filed items. New captures are what need association screening;
+        // the prior ascending-item_id enumeration was a static UUID-ordered
+        // window that new content rarely entered on a large estate.
+        let drawer_ids = match vector_store.recent_item_ids(Self::MAX_PROBE_COUNT) {
             Ok(ids) => ids,
             Err(e) => {
                 emissions.push(SignalEmission::Diagnostic(DiagnosticReport {

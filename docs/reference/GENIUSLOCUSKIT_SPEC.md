@@ -962,8 +962,11 @@ produces the production signal spec. The emit closure captures the
 `VectorStore` (and the estate's `Corpus`, when one is registered) and on
 each five-minute fire:
 
-1. Calls `VectorStore.findByKeyword("", limit: 50)` to sample up to
-   50 candidate item IDs.
+1. Calls `VectorStore.recentItemIDs(limit: 50)` to sample the 50 most
+   recently filed candidate item IDs (newest-first — new captures are
+   what need association screening; the earlier ascending-item_id
+   enumeration was a static UUID-ordered window new content rarely
+   entered on a large estate).
 2. Lane 1 — drawer-keyed rows: for each candidate, retrieves its engram
    via `VectorStore.getVector(itemID:modelID:)` under the caller's
    `modelID` and calls `VectorStore.findNearest(probe:modelID:limit:5)`

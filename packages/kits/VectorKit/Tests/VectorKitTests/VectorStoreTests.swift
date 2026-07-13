@@ -406,6 +406,34 @@ struct VectorStoreTests {
         }
     }
 
+    /// `recentItemIDs` returns distinct items newest-first — the probe
+    /// surface for bounded sweeps (contradiction hunter,
+    /// VectorSimilaritySignal), so a bounded window always contains the
+    /// latest captures. Multiple rows per item must not duplicate or
+    /// displace items.
+    @Test func testRecentItemIDsNewestFirstDistinct() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            // old-item first, two models; then mid-item; then new-item.
+            for (item, offset) in [("old-item", 0.0), ("mid-item", 100.0), ("new-item", 200.0)] {
+                for model in ["model-one", "model-two"] {
+                    try await store.addVector(
+                        itemID: item,
+                        engram: Engram(blocks: 9, 9, 9, 9),
+                        modelID: model,
+                        modelVersion: "1.0",
+                        filedAt: t0.addingTimeInterval(offset))
+                }
+            }
+            let recent = try await store.recentItemIDs(limit: 2)
+            #expect(recent == ["new-item", "mid-item"],
+                "recentItemIDs must return distinct items newest-first")
+            let all = try await store.recentItemIDs(limit: 10)
+            #expect(all == ["new-item", "mid-item", "old-item"])
+        }
+    }
+
     /// `findByKeyword` returns the empty array when no row matches —
     /// no thrown error, no nil.
     @Test func testFindByKeywordReturnsEmptyForNoMatch() async throws {

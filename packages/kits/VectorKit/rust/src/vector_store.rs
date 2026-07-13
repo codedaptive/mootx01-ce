@@ -1553,6 +1553,56 @@ impl VectorStore {
     }
 
     /// Remove the row for `(item_id, 0, model_id)`. Idempotent.
+    /// The most recently filed DISTINCT item IDs, newest first.
+    ///
+    /// The probe-enumeration surface for sweep consumers (the contradiction
+    /// hunter, VectorSimilaritySignal): a bounded sweep should examine the
+    /// NEWEST content first — new memories are the ones that need
+    /// contradiction/association screening against the existing estate, and
+    /// a recency window composes with the hunter's `filed_after` watermark.
+    /// `find_by_keyword`'s ascending-item_id order is a UUID lottery: on a
+    /// 109k-chunk estate a 10k-item window is static and newly-captured
+    /// chunks' content-addressed UUIDs almost never sort into it, so
+    /// bounded sweeps never saw new content.
+    ///
+    /// `limit` counts DISTINCT item IDs (rows are many-per-item); pages the
+    /// row query until `limit` IDs are collected or the table is exhausted.
+    /// Ties on filed_at break by item_id ascending for determinism.
+    /// Mirrors the Swift twin `recentItemIDs(limit:)`.
+    pub fn recent_item_ids(&self, limit: usize) -> Result<Vec<String>, VectorKitError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let order = vec![
+            OrderClause::new(Column::new("vectors", "filed_at"), OrderDirection::Descending),
+            OrderClause::new(Column::new("vectors", "item_id"), OrderDirection::Ascending),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        const PAGE_SIZE: usize = 8192;
+        let mut offset = 0usize;
+        while out.len() < limit {
+            let rows = self
+                .storage
+                .row_store()
+                .query("vectors", None, &order, Some(PAGE_SIZE), Some(offset))
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            let page_len = rows.len();
+            for row in rows {
+                if let Some(TypedValue::Text(item_id)) = row.get("item_id") {
+                    if seen.insert(item_id.clone()) && out.len() < limit {
+                        out.push(item_id.clone());
+                    }
+                }
+            }
+            if page_len < PAGE_SIZE {
+                break; // table exhausted
+            }
+            offset += PAGE_SIZE;
+        }
+        Ok(out)
+    }
+
     pub fn delete_vector(
         &self,
         item_id: &str,
