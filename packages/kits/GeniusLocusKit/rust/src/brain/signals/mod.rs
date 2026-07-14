@@ -38,4 +38,4 @@ pub use end_of_day_tournament::EndOfDayTournamentSignal;
 pub use maintenance::MaintenanceSignal;
 pub use temporal_causality::TemporalCausalitySignal;
 pub use training::TrainingSignal;
-pub use vector_similarity::VectorSimilaritySignal;
+pub use vector_similarity::{AssociationEdgeChecker, VectorSimilaritySignal};

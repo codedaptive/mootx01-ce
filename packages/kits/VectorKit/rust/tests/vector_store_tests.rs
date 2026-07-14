@@ -580,3 +580,120 @@ fn default_sidecar_path_derives_vec_beside_sqlite_and_none_for_inmemory() {
     let mem: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     assert!(VectorStore::default_sidecar_path(&mem).is_none());
 }
+
+// VK-PERF-FIX-2026-07-13: schema v4 index + projection guard tests.
+// Mirrors the Swift VectorStoreTests "VK-PERF-FIX" section.
+
+/// Schema version is v4 (VK-PERF-FIX-2026-07-13).
+///
+/// Guards the version bump: if schema_version drifts below 4, the
+/// idx_vectors_filed_at_item migration will not run and the GeniusLocusKit
+/// composite version gate will reject fresh estate opens.
+#[test]
+fn schema_declaration_is_version_four() {
+    let schema = VectorStore::schema_declaration();
+    assert_eq!(schema.version, 4, "VectorKit schema must be v4 after idx_vectors_filed_at_item was added");
+}
+
+/// The schema declaration includes idx_vectors_filed_at_item (v4).
+///
+/// Guards that the index is present in the declared schema so fresh installs
+/// get it immediately and existing estates receive it via the v3→v4 migration.
+/// The index covers `recent_item_ids` ORDER BY filed_at DESC, item_id ASC —
+/// without it every call performs a full-table scan + filesort on large estates.
+#[test]
+fn schema_declaration_contains_filed_at_item_index() {
+    let schema = VectorStore::schema_declaration();
+    let idx = schema.indices.iter().find(|i| i.name == "idx_vectors_filed_at_item");
+    assert!(idx.is_some(), "idx_vectors_filed_at_item must be declared in schema v4");
+    let idx = idx.unwrap();
+    assert_eq!(idx.table, "vectors");
+    assert_eq!(idx.columns, vec!["filed_at", "item_id"]);
+    assert!(!idx.unique);
+}
+
+/// v3→v4 migration is declared and well-formed.
+///
+/// Guards the migration path for existing estates: a v3 estate must receive
+/// exactly one migration that adds idx_vectors_filed_at_item. If this migration
+/// is absent, existing production estates keep their full-scan behaviour after
+/// upgrading.
+#[test]
+fn schema_declaration_has_v3_to_v4_index_migration() {
+    use persistence_kit::SchemaOperation;
+    let schema = VectorStore::schema_declaration();
+    let m = schema.migrations.iter().find(|m| m.from_version == 3 && m.to_version == 4);
+    assert!(m.is_some(), "v3→v4 migration must be present");
+    let m = m.unwrap();
+    assert_eq!(m.operations.len(), 1, "v3→v4 migration must contain exactly one operation");
+    match &m.operations[0] {
+        SchemaOperation::AddIndex(decl) => {
+            assert_eq!(decl.name, "idx_vectors_filed_at_item");
+            assert_eq!(decl.columns, vec!["filed_at", "item_id"]);
+        }
+        other => panic!("v3→v4 migration operation must be AddIndex, got {other:?}"),
+    }
+}
+
+/// `find_by_keyword` returns correct results with column projection.
+///
+/// Regression guard: before VK-PERF-FIX-2026-07-13 the query read full rows
+/// including payload blobs. After the fix, only item_id is projected. This
+/// test verifies correct item-ID results still come back when the code uses
+/// query_projected — confirming no dependency on payload being present.
+#[test]
+fn find_by_keyword_correct_after_column_projection() {
+    let store = fresh_store();
+    let engram = Engram::new(0xAAAA_BBBB_CCCC_DDDD, 0xEEEE_FFFF_0000_1111,
+                             0x2222_3333_4444_5555, 0x6666_7777_8888_9999);
+    for item in &["proj-alpha", "proj-bravo", "proj-charlie"] {
+        for model in &["model-a", "model-b"] {
+            store.add_vector(item, &engram, model, "1.0", FILED_AT_1).expect("add_vector");
+        }
+    }
+    let hits = store.find_by_keyword("proj", 3).expect("find_by_keyword");
+    assert_eq!(hits.len(), 3, "limit 3 must return all three projected items");
+    let hit_set: std::collections::HashSet<_> = hits.iter().map(|s| s.as_str()).collect();
+    assert!(hit_set.contains("proj-alpha"));
+    assert!(hit_set.contains("proj-bravo"));
+    assert!(hit_set.contains("proj-charlie"));
+}
+
+/// `recent_item_ids` returns correct results with column projection.
+///
+/// Regression guard: the column projection `["item_id", "filed_at"]` must
+/// not break distinct-item dedup or newest-first ordering. Projected rows
+/// carry only item_id and filed_at — this confirms the function works
+/// correctly without payload, model_id, or other columns present.
+#[test]
+fn recent_item_ids_correct_after_column_projection() {
+    let store = fresh_store();
+    let engram = Engram::new(7, 7, 7, 7);
+    // Three items at distinct filing times; two models each.
+    for (item, ts) in &[("oldest", FILED_AT_1), ("middle", FILED_AT_2), ("newest", FILED_AT_3)] {
+        for model in &["model-x", "model-y"] {
+            store.add_vector(item, &engram, model, "1.0", *ts).expect("add_vector");
+        }
+    }
+    let top2 = store.recent_item_ids(2).expect("recent_item_ids");
+    assert_eq!(top2, vec!["newest", "middle"],
+        "projection must not break newest-first ordering");
+    let all3 = store.recent_item_ids(10).expect("recent_item_ids");
+    assert_eq!(all3, vec!["newest", "middle", "oldest"],
+        "projection must not break full enumeration");
+}
+
+/// `find_by_keyword` returns empty immediately when the query is empty.
+///
+/// Regression guard: an empty query must short-circuit before issuing any SQL,
+/// not match every row via LIKE '%%'.
+#[test]
+fn find_by_keyword_empty_query_returns_empty() {
+    let store = fresh_store();
+    let engram = Engram::new(1, 2, 3, 4);
+    // Insert a row so the table is non-empty; a LIKE '%%' scan would match it.
+    store.add_vector("some-item", &engram, "test-model", "1.0", FILED_AT_1)
+         .expect("add_vector");
+    let result = store.find_by_keyword("", 100).expect("find_by_keyword");
+    assert!(result.is_empty(), "empty query must return empty without scanning");
+}

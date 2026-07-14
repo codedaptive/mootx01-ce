@@ -56,11 +56,13 @@ struct CompositeSchemaVersionTests {
 
     /// The composite version is the sum of component versions.
     /// Components after matrix_snapshot inclusion:
-    ///   LocusKit v9 + VectorKit v3 + CorpusKit/BundleStore v3 + Grants v1 + MatrixSnapshot v1 = 17.
+    ///   LocusKit v10 + VectorKit v4 + CorpusKit/BundleStore v3 + Grants v1 + MatrixSnapshot v1 = 19.
+    /// LocusKit bumped to v10 for associations natural-key uniqueness constraint (FINDING-3).
+    /// VectorKit bumped to v4 when idx_vectors_filed_at_item was added (VK-PERF-FIX-2026-07-13).
     /// This guards the version coupling the Rust replication gate depends on:
     /// a drift between composite and the gate's expected value would let a
     /// fresh estate open at a version the gate rejects.
-    @Test("composite version includes grant and matrix_snapshot tables and equals 17")
+    @Test("composite version includes grant and matrix_snapshot tables and equals 19")
     func compositeVersionEqualsComponentSum() {
         // +1 grants addend, +1 matrix_snapshot addend = two GLK-owned table addends
         let componentSum =
@@ -70,11 +72,11 @@ struct CompositeSchemaVersionTests {
             + 1  // grants
             + 1  // matrix_snapshot
         #expect(GeniusLocusKitSchema.version == componentSum)
-        #expect(GeniusLocusKitSchema.version == 17)
+        #expect(GeniusLocusKitSchema.version == 19)
         // The declaration the gate actually consumes carries the same version
         // and includes grant authorization state and matrix snapshot state
         // in hydrate/flush snapshots.
-        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 17)
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == 19)
         #expect(GeniusLocusKitSchema.estateSchemaDeclaration.tables.contains { $0.name == "grants" })
         // matrix_snapshot must be in the composite so hydration copies persisted
         // calibration state from the durable backend into the in-memory backend.
@@ -84,12 +86,12 @@ struct CompositeSchemaVersionTests {
     /// A fresh in-memory estate opens with the composite schema and registers
     /// the composite version under the "GeniusLocusKit" kit ID — the value the
     /// replication schema gate checks.
-    @Test("fresh estate opens and registers composite version 17")
+    @Test("fresh estate opens and registers composite version 19")
     func freshEstateOpensAtCompositeVersion() async throws {
         let storage = makeInMemoryStorage()
         try await storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
         let registered = try await storage.currentSchemaVersion(for: GeniusLocusKitSchema.kitID)
-        #expect(registered == 17)
+        #expect(registered == 19)
     }
 }
 

@@ -36,6 +36,34 @@ private func ok(_ url: String, _ data: Data) -> (String, Result<(Data, URLRespon
     return (url, .success((data, response)))
 }
 
+// MARK: - Platform helpers
+
+#if !os(macOS)
+/// Locate the `minisign` executable via `which(1)`. Returns the full path when
+/// minisign is present in PATH, `nil` when it is absent. Used by tests that
+/// require minisign to actually run (as opposed to tests that mock the fetch
+/// layer and never reach the subprocess).
+private func findMinisignInPath() -> String? {
+    // Try which(1) at the two common POSIX locations.
+    for whichPath in ["/usr/bin/which", "/bin/which"] {
+        guard FileManager.default.isExecutableFile(atPath: whichPath) else { continue }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: whichPath)
+        p.arguments = ["minisign"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        guard (try? p.run()) != nil else { continue }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        let path = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
+    }
+    return nil
+}
+#endif
+
 // MARK: - Tests
 
 @Suite("ReleaseDownloader")
@@ -113,6 +141,216 @@ struct ReleaseDownloaderTests {
                 Issue.record("Wrong UpgradeError case thrown: \(e)")
             }
         }
+    }
+
+    /// A matching SHA-256 line is not enough on Linux/POSIX: checksums.txt must
+    /// also have a detached minisign signature. This prevents a tampered release
+    /// endpoint from supplying a malicious tarball plus a matching checksum file.
+    @Test func downloadRequiresMinisignSignatureWhenChecksumMatches() async throws {
+        #if !os(macOS)
+        let tag = "v1.1.0"
+
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "x86_64"
+        #endif
+        let os = "linux"
+        let tarball  = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
+        let base     = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
+
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mootx01-minisig-required-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let contentDir = tmpDir.appendingPathComponent("contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contentDir, withIntermediateDirectories: true)
+        let fakeBinary = contentDir.appendingPathComponent("mootx01")
+        try Data("#!/bin/sh\necho tampered\n".utf8).write(to: fakeBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBinary.path)
+
+        let tarballURL = tmpDir.appendingPathComponent(tarball)
+        let pack = Process()
+        pack.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        pack.arguments = ["-czf", tarballURL.path, "-C", contentDir.path, "."]
+        pack.standardError = Pipe()
+        try pack.run()
+        pack.waitUntilExit()
+        guard pack.terminationStatus == 0 else {
+            Issue.record("Test setup: tar -czf exited \(pack.terminationStatus) — cannot continue")
+            return
+        }
+
+        let tarballData = try Data(contentsOf: tarballURL)
+        let digestProcess = Process()
+        digestProcess.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        digestProcess.arguments = ["-a", "256", tarballURL.path]
+        let digestPipe = Pipe()
+        digestProcess.standardOutput = digestPipe
+        try digestProcess.run()
+        let digestOutput = digestPipe.fileHandleForReading.readDataToEndOfFile()
+        digestProcess.waitUntilExit()
+        guard digestProcess.terminationStatus == 0,
+              let digest = String(decoding: digestOutput, as: UTF8.self).split(separator: " ").first
+        else {
+            Issue.record("Test setup: shasum -a 256 exited \(digestProcess.terminationStatus)")
+            return
+        }
+        let checksum = "\(digest)  \(tarball)\n"
+
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.0.0",
+            fetchData: mockFetch([
+                ok("\(base)/\(tarball)", tarballData),
+                ok("\(base)/checksums.txt", checksum),
+                // No checksums.txt.minisig fixture: the downloader must request
+                // it and fail closed rather than extracting the matching-checksum tarball.
+            ]))
+
+        do {
+            _ = try await downloader.download(tag: tag)
+            Issue.record("Expected failure before extraction without checksums.txt.minisig")
+        } catch let e as URLError {
+            #expect(e.code == .badURL, "mockFetch should fail on the required minisig URL")
+        } catch {
+            Issue.record("Unexpected error type when minisig is absent: \(error)")
+        }
+        #endif
+    }
+
+        /// A structurally-valid minisign signature made with a key OTHER THAN the
+    /// embedded production public key must be rejected. This exercises the actual
+    /// signature-validation rejection path: checksum verification passes (the
+    /// SHA-256 is correct), the .minisig URL is fetched successfully, but
+    /// `minisign -V` exits non-zero because the signature was made with a
+    /// throwaway key that the embedded BC4D1E6ABCB5B788 pubkey cannot verify.
+    ///
+    /// Gated #if !os(macOS): the production verify path skips minisign on macOS
+    /// (Gatekeeper / Developer ID handles code-signing there). Also requires
+    /// minisign in PATH; returns early when minisign is absent so CI stays green
+    /// on runners that do not have it installed — the "minisign unavailable"
+    /// rejection is a separate production code path, not what this test covers.
+    @Test func downloadRejectsWrongKeyMinisignSignature() async throws {
+        #if !os(macOS)
+        guard let minisignPath = findMinisignInPath() else { return }
+
+        let tag = "v1.1.0"
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "x86_64"
+        #endif
+        let os = "linux"
+        let tarball = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
+        let base    = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
+
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mootx01-wrong-sig-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // Build a minimal valid tarball so verifySHA256 has real bytes to hash.
+        let contentDir = tmpDir.appendingPathComponent("contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contentDir, withIntermediateDirectories: true)
+        let fakeBinary = contentDir.appendingPathComponent("mootx01")
+        try Data("#!/bin/sh\necho fake\n".utf8).write(to: fakeBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBinary.path)
+        let tarballURL = tmpDir.appendingPathComponent(tarball)
+        let pack = Process()
+        pack.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        pack.arguments = ["-czf", tarballURL.path, "-C", contentDir.path, "."]
+        pack.standardError = Pipe()
+        try pack.run()
+        pack.waitUntilExit()
+        guard pack.terminationStatus == 0 else {
+            Issue.record("Test setup: tar -czf exited \(pack.terminationStatus)")
+            return
+        }
+        let tarballData = try Data(contentsOf: tarballURL)
+
+        // Compute the correct SHA-256 so verifySHA256 passes and execution
+        // reaches verifyMinisignSignature.
+        let shasum = Process()
+        shasum.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        shasum.arguments = ["-a", "256", tarballURL.path]
+        let shasumPipe = Pipe()
+        shasum.standardOutput = shasumPipe
+        shasum.standardError = Pipe()
+        try shasum.run()
+        let shasumRaw = shasumPipe.fileHandleForReading.readDataToEndOfFile()
+        shasum.waitUntilExit()
+        guard shasum.terminationStatus == 0,
+              let digest = String(decoding: shasumRaw, as: UTF8.self)
+                  .split(separator: " ").first
+        else {
+            Issue.record("Test setup: shasum -a 256 failed")
+            return
+        }
+        let checksumText = "\(digest)  \(tarball)\n"
+
+        // Write checksums.txt to disk so minisign can sign its content.
+        let checksumsFile = tmpDir.appendingPathComponent("checksums.txt")
+        try Data(checksumText.utf8).write(to: checksumsFile)
+
+        // Generate a throwaway keypair — NOT the embedded production pubkey.
+        // -W skips passphrase so keygen and signing are non-interactive.
+        let throwawayPub = tmpDir.appendingPathComponent("throwaway.pub")
+        let throwawaySec = tmpDir.appendingPathComponent("throwaway.sec")
+        let keygen = Process()
+        keygen.executableURL = URL(fileURLWithPath: minisignPath)
+        keygen.arguments = ["-G", "-p", throwawayPub.path, "-s", throwawaySec.path, "-W"]
+        keygen.standardInput = FileHandle.nullDevice
+        keygen.standardOutput = Pipe()
+        keygen.standardError = Pipe()
+        try keygen.run()
+        keygen.waitUntilExit()
+        guard keygen.terminationStatus == 0 else {
+            Issue.record("Test setup: minisign -G exited \(keygen.terminationStatus)")
+            return
+        }
+
+        // Sign checksums.txt with the throwaway key. The signature is structurally
+        // valid minisign format but was made with a key the embedded pubkey cannot
+        // verify — minisign -V will exit non-zero when attempted.
+        let minisigFile = tmpDir.appendingPathComponent("checksums.txt.minisig")
+        let sign = Process()
+        sign.executableURL = URL(fileURLWithPath: minisignPath)
+        sign.arguments = ["-S", "-s", throwawaySec.path, "-m", checksumsFile.path, "-x", minisigFile.path]
+        sign.standardInput = FileHandle.nullDevice
+        sign.standardOutput = Pipe()
+        sign.standardError = Pipe()
+        try sign.run()
+        sign.waitUntilExit()
+        guard sign.terminationStatus == 0 else {
+            Issue.record("Test setup: minisign -S exited \(sign.terminationStatus)")
+            return
+        }
+        let wrongKeySigData = try Data(contentsOf: minisigFile)
+
+        // Wire mock fetch: correct tarball + correct checksum + wrong-key minisig.
+        // verifySHA256 passes; verifyMinisignSignature must reject the bad sig.
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.0.0",
+            fetchData: mockFetch([
+                ok("\(base)/\(tarball)", tarballData),
+                ok("\(base)/checksums.txt", checksumText),
+                ok("\(base)/checksums.txt.minisig", wrongKeySigData),
+            ]))
+
+        do {
+            _ = try await downloader.download(tag: tag)
+            Issue.record("Expected UpgradeError.signatureVerificationFailed — wrong-key minisig should be rejected before extraction")
+        } catch let e as UpgradeError {
+            if case .signatureVerificationFailed = e { /* expected: minisign rejected the wrong key */ } else {
+                Issue.record("Wrong UpgradeError case: expected signatureVerificationFailed, got \(e)")
+            }
+        } catch {
+            Issue.record("Unexpected error type (expected UpgradeError.signatureVerificationFailed): \(error)")
+        }
+        #endif
     }
 
     // MARK: unsafeMemberReason — zip-slip path safety predicate

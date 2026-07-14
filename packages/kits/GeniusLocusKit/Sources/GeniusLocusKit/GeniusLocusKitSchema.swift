@@ -32,12 +32,14 @@
 //
 // Kit ID and version: the composite uses "GeniusLocusKit" as the kit
 // identifier and the sum of component versions plus the GLK-owned addends.
-// Components: LocusKit v9 + VectorKit v3 + CorpusKit (BundleStore) v3
-// + Grants v1 + MatrixSnapshot v1 = 17. (BasisStore is the
+// Components: LocusKit v10 + VectorKit v4 + CorpusKit (BundleStore) v3
+// + Grants v1 + MatrixSnapshot v1 = 19. (BasisStore is the
 // separate "CorpusKitBasis" kit-ID schema, not part of this composite,
-// so its version is not summed here.) The schema gate in the replication
-// primitive checks this version on both the source and destination; both
-// must be opened with this same declaration before a flush or hydrate.
+// so its version is not summed here.) LocusKit bumped to v10 for
+// associations natural-key uniqueness constraint (FINDING-3).
+// The schema gate in the replication primitive checks this version on
+// both the source and destination; both must be opened with this same
+// declaration before a flush or hydrate.
 //
 // Reference: REPLICATION_GROUND_TRUTH.md §SchemaDeclaration tables enumeration.
 
@@ -56,8 +58,10 @@ public enum GeniusLocusKitSchema {
     public static let kitID = "GeniusLocusKit"
 
     /// Composite schema version. Defined as the sum of component versions.
-    /// Components: LocusKit v9 + VectorKit v3 + CorpusKit (BundleStore) v3
-    ///             + Grants v1 + MatrixSnapshot v1 = 17.
+    /// Components: LocusKit v10 + VectorKit v4 + CorpusKit (BundleStore) v3
+    ///             + Grants v1 + MatrixSnapshot v1 = 19.
+    /// LocusKit bumped to v10 for associations natural-key uniqueness
+    /// constraint (FINDING-3 duplicate-edge fix).
     /// Component declarations are live references so a component bump
     /// self-corrects the composite without a hand-edited constant. (BasisStore
     /// is the separate "CorpusKitBasis" kit-ID schema, not part of this

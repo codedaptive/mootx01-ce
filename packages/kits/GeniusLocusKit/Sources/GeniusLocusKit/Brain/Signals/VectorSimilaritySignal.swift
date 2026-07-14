@@ -3,6 +3,22 @@ import LocusKit
 import VectorKit
 import CorpusKit
 
+/// Async closure type for checking whether a persisted association already
+/// exists between two drawer IDs (in either direction). Passed to
+/// `VectorSimilaritySignal.spec` to suppress redundant frame emissions.
+///
+/// Returns `true` when an active (non-tombstoned) association edge exists
+/// between `drawerIdA` and `drawerIdB` in either direction.
+/// Returns `false` when no such edge exists (the pair is a new candidate).
+/// Returns `false` on any error — fail-open so a transient query failure
+/// does not permanently suppress a valid candidate pair.
+///
+/// Production callers wire `DrawerStore.hasAssociationBetweenDrawers`
+/// here. Default (nil) disables the optimization; correctness is
+/// preserved by the DB-level INSERT-OR-IGNORE in addAssociation (FINDING-3).
+public typealias AssociationEdgeChecker =
+    @Sendable (String, String) async -> Bool
+
 /// Vector-similarity signal — architecture spec §11.2 row 6.
 ///
 /// What it does: reads the estate's VectorStore on schedule, finds row
@@ -94,11 +110,19 @@ public enum VectorSimilaritySignal {
     ///     estates actually hold. `nil` (the default) scans only the
     ///     drawer-keyed `modelID` lane, which is correct for tests that
     ///     plant drawer-keyed vectors directly.
+    ///   - edgeChecker: Optional async closure that returns `true` when
+    ///     a persisted (non-tombstoned) association already exists between
+    ///     the two drawer IDs in either direction (FINDING-3 optimization).
+    ///     When non-nil, the pass skips pairs that already have an edge,
+    ///     avoiding redundant frame emissions every 300 seconds. Correctness
+    ///     is preserved even when `nil` — the DB-level INSERT-OR-IGNORE in
+    ///     `addAssociation` is the primary guard; this check reduces churn.
     public static func spec(
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int = defaultProximityThreshold,
-        corpus: Corpus? = nil
+        corpus: Corpus? = nil,
+        edgeChecker: AssociationEdgeChecker? = nil
     ) -> SignalSpec {
         SignalSpec(
             name: signalName,
@@ -111,6 +135,7 @@ public enum VectorSimilaritySignal {
                     modelID: modelID,
                     proximityThreshold: proximityThreshold,
                     corpus: corpus,
+                    edgeChecker: edgeChecker,
                     context: context)
             })
     }
@@ -119,11 +144,14 @@ public enum VectorSimilaritySignal {
 
     /// Execute one proximity scan pass: sample probe drawer IDs, find
     /// nearby neighbours, deduplicate pairs, emit AssociateFrames.
+    /// If `edgeChecker` is provided, pairs with a persisted association
+    /// are filtered out before emission (FINDING-3 optimization).
     private static func proximityPass(
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int,
         corpus: Corpus?,
+        edgeChecker: AssociationEdgeChecker?,
         context: SignalContext
     ) async -> [SignalEmission] {
         var emissions: [SignalEmission] = []
@@ -240,7 +268,26 @@ public enum VectorSimilaritySignal {
             }
         }
 
-        for pair in candidatePairs {
+        // FINDING-3 optimization: filter out pairs that already have a
+        // persisted association. The DB-level INSERT-OR-IGNORE in
+        // `addAssociation` is the primary correctness guard; this check
+        // reduces churn (frame construction, queue writes, verb dispatch)
+        // for unchanged vector neighborhoods every 300 seconds.
+        // edgeChecker is fail-open: a transient error returns false so
+        // a valid new pair is never permanently suppressed.
+        var emittablePairs = candidatePairs
+        if let check = edgeChecker {
+            var filtered: [(a: String, b: String, weight: Double)] = []
+            for pair in candidatePairs {
+                let alreadyPersisted = await check(pair.a, pair.b)
+                if !alreadyPersisted {
+                    filtered.append(pair)
+                }
+            }
+            emittablePairs = filtered
+        }
+
+        for pair in emittablePairs {
             emissions.append(.associate(AssociationFrame(
                 a: pair.a,
                 b: pair.b,
@@ -249,7 +296,7 @@ public enum VectorSimilaritySignal {
 
         emissions.append(.diagnostic(DiagnosticReport(
             title: "vector_similarity.scan.summary",
-            detail: "5-minute proximity pass found \(candidatePairs.count) candidate pair(s); signal=\(context.signalID.rawValue)",
+            detail: "5-minute proximity pass found \(candidatePairs.count) candidate pair(s), emitting \(emittablePairs.count); signal=\(context.signalID.rawValue)",
             observedAt: context.now)))
 
         return emissions
