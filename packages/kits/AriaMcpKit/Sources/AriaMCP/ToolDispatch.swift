@@ -409,11 +409,16 @@ public struct ToolDispatcher: Sendable {
         } catch let error as GeniusLocusKitError {
             return Self.errorResult(describe(error))
         } catch {
-            // Anything else is genuinely out of band.
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.toolDispatchFailure,
-                message: "\(error)"
-            )
+            // Anything else is unexpected (a CocoaError from the filesystem, a
+            // VaultKitError from an adapter, …) — but the call DID reach its
+            // runner, so it is an execution failure, not a protocol fault. MCP
+            // clients render a thrown JSON-RPC error as a bare "failed to call
+            // tool" and discard the message; returning isError:true instead
+            // puts the description in front of the model so it can react.
+            // Mirror to stderr — the daemon log otherwise records nothing for
+            // a failed tool call, which makes field failures undiagnosable.
+            fputs("aria-mcp: tool \(name) failed: \(error)\n", stderr)
+            return Self.errorResult("unexpected error in \(name): \(error)")
         }
     }
 

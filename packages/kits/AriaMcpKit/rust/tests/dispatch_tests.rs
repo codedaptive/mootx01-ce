@@ -7216,3 +7216,53 @@ fn memory_tool_edit_preserves_elevated_sensitivity() {
         "str_replace re-capture must carry the source tier, not downgrade to Normal"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch-failure surfacing — TOOL_DISPATCH_FAILURE becomes an isError result
+// ---------------------------------------------------------------------------
+//
+// Runner-raised TOOL_DISPATCH_FAILURE means the call reached its runner and
+// the substrate (or an adapter under it) failed. The dispatch funnel converts
+// it into a tools/call result with isError:true so the failure description
+// reaches the model — a thrown JSON-RPC error is rendered by MCP clients as a
+// bare "failed to call tool" with the message discarded. Protocol faults keep
+// their thrown shape. Mirrors the Swift DispatchFailureSurfacingTests.
+
+#[test]
+fn tool_dispatch_failure_converts_to_error_result() {
+    use aria_mcp::jsonrpc::JSONRPCError;
+    let routed: Result<serde_json::Value, JSONRPCError> = Err(JSONRPCError::new(
+        JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
+        "vector lane save failed: permission denied".to_string(),
+    ));
+    let result = aria_mcp::dispatch::surface_dispatch_failure("moot_file_memory", routed)
+        .expect("TOOL_DISPATCH_FAILURE must convert to an Ok(isError) result, not stay thrown");
+    assert!(is_tool_error(&result), "converted result must set isError:true; got: {result}");
+    assert!(
+        content_text(&result).contains("permission denied"),
+        "the underlying message must reach the client; got: {}",
+        content_text(&result)
+    );
+}
+
+#[test]
+fn protocol_faults_stay_thrown() {
+    use aria_mcp::jsonrpc::JSONRPCError;
+    let routed: Result<serde_json::Value, JSONRPCError> = Err(JSONRPCError::new(
+        JSONRPCErrorCode::METHOD_NOT_FOUND,
+        "Unknown tool: moot_no_such_tool".to_string(),
+    ));
+    let err = aria_mcp::dispatch::surface_dispatch_failure("moot_no_such_tool", routed)
+        .expect_err("METHOD_NOT_FOUND is a protocol fault and must pass through as Err");
+    assert_eq!(err.code, JSONRPCErrorCode::METHOD_NOT_FOUND);
+}
+
+#[test]
+fn successful_results_pass_through_untouched() {
+    use aria_mcp::jsonrpc::JSONRPCError;
+    let ok = aria_mcp::dispatch::text_result("filed memory ABC");
+    let routed: Result<serde_json::Value, JSONRPCError> = Ok(ok.clone());
+    let result = aria_mcp::dispatch::surface_dispatch_failure("moot_file_memory", routed)
+        .expect("Ok results must pass through");
+    assert_eq!(result, ok, "a successful result must not be rewritten by the funnel");
+}

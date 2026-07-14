@@ -170,9 +170,12 @@ impl JSONRPCErrorCode {
     /// -32603: internal error.
     pub const INTERNAL_ERROR: i64 = -32603;
     /// -32010: implementation-defined — the substrate refused the verb.
-    /// Mapped to a JSON-RPC error rather than `tools/call` result isError
-    /// so clients without a tool-error code path still see a machine-readable
-    /// failure. Tool-level expected refusals stay on the isError=true path.
+    /// An INTERNAL marker, never emitted on the wire: runners raise it, and
+    /// `dispatch::surface_dispatch_failure` converts it at the dispatch
+    /// funnel into a `tools/call` result with `isError:true` so the failure
+    /// description reaches the model (clients render a thrown JSON-RPC error
+    /// as a bare "failed to call tool" and discard the message). Matches the
+    /// Swift `ToolDispatcher.dispatch` discipline.
     pub const TOOL_DISPATCH_FAILURE: i64 = -32010;
 }
 
