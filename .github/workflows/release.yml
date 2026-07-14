@@ -1303,26 +1303,24 @@ jobs:
           git commit -m "ci: update winget manifests to ${RELEASE_TAG} (automated)"
           git push
 
-  # ── Publish moot-memory to PyPI ─────────────────────────────────────────
-  # pip install moot-memory for Messages API users.
-  # Uses PyPI Trusted Publishing (OIDC); configure the moot-memory PyPI project
-  # to trust this repository, workflow, and release environment.
-  publish-pypi:
-    name: Publish moot-memory to PyPI
+  # ── Build moot-memory distribution ──────────────────────────────────────
+  # Builds the sdist + wheel with an ARBITRARY Python build backend
+  # (pyproject build hooks, build-time deps). Deliberately split from
+  # publish-pypi: this job holds NO id-token, so a compromised `build` or
+  # build-time dependency cannot mint the PyPI OIDC publish token. Mirrors
+  # the Windows build/sign split — untrusted build here, trusted publish next.
+  build-pypi:
+    name: Build moot-memory distribution
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     needs: [release]
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/moot-memory
     permissions:
-      contents: read
-      id-token: write
+      contents: read   # checkout only — NO id-token in the build job
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          # Publishes to PyPI via OIDC (id-token), not via git — no persisted
-          # token needed.
+          # No publish credential here, but never persist a git token when
+          # arbitrary build-backend code executes.
           persist-credentials: false
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -1338,13 +1336,47 @@ jobs:
           python -m pip install --upgrade build
           python -m build
 
+      - name: Upload distribution
+        # Hand the built sdist + wheel to publish-pypi. That job holds the OIDC
+        # publish credential and runs NO build step — it only uploads these.
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pypi-dist
+          path: apps/moot-memory-adapter/dist/
+
+  # ── Publish moot-memory to PyPI ─────────────────────────────────────────
+  # pip install moot-memory for Messages API users.
+  # Uses PyPI Trusted Publishing (OIDC); configure the moot-memory PyPI project
+  # to trust this repository, workflow, and release environment. Trusted,
+  # build-free publish job: it holds id-token: write but runs no arbitrary
+  # package build/install — only the upload of the artifact from build-pypi.
+  publish-pypi:
+    name: Publish moot-memory to PyPI
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs: [build-pypi]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/moot-memory
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distribution
+        # Places the sdist + wheel where gh-action-pypi-publish expects them.
+        # No checkout, no build — nothing arbitrary runs while id-token is live.
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: pypi-dist
+          path: dist/
+
       - name: Publish distribution to PyPI
         # Pinned by commit SHA like every other action in this workflow —
         # `release/v1` is a mutable branch and this step holds the OIDC
         # publish credential.
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
-          packages-dir: apps/moot-memory-adapter/dist/
+          packages-dir: dist/
           # Idempotent re-runs: if this version is already on PyPI (e.g. a tag
           # was force-moved and the workflow re-fired), skip instead of erroring
           # — PyPI rejects re-uploading an existing version.
