@@ -5166,7 +5166,33 @@ impl EstateCoordinator {
                 .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                     reason: format!("Ed25519 public key base64 decode failed: {e:?}"),
                 })?;
-            let signing_payload = authorizing_grant.signing_payload();
+            // Reconstruct the canonical verification payload with the initial
+            // budget (1.0), mirroring Swift CrossEstateFederation step 4.5.
+            //
+            // The grant store's debit_budget mutates the persisted grant's
+            // inference_remaining_budget in place (step 6 below). When
+            // active() returns the grant on a second or later recall, the
+            // stored value is the debited budget (e.g. 0.99 after one read).
+            // Calling authorizing_grant.signing_payload() at that point
+            // produces different bytes than were signed at issue time —
+            // breaking signature verification for every recall after the first
+            // even though the grant is valid and budget remains.
+            //
+            // The granter always signs with inferenceRemainingBudget: 1.0 (the
+            // full initial allotment). Reconstructing with 1.0 here keeps the
+            // signed bytes stable across all debits. Identical to Swift's
+            // Grant.canonicalPayload(... inferenceRemainingBudget: 1.0 ...).
+            let signing_payload = Grant::canonical_payload(
+                authorizing_grant.id,
+                authorizing_grant.grantee_estate_id,
+                &authorizing_grant.scope,
+                authorizing_grant.content_level,
+                &authorizing_grant.lifetime,
+                &authorizing_grant.custody_mode,
+                &authorizing_grant.re_share_permission,
+                1.0, // canonical initial budget — byte-identical to signing time
+                authorizing_grant.issued_at,
+            );
             if !convergence_kit::verify_signature(
                 &authorizing_grant.signature,
                 &signing_payload,
