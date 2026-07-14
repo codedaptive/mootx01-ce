@@ -507,7 +507,14 @@ jobs:
           MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
         run: |
           mkdir -p flat
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' \) \
+          # windows-*-unsigned is the raw-exe handoff from the Windows build
+          # job to the signing job (downloaded there by exact name), not a
+          # candidate asset — exclude it so the bare *.exe glob cannot publish
+          # or checksum the unsigned intermediates, whose identical filenames
+          # across arches would also clobber each other in flat/.
+          # (Codex finding 43badd43067481918899a5fbe77f42df)
+          find artifacts -type f -not -path 'artifacts/windows-*-unsigned/*' \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' \) \
             -exec cp {} flat/ \;
           ( cd flat && sha256sum * > ../checksums.txt )
           cp checksums.txt flat/

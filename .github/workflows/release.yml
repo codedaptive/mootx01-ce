@@ -1135,8 +1135,16 @@ jobs:
           # Covers binary archives (*.tar.gz, *.zip), macOS .pkg installers,
           # and Windows setup .exe installers so the checksum file covers all
           # release assets and the minisign signature below seals the full set.
+          # The windows-*-unsigned artifacts are EXCLUDED: they are the raw
+          # exe handoff from the Windows build jobs to the signing jobs (which
+          # download them by exact name), not release assets. Without the
+          # exclusion the bare *.exe glob would publish and checksum the
+          # unsigned intermediates — and both arches' handoffs carry
+          # identically-named exes, so the flat copy would also clobber one
+          # arch with the other. (Codex finding 43badd43067481918899a5fbe77f42df)
           mkdir -p flat
-          find . \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.pkg' -o -name '*.exe' \) \
+          find . -not -path './windows-*-unsigned/*' \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.pkg' -o -name '*.exe' \) \
             | xargs -I{} cp {} flat/
           # Stable version-less aliases for the website: asset names embed the
           # version, so a hardcoded link breaks every release. These copies
