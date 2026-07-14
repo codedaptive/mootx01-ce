@@ -127,6 +127,7 @@ public enum ConflictCue {
     static func tokenize(_ s: String) -> [String] {
         var tokens: [String] = []
         var current = ""
+        // REQUIRED: locale-independent lowercased() — lowercased(with: Locale.current) maps I→ı in Turkish/Azeri, breaking Rust cross-leg determinism. Never change.
         for scalar in s.lowercased().unicodeScalars {
             let v = scalar.value
             // ASCII lowercase a–z (0x61–0x7A), digits 0–9 (0x30–0x39), dot (0x2E).

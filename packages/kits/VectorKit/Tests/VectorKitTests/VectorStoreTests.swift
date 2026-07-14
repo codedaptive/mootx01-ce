@@ -927,4 +927,25 @@ struct VectorStoreTests {
                 "projection must not break full enumeration")
         }
     }
+
+    /// Empty query returns empty immediately — guard against LIKE '%%' full-scan.
+    ///
+    /// Regression guard for the fail-safe introduced in VectorStore: an empty
+    /// query string must short-circuit before issuing any SQL, not match every
+    /// row in the table via LIKE '%%'.
+    @Test func findByKeywordEmptyQueryReturnsEmpty() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            // Insert a vector so the table is non-empty; an unguarded empty query
+            // would match it via LIKE '%%'.
+            try await store.addVector(
+                itemID: "some-item",
+                engram: Engram(blocks: 1, 2, 3, 4),
+                modelID: "test-model",
+                modelVersion: "1.0",
+                filedAt: Date())
+            let result = try await store.findByKeyword("", limit: 100)
+            #expect(result.isEmpty, "empty query must return empty without scanning")
+        }
+    }
 }

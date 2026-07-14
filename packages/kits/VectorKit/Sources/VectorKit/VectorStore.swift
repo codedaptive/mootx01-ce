@@ -1386,6 +1386,9 @@ public actor VectorStore {
     ///
     /// Telemetry: emits `vectorkit.search.keyword_result_count` when enabled.
     public func findByKeyword(_ query: String, limit: Int) async throws -> [String] {
+        // Empty query would become LIKE '%%', scanning every row — fail-safe: return
+        // empty immediately. No caller depends on empty-query-returns-all (confirmed).
+        guard !query.isEmpty else { return [] }
         // `limit` counts DISTINCT item IDs — the contract every caller
         // means ("memories probed"): the contradiction hunter's probe_limit
         // and VectorSimilaritySignal's sample size both document items, not

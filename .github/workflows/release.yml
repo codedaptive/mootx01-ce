@@ -73,14 +73,6 @@ jobs:
           # contents: read, so no write token exists for a build step to abuse.
           persist-credentials: false
 
-      - name: Authenticate git clones (raise github.com clone rate limit)
-        # macOS jobs resolve SPM dependencies by cloning from github.com. The
-        # anonymous clone rate limit intermittently returns 403 under CI load —
-        # the cached Linux/Windows cargo jobs don't clone from github, which is
-        # why only the macOS builds hit it. GITHUB_TOKEN authenticates the clones
-        # for a far higher limit.
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
       - name: Select Swift 6.2 toolchain (latest stable Xcode)
         # macos-26 carries the Swift 6.2 OS runtime the packages require; pair it
         # with the latest stable Xcode so the build toolchain and runtime match.
@@ -98,6 +90,8 @@ jobs:
           # SwiftUI app (built here and on x86_64); Linux and Windows ship the
           # headless Rust moot-mgr (built in their respective jobs) — its control
           # channel is a Unix-domain socket on Unix and a named pipe on Windows.
+          # SPM dependencies are public github.com packages and build without
+          # auth injection (verified: candidate.yml omits this step and builds fine).
           swift build -c release --package-path apps/mootx01 --product mootx01
           swift build -c release --package-path apps/moot-mgr --product moot-mgr
 
@@ -332,14 +326,6 @@ jobs:
         with:
           # See the arm64 job: no persisted write token in a swift-build job.
           persist-credentials: false
-
-      - name: Authenticate git clones (raise github.com clone rate limit)
-        # macOS jobs resolve SPM dependencies by cloning from github.com. The
-        # anonymous clone rate limit intermittently returns 403 under CI load —
-        # the cached Linux/Windows cargo jobs don't clone from github, which is
-        # why only the macOS builds hit it. GITHUB_TOKEN authenticates the clones
-        # for a far higher limit.
-        run: git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       - name: Select Swift 6.2 toolchain (latest stable Xcode)
         # See arm64 job: macos-26 ships the 6.2 runtime; latest-stable Xcode matches it.

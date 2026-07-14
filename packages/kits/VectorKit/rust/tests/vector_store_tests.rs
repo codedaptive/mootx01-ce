@@ -682,3 +682,18 @@ fn recent_item_ids_correct_after_column_projection() {
     assert_eq!(all3, vec!["newest", "middle", "oldest"],
         "projection must not break full enumeration");
 }
+
+/// `find_by_keyword` returns empty immediately when the query is empty.
+///
+/// Regression guard: an empty query must short-circuit before issuing any SQL,
+/// not match every row via LIKE '%%'.
+#[test]
+fn find_by_keyword_empty_query_returns_empty() {
+    let store = fresh_store();
+    let engram = Engram::new(1, 2, 3, 4);
+    // Insert a row so the table is non-empty; a LIKE '%%' scan would match it.
+    store.add_vector("some-item", &engram, "test-model", "1.0", FILED_AT_1)
+         .expect("add_vector");
+    let result = store.find_by_keyword("", 100).expect("find_by_keyword");
+    assert!(result.is_empty(), "empty query must return empty without scanning");
+}
