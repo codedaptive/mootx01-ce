@@ -125,6 +125,41 @@ enum TypedValueComparator {
             // order (its layout puts node and logical above physical —
             // HLC_PACKED_ORDER_UNSOUND), so packed comparison is wrong here.
             return x == y ? 0 : (x < y ? -1 : 1)
+        case (.blob(let x), .blob(let y)):
+            // Byte-wise lexicographic compare — mirrors Rust Vec<u8> Ord and SQLite
+            // BLOB affinity ordering. Used by .eq/.neq/.in (equality contract) and
+            // .lt/.lte/.gt/.gte (ordering predicates) on blob columns.
+            if x == y { return 0 }
+            return x.lexicographicallyPrecedes(y) ? -1 : 1
+        case (.json(let x), .json(let y)):
+            // json is pre-encoded bytes; compare byte-wise, same as blob.
+            // The kit invariant is that json values are stored as the caller-supplied
+            // bytes — equality means identical bytes, NOT JSON semantic equivalence.
+            // Mirrors Rust Vec<u8> Ord for the same reason.
+            if x == y { return 0 }
+            return x.lexicographicallyPrecedes(y) ? -1 : 1
+        case (.fingerprint(let x), .fingerprint(let y)):
+            // Block-wise compare in declaration order (block0 … block3 = bits 0–255).
+            // Little-endian wire format: block0 carries bits 0–63. Comparing block0
+            // first produces a lexicographic order over the 32-byte representation
+            // that matches byte-array comparison of the wire format, and mirrors the
+            // Rust leg's block-by-block Ordering::then chain.
+            let xWords = [x.block0, x.block1, x.block2, x.block3]
+            let yWords = [y.block0, y.block1, y.block2, y.block3]
+            for (bx, by) in zip(xWords, yWords) {
+                if bx != by { return bx < by ? -1 : 1 }
+            }
+            return 0
+        case (.array(let xs), .array(let ys)):
+            // Element-wise recursive compare; length is the tiebreak (shorter < longer
+            // when all shared elements are equal). Returns nil if any element pair is
+            // incomparable (mismatched TypedValue cases), propagating nil upward
+            // consistent with the mismatched-type contract of the overall comparator.
+            for (xe, ye) in zip(xs, ys) {
+                guard let cmp = TypedValueComparator.compare(xe, ye) else { return nil }
+                if cmp != 0 { return cmp }
+            }
+            return xs.count == ys.count ? 0 : (xs.count < ys.count ? -1 : 1)
         default:
             return nil
         }

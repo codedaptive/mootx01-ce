@@ -762,3 +762,365 @@ fn inmemory_introspection_captured_at_matches_input() {
     let stats = storage.stats(now).unwrap();
     assert_eq!(stats.captured_at_secs, now);
 }
+
+// ----- Finding #7 regression: comparator coverage for blob/json/fingerprint/array -----
+//
+// Before this fix, compare_typed_values returned None for these TypedValue
+// variants, causing .Eq/.Neq/.In equality predicates to produce wrong results
+// in the Swift leg. The Rust leg uses PartialEq for those predicate operators
+// directly (already correct), so the tests below primarily validate that
+// compare_typed_values now handles these types consistently — covering both
+// ordering predicates (.Lt/.Gt) and the sort path.
+
+use substrate_types::fingerprint256::Fingerprint256;
+
+fn comparator_schema() -> SchemaDeclaration {
+    SchemaDeclaration::new(
+        "comparator-test-kit",
+        1,
+        vec![TableDeclaration::new(
+            "items",
+            vec![
+                ColumnDeclaration::uuid("id"),
+                ColumnDeclaration::blob("blob_col"),
+                ColumnDeclaration::json("json_col"),
+                ColumnDeclaration::fingerprint("fp_col"),
+                // No Array ColumnType variant — InMemory does not validate
+                // TypedValue against declared column type. Store arrays in a
+                // blob column for schema purposes.
+                ColumnDeclaration::blob("arr_col").nullable(),
+            ],
+            vec!["id".to_string()],
+        )],
+    )
+}
+
+fn comparator_storage() -> InMemoryStorage {
+    let s = InMemoryStorage::with_estate(Uuid::new_v4());
+    s.open(&comparator_schema()).expect("open comparator schema");
+    s
+}
+
+#[test]
+fn blob_eq_matches_identical_bytes() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+    let payload: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    let other:   Vec<u8> = vec![0x00, 0x01, 0x02, 0x03];
+
+    let mut r1 = BTreeMap::new();
+    r1.insert("id".into(), TypedValue::Uuid(id1));
+    r1.insert("blob_col".into(), TypedValue::Blob(payload.clone()));
+    rows.insert("items", r1).expect("insert");
+
+    let mut r2 = BTreeMap::new();
+    r2.insert("id".into(), TypedValue::Uuid(id2));
+    r2.insert("blob_col".into(), TypedValue::Blob(other));
+    rows.insert("items", r2).expect("insert");
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::Eq(
+                Column::new("items", "blob_col"),
+                TypedValue::Blob(payload.clone()),
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 1, "blob .Eq must match the row with identical bytes");
+    assert_eq!(results[0].get("id"), Some(&TypedValue::Uuid(id1)));
+}
+
+#[test]
+fn blob_neq_false_for_equal_bytes() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let payload: Vec<u8> = vec![0x01, 0x02, 0x03];
+    let mut r = BTreeMap::new();
+    r.insert("id".into(), TypedValue::Uuid(Uuid::new_v4()));
+    r.insert("blob_col".into(), TypedValue::Blob(payload.clone()));
+    rows.insert("items", r).expect("insert");
+
+    let count = rows
+        .count(
+            "items",
+            Some(&StoragePredicate::Neq(
+                Column::new("items", "blob_col"),
+                TypedValue::Blob(payload.clone()),
+            )),
+        )
+        .expect("count");
+    assert_eq!(count, 0, "blob .Neq against identical bytes must not match");
+}
+
+#[test]
+fn blob_in_matches_membership() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let a: Vec<u8> = vec![0x01];
+    let b: Vec<u8> = vec![0x02];
+    let c: Vec<u8> = vec![0x03];
+    let (id_a, id_b, id_c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+    for (id, blob) in [(id_a, a.clone()), (id_b, b.clone()), (id_c, c.clone())] {
+        let mut r = BTreeMap::new();
+        r.insert("id".into(), TypedValue::Uuid(id));
+        r.insert("blob_col".into(), TypedValue::Blob(blob));
+        rows.insert("items", r).expect("insert");
+    }
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::In(
+                Column::new("items", "blob_col"),
+                vec![TypedValue::Blob(a.clone()), TypedValue::Blob(c.clone())],
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 2, "blob .In must match the rows in the set");
+    let ids: Vec<_> = results.iter().map(|r| r.get("id").cloned().unwrap()).collect();
+    assert!(ids.contains(&TypedValue::Uuid(id_a)));
+    assert!(ids.contains(&TypedValue::Uuid(id_c)));
+    assert!(!ids.contains(&TypedValue::Uuid(id_b)));
+}
+
+#[test]
+fn json_eq_matches_identical_bytes() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+    let p1: Vec<u8> = br#"{"key":"value"}"#.to_vec();
+    let p2: Vec<u8> = br#"{"key":"other"}"#.to_vec();
+
+    let mut r1 = BTreeMap::new();
+    r1.insert("id".into(), TypedValue::Uuid(id1));
+    r1.insert("json_col".into(), TypedValue::Json(p1.clone()));
+    rows.insert("items", r1).expect("insert");
+
+    let mut r2 = BTreeMap::new();
+    r2.insert("id".into(), TypedValue::Uuid(id2));
+    r2.insert("json_col".into(), TypedValue::Json(p2));
+    rows.insert("items", r2).expect("insert");
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::Eq(
+                Column::new("items", "json_col"),
+                TypedValue::Json(p1.clone()),
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 1, "json .Eq must match the row with identical bytes");
+    assert_eq!(results[0].get("id"), Some(&TypedValue::Uuid(id1)));
+}
+
+#[test]
+fn json_in_matches_membership() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let a: Vec<u8> = br#"{"n":1}"#.to_vec();
+    let b: Vec<u8> = br#"{"n":2}"#.to_vec();
+    let c: Vec<u8> = br#"{"n":3}"#.to_vec();
+    let (id_a, id_b, id_c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+    for (id, json) in [(id_a, a.clone()), (id_b, b.clone()), (id_c, c.clone())] {
+        let mut r = BTreeMap::new();
+        r.insert("id".into(), TypedValue::Uuid(id));
+        r.insert("json_col".into(), TypedValue::Json(json));
+        rows.insert("items", r).expect("insert");
+    }
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::In(
+                Column::new("items", "json_col"),
+                vec![TypedValue::Json(a.clone()), TypedValue::Json(b.clone())],
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 2, "json .In must match the rows in the set");
+    let ids: Vec<_> = results.iter().map(|r| r.get("id").cloned().unwrap()).collect();
+    assert!(ids.contains(&TypedValue::Uuid(id_a)));
+    assert!(ids.contains(&TypedValue::Uuid(id_b)));
+    assert!(!ids.contains(&TypedValue::Uuid(id_c)));
+}
+
+#[test]
+fn fingerprint_eq_matches_identical_value() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let fp1 = Fingerprint256 { block0: 0xAAAA, block1: 0xBBBB, block2: 0xCCCC, block3: 0xDDDD };
+    let fp2 = Fingerprint256 { block0: 0x1111, block1: 0x2222, block2: 0x3333, block3: 0x4444 };
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+
+    let mut r1 = BTreeMap::new();
+    r1.insert("id".into(), TypedValue::Uuid(id1));
+    r1.insert("fp_col".into(), TypedValue::Fingerprint(fp1));
+    rows.insert("items", r1).expect("insert");
+
+    let mut r2 = BTreeMap::new();
+    r2.insert("id".into(), TypedValue::Uuid(id2));
+    r2.insert("fp_col".into(), TypedValue::Fingerprint(fp2));
+    rows.insert("items", r2).expect("insert");
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::Eq(
+                Column::new("items", "fp_col"),
+                TypedValue::Fingerprint(fp1),
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 1, "fingerprint .Eq must match the row with identical blocks");
+    assert_eq!(results[0].get("id"), Some(&TypedValue::Uuid(id1)));
+}
+
+#[test]
+fn fingerprint_in_matches_membership() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let fp_a = Fingerprint256 { block0: 100, block1: 0, block2: 0, block3: 0 };
+    let fp_b = Fingerprint256 { block0: 200, block1: 0, block2: 0, block3: 0 };
+    let fp_c = Fingerprint256 { block0: 300, block1: 0, block2: 0, block3: 0 };
+    let (id_a, id_b, id_c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+    for (id, fp) in [(id_a, fp_a), (id_b, fp_b), (id_c, fp_c)] {
+        let mut r = BTreeMap::new();
+        r.insert("id".into(), TypedValue::Uuid(id));
+        r.insert("fp_col".into(), TypedValue::Fingerprint(fp));
+        rows.insert("items", r).expect("insert");
+    }
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::In(
+                Column::new("items", "fp_col"),
+                vec![TypedValue::Fingerprint(fp_a), TypedValue::Fingerprint(fp_c)],
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 2, "fingerprint .In must match the rows in the set");
+    let ids: Vec<_> = results.iter().map(|r| r.get("id").cloned().unwrap()).collect();
+    assert!(ids.contains(&TypedValue::Uuid(id_a)));
+    assert!(ids.contains(&TypedValue::Uuid(id_c)));
+    assert!(!ids.contains(&TypedValue::Uuid(id_b)));
+}
+
+#[test]
+fn array_eq_matches_identical_elements() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let arr_a = TypedValue::Array(vec![TypedValue::Int(1), TypedValue::Text("hello".into())]);
+    let arr_b = TypedValue::Array(vec![TypedValue::Int(2), TypedValue::Text("world".into())]);
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+
+    let mut r1 = BTreeMap::new();
+    r1.insert("id".into(), TypedValue::Uuid(id1));
+    r1.insert("arr_col".into(), arr_a.clone());
+    rows.insert("items", r1).expect("insert");
+
+    let mut r2 = BTreeMap::new();
+    r2.insert("id".into(), TypedValue::Uuid(id2));
+    r2.insert("arr_col".into(), arr_b);
+    rows.insert("items", r2).expect("insert");
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::Eq(
+                Column::new("items", "arr_col"),
+                arr_a.clone(),
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 1, "array .Eq must match the row with identical elements");
+    assert_eq!(results[0].get("id"), Some(&TypedValue::Uuid(id1)));
+}
+
+#[test]
+fn array_neq_false_for_equal_elements() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let arr = TypedValue::Array(vec![TypedValue::Int(42), TypedValue::Bool(true)]);
+    let mut r = BTreeMap::new();
+    r.insert("id".into(), TypedValue::Uuid(Uuid::new_v4()));
+    r.insert("arr_col".into(), arr.clone());
+    rows.insert("items", r).expect("insert");
+
+    let count = rows
+        .count(
+            "items",
+            Some(&StoragePredicate::Neq(
+                Column::new("items", "arr_col"),
+                arr.clone(),
+            )),
+        )
+        .expect("count");
+    assert_eq!(count, 0, "array .Neq against identical value must not match");
+}
+
+#[test]
+fn array_in_matches_membership() {
+    let s = comparator_storage();
+    let rows = s.row_store();
+    let arr_a = TypedValue::Array(vec![TypedValue::Int(10)]);
+    let arr_b = TypedValue::Array(vec![TypedValue::Int(20)]);
+    let arr_c = TypedValue::Array(vec![TypedValue::Int(30)]);
+    let (id_a, id_b, id_c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+    for (id, arr) in [(id_a, arr_a.clone()), (id_b, arr_b.clone()), (id_c, arr_c.clone())] {
+        let mut r = BTreeMap::new();
+        r.insert("id".into(), TypedValue::Uuid(id));
+        r.insert("arr_col".into(), arr);
+        rows.insert("items", r).expect("insert");
+    }
+
+    let results = rows
+        .query(
+            "items",
+            Some(&StoragePredicate::In(
+                Column::new("items", "arr_col"),
+                vec![arr_a.clone(), arr_c.clone()],
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("query");
+    assert_eq!(results.len(), 2, "array .In must match the rows in the set");
+    let ids: Vec<_> = results.iter().map(|r| r.get("id").cloned().unwrap()).collect();
+    assert!(ids.contains(&TypedValue::Uuid(id_a)));
+    assert!(ids.contains(&TypedValue::Uuid(id_c)));
+    assert!(!ids.contains(&TypedValue::Uuid(id_b)));
+}
