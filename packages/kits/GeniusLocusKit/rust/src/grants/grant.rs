@@ -16,6 +16,26 @@
 
 use uuid::Uuid;
 
+/// Format an `f64` for the canonical signing payload so the output is
+/// byte-identical to Swift's `String(Double)`.
+///
+/// Swift's `String(Double)` always includes at least one fractional digit for
+/// finite values (e.g. `1.0`, `0.0`, `1700000000.0`). Rust's `f64` `Display`
+/// impl omits the fractional part for whole numbers (e.g. `1`, `0`,
+/// `1700000000`). This divergence breaks cross-leg signature verification for
+/// any signing-payload field whose value is a whole number — in particular
+/// `inference_remaining_budget` at its initial value of `1.0` and
+/// `issued_at` when the timestamp falls on an exact second boundary.
+///
+/// Fix: if Rust `Display` output contains no `.`, append `.0`.
+/// Fractional values (e.g. `0.99`, `0.5`) already contain `.` and pass through
+/// unchanged. This is the only change needed because Swift and Rust agree on
+/// the shortest-round-trip representation for non-integer values.
+fn format_f64_payload(v: f64) -> String {
+    let s = v.to_string();
+    if s.contains('.') { s } else { format!("{s}.0") }
+}
+
 /// Granularity that a grant exposes, per §6 scope axis.
 ///
 /// Mirror of Swift `GrantScope`. The `signing_token()` output must be
@@ -64,7 +84,7 @@ impl GrantLifetime {
     pub fn signing_token(&self) -> String {
         match self {
             GrantLifetime::Permanent => "permanent".to_string(),
-            GrantLifetime::Until(t) => format!("until:{t}"),
+            GrantLifetime::Until(t) => format!("until:{}", format_f64_payload(*t)),
             GrantLifetime::DecayWindow { seconds } => format!("decay:{seconds}"),
         }
     }
@@ -186,7 +206,7 @@ impl DecayPolicy {
     pub fn signing_token(&self) -> String {
         format!(
             "halfLife:{}|start:{}|floor:{}",
-            self.half_life_seconds, self.started_at, self.floor
+            self.half_life_seconds, format_f64_payload(self.started_at), self.floor
         )
     }
 
@@ -296,8 +316,8 @@ impl Grant {
             lifetime.signing_token(),
             custody_mode.signing_token().to_string(),
             re_share_permission.signing_token().to_string(),
-            inference_remaining_budget.to_string(),
-            issued_at.to_string(),
+            format_f64_payload(inference_remaining_budget),
+            format_f64_payload(issued_at),
         ];
         fields.join("|").into_bytes()
     }

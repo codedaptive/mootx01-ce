@@ -4625,7 +4625,13 @@ impl EstateCoordinator {
             lifetime: options.lifetime,
             custody_mode: options.custody_mode,
             re_share_permission: options.re_share_permission,
-            inference_remaining_budget: 0.0, // default; callers may override via options
+            // Every grant is issued at the full initial budget. The federation
+            // layer debits it per recall. The canonical signing payload always
+            // encodes INITIAL_INFERENCE_BUDGET (not the current debited value)
+            // so the signature is stable across the grant's lifetime — the same
+            // invariant enforced in Swift `VerbSurface.issueGrant` (hardcoded
+            // `inferenceRemainingBudget: 1.0`).
+            inference_remaining_budget: Self::INITIAL_INFERENCE_BUDGET,
             issued_at: now,
             signature: vec![], // signing is caller's responsibility after receiving the result
         };
@@ -5002,6 +5008,19 @@ impl EstateCoordinator {
 
     // MARK: - federated_recall
 
+    /// Initial inference budget assigned to every newly-issued grant.
+    ///
+    /// Every grant leaves `issue_grant` with `inference_remaining_budget ==
+    /// INITIAL_INFERENCE_BUDGET`. The canonical signing payload always uses
+    /// this value at signature-verification time (step 4.5 of
+    /// `federated_recall`), regardless of how much budget has been debited
+    /// since issue — because the granter signed with the initial budget, not
+    /// the current debited value. Mirrors Swift `VerbSurface.issueGrant`
+    /// which hardcodes `inferenceRemainingBudget: 1.0` at issuance and
+    /// `CrossEstateFederation` which hardcodes `inferenceRemainingBudget: 1.0`
+    /// at verification.
+    pub const INITIAL_INFERENCE_BUDGET: f64 = 1.0;
+
     /// Per-read budget debit quantum. Mirrors Swift
     /// `GeniusLocusKit.budgetDebitPerRead` (0.01 per read, ~100 reads on
     /// a fresh 1.0 budget). Spec §6 is silent on debit amount; fail-closed
@@ -5190,7 +5209,7 @@ impl EstateCoordinator {
                 &authorizing_grant.lifetime,
                 &authorizing_grant.custody_mode,
                 &authorizing_grant.re_share_permission,
-                1.0, // canonical initial budget — byte-identical to signing time
+                Self::INITIAL_INFERENCE_BUDGET, // canonical initial budget — byte-identical to signing time
                 authorizing_grant.issued_at,
             );
             if !convergence_kit::verify_signature(
