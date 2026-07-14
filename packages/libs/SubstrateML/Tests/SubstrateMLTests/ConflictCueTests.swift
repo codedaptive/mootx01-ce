@@ -22,6 +22,34 @@ struct ConflictCueTests {
         #expect(ConflictCue.tokenize("shipped in v1.0.30!") == ["shipped", "in", "v1.0.30"])
         #expect(ConflictCue.tokenize("...") == [])
         #expect(ConflictCue.tokenize("Isn't  DONE") == ["isn", "t", "done"])
+
+        // U+0130 İ (LATIN CAPITAL LETTER I WITH DOT ABOVE) lowercases to
+        // "i" + U+0307 (COMBINING DOT ABOVE). The combining scalar must act
+        // as a token separator — NOT be swallowed into an ASCII token.
+        // Expected: identical to "i1 x2 y3 z4" (plain i), mirrored in Rust.
+        #expect(ConflictCue.tokenize("İ1 x2 y3 z4") == ["i", "1", "x2", "y3", "z4"])
+        #expect(ConflictCue.tokenize("i1 x2 y3 z4") == ["i1", "x2", "y3", "z4"])
+    }
+
+    // MARK: - Unicode scalar conformance (İ cross-leg)
+
+    @Test("İ (U+0130) tokenizer divergence regression — must match Rust output")
+    func unicodeCombiningMarkTokenizer() {
+        // İ lowercases to i + U+0307 (combining dot). The combining mark
+        // is NOT ascii_lowercase, so Rust treats it as a separator: "İ1 ..."
+        // tokenizes to ["i", "1", ...] not ["i\u{0307}1", ...].
+        // Swift must agree (scalar-level iteration, not grapheme-cluster).
+        let withDotAbove = ConflictCue.tokenize("İ1 x2 y3 z4")
+        let plainI       = ConflictCue.tokenize("i1 x2 y3 z4")
+        // Not the same token stream — İ1 splits, i1 does not.
+        #expect(withDotAbove != plainI)
+        #expect(withDotAbove == ["i", "1", "x2", "y3", "z4"])
+
+        // evaluate() must also agree across legs for this input.
+        // "İ1 x2 y3 z4" vs "i1 x2 y3 z4" — different token streams, but
+        // neither carries negation/marker/digit-only diffs, so no cue fires.
+        let r = ConflictCue.evaluate("İ1 x2 y3 z4", "i1 x2 y3 z4")
+        #expect(r.kind == .none)
     }
 
     // MARK: - Cue detection (mirrored vectors)
