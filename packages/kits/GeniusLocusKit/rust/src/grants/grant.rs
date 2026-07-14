@@ -31,6 +31,12 @@ use uuid::Uuid;
 /// Fractional values (e.g. `0.99`, `0.5`) already contain `.` and pass through
 /// unchanged. This is the only change needed because Swift and Rust agree on
 /// the shortest-round-trip representation for non-integer values.
+///
+/// Range assumption: this normalization matches Swift's `String(Double)` only
+/// within the practical signing-value range — grant budgets (0.0–1.0) and
+/// Unix-epoch timestamps (~1e9). For |v| ≳ 1e15 Swift switches to scientific
+/// notation while this helper stays in integer form, so the two legs would
+/// diverge. Values that large are out of scope for any real budget or timestamp.
 fn format_f64_payload(v: f64) -> String {
     let s = v.to_string();
     if s.contains('.') { s } else { format!("{s}.0") }
