@@ -330,13 +330,14 @@ jobs:
           name: linux-${{ matrix.arch }}
           path: ${{ env.ASSET }}
 
-  # ── Unsigned Windows builds (x86_64 + arm64): zip archive + Inno setup.exe ───
-  windows:
+  # ── Unsigned Windows builds (x86_64 + arm64) — untrusted cargo, no OIDC ──────
+  # Split from the sign job (below) for supply-chain isolation: cargo build runs
+  # arbitrary Rust build code, so this job holds NO id-token capability. It builds
+  # the exes and hands them to windows-sign as an artifact. (SECURITY: keep the
+  # signing OIDC token out of any job that executes untrusted build code.)
+  windows-build:
     needs: meta
-    # OIDC token for azure/login (Windows code signing); contents:read for checkout.
-    # Both are required because declaring permissions drops all others to none.
     permissions:
-      id-token: write
       contents: read
     strategy:
       fail-fast: false
@@ -362,13 +363,52 @@ jobs:
         run: |
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target ${{ matrix.target }}
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target ${{ matrix.target }}
-          # Copy both exes to the workspace root. Signing (below) rewrites them in
-          # place, and BOTH the zip and the Inno installer must embed the SIGNED
-          # exes — so the signing step is interposed before the zip and ISCC.
+          # Copy both exes to the workspace root so they upload as a flat artifact.
+          # windows-sign downloads them, signs them (when creds present), and
+          # embeds the signed exes in both the zip and the Inno installer.
           Copy-Item "apps/mootx01/rust/target/${{ matrix.target }}/release/mootx01.exe"  "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/${{ matrix.target }}/release/moot-mgr.exe" "moot-mgr.exe"
           # Smoke: both arches run natively on their runners.
           .\mootx01.exe --version
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-${{ matrix.arch }}-unsigned
+          path: |
+            mootx01.exe
+            moot-mgr.exe
+
+  # ── Windows code signing + installer (x86_64 + arm64) — trusted, cargo-free ──
+  # Holds the OIDC id-token capability for Azure code signing and runs NO cargo.
+  # Downloads the unsigned exes from windows-build, signs them (best-effort — a
+  # candidate must not fail when creds are absent), builds the Inno setup.exe,
+  # signs it, and uploads the final zip + setup.exe. Isolating OIDC here — away
+  # from build code — keeps the signing credential unreachable from cargo.
+  windows-sign:
+    needs: [meta, windows-build]
+    permissions:
+      id-token: write   # Azure OIDC login for code signing
+      contents: read    # checkout the .iss installer script
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: candidate/1.0.x
+          persist-credentials: false
+      - name: Download unsigned binaries
+        # Places mootx01.exe + moot-mgr.exe at the workspace root (where the zip
+        # and ISCC's /DBinDir expect them).
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: windows-${{ matrix.arch }}-unsigned
+          path: .
 
       # ── Windows code signing (Azure Artifact Signing) — best-effort ──────────
       # A candidate must not fail when signing creds are absent (forks, first-time
@@ -422,7 +462,8 @@ jobs:
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           # BinDir must be absolute — ISCC resolves /DBinDir relative to the .iss
           # SourceDir (distribution\windows\), not the caller's CWD. The exes it
-          # embeds were signed above when signing creds are configured.
+          # embeds were downloaded to the workspace root above and signed when
+          # signing creds are configured.
           & $iscc `
             "/DMyAppVersion=${{ needs.meta.outputs.tag }}" `
             "/DArch=${{ matrix.arch }}" `
@@ -448,7 +489,7 @@ jobs:
 
   # ── Publish the pre-release + prune to the last 4 ───────────────────────────
   prerelease:
-    needs: [meta, macos, linux, windows]
+    needs: [meta, macos, linux, windows-sign]
     permissions:
       contents: write   # create the pre-release + prune old ones
     runs-on: ubuntu-24.04

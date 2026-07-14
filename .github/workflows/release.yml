@@ -654,10 +654,13 @@ jobs:
     name: Build Windows x86_64
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-x64' }}
     runs-on: windows-latest
-    # OIDC token for azure/login (Windows code signing); contents:read for checkout.
-    # Both are required because declaring permissions drops all others to none.
+    # Untrusted build job: cargo build runs Rust build-scripts, proc-macros, and
+    # dependency code — arbitrary code — so this job holds NO OIDC capability.
+    # contents: read only; NO id-token. The signing credential (OIDC → Azure) is
+    # isolated in sign-windows-x86_64, which runs no build code. This keeps
+    # code-signing capability unreachable from compromised build execution.
+    # (SECURITY: isolate signing OIDC from untrusted cargo build.)
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -697,12 +700,69 @@ jobs:
             Write-Error "mootx01: invalid release tag: $version"
             exit 1
           }
-          # Copy both exes to the workspace root. Signing (below) rewrites them in
-          # place before the zip and ISCC, so the archive and the installer both
-          # embed the SIGNED exes.
+          # Copy both exes to the workspace root so they upload as a flat artifact.
+          # sign-windows-x86_64 downloads them, signs them (when creds present),
+          # and embeds the signed exes in the zip and the installer.
           Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/x86_64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
-          # Export version for the Inno Setup step below (strip leading 'v').
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          # windows-latest is native x86_64, so the freshly built exe runs here.
+          .\mootx01.exe --version
+
+      - name: Upload unsigned binaries
+        # Hand the unsigned exes to sign-windows-x86_64. This build job holds no
+        # signing capability; the sign job is where OIDC/Azure signing happens.
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-x86_64-unsigned
+          path: |
+            mootx01.exe
+            moot-mgr.exe
+
+  # ── Windows code signing + installer (x86_64) ─────────────────────────────
+  # Trusted, cargo-free sign job. Holds the OIDC id-token capability for Azure
+  # code signing and runs NO cargo build. Downloads the unsigned exes built by
+  # build-windows-x86_64, signs them (when Azure is provisioned), builds the
+  # Inno setup.exe, signs that, and uploads the final zip + setup.exe. Isolating
+  # OIDC here — away from any build-time code — is the supply-chain fix: untrusted
+  # Rust build code can never reach the signing credential or mint an OIDC token.
+  sign-windows-x86_64:
+    name: Sign Windows x86_64
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-x64' }}
+    needs: build-windows-x86_64
+    runs-on: windows-latest
+    permissions:
+      id-token: write   # Azure OIDC login for code signing
+      contents: read    # checkout the .iss installer script
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # No cargo here, but this job holds id-token: write — never persist a
+          # git token into .git/config alongside the signing capability.
+          persist-credentials: false
+
+      - name: Download unsigned binaries
+        # Places mootx01.exe + moot-mgr.exe at the workspace root (where the zip
+        # and ISCC's /DBinDir expect them).
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: windows-x86_64-unsigned
+          path: .
+
+      - name: Derive version
+        shell: pwsh
+        run: |
+          # Re-derive from $env:RELEASE_TAG (validated, never shell-templated) —
+          # the build job's env does not cross the job boundary. VERSION_NUM feeds
+          # the Inno Setup step below.
+          $version = $env:RELEASE_TAG
+          if ($version -notmatch '^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$') {
+            Write-Error "mootx01: invalid release tag: $version"
+            exit 1
+          }
           "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # ── Windows code signing (Azure Artifact Signing) ────────────────────────
@@ -747,7 +807,7 @@ jobs:
         shell: pwsh
         run: |
           # Zips the (now-signed when creds present) exes. RELEASE_TAG was validated
-          # in Stage binaries above; the job would have failed there if malformed.
+          # in Derive version above; the job would have failed there if malformed.
           $asset = "mootx01-$($env:RELEASE_TAG)-windows-x86_64.zip"
           Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -764,8 +824,8 @@ jobs:
       # that installs mootx01.exe + moot-mgr.exe into %USERAPPDATA%\.mootx01\bin,
       # adds them to the user PATH, and runs `mootx01 install` post-install.
       #
-      # BinDir=. — the existing "Package binaries" step above already copied both
-      # .exe files to the workspace root, so ISCC can find them at ".".
+      # BinDir=. — the "Download unsigned binaries" step above placed both .exe
+      # files at the workspace root, so ISCC can find them at ".".
       #
       # Inno Setup is installed via Chocolatey; windows-latest runners include
       # Chocolatey but not ISCC itself. The choco install takes ~30 s.
@@ -782,8 +842,8 @@ jobs:
           # BinDir must be an absolute path: ISCC resolves /DBinDir relative to the
           # .iss file's SourceDir (distribution\windows\), not the caller's CWD.
           # Passing $($PWD.Path) (workspace root absolute path) means
-          # {#BinDir}\mootx01.exe resolves to the exes copied there by the
-          # "Package binaries" step above.
+          # {#BinDir}\mootx01.exe resolves to the exes placed there by the
+          # "Download unsigned binaries" step above.
           # /O. — output the setup.exe into the workspace root (caller's CWD).
           & $iscc `
             "/DMyAppVersion=$versionNum" `
@@ -819,10 +879,10 @@ jobs:
     name: Build Windows arm64
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-arm64' }}
     runs-on: windows-11-arm
-    # OIDC token for azure/login (Windows code signing); contents:read for checkout.
-    # Both are required because declaring permissions drops all others to none.
+    # Untrusted build job: cargo runs arbitrary Rust build code, so it holds NO
+    # OIDC capability. contents: read only; signing OIDC is isolated in
+    # sign-windows-arm64. (SECURITY: isolate signing OIDC from untrusted cargo.)
     permissions:
-      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -862,18 +922,72 @@ jobs:
             Write-Error "mootx01: invalid release tag: $version"
             exit 1
           }
-          # Copy both exes to the workspace root. Signing (below) rewrites them in
-          # place before the zip and ISCC, so the archive and the installer both
-          # embed the SIGNED exes.
+          # Copy both exes to the workspace root so they upload as a flat artifact.
+          # sign-windows-arm64 downloads them, signs them (when creds present),
+          # and embeds the signed exes in the zip and the installer.
           Copy-Item "apps/mootx01/rust/target/aarch64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/aarch64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
-          # Export version for the Inno Setup step below (strip leading 'v').
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          # windows-11-arm is native arm64, so the freshly built exe runs here.
+          .\mootx01.exe --version
+
+      - name: Upload unsigned binaries
+        # Hand the unsigned exes to sign-windows-arm64. This build job holds no
+        # signing capability; the sign job is where OIDC/Azure signing happens.
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-arm64-unsigned
+          path: |
+            mootx01.exe
+            moot-mgr.exe
+
+  # ── Windows code signing + installer (arm64) ──────────────────────────────
+  # Trusted, cargo-free sign job (see sign-windows-x86_64 for the full rationale).
+  # Holds the OIDC id-token capability; downloads the unsigned arm64 exes, signs
+  # them (when provisioned), builds and signs the Inno setup.exe, uploads finals.
+  sign-windows-arm64:
+    name: Sign Windows arm64
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-arm64' }}
+    needs: build-windows-arm64
+    runs-on: windows-11-arm
+    permissions:
+      id-token: write   # Azure OIDC login for code signing
+      contents: read    # checkout the .iss installer script
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # No cargo here, but this job holds id-token: write — never persist a
+          # git token into .git/config alongside the signing capability.
+          persist-credentials: false
+
+      - name: Download unsigned binaries
+        # Places mootx01.exe + moot-mgr.exe at the workspace root (where the zip
+        # and ISCC's /DBinDir expect them).
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: windows-arm64-unsigned
+          path: .
+
+      - name: Derive version
+        shell: pwsh
+        run: |
+          # Re-derive from $env:RELEASE_TAG (validated, never shell-templated) —
+          # the build job's env does not cross the job boundary. VERSION_NUM feeds
+          # the Inno Setup step below.
+          $version = $env:RELEASE_TAG
+          if ($version -notmatch '^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$') {
+            Write-Error "mootx01: invalid release tag: $version"
+            exit 1
+          }
           "VERSION_NUM=$($version.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # ── Windows code signing (Azure Artifact Signing) ────────────────────────
-      # Same as the x86_64 job. Gated on a real tag push AND the OIDC creds being
-      # present; ships UNSIGNED until Azure is provisioned. NOTE: the signing tool
-      # runs under x64 emulation on windows-11-arm (like Inno Setup 6, above) —
+      # Same as the x86_64 sign job. Gated on a real tag push AND the OIDC creds
+      # being present; ships UNSIGNED until Azure is provisioned. NOTE: the signing
+      # tool runs under x64 emulation on windows-11-arm (like Inno Setup 6, below) —
       # the first arm64 candidate build is where to confirm it signs cleanly.
       # Provisioning steps: distribution/windows/SIGNING.md.
       - name: Azure signing preflight
@@ -911,7 +1025,7 @@ jobs:
         shell: pwsh
         run: |
           # Zips the (now-signed when creds present) exes. RELEASE_TAG was validated
-          # in Stage binaries above; the job would have failed there if malformed.
+          # in Derive version above; the job would have failed there if malformed.
           $asset = "mootx01-$($env:RELEASE_TAG)-windows-arm64.zip"
           Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -923,7 +1037,7 @@ jobs:
           path: ${{ env.ASSET }}
 
       # ── Windows Inno Setup installer (arm64) ────────────────────────────────
-      # Same pattern as the x86_64 Inno Setup job above. The .iss script is
+      # Same pattern as the x86_64 Inno Setup steps above. The .iss script is
       # arch-agnostic; /DArch=arm64 is passed so the output filename and the
       # installed app directory embed the correct architecture label.
       #
@@ -940,6 +1054,8 @@ jobs:
           $versionNum = $env:VERSION_NUM
           # BinDir must be absolute — same reason as the x86_64 job above:
           # ISCC resolves /DBinDir relative to the .iss file's SourceDir, not CWD.
+          # The exes it embeds were placed at the workspace root by the
+          # "Download unsigned binaries" step above.
           & $iscc `
             "/DMyAppVersion=$versionNum" `
             "/DArch=arm64" `
@@ -976,8 +1092,10 @@ jobs:
       - build-macos-x86_64
       - build-linux-x86_64
       - build-linux-arm64
-      - build-windows-x86_64
-      - build-windows-arm64
+      # Windows: depend on the SIGN jobs (they need the build jobs); the final
+      # zip + setup.exe artifacts are produced by sign-windows-*, not build-*.
+      - sign-windows-x86_64
+      - sign-windows-arm64
     # ubuntu-24.04 (not 22.04): the minisign package is only in the universe
     # repository from Ubuntu 23.10 onward, so it cannot be apt-installed on
     # jammy. The Linux *binary* build jobs stay on 22.04 for broader glibc
