@@ -157,6 +157,50 @@ struct FileEstateIdentityKeyStoreTests {
         let reloaded = try store.loadPrivateKey(forEstateID: estateID)
         #expect(reloaded == Data([0x03, 0x04, 0x05]))
     }
+
+    // MARK: - 6. Subdirectory validation (Perkins path-traversal finding)
+
+    /// `appSupportSubdirectory` is joined directly onto the Application
+    /// Support root via `URL.appendingPathComponent`, which does not
+    /// sanitize `..` segments — the filesystem resolves them. Every shape
+    /// that could steer key-material reads/writes outside Application
+    /// Support must be rejected at construction, before any
+    /// `FileManager` call.
+    @Test(
+        "init throws invalidIdentityKeyStoreSubdirectory for each unsafe subdirectory shape",
+        arguments: [
+            "",                          // empty
+            "..",                        // parent-directory traversal
+            ".",                         // current-directory no-op, still not a real name
+            "../../etc",                 // multi-segment traversal
+            "a/b",                       // embedded path separator — appendingPathComponent
+                                          // would create an extra directory level, not
+                                          // traverse, but still isn't a single component
+            "/etc",                      // leading separator
+        ]
+    )
+    func rejectsUnsafeSubdirectoryShapes(_ unsafeValue: String) throws {
+        do {
+            _ = try FileEstateIdentityKeyStore(appSupportSubdirectory: unsafeValue)
+            Issue.record("expected invalidIdentityKeyStoreSubdirectory for \(unsafeValue.debugDescription)")
+        } catch let EstateError.invalidIdentityKeyStoreSubdirectory(rejected) {
+            #expect(rejected == unsafeValue)
+        }
+    }
+
+    /// A clean, single-component subdirectory name (no separators, not a
+    /// `.`/`..` traversal segment) must still construct successfully —
+    /// the guard must reject only the unsafe shapes, not everything.
+    @Test("init succeeds for a clean single-component subdirectory name")
+    func acceptsCleanSubdirectoryName() throws {
+        let store = try FileEstateIdentityKeyStore(appSupportSubdirectory: Self.testSubdirectory)
+        let estateID = UUID()
+        let keyURL = try keyFileURL(forEstateID: estateID)
+        defer { try? FileManager.default.removeItem(at: keyURL) }
+
+        try store.storePrivateKey(Data([0xAA]), forEstateID: estateID)
+        #expect(try store.loadPrivateKey(forEstateID: estateID) == Data([0xAA]))
+    }
 }
 
 #endif

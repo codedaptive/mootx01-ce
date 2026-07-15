@@ -64,6 +64,21 @@
 // misleading path. This does not change the Perkins-reviewed security
 // posture (DEBUG-only gate, 0600 file, 0700 directory, backup-excluded,
 // per-estate-UUID filename) — only which folder name the caller chooses.
+//
+// PATH-TRAVERSAL FINDING (Perkins, PR review, fixed same PR): the
+// fulcrum original's hardcoded "Fulcrum" literal made the subdirectory
+// structurally unreachable to a caller — generalizing it to a
+// caller-supplied `String` reopened a path-traversal surface, because
+// `appSupportSubdirectory` is joined onto the Application Support root
+// with `URL.appendingPathComponent`, which does not sanitize `..`
+// segments (they resolve at the filesystem layer, not the URL layer). A
+// value like `"../../Library/LaunchAgents"` would write key material
+// outside Application Support entirely — in a shared-kit surface now
+// consumed by 4+ apps, that's a real arbitrary-path-write risk in DEBUG
+// builds, not a theoretical one. `init(appSupportSubdirectory:)`
+// rejects empty, `/`-containing, `.`, and `..` values at construction
+// (throws `EstateError.invalidIdentityKeyStoreSubdirectory`) before any
+// `FileManager` call — see the initializer's own doc comment.
 
 #if DEBUG
 
@@ -85,7 +100,26 @@ public struct FileEstateIdentityKeyStore: EstateIdentityKeyStore {
     ///   from different apps sharing this DEBUG path on the same machine
     ///   must pass distinct values to avoid colliding on the same
     ///   `estate-identity-keys/` directory.
+    /// - Throws: `EstateError.invalidIdentityKeyStoreSubdirectory(_:)` if
+    ///   `appSupportSubdirectory` is empty, contains a path separator
+    ///   (`/`), or is a `.`/`..` traversal segment. This value is joined
+    ///   directly onto the Application Support root via
+    ///   `URL.appendingPathComponent`, which does not sanitize `..`
+    ///   segments — the filesystem resolves them — so an unvalidated
+    ///   caller string could steer key-material reads/writes outside
+    ///   Application Support entirely (Perkins finding, upstream PR
+    ///   review). Validated here, at construction, before any
+    ///   `FileManager` call, rather than deferred to `storePrivateKey`/
+    ///   `loadPrivateKey`, so a bad value fails fast and can never
+    ///   partially write.
     public init(appSupportSubdirectory: String) throws {
+        guard !appSupportSubdirectory.isEmpty,
+              !appSupportSubdirectory.contains("/"),
+              appSupportSubdirectory != ".",
+              appSupportSubdirectory != ".."
+        else {
+            throw EstateError.invalidIdentityKeyStoreSubdirectory(appSupportSubdirectory)
+        }
         let base = try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,

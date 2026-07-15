@@ -139,4 +139,22 @@ public enum EstateError: Error, Sendable, Equatable {
     /// `status` is the raw `OSStatus` value (Int32) from the failing call,
     /// readable as a human-readable string via `SecCopyErrorMessageString`.
     case keychainError(status: Int32)
+
+    /// `FileEstateIdentityKeyStore.init(appSupportSubdirectory:)` (DEBUG
+    /// builds only) received a subdirectory name that is empty, contains a
+    /// path separator, or is a `.`/`..` traversal segment. The associated
+    /// string is the rejected value, verbatim, for caller diagnostics.
+    ///
+    /// Rejected at construction, before any `FileManager` call, because
+    /// the subdirectory is joined onto the Application Support root via
+    /// `URL.appendingPathComponent` — a value like `".."` or
+    /// `"../../Library"` resolves at the filesystem layer and would let a
+    /// caller-supplied string steer key-material reads/writes outside
+    /// Application Support entirely. The original fulcrum-local
+    /// implementation this type was upstreamed from made this
+    /// structurally unreachable by hardcoding the subdirectory literal;
+    /// generalizing it to a caller-supplied parameter for multi-consumer
+    /// use (see `FileEstateIdentityKeyStore`'s doc comment) reopened that
+    /// path unless validated here.
+    case invalidIdentityKeyStoreSubdirectory(String)
 }
