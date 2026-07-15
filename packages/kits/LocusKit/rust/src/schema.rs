@@ -40,28 +40,32 @@
 
 use persistence_kit::generated_column::{GeneratedColumn, GeneratedExpression};
 use persistence_kit::schema::{
-    ColumnDeclaration, IndexDeclaration, SchemaDeclaration, TableDeclaration,
+    ColumnDeclaration, IndexDeclaration, Migration, SchemaDeclaration, SchemaOperation,
+    TableDeclaration,
 };
 use persistence_kit::types::{ColumnType, TypedValue};
 
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v9 added content_fingerprint BLOB nullable
-/// to drawers (CRITICAL fix — `fingerprints_captured_in`/
-/// `fingerprint_bit_series` previously recomputed every drawer's
-/// Fingerprint256 from scratch on every call; the value is now
-/// computed once at write time and read back from this column). v8
-/// changes nodes.merkle_root from TEXT
-/// to BLOB (NT-Q1 — eliminates hex encoding waste). v7 added
-/// content_hash BLOB nullable to drawers (NT-L3) and
-/// snapshot_registry + snapshot_attestations tables (NT-L3 Part 3).
-/// v6 added order_key REAL nullable to tunnels (ADR-017 §11,
-/// mission NT-L5). v5 added erasure_ledger (NT-L4). v4 replaced
-/// wing/room with parent_node_id (NT-L2). v3 added nodes (NT-L1).
-/// v2 added keys.ext (ADR-012). No migration ladder — no estate
-/// data has shipped. Matches Swift `LocusKitSchema.version`.
-pub const SCHEMA_VERSION: i32 = 9;
+/// Current schema version. v10 adds a composite UNIQUE constraint on
+/// associations (sourceWing, sourceRoom, sourceDrawerId, targetWing,
+/// targetRoom, targetDrawerId, label) to prevent VectorSimilaritySignal
+/// from accumulating duplicate association edges on every 300-second
+/// pass (FINDING-3). Migration deduplicates existing rows then adds the
+/// unique index. v9 added content_fingerprint BLOB nullable to drawers
+/// (CRITICAL fix — `fingerprints_captured_in`/`fingerprint_bit_series`
+/// previously recomputed every drawer's Fingerprint256 from scratch on
+/// every call; the value is now computed once at write time and read
+/// back from this column). v8 changes nodes.merkle_root from TEXT to
+/// BLOB (NT-Q1 — eliminates hex encoding waste). v7 added content_hash
+/// BLOB nullable to drawers (NT-L3) and snapshot_registry +
+/// snapshot_attestations tables (NT-L3 Part 3). v6 added order_key
+/// REAL nullable to tunnels (ADR-017 §11, mission NT-L5). v5 added
+/// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
+/// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext (ADR-012).
+/// Matches Swift `LocusKitSchema.version`.
+pub const SCHEMA_VERSION: i32 = 10;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -93,7 +97,46 @@ pub fn schema() -> SchemaDeclaration {
             snapshot_attestations_table(),
         ],
         indices: indices(),
-        migrations: Vec::new(),
+        migrations: vec![
+            // v9 → v10 (FINDING-3): add natural-key uniqueness to associations.
+            // Order matters: dedup FIRST, then CREATE UNIQUE INDEX (the index
+            // creation would fail if duplicate rows still exist). Keeps the
+            // earliest rowid for each natural-key tuple, matching the Swift
+            // migration behaviour.
+            Migration {
+                from_version: 9,
+                to_version: 10,
+                operations: vec![
+                    SchemaOperation::Custom {
+                        sqlite: Some(
+                            r#"DELETE FROM "associations" WHERE rowid NOT IN (
+                                SELECT MIN(rowid) FROM "associations"
+                                GROUP BY "sourceWing", "sourceRoom", "sourceDrawerId",
+                                         "targetWing", "targetRoom", "targetDrawerId", "label"
+                            )"#
+                            .to_string(),
+                        ),
+                        postgresql: None,
+                    },
+                    SchemaOperation::AddIndex(
+                        IndexDeclaration::new(
+                            "idx_associations_natural_key",
+                            "associations",
+                            vec![
+                                "sourceWing".to_string(),
+                                "sourceRoom".to_string(),
+                                "sourceDrawerId".to_string(),
+                                "targetWing".to_string(),
+                                "targetRoom".to_string(),
+                                "targetDrawerId".to_string(),
+                                "label".to_string(),
+                            ],
+                        )
+                        .unique(),
+                    ),
+                ],
+            },
+        ],
     }
 }
 
@@ -481,7 +524,20 @@ fn associations_table() -> TableDeclaration {
             ColumnDeclaration::json("ext").nullable(),
         ],
         primary_key: vec!["id".to_string()],
-        unique_constraints: Vec::new(),
+        // v10 — FINDING-3: natural-key uniqueness prevents VectorSimilaritySignal
+        // from accumulating duplicate association edges on every 300-second pass.
+        // NULL != NULL in SQLite unique indexes, so wing/room-level associations
+        // (NULL drawer IDs) do not conflict — acceptable because the signal always
+        // produces drawer-level pairs with non-null IDs.
+        unique_constraints: vec![vec![
+            "sourceWing".to_string(),
+            "sourceRoom".to_string(),
+            "sourceDrawerId".to_string(),
+            "targetWing".to_string(),
+            "targetRoom".to_string(),
+            "targetDrawerId".to_string(),
+            "label".to_string(),
+        ]],
         generated_columns: Vec::new(),
         append_only: false,
         hashable: false,
@@ -1040,16 +1096,22 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
-    /// v9 added content_fingerprint BLOB to drawers (CRITICAL persist-at-
-    /// write fix). v8 changed nodes.merkle_root from TEXT to BLOB (NT-Q1).
-    /// v7 added content_hash BLOB to drawers and snapshot tables (NT-L3).
-    /// v6 added order_key to tunnels (ADR-017 §11, NT-L5). v5 added
-    /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
-    /// (NT-L2). No migration ladder — no estate data has shipped.
+    /// v10 added associations natural-key UNIQUE constraint + v9→v10 migration
+    /// (FINDING-3 duplicate-edge fix). v9 added content_fingerprint BLOB to
+    /// drawers (CRITICAL persist-at-write fix). v8 changed
+    /// nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added content_hash
+    /// BLOB to drawers and snapshot tables (NT-L3). v6 added order_key to
+    /// tunnels (ADR-017 §11, NT-L5). v5 added erasure_ledger (NT-L4). v4
+    /// replaced wing/room with parent_node_id (NT-L2).
     #[test]
-    fn schema_version_is_nine() {
-        assert_eq!(SCHEMA_VERSION, 9);
-        assert!(schema().migrations.is_empty());
+    fn schema_version_is_ten() {
+        assert_eq!(SCHEMA_VERSION, 10);
+        // One migration: v9 → v10 (FINDING-3 dedup + unique index).
+        let m = schema();
+        assert_eq!(m.migrations.len(), 1);
+        assert_eq!(m.migrations[0].from_version, 9);
+        assert_eq!(m.migrations[0].to_version, 10);
+        assert_eq!(m.migrations[0].operations.len(), 2);
     }
 
     /// Tables in the declared order, matching the Swift declaration.

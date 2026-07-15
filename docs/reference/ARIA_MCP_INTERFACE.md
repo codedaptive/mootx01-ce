@@ -703,10 +703,17 @@ transport: `StdioServer.run()` by default, or `HTTPServer.run()` when
 public struct JSONRPCError: Sendable, Equatable, Error { public let code: Int; public let message: String }
 public enum JSONValueError: Error, Equatable
 ```
-Out-of-band conditions (unknown tool, malformed arguments, unknown
-`estateID`) surface as JSON-RPC errors; substrate refusals
-(`VerbError`, `GeniusLocusKitError`) come back as `tools/call` results
-with `isError: true` so the client keeps the call id. See SPEC § 6.
+Protocol faults (unknown tool, malformed arguments, unknown
+`estateID`) surface as JSON-RPC errors. Every failure of a call that
+reached its runner — substrate refusals (`VerbError`,
+`GeniusLocusKitError`) and unexpected runner errors (filesystem,
+adapter) alike — comes back as a `tools/call` result with
+`isError: true` so the client keeps the call id and the model sees the
+failure description (clients render a thrown JSON-RPC error as a bare
+"failed to call tool" and discard the message). The server also mirrors
+unexpected runner errors to stderr for daemon-side diagnosis.
+`toolDispatchFailure` (-32010) remains defined but is an internal
+marker on the Rust leg, never emitted on the wire. See SPEC § 6.
 
 ## § 4.5 — Side-channel GET endpoints (HTTP transport only)
 

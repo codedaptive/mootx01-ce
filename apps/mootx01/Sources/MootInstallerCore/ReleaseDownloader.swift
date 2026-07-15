@@ -2,8 +2,9 @@
 //
 // Online upgrade path for `mootx01 upgrade`. Mirrors scripts/install.sh:
 // fetch the latest GitHub release tag, download the platform asset,
-// verify SHA-256 via CryptoKit, extract the binary, and delegate
-// placement to Installer.placeBinary.
+// verify SHA-256 via CryptoKit, authenticate checksums.txt with minisign on
+// Linux/POSIX (macOS relies on Developer ID + Gatekeeper), extract the binary,
+// and delegate placement to Installer.placeBinary.
 //
 // Repo slug is "codedaptive/mootx01-ee", matching install.sh:15.
 // Asset naming follows install.sh:136: mootx01-{tag}-{os}-{arch}.tar.gz
@@ -12,6 +13,11 @@
 
 import CryptoKit
 import Foundation
+
+private let minisignPublicKey = """
+untrusted comment: minisign public key BC4D1E6ABCB5B788
+RWSIt7W8ah5NvMXMLQ3+T2flXrQ+J6xoDxDrL62I+8iEkR04YIAlXa12
+"""
 
 // MARK: - ReleaseDownloader
 
@@ -81,13 +87,16 @@ public struct ReleaseDownloader: Sendable {
         return tagName
     }
 
-    /// Downloads the platform asset for `tag`, verifies SHA-256, extracts the
-    /// binary, and returns a URL pointing to the extracted `mootx01` binary.
+    /// Downloads the platform asset for `tag`, verifies SHA-256, verifies the
+    /// detached minisign signature for `checksums.txt` on non-macOS platforms,
+    /// extracts the binary, and returns a URL pointing to the extracted
+    /// `mootx01` binary.
     ///
     /// The asset name mirrors install.sh:136: `mootx01-{tag}-{os}-{arch}.tar.gz`.
-    /// The checksum file `checksums.txt` is downloaded from the same release base
-    /// and verified against the tarball using CryptoKit.SHA256. Extraction uses
-    /// `/usr/bin/tar -xzf`.
+    /// The checksum file `checksums.txt` is downloaded from the same release base,
+    /// authenticated against the embedded Ed25519 minisign public key on
+    /// Linux/POSIX, and verified against the tarball using CryptoKit.SHA256.
+    /// Extraction uses `/usr/bin/tar -xzf`.
     ///
     /// - Parameter tag: raw GitHub tag string (e.g. "v1.0.0") from `latestTag()`.
     /// - Returns: URL of the extracted binary inside a temporary directory.
@@ -106,6 +115,7 @@ public struct ReleaseDownloader: Sendable {
 
         let tarballURL   = tmpDir.appendingPathComponent(tarball)
         let checksumsURL = tmpDir.appendingPathComponent("checksums.txt")
+        let minisigURL   = tmpDir.appendingPathComponent("checksums.txt.minisig")
 
         // Download asset and checksums file.
         let assetURL = URL(string: "\(base)/\(tarball)")!
@@ -119,6 +129,17 @@ public struct ReleaseDownloader: Sendable {
         // Verify SHA-256 before extraction — abort on mismatch without touching
         // the install path (mirrors verify_checksum in scripts/install.sh).
         try verifySHA256(tarballURL: tarballURL, checksumsURL: checksumsURL, tarball: tarball)
+
+        #if !os(macOS)
+        // Authenticate checksums.txt against the bundled Ed25519 trust root before
+        // extracting or installing anything. Without this, an attacker who can
+        // tamper with release assets can ship a malicious tarball plus a matching
+        // unauthenticated checksums.txt and satisfy the SHA-256 check.
+        let sigURL = URL(string: "\(base)/checksums.txt.minisig")!
+        let (sigData, _) = try await fetchData(sigURL)
+        try sigData.write(to: minisigURL)
+        try verifyMinisignSignature(checksumsURL: checksumsURL, signatureURL: minisigURL)
+        #endif
 
         // Validate all archive members before extraction to prevent zip-slip:
         // an archive member with an absolute path or .. component could escape
@@ -178,6 +199,54 @@ public struct ReleaseDownloader: Sendable {
         guard actualHex.lowercased() == expected.lowercased() else {
             throw UpgradeError.checksumMismatch(
                 "SHA-256 mismatch for \(tarball)\n  expected: \(expected)\n  actual:   \(actualHex)"
+            )
+        }
+    }
+
+    /// Verify the detached minisign signature over checksums.txt using the
+    /// repository's embedded public key. Mirrors install.sh and the Rust vertical:
+    /// fail closed if the key is a placeholder, minisign is unavailable, or the
+    /// signature does not validate.
+    private func verifyMinisignSignature(checksumsURL: URL, signatureURL: URL) throws {
+        if minisignPublicKey.contains("PLACEHOLDER") {
+            throw UpgradeError.signatureVerificationFailed(
+                "minisign public key is a PLACEHOLDER — signature verification not yet active"
+            )
+        }
+
+        let keyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mootx01-minisign-pub-\(UUID().uuidString).pub")
+        try minisignPublicKey.write(to: keyURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: keyURL) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "minisign", "-V",
+            "-p", keyURL.path,
+            "-m", checksumsURL.path,
+            "-x", signatureURL.path,
+        ]
+        let errPipe = Pipe()
+        process.standardError = errPipe
+
+        do {
+            try process.run()
+        } catch {
+            throw UpgradeError.signatureVerificationFailed(
+                "minisign is required for release signature verification but was not found. "
+                + "Install minisign and retry; do not bypass this check."
+            )
+        }
+        let stderr = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let detail = String(decoding: stderr, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw UpgradeError.signatureVerificationFailed(
+                "minisign signature verification FAILED for checksums.txt"
+                + (detail.isEmpty ? "" : ": \(detail)")
             )
         }
     }
@@ -347,6 +416,8 @@ public enum UpgradeError: Error, Sendable {
     case invalidAPIResponse(String)
     /// SHA-256 of the downloaded asset does not match checksums.txt.
     case checksumMismatch(String)
+    /// Detached minisign verification of checksums.txt failed or could not run.
+    case signatureVerificationFailed(String)
     /// tar extraction exited non-zero or the expected binary was absent.
     case extractionFailed(String)
     /// Binary write failed due to insufficient permissions.

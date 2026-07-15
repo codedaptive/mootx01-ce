@@ -805,4 +805,147 @@ struct VectorStoreTests {
         #expect(bfHits.map(\.key.itemID) == mihHits.map(\.key.itemID))
         #expect(bfHits.map(\.rawDistance) == mihHits.map(\.rawDistance))
     }
+
+    // MARK: - VK-PERF-FIX-2026-07-13: schema v4 index + projection tests
+
+    /// Schema version is v4 (VK-PERF-FIX-2026-07-13).
+    ///
+    /// Guards the version bump: if schema_version drifts below 4, the
+    /// idx_vectors_filed_at_item migration will not run and the GeniusLocusKit
+    /// composite version gate will reject fresh estate opens.
+    @Test func schemaDeclarationIsVersionFour() {
+        #expect(VectorStore.schemaDeclaration.version == 4)
+    }
+
+    /// The schema declaration includes idx_vectors_filed_at_item (v4).
+    ///
+    /// Guards that the index is present in the declared schema so fresh
+    /// installs get it immediately (no migration needed) and existing estates
+    /// receive it via the v3→v4 migration. The index covers
+    /// `recentItemIDs` ORDER BY filed_at DESC, item_id ASC — without it
+    /// every call performs a full-table scan + filesort on the vectors table.
+    @Test func schemaDeclarationContainsFiledAtItemIndex() {
+        let idx = VectorStore.schemaDeclaration.indices.first {
+            $0.name == "idx_vectors_filed_at_item"
+        }
+        #expect(idx != nil, "idx_vectors_filed_at_item must be declared in schema v4")
+        #expect(idx?.table == "vectors")
+        #expect(idx?.columns == ["filed_at", "item_id"])
+        #expect(idx?.unique == false)
+    }
+
+    /// v3→v4 migration is declared and well-formed.
+    ///
+    /// Guards the migration path for existing estates: a v3 estate must
+    /// receive exactly one migration that adds idx_vectors_filed_at_item.
+    /// If this migration is absent, existing production estates keep their
+    /// full-scan behaviour after upgrading.
+    @Test func schemaDeclarationHasV3ToV4IndexMigration() {
+        let migrations = VectorStore.schemaDeclaration.migrations
+        let m = migrations.first { $0.fromVersion == 3 && $0.toVersion == 4 }
+        #expect(m != nil, "v3→v4 migration must be present")
+        guard let m else { return }
+        #expect(m.operations.count == 1,
+            "v3→v4 migration must contain exactly one operation (addIndex)")
+        if case .addIndex(let decl) = m.operations[0] {
+            #expect(decl.name == "idx_vectors_filed_at_item")
+            #expect(decl.columns == ["filed_at", "item_id"])
+        } else {
+            Issue.record("v3→v4 migration operation must be .addIndex")
+        }
+    }
+
+    /// `findByKeyword` does not read payload blobs.
+    ///
+    /// Regression guard for VK-PERF-FIX-2026-07-13: before the fix,
+    /// findByKeyword paged through full rows including the `payload` BLOB
+    /// on every row, causing enormous data transfer on rich estates. The
+    /// column-projection path (`columns: ["item_id"]`) skips the payload
+    /// entirely. This test verifies correct item-ID results still come back
+    /// even when the projected row has no `payload` key — confirming the
+    /// code path does not accidentally depend on the payload being present.
+    @Test func findByKeywordResultsCorrectAfterColumnProjection() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            // Insert items with recognizable IDs; the payload is large-ish
+            // to make any accidental blob read noticeable in profiling.
+            for item in ["proj-alpha", "proj-bravo", "proj-charlie"] {
+                for model in ["model-a", "model-b"] {
+                    try await store.addVector(
+                        itemID: item,
+                        engram: Engram(blocks: 0xAAAA_BBBB_CCCC_DDDD,
+                                       0xEEEE_FFFF_0000_1111,
+                                       0x2222_3333_4444_5555,
+                                       0x6666_7777_8888_9999),
+                        modelID: model,
+                        modelVersion: "1.0",
+                        filedAt: t0)
+                }
+            }
+            // Limit 3 must return all three projected items, confirming that
+            // the distinct-item counting logic works with projected rows that
+            // carry only item_id (no payload key present).
+            let hits = try await store.findByKeyword("proj", limit: 3)
+            #expect(hits.count == 3)
+            #expect(Set(hits) == Set(["proj-alpha", "proj-bravo", "proj-charlie"]))
+        }
+    }
+
+    /// `recentItemIDs` returns correct results with column projection.
+    ///
+    /// Regression guard for VK-PERF-FIX-2026-07-13: the column projection
+    /// `columns: ["item_id", "filed_at"]` must not break the distinct-item
+    /// dedup or the newest-first ordering. Projected rows carry only item_id
+    /// and filed_at — this confirms the function works correctly with rows
+    /// that have no payload, model_id, or other columns present.
+    @Test func recentItemIDsCorrectAfterColumnProjection() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+            // Three items at distinct filing times; two models each (to
+            // exercise the multi-row-per-item path with projected rows).
+            let items: [(String, TimeInterval)] = [
+                ("oldest", 0.0), ("middle", 100.0), ("newest", 200.0)
+            ]
+            for (item, offset) in items {
+                for model in ["model-x", "model-y"] {
+                    try await store.addVector(
+                        itemID: item,
+                        engram: Engram(blocks: 7, 7, 7, 7),
+                        modelID: model,
+                        modelVersion: "1.0",
+                        filedAt: t0.addingTimeInterval(offset))
+                }
+            }
+            // Newest-first ordering must hold with projection active.
+            let top2 = try await store.recentItemIDs(limit: 2)
+            #expect(top2 == ["newest", "middle"],
+                "projection must not break newest-first ordering")
+            let all3 = try await store.recentItemIDs(limit: 10)
+            #expect(all3 == ["newest", "middle", "oldest"],
+                "projection must not break full enumeration")
+        }
+    }
+
+    /// Empty query returns empty immediately — guard against LIKE '%%' full-scan.
+    ///
+    /// Regression guard for the fail-safe introduced in VectorStore: an empty
+    /// query string must short-circuit before issuing any SQL, not match every
+    /// row in the table via LIKE '%%'.
+    @Test func findByKeywordEmptyQueryReturnsEmpty() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            // Insert a vector so the table is non-empty; an unguarded empty query
+            // would match it via LIKE '%%'.
+            try await store.addVector(
+                itemID: "some-item",
+                engram: Engram(blocks: 1, 2, 3, 4),
+                modelID: "test-model",
+                modelVersion: "1.0",
+                filedAt: Date())
+            let result = try await store.findByKeyword("", limit: 100)
+            #expect(result.isEmpty, "empty query must return empty without scanning")
+        }
+    }
 }

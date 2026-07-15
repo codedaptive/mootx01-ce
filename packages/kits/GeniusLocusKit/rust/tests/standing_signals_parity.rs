@@ -242,6 +242,7 @@ fn vector_similarity_signal_emits_only_diagnostic_when_store_is_empty() {
         "test-model".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
         None,
+        None, // edge_checker: None for this parity test
     );
     let report = fire(spec);
     assert_eq!(report.name, "vector-similarity");

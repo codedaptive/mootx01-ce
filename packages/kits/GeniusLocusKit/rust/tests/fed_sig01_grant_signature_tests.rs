@@ -9,7 +9,7 @@
 // not from any field in the grant blob — the same registered-key trust anchor
 // as the F-3 pull() hardening in ConvergenceKit FederationSyncEngine.
 //
-// Three coverage points (mirrors Swift FED_SIG01_GrantSignatureTests):
+// Four coverage points (mirrors Swift FED_SIG01_GrantSignatureTests):
 //
 //   (a) fed_sig01a — a grant carrying a forged (non-empty, invalid) signature
 //       is rejected with CrossEstateReadRefused { reason: InvalidGrantSignature }.
@@ -20,6 +20,12 @@
 //   (c) fed_sig01c — a grant carrying an empty signature (legacy pre-signing
 //       behaviour) is allowed on the local in-process path (I-13 invariant)
 //       with a logged warning. D9 migration posture.
+//
+//   (d) fed_sig01d — (regression) a correctly-signed grant remains verifiable
+//       after the budget has been debited by one or more prior recalls.
+//       Regression guard for the availability-denial bug: step 4.5 must verify
+//       against the canonical initial budget (1.0) regardless of the current
+//       persisted budget value.
 
 use base64::Engine as _;
 use genius_locus_kit::{
@@ -267,5 +273,89 @@ fn fed_sig01c_empty_signature_allowed_on_local_i13_path() {
         Uuid::from_bytes(recall.source_handle.estate_uuid),
         Uuid::from_bytes(src.estate_uuid),
         "recall result names the correct source estate"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (d) Signature still verifies after budget debit — regression guard
+// ---------------------------------------------------------------------------
+
+/// FED-SIG-01d: a correctly-signed grant remains verifiable after one or more
+/// federated recalls have debited the budget.
+///
+/// This is the regression guard for the availability-denial bug:
+/// federated_recall must canonicalize signature verification against the
+/// initial budget (1.0) rather than the current persisted budget. Without
+/// the fix, step 4.5 calls `authorizing_grant.signing_payload()` on the
+/// grant as returned by `active()` — which carries the debited budget
+/// (e.g. 0.99 after one recall) — producing different bytes from those
+/// originally signed, and returning InvalidGrantSignature on the second
+/// recall even though budget remains and the grant is valid.
+///
+/// Two sequential recalls are performed. Both must succeed.
+///
+/// Mirrors Swift FED_SIG01_GrantSignatureTests
+///   .correctlySignedGrantVerifiesAfterBudgetDebit.
+#[test]
+fn fed_sig01d_signature_verifies_after_budget_debit() {
+    let (mut coord, src, req, identity) = open_two_estate_coord_with_known_identity();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    // Build and sign the grant using canonical_payload with budget: 1.0 —
+    // the same value the granter uses at issue time. This matches what the
+    // fixed step 4.5 reconstructs for verification.
+    let grant = {
+        let unsigned = make_grant(requester_uuid, vec![]);
+        // unsigned.signing_payload() encodes inference_remaining_budget as
+        // 1.0 (the initial value in make_grant). This is the canonical payload
+        // the coordinator's step 4.5 will reconstruct for every recall,
+        // regardless of how much budget has been debited since issue.
+        let payload = unsigned.signing_payload();
+        let sig = identity.sign(&payload).to_vec();
+        Grant { signature: sig, ..unsigned }
+    };
+
+    coord
+        .grant_store_mut(&src)
+        .expect("grant store must be initialised for open estate")
+        .insert(&grant)
+        .expect("insert signed grant for budget-debit test");
+
+    // --- First recall: budget debits from 1.0 → 0.99 ---
+    let result1 = coord.federated_recall(
+        RecallFrame::new(vec![]),
+        &src,
+        &req,
+        NOW_F64,
+        NOW,
+    );
+    assert!(
+        result1.is_ok(),
+        "first federated_recall must succeed with a correctly-signed grant; got {:?}",
+        result1.err()
+    );
+
+    // --- Second recall: budget is now 0.99; signature must still verify ---
+    //
+    // Before the fix, step 4.5 called authorizing_grant.signing_payload()
+    // on the grant returned by active(), which carries budget 0.99. That
+    // produced different bytes than the original payload (budget 1.0),
+    // causing InvalidGrantSignature on every recall after the first.
+    //
+    // After the fix, step 4.5 uses Grant::canonical_payload(..., 1.0, ...)
+    // to reconstruct the verification bytes — stable across all debits.
+    let result2 = coord.federated_recall(
+        RecallFrame::new(vec![]),
+        &src,
+        &req,
+        NOW_F64,
+        NOW,
+    );
+    assert!(
+        result2.is_ok(),
+        "second federated_recall (after one budget debit) must succeed — \
+         signature must verify at canonical initial budget (1.0), \
+         not current debited budget (0.99); got {:?}",
+        result2.err()
     );
 }

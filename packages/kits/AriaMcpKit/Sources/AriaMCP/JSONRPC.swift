@@ -22,11 +22,16 @@ public enum JSONRPCErrorCode {
     public static let methodNotFound: Int = -32601
     public static let invalidParams: Int = -32602
     public static let internalError: Int = -32603
-    /// Implementation-defined: an unexpected out-of-band failure in the
-    /// dispatch layer. Substrate verb refusals (`VerbError`,
-    /// `GeniusLocusKitError`) are caught by `ToolDispatcher.dispatch`
-    /// and surfaced as `tools/call` `isError` results, not as JSON-RPC
-    /// errors. This code is reserved for failures outside that path.
+    /// Implementation-defined band, reserved for the dispatch layer.
+    /// Every failure of a call that reached its runner — substrate verb
+    /// refusals (`VerbError`, `GeniusLocusKitError`) AND unexpected
+    /// errors (CocoaError, adapter errors) — is surfaced by
+    /// `ToolDispatcher.dispatch` as a `tools/call` `isError` result, not
+    /// as a JSON-RPC error, so the message reaches the model instead of
+    /// being dropped by clients as a bare "failed to call tool". The code
+    /// stays defined for wire-compat with clients and with the Rust leg's
+    /// `TOOL_DISPATCH_FAILURE`, which uses it internally as the marker its
+    /// dispatch boundary converts to an `isError` result the same way.
     public static let toolDispatchFailure: Int = -32010
 }
 

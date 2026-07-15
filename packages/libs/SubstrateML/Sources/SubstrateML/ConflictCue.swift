@@ -117,12 +117,23 @@ public enum ConflictCue {
 
     /// Tokenize per the mirrored contract: lowercase; maximal runs of
     /// [a-z0-9.]; trim leading/trailing '.'; drop empties.
+    ///
+    /// Iterates at the Unicode SCALAR level (not grapheme cluster) so that
+    /// a character like U+0130 İ — which lowercases to "i" + U+0307
+    /// (combining dot above) — does not swallow the combining mark into
+    /// an ASCII token. Rust mirrors this via `chars()` + `is_ascii_*`,
+    /// which also operates at scalar level; the two legs are now
+    /// byte-identical for all inputs. See conflict_cue.rs `tokenize`.
     static func tokenize(_ s: String) -> [String] {
         var tokens: [String] = []
         var current = ""
-        for ch in s.lowercased() {
-            if (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") || ch == "." {
-                current.append(ch)
+        // REQUIRED: locale-independent lowercased() — lowercased(with: Locale.current) maps I→ı in Turkish/Azeri, breaking Rust cross-leg determinism. Never change.
+        for scalar in s.lowercased().unicodeScalars {
+            let v = scalar.value
+            // ASCII lowercase a–z (0x61–0x7A), digits 0–9 (0x30–0x39), dot (0x2E).
+            // Mirrors Rust: ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.'
+            if (v >= 97 && v <= 122) || (v >= 48 && v <= 57) || v == 46 {
+                current.append(Character(scalar))
             } else if !current.isEmpty {
                 tokens.append(current)
                 current = ""

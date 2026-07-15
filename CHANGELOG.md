@@ -5,6 +5,69 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.32 — 2026-07-14
+
+Protocol-honesty and release-integrity release. No user-facing feature
+changes — MCP error surfacing, upgrade trust, and CI supply-chain
+hardening.
+
+- **MCP tool failures surface as results, not protocol errors.** aria-mcp
+  now returns tool failures as `isError` tool results instead of raw
+  `-32010` JSON-RPC protocol errors, so clients see the actual failure
+  reason instead of an opaque transport-level code. Both legs.
+- **Authenticated upgrades.** `mootx01 upgrade` now authenticates release
+  checksums before installing (#18), and the installer rejects a binary
+  whose signature doesn't match. A tampered or truncated download can no
+  longer install.
+- **CI supply-chain hardening.** The release pipeline isolates OIDC-bearing
+  jobs from package builds (Windows code-signing and PyPI publish each run
+  in their own job, separate from cargo build), validates the release tag
+  before any version rewrite, drops write-token exposure from build jobs
+  (`persist-credentials:false` + least-privilege perms), and excludes the
+  `windows-*-unsigned` handoff artifacts from published release assets.
+- **Cross-leg grant integrity.** GLK canonicalizes the grant signature
+  payload at the initial-budget boundary and aligns the ConflictCue Swift
+  tokenizer to Unicode scalar semantics, so Swift and Rust agree
+  byte-for-byte on the signed payload. The InMemory RowStore comparator
+  gained the blob/json/fingerprint/array cases it was missing.
+- **Tunnel-disclosure closure.** FIND4 enforces `lifecycle == active` on
+  every MCP disclosure path (including `memory_get` and
+  `allActiveTunnels`) and hardens `addTunnel`; FINDING-3 stops
+  `VectorSimilaritySignal` from accumulating duplicate association edges.
+- **VectorKit schema v4.** Index and projection fixes for `recentItemIDs`
+  and `findByKeyword`.
+
+## v1.0.31 — 2026-07-13
+
+Substrate-capability and test-integrity release. New contradiction-hunting
+and proposed-tunnel-lifecycle surfaces, the corpus-lane retrieval fixes
+that make them work on production estates, and the completion of the
+XCTest → swift-testing migration.
+
+- **Contradiction hunter.** New GLK core plus an aria-mcp surface (hunt,
+  review, proposed links, lens tiers — 66→68 tools) that mines the corpus
+  vector lane for conflicting facts, backed by ConflictCue, a
+  deterministic pairwise text-conflict screen. Both legs.
+- **Proposed-lifecycle tunnels.** Tunnels can be captured in a `proposed`
+  lifecycle and promoted via a `respondToTunnel` review verb, so a link
+  isn't live until it's been reviewed. Both legs.
+- **Retrieval that works on real estates.** The hunter corpus lane now
+  generates candidates by BM25 lexical retrieval rather than vectors;
+  `VectorSimilaritySignal` and the contradiction hunter mine the corpus
+  vector lane (associations were dark on production estates); bounded
+  sweeps probe newest-first via `recentItemIDs`; and `findByKeyword`'s
+  limit counts distinct items, not rows.
+- **Writer-lock liveness.** The writer lock verifies process identity
+  rather than a bare PID check, which had crash-looped after a reboot when
+  the PID was reused.
+- **Scope-aware tunnel read.** Private-scope export carries its provenance
+  tunnels again; audit ordering is re-keyed on full-precision HLC columns.
+- **swift-testing migration complete.** The last XCTest is gone from the
+  tree; the fast unit lane was stabilized and its parallel-runner races
+  fixed.
+- **Windows install.** `install.ps1` documents running via
+  `-ExecutionPolicy Bypass`.
+
 ## v1.0.30 — 2026-07-11
 
 Installer trust release: two small features that keep an install honest

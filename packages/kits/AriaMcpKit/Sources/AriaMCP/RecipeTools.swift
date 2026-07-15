@@ -941,6 +941,7 @@ enum RecipeTools {
         // dreaming produce content results on a never-recalled estate.
         // Bounded probe budget per call; repeated calls stay cheap because
         // settled pairs are skipped.
+        // Sensitivity ceiling is hardcoded .elevated (fail-safe by design); huntContradictions does NOT consult SensitivityGrantLedger.
         let hunt = try await kit.huntContradictions(
             in: handle, probeLimit: 500, now: now)
 
@@ -994,6 +995,7 @@ enum RecipeTools {
             probeLimit = Int(n)
         }
 
+        // Sensitivity ceiling is hardcoded .elevated (fail-safe by design); huntContradictions does NOT consult SensitivityGrantLedger.
         let report = try await kit.huntContradictions(
             in: handle, probeLimit: probeLimit, now: now)
 

@@ -173,6 +173,7 @@ fn signal_emits_real_associate_frames_for_vectors_in_proximity() {
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
         None,
+        None, // edge_checker: None for this parity test
     );
     let report = fire_spec(spec);
 
@@ -223,6 +224,7 @@ fn signal_does_not_emit_associates_for_distant_vectors() {
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
         None,
+        None, // edge_checker: None for this parity test
     );
     let report = fire_spec(spec);
 
@@ -321,6 +323,7 @@ fn corpus_lane_emits_drawer_level_associations() {
         "test-v1".to_string(),
         VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
         Some(Arc::clone(&corpus)),
+        None, // edge_checker: None for this parity test
     );
     let report = fire_spec(spec);
 

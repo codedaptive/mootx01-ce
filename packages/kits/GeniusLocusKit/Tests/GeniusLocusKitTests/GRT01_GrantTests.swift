@@ -289,6 +289,74 @@ struct GRT01_GrantTests {
         _ = try await kit.issueGrant(handle, options(mode3))
     }
 
+    // MARK: - 8. canonicalPayload byte encoding (ADV-2 cross-leg parity)
+
+    /// GRT-01-PAY-1: `Grant.canonicalPayload` encodes whole-number `Double`
+    /// fields with a trailing decimal point (`"1.0"`, `"0.0"`) so the bytes
+    /// are identical to Rust's `Grant::canonical_payload` after the
+    /// `format_f64_payload` fix.
+    ///
+    /// This is the Swift-side anchor for the cross-leg pinned-vector test
+    /// `GRT-04e` in `grants_parity.rs`. Both tests hard-code the same expected
+    /// byte string; if Swift's encoding changes the Rust test will catch it and
+    /// vice versa.
+    @Test
+    func canonicalPayloadEncodesWholeBudgetWithDecimalPoint() throws {
+        let id = try #require(UUID(uuidString: "12345678-1234-1234-1234-123456789ABC"))
+        let grantee = try #require(UUID(uuidString: "ABCDEF01-2345-6789-ABCD-EF0123456789"))
+        // issuedAt = 0 Apple-reference seconds (2001-01-01T00:00:00Z).
+        let issuedAt = Date(timeIntervalSinceReferenceDate: 0)
+
+        let payload = Grant.canonicalPayload(
+            id: id,
+            granteeEstateID: grantee,
+            scope: .wholeEstate,
+            contentLevel: 3,
+            lifetime: .permanent,
+            custodyMode: .mediated,
+            reSharePermission: .none,
+            inferenceRemainingBudget: 1.0,
+            issuedAt: issuedAt
+        )
+
+        let expected = "grant-v1|12345678-1234-1234-1234-123456789ABC|ABCDEF01-2345-6789-ABCD-EF0123456789|estate|3|permanent|mediated|none|1.0|0.0"
+        let payloadString = String(data: payload, encoding: .utf8)
+        #expect(
+            payloadString == expected,
+            "canonical payload must encode 1.0 as \"1.0\" and 0.0 as \"0.0\" — whole-number Double fields must carry the decimal point so cross-leg signature verification is byte-identical"
+        )
+    }
+
+    /// GRT-01-PAY-2: `Grant.canonicalPayload` encodes a whole-number `Until`
+    /// timestamp with a trailing decimal point (`"until:1700000000.0"`) matching
+    /// Rust's fixed `format_f64_payload` output.
+    @Test
+    func canonicalPayloadEncodesUntilTimestampWithDecimalPoint() throws {
+        let id = try #require(UUID(uuidString: "12345678-1234-1234-1234-123456789ABC"))
+        let grantee = try #require(UUID(uuidString: "ABCDEF01-2345-6789-ABCD-EF0123456789"))
+        // until timestamp = 1_700_000_000 Apple-reference seconds (whole number).
+        let until = Date(timeIntervalSinceReferenceDate: 1_700_000_000)
+
+        let payload = Grant.canonicalPayload(
+            id: id,
+            granteeEstateID: grantee,
+            scope: .wholeEstate,
+            contentLevel: 0,
+            lifetime: .until(until),
+            custodyMode: .handedOver,
+            reSharePermission: .none,
+            inferenceRemainingBudget: 1.0,
+            issuedAt: Date(timeIntervalSinceReferenceDate: 0)
+        )
+
+        let expected = "grant-v1|12345678-1234-1234-1234-123456789ABC|ABCDEF01-2345-6789-ABCD-EF0123456789|estate|0|until:1700000000.0|handedOver|none|1.0|0.0"
+        let payloadString = String(data: payload, encoding: .utf8)
+        #expect(
+            payloadString == expected,
+            "Until lifetime timestamp must carry decimal point in canonical payload"
+        )
+    }
+
     // MARK: - 8. Manifest Ed25519 keypair present and stable
 
     @Test

@@ -1,10 +1,11 @@
-# Develop daily regression — `make test-full` on develop, once a day, only if it moved.
+# Develop daily regression — `make test-full` on develop/1.1.x, once a day, only if it moved.
 #
 # The regression backstop. Local `make test` is the fast unit lane for TDD;
 # this scheduled job runs the explicit full sweep (unit + product + validation
-# + checks) against the active development branch to catch anything that slipped
-# through review. The first step short-circuits when develop had no commits in
-# the last day, so a quiet develop doesn't burn a macOS runner for nothing.
+# + checks) against the active development branch — develop/1.1.x, where feature
+# work now lands — to catch anything that slipped through review. The first step
+# short-circuits when the branch had no commits in the last day, so a quiet
+# branch doesn't burn a macOS runner for nothing.
 #
 # candidate/1.0.x and stable/1.0.x do NOT run make test — candidate proves
 # installers work (candidate.yml); stable is a tagged snapshot of already-tested
@@ -14,12 +15,21 @@ name: develop daily test
 
 on:
   schedule:
-    # Daily, 08:00 UTC. Scheduled runs fire from the default branch (develop).
+    # Daily, 08:00 UTC. A schedule trigger only fires from the DEFAULT branch's
+    # copy of this file (default = develop/1.0.x), so this file must live there —
+    # but the jobs below check out and test develop/1.1.x, the active dev branch.
     - cron: "0 8 * * *"
   workflow_dispatch:   # manual "run it now" regardless of the moved-check
 
 permissions:
   contents: read
+
+# One daily-test run at a time. A manual dispatch during a scheduled run (or a
+# second dispatch) cancels the older run instead of stacking a second macOS
+# runner on the same branch state.
+concurrency:
+  group: develop-daily-test
+  cancel-in-progress: true
 
 jobs:
   gate:
@@ -29,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: develop/1.0.x
+          ref: develop/1.1.x
           fetch-depth: 0
       - id: check
         run: |
@@ -47,10 +57,13 @@ jobs:
     needs: gate
     if: ${{ needs.gate.outputs.moved == 'true' }}
     runs-on: macos-26
+    # Full sweep runs well under an hour; cap it so a hung/deadlocked test
+    # fails the run instead of holding a macOS runner for the 6h default.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: develop/1.0.x
+          ref: develop/1.1.x
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable

@@ -295,4 +295,73 @@ struct TunnelRetirementTests {
         #expect(fetched.isDreamed == true,
                 "dreamed tunnel must have isDreamed = true after provenanceBitmap round-trip")
     }
+
+    // MARK: - Lifecycle enforcement in allActiveTunnels (FIND4)
+
+    /// Helper: build a tunnel with a specific TunnelLifecycle.
+    private func tunnelWithLifecycle(
+        id: String, lifecycle: TunnelLifecycle
+    ) -> Tunnel {
+        let proposedBits: Int64 = Int64(lifecycle.rawValue) << 3
+        return Tunnel(
+            id: id,
+            sourceWing: "src", sourceRoom: "r1", sourceDrawerId: nil,
+            targetWing: "tgt", targetRoom: "r2", targetDrawerId: nil,
+            label: "lc-\(id)", kind: .references,
+            adjectiveBitmap: 0,
+            operationalBitmap: proposedBits,
+            provenanceBitmap: 0,
+            addedBy: "bilby", filedAt: Date(timeIntervalSinceReferenceDate: 0),
+            tombstonedAt: nil, removedByBatch: nil, orderKey: nil
+        )
+    }
+
+    @Test("allActiveTunnels excludes proposed tunnels (FIND4)")
+    func allActiveTunnelsExcludesProposed() async throws {
+        let estate = try await makeEstate()
+        // Insert one active and one proposed tunnel.
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-active", lifecycle: .active))
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-proposed", lifecycle: .proposed))
+
+        let active = try await estate.store.allActiveTunnels()
+        #expect(active.count == 1, "allActiveTunnels must exclude proposed tunnels")
+        #expect(active.first?.id == "lc-active", "only the active-lifecycle tunnel must appear")
+    }
+
+    @Test("allActiveTunnels excludes withdrawn tunnels (FIND4)")
+    func allActiveTunnelsExcludesWithdrawn() async throws {
+        let estate = try await makeEstate()
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-active-2", lifecycle: .active))
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-withdrawn", lifecycle: .withdrawn))
+
+        let active = try await estate.store.allActiveTunnels()
+        #expect(active.count == 1, "allActiveTunnels must exclude withdrawn tunnels")
+        #expect(active.first?.id == "lc-active-2")
+    }
+
+    @Test("allActiveTunnels excludes superseded tunnels (FIND4)")
+    func allActiveTunnelsExcludesSuperseded() async throws {
+        let estate = try await makeEstate()
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-active-3", lifecycle: .active))
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-superseded", lifecycle: .superseded))
+
+        let active = try await estate.store.allActiveTunnels()
+        #expect(active.count == 1, "allActiveTunnels must exclude superseded tunnels")
+        #expect(active.first?.id == "lc-active-3")
+    }
+
+    @Test("allTunnels still returns all lifecycle states (full-history view)")
+    func allTunnelsIncludesAllLifecycles() async throws {
+        let estate = try await makeEstate()
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-all-active", lifecycle: .active))
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-all-proposed", lifecycle: .proposed))
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-all-withdrawn", lifecycle: .withdrawn))
+        try await estate.store.addTunnel(tunnelWithLifecycle(id: "lc-all-superseded", lifecycle: .superseded))
+
+        let all = try await estate.store.allTunnels()
+        #expect(all.count == 4, "allTunnels must return all lifecycle states")
+
+        let activeOnly = try await estate.store.allActiveTunnels()
+        #expect(activeOnly.count == 1, "allActiveTunnels must return only lifecycle==active tunnels")
+    }
 }
