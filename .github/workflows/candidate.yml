@@ -1,4 +1,4 @@
-# Candidate — test builds from candidate/1.0.x, published as GitHub pre-releases.
+# Candidate — test builds from candidate/1.1.x, published as GitHub pre-releases.
 #
 # Branch model: develop (default, active work) → candidate (this: test builds /
 # pre-release) → stable (last-known-good; release tags cut from there).
@@ -19,17 +19,17 @@
 # because the key is absent).
 #
 # Testers install a candidate with the pre-release tag:
-#   MOOTX01_VERSION=1.0.10-prerelease.42 sh install.sh
+#   MOOTX01_VERSION=1.1.0-prerelease.42 sh install.sh
 # (the normal `releases/latest` path deliberately skips pre-releases).
 
 name: candidate
 
 on:
   push:
-    branches: ["candidate/1.0.x"]
+    branches: ["candidate/1.1.x"]
   schedule:
     # Weekly build, Monday 09:00 UTC. Scheduled runs fire from the DEFAULT
-    # branch (develop), so every job pins `ref: candidate/1.0.x` to build the
+    # branch (develop), so every job pins `ref: candidate/1.1.x` to build the
     # candidate line regardless of what triggered the run.
     - cron: "0 9 * * 1"
   workflow_dispatch:
@@ -51,9 +51,13 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - id: v
+        env:
+          # Read-only: contents:read (workflow-level) is sufficient for the
+          # `gh api .../git/refs/tags/...` lookup below — no write scope needed.
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Source version constant (matches Swift Mootx01.currentVersion).
           version="$(grep -m1 '^version = ' apps/mootx01/rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
@@ -85,7 +89,31 @@ jobs:
           # field.
           base="${version%%-*}"
           patch="${base##*.}"
+          # New-minor/major-line start: the +1-patch arithmetic assumes the
+          # tree's version constant equals a release that has ALREADY SHIPPED
+          # (see above). That assumption breaks the moment a line is cut:
+          # when develop/X.(Y+1).x forks, its Cargo.toml still carries the
+          # last-shipped value from the PRIOR line (e.g. 1.0.32) until the
+          # version-stamp-bump commit sets it to the new line's own first
+          # target (X.(Y+1).0) — which, by definition, has never shipped.
+          # Previewing that as X.(Y+1).1 (plain patch+1) would misname the
+          # very first candidate of the line.
+          #
+          # Detect this deliberately rather than inferring it from patch==0
+          # alone: patch==0 stays true even AFTER X.Y.0 ships (the release
+          # bump commit re-stamps the tree to match the just-shipped X.Y.0,
+          # same as the 1.0.x line's re-stamp-to-match pattern), so patch==0
+          # by itself cannot distinguish "not yet shipped" from "just
+          # shipped." The tag-existence check (vX.Y.0 present or not) is what
+          # actually tells the two apart:
+          #   - patch==0, no vX.Y.0 tag  -> this IS the pre-ship target;
+          #     preview it verbatim (X.Y.0-prerelease.N).
+          #   - patch==0, vX.Y.0 exists  -> already shipped; normal patch+1
+          #     resumes (X.Y.1-prerelease.N), same as any other release.
           next="${base%.*}.$((patch + 1))"
+          if [ "$patch" = "0" ] && ! gh api "repos/${{ github.repository }}/git/refs/tags/v${base}" >/dev/null 2>&1; then
+            next="$base"
+          fi
           tag="${next}-prerelease.${{ github.run_number }}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -106,7 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
@@ -311,7 +339,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Build
@@ -353,7 +381,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -400,7 +428,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - name: Download unsigned binaries
         # Places mootx01.exe + moot-mgr.exe at the workspace root (where the zip
@@ -496,7 +524,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -534,7 +562,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.meta.outputs.tag }}
         run: |
-          notes="Automated **candidate/test build** from \`candidate/1.0.x\` at \`${{ github.sha }}\`.
+          notes="Automated **candidate/test build** from \`candidate/1.1.x\` at \`${{ github.sha }}\`.
 
           NOT a release. macOS binaries and .pkg are Apple Developer ID signed and notarized when secrets are available. Linux and Windows binaries are unsigned. For testing only.
 
@@ -580,7 +608,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - name: install.sh against the published pre-release (sandbox HOME)
         env:
