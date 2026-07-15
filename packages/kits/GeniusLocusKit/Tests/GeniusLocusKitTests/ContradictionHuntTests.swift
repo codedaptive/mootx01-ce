@@ -37,14 +37,19 @@ struct ContradictionHuntTests {
         return (kit, handle, vectorStore)
     }
 
-    private func captureFrame(content: String, room: String) -> CaptureFrame {
+    private func captureFrame(
+        content: String,
+        room: String,
+        sensitivity: AdjectiveSensitivity = .normal
+    ) -> CaptureFrame {
         CaptureFrame(
             content: content,
             channel: .typed,
             room: room,
             latticeAnchor: LatticeAnchor(udcCode: "004"),
             addedBy: "hunt-tests",
-            embeddingModelID: Self.modelID
+            embeddingModelID: Self.modelID,
+            sensitivity: sensitivity
         )
     }
 
@@ -154,6 +159,32 @@ struct ContradictionHuntTests {
         let estate = try await kit.estate(for: handle)
         let contradicts = try await estate.allTunnels().filter { $0.kind == .contradicts }
         #expect(contradicts.isEmpty)
+    }
+
+    @Test("restricted and secret candidates are excluded by the default hunt sensitivity ceiling")
+    func protectedCandidatesAreExcludedByDefaultCeiling() async throws {
+        let (kit, handle, vectorStore) = try await makeKit()
+        let normal = try await kit.capture(
+            handle,
+            captureFrame(content: "Bob lives in Paris", room: "study"))
+        let secret = try await kit.capture(
+            handle,
+            captureFrame(
+                content: "Bob does not live in Paris SECRET-DO-NOT-ECHO",
+                room: "study",
+                sensitivity: .secret))
+
+        for drawer in [normal, secret] {
+            try await vectorStore.addVector(
+                itemID: drawer.id, engram: near, modelID: Self.modelID,
+                modelVersion: "1.0", filedAt: Self.t0)
+        }
+
+        let report = try await kit.huntContradictions(in: handle, now: Self.t0)
+
+        #expect(report.proposed.isEmpty)
+        #expect(report.borderline.isEmpty)
+        #expect(report.pairsScreened == 0)
     }
 
     @Test("unrelated content proposes nothing; missing vector store is reported")

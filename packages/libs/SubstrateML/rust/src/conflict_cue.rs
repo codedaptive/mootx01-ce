@@ -225,6 +225,28 @@ mod tests {
         assert_eq!(tokenize("shipped in v1.0.30!"), ["shipped", "in", "v1.0.30"]);
         assert!(tokenize("...").is_empty());
         assert_eq!(tokenize("Isn't  DONE"), ["isn", "t", "done"]);
+
+        // U+0130 İ lowercases (to_lowercase) to "i" + U+0307 (combining dot above).
+        // U+0307 is not is_ascii_lowercase, so it acts as a separator.
+        // Mirrored verbatim in Swift ConflictCueTests::tokenizerContract.
+        assert_eq!(tokenize("İ1 x2 y3 z4"), ["i", "1", "x2", "y3", "z4"]);
+        assert_eq!(tokenize("i1 x2 y3 z4"), ["i1", "x2", "y3", "z4"]);
+    }
+
+    // Cross-leg Unicode scalar conformance test — mirrors Swift
+    // ConflictCueTests::unicodeCombiningMarkTokenizer.
+    #[test]
+    fn unicode_combining_mark_tokenizer() {
+        // İ1 splits at the combining scalar; i1 does not.
+        let with_dot = tokenize("İ1 x2 y3 z4");
+        let plain_i  = tokenize("i1 x2 y3 z4");
+        assert_ne!(with_dot, plain_i);
+        assert_eq!(with_dot, ["i", "1", "x2", "y3", "z4"]);
+
+        // evaluate() for "İ1 x2 y3 z4" vs "i1 x2 y3 z4": different token
+        // streams, no negation/marker/digit-only diffs — no cue fires.
+        let r = evaluate("İ1 x2 y3 z4", "i1 x2 y3 z4");
+        assert_eq!(r.kind, ConflictCueKind::None);
     }
 
     #[test]

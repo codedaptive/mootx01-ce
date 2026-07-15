@@ -1769,8 +1769,14 @@ public extension GeniusLocusKit {
         try Self.gateCustody(options.custodyMode)
         let identityKey = try await signingIdentity(for: estate)
 
-        // Build and sign the grant. The default inference budget is the
-        // full allotment (1.0); the federation layer debits it later.
+        // Build and sign the grant. The initial budget is always the full
+        // allotment (1.0) — this is load-bearing for cross-leg signature
+        // verification: CrossEstateFederation always reconstructs the
+        // canonical payload with inferenceRemainingBudget: 1.0 regardless
+        // of the current debited value, matching what was signed here.
+        // Invariant: every grant leaves issueGrant with
+        // inferenceRemainingBudget == 1.0. The Rust port mirrors this via
+        // EstateCoordinator.INITIAL_INFERENCE_BUDGET.
         let id = UUID()
         let payload = Grant.canonicalPayload(
             id: id,

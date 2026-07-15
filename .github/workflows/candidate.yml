@@ -330,9 +330,15 @@ jobs:
           name: linux-${{ matrix.arch }}
           path: ${{ env.ASSET }}
 
-  # ── Unsigned Windows builds (x86_64 + arm64): zip archive + Inno setup.exe ───
-  windows:
+  # ── Unsigned Windows builds (x86_64 + arm64) — untrusted cargo, no OIDC ──────
+  # Split from the sign job (below) for supply-chain isolation: cargo build runs
+  # arbitrary Rust build code, so this job holds NO id-token capability. It builds
+  # the exes and hands them to windows-sign as an artifact. (SECURITY: keep the
+  # signing OIDC token out of any job that executes untrusted build code.)
+  windows-build:
     needs: meta
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -352,27 +358,112 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - name: Build + zip
+      - name: Build binaries
         shell: pwsh
         run: |
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target ${{ matrix.target }}
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target ${{ matrix.target }}
+          # Copy both exes to the workspace root so they upload as a flat artifact.
+          # windows-sign downloads them, signs them (when creds present), and
+          # embeds the signed exes in both the zip and the Inno installer.
           Copy-Item "apps/mootx01/rust/target/${{ matrix.target }}/release/mootx01.exe"  "mootx01.exe"
           Copy-Item "apps/moot-mgr/rust/target/${{ matrix.target }}/release/moot-mgr.exe" "moot-mgr.exe"
           # Smoke: both arches run natively on their runners.
           .\mootx01.exe --version
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-${{ matrix.arch }}-unsigned
+          path: |
+            mootx01.exe
+            moot-mgr.exe
+
+  # ── Windows code signing + installer (x86_64 + arm64) — trusted, cargo-free ──
+  # Holds the OIDC id-token capability for Azure code signing and runs NO cargo.
+  # Downloads the unsigned exes from windows-build, signs them (best-effort — a
+  # candidate must not fail when creds are absent), builds the Inno setup.exe,
+  # signs it, and uploads the final zip + setup.exe. Isolating OIDC here — away
+  # from build code — keeps the signing credential unreachable from cargo.
+  windows-sign:
+    needs: [meta, windows-build]
+    permissions:
+      id-token: write   # Azure OIDC login for code signing
+      contents: read    # checkout the .iss installer script
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: candidate/1.0.x
+          persist-credentials: false
+      - name: Download unsigned binaries
+        # Places mootx01.exe + moot-mgr.exe at the workspace root (where the zip
+        # and ISCC's /DBinDir expect them).
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: windows-${{ matrix.arch }}-unsigned
+          path: .
+
+      # ── Windows code signing (Azure Artifact Signing) — best-effort ──────────
+      # A candidate must not fail when signing creds are absent (forks, first-time
+      # setup), so this mirrors the macOS best-effort gate: detect the OIDC creds,
+      # skip with a warning when unset, otherwise sign the two exes here and the
+      # Inno setup.exe after it is built. A stable release (release.yml) fails
+      # closed instead. Provisioning: distribution/windows/SIGNING.md.
+      - name: Azure signing preflight (best-effort)
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
+            Write-Output "::warning::AZURE_CLIENT_ID not set — skipping Windows code signing (candidate ships unsigned)."
+          } else {
+            "SIGNING_READY=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+      - name: Azure login (best-effort)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign binaries (best-effort)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          # Explicit paths (not a folder filter) so only these two exes sign here.
+          files: |
+            ${{ github.workspace }}\mootx01.exe
+            ${{ github.workspace }}\moot-mgr.exe
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          # Zips the (now-signed when creds present) exes.
           $asset = "mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}.zip"
           Compress-Archive -Path "mootx01.exe","moot-mgr.exe" -DestinationPath $asset
           "ARCHIVE=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Install Inno Setup
         # windows-11-arm ships Chocolatey; Inno 6 is x86 and runs under emulation.
         run: choco install innosetup -y --no-progress
-      - name: Build setup.exe (unsigned)
+      - name: Build setup.exe
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           # BinDir must be absolute — ISCC resolves /DBinDir relative to the .iss
-          # SourceDir (distribution\windows\), not the caller's CWD.
+          # SourceDir (distribution\windows\), not the caller's CWD. The exes it
+          # embeds were downloaded to the workspace root above and signed when
+          # signing creds are configured.
           & $iscc `
             "/DMyAppVersion=${{ needs.meta.outputs.tag }}" `
             "/DArch=${{ matrix.arch }}" `
@@ -380,6 +471,15 @@ jobs:
             "/O." `
             "distribution/windows/mootx01-setup.iss"
           "SETUP=mootx01-${{ needs.meta.outputs.tag }}-windows-${{ matrix.arch }}-setup.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Sign setup.exe (best-effort)
+        if: ${{ env.SIGNING_READY == '1' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
+          file-digest: SHA256
+          files: ${{ github.workspace }}\${{ env.SETUP }}
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-${{ matrix.arch }}
@@ -389,7 +489,7 @@ jobs:
 
   # ── Publish the pre-release + prune to the last 4 ───────────────────────────
   prerelease:
-    needs: [meta, macos, linux, windows]
+    needs: [meta, macos, linux, windows-sign]
     permissions:
       contents: write   # create the pre-release + prune old ones
     runs-on: ubuntu-24.04
@@ -407,7 +507,14 @@ jobs:
           MINISIGN_SECRET_KEY_PASSWORD: ${{ secrets.MINISIGN_SECRET_KEY_PASSWORD }}
         run: |
           mkdir -p flat
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' \) \
+          # windows-*-unsigned is the raw-exe handoff from the Windows build
+          # job to the signing job (downloaded there by exact name), not a
+          # candidate asset — exclude it so the bare *.exe glob cannot publish
+          # or checksum the unsigned intermediates, whose identical filenames
+          # across arches would also clobber each other in flat/.
+          # (Codex finding 43badd43067481918899a5fbe77f42df)
+          find artifacts -type f -not -path 'artifacts/windows-*-unsigned/*' \
+            \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.exe' -o -name '*.pkg' \) \
             -exec cp {} flat/ \;
           ( cd flat && sha256sum * > ../checksums.txt )
           cp checksums.txt flat/

@@ -1043,13 +1043,19 @@ struct VaultToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "v-throw-preflight"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // The import must throw — hashAllNotes cannot read the file and the
-        // error propagates after the slot-release guard runs fail().
-        await #expect(throws: (any Error).self) {
-            _ = try await dispatcher.dispatch(
-                name: "moot_vault_import",
-                arguments: args(["vaultPath": vault.path]))
+        // The import must fail as an isError result — hashAllNotes cannot
+        // read the file, the error propagates after the slot-release guard
+        // runs fail(), and the dispatch catch-all surfaces it to the client
+        // (unexpected runner errors are tool results, not thrown JSON-RPC
+        // errors — see DispatchFailureSurfacingTests).
+        let failed = try await dispatcher.dispatch(
+            name: "moot_vault_import",
+            arguments: args(["vaultPath": vault.path]))
+        guard case let .object(obj) = failed, case let .bool(isError)? = obj["isError"] else {
+            Issue.record("expected a tool result with an isError flag; got: \(failed)")
+            return
         }
+        #expect(isError, "unreadable preflight must surface as isError:true; got: \(failed)")
 
         // After the throwing preflight, the slot must be released. A subsequent
         // valid import must succeed — cap not permanently exhausted.

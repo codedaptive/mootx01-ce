@@ -549,6 +549,105 @@ fn grt04d_session_key_matches_swift_vector() {
 }
 
 // ---------------------------------------------------------------------------
+// GRT-04e / GRT-04f — Canonical payload encoding parity
+//
+// Cross-leg pinned vector: the exact byte string that Swift's
+// `Grant.canonicalPayload(...)` produces for fixed inputs is hard-coded here
+// and asserted against Rust's `Grant::canonical_payload(...)`. This test
+// FAILS against the bug where Rust's `f64::to_string()` omits the decimal
+// point for whole numbers (e.g. `1.0` → `"1"` instead of `"1.0"`) and passes
+// only after the `format_f64_payload()` fix.
+//
+// The expected payloads below were verified by running the equivalent Swift
+// expression in the Swift test harness:
+//   Grant.canonicalPayload(id:granteeEstateID:scope:contentLevel:lifetime:
+//       custodyMode:reSharePermission:inferenceRemainingBudget:issuedAt:)
+// with each fixed input set and encoding the result as UTF-8.
+//
+// Note: `issued_at` uses the SAME raw numeric value on both sides for the
+// test fixture (0.0 and 1_700_000_000.0). In real cross-leg usage the epochs
+// differ by 978_307_200 (Unix vs Apple reference) and must be normalised; this
+// test isolates only the decimal-point encoding question.
+// ---------------------------------------------------------------------------
+
+/// GRT-04e — Canonical payload byte identity for a whole-estate mediated grant
+/// with budget 1.0 and issued_at 0.0 (the exact scenario broken by ADV-2).
+///
+/// Swift expected: `Grant.canonicalPayload(id: UUID("12345678-..."), ...,
+///     inferenceRemainingBudget: 1.0, issuedAt: Date(timeIntervalSinceReferenceDate: 0))`
+/// → UTF-8 bytes of
+/// `"grant-v1|12345678-1234-1234-1234-123456789ABC|ABCDEF01-2345-6789-ABCD-EF0123456789|estate|3|permanent|mediated|none|1.0|0.0"`
+///
+/// Before the fix, Rust produced `"...|1|0"` (no decimal point) — different
+/// bytes than Swift's `"...|1.0|0.0"`, breaking signature verification for
+/// every Swift-signed grant on the Rust coordinator.
+#[test]
+fn grt04e_canonical_payload_budget_decimal_point_matches_swift() {
+    let id = Uuid::parse_str("12345678-1234-1234-1234-123456789ABC").unwrap();
+    let grantee = Uuid::parse_str("ABCDEF01-2345-6789-ABCD-EF0123456789").unwrap();
+
+    let payload = Grant::canonical_payload(
+        id,
+        grantee,
+        &GrantScope::WholeEstate,
+        3,
+        &GrantLifetime::Permanent,
+        &CustodyMode::Mediated,
+        &ReSharePermission::None,
+        1.0,  // initial budget — whole number, must render as "1.0" not "1"
+        0.0,  // issued_at — whole number, must render as "0.0" not "0"
+    );
+
+    // Swift-computed expected payload (UTF-8 bytes of the pipe-delimited string).
+    let expected = b"grant-v1|12345678-1234-1234-1234-123456789ABC|ABCDEF01-2345-6789-ABCD-EF0123456789|estate|3|permanent|mediated|none|1.0|0.0";
+    assert_eq!(
+        payload, expected,
+        "GRT-04e: canonical payload must be byte-identical to Swift output;\n\
+         got:      {:?}\n\
+         expected: {:?}",
+        String::from_utf8_lossy(&payload),
+        String::from_utf8_lossy(expected),
+    );
+}
+
+/// GRT-04f — Canonical payload for a grant with `GrantLifetime::Until` carrying
+/// a whole-number timestamp. The `until:` field must include the decimal point
+/// (e.g. `"until:1700000000.0"`) to match Swift's string interpolation of
+/// `Date.timeIntervalSinceReferenceDate`.
+///
+/// Swift expected payload fragment: `"...until:1700000000.0..."`
+#[test]
+fn grt04f_canonical_payload_until_timestamp_decimal_point_matches_swift() {
+    let id = Uuid::parse_str("12345678-1234-1234-1234-123456789ABC").unwrap();
+    let grantee = Uuid::parse_str("ABCDEF01-2345-6789-ABCD-EF0123456789").unwrap();
+
+    let payload = Grant::canonical_payload(
+        id,
+        grantee,
+        &GrantScope::WholeEstate,
+        0,
+        &GrantLifetime::Until(1_700_000_000.0), // whole-number timestamp
+        &CustodyMode::HandedOver,
+        &ReSharePermission::None,
+        1.0,
+        0.0,
+    );
+
+    // Swift `GrantLifetime.until(date).signingToken` →
+    //   `"until:\(date.timeIntervalSinceReferenceDate)"` =
+    //   `"until:1700000000.0"` for a Date at exactly 1_700_000_000 seconds.
+    let expected = b"grant-v1|12345678-1234-1234-1234-123456789ABC|ABCDEF01-2345-6789-ABCD-EF0123456789|estate|0|until:1700000000.0|handedOver|none|1.0|0.0";
+    assert_eq!(
+        payload, expected,
+        "GRT-04f: Until timestamp must carry decimal point to match Swift;\n\
+         got:      {:?}\n\
+         expected: {:?}",
+        String::from_utf8_lossy(&payload),
+        String::from_utf8_lossy(expected),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // GRT-05 — CustodyMode enforcement on federated_recall
 //
 // Mirrors Swift CrossEstateFederationTests tests 15, 16, 17 (mode-1, mode-2,

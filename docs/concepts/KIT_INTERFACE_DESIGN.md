@@ -501,7 +501,7 @@ aggregation families listed below.
 
 **Dependencies:** EideticLib, SubstrateLib, EngramLib, GeniusLocusKit
 
-**Maturity:** In progress (reasoning and dreaming surfaces built; branch ops and migration API in progress).
+**Maturity:** Implemented (Swift + Rust, conformance-gated). Reasoning, dreaming, branch ops, and migration surfaces built.
 
 ---
 
@@ -511,7 +511,7 @@ aggregation families listed below.
 
 **Spec:** TOPOLOGY.md § Behaviour, MOOTX01_AND_ARIA_CANON.md
 
-**Expected Interface (not yet built):**
+**Interface:**
 - `Workflow` protocol
 - `WorkflowStep`
 - `FulcrumDailyFraming` (workflow)
@@ -520,7 +520,7 @@ aggregation families listed below.
 
 **Dependencies:** NeuronKit, GeniusLocusKit
 
-**Maturity:** Planned (after NeuronKit complete).
+**Maturity:** Implemented (Swift + Rust, conformance-gated). Source-available Brain layer in CE.
 
 ---
 
@@ -546,7 +546,7 @@ aggregation families listed below.
 **Subscriptions (live notifications):**
 - Estate changes as real-time events
 
-**Maturity:** In progress.
+**Maturity:** Implemented (Swift + Rust, conformance-gated).
 
 ---
 
@@ -556,7 +556,7 @@ aggregation families listed below.
 
 **Spec:** MOOTX01_AND_ARIA_CANON.md § Consumption surfaces
 
-**Maturity:** In progress.
+**Maturity:** Implemented (Swift + Rust, conformance-gated).
 
 ---
 
@@ -578,7 +578,7 @@ aggregation families listed below.
 
 **Spec:** MOOTX01_AND_ARIA_CANON.md § Demonstration apps (required, not optional)
 
-**Maturity:** Planned.
+**Maturity:** Implemented (conformance-gated against the Swift port).
 
 ---
 
@@ -601,9 +601,9 @@ aggregation families listed below.
 | **Grounding** | LatticeLib, EideticLib |
 | **Substrate** | LocusKit, VectorKit, CorpusKit |
 | **Composition** | GeniusLocusKit |
-| **Reasoning** | NeuronKit (in progress) |
-| **Behaviour** | CognitionKit (planned) |
-| **Access** | aria-mcp (in progress), AriaMcpKit (in progress), Mootx01-App (planned), aria-mcp Rust port (planned) |
+| **Reasoning** | NeuronKit (implemented, Swift + Rust) |
+| **Behaviour** | CognitionKit (implemented, Swift + Rust) |
+| **Access** | aria-mcp (implemented), AriaMcpKit (implemented), Mootx01-App (planned), aria-mcp Rust port (implemented) |
 
 ---
 

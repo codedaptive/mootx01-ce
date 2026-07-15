@@ -2870,6 +2870,17 @@ impl EstateCoordinator {
             if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
                 continue;
             }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            if a.adjective_sensitivity().raw_value()
+                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+                || b.adjective_sensitivity().raw_value()
+                    > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            {
+                continue;
+            }
             // Incremental watermark: at least one side must be new enough.
             if let Some(watermark) = filed_after {
                 if a.filed_at <= watermark && b.filed_at <= watermark {
@@ -4684,7 +4695,13 @@ impl EstateCoordinator {
             lifetime: options.lifetime,
             custody_mode: options.custody_mode,
             re_share_permission: options.re_share_permission,
-            inference_remaining_budget: 0.0, // default; callers may override via options
+            // Every grant is issued at the full initial budget. The federation
+            // layer debits it per recall. The canonical signing payload always
+            // encodes INITIAL_INFERENCE_BUDGET (not the current debited value)
+            // so the signature is stable across the grant's lifetime — the same
+            // invariant enforced in Swift `VerbSurface.issueGrant` (hardcoded
+            // `inferenceRemainingBudget: 1.0`).
+            inference_remaining_budget: Self::INITIAL_INFERENCE_BUDGET,
             issued_at: now,
             signature: vec![], // signing is caller's responsibility after receiving the result
         };
@@ -5061,6 +5078,19 @@ impl EstateCoordinator {
 
     // MARK: - federated_recall
 
+    /// Initial inference budget assigned to every newly-issued grant.
+    ///
+    /// Every grant leaves `issue_grant` with `inference_remaining_budget ==
+    /// INITIAL_INFERENCE_BUDGET`. The canonical signing payload always uses
+    /// this value at signature-verification time (step 4.5 of
+    /// `federated_recall`), regardless of how much budget has been debited
+    /// since issue — because the granter signed with the initial budget, not
+    /// the current debited value. Mirrors Swift `VerbSurface.issueGrant`
+    /// which hardcodes `inferenceRemainingBudget: 1.0` at issuance and
+    /// `CrossEstateFederation` which hardcodes `inferenceRemainingBudget: 1.0`
+    /// at verification.
+    pub const INITIAL_INFERENCE_BUDGET: f64 = 1.0;
+
     /// Per-read budget debit quantum. Mirrors Swift
     /// `GeniusLocusKit.budgetDebitPerRead` (0.01 per read, ~100 reads on
     /// a fresh 1.0 budget). Spec §6 is silent on debit amount; fail-closed
@@ -5225,7 +5255,33 @@ impl EstateCoordinator {
                 .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                     reason: format!("Ed25519 public key base64 decode failed: {e:?}"),
                 })?;
-            let signing_payload = authorizing_grant.signing_payload();
+            // Reconstruct the canonical verification payload with the initial
+            // budget (1.0), mirroring Swift CrossEstateFederation step 4.5.
+            //
+            // The grant store's debit_budget mutates the persisted grant's
+            // inference_remaining_budget in place (step 6 below). When
+            // active() returns the grant on a second or later recall, the
+            // stored value is the debited budget (e.g. 0.99 after one read).
+            // Calling authorizing_grant.signing_payload() at that point
+            // produces different bytes than were signed at issue time —
+            // breaking signature verification for every recall after the first
+            // even though the grant is valid and budget remains.
+            //
+            // The granter always signs with inferenceRemainingBudget: 1.0 (the
+            // full initial allotment). Reconstructing with 1.0 here keeps the
+            // signed bytes stable across all debits. Identical to Swift's
+            // Grant.canonicalPayload(... inferenceRemainingBudget: 1.0 ...).
+            let signing_payload = Grant::canonical_payload(
+                authorizing_grant.id,
+                authorizing_grant.grantee_estate_id,
+                &authorizing_grant.scope,
+                authorizing_grant.content_level,
+                &authorizing_grant.lifetime,
+                &authorizing_grant.custody_mode,
+                &authorizing_grant.re_share_permission,
+                Self::INITIAL_INFERENCE_BUDGET, // canonical initial budget — byte-identical to signing time
+                authorizing_grant.issued_at,
+            );
             if !convergence_kit::verify_signature(
                 &authorizing_grant.signature,
                 &signing_payload,
@@ -9240,6 +9296,31 @@ mod tests {
             .filter(|t| t.kind == locus_kit::tunnel_operational::TunnelKind::Contradicts)
             .count();
         assert_eq!(contradicts, 0);
+    }
+
+    #[test]
+    fn hunt_protected_candidates_are_excluded_by_default_ceiling() {
+        let (coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        let normal = coord
+            .capture(&h, cap_frame("Bob lives in Paris"), NOW)
+            .expect("capture normal");
+        let mut secret_frame = cap_frame("Bob does not live in Paris SECRET-DO-NOT-ECHO");
+        secret_frame.sensitivity = locus_kit::adjectives::AdjectiveSensitivity::Secret;
+        let secret = coord
+            .capture(&h, secret_frame, NOW)
+            .expect("capture secret");
+        for drawer in [&normal, &secret] {
+            vs.add_vector(&drawer.id, &near, "minilm-v6", "1.0", NOW)
+                .expect("add vector");
+        }
+
+        let report = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect("hunt");
+        assert!(report.proposed.is_empty());
+        assert!(report.borderline.is_empty());
+        assert_eq!(report.pairs_screened, 0);
     }
 
     #[test]

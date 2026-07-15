@@ -40,13 +40,14 @@ public extension GeniusLocusKit {
         return try await estate.allTunnels()
     }
 
-    /// All non-tombstoned, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
+    /// All confirmed-active, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
     ///
     /// OMEGA uses this to enumerate the active dreamed-tunnel population before
-    /// applying its retire predicate (`isDreamed AND not reinforced`). Retired
-    /// tunnels are excluded so that a re-proposed tunnel that was previously
-    /// retired does not appear in the active set until a new `associate` verb
-    /// promotes it from proposal to confirmed tunnel. Delegates to
+    /// applying its retire predicate (`isDreamed AND not reinforced`). Only
+    /// tunnels with `lifecycle == .active` (confirmed) and `isRetired == false`
+    /// are returned — proposed, withdrawn, and superseded tunnels are excluded.
+    /// OMEGA must not retire a proposed tunnel that has not yet been reviewed.
+    /// Full tunnel history is reachable via `allTunnels(in:)`. Delegates to
     /// `Estate.allActiveTunnels()`.
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale.

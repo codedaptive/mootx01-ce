@@ -86,6 +86,8 @@ pub fn default_standing_signal_specs(
             model_id.into(),
             VectorSimilaritySignal::DEFAULT_PROXIMITY_THRESHOLD,
             corpus,
+            None, // edge_checker: DB-level uniqueness (LocusKit v10) prevents
+                  // duplicates; wire a checker for production frame-churn reduction.
         ),
         // Signal 10: ContradictionScoutSignal registered with its no-op
         // spec — the generic helper cannot supply the estate-specific hunt

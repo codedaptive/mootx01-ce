@@ -5,9 +5,9 @@
 // (rust/src/commands/upgrade.rs):
 //
 //   Remote (default): fetch the latest GitHub release via ReleaseDownloader
-//   (SHA-256 + tarball-member validation), confirm unless --yes, place, and
-//   run the convergence steps (plugin rematerialization, permission-tier
-//   migration, service restart).
+//   (SHA-256 + minisign on Linux/POSIX + tarball-member validation), confirm
+//   unless --yes, place, and run the convergence steps (plugin rematerialization,
+//   permission-tier migration, service restart).
 //
 //   Local (--from <path>): the developer workflow — copies a freshly built
 //   binary from an explicit path (e.g. --from .build/release/mootx01).
@@ -25,7 +25,8 @@ struct UpgradeCommand: AsyncParsableCommand {
         abstract: "Upgrade mootx01 to the latest release (or from a local build).",
         discussion: """
             Without flags, upgrade downloads the latest release (SHA-256
-            verified), installs it, converges plugin packages and tool
+            verified, with checksums.txt authenticated by minisign on
+            Linux/POSIX), installs it, converges plugin packages and tool
             permissions, and restarts the background services.
 
             Use --from to install a local build instead of downloading:
@@ -84,12 +85,15 @@ struct UpgradeCommand: AsyncParsableCommand {
 
         // Source resolution, mirroring the Rust vertical: --from is the
         // local developer path; the default is the verified remote download
-        // (MOOT-INSTALL-E fix 3a — ReleaseDownloader's SHA-256 + tarball
-        // member validation, the machinery ReleaseDownloaderTests covers).
+        // (MOOT-INSTALL-E fix 3a — ReleaseDownloader's SHA-256 + independent
+        // checksums.txt authentication + tarball member validation, the
+        // machinery ReleaseDownloaderTests covers).
         let sourcePath: String
         var downloadTmpDir: URL?
+        let isRemoteDownload: Bool
         if from != nil {
             sourcePath = try resolveSource(cwd: cwd)
+            isRemoteDownload = false
         } else {
             let tag: String?
             do {
@@ -122,6 +126,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             // the remote path unchanged.
             downloadTmpDir = binaryURL.deletingLastPathComponent()
             sourcePath = binaryURL.path
+            isRemoteDownload = true
         }
         defer {
             if let downloadTmpDir {
@@ -150,6 +155,11 @@ struct UpgradeCommand: AsyncParsableCommand {
                 print("Updated:        \(mgrPath)")
             }
         }
+        #if os(macOS)
+        if isRemoteDownload {
+            applyGatekeeperQuarantine(paths: [binaryPath, MootPaths.installedMgrBinaryURL(homeDirectory: home).path])
+        }
+        #endif
 
         // ADR-024 Wave 3, Defect 1: an upgrade alone never touches
         // ~/.claude/mootx01-plugin or Claude Code's plugin cache — without
@@ -203,6 +213,36 @@ struct UpgradeCommand: AsyncParsableCommand {
             }
         }
     }
+
+    #if os(macOS)
+    /// The Swift remote upgrade path downloads and extracts with URLSession/tar,
+    /// which does not mark files as internet downloads. Restore the shell
+    /// installer's trust split by setting com.apple.quarantine on remotely
+    /// installed binaries so Gatekeeper assesses Developer ID/notarization on
+    /// first launch. This is best-effort, matching install.sh's non-fatal xattr
+    /// behavior.
+    private func applyGatekeeperQuarantine(paths: [String]) {
+        let qts = String(Int(Date().timeIntervalSince1970), radix: 16)
+        let qval = "0083;\(qts);mootx01-upgrade;"
+        for path in paths where FileManager.default.fileExists(atPath: path) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+            process.arguments = ["-w", "com.apple.quarantine", qval, path]
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 {
+                    print("Quarantine xattr set on \(path) (Gatekeeper will assess on first run)")
+                } else {
+                    print("Note: could not set quarantine xattr on \(path) — Gatekeeper assessment skipped (non-fatal)")
+                }
+            } catch {
+                print("Note: xattr not found — skipping Gatekeeper quarantine tagging (non-fatal)")
+                return
+            }
+        }
+    }
+    #endif
 
     /// See the call site's doc comment. Only touches
     /// `~/.claude/settings.json` when it already carries at least one of

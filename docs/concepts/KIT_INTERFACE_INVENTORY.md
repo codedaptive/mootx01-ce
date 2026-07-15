@@ -336,7 +336,9 @@ description: A per-kit inventory of every kit's public interface — types, func
 
 ### NeuronKit
 **Role:** AI algorithms (reasoning, autonomic daemons).  
-**Language:** Swift
+**Language:** Swift + Rust
+
+**Status:** Implemented (Swift + Rust, conformance-gated).
 
 **Public Type:**
 - `LinguisticPipelineMode` enum
@@ -377,11 +379,11 @@ description: A per-kit inventory of every kit's public interface — types, func
 
 ### CognitionKit
 **Role:** Behaviour recipes (named, composable workflows).  
-**Language:** Swift
+**Language:** Swift + Rust
 
-**Status:** Planned.
+**Status:** Implemented (Swift + Rust, conformance-gated). Source-available Brain layer in CE.
 
-**Expected Interface:**
+**Interface:**
 - `Workflow` protocol
 - `WorkflowStep`
 - `FulcrumDailyFraming`
@@ -392,20 +394,19 @@ description: A per-kit inventory of every kit's public interface — types, func
 
 ## Access Layer
 
-> **Content-refresh flag (for a human/content-owner pass):** The
-> access-surface entries below were authored against an older app
-> layout. The clean token renames are applied (aria-mcp / Mootx01-App),
-> but the entry list itself is likely stale against the current
-> surface — aria-mcp-server, AriaMcpKit, the mootx01 CLI, moot-mgr,
-> Mootx01-App, moot-math-benchmark, and moot-agent-skills. These
-> entries need a content refresh, not just a rename; left as stubs
-> pending that pass.
+> **Content-completeness note (for a human/content-owner pass):** The
+> shipped/planned statuses below now reflect the current surface (the
+> ARIA MCP server and its Rust port are implemented). The entry list is
+> still incomplete against the full access surface — it does not yet
+> enumerate the mootx01 CLI, moot-mgr, moot-math-benchmark, or
+> moot-agent-skills, and the per-entry interface detail is summary-level.
+> A content-completeness pass is pending for those.
 
 ### aria-mcp
 **Role:** MCP server exposing any MOOTx01 estate to Claude, Claude Code, etc.  
-**Language:** Swift + Python
+**Language:** Swift + Rust
 
-**Status:** In progress.
+**Status:** Implemented (Swift + Rust, conformance-gated). Built from AriaMcpKit.
 
 **Expected Interface:**
 - MCP server conformance
@@ -435,7 +436,7 @@ description: A per-kit inventory of every kit's public interface — types, func
 **Role:** Rust demonstration (required for conformance parity).  
 **Language:** Rust
 
-**Status:** Planned, after the macOS app.
+**Status:** Implemented (conformance-gated against the Swift port).
 
 ---
 
@@ -474,4 +475,4 @@ aria-mcp              (All substrate kits + NeuronKit)
 
 ---
 
-**Status:** Foundation + Substrate + Grounding complete. Reasoning (NeuronKit) in progress. Access (aria-mcp) in progress.
+**Status:** Foundation + Substrate + Grounding complete. Reasoning (NeuronKit), Behaviour (CognitionKit), and Access (aria-mcp, Swift + Rust) implemented and conformance-gated.

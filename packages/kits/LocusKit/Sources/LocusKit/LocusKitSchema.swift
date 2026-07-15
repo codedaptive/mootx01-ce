@@ -79,21 +79,26 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v9 added content_fingerprint BLOB
-    /// nullable to drawers (CRITICAL fix — `fingerprintsCaptured`/
-    /// `fingerprintBitSeries` previously recomputed every drawer's
-    /// Fingerprint256 from scratch on every call; the value is now
-    /// computed once at write time and read back from this column).
-    /// v8 changes nodes.merkle_root from TEXT
-    /// to BLOB (NT-Q1 — eliminates hex encoding waste). v7 added
-    /// content_hash BLOB nullable to drawers (NT-L3) and
-    /// snapshot_registry + snapshot_attestations tables (NT-L3 Part 3).
-    /// v6 added order_key REAL nullable to tunnels (ADR-017 §11,
-    /// mission NT-L5). v5 added erasure_ledger (NT-L4). v4 replaced
-    /// wing/room with parent_node_id (NT-L2). v3 added nodes (NT-L1).
-    /// v2 added keys.ext (ADR-012). No migration ladder — no estate
-    /// data has shipped.
-    public static let version = 9
+    /// Current schema version. v10 adds a UNIQUE constraint on the
+    /// associations table natural key (sourceWing, sourceRoom,
+    /// sourceDrawerId, targetWing, targetRoom, targetDrawerId, label)
+    /// — FINDING-3 duplicate-edge fix. The migration from v9 first
+    /// de-duplicates existing rows, then adds a unique index so the
+    /// constraint is enforced on upgrade paths. Fresh installs carry
+    /// the constraint inline in the table declaration. v9 added
+    /// content_fingerprint BLOB nullable to drawers (CRITICAL fix —
+    /// `fingerprintsCaptured`/`fingerprintBitSeries` previously
+    /// recomputed every drawer's Fingerprint256 from scratch on every
+    /// call; the value is now computed once at write time and read back
+    /// from this column). v8 changes nodes.merkle_root from TEXT to
+    /// BLOB (NT-Q1). v7 added content_hash BLOB nullable to drawers
+    /// (NT-L3) and snapshot_registry + snapshot_attestations tables.
+    /// v6 added order_key REAL nullable to tunnels (NT-L5). v5 added
+    /// erasure_ledger (NT-L4). v4 replaced wing/room with
+    /// parent_node_id (NT-L2). v3 added nodes (NT-L1). v2 added
+    /// keys.ext (ADR-012). No migration ladder beyond v8→v9 and
+    /// v9→v10 — no estate data has shipped.
+    public static let version = 10
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -130,6 +135,37 @@ public enum LocusKitSchema {
                 // on every write after the daemon binary is upgraded to v9.
                 Migration(fromVersion: 8, toVersion: 9, operations: [
                     .addColumn(table: "drawers", column: .blob("content_fingerprint", nullable: true))
+                ]),
+                // v9 → v10: add unique index on the associations natural key
+                // (FINDING-3 duplicate-edge fix). Order is mandatory:
+                // de-duplicate first, then create the unique index — a
+                // CREATE UNIQUE INDEX fails if duplicate rows already exist.
+                // The custom SQL removes all but the earliest (MIN rowid)
+                // duplicate for each (sourceWing, sourceRoom, sourceDrawerId,
+                // targetWing, targetRoom, targetDrawerId, label) group.
+                // SQLite's GROUP BY treats NULL values as equal, so
+                // wing/room-level associations (NULL drawer IDs) are also
+                // deduplicated correctly. After dedup, the unique index is
+                // equivalent to the table-level uniqueConstraints declared
+                // on `associationsTable` for fresh installs.
+                Migration(fromVersion: 9, toVersion: 10, operations: [
+                    .custom(
+                        sqlite: """
+                        DELETE FROM "associations" WHERE rowid NOT IN (
+                            SELECT MIN(rowid) FROM "associations"
+                            GROUP BY "sourceWing", "sourceRoom", "sourceDrawerId",
+                                     "targetWing", "targetRoom", "targetDrawerId", "label"
+                        )
+                        """,
+                        postgresql: nil
+                    ),
+                    .addIndex(IndexDeclaration(
+                        name: "idx_associations_natural_key",
+                        table: "associations",
+                        columns: ["sourceWing", "sourceRoom", "sourceDrawerId",
+                                  "targetWing", "targetRoom", "targetDrawerId", "label"],
+                        unique: true
+                    )),
                 ]),
             ]
         )
@@ -481,6 +517,16 @@ public enum LocusKitSchema {
     // rejects an empty anchor before insert. Same headroom convention as
     // tunnels. No generated columns — like `tunnels`, the edge endpoints
     // (not a state cluster) are the indexed query paths.
+    //
+    // v10 (FINDING-3): unique constraint on the natural key
+    // (sourceWing, sourceRoom, sourceDrawerId, targetWing, targetRoom,
+    // targetDrawerId, label) prevents duplicate edges from accumulating.
+    // `addAssociation` is INSERT-OR-IGNORE (swallows duplicateKey from
+    // the constraint). SQLite treats NULL sourceDrawerId/targetDrawerId
+    // as distinct values in the index, so the constraint is precise
+    // for drawer-level associations (always produced by
+    // VectorSimilaritySignal) and permissive for wing/room-level
+    // associations (NULL drawer IDs, unusual case).
     static let associationsTable = TableDeclaration(
         name: "associations",
         columns: [
@@ -506,7 +552,15 @@ public enum LocusKitSchema {
             .bitmap("provenanceBitmap"),
             .json("ext", nullable: true)
         ],
-        primaryKey: ["id"]
+        primaryKey: ["id"],
+        uniqueConstraints: [
+            // Natural-key uniqueness: one active edge per
+            // (source endpoint, target endpoint, label) tuple.
+            // Enforced for INSERT-OR-IGNORE semantics in
+            // `addAssociation` (FINDING-3).
+            ["sourceWing", "sourceRoom", "sourceDrawerId",
+             "targetWing", "targetRoom", "targetDrawerId", "label"]
+        ]
     )
 
     // MARK: - learned_references

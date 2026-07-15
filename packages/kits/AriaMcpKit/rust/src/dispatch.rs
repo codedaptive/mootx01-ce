@@ -11,10 +11,12 @@
 //!   6. Unknown tool → methodNotFound error
 //!   hint: appended to non-error results by CoachingEngine
 //!
-//! Out-of-band faults (unknown tool, missing required argument, malformed
-//! UUID) surface as `JSONRPCError` (thrown as Err). Substrate-level
-//! refusals surface as a tool-call result with `isError: true`, matching
-//! the Swift discipline.
+//! Protocol faults (unknown tool, missing required argument, malformed
+//! UUID) surface as `JSONRPCError` (thrown as Err). Every failure of a
+//! call that reached its runner — substrate refusals AND runner-thrown
+//! `TOOL_DISPATCH_FAILURE` errors, which `surface_dispatch_failure`
+//! converts at the funnel — surfaces as a tool-call result with
+//! `isError: true`, matching the Swift discipline.
 
 use std::collections::BTreeMap;
 
@@ -154,6 +156,61 @@ pub fn dispatch_tool_with_vault_ledger(
 /// `moot_estate_ping` / `moot_estate_status`.
 #[allow(clippy::too_many_arguments)] // single inner impl all entry points delegate to; grouping would obscure which ledger/flag each callsite supplies
 fn dispatch_tool_with_vault_ledger_and_flag(
+    name: &str,
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+    ledger: &SurfacedRecallLedger,
+    vault_ledger: &VaultJobLedger,
+    sensitivity_ledger: &SensitivityGrantLedger,
+    vault_on: bool,
+    build_serial: &str,
+    version_skew: &str,
+    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let routed = route_tool(
+        name, args, registry, ledger, vault_ledger, sensitivity_ledger,
+        vault_on, build_serial, version_skew, monitoring_control,
+    );
+    surface_dispatch_failure(name, routed)
+}
+
+/// Convert a runner's `TOOL_DISPATCH_FAILURE` into a tool result with
+/// `isError:true`, and mirror the message to stderr. Every other outcome
+/// passes through untouched.
+///
+/// A `TOOL_DISPATCH_FAILURE` means the call reached its runner and the
+/// substrate (or an adapter under it) failed — an execution failure, not a
+/// protocol fault. MCP clients render a thrown JSON-RPC error as a bare
+/// "failed to call tool" and discard the message; an `isError` result puts
+/// the description in front of the model so it can react. Matches the Swift
+/// `ToolDispatcher.dispatch` catch-all discipline. The stderr mirror exists
+/// because the daemon log otherwise records nothing for a failed tool call,
+/// which makes field failures undiagnosable.
+///
+/// Protocol faults (`METHOD_NOT_FOUND`, `INVALID_PARAMS`, …) stay thrown —
+/// those mean the call never reached a runner.
+pub fn surface_dispatch_failure(
+    name: &str,
+    routed: Result<serde_json::Value, JSONRPCError>,
+) -> Result<serde_json::Value, JSONRPCError> {
+    match routed {
+        // The message is emitted bare (no prefix): the Rust runners route
+        // substrate refusals through this band, and Swift surfaces those same
+        // refusals as bare `describe(error)` isError results — a prefix here
+        // would diverge the legs' output for the same failure.
+        Err(e) if e.code == JSONRPCErrorCode::TOOL_DISPATCH_FAILURE => {
+            eprintln!("aria-mcp: tool {name} failed: {msg}", msg = e.message);
+            Ok(error_result(&e.message))
+        }
+        other => other,
+    }
+}
+
+/// Route `name` to its tool-group runner. Errors propagate raw — the caller
+/// (`dispatch_tool_with_vault_ledger_and_flag`) owns converting
+/// `TOOL_DISPATCH_FAILURE` into an `isError` result.
+#[allow(clippy::too_many_arguments)] // mirrors the funnel signature it is extracted from
+fn route_tool(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,

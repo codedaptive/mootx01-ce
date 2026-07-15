@@ -38,10 +38,10 @@
 // any lifecycle, including `.withdrawn` (a rejected review) and
 // tombstoned rows — is never proposed again. Rejection is durable.
 //
-// Sensitivity: `DrawerStore.addTunnel` stamps the tunnel with the MAX
-// of its endpoints' sensitivities (#57, both legs), so a proposed edge
-// touching a restricted drawer is gated by the tunnel sensitivity
-// ceiling automatically; the hunter adds nothing to disclose.
+// Sensitivity: the hunt applies the same default ceiling as recall
+// (`.sensitivityAtMost(.elevated)`) before content screening or
+// snippet generation. Proposed tunnels are then additionally stamped
+// by `DrawerStore.addTunnel` with the MAX endpoint sensitivity (#57).
 //
 // Cost: O(probeLimit) BM25 queries (sub-linear WAND/BMW over posting
 // lists, each capped to a bounded query length) + one batched body
@@ -273,6 +273,13 @@ public extension GeniusLocusKit {
         for pair in candidatePairs {
             guard let a = drawersByID[pair.a], let b = drawersByID[pair.b],
                   a.tombstonedAt == nil, b.tombstonedAt == nil else { continue }
+            // Match BitmapEvaluator's default recall posture: callers
+            // without an explicit sensitivity grant may only mine the Normal
+            // tier (normal + elevated). Restricted/secret rows must not be
+            // screened, proposed, or echoed as borderline snippets.
+            guard a.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue,
+                  b.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue
+            else { continue }
             // Incremental watermark: at least one side must be new enough.
             if let watermark = filedAfter,
                a.filedAt <= watermark, b.filedAt <= watermark { continue }
