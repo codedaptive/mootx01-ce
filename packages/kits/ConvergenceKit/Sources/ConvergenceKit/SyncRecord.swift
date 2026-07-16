@@ -34,11 +34,24 @@ public struct SyncRecord: Sendable, Codable {
     public let hlc: PackedHLC
     public let schemaVersion: Int
     public let kitID: String
+    /// Set to `true` when this record represents a delete tombstone.
+    ///
+    /// WHY a separate field instead of relying solely on `event == .delete`:
+    /// the tombstone concept is distinct from the event kind in that it
+    /// also signals that the deletion HLC must persist in the side table
+    /// after the row is hard-deleted (A6 adjudication). Explicit flag
+    /// keeps the semantics clear and matches the Rust wire format
+    /// (`sync_deleted: Option<bool>`, omitted when nil — C-8 parity).
+    ///
+    /// Omitted (nil) in JSON when not a tombstone; decoded as nil when
+    /// absent (Rust `#[serde(default)]` provides the same null default).
+    public let syncDeleted: Bool?
 
     /// Explicit CodingKeys documenting the cross-port JSON contract.
-    /// Rust serde renames match these exact strings.
+    /// Rust serde renames match these exact strings (`rename_all = "camelCase"`
+    /// plus explicit `rename = "kitID"` for the ID suffix convention).
     private enum CodingKeys: String, CodingKey {
-        case table, event, rowKey, values, hlc, schemaVersion, kitID
+        case table, event, rowKey, values, hlc, schemaVersion, kitID, syncDeleted
     }
 
     public init(
@@ -48,7 +61,8 @@ public struct SyncRecord: Sendable, Codable {
         values: SyncValueMap?,
         hlc: PackedHLC,
         schemaVersion: Int,
-        kitID: String
+        kitID: String,
+        syncDeleted: Bool? = nil
     ) {
         self.table = table
         self.event = event
@@ -57,6 +71,33 @@ public struct SyncRecord: Sendable, Codable {
         self.hlc = hlc
         self.schemaVersion = schemaVersion
         self.kitID = kitID
+        self.syncDeleted = syncDeleted
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(table, forKey: .table)
+        try container.encode(event, forKey: .event)
+        try container.encode(rowKey, forKey: .rowKey)
+        try container.encodeIfPresent(values, forKey: .values)
+        try container.encode(hlc, forKey: .hlc)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(kitID, forKey: .kitID)
+        // Omit syncDeleted when nil — Rust serde `skip_serializing_if = "Option::is_none"` parity.
+        try container.encodeIfPresent(syncDeleted, forKey: .syncDeleted)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        table = try container.decode(String.self, forKey: .table)
+        event = try container.decode(SyncEventKind.self, forKey: .event)
+        rowKey = try container.decode(UUID.self, forKey: .rowKey)
+        values = try container.decodeIfPresent(SyncValueMap.self, forKey: .values)
+        hlc = try container.decode(PackedHLC.self, forKey: .hlc)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        kitID = try container.decode(String.self, forKey: .kitID)
+        // Absent in JSON from older peers — defaults to nil (not a tombstone).
+        syncDeleted = try container.decodeIfPresent(Bool.self, forKey: .syncDeleted)
     }
 }
 

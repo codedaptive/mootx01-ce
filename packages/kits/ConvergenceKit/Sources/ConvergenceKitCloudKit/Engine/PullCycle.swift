@@ -92,12 +92,18 @@ extension CloudKitStateActor {
             }
         }
 
-        // Apply deletions. Deletion events carry only a CKRecord.ID, no record type
-        // that could identify the target table. Deletion is attempted against every
-        // non-pushOnly manifest table; the manifest is the scope guard.
+        // Legacy CKRecord.ID deletions: arrives when a record is deleted outside
+        // our engine (e.g. directly via CloudKit Dashboard or iCloud.com). Our engine
+        // no longer produces CKRecord.ID deletions — all deletes are pushed as typed
+        // tombstone CKRecords and arrive via `pulledRecords` above with full table
+        // routing. This path is a best-effort fallback for external deletions only.
+        //
+        // WHY we keep it: silently ignoring external deletions would leave ghost rows.
+        // WHY we skip the HLC gate here: no HLC is available from CKRecord.ID.
+        // The fan-out to all tables is accepted here because this is a legacy path
+        // for externally-sourced deletions; our own deletes never enter this path.
         for recordID in deletedIDs {
-            let parts = recordID.recordName.split(separator: ":")
-            guard let rowKey = UUID(uuidString: String(parts[0])) else { continue }
+            guard let rowKey = UUID(uuidString: recordID.recordName) else { continue }
             for syncedTable in manifest.tables where syncedTable.direction != .pushOnly {
                 let predicate = StoragePredicate.eq(
                     Column(table: syncedTable.name, name: syncedTable.primaryKeyColumn),

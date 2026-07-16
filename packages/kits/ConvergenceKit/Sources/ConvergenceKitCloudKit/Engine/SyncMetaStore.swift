@@ -45,6 +45,7 @@ extension CloudKitStateActor {
     }
 
     /// Persist the sync HLC for a specific row after a successful upsert.
+    /// Sets `is_deleted = 0` (live row, not a tombstone).
     func writeSyncHLC(
         storage: any Storage, table: String, primaryKey: UUID, pkColumn: String,
         hlc: HLC, schemaVersion: Int, kitID: String
@@ -56,7 +57,37 @@ extension CloudKitStateActor {
                 "primary_key": .text(primaryKey.uuidString),
                 "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
                 "schema_version": .int(Int64(schemaVersion)),
-                "kit_id": .text(kitID)
+                "kit_id": .text(kitID),
+                "is_deleted": .int(0)
+            ],
+            conflictColumns: ["table_name", "primary_key"]
+        )
+    }
+
+    /// Persist the delete HLC in `_ck_sync_meta` after a hard-delete (A6).
+    ///
+    /// WHY the tombstone HLC must persist after the row is gone:
+    /// a stale insert or upsert for the same (table, rowKey) arriving
+    /// after the delete would find `localHLC = nil` if the side table entry
+    /// were removed, accept the write, and resurrect the deleted row.
+    /// Keeping the tombstone HLC blocks stale resurrections via the standard
+    /// LWW gate. A newer insert (higher HLC) is still allowed — the gate
+    /// only blocks HLCs strictly older than the tombstone (intentional
+    /// recreate). The entry is eligible for GC after
+    /// `SyncTombstone.gcRetentionSeconds`.
+    func writeTombstoneHLC(
+        storage: any Storage, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await storage.rowStore.upsert(
+            table: Self.syncMetaTable,
+            values: [
+                "table_name": .text(table),
+                "primary_key": .text(primaryKey.uuidString),
+                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "schema_version": .int(Int64(schemaVersion)),
+                "kit_id": .text(kitID),
+                "is_deleted": .int(1)
             ],
             conflictColumns: ["table_name", "primary_key"]
         )

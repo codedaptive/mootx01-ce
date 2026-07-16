@@ -67,6 +67,12 @@ public enum CKSideSchema {
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "schema_version", type: .int,  nullable: false,
                                   defaultValue: .int(0)),
+                // is_deleted: 1 when this entry records a delete tombstone HLC that
+                // must outlive the row for A6 stale-resurrect protection. Used by
+                // tombstone GC to identify entries eligible for compaction after
+                // SyncTombstone.gcRetentionSeconds. Int, not Bool (schema invariants).
+                ColumnDeclaration(name: "is_deleted",     type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
                 ColumnDeclaration(name: "kit_id",         type: .text, nullable: false,
                                   defaultValue: .text("")),
             ],

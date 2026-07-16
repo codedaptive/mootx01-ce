@@ -38,7 +38,12 @@ extension CloudKitStateActor {
         let batch = try await OutboxStore.readBatch(from: storage)
 
         var saved: [CKRecord] = []
-        var deleted: [CKRecord.ID] = []
+        // WHY no `deleted: [CKRecord.ID]` queue: we no longer send typed deletions.
+        // CKRecord.ID deletions carry no record type so the receiver fans out to
+        // every non-pushOnly manifest table (D1 defect). Tombstone CKRecords encode
+        // the table in their recordType (`kitID_tableName`) — the pull path routes
+        // them correctly. All delete events are pushed as tombstone CKRecords and
+        // saved alongside regular upserts in the single `modifyRecords` call.
         var confirmedIDs: [UUID] = []
         var pushedCount = 0
 
@@ -86,19 +91,32 @@ extension CloudKitStateActor {
                     logger.error("push encode failed for entry \(entry.id): \(String(describing: error))")
                 }
             case .delete:
-                let ckID = CKRecordMapping.recordID(rowKey: rowKey, zone: zoneID)
-                deleted.append(ckID)
+                // Push a tombstone CKRecord instead of a CKRecord.ID deletion.
+                // The typed record (`kitID_tableName`) gives the pull path the
+                // table identity it needs for routing (D1 fix). The delete HLC
+                // in `_syncHLC` enables the receiver's LWW gate (D2 fix) and
+                // the A6 tombstone-HLC persistence in `_ck_sync_meta`. The HLC
+                // is the outbox entry's capture-time HLC, preserving ordering.
+                let tombstone = CKRecordMapping.tombstoneRecord(
+                    rowKey: rowKey,
+                    table: entry.tableName,
+                    kitID: manifest.kitID,
+                    deleteHLC: hlc,
+                    schemaVersion: manifest.schemaVersion,
+                    zone: zoneID
+                )
+                saved.append(tombstone)
                 confirmedIDs.append(entry.id)
                 pushedCount += 1
             }
         }
 
-        // Send to CloudKit.
-        if !saved.isEmpty || !deleted.isEmpty {
+        // Send to CloudKit. All changes (upserts and tombstones) go as saves.
+        if !saved.isEmpty {
             do {
                 _ = try await container.privateCloudDatabase.modifyRecords(
                     saving: saved,
-                    deleting: deleted,
+                    deleting: [],
                     savePolicy: .changedKeys,
                     atomically: false
                 )
