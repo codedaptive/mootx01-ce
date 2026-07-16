@@ -189,7 +189,12 @@ actor CloudKitStateActor {
         pendingOutbound.removeAll()
 
         var saved: [CKRecord] = []
-        var deleted: [CKRecord.ID] = []
+        // WHY no `deleted: [CKRecord.ID]` queue: we no longer send typed deletions.
+        // CKRecord.ID deletions carry no record type so the receiver fans out to
+        // every non-pushOnly manifest table (D1 defect). Tombstone CKRecords encode
+        // the table in their recordType (`kitID_tableName`) — the pull path routes
+        // them correctly. All delete events are pushed as tombstone CKRecords and
+        // saved alongside regular upserts in the single `modifyRecords` call.
         var pushedCount = 0
 
         for change in pending {
@@ -228,18 +233,31 @@ actor CloudKitStateActor {
                     logger.error("push encode failed: \(String(describing: error))")
                 }
             case .delete:
-                let id = CKRecordMapping.recordID(rowKey: rowKey, zone: zoneID)
-                deleted.append(id)
+                // Push a tombstone CKRecord instead of a CKRecord.ID deletion.
+                // The typed record (`kitID_tableName`) gives the pull path the
+                // table identity it needs for routing (D1 fix). The delete HLC
+                // in `_syncHLC` enables the receiver's LWW gate (D2 fix) and
+                // the A6 tombstone-HLC persistence in `_ck_sync_meta`.
+                let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
+                let tombstone = CKRecordMapping.tombstoneRecord(
+                    rowKey: rowKey,
+                    table: change.table,
+                    kitID: manifest.kitID,
+                    deleteHLC: hlc,
+                    schemaVersion: manifest.schemaVersion,
+                    zone: zoneID
+                )
+                saved.append(tombstone)
                 pushedCount += 1
             }
         }
 
-        // Send to CloudKit.
-        if !saved.isEmpty || !deleted.isEmpty {
+        // Send to CloudKit. All changes (upserts and tombstones) go as saves.
+        if !saved.isEmpty {
             do {
                 _ = try await container.privateCloudDatabase.modifyRecords(
                     saving: saved,
-                    deleting: deleted,
+                    deleting: [],
                     savePolicy: .changedKeys,
                     atomically: false
                 )
@@ -314,12 +332,18 @@ actor CloudKitStateActor {
             }
         }
 
-        // Apply deletions. Deletion events carry only a CKRecord.ID, no record type
-        // that could identify the target table. Deletion is attempted against every
-        // non-pushOnly manifest table; the manifest is the scope guard.
+        // Legacy CKRecord.ID deletions: arrives when a record is deleted outside
+        // our engine (e.g. directly via CloudKit Dashboard or iCloud.com). Our engine
+        // no longer produces CKRecord.ID deletions — all deletes are pushed as typed
+        // tombstone CKRecords and arrive via `pulledRecords` above with full table
+        // routing. This path is a best-effort fallback for external deletions only.
+        //
+        // WHY we keep it: silently ignoring external deletions would leave ghost rows.
+        // WHY we skip the HLC gate here: no HLC is available from CKRecord.ID.
+        // The fan-out to all tables is accepted here because this is a legacy path
+        // for externally-sourced deletions; our own deletes never enter this path.
         for recordID in deletedIDs {
-            let parts = recordID.recordName.split(separator: ":")
-            guard let rowKey = UUID(uuidString: String(parts[0])) else { continue }
+            guard let rowKey = UUID(uuidString: recordID.recordName) else { continue }
             for syncedTable in manifest.tables where syncedTable.direction != .pushOnly {
                 let predicate = StoragePredicate.eq(
                     Column(table: syncedTable.name, name: syncedTable.primaryKeyColumn),
@@ -346,6 +370,51 @@ actor CloudKitStateActor {
         syncedTable: SyncedTable,
         storage: any Storage
     ) async throws {
+        // Tombstone path: delete the local row through the standard LWW gate and
+        // persist the delete HLC in _ck_sync_meta (A6 adjudication). The tombstone
+        // HLC outlives the row so subsequent stale inserts with older HLCs are
+        // rejected — even after the row itself is gone from the application table.
+        if decoded.isTombstone {
+            switch syncedTable.conflictPolicy {
+            case .appendOnly:
+                // Append-only tables are write-once; silently reject remote deletes.
+                return
+            case .localWins:
+                // Local state is authoritative; silently reject remote deletes.
+                return
+            case .remoteWins:
+                // Remote delete wins unconditionally.
+                let predicate = StoragePredicate.eq(
+                    Column(table: decoded.table, name: syncedTable.primaryKeyColumn),
+                    .uuid(decoded.rowKey)
+                )
+                _ = try? await storage.rowStore.delete(table: decoded.table, where: predicate)
+            case .lastWriterWinsByHLC:
+                // LWW gate: a stale tombstone (incoming HLC < local `_ck_sync_meta` HLC)
+                // must not delete a newer local row (D2 fix).
+                let localHLC = try await readSyncHLC(
+                    storage: storage, table: decoded.table,
+                    primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn)
+                if let localHLC, decoded.hlc < localHLC {
+                    return // stale tombstone — local is newer, keep the row
+                }
+                let predicate = StoragePredicate.eq(
+                    Column(table: decoded.table, name: syncedTable.primaryKeyColumn),
+                    .uuid(decoded.rowKey)
+                )
+                _ = try? await storage.rowStore.delete(table: decoded.table, where: predicate)
+                // A6: persist tombstone HLC in _ck_sync_meta after hard-delete so
+                // subsequent stale inserts for this (table, rowKey) are still gated.
+                try await writeTombstoneHLC(
+                    storage: storage, table: decoded.table,
+                    primaryKey: decoded.rowKey,
+                    hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                    kitID: decoded.syncMeta.kitID)
+            }
+            return
+        }
+
+        // Normal (non-tombstone) apply path.
         switch syncedTable.conflictPolicy {
         case .appendOnly:
             // Audit log style. Idempotent upsert with the row key as primary.
@@ -356,11 +425,10 @@ actor CloudKitStateActor {
             )
 
         case .lastWriterWinsByHLC:
-            // (#12) LWW comparison reads the persisted HLC from the
-            // _ck_sync_meta side table. If the remote HLC is older than
-            // the local HLC, the remote record is skipped (the local row
-            // is newer). The side table is created at engine init so it
-            // exists on all backends (SQLite, PG, InMemory).
+            // LWW comparison reads the persisted HLC from the _ck_sync_meta side
+            // table. If the remote HLC is older than the local HLC, the remote record
+            // is skipped (the local row is newer). The side table entry exists even
+            // after a delete (tombstone HLC), so a stale resurrect is also gated.
             let localHLC = try await readSyncHLC(
                 storage: storage, table: decoded.table,
                 primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn)
@@ -373,6 +441,7 @@ actor CloudKitStateActor {
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
             // Persist the sync HLC in the side table for future comparisons.
+            // Sets is_deleted = 0 (live row replaces any prior tombstone entry).
             try await writeSyncHLC(
                 storage: storage, table: decoded.table,
                 primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn,
@@ -405,7 +474,7 @@ actor CloudKitStateActor {
         Int64(Date().timeIntervalSince1970 * 1000)
     }
 
-    // MARK: - Sync metadata side table (#12)
+    // MARK: - Sync metadata side table
 
     /// Side table name. Owned by ConvergenceKit, not by the application schema.
     private static let syncMetaTable = "_ck_sync_meta"
@@ -413,10 +482,15 @@ actor CloudKitStateActor {
     /// Ensure the side table exists. Must be called before any pull.
     /// Uses SchemaDeclaration + migrate so the table is created via the
     /// standard PersistenceKit schema path (works on all backends).
+    ///
+    /// Schema v2 adds `is_deleted` (default 0). The column is 1 for tombstone
+    /// entries — HLCs from delete events that must outlive the row for A6
+    /// stale-resurrect protection. GC uses `is_deleted` to identify entries
+    /// eligible for compaction after the tombstone retention window.
     static func ensureSyncMetaTable(storage: any Storage) async throws {
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitCloudKit",
-            version: 1,
+            version: 2,
             tables: [
                 TableDeclaration(
                     name: syncMetaTable,
@@ -429,20 +503,29 @@ actor CloudKitStateActor {
                                           defaultValue: .int(0)),
                         ColumnDeclaration(name: "kit_id", type: .text, nullable: false,
                                           defaultValue: .text("")),
+                        // is_deleted: 1 when this entry records a delete tombstone HLC.
+                        // Used by TombstoneGC to identify entries eligible for compaction
+                        // after SyncTombstone.gcRetentionSeconds.
+                        ColumnDeclaration(name: "is_deleted", type: .int, nullable: false,
+                                          defaultValue: .int(0)),
                     ],
                     primaryKey: ["table_name", "primary_key"]
                 ),
             ],
             indices: []
         )
-        // migrate(to:) is ADDITIVE — it creates missing tables without
+        // migrate(to:) is ADDITIVE — it creates missing tables/columns without
         // replacing the backend's active schema declaration. open(schema:)
         // would clobber the application schema, breaking all row operations.
         try await storage.migrate(to: schema)
     }
 
     /// Read the persisted sync HLC for a specific row.
-    private func readSyncHLC(
+    ///
+    /// Returns the HLC regardless of `is_deleted` status — tombstone HLCs
+    /// compare the same way as live-row HLCs in the LWW gate. This ensures
+    /// a stale upsert arriving after a delete is still rejected.
+    func readSyncHLC(
         storage: any Storage, table: String, primaryKey: UUID, pkColumn: String
     ) async throws -> HLC? {
         let rows = try await storage.rowStore.query(
@@ -458,7 +541,8 @@ actor CloudKitStateActor {
     }
 
     /// Persist the sync HLC for a specific row after a successful upsert.
-    private func writeSyncHLC(
+    /// Sets `is_deleted = 0` (live row, not a tombstone).
+    func writeSyncHLC(
         storage: any Storage, table: String, primaryKey: UUID, pkColumn: String,
         hlc: HLC, schemaVersion: Int, kitID: String
     ) async throws {
@@ -469,7 +553,37 @@ actor CloudKitStateActor {
                 "primary_key": .text(primaryKey.uuidString),
                 "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
                 "schema_version": .int(Int64(schemaVersion)),
-                "kit_id": .text(kitID)
+                "kit_id": .text(kitID),
+                "is_deleted": .int(0)
+            ],
+            conflictColumns: ["table_name", "primary_key"]
+        )
+    }
+
+    /// Persist the delete HLC in `_ck_sync_meta` after a hard-delete (A6).
+    ///
+    /// WHY the tombstone HLC must persist after the row is gone:
+    /// a stale insert or upsert for the same (table, rowKey) arriving
+    /// after the delete would find `localHLC = nil` if the side table entry
+    /// were removed, accept the write, and resurrect the deleted row.
+    /// Keeping the tombstone HLC blocks stale resurrections via the standard
+    /// LWW gate. A newer insert (higher HLC) is still allowed — the gate
+    /// only blocks HLCs strictly older than the tombstone (intentional
+    /// recreate). The entry is eligible for GC after
+    /// `SyncTombstone.gcRetentionSeconds`.
+    func writeTombstoneHLC(
+        storage: any Storage, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await storage.rowStore.upsert(
+            table: Self.syncMetaTable,
+            values: [
+                "table_name": .text(table),
+                "primary_key": .text(primaryKey.uuidString),
+                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "schema_version": .int(Int64(schemaVersion)),
+                "kit_id": .text(kitID),
+                "is_deleted": .int(1)
             ],
             conflictColumns: ["table_name", "primary_key"]
         )
