@@ -5,6 +5,24 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.33 — 2026-07-16
+
+Release-engineering release. No user-facing code changes — Windows release
+signing and version-integrity hardening.
+
+- **Windows release signing wired for tagged releases.** The two Windows
+  sign jobs in `release.yml` now run under the `release` GitHub Environment,
+  so a tag-triggered release presents the OIDC subject
+  `repo:codedaptive/mootx01-ce:environment:release` that an Azure federated
+  credential can match. (Tag refs can't be wildcarded in a federated-credential
+  subject; the environment can.) Candidate signing was validated end-to-end
+  on both arches ahead of this.
+- **Version-integrity gate.** `release.yml` now verifies, before publishing any
+  asset, that every in-source version stamp equals the release tag — the number
+  `mootx01 --version` prints can no longer disagree with the tag it shipped
+  under. A forgotten `bump_version.py` now fails the release loudly instead of
+  shipping a mislabeled binary.
+
 ## v1.0.32 — 2026-07-14
 
 Protocol-honesty and release-integrity release. No user-facing feature
