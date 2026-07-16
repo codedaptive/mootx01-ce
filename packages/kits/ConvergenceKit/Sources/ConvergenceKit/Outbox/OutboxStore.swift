@@ -25,6 +25,7 @@
 
 import Foundation
 import PersistenceKit
+import SubstrateTypes
 
 // MARK: - OutboxStore
 
@@ -222,9 +223,69 @@ public enum OutboxStore {
         try await readBatch(from: storage, limit: Int.max)
     }
 
-    // MARK: - Private helpers
+    // MARK: - Re-mint on re-enrollment (A2)
 
-    private static func insertEntry(_ entry: OutboxEntry, to storage: any Storage) async throws {
+    /// Re-mint the HLC of every pending outbox entry under a new nodeID.
+    ///
+    /// Called by `CloudKitStateActor` when re-enrolling after `reenrollRequired`:
+    /// either from `EpochFence.heartbeat` at push time, or when `enable()` discovers
+    /// the claimed slot differs from the previously stored slot.
+    ///
+    /// WHY RE-MINT IS SAFE:
+    /// Outbox entries are UNPUSHED LOCAL STATE — they have never been delivered to
+    /// CloudKit. No remote replica has seen these HLCs, so there are no existing
+    /// comparisons to invalidate. LWW treats re-minted HLCs as the latest local
+    /// writes, which is exactly what they are. The invariant is that re-minted HLCs
+    /// must be physically newer than all previously-pushed HLCs from this device;
+    /// a fresh HLCGenerator seeded from the current wall clock guarantees this
+    /// because wall time is monotonically non-decreasing and the new nodeID is
+    /// different from the old one (no namespace collision).
+    ///
+    /// Entries are processed in ascending HLC order (readBatch default) so the
+    /// generator mints strictly increasing HLCs, preserving relative ordering
+    /// among the re-minted entries.
+    ///
+    /// - Parameters:
+    ///   - storage: The PersistenceKit storage instance.
+    ///   - newNodeID: The newly claimed HLC node ID (1–15) from the fresh slot.
+    ///   - nowMillis: Current wall-clock in milliseconds for the HLC generator seed.
+    public static func remintAll(
+        from storage: any Storage,
+        newNodeID: Int32,
+        nowMillis: Int64
+    ) async throws {
+        var generator = HLCGenerator(nodeID: newNodeID)
+        // readBatch returns entries in ascending HLC order (oldest first).
+        // Minting new HLCs in that order preserves relative ordering.
+        let entries = try await readBatch(from: storage, limit: Int.max)
+        for entry in entries {
+            // Remove the entry with its old HLC and outbox-ID.
+            _ = try await storage.rowStore.delete(
+                table: table,
+                where: .eq(Column(table: table, name: "id"), .uuid(entry.id))
+            )
+            // Mint a fresh HLC under the new nodeID.
+            let newHLC = generator.send(now: nowMillis)
+            let reminted = OutboxEntry(
+                id: UUID(),
+                tableName: entry.tableName,
+                rowKey: entry.rowKey,
+                event: entry.event,
+                valuesData: entry.valuesData,
+                packedHLC: Int64(bitPattern: newHLC.packed),
+                // Preserve original enqueue time for observability (not for ordering).
+                enqueuedAt: entry.enqueuedAt
+            )
+            try await insertEntry(reminted, to: storage)
+        }
+    }
+
+    // MARK: - Internal helpers
+    //
+    // insertEntry is internal (not private) so remintAll and future within-module
+    // callers can share the insert path without duplicating the column map.
+
+    static func insertEntry(_ entry: OutboxEntry, to storage: any Storage) async throws {
         var values: [String: TypedValue] = [
             "id":           .uuid(entry.id),
             "table_name":   .text(entry.tableName),

@@ -299,6 +299,52 @@ side table increments the version; migrations are additive. No two
 `SchemaDeclaration` entries share the same version number with different
 table sets.
 
+**B-13 (slot registry claim/heartbeat/fence contract) (v1.2-draft):**
+The CloudKit device slot registry (N2) enforces the following behavioral
+contract for every device that participates in a multi-device estate:
+
+1. **Claim.** On `enable()`, the engine claims one of the 15 assignable
+   CloudKit HLC node-ID slots via `SlotClaimOperation` using CloudKit CAS
+   (`ifServerRecordUnchanged`). The claim is atomic: exactly one device wins
+   each slot per epoch. On CAS race loss the engine retries with jittered
+   exponential backoff (A5). After `maxAttempts` all fail, `slotExhausted`
+   is thrown.
+
+2. **Preferred-slot stability.** The previously claimed slot is passed as
+   `preferredSlot` on subsequent enrollments to reduce unnecessary re-mints
+   and HLC namespace changes.
+
+3. **Heartbeat.** At the start of every push cycle — BEFORE reading the
+   outbox batch — `EpochFence.heartbeat` fetches this device's own slot
+   record from CloudKit and writes the current HLC into `last_active_hlc`
+   via a conditional CAS save. The heartbeat doubles as an epoch fence (see
+   below). Slots that have never heartbeated (ghost slots, `lastActiveHLC ==
+   HLC.zero`) that are older than `SlotGhostWindow` (1 hour) are eligible
+   for fast-path eviction.
+
+4. **Epoch fence.** The `EpochFence.heartbeat` CAS compares the registry
+   record's epoch to the locally-stored identity epoch. A mismatch means the
+   slot was evicted and re-epoch'd while this device was inactive. The engine
+   throws `reenrollRequired` BEFORE reading or applying any outbox entries.
+   Applying records under a superseded node-ID would produce HLC ties whose
+   LWW resolution differs across replicas (silent divergence).
+
+5. **Re-enrollment (A2).** On `reenrollRequired` — whether from the fence
+   or from enable-time epoch mismatch — the engine: (a) claims a fresh slot
+   via `SlotClaimOperation`; (b) re-mints ALL pending outbox HLCs under the
+   new node-ID via `OutboxStore.remintAll`; (c) persists the new identity.
+   Re-mint is safe because outbox entries are unpushed local state — no
+   remote replica has seen those HLCs, so LWW has no prior decisions to
+   invalidate.
+
+6. **Eviction.** When all 15 slots are occupied, `SlotClaimOperation` runs
+   `SlotTable.claimSlot` to pick an eviction candidate. Ghost slots (never
+   heartbeated, claimedAt older than `SlotGhostWindow`) are preferred (A4
+   fast path). Otherwise the slot with the oldest `lastActiveHLC.physicalTime`
+   beyond `SlotLongInactivityWindow` (30 days) is chosen. Eviction bumps the
+   epoch atomically via a CAS save; a race loss retries. When no candidate
+   qualifies, `slotExhausted(activeCount:)` is thrown.
+
 **Note N4 (CloudKit exclusivity) (v1.2-draft):** The CloudKit backend is
 Swift-vertical only, following the same precedent as Metal compute kernels.
 CloudKit has no Rust API, and the no-FFI constraint between Swift and Rust
