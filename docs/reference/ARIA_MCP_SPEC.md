@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.15.0
+version: 1.17.0
 status: active
 date: 2026-07-16
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -304,14 +304,19 @@ Invariants:
 - The block is **unconditional** — appears even on zero-memory estates.
 - No estate is touched to produce the block; it requires no async work.
 
-### Nine-tier `moot_estate_status teachme:true` guide
+### Ten-tier `moot_estate_status teachme:true` guide
 
-The `TeachmeGuides` entry for `moot_estate_status` is a nine-tier surface
-summary covering tiers 1–9 plus the teachme and coaching mechanisms, with a
-total count line ("56 tools" as of the current code). The cold-start sequence
-is named explicitly. Note: the guide's tier tallies and total are updated only
-when code changes land; the authoritative live count is in
-ARIA_MCP_INTERFACE.md §2.
+The `TeachmeGuides` entry for `moot_estate_status` is a ten-tier surface
+summary covering tiers 1–10 plus the teachme and coaching mechanisms. The
+total count line and all per-tier counts are computed at call time from
+`ToolProjection.tools()` — the guide can never drift from the shipped surface.
+The live vault-on count is 71 tools; vault-off is 65 (moot_palace_import and
+the 5 moot_vault_* tools omitted). The cold-start sequence is named explicitly.
+Tier structure: Tier 1 Core Memory (9), Tier 2 Connections (4), Tier 3 KG (4),
+Tier 4 Journal (2), Tier 5 Estate (7 always + 1 vault-gated), Tier 6 Cognition
+(27 = 4 recipe + 23 lens), Tier 7 Extended Cognition (8 = remaining recipe
+tools), Tier 8 Dataset (3), Tier 9 Vault (5 vault-on only), Tier 10 Federation
+(1). The authoritative live count is always in ARIA_MCP_INTERFACE.md §2.
 
 ### `moot_list_lenses` cognition menu
 
@@ -871,6 +876,26 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.17.0 -- 2026-07-16
+Rust leg Anthropic memory_20250818 adapter parity (M-MEMTOOL-1): the `memory` tool
+is now at full parity in both ports. `memory_adapter.rs` implements all six commands
+(view, create, str_replace, insert, delete, rename), the `MOOTX01_MEMORY_TOOL=1`
+opt-in gate (off by default — 71/65 baseline unchanged), the Normal-tier sensitivity
+gate (Restricted/Secret drawers not visible), and sensitivity-tier carry-forward on
+edit/rename so elevated drawers are not silently downgraded. Wire contract is
+byte-identical to the Swift `MemoryToolAdapter.swift` adapter per the no-FFI law.
+
+### 1.16.0 -- 2026-07-16
+§12 teachme guide: corrects stale tier tallies (Tier 1: 7→9, Tier 2: 3→4,
+Tier 6: 18→27, Tier 8: 4→5, Total: 56→71/65) and expands from nine to ten
+tiers (adds Tier 8 Dataset, Tier 7 Extended Cognition, renumbers Vault→Tier 9
+and Federation→Tier 10). The guide is now a computed var deriving all counts
+from ToolProjection.tools() at call time — it can never silently drift from
+the shipped surface. Adds moot_memory_list to Tier 1 listing and its teachme
+guide. Adds moot_review_tunnel to Tier 2 listing. Adds moot_vault_job to the
+vault generic guide. New test (sp-3b) pins that the guide's count matches the
+live registry.
 
 ### 1.15.0 -- 2026-07-16
 Dataset tools (MX-TAB-7, §11): corrects the stale "44 tools / 19 interface /

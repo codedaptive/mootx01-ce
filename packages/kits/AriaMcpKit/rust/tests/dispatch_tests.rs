@@ -24,7 +24,7 @@ use aria_mcp::{
     estate_registry::EstateRegistry,
     jsonrpc::{JSONRPCErrorCode, JsonValue},
     surfaced_recall_ledger::SurfacedRecallLedger,
-    tool_list::{build_tool_list, build_tool_list_with_vault_flag, vault_enabled},
+    tool_list::{build_tool_list, build_tool_list_with_flags, build_tool_list_with_vault_flag, vault_enabled},
 };
 
 // ---------------------------------------------------------------------------
@@ -270,8 +270,11 @@ fn tools_list_count_is_68() {
     // ----
     //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   71  total
-    let tools = build_tool_list();
+    //   71  total (memory adapter excluded — opt-in, off by default)
+    // Use build_tool_list_with_flags with memory_on=false for deterministic count:
+    // the 3 memory-tool tests in this file hold memory_env_lock() while setting
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 72.
+    let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
     assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());
 }
@@ -380,7 +383,11 @@ fn tools_list_name_set_matches_expected_71_names() {
     .copied()
     .collect();
 
-    let tools = build_tool_list();
+    // Use build_tool_list_with_flags with memory_on=false: this test gates the
+    // baseline 71-name set; the `memory` tool's opt-in appearance is tested in
+    // memory_adapter_tests.rs. Deterministic flag prevents racing the env-var
+    // mutations in the three memory_env_lock()-gated tests below.
+    let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
     let actual: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();

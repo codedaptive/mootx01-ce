@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Interface
-version: 1.20.0
+version: 1.21.0
 status: active
 date: 2026-07-16
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
@@ -55,7 +55,7 @@ purpose: |
   (`LensTools.swift`), vault control tools (`VaultTools.swift`),
   tabular dataset tools (`DatasetTools.swift`),
   recall discrimination helper (`RecallDiscrimination.swift`),
-  Anthropic memory_20250818 adapter (`MemoryToolAdapter.swift`),
+  Anthropic memory_20250818 adapter (`MemoryToolAdapter.swift`; Rust: `memory_adapter.rs`),
   monitoring-control injection seam (`MonitoringControl.swift`).
 - `Sources/aria-mcp/` — the `aria-mcp` executable (`AriaMCPMain.swift`):
   opens an estate and runs the selected transport — stdio by default, the
@@ -68,9 +68,11 @@ purpose: |
 The Rust binary is a parity sibling; the shipped runtime is the Swift binary —
 the `mootx01` executable target in `apps/mootx01/Package.swift`, which links the
 `AriaMCP` library and runs `mootx01 serve` (the default subcommand on macOS).
-The Rust binary
-links the same 71-tool surface (65 vault-off) backed by the Rust kit stack (genius-locus-kit,
-locus-kit, vault-kit, cognition-kit, neuron-kit). All five
+The Rust binary links the same 71-tool surface (65 vault-off) backed by the Rust kit stack
+(genius-locus-kit, locus-kit, vault-kit, cognition-kit, neuron-kit). The opt-in
+Anthropic memory_20250818 adapter (`memory_adapter.rs`) adds one `memory` tool when
+`MOOTX01_MEMORY_TOOL=1`, raising the count to 72/66 — same gate as the Swift port
+(`MemoryToolAdapter.swift`). Default (absent/≠ "1") preserves the 71/65 baseline. All five
 `moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
 (`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
 manifest owned by the ARIA layer. The fifth vault
@@ -1303,6 +1305,22 @@ alongside `build_serial`. Computed once at server startup by the host binary
 the kit itself, which does not read `~/.claude/plugins/` or know a product
 version. `aria-mcp-server` (both ports) has no plugin concept and always
 passes the empty/nil default. Both ports at parity.
+
+### 1.21.0 -- 2026-07-16
+Rust leg Anthropic memory_20250818 adapter parity (M-MEMTOOL-1): `memory_adapter.rs`
+implements all six commands (view, create, str_replace, insert, delete, rename),
+the `MOOTX01_MEMORY_TOOL=1` opt-in gate, the Normal-tier sensitivity filter (mirrors
+`isMemoryAdapterVisible` in Swift), and sensitivity-tier carry-forward on edits so
+elevated-tier drawers are not silently downgraded. `tool_list.rs` gains
+`memory_enabled()`, `build_tool_list_with_flags(vault_on, memory_on)`, and the
+`memory_adapter_tool()` schema; `build_tool_list()` and `build_tool_list_with_vault_flag()`
+delegate to it. When `memory_on=true` the `memory` tool is prepended (first in list,
+mirrors Swift `memoryAdapterTools()` prepend order), raising the count to 72/66.
+Existing dispatch and count tests updated to use `build_tool_list_with_flags(vault_enabled(), false)`
+for determinism (prevents racing with env-var mutations in memory-tool tests). New test
+file `tests/memory_adapter_tests.rs`: 19 tests covering env gate, tool-list projection,
+and per-command happy + error paths. Updated §1 Rust package layout and Rust binary
+description to document `memory_adapter.rs` and the opt-in gate.
 
 ### 1.20.0 -- 2026-07-16
 Dataset tools (MX-TAB-7): three new tools `moot_file_dataset`,

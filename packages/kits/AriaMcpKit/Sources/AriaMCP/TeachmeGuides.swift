@@ -98,6 +98,32 @@ enum TeachmeGuides {
           - Omitting limit when expecting many results; default is 20.
         """
 
+    private static let memoryListGuide = """
+        moot_memory_list — Enumerate all memory drawer IDs in a wing.
+
+        Returns each drawer's ID, room, and an 80-character content preview.
+        Capped at 200 results. Use for structural inventory, not semantic search.
+
+        When to use vs siblings:
+          - moot_memory_search — when you need ranked semantic results by query
+          - moot_memory_get — when you already have an ID and need the full record
+          - moot_estate_map — when you want wing/room counts, not individual IDs
+
+        Example:
+          { "wing": "Agentic Memory" }
+          { "wing": "Agentic Memory", "room": "architecture" }
+
+        Response:
+          drawers in wing Agentic Memory: N
+          <uuid>  [room]  <80-char preview>
+
+        Common mistakes:
+          - Calling without wing. Wing is required; omitting it returns an error.
+          - Using this as a search tool. It is a structural enumerator — use
+            moot_memory_search for semantic recall.
+          - Expecting more than 200 results. For large wings, filter by room.
+        """
+
     private static let memoryGetGuide = """
         moot_memory_get — Fetch one memory drawer by id, in full.
 
@@ -586,56 +612,107 @@ enum TeachmeGuides {
 
     // MARK: - Tier 5: Estate
 
-    private static let estateStatusGuide = """
-        moot_estate_status — Estate overview and session orientation.
+    // Computed so tier tallies and the total tool count are derived from
+    // ToolProjection's live registry at call time. If a tier grows, the
+    // guide updates automatically without a separate edit here.
+    //
+    // Per-tier breakdown (registry sources):
+    //   Tier 1:  ToolProjection.coreMemoryTools().count           (9)
+    //   Tier 2:  ToolProjection.connectionTools().count            (4)
+    //   Tier 3:  ToolProjection.knowledgeGraphTools().count        (4)
+    //   Tier 4:  ToolProjection.journalTools().count               (2)
+    //   Tier 5:  ToolProjection.estateTools() minus palace_import  (7 always; +1 vault-gated)
+    //   Tier 6:  LensTools.tools().count + 4 Tier-6 recipe tools  (27)
+    //   Tier 7:  RecipeTools.tools().count minus 4 Tier-6 tools    (8)
+    //   Tier 8:  DatasetTools.tools().count                        (3)
+    //   Tier 9:  VaultTools.vaultToolNames.count (vault-on only)   (5)
+    //   Tier 10: 1 (moot_federated_search, always present)         (1)
+    //   Total vault-on:  ToolProjection.tools(environment:[:]).count (71)
+    //   Total vault-off: ToolProjection.tools(environment:["MOOTX01_VAULT":"0"]).count (65)
+    private static var estateStatusGuide: String {
+        // Tier counts derived from the live registry.
+        let tier1 = ToolProjection.coreMemoryTools().count
+        let tier2 = ToolProjection.connectionTools().count
+        let tier3 = ToolProjection.knowledgeGraphTools().count
+        let tier4 = ToolProjection.journalTools().count
+        // estateTools() always includes moot_palace_import (8 total).
+        // The 7 non-vault-gated estate tools are always present.
+        let tier5Always  = ToolProjection.estateTools().filter { $0.name != "moot_palace_import" }.count
+        // Tier 6: 4 Tier-6 recipe tools + all lens tools (moot_list_lenses shows these 27).
+        let tier6RecipeCount = 4  // list_lenses, synthesize, recall_precise, recall_shaped
+        let tier6 = tier6RecipeCount + LensTools.tools().count
+        // Tier 7: remaining recipe tools (dream, consolidate, distilled, recollect, hunt,
+        //         list_recipes, run_migration, confirm_migration).
+        let tier7 = RecipeTools.tools().count - tier6RecipeCount
+        let tier8 = DatasetTools.tools().count
+        let tier9 = VaultTools.vaultToolNames.count  // vault-on only
+        let tier10 = 1  // moot_federated_search
+        // Totals from the live registry (empty env = vault-on default).
+        let totalVaultOn  = ToolProjection.tools(environment: [:]).count
+        let totalVaultOff = ToolProjection.tools(environment: ["MOOTX01_VAULT": "0"]).count
 
-        Cold-start sequence for a new session:
-          1. moot_estate_status          — this call; get counts + protocol
-          2. moot_list_lenses            — see all cognition tools
-          3. moot_memory_search          — start retrieving
-          4. moot_file_memory            — start storing
+        return """
+            moot_estate_status — Estate overview and session orientation.
 
-        Tier 1 — Core Memory (7 tools):
-          moot_file_memory, moot_memory_search, moot_update_memory,
-          moot_withdraw_memory, moot_erase_memory, moot_confirm_memory,
-          moot_move_memory
+            Cold-start sequence for a new session:
+              1. moot_estate_status          — this call; get counts + protocol
+              2. moot_list_lenses            — see all cognition tools
+              3. moot_memory_search          — start retrieving
+              4. moot_file_memory            — start storing
 
-        Tier 2 — Connections (3 tools):
-          moot_link_memories, moot_connection_search, moot_connection_map
+            Tier 1 — Core Memory (\(tier1) tools):
+              moot_file_memory, moot_memory_search, moot_memory_list,
+              moot_memory_get, moot_update_memory, moot_withdraw_memory,
+              moot_erase_memory, moot_confirm_memory, moot_move_memory
 
-        Tier 3 — Knowledge Graph (4 tools):
-          moot_file_fact, moot_fact_search, moot_retire_fact, moot_fact_timeline
+            Tier 2 — Connections (\(tier2) tools):
+              moot_link_memories, moot_review_tunnel,
+              moot_connection_search, moot_connection_map
 
-        Tier 4 — Journal (2 tools):
-          moot_write_journal, moot_read_journal
+            Tier 3 — Knowledge Graph (\(tier3) tools):
+              moot_file_fact, moot_fact_search, moot_retire_fact, moot_fact_timeline
 
-        Tier 5 — Estate (3 tools):
-          moot_estate_status, moot_estate_map, moot_estate_ping
+            Tier 4 — Journal (\(tier4) tools):
+              moot_write_journal, moot_read_journal
 
-        Tier 6 — Cognition (18 tools):
-          moot_synthesize, moot_list_lenses, and 16 moot_lens_* tools.
-          Call moot_list_lenses for the full menu.
+            Tier 5 — Estate (\(tier5Always) tools + 1 vault-gated):
+              moot_estate_status, moot_estate_map, moot_estate_ping,
+              moot_monitoring_status, moot_reindex, moot_drain_status,
+              moot_reclassify_fdc
+              [vault-on only: moot_palace_import]
 
-        Tier 7 — Migration (2 tools):
-          moot_run_migration, moot_confirm_migration
+            Tier 6 — Cognition (\(tier6) tools):
+              moot_list_lenses, moot_synthesize, moot_recall_precise,
+              moot_recall_shaped, and \(LensTools.tools().count) moot_lens_* tools.
+              Call moot_list_lenses for the full menu.
 
-        Tier 8 — Vault (4 tools):
-          moot_vault_export, moot_vault_import, moot_vault_status,
-          moot_vault_reconcile
+            Tier 7 — Extended Cognition (\(tier7) tools):
+              moot_dream, moot_consolidate, moot_recall_distilled,
+              moot_recollect, moot_hunt_contradictions, moot_list_recipes,
+              moot_run_migration, moot_confirm_migration
 
-        Tier 9 — Federation (1 tool):
-          moot_federated_search
+            Tier 8 — Dataset (\(tier8) tools):
+              moot_file_dataset, moot_dataset_query, moot_dataset_stats
 
-        Teaching mechanism:
-          Add teachme:true to any tool call to receive a usage guide instead
-          of executing. No estate touch occurs.
+            Tier 9 — Vault (\(tier9) tools, vault-on only):
+              moot_vault_export, moot_vault_import, moot_vault_status,
+              moot_vault_reconcile, moot_vault_job
 
-        Coaching mechanism:
-          Watch for hint: lines appended to successful responses. These appear
-          when the server detects a suboptimal call pattern.
+            Tier 10 — Federation (\(tier10) tool):
+              moot_federated_search
 
-        Total: 56 tools. All accept teachme. All may return hint.
-        """
+            Teaching mechanism:
+              Add teachme:true to any tool call to receive a usage guide instead
+              of executing. No estate touch occurs.
+
+            Coaching mechanism:
+              Watch for hint: lines appended to successful responses. These appear
+              when the server detects a suboptimal call pattern.
+
+            Total: \(totalVaultOn) tools vault-on / \(totalVaultOff) vault-off.
+            All accept teachme. All may return hint.
+            """
+    }
 
     private static let estateMapGuide = """
         moot_estate_map — Return the estate's structural map.
@@ -765,6 +842,7 @@ enum TeachmeGuides {
         // Tier 1
         case "moot_file_memory":     return fileMemoryGuide
         case "moot_memory_search":   return memorySearchGuide
+        case "moot_memory_list":     return memoryListGuide
         case "moot_memory_get":      return memoryGetGuide
         case "moot_update_memory":   return updateMemoryGuide
         case "moot_withdraw_memory": return withdrawMemoryGuide
@@ -1059,13 +1137,14 @@ enum TeachmeGuides {
         """
         \(name) — Vault control tool.
 
-        Vault tools manage estate export, import, and reconciliation.
+        Vault tools manage estate export, import, reconciliation, and async jobs.
 
-        Workflow:
+        Surface (\(VaultTools.vaultToolNames.count) tools):
           - moot_vault_export — export the estate to an archive
           - moot_vault_import — import a previously exported archive
           - moot_vault_status — check the vault archive state
           - moot_vault_reconcile — detect drift between live estate and archive
+          - moot_vault_job — poll or cancel an async vault job (export/import)
 
         Reconcile two-step workflow:
           1. moot_vault_reconcile vaultPath=<path> — dry-run: reports added/modified/deleted
@@ -1077,6 +1156,8 @@ enum TeachmeGuides {
         Common mistakes:
           - Importing without verifying vault status first.
           - Running reconcile without a prior export; there is nothing to compare.
+          - Ignoring an async job handle. Large exports/imports return a job_id;
+            use moot_vault_job to poll for completion.
         """
     }
 
