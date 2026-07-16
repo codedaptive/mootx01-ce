@@ -1,8 +1,8 @@
 ---
-title: EngramLib Specification
-version: 1.0.0
+title: EngramLib Interface
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: Public API surface for EngramLib in both the Swift and Rust ports — the Engram type, similarity / nearest-neighbour / threshold / union operations, the Match result type, and the Session reuse handle.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -20,12 +20,16 @@ relates_to:
   `Engram` typealias + initializer, `Session`
 - `Sources/EngramLib/Match.swift` — the `Match` result type
 - `Tests/EngramLibTests/`, `Package.swift`
+- depends on `SubstrateTypes` + `SubstrateKernel`
 
 **Rust:** `packages/libs/EngramLib/rust/`
 
 - `src/lib.rs` — crate `engram-lib`: `Engram` type alias, `EngramLib`,
-  `Session`, `Match`
-- depends on `substrate-lib`
+  `Session`
+- `src/matchx.rs` — the `Match` result type (re-exported from the
+  crate root)
+- depends on `substrate-types` + `substrate-kernel`; forwards the
+  optional `simd-nightly` feature to `substrate-kernel`
 
 ## § 2 — Public types
 
@@ -37,7 +41,7 @@ The encoded-memory unit; a stable alias over the substrate fingerprint
 **Swift:**
 
 ```swift
-public typealias Engram = SubstrateLib.Fingerprint256
+public typealias Engram = SubstrateTypes.Fingerprint256
 
 extension Engram {
     /// Construct an engram from four 64-bit blocks (treated opaquely).
@@ -69,7 +73,9 @@ public struct Match: Hashable, Sendable, Codable, Comparable {
 **Rust:**
 
 ```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Match { pub index: usize, pub distance: u32 }
+// Ord/PartialOrd: by distance asc, then index asc
 ```
 
 ### `EngramLib.Session`

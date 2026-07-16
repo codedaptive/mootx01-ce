@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.14.0
+version: 1.15.0
 status: active
-date: 2026-07-12
+date: 2026-07-16
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -245,12 +245,21 @@ from. Omit for agent-asserted freestanding triples (the server supplies `""` as 
 unanchored sentinel). Supply when the fact was derived from a specific memory to preserve
 provenance.
 
-### Recipe, lens, and vault tools (above the interface tier)
+### Recipe, lens, vault, and dataset tools
 
-CognitionKit recipe tools (`moot_list_lenses`, `moot_synthesize`, `moot_run_migration`,
-`moot_confirm_migration`), sixteen reasoning-lens tools (`moot_lens_*`), and four vault
-control tools (`moot_vault_*`) sit above the interface tier with `.recipe` and `.vault`
-provenance respectively. Total: 44 tools (19 interface + 1 federation + 20 recipe/lens + 4 vault).
+Twelve CognitionKit recipe tools (`moot_list_lenses`, `moot_list_recipes`,
+`moot_synthesize`, `moot_recall_precise`, `moot_recall_shaped`,
+`moot_run_migration`, `moot_confirm_migration`, `moot_dream`, `moot_consolidate`,
+`moot_recall_distilled`, `moot_recollect`, `moot_hunt_contradictions`),
+twenty-three reasoning-lens tools (`moot_lens_*`), and five vault control tools
+(`moot_vault_export`, `moot_vault_import`, `moot_vault_status`,
+`moot_vault_reconcile`, `moot_vault_job`) carry `.recipe` and `.vault`
+provenance respectively. Three tabular-dataset tools (`moot_file_dataset`,
+`moot_dataset_query`, `moot_dataset_stats`, MX-TAB-7) carry `.interface`
+provenance — always visible, never vault-gated. Total: 71 tools vault-on,
+65 vault-off (30 interface: 22 five-tier + 4 maintenance + 1 monitoring + 3
+dataset; 1 federation; 35 recipe/lens; 5 vault). For the full enumeration see
+ARIA_MCP_INTERFACE.md §2.
 
 ### Conformance contract
 
@@ -297,22 +306,27 @@ Invariants:
 
 ### Nine-tier `moot_estate_status teachme:true` guide
 
-The `TeachmeGuides` entry for `moot_estate_status` is replaced with a
-nine-tier surface summary covering all 44 tools across Tier 1 (Core Memory)
-through Tier 9 (Federation), plus the teachme and coaching mechanisms.
-The guide states "44 tools" and names the cold-start sequence explicitly.
+The `TeachmeGuides` entry for `moot_estate_status` is a nine-tier surface
+summary covering tiers 1–9 plus the teachme and coaching mechanisms, with a
+total count line ("56 tools" as of the current code). The cold-start sequence
+is named explicitly. Note: the guide's tier tallies and total are updated only
+when code changes land; the authoritative live count is in
+ARIA_MCP_INTERFACE.md §2.
 
 ### `moot_list_lenses` cognition menu
 
-`RecipeTools.runListRecipes()` now returns a one-block-per-tool cognition menu
-assembled from `LensTools.tools()` and `RecipeTools.tools()`, listing only the
-18 Tier 6 cognition tools (16 lens + `moot_synthesize` + `moot_list_lenses`).
-Migration tools (Tier 7) are intentionally excluded — they have their own tier
-and teachme guides.
+`RecipeTools.runListRecipes()` returns a one-block-per-tool cognition menu
+assembled from `LensTools.tools()` and four Tier 6 recipe tools, listing 27
+cognition tools total (23 `moot_lens_*` tools + `moot_synthesize`,
+`moot_list_lenses`, `moot_recall_precise`, `moot_recall_shaped`).
+Migration and distillation tools (Tier 7: `moot_run_migration`,
+`moot_confirm_migration`, `moot_consolidate`, `moot_recall_distilled`,
+`moot_recollect`) are intentionally excluded — they have their own tier and
+teachme guides.
 
 Response shape:
 ```
-moot_list_lenses: 18 cognition tools
+moot_list_lenses: 27 cognition tools
 
 moot_list_lenses
   List the available reasoning lenses and CognitionKit behaviour recipes...
@@ -857,6 +871,17 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.15.0 -- 2026-07-16
+Dataset tools (MX-TAB-7, §11): corrects the stale "44 tools / 19 interface /
+16 lens / 4 vault / 4 recipe" figures throughout §11 to reflect the current
+shipped surface (71 vault-on / 65 vault-off; 22 five-tier interface tools;
+23 lens tools; 5 vault tools; 12 recipe tools; 3 new dataset tools
+`moot_file_dataset`, `moot_dataset_query`, `moot_dataset_stats`). Updates
+§12 moot_list_lenses cognition-menu count from 18 to 27 (23 lens + 4 recipe
+tier-6 tools). Corrects the guide's stated total from the wrong "44 tools"
+(written when the guide code said 44; the code now says "56 tools") to "56
+tools", pointing to ARIA_MCP_INTERFACE.md §2 as the authoritative live count.
 
 ### 1.14.0 -- 2026-07-12
 Contradiction hunter surface (§11): `moot_hunt_contradictions` (recipe,

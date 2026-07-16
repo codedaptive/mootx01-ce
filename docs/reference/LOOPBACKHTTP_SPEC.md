@@ -1,6 +1,6 @@
 ---
 title: LoopbackHTTP Specification
-version: 1.0.1
+version: 1.0.2
 status: active
 description: Specifies the shared loopback-pinned HTTP/1.1 server primitive (POSIXSocket, HTTPRequest, HTTPResponse, SSEStream) used by the MOOTx01 resident daemons.
 spec_type: kit
@@ -90,6 +90,17 @@ accept or reject is the consumer's, composed above the transport. This keeps the
 same binary shipping unchanged in Community Edition (loopback, no auth) and
 Enterprise Edition (whose v2 remote/OAuth layer composes above this transport).
 
+**CSRF note — SSE and the Origin header.** `HTTPRequest.wantsEventStream` is
+true when the client sets `Accept: text/event-stream` or appends `?stream=1`.
+A browser SSE request via `?stream=1` is a plain GET, so the browser's CORS
+preflight does NOT fire for same-origin policies. A malicious page on a
+different origin can therefore open an SSE connection to a loopback port that
+the browser can reach. Consumers that expose sensitive data over SSE MUST
+validate `request.origin` before calling `SSEStream.writeHead()` and MUST
+reject connections from unexpected origins. The transport does not enforce
+this — per ADR-LOOPBACKHTTP-001 condition 3, accept/reject policy belongs to
+the consumer layer.
+
 ## 7. Request limits
 
 `HTTPRequest.read(fd:maxHeaderBytes:maxBodyBytes:)` takes per-listener size caps
@@ -137,6 +148,9 @@ live in moot-mgr's own suite.
 - **I-5**: Zero external dependencies; Swift + platform socket module only.
 
 ## Changelog
+
+### 1.0.2 -- 2026-07-16
+Added CSRF note to §6 (auth-free invariant): SSE `?stream=1` requests bypass CORS preflight; consumers MUST validate `request.origin` before upgrading to an event stream. No invariant changes — this documents existing required behavior that was only in the source doccomments.
 
 ### 1.0.1 -- 2026-06-15
 Corrected the moot-mgr daemon port from the retired debug port `7077` to its current default `4200` (the mootx01 daemon default is `4242`). Both are defaults that hunt upward to the next free port if the base is already bound.

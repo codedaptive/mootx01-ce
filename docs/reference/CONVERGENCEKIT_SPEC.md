@@ -1,6 +1,6 @@
 ---
 title: ConvergenceKit Specification
-version: 1.0.0
+version: 1.1
 status: active
 date: 2026-06-14
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -241,12 +241,15 @@ Errors are the `SyncError` enum (shape in INTERFACE § 4). Categories:
 | `peerUnreachable(identity)` | Federation peer not reachable | surface; retry |
 | `authenticationFailed(detail)` | Federation identity/auth failure | surface; do not apply |
 | `unsupportedTable(name)` | inbound record names a table absent from the manifest | reject record |
+| `corruptRemoteIdentity(recordName)` | CloudKit-only: CKRecord's `recordName` cannot be parsed as a UUID | quarantine record; counted as conflict; pull continues | 
 
 Per-cycle inbound rejections (`schemaMismatch`, `kitMismatch`,
-`decodingFailure`, `unsupportedTable`, signature failure) are caught,
-logged, and counted in the receipt's `conflicts`; they do not abort the
-whole cycle. `notEnabled`, `alreadyEnabled`, `transportFailure`, and
-`encodingFailure` are thrown to the caller.
+`decodingFailure`, `unsupportedTable`, `corruptRemoteIdentity`, signature
+failure) are caught, logged, and counted in the receipt's `conflicts`;
+they do not abort the whole cycle. `notEnabled`, `alreadyEnabled`,
+`transportFailure`, and `encodingFailure` are thrown to the caller.
+`corruptRemoteIdentity` is CloudKit-only; it is never thrown by the
+Federation or None backends.
 
 ## § 7 — Conformance requirements
 
@@ -284,6 +287,10 @@ None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.1 -- 2026-07-16
+- Added `corruptRemoteIdentity(recordName)` to § 6 error model (CloudKit-only; per-record quarantine, does not abort the pull cycle).
+- Clarified which error categories are per-cycle vs. cycle-aborting.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

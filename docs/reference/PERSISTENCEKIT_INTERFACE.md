@@ -3,7 +3,7 @@ title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-28
-version: 1.6.0
+version: 1.8.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -12,15 +12,15 @@ relates_to:
   - PERSISTENCEKIT_SPEC.md  (the contract this interface implements)
 purpose: |
   Public API surface of PersistenceKit in both ports, in two tiers
-  within § 2. Tier 1 is the CONSUMED CONTRACT — the 21 types other
-  packages actually import (the Storage protocol, its five sub-store
-  protocols, the value model, schema declaration, predicate algebra,
-  and the three backend entry points) — documented in full with
-  bilingual signatures. Tier 2 (§ 2's closing subsection) is the
-  remaining public surface present in the package but not directly
+  within § 2. Tier 1 is the CONSUMED CONTRACT — the Storage protocol
+  and its five sub-store protocols (RowStore, BlobStore, AuditLog,
+  StorageObserver, DatasetStore), the value model, schema declaration,
+  predicate algebra, and the three backend entry points — documented in
+  full with bilingual signatures. Tier 2 (§ 2's closing subsection) is
+  the remaining public surface present in the package but not directly
   named by any consumer: a table of contents (name + role + source
   file). The companion SPEC carries the behavioral contracts
-  (invariants I-1…I-10, conformance C-1…C-8).
+  (invariants I-1…I-27, conformance C-1…C-11).
 ---
 
 # PersistenceKit Interface
@@ -83,7 +83,10 @@ Naming differs by port convention (Swift `insert(table:values:)` /
 #### `Storage`
 
 The top-level protocol every backend conforms to; surfaces the five
-sub-stores and the transaction/migration lifecycle (SPEC § 4, I-1).
+sub-stores (rowStore, blobStore, auditLog, observer, datasetStore) and
+the transaction/migration lifecycle (SPEC § 4, I-1).
+`StorageIntrospection` is a separate optional-capability protocol, not
+a Storage requirement.
 
 **Swift:**
 
@@ -94,6 +97,11 @@ public protocol Storage: Sendable {
     var blobStore: any BlobStore { get }
     var auditLog: any AuditLog { get }
     var observer: any StorageObserver { get }
+    /// Dataset store for user-defined tabular data (MX-TAB-1).
+    /// Default implementation throws `StorageError.featureGated("datasetStore")`.
+    /// SQLiteStorage and InMemoryStorage override with a concrete implementation.
+    /// PostgreSQLStorage and third-party conformers inherit the default (SPEC B-18).
+    var datasetStore: any DatasetStore { get throws }
 
     func open(schema: SchemaDeclaration) async throws
     func close() async
@@ -111,6 +119,8 @@ public extension Storage {
     func transaction<T: Sendable>(
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T
+    // Default datasetStore throws featureGated("datasetStore").
+    var datasetStore: any DatasetStore { get throws }
 }
 ```
 
@@ -123,6 +133,10 @@ pub trait Storage: Send + Sync {
     fn blob_store(&self) -> Arc<dyn BlobStore>;
     fn audit_log(&self) -> Arc<dyn AuditLog>;
     fn observer(&self) -> Arc<dyn StorageObserver>;
+    /// Dataset store for user-defined tabular data (MX-TAB-1).
+    /// Default returns `Err(StorageError::FeatureGated { feature: "datasetStore" })`.
+    /// SqliteStorage and InMemoryStorage override; PostgresStorage and others inherit the default.
+    fn dataset_store(&self) -> StorageResult<Arc<dyn DatasetStore>>;
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()>;
     fn close(&self) -> StorageResult<()>;
     fn current_schema_version(&self) -> StorageResult<i32>;
@@ -194,15 +208,53 @@ public protocol RowStore: Sendable {
     func query(table: String, where predicate: StoragePredicate?, orderBy: [OrderClause],
                limit: Int?, offset: Int?) async throws -> [StorageRow]
     func count(table: String, where predicate: StoragePredicate?) async throws -> Int
+    /// Column-projecting query: returns only the named columns in each row.
+    /// `nil` columns = full read. Default ignores projection and delegates
+    /// to `query(…)`. Override on hot-path backends to avoid reading the
+    /// content blob (the "no-blob recall path").
+    func query(table: String, where predicate: StoragePredicate?,
+               orderBy: [OrderClause], limit: Int?, offset: Int?,
+               columns: [String]?) async throws -> [StorageRow]
+    /// Best-effort corpus scan: skips rows with `StorageError.corruptStoredValue`
+    /// rather than aborting. Returns `(cleanRows, skippedCount)`. Other errors
+    /// are re-thrown. Default wraps `query(columns:)` and promotes a top-level
+    /// `corruptStoredValue` to `([], 1)`. SQLiteStorage overrides for per-row skipping.
+    func querySkipCorrupt(table: String, where predicate: StoragePredicate?,
+                          orderBy: [OrderClause], limit: Int?, offset: Int?,
+                          columns: [String]?) async throws -> (rows: [StorageRow], skipped: Int)
+    // Explicit transaction boundary (GLK_BATCH1). Default is a no-op.
+    // SQLiteRowStore overrides with BEGIN IMMEDIATE / COMMIT / ROLLBACK.
+    // CachingRowStore delegates explicitly to its backing store.
+    func beginTransaction() async throws
+    func commitTransaction() async throws
+    func rollbackTransaction() async throws
 }
 public extension RowStore {
     func query(table: String, where predicate: StoragePredicate?) async throws -> [StorageRow] // orderBy [], no paging
+    // As-of temporal variants (ADR-017 §15; currently gated — returns
+    // StorageError.featureGated("asOfQuery") for any non-present coordinate):
+    func query(table: String, where predicate: StoragePredicate?,
+               orderBy: [OrderClause], limit: Int?, offset: Int?,
+               asOf: AsOfCoordinate?) async throws -> [StorageRow]
+    func query(table: String, where predicate: StoragePredicate?,
+               orderBy: [OrderClause], limit: Int?, offset: Int?,
+               columns: [String]?, asOf: AsOfCoordinate?) async throws -> [StorageRow]
+    func querySkipCorrupt(table: String, where predicate: StoragePredicate?,
+                          orderBy: [OrderClause], limit: Int?, offset: Int?,
+                          columns: [String]?, asOf: AsOfCoordinate?) async throws -> (rows: [StorageRow], skipped: Int)
 }
 ```
 **Rust:** `pub type RowKey = uuid::Uuid;` `pub trait RowStore: Send + Sync`
-with `insert`, `upsert`, `update`, `delete`, `query`, `count` returning
-`StorageResult<…>`; `StorageRow { values: HashMap<String, TypedValue> }`,
-`RowHandle { table, key }`.
+with `insert`, `upsert`, `update`, `delete`, `query`, `count`, plus
+`query_projected(table, columns, predicate, order_by, limit, offset)` (column-projecting),
+`query_skip_corrupt(table, predicate, order_by, limit, offset)` (corrupt-skip),
+`query_projected_skip_corrupt(table, columns, predicate, order_by, limit, offset)` (projected + corrupt-skip),
+as-of temporal variants `query_as_of`, `query_projected_as_of`, `query_skip_corrupt_as_of`
+(all gated — return `StorageError::FeatureGated` for `AsOf` coordinate),
+and explicit transaction boundary `begin_transaction() / commit_transaction() / rollback_transaction()`
+(no-op defaults; `SqliteRowStore` overrides with `BEGIN IMMEDIATE / COMMIT / ROLLBACK`).
+All non-temporal methods return `StorageResult<…>`.
+`StorageRow { values: HashMap<String, TypedValue> }`, `RowHandle { table, key }`.
 
 #### `BlobStore`
 
@@ -286,6 +338,85 @@ public final class NoOpObserver: StorageObserver, Sendable {
 **Rust:** `pub enum StorageEvent { Insert, Update, Delete }`,
 `pub struct TableChange { table, event, row_key, values, hlc }`,
 `pub trait StorageObserver`, `pub struct NoOpObserver`.
+
+#### `DatasetStore` / `DatasetSchema` / `DatasetIndexDeclaration` / `ColumnStats`
+
+Typed row I/O for user-defined dataset tables (MX-TAB-1, SPEC § 5 B-18).
+Accessed through `Storage.datasetStore`; reuses `StoragePredicate`, `OrderClause`,
+and `TypedValue` — no new query language. Each dataset owns one backend table
+(`ds_<uuid-no-hyphens>`). Column names are user-supplied and validated against
+`[A-Za-z_][A-Za-z0-9_]*` before any DDL or DML — rejection throws
+`StorageError.invalidIdentifier` with no sanitize-and-continue path (SPEC I-21).
+
+**Swift:**
+
+```swift
+/// Column declarations and optional primary-key for a dataset table.
+public struct DatasetSchema: Sendable {
+    public let columns: [ColumnDeclaration]
+    public let primaryKeyColumn: String?   // nil = backend synthetic key
+    public init(columns: [ColumnDeclaration], primaryKeyColumn: String? = nil)
+}
+
+/// Single-column secondary index declaration for a dataset table.
+public struct DatasetIndexDeclaration: Sendable {
+    public let column: String    // user-supplied; validated before DDL
+    public let unique: Bool
+    public init(column: String, unique: Bool = false)
+}
+
+/// Per-column aggregate statistics computed in SQL by the backend.
+/// min/max are `.null` when no non-null values exist.
+/// Float values for REAL columns always use TypedValue.float(Double) — never
+/// f32 — to guarantee identical JSON text across Swift and Rust legs.
+public struct ColumnStats: Sendable, Equatable {
+    public let count: Int64          // COUNT("col")
+    public let distinctCount: Int64  // COUNT(DISTINCT "col")
+    public let nullCount: Int64      // COUNT(*) - COUNT("col")
+    public let min: TypedValue
+    public let max: TypedValue
+    public init(count: Int64, distinctCount: Int64, nullCount: Int64,
+                min: TypedValue, max: TypedValue)
+}
+
+public protocol DatasetStore: Sendable {
+    /// Create the backing table. Idempotent (CREATE TABLE IF NOT EXISTS).
+    func createDataset(id: UUID, schema: DatasetSchema,
+                       indexes: [DatasetIndexDeclaration]) async throws
+    /// Bulk-insert rows. Pre-sorts by primaryKeyColumn when declared.
+    func appendRows(id: UUID, rows: [[String: TypedValue]]) async throws
+    /// Column-projecting predicate query. columns nil = all columns.
+    func queryRows(id: UUID, predicate: StoragePredicate?,
+                   orderBy: [OrderClause], limit: Int?, offset: Int?,
+                   columns: [String]?) async throws -> [StorageRow]
+    /// Per-column aggregate statistics (COUNT, COUNT DISTINCT, MIN, MAX, NULL count).
+    func columnStats(id: UUID, column: String) async throws -> ColumnStats
+    /// Drop backing table. DROP TABLE IF EXISTS semantics — no-op if absent.
+    func dropDataset(id: UUID) async throws
+}
+
+/// Validate a user-supplied dataset column name as a SQL identifier.
+/// Accepts [A-Za-z_][A-Za-z0-9_]* only. Throws StorageError.invalidIdentifier otherwise.
+public func validateDatasetColumnIdentifier(_ name: String) throws
+
+/// Derive backing table name: `ds_` + UUID hex with hyphens stripped.
+public func datasetTableName(_ id: UUID) -> String
+
+/// Derive index name: `dsi_<uuid-no-hyphens>_<column>`.
+public func datasetIndexName(_ id: UUID, column: String) -> String
+```
+
+**Rust:** `pub struct DatasetSchema { columns: Vec<ColumnDeclaration>, primary_key_column: Option<String> }`,
+`pub struct DatasetIndexDeclaration { column: String, unique: bool }`,
+`pub struct ColumnStats { count: i64, distinct_count: i64, null_count: i64, min: TypedValue, max: TypedValue }`,
+`pub trait DatasetStore: Send + Sync` with `create_dataset`, `append_rows`, `query_rows`, `column_stats`,
+`drop_dataset` — all returning `StorageResult<…>`. Free functions `validate_dataset_column_identifier`,
+`dataset_table_name`, `dataset_index_name` in `dataset_store.rs`.
+`pub struct InMemoryDatasetStore` provides the test-double `DatasetStore` implementation.
+
+**Backends:** SQLite and InMemory override `Storage.datasetStore` / `dataset_store()` with a
+concrete implementation. PostgreSQL (MX-TAB-2) and other conformers inherit the default
+`featureGated("datasetStore")` error.
 
 #### `TypedValue` / `Column` / `ColumnType`
 
@@ -733,7 +864,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `Storage` (protocol) | `Storage` (trait) | Top-level backend protocol/trait. Swift: `async throws` methods. Rust: synchronous `StorageResult<T>` — sanctioned async/sync seam (§ 1). |
 | `StorageTransaction` (protocol) | `StorageTransaction` (trait) | Transaction handle carrying `rowStore`, `blobStore`, `auditLog`. Rust `transaction` is non-generic (object-safety; block returns `StorageResult<()>`). |
 | `IsolationLevel` | `IsolationLevel` | Three cases: `readCommitted`/`ReadCommitted`, `repeatableRead`/`RepeatableRead`, `serializable`/`Serializable`. |
-| `RowStore` (protocol) | `RowStore` (trait) | Typed row I/O. `insert`, `upsert`, `update`, `delete`, `query`, `count`, plus default as-of temporal query methods (`query(..., asOf:)` / `query_as_of`, `query(..., columns:, asOf:)` / `query_projected_as_of`, `querySkipCorrupt(..., asOf:)` / `query_skip_corrupt_as_of`). Swift `async throws` / Rust `StorageResult`. |
+| `RowStore` (protocol) | `RowStore` (trait) | Typed row I/O. Core: `insert`, `upsert`, `update`, `delete`, `query`, `count`. Column-projecting: `query(columns:)` / `query_projected`. Corrupt-skip: `querySkipCorrupt(columns:)` / `query_skip_corrupt`, `query_projected_skip_corrupt`. Explicit transaction boundary: `beginTransaction/commitTransaction/rollbackTransaction` / `begin_transaction/commit_transaction/rollback_transaction` (no-op defaults; SQLiteRowStore overrides). As-of temporal (gated — `featureGated("asOfQuery")` for any `AsOf` coordinate): `query(asOf:)` / `query_as_of`, `query(columns:asOf:)` / `query_projected_as_of`, `querySkipCorrupt(columns:asOf:)` / `query_skip_corrupt_as_of`. Swift `async throws` / Rust synchronous `StorageResult`. |
 | `RowKey` (typealias `UUID`) | `RowKey` (type alias `uuid::Uuid`) | Primary key type. |
 | `StorageRow` | `StorageRow` | `values: [String: TypedValue]` / `HashMap<String, TypedValue>`. |
 | `RowHandle` | `RowHandle` | `table: String`, `key: RowKey`. |
@@ -772,6 +903,19 @@ struct inside `IncrementalReplicationSession.swift`.
 | `StorageStats` | `StorageStats` | Introspection snapshot. See § 9. |
 | `StorageIntrospection` (protocol) | `StorageIntrospection` (trait) | Optional introspection capability. See § 9. |
 
+### Dataset store (MX-TAB-1, swift+rust)
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `DatasetStore` (protocol) | `DatasetStore` (trait) | Typed row I/O for user-defined dataset tables. Reached via `Storage.datasetStore` / `Storage::dataset_store()`. Methods: `createDataset`/`create_dataset`, `appendRows`/`append_rows`, `queryRows`/`query_rows`, `columnStats`/`column_stats`, `dropDataset`/`drop_dataset`. Swift `async throws` / Rust `StorageResult`. Default on `Storage` throws/returns `featureGated("datasetStore")`. |
+| `DatasetSchema` | `DatasetSchema` | `columns: [ColumnDeclaration]` / `Vec<ColumnDeclaration>`, `primaryKeyColumn: String?` / `primary_key_column: Option<String>`. |
+| `DatasetIndexDeclaration` | `DatasetIndexDeclaration` | `column: String`, `unique: bool`/`Bool`. |
+| `ColumnStats` | `ColumnStats` | Aggregate stats: `count`/`distinct_count`/`null_count` (Int64/i64), `min`/`max` (TypedValue). Float values for REAL columns use TypedValue.float(Double) / TypedValue::Float(f64) — f64 only, enforcing the cross-leg wire rule. |
+| `validateDatasetColumnIdentifier(_:)` (free func) | `validate_dataset_column_identifier` (free fn) | Validates `[A-Za-z_][A-Za-z0-9_]*`; throws/returns `StorageError.invalidIdentifier` otherwise. Shared seam for all backends. |
+| `datasetTableName(_:)` (free func) | `dataset_table_name` (free fn) | Derives backing table name: `ds_` + UUID hex with hyphens stripped. Generated internally — never user-supplied. |
+| `datasetIndexName(_:column:)` (free func) | `dataset_index_name` (free fn) | Derives index name: `dsi_<uuid-no-hyphens>_<column>`. |
+| — | `InMemoryDatasetStore` | Rust-only public struct providing the in-memory `DatasetStore` implementation. Swift's InMemory implementation is internal to `InMemoryStorage`. |
+
 ### Replication module (swift+rust, incremental)
 
 | Swift | Rust | Notes |
@@ -796,11 +940,33 @@ struct inside `IncrementalReplicationSession.swift`.
 | `HashParentChainProvider` | `HashParentChainProvider` | Callback type that returns the Merkle containment parent chain for a row. Swift: `public typealias HashParentChainProvider = @Sendable (...) -> (parentNodeId: UUID, grandparentNodeId: UUID)?`. Rust: `pub type HashParentChainProvider = Box<dyn Fn(&str, RowKey) -> Option<(uuid::Uuid, uuid::Uuid)> + Send + Sync>`. Returns `nil`/`None` for rows without a parent chain (root nodes, non-Merkle tables). NT-P2. |
 | `DirtyChainEvent` | `DirtyChainEvent` | Three-identifier dirty-chain event emitted by `HashingRowStore` on every write to a hashable table. Swift: `public struct DirtyChainEvent: Sendable`. Rust: `pub struct DirtyChainEvent`. Five fields: `changedRowId`/`changed_row_id`, `parentNodeId`/`parent_node_id`, `grandparentNodeId`/`grandparent_node_id` (UUID/Uuid), `contentHash`/`content_hash` (ContentHash), `table` (String). Consumed by `CachingRowStore` (Merkle invalidation, NT-P4) and Merkle rollup (NT-L3). NT-P2. |
 
+### Snapshot registry (ADR-017 §15, swift+rust)
+
+Snapshot and attestation primitives. Both legs ship in `Sources/PersistenceKit/SnapshotRegistry.swift` (Swift) and `rust/src/snapshot_registry.rs` (Rust). The registry records WHEN (an HLC); attestation rows record WHAT the Merkle roots were at that HLC. PersistenceKit is the correct home for these per ADR-017 layering; they are not LocusKit types.
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `SnapshotId` (`struct SnapshotId: Sendable, Hashable, CustomStringConvertible`) | `pub struct SnapshotId { pub raw_value: String }` | Opaque string identifier for a snapshot, keyed by `rawValue: String` (Swift) / `raw_value: String` (Rust). String-typed for cross-backend portability (SQLite TEXT PK, PostgreSQL TEXT PK, InMemory dict key). Swift: `public init(_ rawValue: String)` + `static func mint() -> SnapshotId`. Rust: `pub fn new(raw_value)` + `pub fn mint() -> Self`. |
+| `SnapshotRecord` (`struct SnapshotRecord: Sendable, Equatable`) | `pub struct SnapshotRecord` | Snapshot registry row. Fields: `snapshotId`/`snapshot_id` (`SnapshotId`), `hlc` (`HLC`), `label` (`String?`/`Option<String>`), `createdAt`/`created_at` (`Date`/`i64` wall-clock seconds since Unix epoch). |
+| `SnapshotAttestation` (`struct SnapshotAttestation: Sendable, Equatable`) | `pub struct SnapshotAttestation` | Attestation row. Fields: `snapshotId`/`snapshot_id` (`SnapshotId`), `subjectKind`/`subject_kind` (`String`), `subjectId`/`subject_id` (`String`), `merkleRoot`/`merkle_root` (`String`), `keyVersion`/`key_version` (`Int64?`/`Option<i64>`) — HMAC key version when this attestation is commitment-bearing (§17); `nil`/`None` for non-commitment attestations. |
+| `SnapshotTables` (`enum SnapshotTables`) | Constants `SNAPSHOT_REGISTRY_TABLE`, `SNAPSHOT_ATTESTATIONS_TABLE` (`&str`) | Swift: caseless-enum namespace with `static let registry = "snapshot_registry"` and `static let attestations = "snapshot_attestations"`. Rust: two `pub const &str` values in `snapshot_registry.rs`. Same string values on both legs. |
+| `SnapshotSchema` (`enum SnapshotSchema`) | `pub fn registry_table_declaration()`, `pub fn attestations_table_declaration()` | Swift: caseless-enum namespace with `static let registryTable: TableDeclaration` and `static let attestationsTable: TableDeclaration`. Rust: two `pub fn` returning `TableDeclaration`. Both produce identical schema: `snapshot_registry(snapshot_id TEXT PK, hlc HLC, label TEXT?, created_at TIMESTAMP)` and `snapshot_attestations(snapshot_id TEXT, subject_kind TEXT, subject_id TEXT, merkle_root TEXT, key_version INT?, PK(snapshot_id, subject_kind, subject_id))`. |
+| `SnapshotRegistryOps` (`enum SnapshotRegistryOps`) | Free functions in `snapshot_registry.rs` | Swift: caseless-enum namespace with four `public static` funcs: `createSnapshot(rowStore:hlc:label:createdAt:attestations:) async throws -> SnapshotRecord`, `listSnapshots(rowStore:) async throws -> [SnapshotRecord]`, `deleteSnapshot(rowStore:snapshotId:) async throws -> Bool`, `attestations(rowStore:snapshotId:) async throws -> [SnapshotAttestation]`. Rust: equivalent `pub fn create_snapshot(…) -> StorageResult<SnapshotRecord>`, `pub fn list_snapshots(…) -> StorageResult<Vec<SnapshotRecord>>`, `pub fn delete_snapshot(…) -> StorageResult<bool>`, `pub fn snapshot_attestations(…) -> StorageResult<Vec<SnapshotAttestation>>`. Semantics identical on both legs. |
+
+#### GC pin (ADR-017 §15, swift+rust)
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `GCPin` (`enum GCPin`) | Free functions in `rust/src/gc_pin.rs` | Swift: caseless-enum namespace with `static func minimumRetainableHlc(rowStore:) async throws -> HLC?` and `static func isPinned(rowStore:rowHlc:) async throws -> Bool`. Rust: `pub fn minimum_retainable_hlc(row_store: &dyn RowStore) -> StorageResult<Option<HLC>>` and `pub fn is_pinned(row_store: &dyn RowStore, row_hlc: HLC) -> StorageResult<bool>` — free functions in `persistence_kit::gc_pin`, not a type. The caseless-enum namespace type has no Rust counterpart; the operations are present on both legs with identical semantics (ADR-017 §12 GC pin boundary). |
+
 ### Rust-only types (no Swift public counterpart)
 
 | Rust type | Source file | Reason for Rust-only |
 |---|---|---|
 | `DirtyKey` | `rust/src/incremental_replication.rs` | The Swift port has an internal (non-`public`) `struct DirtyKey` inside `IncrementalReplicationSession.swift`. The Rust port exposes it as `pub struct DirtyKey` because Rust's ownership model requires callers to construct and pass dirty keys explicitly. This is an implementation-visibility difference, not a parity gap in observable behaviour. |
+| `PostgresTlsMode` | `rust/src/postgres_tls.rs` | TLS mode knob for PostgreSQL connections (SECFIX-WS2-PK F3). `pub enum PostgresTlsMode`: three variants — `Disable` (plaintext, loopback/Unix-socket only), `Prefer` (attempt TLS; fall back if server does not support), `Require` (TLS mandatory; fail if server does not offer). Parsed from `ARIA_MCP_POSTGRES_TLS` env var via `PostgresTlsMode::from_env()`; unknown values default to `Prefer` (safe default). Swift uses NIOSSL transport wired directly in `PostgreSQLPool.swift`; there is no named Swift enum. |
+| `SslModeRank` | `rust/src/postgres_tls.rs` | Security ranking for libpq `sslmode` values (SECFIX-WS2-PK F3). `pub enum SslModeRank`: six variants ordered weakest-to-strongest — `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCa`, `VerifyFull`. Implements `PartialOrd`/`Ord` so the no-downgrade rule `max(env_rank, dsn_rank)` reduces to an `Ord` comparison. `pub fn from_str(s: &str) -> Option<Self>` parses libpq sslmode strings; `pub fn as_str(self) -> &'static str` serialises back. No Swift counterpart; the Swift pool does not expose a separate rank type. |
+| `effective_sslmode` (free fn) | `rust/src/postgres_tls.rs` | No-downgrade sslmode computation (SECFIX-WS2-PK F3). Signature: `pub fn effective_sslmode(conn_str: &str, env_mode: PostgresTlsMode) -> (String, bool)`. Returns `(effective_conn_str, use_tls)`. Applies `max(env_mode_rank, dsn_sslmode_rank)`: the env var may raise security above the DSN's explicit setting, but must never lower it. Unrecognised DSN sslmode values are preserved verbatim and a TLS connector is mandated. Called by `Pool::open_connection` in `postgres.rs` before constructing the transport. No Swift counterpart. |
 
 ### Swift-only types (no Rust public counterpart)
 
@@ -810,10 +976,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `ErasureLedgerEntry` | `Sources/PersistenceKit/ErasureLedger.swift:15` | Ledger row for expunge provenance (ADR-017 §13). Swift: `public struct ErasureLedgerEntry: Sendable, Equatable`. Records that a row id was erased — stores the fact of erasure, never the content. Rust parity pending; NT-P3/L4. |
 | `ErasureOverlay` | `Sources/PersistenceKit/ErasureOverlay.swift:50` | Read-path decorator (caseless enum namespace) that hides expunged content. Swift: `public enum ErasureOverlay`. Two-phase fail-closed: any row id in the erasure ledger returns payload nulled regardless of which temporal version was selected (ADR-017 §14). Rust parity pending; NT-P3. |
 | `ErasureOverlayConfig` | `Sources/PersistenceKit/ErasureOverlay.swift:22` | Configuration for the `ErasureOverlay` decorator. Swift: `public struct ErasureOverlayConfig: Sendable`. Rust parity pending; NT-P3. |
-| `GCPin` | `Sources/PersistenceKit/GCPin.swift:17` | Snapshot-aware garbage collection pin (caseless enum namespace). Swift: `public enum GCPin`. Prevents a snapshot's referenced rows from being GC'd while the snapshot pin is live (ADR-017 §12). Rust parity pending; NT-P3. |
-| `SnapshotId` | `Sources/PersistenceKit/SnapshotRegistry.swift:18` | UUID wrapper for snapshot identity. Swift: `public struct SnapshotId: Sendable, Hashable, CustomStringConvertible`. Typed wrapper over a `UUID`; exposes `value: UUID` and `CustomStringConvertible` for diagnostics. Rust parity pending; NT-P1. |
-| `SnapshotRecord` | `Sources/PersistenceKit/SnapshotRegistry.swift:32` | Snapshot metadata row. Swift: `public struct SnapshotRecord: Sendable, Equatable`. Records the snapshot registry entry (id, label, hlc, createdAt). **Layering note:** Rust port places a type of the same name in `LocusKit/merkle_rollup.rs` (see LocusKit concordance). Swift placement in PersistenceKit is correct per ADR-017 PersistenceKit-first layering; Rust should be relocated from LocusKit. NT-P1/L4. |
-| `SnapshotAttestation` | `Sources/PersistenceKit/SnapshotRegistry.swift:47` | Attestation row with `subjectKind` (estate/wing/corpus), `subjectId`, `merkleRoot`. Swift: `public struct SnapshotAttestation: Sendable, Equatable`. Records WHAT the Merkle roots were at snapshot time (registry records WHEN). **Layering note:** Rust port places a type of the same name in `LocusKit/merkle_rollup.rs` (see LocusKit concordance). Swift placement in PersistenceKit is correct; Rust should be relocated. NT-P1/L4. |
+| `GCPin` | `Sources/PersistenceKit/GCPin.swift:17` | Snapshot-aware garbage collection pin (caseless enum namespace). Swift: `public enum GCPin`. Rust ships equivalent free functions (`minimum_retainable_hlc`, `is_pinned`) in `rust/src/gc_pin.rs`; there is no Rust type named `GCPin`. See "GC pin" cross-leg table in the Snapshot registry subsection above. |
 
 ### Encryption types
 
@@ -1179,6 +1342,22 @@ dependency). IntellectusLib has zero in-repo dependencies, so the
 *End of PersistenceKit Interface.*
 
 ## Changelog
+
+### 1.7.0 -- 2026-07-16
+MX-TAB-1: Added DatasetStore protocol and its associated types — DatasetSchema,
+DatasetIndexDeclaration, ColumnStats — plus helper free functions
+validateDatasetColumnIdentifier / datasetTableName / datasetIndexName (both ports).
+Added Storage.datasetStore (Swift throwing accessor) / Storage::dataset_store (Rust)
+to the Storage protocol signature in § 2 Tier 1 and corrected the sub-store count
+to five (rowStore, blobStore, auditLog, observer, datasetStore; StorageIntrospection
+is a separate optional-capability protocol).
+Added complete RowStore expansion in § 2 Tier 1: column-projecting query (query(columns:)
+/ query_projected), corrupt-skip scan (querySkipCorrupt / query_skip_corrupt /
+query_projected_skip_corrupt), explicit transaction boundary (beginTransaction /
+commitTransaction / rollbackTransaction — no-op defaults, SQLiteRowStore overrides),
+and the gated as-of temporal variants (query(asOf:) / query_as_of, etc.) — all were
+present in source but missing from the doc. Updated § 7 concordance RowStore row to
+cover all method groups. Added § 7 "Dataset store (MX-TAB-1)" concordance subsection.
 
 ### 1.6.0 -- 2026-06-28
 SECFIX-WS2-PK: Added `StorageError.invalidIdentifier(name:)` /

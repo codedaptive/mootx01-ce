@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-14
-version: 1.0.0
+version: 1.2
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -55,7 +55,7 @@ Four library products: `ConvergenceKit`, `ConvergenceKitNone`,
 - `src/federation.rs` — `FederationSyncEngine`, `Relay` (transport
   trait), `FederationRelay` (in-process `impl Relay`), `SignedEnvelope`,
   `PayloadKind`, `envelope_signing_bytes`, `LocalIdentity`,
-  `PeerIdentity`, `verify_signature`
+  `PeerIdentity`, `verify_signature`, `PairedPeer`
 - `src/pairing.rs` — `HyperplaneFamilySpec`, `PairingProposal`,
   `PairingAcceptance`, `proposal_signing_bytes`
 
@@ -357,13 +357,31 @@ public enum CKRecordMapping {
     public static func decode(_ record: CKRecord) throws -> DecodedRecord
 }
 
-public struct DecodedRecord: Sendable {
-    public let table: String
-    public let rowKey: UUID
-    public let values: [String: TypedValue]
+/// Sync metadata extracted from the `_sync*` reserved fields of a CKRecord.
+/// Carried separately from `values` so `values` remains clean (no `_sync*` keys)
+/// while the engine retains what it needs for conflict resolution and HLC
+/// persistence.
+public struct SyncMeta: Sendable {
     public let hlc: HLC
     public let schemaVersion: Int
     public let kitID: String
+}
+
+/// Decoded CKRecord: app-data values plus sync metadata. `hlc`, `schemaVersion`,
+/// and `kitID` are computed convenience accessors backed by `syncMeta`.
+public struct DecodedRecord: Sendable {
+    public let table: String
+    public let rowKey: UUID
+    /// App-data values. Contains no `_sync*` keys.
+    public let values: [String: TypedValue]
+    /// Sync metadata extracted during decode.
+    public let syncMeta: SyncMeta
+    /// Convenience: `syncMeta.hlc`
+    public var hlc: HLC { syncMeta.hlc }
+    /// Convenience: `syncMeta.schemaVersion`
+    public var schemaVersion: Int { syncMeta.schemaVersion }
+    /// Convenience: `syncMeta.kitID`
+    public var kitID: String { syncMeta.kitID }
 }
 ```
 
@@ -463,6 +481,12 @@ impl FederationSyncEngine {
     /// subscribes the storage observer and auto-populates the outbox on every
     /// observed write — parity with the Swift port (SPEC § 5, B-7).
     pub fn enqueue(&mut self, record: SyncRecord) -> SyncResult<()>;
+    /// Record a paired peer. The relay is shared at construction; this call
+    /// only registers the peer's public key and family so `push` knows who
+    /// to route to. Must be called symmetrically on both engines (Swift parity:
+    /// `pair(with:via:family:)` calls `acceptPeering` on the remote engine).
+    pub fn pair(&mut self, peer: &FederationSyncEngine,
+                family: HyperplaneFamilySpec) -> SyncResult<()>;
 }
 
 // Transport abstraction (hosted-sync hook): the engine holds `Arc<dyn
@@ -471,6 +495,10 @@ impl FederationSyncEngine {
 pub trait Relay: Send + Sync {
     fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
+    /// Deliver to one specific peer (by public key). Used by `push` to route
+    /// envelopes only to explicitly paired peers rather than broadcasting to
+    /// all relay participants.
+    fn send_to(&self, from: &PeerIdentity, to_public_key: &[u8; 32], envelope: SignedEnvelope);
 }
 
 pub struct FederationRelay { /* … */ }                         // also Default
@@ -480,6 +508,7 @@ impl FederationRelay {
 impl Relay for FederationRelay {
     fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
+    fn send_to(&self, from: &PeerIdentity, to_public_key: &[u8; 32], envelope: SignedEnvelope);
 }
 
 /// Discriminator for the opaque payload carried by `SignedEnvelope`.
@@ -517,6 +546,17 @@ impl LocalIdentity {
 }
 
 pub fn verify_signature(signature: &[u8], data: &[u8], peer_public_key: &[u8]) -> bool;
+
+/// A peer that has been explicitly paired via `pair()`. Re-exported from
+/// `federation.rs` via `pub use federation::*`. The engine only pushes when
+/// at least one `PairedPeer` exists; `push` returns an empty receipt when
+/// `paired_peers` is empty. No Swift public counterpart — the Swift analog
+/// (`FederationStateActor.PairedPeer`) is an internal actor-nested type.
+#[derive(Debug, Clone)]
+pub struct PairedPeer {
+    pub public_key: [u8; 32],
+    pub family: HyperplaneFamilySpec,
+}
 
 pub struct HyperplaneFamilySpec { pub seed: u64, pub dimension: u32 }
 impl HyperplaneFamilySpec {
@@ -563,6 +603,12 @@ public enum SyncError: Error, Sendable, Equatable {
     case peerUnreachable(identity: String)
     case authenticationFailed(detail: String)
     case unsupportedTable(name: String)
+    /// CloudKit-only. A CKRecord whose `recordName` could not be parsed as
+    /// a UUID. Fabricating a UUID from a corrupt recordName would create a
+    /// phantom local row that diverges on every subsequent sync round; the
+    /// pull loop quarantines the record, counts it as a conflict, and
+    /// continues to the next record rather than aborting the batch.
+    case corruptRemoteIdentity(recordName: String)
 }
 ```
 
@@ -610,7 +656,9 @@ cargo test -p convergence-kit
 ```
 
 Test files: `tests/none_engine_tests.rs`, `tests/federation_tests.rs`,
-`tests/wire_format_tests.rs`.
+`tests/federation_lww_tests.rs`, `tests/federation_inbound_event_tests.rs`,
+`tests/federation_observer_outbox_tests.rs`, `tests/wire_format_tests.rs`,
+`tests/json_conformance_tests.rs`.
 
 ## § 6 — Examples
 
@@ -702,8 +750,8 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Federation engine | `FederationSyncEngine` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationSyncEngine` (`rust/src/federation.rs`) | public final class / pub struct | Both ports auto-populate the outbox by subscribing the storage observer at `enable` (SPEC § 5, B-7); Rust also exposes an explicit `enqueue` for direct-record callers; `init()` vs `new(identity, relay)`; Swift `pair(with:via:family:)` | Confirmed |
-| Transport abstraction | `Relay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `Relay` (`rust/src/federation.rs`) | public protocol / pub trait | Same hosted-relay seam, different verb shape: Swift inbox `send`/`drain` (poll) / Rust `register`(→`Receiver`)/`broadcast` (push). Both carry the signed envelope; bound `Sendable` vs `Send + Sync` | Confirmed |
+| Federation engine | `FederationSyncEngine` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationSyncEngine` (`rust/src/federation.rs`) | public final class / pub struct | Both ports auto-populate the outbox by subscribing the storage observer at `enable` (SPEC § 5, B-7); Rust also exposes an explicit `enqueue` for direct-record callers; `init()` vs `new(identity, relay)`. Both ports have a `pair` method: Swift `pair(with:via:family:)` takes a peer engine, relay, and family and calls `acceptPeering` on the remote to make it symmetric; Rust `pair(&mut self, peer:, family:)` takes a peer ref and records the public key — relay is shared at construction so no relay arg; each side must call `pair` on the other. | Confirmed |
+| Transport abstraction | `Relay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `Relay` (`rust/src/federation.rs`) | public protocol / pub trait | Same hosted-relay seam, different verb shape: Swift inbox `send`/`drain` (poll) / Rust `register`(→`Receiver`)/`broadcast` + `send_to` (push, targeted). Rust has an additional `send_to(from:to_public_key:envelope:)` that routes to one specific peer by public key — used by `push` to honor the pairing boundary. Both carry the signed envelope; bound `Sendable` vs `Send + Sync` | Confirmed |
 | In-process relay | `FederationRelay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationRelay` (`rust/src/federation.rs`) | public final class / pub struct | Swift `NSLock`-guarded inboxes / Rust `Mutex` + mpsc senders (+`Default`); same in-process semantics | Confirmed |
 | Signed wire envelope | `SignedEnvelope` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`), `PayloadKind` (same file), `envelopeSigningBytes(...)` (same file) | `SignedEnvelope` (`rust/src/federation.rs`), `PayloadKind` (same file), `envelope_signing_bytes` (same file) | public struct+enum+func / pub struct+enum+fn | Unified batch envelope: both ports carry `sender_public_key` (32B Ed25519), `payload_kind` (C1 tag: `syncRecordBatch`=0x01), opaque `payload` (JSON `[SyncRecord]` batch), `signature` (Ed25519 over canonical bytes — NOT raw JSON), `hlc` (batch-level). Canonical signing bytes are deterministic and byte-identical cross-port; golden vector in both test suites. `payload_kind` is the C1 extension point for `fieldWriteEventBatch`. Shape rule: Swift `Data`/`UInt8` vs Rust `Vec<u8>`/`u8` — same encoding | Confirmed |
 | Peer identity | `PeerIdentity` (`Sources/ConvergenceKitFederation/FederationIdentity.swift`) | `PeerIdentity` (`rust/src/federation.rs`) | public struct / pub struct | Swift `publicKey: Data` (32B Ed25519) / Rust `public_key: [u8;32]` | Confirmed |
@@ -723,7 +771,7 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; same 10 categories. Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed |
+| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; 10 shared categories + Swift-only `corruptRemoteIdentity(recordName:)` (CloudKit pull guard). Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed |
 | Result alias | (Swift: `throws` — no result type) | `SyncResult<T>` (`rust/src/types.rs`) | n/a / pub type alias | Swift uses `throws`; Rust port has no async runtime so it returns `Result<T, SyncError>` aliased as `SyncResult` — sanctioned async/throws ↔ Result seam | Confirmed |
 
 ### CloudKit backend — Apple-platform-bound (Exempt)
@@ -736,14 +784,23 @@ only Federation/None have Rust ports).
 |---|---|---|---|---|---|
 | CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
 | CKRecord ↔ row mapping | `CKRecordMapping` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public enum / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
-| Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
-| CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
+| Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — stored: `table`, `rowKey`, `values`, `syncMeta: SyncMeta`; computed: `hlc`, `schemaVersion`, `kitID` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). `hlc`/`schemaVersion`/`kitID` are computed accessors backed by `syncMeta`, not stored fields. | Exempt |
+| CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — fields: `hlc: HLC`, `schemaVersion: Int`, `kitID: String` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). Introduced to separate sync metadata from app-data values in `DecodedRecord`. | Exempt |
 
 ---
 
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.1 -- 2026-07-16
+- Added Swift-only `SyncError.corruptRemoteIdentity(recordName:)` case to § 4 (CloudKit pull guard, thrown when `recordName` cannot parse as UUID).
+- Added `SyncMeta` public struct to CloudKit backend types in § 2.
+- Fixed `DecodedRecord` signature: `syncMeta: SyncMeta` is the stored property; `hlc`/`schemaVersion`/`kitID` are computed `var` accessors, not stored `let` fields.
+- Added `send_to(from:to_public_key:envelope:)` to Rust `Relay` trait and `FederationRelay` implementation in § 2.
+- Added Rust `FederationSyncEngine.pair` method to § 2.
+- Expanded Rust test-file list in § 5 (four additional test files).
+- Updated concordance table in § 7 for all of the above.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
