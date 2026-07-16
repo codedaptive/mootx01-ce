@@ -1,6 +1,6 @@
 ---
 title: ConvergenceKit Specification
-version: 1.1
+version: 1.2-draft
 status: active
 date: 2026-06-14
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -165,6 +165,27 @@ it does not itself decide cross-estate access. Multi-estate access
 policy is mediated by the access surface (aria-mcp), per architecture
 invariant I-13.
 
+**I-10 (no-echo) (v1.2-draft):** An inbound sync apply never re-enters
+the outbox. The mechanism is a PersistenceKit-stamped change origin:
+`TableChange` carries an `origin` field (`local | syncApply`), stamped
+at write time. ConvergenceKit's outbound observer discards events where
+`origin == syncApply`. Consumer-visible guarantee: hook-observed writes
+and local writes always carry `origin == local` and are never discarded.
+
+**I-11 (device slot identity) (v1.2-draft):** HLC node IDs are
+registry-assigned `(slot, epoch)` pairs. Slots 1–15 are assignable;
+node 0 is permanently reserved (shipped code fabricated HLCs with node 0,
+so no registry-assigned identity may be ambiguous against those historical
+writes). A superseded epoch must not push: a device returning after eviction
+holds a stale `(slot, epoch)` and receives `reenrollRequired` before any
+of its records are applied. On re-enrollment, pending outbound entries are
+re-minted with fresh HLCs under the new `(slot, epoch)` identity.
+
+**I-12 (durable pipeline) (v1.2-draft):** The outbound queue and the
+server change token survive process death. Outbox entries clear only on
+per-record confirmation from the transport; the token is persisted per
+zone and reloaded at next `enable`.
+
 ## § 5 — Behavioral contracts
 
 **B-1 (None passthrough):** with the None backend, `enable` and
@@ -225,6 +246,59 @@ registers the other. Pairing rides a `Relay` transport abstraction
 implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
 `Relay` conformer requiring no change to the engine.
 
+**B-8 (fieldLevelLWW) (v1.2-draft):** `ConflictPolicy.fieldLevelLWW`
+applies last-writer-wins at the column grain. Per-column HLCs are
+wire-carried in the `SyncRecord` (a new optional `columnHLCs:
+[String: PackedHLC]?` field, requiring a byte-identical Rust twin per
+C-8). Array and blob columns have no merge semantics: concurrent writes
+to the same column from different devices lose the lower-HLC side.
+Consumers who need append-safe semantics on array columns should use
+`appendOnly` tables instead.
+
+**B-9 (tombstoned deletes) (v1.2-draft):** Deletes are typed tombstone
+records applied through the LWW gate. The tombstone HLC persists in the
+side table after a hard-delete on both backends — `_ck_sync_meta` on
+CloudKit, an equivalent side-table entry on Federation — so a stale
+insert for the same `(table, rowKey)` cannot resurrect a deleted row.
+The `_syncHLC` storage location for both backends is the side table after
+R7 lands, not the row itself. Note on `pushOnly` and tombstones: a
+`pushOnly` table (I-5) silently swallows remote tombstones; it never
+accepts inbound deletes. Consumers who need delete propagation on
+`pushOnly`-declared tables must use soft-delete bitmap columns instead.
+
+**B-10 (schema-skew posture) (v1.2-draft):** A record whose
+`schemaVersion` is newer than the local receiver's is not rejected as a
+conflict; it is held in a persisted pending queue and replayed after the
+local schema migrates to the matching version. Records whose
+`schemaVersion` is strictly older than the local receiver's are rejected
+as conflicts per I-4.
+
+**B-11 (convergence loop) (v1.2-draft):** The outbox drains on a
+debounced cadence after local writes to prevent per-keystroke push storms.
+Inbound: adaptive tiered polling is the correctness path — fast cadence
+immediately after observed remote activity, backing off to idle cadence
+when the zone has been quiet. Zone-subscription push
+(`CKRecordZoneSubscription`) is an optional latency accelerator for host
+apps holding APNs entitlements; a silent-push wakeup nudges the engine
+to drain a pull cycle sooner than idle cadence would. All multi-device
+behavior is sound under polling alone.
+
+**B-12 (side-table governance) (v1.2-draft):** All `_ck_*` side tables —
+`_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_device_identity`,
+and `_ck_pending_skew` — live under a single `SchemaDeclaration` with
+`kitID "ConvergenceKit"` and a single version counter. Each additional
+side table increments the version; migrations are additive. No two
+`SchemaDeclaration` entries share the same version number with different
+table sets.
+
+**Note N4 (CloudKit exclusivity) (v1.2-draft):** The CloudKit backend is
+Swift-vertical only, following the same precedent as Metal compute kernels.
+CloudKit has no Rust API, and the no-FFI constraint between Swift and Rust
+legs is immutable. Vocabulary and wire-format changes (including additions
+from B-8) still carry byte-identical Rust twins per C-8. The Rust
+vertical's multi-machine story is Federation
+(`DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md`).
+
 ## § 6 — Error model (conceptual)
 
 Errors are the `SyncError` enum (shape in INTERFACE § 4). Categories:
@@ -241,15 +315,17 @@ Errors are the `SyncError` enum (shape in INTERFACE § 4). Categories:
 | `peerUnreachable(identity)` | Federation peer not reachable | surface; retry |
 | `authenticationFailed(detail)` | Federation identity/auth failure | surface; do not apply |
 | `unsupportedTable(name)` | inbound record names a table absent from the manifest | reject record |
-| `corruptRemoteIdentity(recordName)` | CloudKit-only: CKRecord's `recordName` cannot be parsed as a UUID | quarantine record; counted as conflict; pull continues | 
+| `corruptRemoteIdentity(recordName)` | CloudKit-only: CKRecord's `recordName` cannot be parsed as a UUID | quarantine record; counted as conflict; pull continues |
+| `reenrollRequired(slot:staleEpoch:currentEpoch:)` | CloudKit-only (v1.2-draft): device's `(slot, epoch)` has been superseded by eviction and re-epoch; raised before any records are applied | engine re-claims a fresh slot, re-mints pending outbox entries with the new identity, then resumes; does not abort the pull cycle |
+| `slotExhausted(activeCount:)` | CloudKit-only (v1.2-draft): all 15 assignable slots are occupied by recently-active devices | surfaced to caller; loud; no records applied until a slot is freed |
 
 Per-cycle inbound rejections (`schemaMismatch`, `kitMismatch`,
 `decodingFailure`, `unsupportedTable`, `corruptRemoteIdentity`, signature
 failure) are caught, logged, and counted in the receipt's `conflicts`;
 they do not abort the whole cycle. `notEnabled`, `alreadyEnabled`,
 `transportFailure`, and `encodingFailure` are thrown to the caller.
-`corruptRemoteIdentity` is CloudKit-only; it is never thrown by the
-Federation or None backends.
+`corruptRemoteIdentity`, `reenrollRequired`, and `slotExhausted` are
+CloudKit-only; they are never thrown by the Federation or None backends.
 
 ## § 7 — Conformance requirements
 
@@ -287,6 +363,16 @@ None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.2-draft -- 2026-07-16
+- Added I-10 (no-echo), I-11 (device slot identity), I-12 (durable
+  pipeline) to § 4.
+- Added B-8 (fieldLevelLWW), B-9 (tombstoned deletes), B-10 (schema-skew
+  posture), B-11 (convergence loop), B-12 (side-table governance), and
+  Note N4 (CloudKit exclusivity) to § 5.
+- Added `reenrollRequired(slot:staleEpoch:currentEpoch:)` and
+  `slotExhausted(activeCount:)` CloudKit-only error cases to § 6;
+  updated per-cycle vs. cycle-aborting classification note.
 
 ### 1.1 -- 2026-07-16
 - Added `corruptRemoteIdentity(recordName)` to § 6 error model (CloudKit-only; per-record quarantine, does not abort the pull cycle).

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 question: Should ConvergenceKit extend its policy vocabulary and harden its CloudKit backend to support operational-store sync beyond substrate-native data?
 authors: MOOTx01 maintainers
 date: 2026-06-09
@@ -142,4 +142,8 @@ gate rather than a regression risk.
 
 ## Status of this document
 
-Proposed. Acceptance turns R1–R10 into ConvergenceKit v1.1 mission scope.
+Accepted (2026-07-16). R1–R10 constitute ConvergenceKit v1.1 blocking
+scope. Promoted to accepted by
+`DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md`, which
+extends these requirements with N1–N4 for concurrent multi-device
+correctness and records the 2026-07-16 shipped-defect audit.
