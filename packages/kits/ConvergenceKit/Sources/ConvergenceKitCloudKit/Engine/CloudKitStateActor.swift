@@ -131,6 +131,13 @@ actor CloudKitStateActor {
     }
 
     func recordOutbound(_ change: TableChange) {
+        // Echo suppression (I-10, CVK-ICLOUD P1-M1): discard changes that
+        // originated from applyInbound. Without this guard, every inbound
+        // sync write fires the storage observer, re-enters pendingOutbound,
+        // and is pushed back to the sending device — two live machines
+        // ping-pong forever. The .syncApply origin is stamped by the
+        // RowStore sync-tagged write paths (upsertSync / insertSync / deleteSync).
+        guard change.origin != .syncApply else { return }
         pendingOutbound.append(change)
     }
 

@@ -103,7 +103,9 @@ extension CloudKitStateActor {
                     Column(table: syncedTable.name, name: syncedTable.primaryKeyColumn),
                     .uuid(rowKey)
                 )
-                _ = try? await storage.rowStore.delete(table: syncedTable.name, where: predicate)
+                // Use deleteSync so the emitted TableChange carries origin: .syncApply,
+                // preventing the deletion from re-entering the outbox (I-10).
+                _ = try? await storage.rowStore.deleteSync(table: syncedTable.name, where: predicate)
             }
             appliedCount += 1
         }

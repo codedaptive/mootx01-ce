@@ -18,10 +18,13 @@ extension CloudKitStateActor {
         syncedTable: SyncedTable,
         storage: any Storage
     ) async throws {
+        // All writes use the sync-tagged variants (upsertSync / insertSync) so
+        // the emitted TableChange carries origin: .syncApply. CloudKitStateActor's
+        // recordOutbound discards .syncApply changes, preventing the echo loop (I-10).
         switch syncedTable.conflictPolicy {
         case .appendOnly:
             // Audit log style. Idempotent upsert with the row key as primary.
-            _ = try await storage.rowStore.upsert(
+            _ = try await storage.rowStore.upsertSync(
                 table: decoded.table,
                 values: decoded.values,
                 conflictColumns: [syncedTable.primaryKeyColumn]
@@ -39,7 +42,7 @@ extension CloudKitStateActor {
             if let localHLC, decoded.hlc < localHLC {
                 return // local is newer — skip remote
             }
-            _ = try await storage.rowStore.upsert(
+            _ = try await storage.rowStore.upsertSync(
                 table: decoded.table,
                 values: decoded.values,
                 conflictColumns: [syncedTable.primaryKeyColumn]
@@ -52,7 +55,7 @@ extension CloudKitStateActor {
                 kitID: decoded.syncMeta.kitID)
 
         case .remoteWins:
-            _ = try await storage.rowStore.upsert(
+            _ = try await storage.rowStore.upsertSync(
                 table: decoded.table,
                 values: decoded.values,
                 conflictColumns: [syncedTable.primaryKeyColumn]
@@ -65,7 +68,7 @@ extension CloudKitStateActor {
                 where: .eq(Column(table: decoded.table, name: syncedTable.primaryKeyColumn), .uuid(decoded.rowKey))
             )
             if (existing ?? 0) == 0 {
-                _ = try await storage.rowStore.insert(table: decoded.table, values: decoded.values)
+                _ = try await storage.rowStore.insertSync(table: decoded.table, values: decoded.values)
             }
         }
     }
