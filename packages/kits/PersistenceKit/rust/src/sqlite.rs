@@ -23,9 +23,10 @@ use uuid::Uuid;
 use crate::{
     AeadProvider, AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore,
     CachingRowStore, ColumnType, EstateConfiguration, EstateEncryptionConfig,
-    IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore,
-    SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate,
-    StorageResult, StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
+    ChangeOrigin, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle,
+    RowKey, RowStore, SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver,
+    StoragePredicate, StorageResult, StorageRow, StorageTransaction, TableChange,
+    TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
 
@@ -1456,6 +1457,7 @@ impl RowStore for SqliteRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1531,6 +1533,7 @@ impl RowStore for SqliteRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1586,6 +1589,7 @@ impl RowStore for SqliteRowStore {
                 row_key: Some(key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(changed)
@@ -1619,6 +1623,7 @@ impl RowStore for SqliteRowStore {
                 row_key: Some(key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(changed)

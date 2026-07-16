@@ -14,7 +14,7 @@ use crate::audit_log::{AuditEvent, AuditLog};
 use crate::blob_store::BlobStore;
 use crate::error::{StorageError, StorageResult};
 use crate::generated_column::GeneratedColumn;
-use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ObserverHub, StorageEvent, StorageObserver, TableChange};
+use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ChangeOrigin, ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use crate::caching_row_store::CachingRowStore;
 use crate::row_store::RowStore;
@@ -462,6 +462,7 @@ impl RowStore for InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(stored.clone()),
                     hlc: None,
+                    origin: ChangeOrigin::Local,
                 });
             }
             (key, stored, in_txn)
@@ -473,6 +474,7 @@ impl RowStore for InMemoryRowStore {
                 row_key: Some(key),
                 values: Some(stored),
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(RowHandle::new(table, key))
@@ -530,6 +532,7 @@ impl RowStore for InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(vals.clone()),
                     hlc: None,
+                    origin: ChangeOrigin::Local,
                 });
             }
             (key, ev, vals, in_txn)
@@ -541,6 +544,7 @@ impl RowStore for InMemoryRowStore {
                 row_key: Some(key),
                 values: Some(emitted_values),
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(RowHandle::new(table, key))
@@ -593,6 +597,7 @@ impl RowStore for InMemoryRowStore {
                         row_key: Some(*key),
                         values: Some(row.clone()),
                         hlc: None,
+                        origin: ChangeOrigin::Local,
                     });
                 }
             }
@@ -606,6 +611,7 @@ impl RowStore for InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(row),
                     hlc: None,
+                    origin: ChangeOrigin::Local,
                 });
             }
         }
@@ -647,6 +653,7 @@ impl RowStore for InMemoryRowStore {
                         row_key: Some(*key),
                         values: Some(row.clone()),
                         hlc: None,
+                        origin: ChangeOrigin::Local,
                     });
                 }
             }
@@ -660,6 +667,7 @@ impl RowStore for InMemoryRowStore {
                     row_key: Some(key),
                     values: Some(row),
                     hlc: None,
+                    origin: ChangeOrigin::Local,
                 });
             }
         }
