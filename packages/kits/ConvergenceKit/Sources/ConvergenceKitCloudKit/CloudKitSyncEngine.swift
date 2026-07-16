@@ -97,7 +97,6 @@ actor CloudKitStateActor {
     var lastPushAt: Date?
     var lastPullAt: Date?
     var serverChangeToken: CKServerChangeToken?
-    var pendingOutbound: [TableChange] = []
     var observerTasks: [Task<Void, Never>] = []
     var subscribers: [AsyncStream<SyncEvent>.Continuation] = []
     /// Monotonic HLC source for locally-originated changes that
@@ -126,8 +125,19 @@ actor CloudKitStateActor {
             logger.info("zone setup (may already exist): \(String(describing: error))")
         }
 
-        // Ensure the _ck_sync_meta side table exists before any pull (#12 fix).
-        try await Self.ensureSyncMetaTable(storage: storage)
+        // Ensure all ConvergenceKit side tables exist (consolidated schema, B-12).
+        // CKSideSchema owns one SchemaDeclaration with kitID "ConvergenceKit" and
+        // a single version counter covering _ck_sync_meta (v1) and _ck_outbox (v2).
+        try await CKSideSchema.ensure(storage: storage)
+
+        // Drain any outbox leftovers from a previous process life so the next
+        // push cycle picks them up without waiting for a new local write. The
+        // engine does not auto-schedule a push here (that is the host app's
+        // responsibility), but the entries are ready in the outbox.
+        let leftovers = try await OutboxStore.drainLeftovers(from: storage)
+        if !leftovers.isEmpty {
+            logger.info("outbox: \(leftovers.count) leftover entries from previous session")
+        }
 
         // Start observing each declared table that is not pull-only.
         for table in manifest.tables where table.direction != .pullOnly {
@@ -149,7 +159,10 @@ actor CloudKitStateActor {
         observerTasks.removeAll()
         for sub in subscribers { sub.finish() }
         subscribers.removeAll()
-        pendingOutbound.removeAll()
+        // pendingOutbound is now the durable _ck_outbox side table; no in-memory
+        // queue to clear. Outbox entries survive disable() and are drained on the
+        // next enable() call (drainLeftovers above). This is the durability guarantee
+        // that R4 requires: outbox survives process death and disable/enable cycles.
         manifest = nil
         storage = nil
     }
@@ -164,8 +177,51 @@ actor CloudKitStateActor {
         }
     }
 
-    func recordOutbound(_ change: TableChange) {
-        pendingOutbound.append(change)
+    /// Durably append an outbound change to the _ck_outbox side table.
+    ///
+    /// The in-memory fast path (pendingOutbound array) is intentionally absent:
+    /// the durable store IS the queue (R4). A change is not considered captured
+    /// until it is written to the outbox. Process death before this write loses
+    /// the change, which is acceptable (the observer will re-fire on the next
+    /// enable if the local row still exists); process death AFTER this write and
+    /// BEFORE push confirmation is safe — the entry survives in the outbox.
+    ///
+    /// HLC is minted here (before append) so the outbox stores the ordered HLC
+    /// at capture time. The push path uses this stored HLC for the CKRecord, not
+    /// a fresh mint — ensuring that the logical ordering established at observe
+    /// time is preserved all the way to the wire.
+    func recordOutbound(_ change: TableChange) async {
+        guard let storage else { return }
+
+        // Mint HLC if the observation did not carry one (the InMemory and
+        // SQLite observers do not stamp HLCs on TableChange notifications today).
+        let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
+        let packedHLC = Int64(bitPattern: hlc.packed)
+
+        // Encode values as a JSON SyncValueMap blob for transport-agnostic storage.
+        let valuesData: Data?
+        if let rawValues = change.values {
+            valuesData = try? JSONEncoder().encode(SyncValueMap(rawValues))
+        } else {
+            valuesData = nil
+        }
+
+        let enqueuedAt = ISO8601DateFormatter().string(from: Date())
+        let entry = OutboxEntry(
+            id: UUID(),
+            tableName: change.table,
+            rowKey: change.rowKey?.uuidString ?? "",
+            event: SyncEventKind(from: change.event),
+            valuesData: valuesData,
+            packedHLC: packedHLC,
+            enqueuedAt: enqueuedAt
+        )
+
+        do {
+            try await OutboxStore.append(entry: entry, to: storage)
+        } catch {
+            logger.error("outbox append failed for \(change.table): \(String(describing: error))")
+        }
     }
 
     var currentState: SyncState {
@@ -178,44 +234,63 @@ actor CloudKitStateActor {
     // MARK: - Push
 
     func push() async throws -> SyncReceipt {
-        // storage must be configured to push, but push() drives the CloudKit
-        // operations directly off `manifest`/`pendingOutbound` and does not
-        // read it here — so assert configuration without binding the value.
-        guard isEnabled, let manifest, storage != nil else { throw SyncError.notEnabled }
+        // Bind storage: push() now reads from the durable outbox, which requires
+        // a live storage reference (unlike the old pendingOutbound array path).
+        guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
         emit(.pushCompleted(receipt: SyncReceipt.empty))  // start signal; reset after work
 
         let zoneID = CKRecordZone.ID(zoneName: manifest.zoneIdentifier, ownerName: CKCurrentUserDefaultName)
-        let pending = pendingOutbound
-        pendingOutbound.removeAll()
+
+        // Read batch WITHOUT clearing. Entries remain in the outbox until the
+        // transport confirms success. A transport failure throws before confirm(),
+        // leaving all entries intact for the next push cycle. This is R4's
+        // durability guarantee: no change is lost to a transport failure.
+        //
+        // P1-M6 seam: until per-record push results land (P1-M6 / P4-M1),
+        // PushCycle confirms the full batch on transport success and retains
+        // the full batch on transport failure. Per-record confirmation (partial
+        // success from modifyRecords(atomically: false)) requires the per-record
+        // result surface from P1-M6; confirm(ids:) already accepts a list so
+        // the P1-M6 upgrade is a call-site change here, not a schema or
+        // OutboxStore API change.
+        let batch = try await OutboxStore.readBatch(from: storage)
 
         var saved: [CKRecord] = []
         var deleted: [CKRecord.ID] = []
+        var confirmedIDs: [UUID] = []
         var pushedCount = 0
 
-        for change in pending {
-            guard let syncedTable = manifest.table(named: change.table) else { continue }
+        for entry in batch {
+            guard let syncedTable = manifest.table(named: entry.tableName) else { continue }
             guard syncedTable.direction != .pullOnly else { continue }
-            guard let rowKey = change.rowKey else { continue }
+            guard let rowKey = UUID(uuidString: entry.rowKey) else {
+                logger.error("push: malformed row_key in outbox entry \(entry.id): \(entry.rowKey)")
+                continue
+            }
 
-            switch change.event {
+            // Recover the stored HLC from the outbox entry. This is the HLC
+            // that was minted at observe time (recordOutbound), not a fresh
+            // mint — preserving the logical ordering established at capture.
+            let hlc = HLC(packed: UInt64(bitPattern: entry.packedHLC))
+
+            switch entry.event {
             case .insert, .update:
-                guard let values = change.values else { continue }
-                // Prefer the HLC that already ordered the change. If
-                // the observation carried none (the InMemory and
-                // SQLite observers do not stamp an HLC on the change
-                // notification today), mint a monotonic one through
-                // the HLC generator. send(now:) takes the clock as a
-                // parameter so the engine stays deterministic, and
-                // advances per-replica state so two changes pushed in
-                // the same millisecond still order via the logical
-                // counter. The earlier code fabricated an HLC inline
-                // from Date() with nodeID 0, which both violated the
-                // deterministic-engine rule and risked node collisions.
-                let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
+                guard let valuesData = entry.valuesData else {
+                    logger.error("push: missing values blob for \(entry.event.rawValue) entry \(entry.id)")
+                    continue
+                }
+                let values: [String: TypedValue]
+                do {
+                    let valueMap = try JSONDecoder().decode(SyncValueMap.self, from: valuesData)
+                    values = valueMap.asTypedValues
+                } catch {
+                    logger.error("push: values decode failed for entry \(entry.id): \(error)")
+                    continue
+                }
                 do {
                     let record = try CKRecordMapping.record(
                         from: values,
-                        table: change.table,
+                        table: entry.tableName,
                         rowKey: rowKey,
                         hlc: hlc,
                         schemaVersion: manifest.schemaVersion,
@@ -223,13 +298,15 @@ actor CloudKitStateActor {
                         zone: zoneID
                     )
                     saved.append(record)
+                    confirmedIDs.append(entry.id)
                     pushedCount += 1
                 } catch {
-                    logger.error("push encode failed: \(String(describing: error))")
+                    logger.error("push encode failed for entry \(entry.id): \(String(describing: error))")
                 }
             case .delete:
-                let id = CKRecordMapping.recordID(rowKey: rowKey, zone: zoneID)
-                deleted.append(id)
+                let ckID = CKRecordMapping.recordID(rowKey: rowKey, zone: zoneID)
+                deleted.append(ckID)
+                confirmedIDs.append(entry.id)
                 pushedCount += 1
             }
         }
@@ -244,9 +321,17 @@ actor CloudKitStateActor {
                     atomically: false
                 )
             } catch {
+                // Transport failed. Do NOT confirm — leave all outbox entries intact.
+                // They will be retried on the next push cycle (either triggered by
+                // the next local write or by the host app's retry timer).
                 throw SyncError.transportFailure(detail: "CKDatabase.modifyRecords: \(error)")
             }
         }
+
+        // Transport succeeded: confirm the entries that were encoded and sent.
+        // Entries that were skipped (missing table, bad rowKey, decode failure)
+        // are not in confirmedIDs and remain in the outbox.
+        try await OutboxStore.confirm(ids: confirmedIDs, from: storage)
 
         let receipt = SyncReceipt(pushed: pushedCount, pulled: 0, conflicts: 0)
         lastPushAt = Date()
@@ -407,38 +492,19 @@ actor CloudKitStateActor {
 
     // MARK: - Sync metadata side table (#12)
 
-    /// Side table name. Owned by ConvergenceKit, not by the application schema.
-    private static let syncMetaTable = "_ck_sync_meta"
+    /// Side table name. The declaration lives in CKSideSchema (B-12
+    /// governance); this alias keeps local read/write helpers readable.
+    private static let syncMetaTable = CKSideSchema.syncMetaTable
 
-    /// Ensure the side table exists. Must be called before any pull.
-    /// Uses SchemaDeclaration + migrate so the table is created via the
-    /// standard PersistenceKit schema path (works on all backends).
+    /// Ensure ALL ConvergenceKit side tables exist. Delegates to CKSideSchema,
+    /// which owns the single consolidated SchemaDeclaration (kitID
+    /// "ConvergenceKit", version counter covers _ck_sync_meta at v1 and
+    /// _ck_outbox at v2). See SideSchema.swift for the governance rationale.
+    ///
+    /// Kept as a static func (not inlined at the enable() call site) so the
+    /// call signature is stable for tests that exercise the ensure path.
     static func ensureSyncMetaTable(storage: any Storage) async throws {
-        let schema = SchemaDeclaration(
-            kitID: "ConvergenceKitCloudKit",
-            version: 1,
-            tables: [
-                TableDeclaration(
-                    name: syncMetaTable,
-                    columns: [
-                        ColumnDeclaration(name: "table_name", type: .text, nullable: false),
-                        ColumnDeclaration(name: "primary_key", type: .text, nullable: false),
-                        ColumnDeclaration(name: "sync_hlc", type: .int, nullable: false,
-                                          defaultValue: .int(0)),
-                        ColumnDeclaration(name: "schema_version", type: .int, nullable: false,
-                                          defaultValue: .int(0)),
-                        ColumnDeclaration(name: "kit_id", type: .text, nullable: false,
-                                          defaultValue: .text("")),
-                    ],
-                    primaryKey: ["table_name", "primary_key"]
-                ),
-            ],
-            indices: []
-        )
-        // migrate(to:) is ADDITIVE — it creates missing tables without
-        // replacing the backend's active schema declaration. open(schema:)
-        // would clobber the application schema, breaking all row operations.
-        try await storage.migrate(to: schema)
+        try await CKSideSchema.ensure(storage: storage)
     }
 
     /// Read the persisted sync HLC for a specific row.

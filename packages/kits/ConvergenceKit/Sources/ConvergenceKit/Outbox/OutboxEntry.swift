@@ -1,0 +1,72 @@
+// OutboxEntry.swift
+//
+// Entry model for the _ck_outbox durable side table.
+//
+// An OutboxEntry represents one pending outbound change that has not yet been
+// confirmed by the transport. Entries accumulate in the outbox as local writes
+// are observed; PushCycle reads a batch, sends records to CloudKit, and
+// confirms (removes) only the entries whose per-record push succeeded.
+//
+// Transport-agnostic: OutboxEntry holds a serialised SyncValueMap blob so the
+// push path can re-encode to any transport format (CKRecord today, other
+// formats in the future) without coupling the outbox schema to CloudKit.
+
+import Foundation
+
+// MARK: - OutboxEntry
+
+/// A single pending outbound row mutation in the durable outbox.
+///
+/// Stored in the `_ck_outbox` side table managed by `CKSideSchema`. Fields
+/// map one-to-one to the table columns declared there.
+public struct OutboxEntry: Sendable {
+    /// Stable row identity used for per-record confirmation. Generated at
+    /// append time; never reused even if the same (table, rowKey) is
+    /// coalesced into a newer entry.
+    public let id: UUID
+
+    /// Name of the application table this change belongs to.
+    public let tableName: String
+
+    /// UUID of the changed application row, stored as a String because
+    /// PersistenceKit's TEXT column type is the canonical storage form.
+    public let rowKey: String
+
+    /// Change kind, stored as its raw string value ("insert", "update",
+    /// "delete") to satisfy the schema invariant: no Bool stored
+    /// properties on side tables.
+    public let event: SyncEventKind
+
+    /// JSON-encoded SyncValueMap for insert and update events; nil for
+    /// delete events (there are no values to send for a deletion).
+    public let valuesData: Data?
+
+    /// Packed HLC for this change (48-bit physical | 12-bit logical |
+    /// 4-bit node, packed into Int64). Used by the coalescing logic:
+    /// when two entries for the same (tableName, rowKey) exist, the one
+    /// with the lower packedHLC is discarded.
+    public let packedHLC: Int64
+
+    /// ISO8601 wall-clock timestamp recorded at append time. Used for
+    /// observability (staleness monitoring, queue age signals). Not used
+    /// for ordering; HLC is the ordering primitive.
+    public let enqueuedAt: String
+
+    public init(
+        id: UUID,
+        tableName: String,
+        rowKey: String,
+        event: SyncEventKind,
+        valuesData: Data?,
+        packedHLC: Int64,
+        enqueuedAt: String
+    ) {
+        self.id = id
+        self.tableName = tableName
+        self.rowKey = rowKey
+        self.event = event
+        self.valuesData = valuesData
+        self.packedHLC = packedHLC
+        self.enqueuedAt = enqueuedAt
+    }
+}

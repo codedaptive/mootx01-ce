@@ -1,8 +1,8 @@
 ---
 title: ConvergenceKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -13,6 +13,8 @@ relates_to:
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
   - docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md
   - docs/decisions/DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md
+  - docs/decisions/DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md
+  - docs/decisions/DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md
 purpose: |
   ConvergenceKit is the optional sync layer for the substrate. It
   replicates PersistenceKit row mutations across device or perimeter
@@ -51,8 +53,9 @@ mathematics of its own.
 
 This package is a **Kit**: it manages lifecycle and state. A
 `SyncEngine` instance holds enable/disable state, an observation task
-set, a pending-outbound queue, subscriber continuations, and (for
-CloudKit) a server change token. Sync is optional and never assumed —
+set, subscriber continuations, and (for CloudKit) a durable outbound
+queue and server change token backed by PersistenceKit side tables (see
+B-12, I-12). Sync is optional and never assumed —
 the default backend, `None`, makes every operation a successful no-op
 so the substrate runs local-first with no sync code paths active.
 
@@ -165,6 +168,15 @@ it does not itself decide cross-estate access. Multi-estate access
 policy is mediated by the access surface (aria-mcp), per architecture
 invariant I-13.
 
+**I-12 (durable pipeline):** The outbound queue and the CloudKit server
+change token survive process death. `_ck_outbox` is the durable outbound
+queue; outbox entries are read without consuming — they remain in storage
+until the transport confirms delivery via `OutboxStore.confirm(ids:)`. The
+CloudKit change token is persisted in `_ck_sync_meta`. A push cycle that
+aborts before the transport ack retains the full batch; the next push
+cycle re-reads and retries. No in-memory accumulation of pending-outbound
+changes is authoritative — the durable table is the queue.
+
 ## § 5 — Behavioral contracts
 
 **B-1 (None passthrough):** with the None backend, `enable` and
@@ -225,6 +237,26 @@ registers the other. Pairing rides a `Relay` transport abstraction
 implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
 `Relay` conformer requiring no change to the engine.
 
+**B-12 (side-table governance):** All `_ck_*` side tables are declared in
+a single `SchemaDeclaration` with `kitID "ConvergenceKit"` and a unified
+version counter managed by `CKSideSchema` in the core target. Adding a
+side table increments the declaration's version and adds an additive
+migration operation (`createTable`); no separate `SchemaDeclaration` is
+created for the new table. The consolidated declaration is the authoritative
+reference for all `_ck_*` schema across all backends — neither the CloudKit
+nor the Federation target maintains its own independent side-table
+declarations. The current table inventory: `_ck_sync_meta` (v1, CloudKit
+change-token persistence) and `_ck_outbox` (v2, durable outbound queue per
+I-12). PersistenceKit's `migrate(to:)` uses IF-NOT-EXISTS semantics, so
+applying the declaration to storage that already has earlier-version tables
+is safe and additive.
+
+**Note N4 (Federation outbox not yet durable):** The Federation backend
+uses the same conceptual outbound-queue pattern as CloudKit but has not
+been updated to the durable `_ck_outbox` store. R4 and this mission scope
+CloudKit only; Federation durable outbox is deferred pending per-envelope
+confirmation semantics and a separate Federation-specific envelope model.
+
 ## § 6 — Error model (conceptual)
 
 Errors are the `SyncError` enum (shape in INTERFACE § 4). Categories:
@@ -284,6 +316,13 @@ None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-16
+CVK-ICLOUD P1-M4: added I-12 (durable pipeline), B-12 (side-table
+governance), and Note N4 (Federation outbox scope). Updated § 1 description
+to reflect durable outbound queue (replaces in-memory pending-outbound
+array). The `_ck_outbox` table and `CKSideSchema` (unified side-table
+declaration) ship with this version.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
