@@ -29,7 +29,7 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Release date stamp printed next to the version by `--version`. Must match
 /// the Swift port's `Mootx01.releaseDate` so both binaries print an identical
 /// `--version` line.
-pub const RELEASE_DATE: &str = "2026-07-14";
+pub const RELEASE_DATE: &str = "2026-07-16";
 
 /// Exit codes per spec §5.
 pub mod exit {

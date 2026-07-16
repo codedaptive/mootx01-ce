@@ -16,6 +16,7 @@
 //! ```
 
 fn main() {
-    // No plugin concept for this reference server — always "" (no skew to report).
-    aria_mcp::runtime::run("mootx01", "");
+    // No plugin concept for this reference server — always "" (no skew to
+    // report) and no release feed — None (no update advisory either).
+    aria_mcp::runtime::run("mootx01", "", None);
 }

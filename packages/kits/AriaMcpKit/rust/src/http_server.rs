@@ -370,14 +370,24 @@ pub fn run_http_loop(
     // the same throughput profile as the previous sequential model but
     // allows concurrent read-only routing (GET endpoints) to proceed without
     // waiting on active dispatches.
-    let dispatcher = Arc::new(Mutex::new(Dispatcher::new(
-        config.registry,
-        &config.server_name,
-        &config.server_version,
-        &config.build_serial,
-        &config.version_skew,
-        monitoring_control,
-    )));
+    // Hoisted before the constructor call so the provider survives the
+    // partial move of config.registry below. Note the dispatcher Mutex
+    // serializes tool dispatch: a provider probe blocks other calls for
+    // its duration, which is why the host bounds it (curl --max-time) and
+    // caches it (once per 24h TTL) — worst case is one bounded stall per
+    // cache window, not per call.
+    let update_advisory = config.update_advisory.clone();
+    let dispatcher = Arc::new(Mutex::new(
+        Dispatcher::new(
+            config.registry,
+            &config.server_name,
+            &config.server_version,
+            &config.build_serial,
+            &config.version_skew,
+            monitoring_control,
+        )
+        .with_update_advisory(update_advisory),
+    ));
 
     let listener = bind_loopback(port)?;
     let bound = listener.local_addr()?.port();

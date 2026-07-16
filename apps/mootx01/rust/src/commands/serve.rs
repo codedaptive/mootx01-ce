@@ -25,6 +25,8 @@ use crate::cli::HttpMode;
 use crate::core::daemon_client;
 use crate::core::mcp_ownership;
 use crate::core::paths;
+use crate::core::release;
+use crate::core::update_advisor;
 use crate::exit;
 
 /// How many ports above 4242 `auto` will probe before giving up.
@@ -242,8 +244,40 @@ pub fn run(db: Option<String>, http: Option<HttpMode>) -> ExitCode {
     )
     .unwrap_or_default();
 
+    // Upstream-release advisory (`update_available` in ping/status):
+    // resident daemons only. A resident outlives releases, so this must be
+    // evaluated lazily at ping/status time — UpdateAdvisor rate-limits the
+    // release-feed probe to once per 24h (and honors the
+    // MOOTX01_NO_UPDATE_CHECK kill switch) and collapses failures to
+    // silence. stdio one-shots stay network-free on purpose: ping is
+    // documented as returning immediately, and an offline probe timeout
+    // there would break that; every plugin-capable host talks to the
+    // resident over HTTP anyway (ADR-024 §2). The probe itself is bounded
+    // (curl --max-time 4) because it runs behind the dispatcher mutex.
+    // Mirrors Swift ServeCommand's `residentPort != nil` gate.
+    let update_advisory: Option<aria_mcp::dispatcher::UpdateAdvisoryProvider> =
+        if bound_port.is_some() {
+            let advisor = std::sync::Arc::new(update_advisor::UpdateAdvisor::new(
+                env!("CARGO_PKG_VERSION"),
+                Box::new(|| {
+                    let latest = release::latest_version_within(Some(4)).ok()?;
+                    // Newer-only gating: the advisor renders whatever tag it
+                    // is handed, so equal/older/unparsable must collapse to
+                    // None here. Leading v restored for display parity with
+                    // the Swift leg (which surfaces the raw GitHub tag).
+                    match release::is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+                        Some(true) => Some(format!("v{latest}")),
+                        _ => None,
+                    }
+                }),
+            ));
+            Some(std::sync::Arc::new(move || advisor.advisory()))
+        } else {
+            None
+        };
+
     // Host the runtime. Does not return until the transport stops.
-    aria_mcp::runtime::run("mootx01", &version_skew);
+    aria_mcp::runtime::run("mootx01", &version_skew, update_advisory);
 
     if bound_port.is_some() {
         remove_port_file(&port_file);

@@ -57,6 +57,13 @@ pub struct ServerConfig {
     /// (not a constant) so `Dispatcher::new` has one signature shared by
     /// every host.
     pub version_skew: String,
+    /// Upstream-release advisory provider (see
+    /// `crate::dispatcher::UpdateAdvisoryProvider`) surfaced as an
+    /// `update_available:` line by ping/status. `None` (both constructors'
+    /// default) means no provider — the host (mootx01-cli's resident
+    /// `serve`) injects one after `from_env()`; stdio one-shots and the
+    /// aria-mcp dev server leave it unset.
+    pub update_advisory: Option<crate::dispatcher::UpdateAdvisoryProvider>,
 }
 
 impl ServerConfig {
@@ -159,6 +166,7 @@ impl ServerConfig {
             // filesystem is not touched on every estate_ping call.
             build_serial: crate::build_serial::derive(),
             version_skew: String::new(),
+            update_advisory: None,
         }
     }
 
@@ -174,6 +182,7 @@ impl ServerConfig {
             // filesystem is not touched on every estate_ping call.
             build_serial: crate::build_serial::derive(),
             version_skew: String::new(),
+            update_advisory: None,
         }
     }
 }
@@ -275,7 +284,10 @@ pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: Serv
         &config.build_serial,
         &config.version_skew,
         None,
-    );
+    )
+    // Forwarded even though resident hosts wire it only for HTTP mode —
+    // stdio configs carry None, so ping/status stay advisory-free here.
+    .with_update_advisory(config.update_advisory);
     let mut buf = BufReader::new(reader);
 
     loop {

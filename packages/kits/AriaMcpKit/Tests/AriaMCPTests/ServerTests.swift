@@ -518,4 +518,93 @@ struct ServerTests {
         #expect(!text.contains("version_skew"),
                 "no version_skew field expected when the host injected no advisory; got: \(text)")
     }
+
+    // MARK: - Upstream-release advisory (update_available)
+
+    /// When the host injects an update-advisory provider, both
+    /// `moot_estate_ping` and `moot_estate_status` surface its line under
+    /// `update_available:`. A provider returning nil (up to date / feed
+    /// unreachable — the host's advisor collapses both to nil) must leave
+    /// the field out entirely, mirroring version_skew's opt-in shape. The
+    /// no-provider default is covered implicitly by every other test in
+    /// this file — none of them mention "update_available".
+    @Test func testUpdateAdvisorySurfacesInPingAndStatus() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-update-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        let line = "v9.9.9 is available (installed 1.0.33) — upgrade with `mootx01 upgrade`"
+        let tooling = ToolDispatcher(
+            kit: kit, handle: handle,
+            updateAdvisoryProvider: { line }
+        )
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+
+        for toolName in ["moot_estate_ping", "moot_estate_status"] {
+            let request = JSONRPCRequest(
+                id: .integer(64),
+                method: "tools/call",
+                params: .object([
+                    "name": .string(toolName),
+                    "arguments": .object([:]),
+                ])
+            )
+            let rawResponse = await dispatcher.handle(request)
+            let response = try #require(rawResponse)
+            guard case .result(let result) = response.payload else {
+                Issue.record("\(toolName) returned error: \(response.payload)")
+                continue
+            }
+            let content = try #require(result.objectValue?["content"]?.arrayValue)
+            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+            #expect(text.contains("update_available: \(line)"),
+                    "\(toolName) must surface the provider's update advisory; got: \(text)")
+        }
+    }
+
+    /// A wired provider that answers nil (the common up-to-date case) must
+    /// leave `update_available` out entirely — opt-in field, never an empty
+    /// slot.
+    @Test func testNilUpdateAdvisoryOmitsField() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-update-nil-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        let tooling = ToolDispatcher(
+            kit: kit, handle: handle,
+            updateAdvisoryProvider: { nil }
+        )
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+
+        for toolName in ["moot_estate_ping", "moot_estate_status"] {
+            let request = JSONRPCRequest(
+                id: .integer(65),
+                method: "tools/call",
+                params: .object([
+                    "name": .string(toolName),
+                    "arguments": .object([:]),
+                ])
+            )
+            let rawResponse = await dispatcher.handle(request)
+            let response = try #require(rawResponse)
+            guard case .result(let result) = response.payload else {
+                Issue.record("\(toolName) returned error: \(response.payload)")
+                continue
+            }
+            let content = try #require(result.objectValue?["content"]?.arrayValue)
+            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+            #expect(!text.contains("update_available"),
+                    "\(toolName) must omit update_available when the provider answers nil; got: \(text)")
+        }
+    }
 }

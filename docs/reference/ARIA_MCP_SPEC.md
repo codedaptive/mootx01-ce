@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.17.0
+version: 1.18.0
 status: active
 date: 2026-07-16
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -876,6 +876,30 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.18.0 -- 2026-07-16
+Upstream-release advisory: `moot_estate_ping` / `moot_estate_status` gain an
+opt-in `update_available:` line when a newer product release exists on the
+release feed than the running binary. Sibling of the 1.10.0 `version_skew:`
+line (that one reports local plugin/binary skew; this one reports "the world
+has moved past this install"), and deliberately confined to the same two
+session-orientation tools so MCP clients are informed once at orientation
+time, never nagged per call. Unlike `version_skew` the value is NOT computed
+at startup: the resident daemon outlives releases, so the host injects a
+PROVIDER (Swift `ToolDispatcher.updateAdvisoryProvider` closure; Rust
+`Dispatcher.update_advisory` via `with_update_advisory`) that the two tools
+evaluate lazily behind a host-owned 24h-TTL cache (Swift
+`MootInstallerCore.UpdateAdvisor`; Rust `mootx01-cli::core::update_advisor`).
+Probe bounded (4s) and failure-cached; resident daemons only (stdio
+one-shots and aria-mcp dev never probe); disabled by
+`MOOTX01_NO_UPDATE_CHECK` — the same kill switch as the Claude Code plugin's
+SessionStart update hook. Line text: ``v<latest> is available (installed
+<current>) — upgrade with `mootx01 upgrade` ``. Both ports at parity. New
+tests: `testUpdateAdvisorySurfacesInPingAndStatus`,
+`testNilUpdateAdvisoryOmitsField` (Swift `ServerTests.swift`);
+`update_advisory_surfaces_when_wired_and_omitted_when_none` (Rust
+`dispatch_tests.rs`); `UpdateAdvisorTests` (Swift, 8) and
+`core::update_advisor::tests` (Rust, 6) unit-test the TTL/kill-switch cache.
 
 ### 1.17.0 -- 2026-07-16
 Rust leg Anthropic memory_20250818 adapter parity (M-MEMTOOL-1): the `memory` tool
