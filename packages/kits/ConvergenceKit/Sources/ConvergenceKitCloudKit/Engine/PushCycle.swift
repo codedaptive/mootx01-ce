@@ -1,7 +1,22 @@
 // PushCycle.swift
 //
-// Outbound push path for CloudKitStateActor. Encodes pending local
-// changes into CKRecords and sends them to the private CloudKit database.
+// Outbound push path for CloudKitStateActor. Calls the epoch fence, then
+// encodes pending local changes into CKRecords and sends them to the private
+// CloudKit database via the injectable CloudKitDatabaseProtocol seam.
+//
+// PUSH LIFECYCLE:
+// 1. EpochFence.heartbeat() verifies (slot, epoch) is still current and
+//    updates last_active_hlc. MUST run BEFORE reading the outbox so that
+//    a reenrollRequired event (slot was evicted while we were away) can
+//    trigger remintAll on the outbox BEFORE any stale-nodeID records
+//    reach the wire (A2, A5).
+// 2. If reenrollRequired is thrown: call actor.reenroll() (re-claim slot,
+//    remint outbox HLCs, update identity) and retry from the batch read.
+//    Only one re-enrollment is attempted per push cycle to avoid loops.
+// 3. Read the outbox batch (without consuming). Entries survive a transport
+//    failure (R4 durability).
+// 4. Encode and send via database.modifyRecords.
+// 5. Confirm sent entries by deleting them from the outbox.
 
 import Foundation
 import CloudKit
@@ -17,14 +32,38 @@ private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category:
 extension CloudKitStateActor {
 
     func push() async throws -> SyncReceipt {
-        // Bind storage: push() reads from the durable outbox, which requires
-        // a live storage reference (unlike the old pendingOutbound array path).
-        guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
+        guard isEnabled, let manifest, let storage, let database else { throw SyncError.notEnabled }
 
         let zoneID = CKRecordZone.ID(zoneName: manifest.zoneIdentifier, ownerName: CKCurrentUserDefaultName)
 
-        // Read batch WITHOUT clearing. Entries remain in the outbox until the
-        // transport confirms success. A transport failure throws before confirm(),
+        // Step 1: Epoch fence — verify (slot, epoch) is still current and heartbeat.
+        //
+        // Must run BEFORE reading the outbox batch. If this device was evicted while
+        // inactive, the outbox entries carry an old nodeID. Sending them would produce
+        // HLC collisions that different replicas resolve differently (silent LWW
+        // divergence). The fence detects the superseded epoch LOUDLY so re-enrollment
+        // can remint the outbox before any records reach the wire.
+        if let identity = currentIdentity {
+            // Mint an HLC for the heartbeat's last_active_hlc field.
+            let heartbeatHLC = hlcGenerator.send(now: nowMillis())
+            do {
+                try await EpochFence.heartbeat(
+                    identity: identity,
+                    currentHLC: heartbeatHLC,
+                    database: database,
+                    zoneID: zoneID
+                )
+            } catch SyncError.reenrollRequired(let slot, let staleEpoch, let currentEpoch) {
+                logger.warning("push: epoch fence triggered re-enrollment (slot=\(slot) staleEpoch=\(staleEpoch) currentEpoch=\(currentEpoch))")
+                // Re-enroll: re-claim slot, remint outbox HLCs under new nodeID, persist identity.
+                try await reenroll(zoneID: zoneID)
+                // Fall through to push with the re-minted outbox entries.
+            }
+            // Other errors (transportFailure) bubble up — push is aborted.
+        }
+
+        // Step 2: Read batch WITHOUT clearing. Entries remain in the outbox until
+        // the transport confirms success. A transport failure throws before confirm(),
         // leaving all entries intact for the next push cycle. This is R4's
         // durability guarantee: no change is lost to a transport failure.
         //
@@ -58,6 +97,7 @@ extension CloudKitStateActor {
             // Recover the stored HLC from the outbox entry. This is the HLC
             // that was minted at observe time (recordOutbound), not a fresh
             // mint — preserving the logical ordering established at capture.
+            // After re-enrollment, remintAll replaced these with new nodeID HLCs.
             let hlc = HLC(packed: UInt64(bitPattern: entry.packedHLC))
 
             switch entry.event {
@@ -111,10 +151,11 @@ extension CloudKitStateActor {
             }
         }
 
-        // Send to CloudKit. All changes (upserts and tombstones) go as saves.
+        // Step 3: Send to CloudKit via the injectable database seam.
+        // All changes (upserts and tombstones) go as saves.
         if !saved.isEmpty {
             do {
-                _ = try await container.privateCloudDatabase.modifyRecords(
+                _ = try await database.modifyRecords(
                     saving: saved,
                     deleting: [],
                     savePolicy: .changedKeys,
@@ -128,7 +169,7 @@ extension CloudKitStateActor {
             }
         }
 
-        // Transport succeeded: confirm the entries that were encoded and sent.
+        // Step 4: Transport succeeded: confirm the entries that were encoded and sent.
         // Entries that were skipped (missing table, bad rowKey, decode failure)
         // are not in confirmedIDs and remain in the outbox.
         try await OutboxStore.confirm(ids: confirmedIDs, from: storage)

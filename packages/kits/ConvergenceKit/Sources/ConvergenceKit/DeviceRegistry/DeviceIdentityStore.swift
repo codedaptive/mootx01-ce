@@ -41,23 +41,21 @@ import PersistenceKit
 ///
 /// Minted once on first `enable()` and persisted across process restarts.
 /// The `deviceUUID` differentiates machines that share one iCloud account.
-/// The `slot` is the provisionally claimed node-ID slot (1–15); confirmed
-/// via CloudKit CAS in P1-M3.
+/// The `slot` is the device's HLC node-ID slot (1–15), confirmed via
+/// CloudKit CAS against the shared slot registry (SlotClaimOperation).
 public struct DeviceIdentity: Sendable, Equatable {
 
     /// Stable device UUID. Generated once per device/estate pair.
     /// Never changes for this device's relationship to this estate.
     public let deviceUUID: UUID
 
-    /// The registry slot provisionally claimed by this device (1–15).
+    /// The registry slot claimed by this device (1–15).
     ///
-    /// This is a local-only provisional claim until P1-M3 confirms it via
-    /// CloudKit CAS against the shared slot manifest zone. Using a persisted
-    /// provisional slot (rather than re-drawing randomly on every launch)
-    /// reduces the collision probability: a stable node-ID only collides
-    /// with another device that happened to pick the same slot, while
-    /// per-launch random re-roll has collision probability ≈1/15 per
-    /// session pair regardless of history.
+    /// Confirmed via CloudKit CAS by `SlotClaimOperation` and persisted here.
+    /// A persisted slot is passed as `preferredSlot` to the claim operation on
+    /// subsequent `enable()` calls, so the device reclaims the same slot if it
+    /// is still free — reducing unnecessary slot changes and HLC outbox remints
+    /// across process restarts.
     public let slot: Int
 
     /// Epoch counter matching the registry record for this slot.
@@ -230,12 +228,11 @@ public struct DeviceIdentityStore: Sendable {
         }
         // No persisted identity — mint a new one.
         //
-        // Slot is a random provisional local-only claim. Per-launch random
-        // re-roll (the old approach) has collision probability ≈1/15 per
-        // session pair on every launch. A stable provisionally-persisted slot
-        // only collides when another device independently picks the same
-        // number — strictly better, even before CloudKit CAS arbitration
-        // in P1-M3 confirms or reassigns it.
+        // Slot is a randomly chosen initial value. Per-launch random re-roll
+        // would have collision probability ≈1/15 per session pair. A stable
+        // persisted slot only collides when another device independently picked
+        // the same number — but CloudKit CAS arbitration in SlotClaimOperation
+        // (called immediately after loadOrMint) confirms or reassigns it.
         let provisional = DeviceIdentity(
             deviceUUID: UUID(),
             slot: Int.random(in: 1...15),

@@ -1,8 +1,9 @@
 // PullCycle.swift
 //
 // Inbound pull path for CloudKitStateActor. Fetches remote record
-// changes and deletions from the private CloudKit database and applies
-// them through the conflict-policy switch in ApplyInbound.swift.
+// changes and deletions from the private CloudKit database via the
+// injectable CloudKitDatabaseProtocol seam and applies them through
+// the conflict-policy switch in ApplyInbound.swift.
 
 import Foundation
 import CloudKit
@@ -17,30 +18,35 @@ private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category:
 extension CloudKitStateActor {
 
     func pull() async throws -> SyncReceipt {
-        guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
+        guard isEnabled, let manifest, let storage, let database else { throw SyncError.notEnabled }
         let zoneID = CKRecordZone.ID(zoneName: manifest.zoneIdentifier, ownerName: CKCurrentUserDefaultName)
 
-        // Pull via async recordZoneChanges(inZoneWith:since:) API.
-        let config = CKFetchRecordZoneChangesOperation.ZoneConfiguration()
-        config.previousServerChangeToken = serverChangeToken
-
+        // Fetch zone changes via the injectable database seam.
+        //
+        // database.fetchZoneChanges(inZoneWith:since:) returns a CloudKitZoneChanges
+        // mirror type (constructible in tests, unlike CKDatabase.RecordZoneChanges
+        // which has no public init). The real CKDatabase conformance translates
+        // from recordZoneChanges(inZoneWith:since:) in the retroactive extension.
         var pulledRecords: [CKRecord] = []
         var deletedIDs: [CKRecord.ID] = []
         var newToken: CKServerChangeToken? = serverChangeToken
 
         do {
-            let result = try await container.privateCloudDatabase.recordZoneChanges(
+            let result = try await database.fetchZoneChanges(
                 inZoneWith: zoneID,
                 since: serverChangeToken
             )
-            for (_, modResult) in result.modificationResultsByID {
-                if case .success(let mod) = modResult {
-                    pulledRecords.append(mod.record)
-                }
-            }
-            for deletion in result.deletions {
-                deletedIDs.append(deletion.recordID)
-            }
+            // CloudKitZoneChanges.modifiedRecords is a [CKRecord] direct list
+            // (already unwrapped from the per-record Result in the CKDatabase
+            // conformance). Only successful modification results are included.
+            pulledRecords = result.modifiedRecords
+
+            // CloudKitZoneChanges.deletedRecordIDs mirrors CKDatabase.RecordZoneChanges
+            // deletions as [CKRecord.ID]. These are legacy external deletions (the
+            // engine itself uses typed tombstone CKRecords for its own deletes — see
+            // PushCycle.swift and the D1 fix rationale below).
+            deletedIDs = result.deletedRecordIDs
+
             newToken = result.changeToken
         } catch let ckError as CKError where ckError.code == .changeTokenExpired {
             // The server has invalidated the token (zone history truncated or
@@ -61,7 +67,7 @@ extension CloudKitStateActor {
             serverChangeToken = nil
             return try await pull()
         } catch {
-            throw SyncError.transportFailure(detail: "recordZoneChanges: \(error)")
+            throw SyncError.transportFailure(detail: "fetchZoneChanges: \(error)")
         }
 
         var appliedCount = 0
