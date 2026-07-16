@@ -265,6 +265,10 @@ actor FederationStateActor {
         if isEnabled { throw SyncError.alreadyEnabled }
         self.manifest = manifest
         self.storage = storage
+        // Ensure the _fed_sync_meta side table exists before any pull.
+        // Mirrors the CloudKit engine's ensureSyncMetaTable call in enable() so
+        // the LWW side-table path is available from the first apply (A6 unification).
+        try await Self.ensureFedSyncMetaTable(storage: storage)
         for table in manifest.tables where table.direction != .pullOnly {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
             let task = Task { [weak self] in
@@ -352,14 +356,21 @@ actor FederationStateActor {
             // advances the logical counter and takes the clock as a
             // parameter, keeping the engine deterministic.
             let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
+            let eventKind = SyncEventKind(from: change.event)
+            // Tombstone flag: set syncDeleted = true for delete events so the
+            // receiver knows to apply the tombstone path (LWW gate + side-table
+            // HLC persistence) rather than a normal upsert. Matches the A6
+            // unification contract and the Rust wire format (C-8 parity).
+            let syncDeleted: Bool? = eventKind == .delete ? true : nil
             let record = SyncRecord(
                 table: change.table,
-                event: SyncEventKind(from: change.event),
+                event: eventKind,
                 rowKey: rowKey,
                 values: change.values.map { SyncValueMap($0) },
                 hlc: PackedHLC(hlc),
                 schemaVersion: manifest.schemaVersion,
-                kitID: manifest.kitID
+                kitID: manifest.kitID,
+                syncDeleted: syncDeleted
             )
             records.append(record)
         }
@@ -509,19 +520,15 @@ actor FederationStateActor {
 
     /// Apply one inbound SyncRecord to local storage.
     ///
-    /// The body is two nested switches: event kind (insert/update/delete)
-    /// × conflict policy (four cases each). Each arm is a short operation —
-    /// upsert, insert-if-absent, delete, or early-return. The length comes
-    /// from the cross-product of cases, not from complex logic.
+    /// A6 UNIFICATION: the sync HLC is now stored in `_fed_sync_meta` (a per-engine
+    /// side table) rather than in the application row's `_syncHLC` column. This
+    /// matches the CloudKit engine's `_ck_sync_meta` pattern and fixes the tombstone
+    /// HLC loss: when a row is deleted the side-table entry survives, blocking stale
+    /// resurrections for subsequent inserts with older HLCs.
     ///
-    /// `lastWriterWinsByHLC` compares the incoming record's HLC against the
-    /// stored row's `_syncHLC`. If the incoming HLC is older (strictly less),
-    /// the write is silently dropped. On every apply that wins the comparison
-    /// the row is written with `_syncHLC` so the next inbound can compare.
-    /// Note: this path persists only `_syncHLC`; CloudKitStateActor.applyInbound
-    /// also persists `_syncSchemaVersion` and `_syncKitID`.
-    /// The same HLC gate applies to delete events: a stale delete (incoming
-    /// HLC < local `_syncHLC`) is silently rejected; a newer delete proceeds.
+    /// The body dispatches on `record.syncDeleted` (tombstone) first, then on
+    /// event kind × conflict policy for normal (non-tombstone) records. Each arm
+    /// is a short operation — upsert, insert-if-absent, delete, or early-return.
     ///
     /// Internal (not private) so the LWW force-tests can call it directly
     /// via @testable import without going through the full push/pull stack.
@@ -530,69 +537,10 @@ actor FederationStateActor {
         syncedTable: SyncedTable,
         storage: any Storage
     ) async throws {
-        switch record.event {
-        case .insert, .update:
-            let values = record.values?.asTypedValues ?? [:]
-            switch syncedTable.conflictPolicy {
-            case .appendOnly:
-                _ = try await storage.rowStore.upsert(
-                    table: record.table,
-                    values: values,
-                    conflictColumns: [syncedTable.primaryKeyColumn]
-                )
-
-            case .lastWriterWinsByHLC:
-                // Compare HLC; only apply if remote >= local.
-                // Mirrors CloudKitStateActor.applyInbound exactly.
-                let existing = try? await storage.rowStore.query(
-                    table: record.table,
-                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
-                )
-                if let first = existing?.first {
-                    // Recover the stored HLC from either `.hlc` (InMemory, where
-                    // TypedValue is preserved verbatim) or `.int` (SQLite/Postgres,
-                    // where the schema does not declare _syncHLC as .hlc so
-                    // readColumn returns the raw packed integer). Both cases carry
-                    // the canonical HLC.packed layout (node<<56 | logical<<40 | phys).
-                    let localHLC: HLC?
-                    switch first["_syncHLC"] ?? .null {
-                    case .hlc(let h): localHLC = h
-                    case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
-                    default: localHLC = nil
-                    }
-                    let incomingHLC = record.hlc.asHLC
-                    if let localHLC, incomingHLC < localHLC {
-                        return
-                    }
-                }
-                // Persist _syncHLC so the next inbound write can compare.
-                // (Schema version and kit ID are not merged here.)
-                var rowValues = values
-                rowValues["_syncHLC"] = .hlc(record.hlc.asHLC)
-                _ = try await storage.rowStore.upsert(
-                    table: record.table,
-                    values: rowValues,
-                    conflictColumns: [syncedTable.primaryKeyColumn]
-                )
-
-            case .remoteWins:
-                _ = try await storage.rowStore.upsert(
-                    table: record.table,
-                    values: values,
-                    conflictColumns: [syncedTable.primaryKeyColumn]
-                )
-
-            case .localWins:
-                let existing = try? await storage.rowStore.count(
-                    table: record.table,
-                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
-                )
-                if (existing ?? 0) == 0 {
-                    _ = try await storage.rowStore.insert(table: record.table, values: values)
-                }
-            }
-
-        case .delete:
+        // Tombstone path: applies via LWW gate and persists delete HLC in
+        // _fed_sync_meta after hard-delete (A6 adjudication).
+        let isTombstone = record.syncDeleted == true || record.event == .delete
+        if isTombstone {
             let predicate: StoragePredicate = .eq(
                 Column(table: record.table, name: syncedTable.primaryKeyColumn),
                 .uuid(record.rowKey)
@@ -601,39 +549,183 @@ actor FederationStateActor {
             case .appendOnly:
                 // Append-only tables are write-once; silently reject remote deletes.
                 return
-
-            case .lastWriterWinsByHLC:
-                // HLC gate on the delete path: a stale delete (incoming HLC <
-                // local _syncHLC) must not remove a newer local row. A newer
-                // delete (incoming HLC >= local _syncHLC) proceeds.
-                let existing = try? await storage.rowStore.query(
-                    table: record.table,
-                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
-                )
-                if let first = existing?.first {
-                    let localHLC: HLC?
-                    switch first["_syncHLC"] ?? .null {
-                    case .hlc(let h): localHLC = h
-                    case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
-                    default: localHLC = nil
-                    }
-                    let incomingHLC = record.hlc.asHLC
-                    if let localHLC, incomingHLC < localHLC {
-                        return
-                    }
-                }
-                _ = try await storage.rowStore.delete(table: record.table, where: predicate)
-
-            case .remoteWins:
-                // Remote delete wins unconditionally; hard-delete the row by primary key.
-                _ = try await storage.rowStore.delete(table: record.table, where: predicate)
-
             case .localWins:
-                // Local state is authoritative; silently reject remote deletes
-                // regardless of whether the row exists locally.
+                // Local state is authoritative; silently reject remote deletes.
                 return
+            case .remoteWins:
+                // Remote delete wins unconditionally; hard-delete the row.
+                _ = try? await storage.rowStore.delete(table: record.table, where: predicate)
+            case .lastWriterWinsByHLC:
+                // HLC gate: stale delete (incoming HLC < side-table HLC) must not
+                // remove a newer local row (D2 fix). Side table persists the HLC
+                // after delete so stale resurrections are also blocked (A6).
+                let localHLC = try await readFedSyncHLC(
+                    storage: storage, table: record.table, primaryKey: record.rowKey)
+                if let localHLC, record.hlc.asHLC < localHLC {
+                    return // stale delete — local row is newer
+                }
+                _ = try? await storage.rowStore.delete(table: record.table, where: predicate)
+                // A6: persist tombstone HLC in side table after hard-delete.
+                // WHY: without this, a stale insert arriving after the delete would
+                // find localHLC = nil and be accepted, resurrecting the deleted row.
+                try await writeFedTombstoneHLC(
+                    storage: storage, table: record.table,
+                    primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                    schemaVersion: record.schemaVersion, kitID: record.kitID)
+            }
+            return
+        }
+
+        // Normal (non-tombstone) insert/update path.
+        let values = record.values?.asTypedValues ?? [:]
+        switch syncedTable.conflictPolicy {
+        case .appendOnly:
+            _ = try await storage.rowStore.upsert(
+                table: record.table,
+                values: values,
+                conflictColumns: [syncedTable.primaryKeyColumn]
+            )
+
+        case .lastWriterWinsByHLC:
+            // A6: read HLC from _fed_sync_meta side table, not from the row.
+            // The side table entry exists even after a delete (tombstone HLC),
+            // so a stale resurrect for a previously-deleted row is also gated.
+            let localHLC = try await readFedSyncHLC(
+                storage: storage, table: record.table, primaryKey: record.rowKey)
+            if let localHLC, record.hlc.asHLC < localHLC {
+                return // local is newer (or tombstone is newer) — skip remote
+            }
+            // Apply the row WITHOUT embedding _syncHLC in the row values.
+            // A6: HLC lives in _fed_sync_meta, not in the application row.
+            _ = try await storage.rowStore.upsert(
+                table: record.table,
+                values: values,
+                conflictColumns: [syncedTable.primaryKeyColumn]
+            )
+            // Persist HLC in side table (is_deleted = 0, live row).
+            try await writeFedSyncHLC(
+                storage: storage, table: record.table,
+                primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                schemaVersion: record.schemaVersion, kitID: record.kitID)
+
+        case .remoteWins:
+            _ = try await storage.rowStore.upsert(
+                table: record.table,
+                values: values,
+                conflictColumns: [syncedTable.primaryKeyColumn]
+            )
+
+        case .localWins:
+            let existing = try? await storage.rowStore.count(
+                table: record.table,
+                where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
+            )
+            if (existing ?? 0) == 0 {
+                _ = try await storage.rowStore.insert(table: record.table, values: values)
             }
         }
+    }
+
+    // MARK: - _fed_sync_meta side table (A6 unification)
+
+    /// Side table name for Federation. Mirrors `_ck_sync_meta` in the CloudKit
+    /// engine — both backends use a side table to persist sync HLCs so the HLC
+    /// survives hard-deletes and provides the stale-resurrect guard (A6).
+    private static let fedSyncMetaTable = "_fed_sync_meta"
+
+    /// Create the `_fed_sync_meta` side table if it does not exist.
+    ///
+    /// Must be called from `enable()` before any `applyInbound`. Mirrors
+    /// `CloudKitStateActor.ensureSyncMetaTable`. Marked `internal` (not private)
+    /// so tests that call `applyInbound` directly can call this in their setup.
+    static func ensureFedSyncMetaTable(storage: any Storage) async throws {
+        let schema = SchemaDeclaration(
+            kitID: "ConvergenceKitFederation",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: fedSyncMetaTable,
+                    columns: [
+                        ColumnDeclaration(name: "table_name", type: .text, nullable: false),
+                        ColumnDeclaration(name: "primary_key", type: .text, nullable: false),
+                        ColumnDeclaration(name: "sync_hlc", type: .int, nullable: false,
+                                          defaultValue: .int(0)),
+                        ColumnDeclaration(name: "schema_version", type: .int, nullable: false,
+                                          defaultValue: .int(0)),
+                        ColumnDeclaration(name: "kit_id", type: .text, nullable: false,
+                                          defaultValue: .text("")),
+                        // is_deleted: 1 for tombstone entries (delete HLC that outlives
+                        // the row). Used by GC to identify entries eligible for compaction
+                        // after SyncTombstone.gcRetentionSeconds.
+                        ColumnDeclaration(name: "is_deleted", type: .int, nullable: false,
+                                          defaultValue: .int(0)),
+                    ],
+                    primaryKey: ["table_name", "primary_key"]
+                ),
+            ],
+            indices: []
+        )
+        // migrate(to:) is ADDITIVE — creates missing tables/columns without clobbering
+        // the application schema. This matches the CloudKit engine's pattern.
+        try await storage.migrate(to: schema)
+    }
+
+    /// Read the persisted sync HLC from `_fed_sync_meta` for a given row.
+    /// Returns the HLC regardless of `is_deleted` — tombstone HLCs compare
+    /// identically to live-row HLCs in the LWW gate.
+    private func readFedSyncHLC(
+        storage: any Storage, table: String, primaryKey: UUID
+    ) async throws -> HLC? {
+        let rows = try await storage.rowStore.query(
+            table: Self.fedSyncMetaTable,
+            where: .and([
+                .eq(Column(table: Self.fedSyncMetaTable, name: "table_name"), .text(table)),
+                .eq(Column(table: Self.fedSyncMetaTable, name: "primary_key"), .text(primaryKey.uuidString))
+            ])
+        )
+        guard let row = rows.first,
+              case .int(let packed) = row["sync_hlc"] else { return nil }
+        return HLC(packed: UInt64(bitPattern: packed))
+    }
+
+    /// Persist the sync HLC in `_fed_sync_meta` after a successful upsert.
+    /// Sets `is_deleted = 0` (live row, not a tombstone).
+    private func writeFedSyncHLC(
+        storage: any Storage, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await storage.rowStore.upsert(
+            table: Self.fedSyncMetaTable,
+            values: [
+                "table_name": .text(table),
+                "primary_key": .text(primaryKey.uuidString),
+                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "schema_version": .int(Int64(schemaVersion)),
+                "kit_id": .text(kitID),
+                "is_deleted": .int(0)
+            ],
+            conflictColumns: ["table_name", "primary_key"]
+        )
+    }
+
+    /// Persist the delete HLC in `_fed_sync_meta` after a hard-delete (A6).
+    /// Sets `is_deleted = 1` to mark this as a tombstone entry for GC purposes.
+    private func writeFedTombstoneHLC(
+        storage: any Storage, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await storage.rowStore.upsert(
+            table: Self.fedSyncMetaTable,
+            values: [
+                "table_name": .text(table),
+                "primary_key": .text(primaryKey.uuidString),
+                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "schema_version": .int(Int64(schemaVersion)),
+                "kit_id": .text(kitID),
+                "is_deleted": .int(1)
+            ],
+            conflictColumns: ["table_name", "primary_key"]
+        )
     }
 
     /// Current wall-clock in milliseconds, passed explicitly into
