@@ -465,7 +465,7 @@ actor SQLiteBackend {
 
     // MARK: - Row operations
 
-    func insertRow(table: String, values: [String: TypedValue]) throws -> RowHandle {
+    func insertRow(table: String, values: [String: TypedValue], origin: ChangeOrigin = .local) throws -> RowHandle {
         // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
         // the table name before it is interpolated into the INSERT statement, and
         // validate all column names from the caller-supplied `values` map before
@@ -505,7 +505,7 @@ actor SQLiteBackend {
             throw error
         }
         let key = extractRowKey(values: values)
-        notifyObservers(TableChange(table: table, event: .insert, rowKey: key, values: values))
+        notifyObservers(TableChange(table: table, event: .insert, rowKey: key, values: values, origin: origin))
         return RowHandle(table: table, key: key)
     }
 
@@ -519,7 +519,7 @@ actor SQLiteBackend {
     // null keyID (an unreadable row). A future content-upsert path must
     // extend the encryption seam symmetrically with insertRow before this
     // guard would let such a write through.
-    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) throws -> RowHandle {
+    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String], origin: ChangeOrigin = .local) throws -> RowHandle {
         // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
         // the table name, all value-map column names, and the conflict-column list
         // before interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
@@ -553,7 +553,7 @@ actor SQLiteBackend {
         }
         _ = try stmt.step()
         let key = extractRowKey(values: values)
-        notifyObservers(TableChange(table: table, event: .update, rowKey: key, values: values))
+        notifyObservers(TableChange(table: table, event: .update, rowKey: key, values: values, origin: origin))
         return RowHandle(table: table, key: key)
     }
 
@@ -601,7 +601,7 @@ actor SQLiteBackend {
         return changes
     }
 
-    func deleteRows(table: String, where predicate: StoragePredicate) throws -> Int {
+    func deleteRows(table: String, where predicate: StoragePredicate, origin: ChangeOrigin = .local) throws -> Int {
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name before interpolation. Predicate column names are validated by
         // SQLitePredicateCompiler.compile (SECFIX-WS2-PK F7).
@@ -624,7 +624,7 @@ actor SQLiteBackend {
         _ = try stmt.step()
         let changes = Int(sqlite3_changes(connection.handle))
         for key in matchedKeys {
-            notifyObservers(TableChange(table: table, event: .delete, rowKey: key, values: nil))
+            notifyObservers(TableChange(table: table, event: .delete, rowKey: key, values: nil, origin: origin))
         }
         return changes
     }

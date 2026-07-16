@@ -303,7 +303,11 @@ actor InMemoryStateActor {
 
     // MARK: - Row operations (called by InMemoryRowStore)
 
-    func insertRow(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+    func insertRow(
+        table: String,
+        values: [String: TypedValue],
+        origin: ChangeOrigin = .local
+    ) async throws -> RowHandle {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "insert: table \(table) not found")
         }
@@ -314,11 +318,16 @@ actor InMemoryStateActor {
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
+        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored, origin: origin))
         return RowHandle(table: table, key: key)
     }
 
-    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle {
+    func upsertRow(
+        table: String,
+        values: [String: TypedValue],
+        conflictColumns: [String],
+        origin: ChangeOrigin = .local
+    ) async throws -> RowHandle {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "upsert: table \(table) not found")
         }
@@ -334,14 +343,14 @@ actor InMemoryStateActor {
             merged = Self.materializeGenerated(t.declaration, merged)
             t.rows[existingKey] = merged
             state.tables[table] = t
-            await notify(TableChange(table: table, event: .update, rowKey: existingKey, values: merged))
+            await notify(TableChange(table: table, event: .update, rowKey: existingKey, values: merged, origin: origin))
             return RowHandle(table: table, key: existingKey)
         }
         let key = resolveOrAllocateKey(table: t, values: values)
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
+        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored, origin: origin))
         return RowHandle(table: table, key: key)
     }
 
@@ -367,7 +376,11 @@ actor InMemoryStateActor {
         return count
     }
 
-    func deleteRows(table: String, where predicate: StoragePredicate) async throws -> Int {
+    func deleteRows(
+        table: String,
+        where predicate: StoragePredicate,
+        origin: ChangeOrigin = .local
+    ) async throws -> Int {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "delete: table \(table) not found")
         }
@@ -378,7 +391,7 @@ actor InMemoryStateActor {
         var notifications: [TableChange] = []
         for (k, row) in t.rows where PredicateEvaluator.evaluate(predicate, against: row) {
             t.rows.removeValue(forKey: k)
-            notifications.append(TableChange(table: table, event: .delete, rowKey: k, values: row))
+            notifications.append(TableChange(table: table, event: .delete, rowKey: k, values: row, origin: origin))
             count += 1
         }
         state.tables[table] = t
