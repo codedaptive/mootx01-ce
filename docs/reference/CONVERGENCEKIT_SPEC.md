@@ -1,8 +1,8 @@
 ---
 title: ConvergenceKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -188,15 +188,21 @@ buffer the newest 256 events.
 **B-4 (conflict policy at the apply boundary):** the receiver applies
 each inbound record under the table's `ConflictPolicy`:
 
-- `lastWriterWinsByHLC` — on insert/update: reads the local row's stored
-  `_syncHLC` (reserved column written by every winning apply); if the
-  incoming HLC is strictly less than `_syncHLC` the record is silently
-  dropped; otherwise the row is upserted and `_syncHLC` is written with
-  the incoming HLC so the next inbound comparison has durable state. On
-  delete: the same HLC gate applies — a stale delete (incoming HLC <
-  local `_syncHLC`) is silently rejected; a newer or equal delete
-  hard-deletes the row. Both CloudKit and Federation backends implement
-  this identical comparison semantics.
+- `lastWriterWinsByHLC` — on insert/update: reads the stored HLC for
+  (table, primaryKey) from the `_ck_sync_meta` (CloudKit) or
+  `_fed_sync_meta` (Federation) side table; if the incoming HLC is
+  strictly less than the stored HLC the record is silently dropped;
+  otherwise the row is upserted and the HLC is written to the side table
+  so the next inbound comparison has durable state. The HLC is stored in
+  the side table rather than in the application row (A6 adjudication —
+  the side-table entry survives hard-deletes, blocking stale
+  resurrections). On delete: the same HLC gate applies — a stale delete
+  (incoming HLC < local side-table HLC) is silently rejected; a newer or
+  equal delete hard-deletes the row and writes the delete HLC to the side
+  table with `is_deleted = 1` so subsequent stale inserts are still gated
+  even after the row is gone. Both CloudKit and Federation backends
+  implement identical LWW semantics (B-8 describes the tombstone
+  mechanism).
 - `appendOnly` — upserts idempotently on the primary key (audit-log
   style); remote deletes are silently rejected.
 - `remoteWins` — upserts unconditionally; remote deletes execute without
@@ -224,6 +230,56 @@ registers the other. Pairing rides a `Relay` transport abstraction
 (INTERFACE § 4): the in-process `FederationRelay` is the local-and-test
 implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
 `Relay` conformer requiring no change to the engine.
+
+**B-8 (typed tombstone transport — D1 fix):** delete events are
+transmitted as full tombstone records, not as identifier-only deletions,
+so the transport layer carries unambiguous table routing.
+
+- **CloudKit backend:** `push` converts a `.delete` event into a `CKRecord`
+  tombstone with `recordType = "{kitID}_{tableName}"` and a `_syncDeleted`
+  field set to `1`. This is appended to the `save` list of the
+  `CKModifyRecordsOperation` — it is a record save, not a record delete.
+  `applyInbound` detects `_syncDeleted == 1` and routes the record through
+  the tombstone path rather than the normal upsert path. Because the
+  `recordType` carries the table name, a tombstone for table A cannot be
+  mis-applied to table B even if both tables share the same UUID primary
+  key (D1 fix: eliminates the fan-out-to-all-tables defect present when
+  `CKRecord.ID` deletions were used, which carry no record type).
+
+- **Federation backend:** `SyncRecord` carries an optional `syncDeleted:
+  Bool?` field (`sync_deleted` in Rust). When `true`, the record is a
+  tombstone; when `nil`, the field is omitted from the JSON wire encoding
+  for compactness (C-8 parity). The `event: .delete` / `event == Delete`
+  field also signals deletion; the receiving engine treats either signal
+  as a tombstone.
+
+**B-9 (side-table HLC adjudication — A6 — stale-resurrect protection):**
+both sync backends maintain a `(table_name, primary_key)` keyed side
+table that persists the HLC for every row ever seen. The side table is
+created during `enable()` and never removed.
+
+- **CloudKit:** `_ck_sync_meta` (schema version 2) — columns
+  `table_name TEXT`, `primary_key TEXT`, `sync_hlc INT`, `schema_version
+  INT`, `kit_id TEXT`, `is_deleted INT NOT NULL DEFAULT 0`.
+- **Federation:** `_fed_sync_meta` (schema version 1) — identical schema.
+
+The `is_deleted` column distinguishes live-row HLC entries (`0`) from
+tombstone entries (`1`). When a delete wins the LWW gate, the application
+row is hard-deleted and the side-table entry is written (or overwritten)
+with `is_deleted = 1` and the tombstone HLC. The side-table entry
+therefore **outlives the application row**. Subsequent inserts for the
+same `(table_name, primary_key)` must pass the same LWW comparison
+against this side-table HLC — a stale insert (incoming HLC < tombstone
+HLC) is silently dropped (stale-resurrect protection). A newer insert
+(incoming HLC >= tombstone HLC) succeeds and flips `is_deleted` back to
+`0`.
+
+Tombstone entries are eligible for garbage collection after
+`SyncTombstone.gcRetentionSeconds` (30 days) measured from the physical
+time component of the stored HLC. `TombstoneGC.compact(from:sideTable:
+nowMillis:)` performs query-then-delete on `is_deleted = 1` entries whose
+unpacked physical time falls below the cutoff. Both backends call this via
+the same shared utility; callers pass the appropriate `sideTable` name.
 
 ## § 6 — Error model (conceptual)
 
@@ -279,11 +335,46 @@ is rejected at pull and its records do not apply (I-7).
 `SyncValueMap` / `SyncValueBox` and the Rust version agrees with the Swift version on the discriminated encoding (B-5). The CloudKit HLC pack/unpack
 is lossless within the 48/12/4-bit layout (B-6).
 
+**C-9 (tombstone LWW gate — D2 fix):** for every `lastWriterWinsByHLC`
+table, a tombstone (delete) record must pass the same HLC gate as an
+upsert:
+
+- A tombstone with HLC strictly less than the stored side-table HLC for
+  the same `(table, primaryKey)` is silently dropped — the application
+  row survives (stale-delete-loses).
+- A tombstone with HLC greater than or equal to the stored HLC
+  hard-deletes the application row and writes the tombstone HLC to the
+  side table with `is_deleted = 1` (newer-delete-wins).
+
+Both CloudKit and Federation backends must satisfy this matrix on the
+conformance fixtures (B-8, B-9).
+
+**C-10 (stale-resurrect protection — A6):** after a tombstone wins the
+LWW gate, any subsequent upsert for the same `(table, primaryKey)` with
+HLC strictly less than the tombstone HLC must be silently dropped —
+the application row must remain absent. An upsert with HLC greater than
+or equal to the tombstone HLC is accepted (intentional recreate) and the
+side-table `is_deleted` value flips back to `0`. Both backends must
+satisfy this property; the conformance fixtures cover:
+stale-resurrect-rejected and delete-then-recreate cases (B-9).
+
 The conformance fixtures run with InMemory PersistenceKit underneath.
 None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-16
+CVK-ICLOUD P1-M7 (D1, D2, A6 fixes):
+- B-4 updated: `_syncHLC` description corrected — HLC now lives in the
+  `_ck_sync_meta` / `_fed_sync_meta` side table (not a row column); delete
+  LWW gate and stale-resurrect block described.
+- B-8 added: typed tombstone transport mechanism for CloudKit (full CKRecord
+  with `_syncDeleted = 1`) and Federation (`syncDeleted: true` wire field).
+- B-9 added: side-table HLC adjudication, tombstone `is_deleted` column,
+  stale-resurrect protection, and TombstoneGC retention window.
+- C-9 added: tombstone LWW gate conformance requirement (D2 fix).
+- C-10 added: stale-resurrect protection conformance requirement (A6).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
