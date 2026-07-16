@@ -2,6 +2,7 @@
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
 //! `LensTools.tools()` + `VaultTools.tools()` composition.
+//!   Memory adapter (0/1) — opt-in `memory` tool (MOOTX01_MEMORY_TOOL=1, M-MEMTOOL-1)
 //!   Tier 1 (9)  — core memory: file, search, list, get, update, withdraw, erase, confirm, move
 //!   Tier 2 (4)  — connections: link, review_tunnel, search, map
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
@@ -26,6 +27,10 @@
 //! Vault-off (MOOTX01_VAULT=0): 62 tools —
 //! the five moot_vault_* tools and moot_palace_import are hidden together
 //! because all open local SQLite files (filesystem import/export vector).
+//! Memory adapter (opt-in, MOOTX01_MEMORY_TOOL=1): adds 1 tool (`memory`) above the
+//! base count — 69 vault-on or 63 vault-off when enabled. Default (absent / ≠ "1")
+//! is OFF, preserving the 68/62 counts unchanged. There are no dataset tools on
+//! this branch's registry (a 1.1.x-only surface); the tier list stops at Vault.
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -50,27 +55,60 @@ pub fn vault_enabled() -> bool {
         .unwrap_or(true) // absent = vault-on (the default)
 }
 
+/// True when the Anthropic memory_20250818 adapter tool is enabled.
+///
+/// Opt-in: requires `MOOTX01_MEMORY_TOOL=1` (set by `mootx01 enable memory-tool`).
+/// Default (absent or any value ≠ "1") is OFF — the base tool surface (71/65) is
+/// unchanged. When ON, a single `memory` tool is prepended to the list (72/66).
+/// Mirrors Swift `ToolProjection.memoryToolEnabled(environment:)`.
+pub fn memory_enabled() -> bool {
+    std::env::var("MOOTX01_MEMORY_TOOL")
+        .map(|v| v == "1")
+        .unwrap_or(false) // absent = off (the default)
+}
+
 /// Build the tool surface for `tools/list`.
 ///
 /// Produces 68 tools when vault is enabled (the default) or 62 tools when
-/// `MOOTX01_VAULT=0` (installed with `--vault-off`). The filesystem-importing
+/// `MOOTX01_VAULT=0` (installed with `--vault-off`). Adding 1 each when
+/// `MOOTX01_MEMORY_TOOL=1` (the opt-in memory adapter). The filesystem-importing
 /// `moot_palace_import` tool is hidden with the vault surface (same security
 /// posture). All other non-vault tiers are always present. See ADR-015.
 /// ADR-025 wave 8.2 added `moot_monitoring_status`; the FDC reset tool added
 /// `moot_reclassify_fdc`.
 pub fn build_tool_list() -> serde_json::Value {
-    build_tool_list_with_vault_flag(vault_enabled())
+    build_tool_list_with_flags(vault_enabled(), memory_enabled())
 }
 
 /// Build the tool surface with an explicit vault-on flag. Used by tests
 /// that need to verify vault-gating behaviour without mutating the process
 /// environment (std::env::set_var is not thread-safe under the parallel
 /// Rust test runner). Production code uses `build_tool_list()` which reads
-/// the env var via `vault_enabled()`.
+/// the env var via `vault_enabled()`. Also reads `MOOTX01_MEMORY_TOOL` from
+/// the environment; use `build_tool_list_with_flags` to control both flags
+/// deterministically.
 pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
+    build_tool_list_with_flags(vault_on, memory_enabled())
+}
+
+/// Build the tool surface with explicit vault-on and memory-on flags.
+///
+/// The single implementation all entry points delegate to. Tests that need
+/// fully deterministic behaviour (no env-var reads) call this directly —
+/// e.g. `build_tool_list_with_flags(vault_enabled(), false)` to get the
+/// baseline 68/62 count without racing against memory-tool env mutations.
+pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json::Value {
     // Vault-on: 68 tools. Vault-off: 62 tools (palace_import + 5 vault_* hidden).
-    let capacity = if vault_on { 68 } else { 62 };
+    // Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1: 69/63.
+    let capacity = if vault_on { 68 } else { 62 } + if memory_on { 1 } else { 0 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
+
+    // Anthropic memory_20250818 adapter (M-MEMTOOL-1) — opt-in, prepended when
+    // MOOTX01_MEMORY_TOOL=1 (set by `mootx01 enable memory-tool`). Mirrors Swift
+    // ToolProjection.tools(environment:) which prepends memoryAdapterTools() first.
+    if memory_on {
+        tools.push(memory_adapter_tool());
+    }
 
     // Tier 1 — Core memory (9)
     tools.push(file_memory_tool());
@@ -175,6 +213,41 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
     }
 
     serde_json::Value::Array(tools)
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic memory_20250818 adapter (M-MEMTOOL-1)
+// ---------------------------------------------------------------------------
+
+/// `memory` — Anthropic memory_20250818 compatible virtual filesystem tool.
+///
+/// Schema is byte-identical to Swift `ToolProjection.memoryTool()`. Opt-in
+/// via `MOOTX01_MEMORY_TOOL=1`; absent from `tools/list` when disabled.
+/// `command` is the only required field; all path/content/range args are
+/// optional because each command uses a different subset.
+fn memory_adapter_tool() -> serde_json::Value {
+    json!({
+        "name": "memory",
+        "description": "Anthropic memory_20250818 compatible. Manages a virtual /memories \
+filesystem backed by the MOOTx01 estate with governance: audit \
+trail, lineage, sensitivity, confirmation state. Commands: view, \
+create, str_replace, insert, delete, rename.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "command": string_schema("One of: view, create, str_replace, insert, delete, rename."),
+                "path": string_schema("Virtual path under /memories."),
+                "file_text": string_schema("File content for create."),
+                "old_str": string_schema("Text to find for str_replace."),
+                "new_str": string_schema("Replacement text for str_replace. Omit to delete old_str."),
+                "view_range": string_schema("Optional 'start,end' for view line range. Use -1 for EOF."),
+                "insert_line": integer_schema("Line number after which to insert (0 = beginning)."),
+                "insert_text": string_schema("Text to insert."),
+                "old_path": string_schema("Source path for rename."),
+                "new_path": string_schema("Destination path for rename.")
+            }),
+            json!(["command"])
+        )))
+    })
 }
 
 // ---------------------------------------------------------------------------

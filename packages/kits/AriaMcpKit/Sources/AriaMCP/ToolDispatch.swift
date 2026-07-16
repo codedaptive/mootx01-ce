@@ -118,6 +118,21 @@ public struct ToolDispatcher: Sendable {
     /// a stale plugin or stale binary is visible without a separate check.
     public let versionSkewAdvisory: String?
 
+    /// Upstream-release advisory provider: returns a one-line "a newer
+    /// release exists" message (e.g. "v1.0.34 is available (installed
+    /// 1.0.33) — upgrade with `mootx01 upgrade`"), or nil when there is
+    /// nothing to say. Unlike `versionSkewAdvisory` this is a CLOSURE,
+    /// not a startup-computed string: the daemon is long-lived and
+    /// releases ship while it is resident, so freshness requires
+    /// evaluation at call time. The host owns rate limiting and the
+    /// network boundary (see `MootInstallerCore.UpdateAdvisor` — kits
+    /// never touch the network themselves); the kit only renders the
+    /// returned line. Evaluated in `moot_estate_ping` /
+    /// `moot_estate_status` ONLY — the two session-orientation tools —
+    /// so every other tool response is untouched and clients are
+    /// informed once at orientation time, not nagged per call.
+    public let updateAdvisoryProvider: (@Sendable () async -> String?)?
+
     /// Environment the dispatch-time feature-flag guards read
     /// (`MOOTX01_MEMORY_TOOL`, `MOOTX01_VAULT`). Injected at construction —
     /// defaulting to the process environment — so tests can enable or disable
@@ -144,6 +159,7 @@ public struct ToolDispatcher: Sendable {
                 buildSerial: String = Self.deriveBuildSerial(),
                 serverIdentity: String = "aria-mcp-server",
                 versionSkewAdvisory: String? = nil,
+                updateAdvisoryProvider: (@Sendable () async -> String?)? = nil,
                 monitoringControl: (any MonitoringControl)? = nil,
                 environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.kit = kit
@@ -155,6 +171,7 @@ public struct ToolDispatcher: Sendable {
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisoryProvider = updateAdvisoryProvider
         self.monitoringControl = monitoringControl
         self.environment = environment
     }
@@ -176,6 +193,7 @@ public struct ToolDispatcher: Sendable {
                               monitoringControl: monitoringControl,
                               buildSerial: buildSerial, serverIdentity: serverIdentity,
                               versionSkewAdvisory: versionSkewAdvisory,
+                              updateAdvisoryProvider: updateAdvisoryProvider,
                               environment: environment)
     }
 
@@ -191,6 +209,7 @@ public struct ToolDispatcher: Sendable {
                        monitoringControl: control,
                        buildSerial: buildSerial, serverIdentity: serverIdentity,
                        versionSkewAdvisory: versionSkewAdvisory,
+                       updateAdvisoryProvider: updateAdvisoryProvider,
                        environment: environment)
     }
 
@@ -207,6 +226,7 @@ public struct ToolDispatcher: Sendable {
         sensitivityUnlockLedger: SensitivityGrantLedger,
         monitoringControl: (any MonitoringControl)?,
         buildSerial: String, serverIdentity: String, versionSkewAdvisory: String?,
+        updateAdvisoryProvider: (@Sendable () async -> String?)?,
         environment: [String: String]
     ) {
         self.kit = kit
@@ -219,6 +239,7 @@ public struct ToolDispatcher: Sendable {
         self.buildSerial = buildSerial
         self.serverIdentity = serverIdentity
         self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisoryProvider = updateAdvisoryProvider
         self.environment = environment
     }
 
@@ -2418,6 +2439,12 @@ extension ToolDispatcher {
         if let versionSkewAdvisory {
             stats.append("version_skew: \(versionSkewAdvisory)")
         }
+        // Upstream-release advisory (see `updateAdvisoryProvider`): evaluated
+        // lazily here and in ping only — the host rate-limits the underlying
+        // release-feed probe, and the common up-to-date case appends nothing.
+        if let updateAdvisoryProvider, let update = await updateAdvisoryProvider() {
+            stats.append("update_available: \(update)")
+        }
         return Self.textResult(stats.joined(separator: "\n") + Self.ARIASessionProtocol)
     }
 
@@ -2589,6 +2616,13 @@ extension ToolDispatcher {
             var pong = "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live — build \(buildSerial)"
             if let versionSkewAdvisory {
                 pong += "\nversion_skew: \(versionSkewAdvisory)"
+            }
+            // Upstream-release advisory — same opt-in shape as version_skew.
+            // The provider's TTL cache keeps this a memory read on all but
+            // the first ping of each cache window, preserving "true
+            // lightweight ping" in the common case.
+            if let updateAdvisoryProvider, let update = await updateAdvisoryProvider() {
+                pong += "\nupdate_available: \(update)"
             }
             return Self.textResult(pong)
         case .quiesced, .draining:
