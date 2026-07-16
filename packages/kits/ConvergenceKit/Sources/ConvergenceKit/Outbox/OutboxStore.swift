@@ -3,9 +3,9 @@
 // Durable operations on the _ck_outbox side table.
 //
 // OutboxStore is transport-agnostic: it knows how to persist, coalesce, read,
-// and confirm outbox entries, but it does not know about CloudKit, CKRecord,
-// or any other transport detail. The push cycle (PushCycle.swift in the
-// CloudKit target) owns the transport seam.
+// confirm, park, and retry outbox entries, but it does not know about CloudKit,
+// CKRecord, or any other transport detail. The push cycle (PushCycle.swift in
+// the CloudKit target) owns the transport seam.
 //
 // COALESCING RULE:
 // Multiple changes to the same (table_name, row_key) collapse to the entry
@@ -15,12 +15,13 @@
 // row is inserted and then deleted, only the delete needs to be sent. The
 // coalescing bounds hot-row growth in high-write workloads.
 //
-// P1-M6 SEAM (per-record push results):
-// Until P1-M6 lands, PushCycle confirms the full batch on transport success
-// and retains the full batch on transport failure. Per-record confirmation
-// (partial success from modifyRecords(atomically: false)) is wired in P1-M6.
-// OutboxStore's confirm(ids:from:) already accepts a list of IDs so the P1-M6
-// upgrade is a call-site change in PushCycle, not a schema or API change here.
+// PER-RECORD PUSH RESULTS (R6, CVK-ICLOUD P1-M6):
+// PushCycle.push() now consumes the per-record result dictionaries from
+// modifyRecords(atomically:false) and classifies each result via CKErrorTaxonomy.
+// confirm(ids:from:) removes successfully pushed entries; park(id:from:) marks
+// permanently-failed entries as is_parked=1 (excluded from readBatch);
+// incrementRetryCount(id:from:) bumps retry_count on retryable failures.
+// parkedEntries(from:) exposes parked entries for host-app diagnostics.
 
 import Foundation
 import PersistenceKit
@@ -98,6 +99,10 @@ public enum OutboxStore {
     /// Read up to `limit` pending outbox entries, ordered by HLC ascending
     /// (oldest first, so re-delivery after a failure preserves chronological order).
     ///
+    /// **Parked entries are excluded.** Entries with `is_parked == 1` have
+    /// permanently failed and are filtered out here; use `parkedEntries(from:)`
+    /// for diagnostics access.
+    ///
     /// Does NOT delete the entries — they remain in the outbox until the caller
     /// confirms them via `confirm(ids:from:)`. This is the read-without-consume
     /// pattern: the transport failure path is a no-op (entries stay intact).
@@ -109,7 +114,10 @@ public enum OutboxStore {
             limit: limit,
             offset: nil
         )
-        return rows.compactMap { decodeRow($0) }
+        // Filter parked entries in Swift. The is_parked column may be absent on
+        // rows written before the v3 migration; decodeRow defaults it to false,
+        // so pre-migration rows are treated as active (correct behaviour).
+        return rows.compactMap { decodeRow($0) }.filter { !$0.isParked }
     }
 
     // MARK: - Confirm (delete on transport success)
@@ -130,11 +138,82 @@ public enum OutboxStore {
         }
     }
 
+    // MARK: - Park (permanent failure)
+
+    /// Mark the entry identified by `id` as permanently failed.
+    ///
+    /// Sets `is_parked = 1`. Parked entries are excluded from `readBatch` and
+    /// will never be pushed again. They remain in the table and are visible via
+    /// `parkedEntries(from:)` so the host app can surface a diagnostic warning
+    /// (e.g. "some changes could not be synced because your iCloud storage is
+    /// full").
+    public static func park(id: UUID, from storage: any Storage) async throws {
+        _ = try await storage.rowStore.update(
+            table: table,
+            values: ["is_parked": .int(1)],
+            where: .eq(Column(table: table, name: "id"), .uuid(id))
+        )
+    }
+
+    // MARK: - Increment retry count
+
+    /// Increment the `retry_count` for the entry identified by `id`.
+    ///
+    /// Called after a retryable or conflict error so the host app can surface
+    /// entries that are stuck in a retry loop. The count is informational —
+    /// OutboxStore does not apply a retry cap; callers decide when to give up
+    /// and park an entry.
+    public static func incrementRetryCount(id: UUID, from storage: any Storage) async throws {
+        // Read the current count, increment, write back.
+        // This is a read-modify-write; safe here because the outbox is single-
+        // writer (the CloudKitStateActor's serial push cycle).
+        let rows = try await storage.rowStore.query(
+            table: table,
+            where: .eq(Column(table: table, name: "id"), .uuid(id))
+        )
+        guard let row = rows.first else { return }
+        let current: Int
+        if case .int(let c) = row["retry_count"] {
+            current = Int(c)
+        } else {
+            current = 0
+        }
+        _ = try await storage.rowStore.update(
+            table: table,
+            values: ["retry_count": .int(Int64(current + 1))],
+            where: .eq(Column(table: table, name: "id"), .uuid(id))
+        )
+    }
+
+    // MARK: - Diagnostics: parked entries
+
+    /// Read all parked outbox entries.
+    ///
+    /// Returns entries that have been marked `is_parked = 1` due to a permanent
+    /// push failure (quota exceeded or record too large). These entries are
+    /// excluded from normal push batches but remain in the table so the host app
+    /// can surface a user-visible warning.
+    ///
+    /// Ordered by HLC ascending (oldest first).
+    public static func parkedEntries(from storage: any Storage) async throws -> [OutboxEntry] {
+        let rows = try await storage.rowStore.query(
+            table: table,
+            where: nil,
+            orderBy: [OrderClause(column: Column(table: table, name: "hlc"), direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return rows.compactMap { decodeRow($0) }.filter { $0.isParked }
+    }
+
     // MARK: - Drain leftovers on enable
 
     /// Read all pending outbox entries that survived from a previous process
     /// lifetime. Called by `CloudKitStateActor.enable()` to discover unconfirmed
     /// changes so a push cycle can be scheduled immediately after enable.
+    ///
+    /// Returns only active (non-parked) entries; parked entries are skipped
+    /// because they will not be pushed regardless.
     ///
     /// Semantically equivalent to `readBatch(limit: Int.max)`. The separate
     /// function name documents the enable-time intent and lets callers distinguish
@@ -147,12 +226,14 @@ public enum OutboxStore {
 
     private static func insertEntry(_ entry: OutboxEntry, to storage: any Storage) async throws {
         var values: [String: TypedValue] = [
-            "id":          .uuid(entry.id),
-            "table_name":  .text(entry.tableName),
-            "row_key":     .text(entry.rowKey),
-            "event":       .text(entry.event.rawValue),
-            "hlc":         .int(entry.packedHLC),
-            "enqueued_at": .text(entry.enqueuedAt),
+            "id":           .uuid(entry.id),
+            "table_name":   .text(entry.tableName),
+            "row_key":      .text(entry.rowKey),
+            "event":        .text(entry.event.rawValue),
+            "hlc":          .int(entry.packedHLC),
+            "enqueued_at":  .text(entry.enqueuedAt),
+            "retry_count":  .int(Int64(entry.retryCount)),
+            "is_parked":    .int(entry.isParked ? 1 : 0),
         ]
         if let blob = entry.valuesData {
             values["values"] = .blob(blob)
@@ -165,12 +246,12 @@ public enum OutboxStore {
 
     private static func decodeRow(_ row: StorageRow) -> OutboxEntry? {
         guard
-            case .uuid(let id)       = row["id"],
-            case .text(let tableName) = row["table_name"],
-            case .text(let rowKey)   = row["row_key"],
-            case .text(let eventRaw) = row["event"],
-            case .int(let hlc)       = row["hlc"],
-            case .text(let enqueuedAt) = row["enqueued_at"],
+            case .uuid(let id)          = row["id"],
+            case .text(let tableName)   = row["table_name"],
+            case .text(let rowKey)      = row["row_key"],
+            case .text(let eventRaw)    = row["event"],
+            case .int(let hlc)          = row["hlc"],
+            case .text(let enqueuedAt)  = row["enqueued_at"],
             let event = SyncEventKind(rawValue: eventRaw)
         else { return nil }
 
@@ -181,6 +262,14 @@ public enum OutboxStore {
         default:           valuesData = nil
         }
 
+        // retry_count and is_parked may be absent on rows written before the v3
+        // migration. Default both to 0/false so pre-migration rows behave as active.
+        let retryCount: Int
+        if case .int(let c) = row["retry_count"] { retryCount = Int(c) } else { retryCount = 0 }
+
+        let isParked: Bool
+        if case .int(let p) = row["is_parked"] { isParked = p != 0 } else { isParked = false }
+
         return OutboxEntry(
             id: id,
             tableName: tableName,
@@ -188,7 +277,9 @@ public enum OutboxStore {
             event: event,
             valuesData: valuesData,
             packedHLC: hlc,
-            enqueuedAt: enqueuedAt
+            enqueuedAt: enqueuedAt,
+            retryCount: retryCount,
+            isParked: isParked
         )
     }
 }

@@ -96,8 +96,10 @@ actor CloudKitStateActor {
         }
 
         // Ensure all ConvergenceKit side tables exist (consolidated schema, B-12).
-        // CKSideSchema owns one SchemaDeclaration with kitID "ConvergenceKit" and
-        // a single version counter covering _ck_sync_meta (v1) and _ck_outbox (v2).
+        // CKSideSchema v3 covers _ck_sync_meta (v1), _ck_outbox (v2, plus
+        // retry_count and is_parked columns added in v3), and _ck_change_token
+        // (v3, consolidated from TokenStore.swift in P1-M6 adjudication A11).
+        // A separate TokenStore.ensure call is no longer needed.
         try await CKSideSchema.ensure(storage: storage)
 
         // Drain any outbox leftovers from a previous process life so the next
@@ -109,10 +111,10 @@ actor CloudKitStateActor {
             logger.info("outbox: \(leftovers.count) leftover entries from previous session")
         }
 
-        // Ensure the _ck_change_token side table exists, then restore the
-        // persisted token so the first pull resumes from where the previous
-        // process left off rather than re-pulling the entire zone. R5.
-        try await TokenStore.ensure(storage: storage)
+        // Restore the persisted server change token so the first pull resumes
+        // from where the previous process left off rather than re-pulling the
+        // entire zone. R5. The _ck_change_token table is guaranteed to exist
+        // by the CKSideSchema.ensure call above.
         serverChangeToken = try await TokenStore.load(zoneName: manifest.zoneIdentifier, storage: storage)
 
         // Load or mint this device's persistent sync identity (N2: device slot registry).

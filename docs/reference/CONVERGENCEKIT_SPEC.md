@@ -335,6 +335,33 @@ they do not abort the whole cycle. `notEnabled`, `alreadyEnabled`,
 `corruptRemoteIdentity`, `reenrollRequired`, and `slotExhausted` are
 CloudKit-only; they are never thrown by the Federation or None backends.
 
+### Per-record push error taxonomy (CloudKit-only, v1.2-draft)
+
+When `modifyRecords(atomically: false)` returns, each record carries its
+own `Result<CKRecord, Error>`. The engine classifies each per-record error
+into one of four postures and acts immediately:
+
+| Posture | Trigger | Outbox action |
+|---|---|---|
+| `retryableBackoff` | Transient: network, rate-limit, service unavailable, authentication | Increment `retry_count`; leave in outbox. If `CKError.retryAfterSeconds` is set, the caller honours it as a minimum delay floor before the next push cycle. |
+| `reclaim` | Zone or change token invalid (`zoneNotFound`, `userDeletedZone`, `changeTokenExpired`) | Increment `retry_count`; surface `reclaimNeeded` to caller. Caller must re-create the zone or clear the server change token before the next push attempt. |
+| `conflict` | `serverRecordChanged` — server holds a newer version | Increment `retry_count`; leave in outbox. The pull cycle resolves the conflict via LWW before the next push attempt re-pushes the same entry. |
+| `permanent` | Quota exceeded, record size exceeded, programming / configuration error | Set `is_parked = 1`; exclude from future `readBatch` calls. Entry is visible via `OutboxStore.parkedEntries()` for diagnostics. No further push attempts. |
+
+The receipt's `pushed` count equals the number of records that received a
+`.success` result — not the total sent. Entries that fail with any posture
+are NOT counted as pushed (B-2).
+
+Whole-batch transport failures (network outage or authentication error
+before CloudKit processes any records) still throw `SyncError.transportFailure`
+to the caller; no per-record classification runs. All outbox entries survive
+intact for the next push cycle.
+
+The `retryAfter` value from `CKError.retryAfterSeconds` on `requestRateLimited`
+errors is surfaced in the `CKErrorClass.retryableBackoff(retryAfter:)` case.
+`RetryPolicy.delay(forAttempt:suggestedRetryAfter:)` uses it as a hard floor:
+the computed exponential backoff is never shorter than the server's instruction.
+
 ## § 7 — Conformance requirements
 
 **C-1 (lifecycle gate):** `push`/`pull` before `enable` raise
@@ -372,7 +399,13 @@ configured test container.
 
 ## Changelog
 
-### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P1-M1)
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P1-M6)
+- Added per-record push error taxonomy subsection to § 6: four postures
+  (`retryableBackoff`, `reclaim`, `conflict`, `permanent`), outbox action
+  per posture, B-2 `pushed`-count alignment, `retryAfter` floor semantics
+  (CVK-ICLOUD P1-M6 R6).
+
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P1-M5)
 - Added I-10 (no-echo), I-11 (device slot identity), I-12 (durable
   pipeline) to § 4.
 - Added implementation note to I-10: echo suppression is now implemented

@@ -20,12 +20,13 @@
 // corruption, not a hostile attacker with direct DB access.
 //
 // --- Schema note ---
-// P1-M4 (parallel mission on a sibling stream) is creating a consolidated
-// SideSchema.swift in ConvergenceKitCloudKit for all _ck_* tables. This
-// file declares _ck_change_token locally using the same
-// SchemaDeclaration + migrate(to:) pattern as CloudKitStateActor's
-// ensureSyncMetaTable. When SideSchema.swift lands and the root merge
-// reconciles, this local declaration should be folded in there.
+// The _ck_change_token table declaration has been consolidated into
+// CKSideSchema.swift (v3, CVK-ICLOUD P1-M6 adjudication A11). TokenStore's
+// read/write helpers (load, save, clear, archive, unarchive, saveBlob,
+// loadBlob) remain here; only the SchemaDeclaration has moved. The
+// ensure(storage:) function now delegates to CKSideSchema.ensure so existing
+// callers continue to work, and CloudKitStateActor.enable() no longer needs
+// to call it separately (CKSideSchema.ensure already covers _ck_change_token).
 //
 // --- Per-zone keying ---
 // zone_name is the sole primary key. Tokens for different zones are
@@ -36,6 +37,7 @@
 import Foundation
 import CloudKit
 import PersistenceKit
+import ConvergenceKit
 
 // MARK: - TokenStore
 
@@ -43,46 +45,19 @@ import PersistenceKit
 /// All methods are static; no instances are created.
 enum TokenStore {
 
-    static let tableName = "_ck_change_token"
+    static let tableName = CKSideSchema.changeTokenTable
 
     // MARK: - Schema setup
 
     /// Ensure the _ck_change_token side table exists in storage.
     ///
-    /// Uses SchemaDeclaration + migrate(to:) (ADDITIVE) so the
-    /// application schema declaration is never overwritten. This mirrors
-    /// the pattern from CloudKitStateActor.ensureSyncMetaTable exactly.
-    ///
-    /// The kitID "ConvergenceKitCloudKit" and version 1 are shared with
-    /// ensureSyncMetaTable. Both calls are safe to interleave because:
-    ///   - SQLite: CREATE TABLE IF NOT EXISTS runs for every table in the
-    ///     schema.tables array, regardless of the kit version gate.
-    ///   - InMemory: tables are created if absent before version gates fire.
-    /// Either call order creates both _ck_sync_meta and _ck_change_token.
+    /// Delegates to CKSideSchema.ensure(storage:), which owns the
+    /// consolidated SchemaDeclaration for all ConvergenceKit side tables.
+    /// Kept as a function so existing callers compile without modification;
+    /// CloudKitStateActor.enable() no longer calls this separately because
+    /// CKSideSchema.ensure is already called earlier in the enable path.
     static func ensure(storage: any Storage) async throws {
-        let schema = SchemaDeclaration(
-            kitID: "ConvergenceKitCloudKit",
-            version: 1,
-            tables: [
-                TableDeclaration(
-                    name: tableName,
-                    columns: [
-                        // zone_name is the sole primary key — one row per zone.
-                        ColumnDeclaration(name: "zone_name", type: .text, nullable: false),
-                        // token: NSKeyedArchiver blob of a CKServerChangeToken.
-                        ColumnDeclaration(name: "token", type: .blob, nullable: false),
-                        // updated_at: ISO 8601 wall-clock timestamp for debugging.
-                        // Date storage is TEXT (ISO8601) per schema-invariants.md.
-                        ColumnDeclaration(name: "updated_at", type: .text, nullable: false),
-                    ],
-                    primaryKey: ["zone_name"]
-                ),
-            ],
-            indices: []
-        )
-        // migrate(to:) is ADDITIVE — creates _ck_change_token without
-        // touching the application schema or any existing tables.
-        try await storage.migrate(to: schema)
+        try await CKSideSchema.ensure(storage: storage)
     }
 
     // MARK: - Load / Save / Clear

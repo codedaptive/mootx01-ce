@@ -18,7 +18,9 @@ import Foundation
 /// A single pending outbound row mutation in the durable outbox.
 ///
 /// Stored in the `_ck_outbox` side table managed by `CKSideSchema`. Fields
-/// map one-to-one to the table columns declared there.
+/// map one-to-one to the table columns declared there. The `retry_count` and
+/// `is_parked` columns were added in CKSideSchema v3 (CVK-ICLOUD P1-M6) to
+/// support per-record error handling and permanent-failure parking.
 public struct OutboxEntry: Sendable {
     /// Stable row identity used for per-record confirmation. Generated at
     /// append time; never reused even if the same (table, rowKey) is
@@ -52,6 +54,18 @@ public struct OutboxEntry: Sendable {
     /// for ordering; HLC is the ordering primitive.
     public let enqueuedAt: String
 
+    /// Number of push attempts that have failed with a retryable or conflict
+    /// error. Incremented by OutboxStore.incrementRetryCount after each failed
+    /// push cycle. The column is Int (not Bool) in the DB per schema invariants.
+    public let retryCount: Int
+
+    /// When true, this entry has permanently failed (quotaExceeded or
+    /// limitExceeded) and is excluded from future push batches. The entry
+    /// remains in the outbox for diagnostics visibility via
+    /// OutboxStore.parkedEntries(from:). The column is `is_parked` (Int 0/1)
+    /// in the DB per schema invariants; this Swift Bool is derived from it.
+    public let isParked: Bool
+
     public init(
         id: UUID,
         tableName: String,
@@ -59,7 +73,9 @@ public struct OutboxEntry: Sendable {
         event: SyncEventKind,
         valuesData: Data?,
         packedHLC: Int64,
-        enqueuedAt: String
+        enqueuedAt: String,
+        retryCount: Int = 0,
+        isParked: Bool = false
     ) {
         self.id = id
         self.tableName = tableName
@@ -68,5 +84,7 @@ public struct OutboxEntry: Sendable {
         self.valuesData = valuesData
         self.packedHLC = packedHLC
         self.enqueuedAt = enqueuedAt
+        self.retryCount = retryCount
+        self.isParked = isParked
     }
 }
