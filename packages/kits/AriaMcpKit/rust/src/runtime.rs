@@ -60,7 +60,19 @@ fn env_observer_enabled() -> bool {
 /// `~/.claude/plugins/` or know a product version itself — see
 /// `mootx01-cli`'s `commands::serve::version_skew_advisory`, the Rust twin
 /// of Swift's `MootInstallerCore.VersionSkewAdvisory`).
-pub fn run(banner: &str, version_skew: &str) {
+///
+/// `update_advisory` is the upstream-release advisory provider surfaced as
+/// an `update_available:` line by ping/status (see
+/// `crate::dispatcher::UpdateAdvisoryProvider`). The caller owns the
+/// network boundary, rate limiting, and the resident-only gate — pass
+/// `None` from stdio one-shots and hosts with no release feed (the
+/// aria-mcp dev server). Rust twin of Swift ServeCommand's
+/// `updateAdvisoryProvider` wiring.
+pub fn run(
+    banner: &str,
+    version_skew: &str,
+    update_advisory: Option<crate::dispatcher::UpdateAdvisoryProvider>,
+) {
     eprintln!("{banner}: starting Rust MCP server");
     // from_env reads ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH and applies
     // the four-state precedence ladder. Exits with a nonzero code on ambiguous
@@ -78,6 +90,7 @@ pub fn run(banner: &str, version_skew: &str) {
     // Swift product's `ServerInfo(name: "mootx01")` in ServeCommand.swift.
     config.server_name = banner.to_owned();
     config.version_skew = version_skew.to_owned();
+    config.update_advisory = update_advisory;
 
     // Telemetry wiring (durable default for resident mode, opt-in for stdio).
     //

@@ -2,7 +2,8 @@
 //!
 //! Exports: clients, daemon_client, depth, mcp_ownership, merge, paths,
 //! permissions, release, sensitivity_crypto, sensitivity_hashes,
-//! unlock_authority, and service — the full installer-core module set.
+//! unlock_authority, update_advisor, and service — the full
+//! installer-core module set.
 
 pub mod clients;
 pub mod daemon_client;
@@ -23,3 +24,6 @@ pub mod service;
 /// for the tier-specific password with echo disabled, verifies via PBKDF2,
 /// and on success POSTs to the daemon's /api/control/unlock endpoint.
 pub mod unlock_authority;
+/// TTL-cached upstream-release advisory for the resident daemon's
+/// ping/status tools (Rust twin of Swift `MootInstallerCore.UpdateAdvisor`).
+pub mod update_advisor;

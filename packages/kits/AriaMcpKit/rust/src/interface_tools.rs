@@ -350,6 +350,9 @@ pub fn dispatch(
     sensitivity_ledger: &SensitivityGrantLedger,
     build_serial: &str,
     version_skew: &str,
+    // Upstream-release advisory provider — consumed by ping/status only.
+    // None when the host wired none (stdio one-shots, tests, aria-mcp dev).
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
     // ADR-025 wave 8.2: monitoring seam injected from the serve host.
     // None when no stats store wired — moot_monitoring_status reports "unavailable".
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
@@ -378,10 +381,10 @@ pub fn dispatch(
         "moot_read_journal" => run_read_journal(args, registry),
         // Pass version_skew so the report includes the ADR-024 §5 advisory
         // when present (empty string ⇒ no line appended).
-        "moot_estate_status" => run_estate_status(args, registry, version_skew),
+        "moot_estate_status" => run_estate_status(args, registry, version_skew, update_advisory),
         "moot_estate_map" => run_estate_map(args, registry),
         // Pass build_serial so the pong includes the build segment.
-        "moot_estate_ping" => run_estate_ping(args, registry, build_serial, version_skew),
+        "moot_estate_ping" => run_estate_ping(args, registry, build_serial, version_skew, update_advisory),
         // Monitoring control (ADR-025 wave 8.2) — pass the injected seam.
         "moot_monitoring_status" => run_monitoring_status(args, monitoring_control),
         // Maintenance
@@ -2045,6 +2048,7 @@ fn run_estate_status(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
     version_skew: &str,
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let coord = estate.coord.lock().unwrap();
@@ -2148,6 +2152,13 @@ fn run_estate_status(
     );
     if !version_skew.is_empty() {
         body.push_str(&format!("\nversion_skew: {version_skew}"));
+    }
+    // Upstream-release advisory (see `UpdateAdvisoryProvider`): evaluated
+    // lazily here and in ping only — the host rate-limits the underlying
+    // release-feed probe, and the common up-to-date case appends nothing.
+    // Mirrors Swift runEstateStatus.
+    if let Some(line) = update_advisory.and_then(|provider| provider()) {
+        body.push_str(&format!("\nupdate_available: {line}"));
     }
     body.push('\n');
     body.push_str(ARIA_SESSION_PROTOCOL);
@@ -2309,6 +2320,7 @@ fn run_estate_ping(
     registry: &EstateRegistry,
     build_serial: &str,
     version_skew: &str,
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let coord = estate.coord.lock().unwrap();
@@ -2331,6 +2343,13 @@ fn run_estate_ping(
     );
     if !version_skew.is_empty() {
         pong.push_str(&format!("\nversion_skew: {version_skew}"));
+    }
+    // Upstream-release advisory — same opt-in shape as version_skew. The
+    // host's advisor caches behind a TTL, so this is a memory read on all
+    // but the first ping of each cache window ("true lightweight ping"
+    // preserved in the common case). Mirrors Swift runEstatePing.
+    if let Some(line) = update_advisory.and_then(|provider| provider()) {
+        pong.push_str(&format!("\nupdate_available: {line}"));
     }
     Ok(text_result(&pong))
 }
