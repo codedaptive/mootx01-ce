@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.7.0
+version: 1.8.0
 status: active
-date: 2026-06-28
+date: 2026-07-16
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -575,6 +575,27 @@ The default `Storage.datasetStore` / `Storage::dataset_store()` throws
 `InMemoryStorage` override this with a concrete implementation.
 `PostgreSQLStorage` and third-party conformers inherit the default (MX-TAB-2).
 
+**B-19 (change origin tag):** Every `TableChange` emitted by a backend carries
+an `origin: ChangeOrigin` field (`ChangeOrigin` / `change_origin::ChangeOrigin`
+in Rust) that identifies whether the triggering write was a local user-initiated
+write (`.local` / `Local`) or a write performed during inbound sync application
+(`.syncApply` / `SyncApply`).
+
+- All ordinary write paths (`insert`, `upsert`, `update`, `delete` on every
+  backend) emit `origin: .local` / `ChangeOrigin::Local`.
+- Three sync-tagged write methods — `insertSync`, `upsertSync`, `deleteSync`
+  (Swift) / `insert_sync`, `upsert_sync`, `delete_sync` (Rust) — emit
+  `origin: .syncApply` / `ChangeOrigin::SyncApply`. All three are protocol
+  requirements with default implementations that delegate to the ordinary write
+  paths (safe for non-sync conformers; the origin override is in the backend
+  implementations that ConvergenceKit's `applyInbound` calls).
+- `CachingRowStore` delegates `insertSync` / `upsertSync` / `deleteSync` to its
+  backing store and applies identical cache-invalidation logic, preserving the
+  origin tag through the caching layer.
+- The `origin` field enables ConvergenceKit's outbound observer to discard
+  `applyInbound` writes and prevent the multi-device echo loop (I-10,
+  CVK-ICLOUD P1-M1). Observers uninterested in origin may ignore the field.
+
 ## § 6 — Error model (conceptual)
 
 Errors are surfaced as `StorageError` (Swift) / `StorageError` (Rust).
@@ -790,6 +811,13 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.8.0 -- 2026-07-16
+CVK-ICLOUD P1-M1: Added behavioral contract B-19 (change origin tag). Every
+`TableChange` now carries `origin: ChangeOrigin` (.local / .syncApply). Three
+sync-tagged write methods (`insertSync` / `upsertSync` / `deleteSync`, with Rust
+equivalents) emit `.syncApply`, enabling ConvergenceKit's outbound observer to
+discard `applyInbound` writes and prevent the multi-device echo loop (I-10).
 
 ### 1.7.0 -- 2026-07-16
 MX-TAB-1: Updated § 1 to name five sub-stores (was four, omitting DatasetStore;
