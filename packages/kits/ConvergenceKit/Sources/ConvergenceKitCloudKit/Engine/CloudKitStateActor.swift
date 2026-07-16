@@ -89,6 +89,12 @@ actor CloudKitStateActor {
         // Ensure the _ck_sync_meta side table exists before any pull (#12 fix).
         try await Self.ensureSyncMetaTable(storage: storage)
 
+        // Ensure the _ck_change_token side table exists, then restore the
+        // persisted token so the first pull resumes from where the previous
+        // process left off rather than re-pulling the entire zone. R5.
+        try await TokenStore.ensure(storage: storage)
+        serverChangeToken = try await TokenStore.load(zoneName: manifest.zoneIdentifier, storage: storage)
+
         // Start observing each declared table that is not pull-only.
         for table in manifest.tables where table.direction != .pullOnly {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
