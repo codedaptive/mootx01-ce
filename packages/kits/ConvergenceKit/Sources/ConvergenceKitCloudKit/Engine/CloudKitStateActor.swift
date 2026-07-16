@@ -2,8 +2,9 @@
 //
 // Actor shell for CloudKitSyncEngine. Owns all mutable sync state:
 // container, manifest, storage, observer tasks, subscriber continuations,
-// pending outbound queue, HLC generator, server change token, and the
-// enable/disable lifecycle.
+// HLC generator, server change token, and the enable/disable lifecycle.
+// The outbound queue is NOT in-memory state: it is the durable _ck_outbox
+// side table (R4), written by recordOutbound and drained by PushCycle.
 //
 // Push, pull, conflict-policy application, sync-meta side table,
 // and clock helpers live in sibling files under Engine/:
@@ -57,7 +58,6 @@ actor CloudKitStateActor {
     var lastPushAt: Date?
     var lastPullAt: Date?
     var serverChangeToken: CKServerChangeToken?
-    var pendingOutbound: [TableChange] = []
     var observerTasks: [Task<Void, Never>] = []
     var subscribers: [AsyncStream<SyncEvent>.Continuation] = []
     /// Monotonic HLC source for locally-originated changes that
@@ -86,8 +86,19 @@ actor CloudKitStateActor {
             logger.info("zone setup (may already exist): \(String(describing: error))")
         }
 
-        // Ensure the _ck_sync_meta side table exists before any pull (#12 fix).
-        try await Self.ensureSyncMetaTable(storage: storage)
+        // Ensure all ConvergenceKit side tables exist (consolidated schema, B-12).
+        // CKSideSchema owns one SchemaDeclaration with kitID "ConvergenceKit" and
+        // a single version counter covering _ck_sync_meta (v1) and _ck_outbox (v2).
+        try await CKSideSchema.ensure(storage: storage)
+
+        // Drain any outbox leftovers from a previous process life so the next
+        // push cycle picks them up without waiting for a new local write. The
+        // engine does not auto-schedule a push here (that is the host app's
+        // responsibility), but the entries are ready in the outbox.
+        let leftovers = try await OutboxStore.drainLeftovers(from: storage)
+        if !leftovers.isEmpty {
+            logger.info("outbox: \(leftovers.count) leftover entries from previous session")
+        }
 
         // Ensure the _ck_change_token side table exists, then restore the
         // persisted token so the first pull resumes from where the previous
@@ -115,7 +126,11 @@ actor CloudKitStateActor {
         observerTasks.removeAll()
         for sub in subscribers { sub.finish() }
         subscribers.removeAll()
-        pendingOutbound.removeAll()
+        // The outbound queue is the durable _ck_outbox side table; no in-memory
+        // queue to clear. Outbox entries survive disable() and are drained on
+        // the next enable() (drainLeftovers above). This is the durability
+        // guarantee R4 requires: the outbox survives process death and
+        // disable/enable cycles.
         manifest = nil
         storage = nil
     }
@@ -130,8 +145,51 @@ actor CloudKitStateActor {
         }
     }
 
-    func recordOutbound(_ change: TableChange) {
-        pendingOutbound.append(change)
+    /// Durably append an outbound change to the _ck_outbox side table.
+    ///
+    /// The in-memory fast path (pendingOutbound array) is intentionally absent:
+    /// the durable store IS the queue (R4). A change is not considered captured
+    /// until it is written to the outbox. Process death before this write loses
+    /// the change, which is acceptable (the observer will re-fire on the next
+    /// enable if the local row still exists); process death AFTER this write and
+    /// BEFORE push confirmation is safe — the entry survives in the outbox.
+    ///
+    /// HLC is minted here (before append) so the outbox stores the ordered HLC
+    /// at capture time. The push path uses this stored HLC for the CKRecord, not
+    /// a fresh mint — ensuring that the logical ordering established at observe
+    /// time is preserved all the way to the wire.
+    func recordOutbound(_ change: TableChange) async {
+        guard let storage else { return }
+
+        // Mint HLC if the observation did not carry one (the InMemory and
+        // SQLite observers do not stamp HLCs on TableChange notifications today).
+        let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
+        let packedHLC = Int64(bitPattern: hlc.packed)
+
+        // Encode values as a JSON SyncValueMap blob for transport-agnostic storage.
+        let valuesData: Data?
+        if let rawValues = change.values {
+            valuesData = try? JSONEncoder().encode(SyncValueMap(rawValues))
+        } else {
+            valuesData = nil
+        }
+
+        let enqueuedAt = ISO8601DateFormatter().string(from: Date())
+        let entry = OutboxEntry(
+            id: UUID(),
+            tableName: change.table,
+            rowKey: change.rowKey?.uuidString ?? "",
+            event: SyncEventKind(from: change.event),
+            valuesData: valuesData,
+            packedHLC: packedHLC,
+            enqueuedAt: enqueuedAt
+        )
+
+        do {
+            try await OutboxStore.append(entry: entry, to: storage)
+        } catch {
+            logger.error("outbox append failed for \(change.table): \(String(describing: error))")
+        }
     }
 
     var currentState: SyncState {

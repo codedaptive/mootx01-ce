@@ -13,38 +13,19 @@ import SubstrateTypes
 
 extension CloudKitStateActor {
 
-    /// Side table name. Owned by ConvergenceKit, not by the application schema.
-    private static let syncMetaTable = "_ck_sync_meta"
+    /// Side table name. The declaration lives in CKSideSchema (B-12
+    /// governance); this alias keeps local read/write helpers readable.
+    private static let syncMetaTable = CKSideSchema.syncMetaTable
 
-    /// Ensure the side table exists. Must be called before any pull.
-    /// Uses SchemaDeclaration + migrate so the table is created via the
-    /// standard PersistenceKit schema path (works on all backends).
+    /// Ensure ALL ConvergenceKit side tables exist. Delegates to CKSideSchema,
+    /// which owns the single consolidated SchemaDeclaration (kitID
+    /// "ConvergenceKit", version counter covers _ck_sync_meta at v1 and
+    /// _ck_outbox at v2). See SideSchema.swift for the governance rationale.
+    ///
+    /// Kept as a static func (not inlined at the enable() call site) so the
+    /// call signature is stable for tests that exercise the ensure path.
     static func ensureSyncMetaTable(storage: any Storage) async throws {
-        let schema = SchemaDeclaration(
-            kitID: "ConvergenceKitCloudKit",
-            version: 1,
-            tables: [
-                TableDeclaration(
-                    name: syncMetaTable,
-                    columns: [
-                        ColumnDeclaration(name: "table_name", type: .text, nullable: false),
-                        ColumnDeclaration(name: "primary_key", type: .text, nullable: false),
-                        ColumnDeclaration(name: "sync_hlc", type: .int, nullable: false,
-                                          defaultValue: .int(0)),
-                        ColumnDeclaration(name: "schema_version", type: .int, nullable: false,
-                                          defaultValue: .int(0)),
-                        ColumnDeclaration(name: "kit_id", type: .text, nullable: false,
-                                          defaultValue: .text("")),
-                    ],
-                    primaryKey: ["table_name", "primary_key"]
-                ),
-            ],
-            indices: []
-        )
-        // migrate(to:) is ADDITIVE — it creates missing tables without
-        // replacing the backend's active schema declaration. open(schema:)
-        // would clobber the application schema, breaking all row operations.
-        try await storage.migrate(to: schema)
+        try await CKSideSchema.ensure(storage: storage)
     }
 
     /// Read the persisted sync HLC for a specific row.
