@@ -149,4 +149,30 @@ public enum SyncError: Error, Sendable, Equatable {
     /// The record is quarantined: the pull loop counts it as a conflict,
     /// logs it, and continues to the next record rather than aborting the batch.
     case corruptRemoteIdentity(recordName: String)
+
+    // ── N2 slot-registry errors (v1.2-draft) ──────────────────────────────
+    // CloudKit-only. Vocabulary is mirrored in the Rust SyncError enum for
+    // cross-port parity even though the CloudKit backend is Swift-only (N4).
+    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+
+    /// This device's (slot, epoch) pair has been superseded: the slot was
+    /// evicted and its epoch bumped while this device was inactive.
+    ///
+    /// Recovery: the engine re-claims a fresh slot, re-mints pending outbox
+    /// HLCs under the new nodeID, then resumes the pull cycle. No inbound
+    /// records are applied until re-enrollment is complete — applying records
+    /// with the old (colliding) nodeID would produce LWW ties that different
+    /// replicas resolve differently.
+    ///
+    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4 (v1.2-draft stub).
+    case reenrollRequired(slot: Int, staleEpoch: Int, currentEpoch: Int)
+
+    /// All 15 assignable node-ID slots (1–15) are occupied by recently-active
+    /// devices. No records are applied. The engine retries after a backoff
+    /// period; the error is surfaced to the caller loud (not silently dropped)
+    /// because the real ceiling is 15 concurrent machines and hitting it is
+    /// an operational signal that warrants attention.
+    ///
+    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4 (v1.2-draft stub).
+    case slotExhausted(activeCount: Int)
 }

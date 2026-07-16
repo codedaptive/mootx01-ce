@@ -100,11 +100,20 @@ actor CloudKitStateActor {
     var pendingOutbound: [TableChange] = []
     var observerTasks: [Task<Void, Never>] = []
     var subscribers: [AsyncStream<SyncEvent>.Continuation] = []
-    /// Monotonic HLC source for locally-originated changes that
-    /// reach the push path without an HLC of their own. nodeID is
-    /// drawn from the low nibble per the substrate's 4-bit node
-    /// field; a fresh send() preserves per-replica monotonicity
-    /// rather than fabricating a colliding nodeID-0 timestamp.
+    /// Monotonic HLC source for locally-originated changes that reach the push
+    /// path without an HLC of their own.
+    ///
+    /// Initialized to a random provisional value here; `enable()` immediately
+    /// replaces it with a stable identity-backed nodeID loaded from
+    /// `DeviceIdentityStore` (side table `_ck_device_identity`). The provisional
+    /// random draw is never used in production: `isEnabled` remains `false` until
+    /// `enable()` completes, and `push()` guards on `isEnabled`.
+    ///
+    /// The stable nodeID eliminates the per-launch collision probability ≈1/15
+    /// per session pair that the previous random draw produced (N2,
+    /// DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16). Shared-registry
+    /// arbitration (CloudKit CAS against the slot manifest zone) to enforce
+    /// uniqueness across all devices arrives in P1-M3.
     var hlcGenerator = HLCGenerator(nodeID: Int32.random(in: 1...0x0F))
 
     init(containerIdentifier: String?) {
@@ -128,6 +137,24 @@ actor CloudKitStateActor {
 
         // Ensure the _ck_sync_meta side table exists before any pull (#12 fix).
         try await Self.ensureSyncMetaTable(storage: storage)
+
+        // Load or mint this device's persistent sync identity (N2: device slot registry).
+        //
+        // DeviceIdentityStore persists (deviceUUID, slot, epoch) in the
+        // `_ck_device_identity` side table so the slot number is stable across
+        // process restarts. The stable nodeID eliminates the per-launch collision
+        // probability ≈1/15 per session pair that the previous random draw produced.
+        //
+        // This is a provisional local-only slot claim. Shared-registry arbitration
+        // (CloudKit CAS against the slot manifest zone) to confirm or reassign the
+        // slot among all concurrently active devices arrives in P1-M3. Until then,
+        // two devices may independently pick the same slot number; this is strictly
+        // better than per-launch random re-roll, which guarantees fresh collision
+        // risk on every restart.
+        try await DeviceIdentityStore.ensureSchema(storage: storage)
+        let identityStore = DeviceIdentityStore(storage: storage)
+        let identity = try await identityStore.loadOrMint(now: { Date() })
+        hlcGenerator = HLCGenerator(nodeID: Int32(identity.slot))
 
         // Start observing each declared table that is not pull-only.
         for table in manifest.tables where table.direction != .pullOnly {

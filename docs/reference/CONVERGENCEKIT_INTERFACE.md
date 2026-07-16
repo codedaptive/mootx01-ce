@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-07-16
+version: 1.1
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -723,7 +723,7 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; same 10 categories. Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed |
+| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; 10 shared base categories + 3 Swift-sourced cases: `corruptRemoteIdentity(recordName:)` (CloudKit-only, Swift only; no Rust equivalent because the error arises from CKRecord parsing), `reenrollRequired(slot:staleEpoch:currentEpoch:)` (CloudKit-only; mirrored in Rust for vocabulary parity — `ReenrollRequired { slot, stale_epoch, current_epoch }` — never thrown by Rust code), `slotExhausted(activeCount:)` (CloudKit-only; mirrored in Rust — `SlotExhausted { active_count }` — never thrown by Rust code). Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed (base) / Added (CVK-ICLOUD P1-M2) |
 | Result alias | (Swift: `throws` — no result type) | `SyncResult<T>` (`rust/src/types.rs`) | n/a / pub type alias | Swift uses `throws`; Rust port has no async runtime so it returns `Result<T, SyncError>` aliased as `SyncResult` — sanctioned async/throws ↔ Result seam | Confirmed |
 
 ### CloudKit backend — Apple-platform-bound (Exempt)
@@ -744,6 +744,18 @@ only Federation/None have Rust ports).
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.1 -- 2026-07-16 (CVK-ICLOUD P1-M2)
+- Added `SyncError.corruptRemoteIdentity(recordName:)` (shipped but undocumented
+  in concordance table; CloudKit-only; Swift only, no Rust equivalent).
+- Added `SyncError.reenrollRequired(slot:staleEpoch:currentEpoch:)` (v1.2-draft;
+  CloudKit-only in Swift; mirrored in Rust as `ReenrollRequired { slot, stale_epoch,
+  current_epoch }` for vocabulary parity — never thrown by Rust code).
+- Added `SyncError.slotExhausted(activeCount:)` (v1.2-draft; CloudKit-only in Swift;
+  mirrored in Rust as `SlotExhausted { active_count }` for vocabulary parity).
+- Updated concordance table SyncError row to reflect 10 base categories + 3 new
+  CloudKit-sourced cases, distinguishing corruptRemoteIdentity (Swift-only) from
+  reenrollRequired/slotExhausted (Swift-only throw surface, both-ports vocabulary).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -1,0 +1,273 @@
+// DeviceIdentityStore.swift
+//
+// Persists this device's (deviceUUID, slot, epoch) sync identity via
+// PersistenceKit's side-table migration mechanism.
+//
+// WHY a side table and not a UserDefaults or a plist:
+//   The identity must be stored inside the same PersistenceKit `Storage`
+//   instance as the sync data so that a transaction can atomically update
+//   the identity and the sync state without a cross-store ordering hazard.
+//   PersistenceKit's `migrate(to:)` path creates the table without touching
+//   the application schema (it is additive-only), matching the pattern
+//   established by `SyncMetaStore.swift` for `_ck_sync_meta`.
+//
+// Schema invariants observed (rules/schema-invariants.md):
+//   - NO Bool stored columns. Boolean state lives in Int64 bitmaps.
+//   - All date columns are TEXT ISO8601, never REAL (unix float).
+//
+// kitID convention: "ConvergenceKit" (not "ConvergenceKitCloudKit").
+//   Device identity is transport-agnostic; the slot registry protocol
+//   would apply to any shared relay backend, not only CloudKit. Using
+//   the core kitID keeps the table visible to any future backend.
+//
+// Consolidation note (adjudication A11):
+//   A shared SideSchema struct that collects all ConvergenceKit side
+//   tables (_ck_sync_meta, _ck_device_identity, and any future tables)
+//   into one versioned SchemaDeclaration will land in P1-M4. Until then
+//   each side table migrates independently with kitID "ConvergenceKit"
+//   and schema version 1. The P1-M4 consolidation MUST be additive-
+//   compatible with both tables' column sets (no column renames or type
+//   changes — only additions). Do not add Bool columns or REAL dates
+//   before P1-M4 closes this gap.
+
+import Foundation
+import PersistenceKit
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - Stored value
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// This device's persistent sync identity for a given estate.
+///
+/// Minted once on first `enable()` and persisted across process restarts.
+/// The `deviceUUID` differentiates machines that share one iCloud account.
+/// The `slot` is the provisionally claimed node-ID slot (1–15); confirmed
+/// via CloudKit CAS in P1-M3.
+public struct DeviceIdentity: Sendable, Equatable {
+
+    /// Stable device UUID. Generated once per device/estate pair.
+    /// Never changes for this device's relationship to this estate.
+    public let deviceUUID: UUID
+
+    /// The registry slot provisionally claimed by this device (1–15).
+    ///
+    /// This is a local-only provisional claim until P1-M3 confirms it via
+    /// CloudKit CAS against the shared slot manifest zone. Using a persisted
+    /// provisional slot (rather than re-drawing randomly on every launch)
+    /// reduces the collision probability: a stable node-ID only collides
+    /// with another device that happened to pick the same slot, while
+    /// per-launch random re-roll has collision probability ≈1/15 per
+    /// session pair regardless of history.
+    public let slot: Int
+
+    /// Epoch counter matching the registry record for this slot.
+    /// Bumped by the evicting device when it performs a CloudKit CAS
+    /// to reclaim the slot. A mismatch between the stored epoch and the
+    /// registry epoch signals that this device was evicted (reenrollRequired).
+    public let epoch: Int64
+
+    /// ISO8601 wall-clock timestamp when this slot was first claimed
+    /// in its current epoch. Stored as a `Date` in the model; persisted
+    /// as TEXT ISO8601 in the side table (schema invariant).
+    public let claimedAt: Date
+
+    /// Public memberwise initializer.
+    /// Swift synthesises an `internal` memberwise init for public structs;
+    /// an explicit `public init` is required for cross-module construction.
+    public init(deviceUUID: UUID, slot: Int, epoch: Int64, claimedAt: Date) {
+        self.deviceUUID = deviceUUID
+        self.slot = slot
+        self.epoch = epoch
+        self.claimedAt = claimedAt
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - DeviceIdentityStore
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Side-table manager for `_ck_device_identity`.
+///
+/// Usage (from `CloudKitStateActor.enable()`):
+/// ```swift
+/// try await DeviceIdentityStore.ensureSchema(storage: storage)
+/// let store = DeviceIdentityStore(storage: storage)
+/// let identity = try await store.loadOrMint(now: { Date() })
+/// ```
+///
+/// All methods are `async throws` — they issue PersistenceKit I/O and
+/// must be awaited in an async context.
+public struct DeviceIdentityStore: Sendable {
+
+    // Side table name. Prefixed with `_ck_` to match the established
+    // ConvergenceKit side-table naming convention (cf. `_ck_sync_meta`).
+    private static let tableName = "_ck_device_identity"
+
+    // Fixed primary key for the single-row table. This device has exactly
+    // one identity per estate; a sentinel constant avoids needing a ROWID
+    // or a surrogate counter.
+    private static let selfRowID = "self"
+
+    // ISO 8601 formatter shared across all encode/decode calls in this type.
+    // ISO8601DateFormatter is documented as thread-safe once configured; the
+    // `nonisolated(unsafe)` annotation satisfies Swift 6 strict concurrency
+    // without disabling the thread-safety guarantee. The formatter is created
+    // once at first access and then only read (never mutated) after that.
+    nonisolated(unsafe) private static let iso8601: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        // .withInternetDateTime produces "yyyy-MM-dd'T'HH:mm:ssZZZZZ",
+        // which is human-readable, string-sortable, and unambiguous.
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    private let storage: any Storage
+
+    public init(storage: any Storage) {
+        self.storage = storage
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MARK: - Schema
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Create the `_ck_device_identity` side table if it does not exist.
+    ///
+    /// Call this once before any `DeviceIdentityStore` read or write —
+    /// `CloudKitStateActor.enable()` does so immediately after calling
+    /// `ensureSyncMetaTable`. Calling it multiple times is safe because
+    /// `Storage.migrate(to:)` is additive-only: it creates missing tables
+    /// without touching existing ones or the application's active schema.
+    ///
+    /// Do NOT call `Storage.open(schema:)` here — that replaces the active
+    /// schema declaration and would break all application row operations.
+    ///
+    /// Schema invariants enforced here:
+    ///   - No Bool stored columns (operationalBitmap pattern would apply
+    ///     if boolean state were needed; none is needed for this table).
+    ///   - `claimed_at` is TEXT ISO8601, NOT REAL/unix timestamp.
+    public static func ensureSchema(storage: any Storage) async throws {
+        let schema = SchemaDeclaration(
+            // kitID "ConvergenceKit" (not "ConvergenceKitCloudKit") because
+            // device identity is transport-agnostic. See file header rationale
+            // and adjudication A11 consolidation note.
+            kitID: "ConvergenceKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: tableName,
+                    columns: [
+                        // Fixed sentinel key — always "self" for this device.
+                        ColumnDeclaration(name: "id", type: .text, nullable: false),
+                        // Device UUID as a TEXT string (UUID.uuidString).
+                        ColumnDeclaration(name: "device_uuid", type: .text, nullable: false),
+                        // Slot number 1–15 stored as Int64.
+                        ColumnDeclaration(name: "slot", type: .int, nullable: false),
+                        // Epoch counter; starts at 1 on first mint.
+                        ColumnDeclaration(name: "epoch", type: .int, nullable: false,
+                                          defaultValue: .int(1)),
+                        // DATE STORAGE INVARIANT: TEXT ISO8601, never REAL.
+                        // Storing as unix float would lose sub-second precision
+                        // and prevent human readability in DB browsers.
+                        ColumnDeclaration(name: "claimed_at", type: .text, nullable: false),
+                    ],
+                    primaryKey: ["id"]
+                ),
+            ],
+            indices: []
+        )
+        try await storage.migrate(to: schema)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MARK: - Read / write
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Load the persisted identity for this device, or `nil` if none exists.
+    public func load() async throws -> DeviceIdentity? {
+        let rows = try await storage.rowStore.query(
+            table: Self.tableName,
+            where: .eq(
+                Column(table: Self.tableName, name: "id"),
+                .text(Self.selfRowID)
+            )
+        )
+        guard let row = rows.first else { return nil }
+        return try Self.decode(row: row.values)
+    }
+
+    /// Persist `identity`, replacing any existing row.
+    public func save(_ identity: DeviceIdentity) async throws {
+        _ = try await storage.rowStore.upsert(
+            table: Self.tableName,
+            values: [
+                "id":          .text(Self.selfRowID),
+                "device_uuid": .text(identity.deviceUUID.uuidString),
+                "slot":        .int(Int64(identity.slot)),
+                "epoch":       .int(identity.epoch),
+                // ISO8601 text — DATE STORAGE INVARIANT enforced here
+                "claimed_at":  .text(Self.iso8601.string(from: identity.claimedAt)),
+            ],
+            conflictColumns: ["id"]
+        )
+    }
+
+    /// Load the existing identity, or mint and persist a fresh one.
+    ///
+    /// **Fresh mint:** generates a new stable `deviceUUID`, picks a random
+    /// provisional slot (1–15), sets epoch to 1, and persists to the side
+    /// table before returning. Subsequent calls return the same stored identity.
+    ///
+    /// **Idempotency:** if an identity already exists it is returned as-is.
+    /// The `now` clock is only used for the `claimedAt` timestamp on a fresh
+    /// mint; it is never called on subsequent loads.
+    ///
+    /// - Parameter now: Injected clock. Never call `Date()` inside this method
+    ///   — tests supply a fixed clock for reproducibility.
+    public func loadOrMint(now: @Sendable () -> Date) async throws -> DeviceIdentity {
+        if let existing = try await load() {
+            return existing
+        }
+        // No persisted identity — mint a new one.
+        //
+        // Slot is a random provisional local-only claim. Per-launch random
+        // re-roll (the old approach) has collision probability ≈1/15 per
+        // session pair on every launch. A stable provisionally-persisted slot
+        // only collides when another device independently picks the same
+        // number — strictly better, even before CloudKit CAS arbitration
+        // in P1-M3 confirms or reassigns it.
+        let provisional = DeviceIdentity(
+            deviceUUID: UUID(),
+            slot: Int.random(in: 1...15),
+            epoch: 1,
+            claimedAt: now()
+        )
+        try await save(provisional)
+        return provisional
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MARK: - Private helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static func decode(row: [String: TypedValue]) throws -> DeviceIdentity {
+        guard
+            case .text(let uuidStr) = row["device_uuid"],
+            let deviceUUID = UUID(uuidString: uuidStr),
+            case .int(let slotRaw) = row["slot"],
+            case .int(let epoch) = row["epoch"],
+            case .text(let claimedAtStr) = row["claimed_at"],
+            let claimedAt = iso8601.date(from: claimedAtStr)
+        else {
+            throw SyncError.decodingFailure(
+                detail: "_ck_device_identity row has unexpected column shape"
+            )
+        }
+        return DeviceIdentity(
+            deviceUUID: deviceUUID,
+            slot: Int(slotRaw),
+            epoch: epoch,
+            claimedAt: claimedAt
+        )
+    }
+}
