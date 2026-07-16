@@ -191,6 +191,27 @@ pub enum SyncError {
     PeerUnreachable { identity: String },
     AuthenticationFailed { detail: String },
     UnsupportedTable { name: String },
+    // ── N2 slot-registry errors (v1.2-draft) ──────────────────────────────
+    // Vocabulary parity with the Swift leg. These variants are thrown by the
+    // CloudKit backend (Swift-only; CloudKit has no Rust API per N4). They
+    // exist in the Rust error enum so error-handling code and tests can
+    // reference the vocabulary without depending on CloudKit.
+    //
+    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+
+    /// This device's (slot, epoch) pair has been superseded: the slot was
+    /// evicted and its epoch bumped while the device was inactive. Raised
+    /// before any inbound records are applied. (Swift CloudKit engine only;
+    /// present here for vocabulary parity. Never thrown by Rust code.)
+    ReenrollRequired {
+        slot: i32,
+        stale_epoch: i64,
+        current_epoch: i64,
+    },
+    /// All 15 assignable node-ID slots (1–15) are occupied by recently-active
+    /// devices. No records are applied. (Swift CloudKit engine only; present
+    /// here for vocabulary parity. Never thrown by Rust code.)
+    SlotExhausted { active_count: usize },
 }
 
 impl std::fmt::Display for SyncError {
@@ -212,6 +233,17 @@ impl std::fmt::Display for SyncError {
                 write!(f, "authentication failed: {}", detail)
             }
             SyncError::UnsupportedTable { name } => write!(f, "unsupported table: {}", name),
+            // N2 slot-registry errors — vocabulary parity with Swift leg
+            SyncError::ReenrollRequired { slot, stale_epoch, current_epoch } => {
+                write!(
+                    f,
+                    "reenroll required: slot {} stale epoch {} current epoch {}",
+                    slot, stale_epoch, current_epoch
+                )
+            }
+            SyncError::SlotExhausted { active_count } => {
+                write!(f, "slot exhausted: {} active devices", active_count)
+            }
         }
     }
 }
