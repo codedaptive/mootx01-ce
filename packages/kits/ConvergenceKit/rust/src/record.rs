@@ -212,6 +212,17 @@ pub struct SyncRecord {
     /// Serializes as "kitID" to match Swift's property name (not "kitId").
     #[serde(rename = "kitID")]
     pub kit_id: String,
+    /// Set to `true` when this record represents a delete tombstone.
+    ///
+    /// WHY: explicit tombstone flag signals that the deletion HLC must
+    /// persist in the `_fed_sync_meta` side table after the row is
+    /// hard-deleted (A6 adjudication), preventing stale resurrections.
+    /// Matches Swift's `syncDeleted: Bool?` field (C-8 wire parity).
+    ///
+    /// Omitted from JSON when None (`skip_serializing_if`); decoded as
+    /// None when absent in older wire format (`default`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sync_deleted: Option<bool>,
 }
 
 impl SyncRecord {
@@ -232,6 +243,31 @@ impl SyncRecord {
             hlc: PackedHLC::from(hlc),
             schema_version,
             kit_id: kit_id.into(),
+            sync_deleted: None,
+        }
+    }
+
+    /// Construct a tombstone record for a delete event.
+    ///
+    /// A tombstone carries the delete HLC so the receiver can apply the
+    /// same LWW gate as for upserts and persist the HLC in the side table
+    /// after hard-deleting the row (A6 adjudication).
+    pub fn new_tombstone(
+        table: impl Into<String>,
+        row_key: Uuid,
+        hlc: HLC,
+        schema_version: i32,
+        kit_id: impl Into<String>,
+    ) -> Self {
+        SyncRecord {
+            table: table.into(),
+            event: SyncEventKind::Delete,
+            row_key,
+            values: None,
+            hlc: PackedHLC::from(hlc),
+            schema_version,
+            kit_id: kit_id.into(),
+            sync_deleted: Some(true),
         }
     }
 }
