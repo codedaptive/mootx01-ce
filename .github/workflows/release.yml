@@ -734,6 +734,11 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-x64' }}
     needs: build-windows-x86_64
     runs-on: windows-latest
+    # Binds the OIDC token subject to repo:<owner/repo>:environment:release so an
+    # Azure federated credential can match tag-triggered runs (tag refs cannot be
+    # wildcarded in a federated credential subject; the environment can). See
+    # distribution/windows/SIGNING.md §2 Option A.
+    environment: release
     permissions:
       id-token: write   # Azure OIDC login for code signing
       contents: read    # checkout the .iss installer script
@@ -953,6 +958,11 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-arm64' }}
     needs: build-windows-arm64
     runs-on: windows-11-arm
+    # Binds the OIDC token subject to repo:<owner/repo>:environment:release so an
+    # Azure federated credential can match tag-triggered runs (tag refs cannot be
+    # wildcarded in a federated credential subject; the environment can). See
+    # distribution/windows/SIGNING.md §2 Option A.
+    environment: release
     permissions:
       id-token: write   # Azure OIDC login for code signing
       contents: read    # checkout the .iss installer script
