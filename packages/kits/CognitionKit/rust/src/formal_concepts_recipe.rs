@@ -237,6 +237,7 @@ fn content_kind_value(kind: ContentKind) -> &'static str {
         ContentKind::StructuredJson => "structuredJSON",
         ContentKind::ImageCaption => "imageCaption",
         ContentKind::FingerprintOnly => "fingerprintOnly",
+        ContentKind::Dataset => "dataset",
     }
 }
 

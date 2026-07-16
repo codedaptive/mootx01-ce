@@ -1,8 +1,8 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.13.0
+version: 1.15.0
 status: active
-date: 2026-07-12
+date: 2026-07-16
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees. Updated 1.12.0: AUDIT-ALERT-RESTORE — UnifiedAuditLog ingress-rejection observability (I-11, B-9, B-10)."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -543,6 +543,37 @@ entry. `revokeGrant` writes the revocation
 record, drops any mode-1 vault key (cryptographic clawback), and appends
 a `grantRevoked` entry. Both append HLC-stamped entries that sort cleanly
 and cannot break the chain.
+
+**B-8a (ADR-025 sensitivity-unlock audit seam):** Four public methods on
+`GeniusLocusKit` (`SensitivityAuditVerbs.swift`) provide the audit write
+surface that `AriaMcpKit`'s `SensitivityGrantLedger` / `ToolDispatcher`
+calls into for ADR-025 §4 compliance ("every grant, every denial, every
+manual revocation, and every read served under an active grant is written
+to the UnifiedAuditLog with tier, grant id, and timestamps"):
+- `recordSensitivityGrantIssued(_:tier:grantID:expiresAt:now:)` — a
+  `sensitivityGrantIssued` audit entry with `afterValue = .integer(expiresAt_epochMs)`.
+  `grantID` (a fresh caller-minted UUID) occupies `rowID` as the grant's
+  synthetic identity; correlates with the matching revocation entry.
+- `recordSensitivityGrantDenied(_:tier:now:)` — a `sensitivityGrantDenied`
+  entry; a fresh UUID is minted for the denial event (no grant to correlate).
+- `recordSensitivityGrantRevoked(_:tier:grantID:now:)` — a
+  `sensitivityGrantRevoked` entry; `grantID` is the SAME id used in
+  `recordSensitivityGrantIssued`, allowing the two entries to correlate by
+  `rowID`. `beforeValue = .integer(1)`, `afterValue = .null`.
+- `recordSensitivityReadUnderGrant(_:tier:drawerID:now:)` — a
+  `sensitivityReadUnderGrant` entry; `rowID` here is the DRAWER's own UUID
+  (not a grant id), because this event is about a specific row. A malformed
+  `drawerID` is silently skipped without error — audit recording is
+  best-effort observability on the read path, never a gate.
+
+All four use `sensitivityGrant*` verbs (not the federation-reserved `grantIssued`/
+`grantRevoked`), appended via `storage.auditLog.append(event)` (awaited,
+`async throws` — a failed durable append surfaces to the caller). The `fieldPath`
+slot carries the `AdjectiveSensitivity` tier token (`"restricted"` or `"secret"`),
+making entries self-describing. Entries are readable through `auditLog(for:)` via
+`AuditBridge`'s synthetic-verb decode path (no new storage schema needed). Rust
+parity: `EstateCoordinator` exposes the four methods under snake_case names with
+`now_ms: i64` (epoch-ms) in place of `now: Date`.
 
 **B-9 (audit feed, projection, recovery):** `auditLog(for:)` (exposed to
 NeuronKit as `currentAuditLog(in:)`) issues a single bounded SQL query
@@ -1728,9 +1759,58 @@ The `test-seams` Cargo feature enables the seams for integration tests. The
 force-tests cover the two present stages and the seam-not-applicable
 (locusOnly) case.
 
+## § DATASET_STORE_ACCESS — Raw dataset table surface
+
+Dataset tables are raw backend tables stored below the belief layer
+(drawers, tunnels, KGFacts). They are not part of the nine-verb ARIA
+surface and carry no decay, audit, or provenance machinery — they are
+opaque tabular payloads the host imports and owns.
+
+GLK's role is narrow: providing a type-safe accessor seam so callers
+can reach the estate's `DatasetStore` without touching the storage
+backend directly. The behavioral contract for `DatasetStore` itself
+(schema, query, import, expunge) lives in `LOCUSKIT_SPEC.md §
+DATASET_STORE`.
+
+### Accessor
+
+`GeniusLocusKit.datasetStore(for: EstateHandle) throws -> any DatasetStore`
+
+Returns the `DatasetStore` for the named estate. Throws `.estateNotOpen`
+if the estate is not open; throws `StorageError.featureGated("datasetStore")`
+if the estate's storage backend does not support the dataset tier. This
+seam is Swift-only; the Rust port accesses the estate's storage backend
+directly.
+
+### Layered content fingerprints (MX-TAB-5)
+
+`computeDatasetSignatures(handle:drawerId:columns:columnStats:sampledRows:now:)`
+annotates the drawer that backs a dataset table with two SHA-256 fingerprints:
+
+- **Tier 1 (table):** SHA-256 over the schema and a deterministic sample
+  of up to 128 rows (domain tag 0x10). Detects schema drift and gross
+  content changes.
+- **Tier 2 (per-column):** SHA-256 per column over name, type, and a
+  value-distribution sketch (domain tag 0x11). Detects per-column drift
+  even when the row count is stable.
+
+Both fingerprints are stored as vector slots on the drawer. The preimage
+format is byte-identical between Swift (`Intake/DatasetSignatures.swift`)
+and Rust (`rust/src/dataset_signatures.rs`); cross-leg anchor hash
+vectors are locked in both test suites. See
+`GENIUSLOCUSKIT_INTERFACE.md § Dataset store access` for the full API
+surface.
+
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.14.0 -- 2026-07-16
+MX-TAB dataset surface documented (shipped 2026-07-11/12, not previously
+in the spec): added `§ DATASET_STORE_ACCESS` covering the
+`datasetStore(for:)` accessor seam and the layered content fingerprint
+contract (`computeDatasetSignatures` — Tier 1 table SHA-256, Tier 2
+per-column SHA-256, byte-identical preimage both legs).
 
 ### 1.13.0 -- 2026-07-12
 VectorSimilaritySignal corpus lane (both ports at parity): the signal spec

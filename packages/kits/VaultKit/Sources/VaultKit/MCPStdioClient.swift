@@ -27,8 +27,22 @@ import Foundation
 
 /// An error raised while talking to the MCP server.
 public struct MCPClientError: Error, Sendable, CustomStringConvertible {
+    public enum Code: String, Sendable {
+        case transport
+        case unsupportedPlatform
+    }
+
+    public let code: Code
     public let description: String
-    public init(_ description: String) { self.description = description }
+
+    public init(_ description: String, code: Code = .transport) {
+        self.code = code
+        self.description = description
+    }
+
+    public static let unsupportedPlatform = MCPClientError(
+        "MCP stdio transport is unavailable on this platform",
+        code: .unsupportedPlatform)
 }
 
 /// One tool result: the raw text content blocks the server returned. The pump
@@ -66,9 +80,11 @@ public actor MCPStdioClient {
     /// `MEMPALACE_PALACE_PATH` instead of embedding them in a command string.
     private let extraEnv: [String: String]
 
+    #if os(macOS)
     private var process: Process?
     private var inputPipe: Pipe?
     private var outputHandle: FileHandle?
+    #endif
     private var outputBuffer = Data()
     private var nextRequestID = 1
 
@@ -98,11 +114,13 @@ public actor MCPStdioClient {
 
     /// Terminate the server process. Safe to call more than once.
     public func disconnect() {
+        #if os(macOS)
         inputPipe?.fileHandleForWriting.closeFile()
         process?.terminate()
         process = nil
         inputPipe = nil
         outputHandle = nil
+        #endif
         outputBuffer.removeAll()
     }
 
@@ -168,6 +186,7 @@ public actor MCPStdioClient {
     // MARK: - stdio transport
 
     private func launch() throws {
+        #if os(macOS)
         // Resolve the program through /usr/bin/env so plain binary names like
         // "mempalace-mcp" are found via PATH, matching the behaviour callers
         // expect. The argv array is passed intact — no whitespace splitting, no
@@ -195,10 +214,14 @@ public actor MCPStdioClient {
         self.process = proc
         self.inputPipe = input
         self.outputHandle = output.fileHandleForReading
+        #else
+        throw MCPClientError.unsupportedPlatform
+        #endif
     }
 
     /// Write one newline-delimited JSON-RPC message and read one line back.
     private func sendLine(_ requestData: Data) async throws -> Data {
+        #if os(macOS)
         guard let input = inputPipe, let output = outputHandle else {
             throw MCPClientError("stdio transport not connected")
         }
@@ -206,6 +229,9 @@ public actor MCPStdioClient {
         line.append(0x0A)  // '\n' — MCP stdio framing is one object per line.
         input.fileHandleForWriting.write(line)
         return try await readLine(from: output)
+        #else
+        throw MCPClientError.unsupportedPlatform
+        #endif
     }
 
     /// Read bytes from stdout until a newline delimits one complete JSON-RPC

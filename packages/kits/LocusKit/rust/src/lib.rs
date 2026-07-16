@@ -104,6 +104,7 @@
 pub mod adjectives;
 pub mod association;
 pub mod association_operational;
+pub mod dataset_handle;
 pub mod default_wings;
 #[cfg(test)]
 mod association_tests;

@@ -38,17 +38,52 @@ The managed-daemon panel (Engine tab, macOS) needs the real server binary; build
 - `Sources/MootGateway/` — the substrate-facing bridge: `MootBridge` (drives the ARIA tool
   surface), the transport modes (`Engine/ManagedServerProcess` = app-managed daemon; the HTTP
   seam), the App Intent / callback-URL / share-sink shells, and the lexicon→Apple mapping.
-- `Sources/GatewayUI/` — the shared SwiftUI surface (model + six tabs: Capture, Recall, The Top,
-  Apple Surfaces, Edges, Engine) used by both app targets.
+- `Sources/GatewayUI/` — the shared SwiftUI surface (model + tabs: Capture, Recall, The Top,
+  Intelligence, Apple Surfaces, Edges, Engine, and Miners) used by both app targets.
 - `App/` — the app targets' `@main` + the app-target `AppShortcutsProvider` (what registers the
   App Intents with the system).
 - `project.yml` — xcodegen spec (macOS + iOS targets). `LEXICON_TO_APPLE_MAPPING.md` — the
   complete ARIA-lexicon → Apple-surface mapping + WWDC reaction-delta map.
 
+## Apple intelligence
+
+- Cold-launched App Intents attach the same durable estate as the GUI; DEBUG XCUITests use a
+  persisted, disposable estate selector and clear it after each test.
+- `packages/apple/MootFoundationModelsKit` provides provider-neutral Foundation Models recall
+  and one-shot-authorized capture tools. Recalled text is explicitly bounded as untrusted data.
+- The Intelligence tab uses `SystemLanguageModel` today; the session factory accepts any
+  OS-27 `LanguageModel`, including compatible PCC or Core AI providers.
+- The estate's embedding seam is `VectorKit.EmbeddingProvider` (with a Rust parity twin); a
+  real on-device Apple provider (NLContextualEmbedding / CoreAI `.aimodel`) belongs there as a
+  conformer authored in the substrate lane, not as an app-side type.
+- Core Spotlight donation is a derived projection, never canonical storage. Only explicitly
+  public, normal/elevated memories are indexed; private, restricted, and secret content is
+  excluded. `SpotlightSearchTool` is enabled on Apple Silicon.
+- The recall widget renders the same kind of derived projection (`WidgetSnapshotStore` in the
+  app group, refreshed from a publicOnly recall at launch/foreground/tick) — the widget process
+  never opens the estate. RelevantEntities donation is deliberately unwired: the shipping SDK
+  offers only an audio `AppEntityContext`, which does not fit memory drawers.
+- The Share Sheet captures through the same one-host discipline: the extension spools to the
+  app-group `ShareInbox`; the app drains via `CaptureSink` at launch/foreground/tick.
+- **Portable LAN MCP server** (`Sources/MootGateway/LANServer/`): the app hosts an `NWListener`
+  that serves its own estate to MCP clients on the LAN over credentialed HTTP/JSON-RPC, bridged
+  to the same in-process dispatcher (ARIA is still the server; the parity boundary is untouched).
+  Remote callers present a bearer token (`LANCredential`), are restricted to a read-only tool
+  allowlist, and see only public/exportable memory (`LANRequestGate`). The token is bound to the
+  device owner: it lives behind a `.userPresence` Keychain item (`BiometricLANCredentialStore`),
+  so starting the server or revealing the token triggers the device unlock system (Face ID /
+  Touch ID / passcode) — the credential is validated against the phone's owner, not just compared. The listener advertises
+  `_mootx01._tcp` (discoverable by `LANDaemonBrowser`) and, by default, serves only while the
+  device is on power (`PowerState`). On iOS it runs only while the app is active — "on power"
+  narrows when it serves, it does not grant background longevity.
+- Calendar and birthday miners are disabled by default. Only Mine Now may request consent;
+  unattended macOS ticks and opportunistic iOS background refreshes use existing grants only.
+
 ## Status
 
-In progress. Embedded server-in-app + the macOS app-managed-daemon (proven by an integration test
+Embedded server-in-app + the macOS app-managed-daemon (proven by an integration test
 that spawns the real `aria-mcp` and round-trips `tools/list`). App Intents are system-registered
-(real, in the app bundle). Developer examples that build on this live in `examples/Moot*`.
+(real, in the app bundle) and exercised through AppIntentsTesting on an iOS 27 simulator.
+Developer examples that build on this live in `examples/Moot*`.
 The loopback-HTTP client mode (connect to a standalone daemon) is seamed, not built (it belongs to
 the loopback-HTTP transport workstream).

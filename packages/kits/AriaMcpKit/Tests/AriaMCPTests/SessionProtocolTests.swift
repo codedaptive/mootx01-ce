@@ -91,8 +91,8 @@ struct SessionProtocolTests {
 
     // MARK: - Test 3: teachme expands to full tier-based guide
 
-    /// `moot_estate_status teachme:true` returns the nine-tier orientation guide.
-    /// The guide must name every tier from Tier 1 through Tier 9, and its
+    /// `moot_estate_status teachme:true` returns the ten-tier orientation guide.
+    /// The guide must name every tier from Tier 1 through Tier 10, and its
     /// stated total tool count must match ToolProjection.tools() (vault-on).
     @Test func teachmeExpandsToTierBasedGuide() async throws {
         let dispatcher = try await makeDispatcher(ownerID: "sp-3")
@@ -105,6 +105,7 @@ struct SessionProtocolTests {
         let t = text(of: result)
         #expect(t.contains("Tier 1"), "guide must mention Tier 1")
         #expect(t.contains("Tier 9"), "guide must mention Tier 9")
+        #expect(t.contains("Tier 10"), "guide must mention Tier 10")
         // Guide total is computed at runtime from ToolProjection.tools().
         // Verify it contains the live vault-on count so it never goes stale.
         let expectedVaultOnCount = ToolProjection.tools(environment: [:]).count

@@ -380,6 +380,106 @@ fn pull_rejects_tampered_signature() {
     assert_eq!(receipt.conflicts, 1);
 }
 
+// MARK: - F-3 security gate tests (FED-HARDEN-1)
+//
+// F-3 attack: attacker crafts signing bytes using ATTACKER'S own public key,
+// signs with the attacker's private key, but sets `sender_public_key` in the
+// envelope header to the REGISTERED peer's key. When pull() verifies against
+// the registry-sourced key (the fix), it recomputes signing bytes with the
+// registered key — those bytes differ from what the attacker signed, so the
+// signature fails verification and the envelope is rejected.
+//
+// Both the negative case (F-3 spoofing rejected) and the positive case
+// (correctly-paired envelope ingested) are required to prove that the
+// hardened verification path does not regress legitimate traffic.
+
+/// F-3 negative case: attacker signs with their own key but claims the
+/// registered peer's key as the sender. The receiver must reject.
+///
+/// Mirrors Swift `pullRejectsEnvelopeWithSpoofedSenderKeyAndAttackerSignature`.
+#[test]
+fn pull_rejects_envelope_with_spoofed_sender_key_and_attacker_signature() {
+    let relay = Arc::new(FederationRelay::new());
+    let id_victim  = Arc::new(LocalIdentity::generate());
+    let id_trusted = Arc::new(LocalIdentity::generate());
+    // Attacker is a bare identity — no engine, not registered on the relay.
+    let attacker = LocalIdentity::generate();
+
+    let mut victim  = FederationSyncEngine::new(id_victim.clone(),  relay.clone());
+    let mut trusted = FederationSyncEngine::new(id_trusted.clone(), relay.clone());
+
+    victim.enable(sample_manifest(), make_storage()).unwrap();
+    trusted.enable(sample_manifest(), make_storage()).unwrap();
+
+    // Victim is paired with trusted, not with attacker.
+    let family = convergence_kit::HyperplaneFamilySpec::new(0xDEADC0DE);
+    victim.pair(&trusted, family.clone()).unwrap();
+    trusted.pair(&victim, family).unwrap();
+
+    let trusted_pk  = id_trusted.public_key_bytes();
+    let attacker_pk = attacker.public_key_bytes();
+
+    // Forge: signing bytes use the ATTACKER's key; envelope claims trusted's key.
+    let payload_bytes = serde_json::to_vec(&vec![sample_record()]).unwrap();
+    let batch_hlc = PackedHLC { physical_time: 2000, logical_count: 1, node_id: 0 };
+    let attacker_signing_bytes = envelope_signing_bytes(
+        &attacker_pk,               // ATTACKER's key in canonical signing bytes
+        PayloadKind::SyncRecordBatch,
+        &payload_bytes,
+        &batch_hlc,
+    );
+    let attacker_signature = attacker.sign(&attacker_signing_bytes);
+
+    let forged_envelope = SignedEnvelope {
+        sender_public_key: trusted_pk,          // spoof: claim registered peer's key
+        payload_kind: PayloadKind::SyncRecordBatch,
+        payload: payload_bytes,
+        signature: attacker_signature,          // signed using attacker's key, not trusted's
+        hlc: batch_hlc,
+    };
+
+    // Broadcast from a sentinel so the forged envelope lands in victim's relay
+    // inbox. Because sender_public_key matches a registered peer, the
+    // pairing-registry lookup passes — only signature verification (using the
+    // registry-sourced key) catches the mismatch and rejects.
+    let sentinel = convergence_kit::PeerIdentity::new([0u8; 32]);
+    relay.broadcast(&sentinel, forged_envelope);
+
+    let receipt = victim.pull().unwrap();
+    assert_eq!(receipt.pulled, 0, "forged sender key claim must not apply records");
+    assert_eq!(receipt.conflicts, 1, "rejected envelope must be counted as conflict");
+}
+
+/// F-3 positive regression: a correctly-signed envelope from a registered
+/// peer must still be ingested after the hardened verification path is active.
+///
+/// Mirrors Swift `inProcessPairingPushPull` — proves the registry-key
+/// verification path does not block legitimate traffic.
+#[test]
+fn pull_accepts_paired_envelope_and_ingests_record() {
+    let relay = Arc::new(FederationRelay::new());
+    let id_a = Arc::new(LocalIdentity::generate());
+    let id_b = Arc::new(LocalIdentity::generate());
+    let mut engine_a = FederationSyncEngine::new(id_a, relay.clone());
+    let mut engine_b = FederationSyncEngine::new(id_b, relay.clone());
+
+    engine_a.enable(sample_manifest(), make_storage()).unwrap();
+    engine_b.enable(sample_manifest(), make_storage()).unwrap();
+
+    // Symmetric pairing is required for push to deliver envelopes.
+    let family = convergence_kit::HyperplaneFamilySpec::new(0xFED_CAFE);
+    engine_a.pair(&engine_b, family.clone()).unwrap();
+    engine_b.pair(&engine_a, family).unwrap();
+
+    engine_a.enqueue(sample_record()).unwrap();
+    let push = engine_a.push().unwrap();
+    assert_eq!(push.pushed, 1, "push must send one record when paired");
+
+    let pull = engine_b.pull().unwrap();
+    assert_eq!(pull.pulled, 1, "correctly-signed paired envelope must be ingested");
+    assert_eq!(pull.conflicts, 0, "no conflicts on a legitimate paired envelope");
+}
+
 // MARK: - Canonical signing bytes conformance
 
 /// Verify that `envelope_signing_bytes` is deterministic: same inputs,

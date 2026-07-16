@@ -1,8 +1,8 @@
 ---
 title: QueueKit Specification
-version: 1.4.1
+version: 1.4.2
 status: active
-date: 2026-06-25
+date: 2026-07-16
 description: "Behavioral specification for QueueKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -320,6 +320,7 @@ live in INTERFACE § 4.
 | Bad terminal status | `reply()` is called with `.running`. | Reject before any storage mutation (I-7). |
 | Backend unavailable | The underlying `Storage` is unreachable, or an operation is unsupported by the mounted backend. | Surface; caller decides retry vs abort. |
 | Stale tmp file | A file lingers in `tmp/` past the stale threshold. | Cleanup heuristic; swept on init, not a fatal error in normal flow. |
+| Invalid identifier | A caller-supplied `StreamID`, `JobID`, or other identifier used as a filename component contains a path separator (`/`, `\`), equals `.` or `..`, or contains an ASCII control character. | Rejected by the backend before any storage mutation. Surface `invalidIdentifier`; caller must sanitise. |
 
 **Telemetry depth honesty:** the self-report path
 (`QueueKitTelemetry.reportQueueStats`, Swift-only — telemetry is the
@@ -371,6 +372,12 @@ PersistenceKit backend is behaviour-conformant, not byte-identical,
 since it stores rows rather than files.)
 
 ## Changelog
+
+### 1.4.2 -- 2026-07-16
+Added "Invalid identifier" row to the § 6 error model table: a `StreamID`, `JobID`,
+or other caller-supplied identifier containing a path separator, `.`, `..`, or an
+ASCII control character is rejected before any storage mutation with `invalidIdentifier`.
+This is a behavioral contract that was shipped (both ports) but unspecified.
 
 ### 1.4.1 -- 2026-06-25
 Corrected the § 3 dreaming-queue note to ADR-021 Decision 7 (the design moved

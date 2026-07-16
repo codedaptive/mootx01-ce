@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.11.0
+version: 1.13.0
 status: active
-date: 2026-06-25
+date: 2026-07-16
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -131,9 +131,13 @@ public actor Estate {
     public func learn(_ frame: LearnFrame) async throws
 
     // History (extension Estate, EstateAudit.swift):
-    public func auditTrail(rowID: RowID) async throws -> [AuditRow]
-    public func auditTrail(since: Date, until: Date? = nil) async throws -> [AuditRow]
-    public func bitmapState(rowID: RowID, at timestamp: Date) async throws -> BitmapState
+    // Returns the sealed AuditEvent log for one row (HLC order, genesis-forward).
+    // The wall-clock range form auditTrail(since:until:) was dropped — HLC is the
+    // ordering axis (§11 clock decision; wall-clock is not a fold axis).
+    func auditTrail(rowID: RowID) async throws -> [AuditEvent]   // internal
+    // Reconstructs bitmaps at a past HLC via AuditLogFold.projectStateAt (SPEC B-9).
+    // Parameter label is asOf: (not at:), type is HLC (not Date).
+    func bitmapState(rowID: RowID, asOf: HLC) async throws -> BitmapState   // internal
 
     // Association graph (extension Estate, Estate.swift):
     public func tunnelsFromWing(_ wing: String) async throws -> [Tunnel]
@@ -141,6 +145,43 @@ public actor Estate {
     // Dreaming substrate reads (extension Estate, Estate.swift):
     public func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem]
     public func allTunnels() async throws -> [Tunnel]
+
+    // Dataset handle verbs (public extension Estate, DatasetHandle.swift — MX-TAB-4 / MX-TAB-5):
+    // captureDatasetHandle is the ONLY authorised creation path for contentKind == .dataset
+    // drawers. The FDC classifier (moot_n_fdc / runReclassifyFDC) is barred from emitting this
+    // content kind; dataset handles are skipped during every reclassification sweep (SPEC B-13).
+    // Sensitivity floor (v1): rows in the backing dataset table are expected at or below the
+    // handle's sensitivity tier — operator convention, no per-row enforcement yet (SPEC B-14).
+    func captureDatasetHandle(datasetId: UUID, columns: [DatasetColumnSummary], rowCount: Int,
+                              sourceDescription: String, wing: String? = nil, room: String,
+                              addedBy: String, sensitivity: AdjectiveSensitivity = .normal,
+                              latticeAnchor: LatticeAnchor) async throws -> Drawer
+    // Return all .dataset-kind drawers referencing datasetId, ordered by filedAt ascending.
+    // Full-corpus scan in v1 (O(datasets), not O(drawers)); targeted index deferred.
+    func findDatasetHandles(datasetId: UUID) async throws -> [Drawer]
+    // Return the cluster-A (active/pending/contested/accepted) non-tombstoned handle.
+    // Throws drawerNotFound when no handle exists for datasetId; withdrawnDatasetHandle when all
+    // handles are cluster-B. Withdrawal is a belief-state change — the backing table is NOT
+    // dropped (use GLK VerbSurface.expunge to erase both handle and table) (SPEC B-15).
+    func resolveActiveDatasetHandle(datasetId: UUID) async throws -> Drawer
+    // Patch MX-TAB-5 computed signatures into an existing dataset handle's content JSON.
+    // Decodes DatasetHandleContent from rowID, replaces tableSignature / columnSignatures,
+    // re-encodes, writes via DrawerStore.updateDatasetContent — no audit event, no supersession
+    // cascade. Idempotent: same inputs produce the same hex strings. Called by
+    // GeniusLocusKit.computeDatasetSignatures (MX-TAB-5). Throws drawerNotFound when rowID is
+    // absent or the update affects zero rows; invalidContent when the stored JSON fails to decode.
+    func patchDatasetHandleSignatures(rowID: String, tableSignature: String,
+                                      columnSignatures: [String: String], now: Date) async throws -> Drawer
+    // Read one drawer by id, unfiltered (tombstoned / content-zeroed rows included). Used by
+    // GLK VerbSurface.expunge to read DatasetHandleContent BEFORE the storage expunge zeroes the
+    // blob, enabling the dataset-erase cascade to extract datasetId and call
+    // DatasetStore.dropDataset (SPEC B-15).
+    func drawerById(rowID: String) async throws -> Drawer?
+    // Append an arbitrary audit event to this estate's audit log. Semantically distinct from
+    // sealExpungeAudit: records supplementary events such as the "datasetTableDrop" annotation
+    // that accompanies the erase of a .dataset-kind handle. Used by GLK VerbSurface.expunge
+    // Step 2.5 (SPEC B-15).
+    func appendAuditEvent(_ event: AuditEvent) async throws
 }
 ```
 **Rust:** `pub struct Estate` with `open`, `create`, `close`, `manifest`,
@@ -163,6 +204,22 @@ All synchronous (SPEC § 8). `propose` / `associate`
 are reached through the tunnel and KG-fact store paths, not as dedicated verb
 methods.
 
+The Rust port exposes the dataset-handle verbs as `pub fn` on `Estate`
+(`estate_verbs.rs`): `capture_dataset_handle(dataset_id: Uuid, columns:
+Vec<DatasetColumnSummary>, row_count: i64, source_description: &str,
+wing: Option<&str>, room: &str, added_by: &str, sensitivity_raw: i64,
+udc_code: &str, now: i64) -> Result<Drawer, LocusKitError>` (the `sensitivity_raw`
+parameter carries the `AdjectiveSensitivity` raw value 0/16/32/48 in place of
+the Swift named enum — no Rust enum boundary crossing for this seam);
+`find_dataset_handles(dataset_id: Uuid) -> Result<Vec<Drawer>, LocusKitError>`;
+`resolve_active_dataset_handle(dataset_id: Uuid) -> Result<Drawer, LocusKitError>`;
+`drawer_by_id(row_id: &str) -> Result<Option<Drawer>, LocusKitError>`;
+`append_audit_event(event: &AuditEvent) -> Result<(), LocusKitError>`.
+`patch_dataset_handle_signatures(row_id: &str, table_signature: &str,
+column_signatures: HashMap<String,String>, now: i64) -> Result<Drawer, LocusKitError>`
+is on `Estate` in the Rust port too (`dataset_handle.rs`). All mirror the Swift
+counterparts in semantics; the signed payload format and error cases are identical.
+
 #### `Drawer`
 
 The atomic, content-immutable memory unit (SPEC § 1, I-3). Three Int64
@@ -173,8 +230,10 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public let id: String
     public let lineageID: UUID
     public let content: String                 // verbatim, never mutated (I-3)
-    public let wing: String
-    public let room: String
+    // Wing and room are NOT stored on Drawer. The drawer belongs to a room node in
+    // the estate containment tree (ADR-017). Display names are resolved via
+    // DrawerStore.resolveNodeNames(parentNodeIds:) when needed.
+    public let parentNodeId: String            // UUID of the room node (depth=2 in node tree)
     public let sourceFile: String?
     public let chunkIndex: Int?
     public let addedBy: String
@@ -190,7 +249,7 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public let udcFacets: String?
     public let wikidataQID: String?
     public let wikidataQidsSecondary: String?
-    public init(id: String = UUID().uuidString, content: String, wing: String, room: String,
+    public init(id: String = UUID().uuidString, content: String, parentNodeId: String,
                 sourceFile: String? = nil, chunkIndex: Int? = nil, addedBy: String,
                 filedAt: Date, eventTime: Date? = nil, embeddingModelID: String,
                 tombstonedAt: Date? = nil, removedByBatch: String? = nil,
@@ -379,14 +438,14 @@ public struct CaptureFrame: Sendable {
 public struct RecallFrame: Sendable {
     public var filterChain: [Filter]            // implicit AND (B-4)
     public var hydrationLevel: HydrationLevel; public var limit: Int?
-    public var ordering: Ordering; public var asOf: Date?
+    public var ordering: Ordering; public var asOf: HLC?   // HLC, not wall-clock Date (§11 clock decision)
     /// nil = write NO trace rows (default); n = trace at most the first n
     /// surfaced rows. Only the GLK RecallDirector primary locus call sets
     /// this; all other estate.recall calls leave it nil.
     public var traceLimit: Int?
     public init(filterChain: [Filter], hydrationLevel: HydrationLevel = .structured,
                 limit: Int? = nil, ordering: Ordering = .byCaptureTimeDesc,
-                asOf: Date? = nil, traceLimit: Int? = nil)
+                asOf: HLC? = nil, traceLimit: Int? = nil)
 }
 public struct LearnFrame: Sendable {
     public var source: SourceCatalogEntry          // carries the genuine anchor learn inherits
@@ -535,7 +594,7 @@ var isExcludedFromBulk: Bool         // true for .secret              (Secret ti
 public enum AdjectiveExportability: Int { case private_=0, public_=32 }
 // operational bitmap (DrawerOperational.swift) — cookbook §2.4
 public enum CaptureChannel: Int { case typed=0, voiced, ocr, importedFile, sensor, actuator }   // actuator=5 NEW in v0.6
-public enum ContentKind: Int { case prose=0, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly }   // fingerprintOnly=6 NEW in v0.6
+public enum ContentKind: Int { case prose=0, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly, dataset }   // fingerprintOnly=6 NEW in v0.6; dataset=7 NEW in MX-TAB-3
 public struct DrawerFeatureFlags: OptionSet { /* hasAttachments(12), hasVoice(13), hasImage(14), hasLinks(15), isPinned(16) */ }
 public typealias FeatureFlag = DrawerFeatureFlags
 // provenance bitmap (Provenance.swift) — cookbook §2.5 (F13/v0.6)
@@ -551,25 +610,37 @@ public typealias Vector = [Float]      // vector recall composes via VectorKit
 **Rust:** identical enums and raw values (`snake_case` cases); `DrawerFeatureFlags`
 is a Rust bitflags-style struct with the same bit positions.
 
-#### Audit history: `AuditRow`, `BitmapState`, `BitmapColumn`, `AuditActor`
+#### Audit history: `AuditEvent` (SubstrateTypes), `BitmapState`
 
 Returned by `Estate.auditTrail` / `bitmapState` (SPEC § 5, B-9; append-only I-8).
 
+`AuditRow`, `AuditActor`, and `BitmapColumn` have been replaced by `AuditEvent`
+(declared in `SubstrateTypes/AuditEvent.swift`). `auditTrail(rowID:)` returns
+`[AuditEvent]`; the wall-clock range form `auditTrail(since:until:)` has been
+dropped (HLC is the ordering axis per §11 clock decision).
+
 ```swift
-public struct AuditRow: Sendable {
-    public let auditID: Int64; public let rowID: RowID; public let timestamp: Date
-    public let actor: AuditActor; public let beforeBitmap, afterBitmap: Int64
-    public let bitmapColumn: BitmapColumn; public let reason: String; public let isTombstoned: Bool
+// SubstrateTypes.AuditEvent — the CRDT audit row (G-Set audit log, cookbook §5.1)
+public struct AuditEvent: Sendable {
+    public let eventID: UUID
+    public let estateUuid: UUID; public let rowId: UUID; public let hlc: HLC
+    public let verb: String
+    public let beforeBitmaps: (adjective: Int64, operational: Int64, provenance: Int64)?
+    public let afterBitmaps: (adjective: Int64, operational: Int64, provenance: Int64)
+    public let beforeLatticeAnchor: LatticeAnchor?; public let afterLatticeAnchor: LatticeAnchor
+    public let actor: String   // "capture" | "mcp_agent" | "dreaming_daemon" | …
+    public let reason: String?
 }
+// BitmapState snapshot returned by Estate.bitmapState(rowID:asOf:)
 public struct BitmapState: Sendable {
-    public let rowID: RowID; public let asOf: Date
+    public let rowID: RowID; public let asOf: HLC  // HLC, not wall-clock Date (§11)
     public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
 }
-public enum BitmapColumn: String, Codable { case adjective = "adjectiveBitmap", operational = "operationalBitmap", provenance = "provenanceBitmap" }
-public struct AuditActor: Sendable, Equatable { public let identifier: String; public init(_ identifier: String) }
 ```
-**Rust:** `pub struct AuditRow`, `BitmapState`, `pub enum BitmapColumn`,
-`pub struct AuditActor` mirror these.
+**Rust:** `pub struct AuditEvent` in `substrate_types` mirrors the Swift struct
+(`snake_case` fields; `before_bitmaps`/`after_bitmaps` are `Option<(i64,i64,i64)>`
+and `(i64,i64,i64)` tuples). `pub struct BitmapState` in `locus-kit` mirrors
+the Swift struct with `as_of: substrate_types::hlc::HLC`.
 
 #### `RecallTraceItem`
 
@@ -650,8 +721,9 @@ public actor DrawerStore {
                                wing: String, room: String, addedBy: String, now: Date) async throws
     public func listWings() async throws -> [WingSummary]; public func listRooms(in wing: String?) async throws -> [RoomSummary]
     public func readManifest() async throws -> ManifestValues; public func setMeta(key: String, value: String) async throws
-    public func bitmapAuditTrail(rowID: String) async throws -> [AuditRow]
-    public func bitmapAuditTrail(since: Date, until: Date?) async throws -> [AuditRow]
+    // Audit reads — returns SubstrateTypes.AuditEvent rows (not AuditRow; that type is retired)
+    public func auditEventsForRow(_ rowID: UUID) async throws -> [AuditEvent]
+    public func auditEventCountForRow(_ rowID: UUID) async throws -> Int
     // … full CRUD + audit surface, see DrawerStore.swift
 }
 ```
@@ -748,6 +820,53 @@ cited file.
 - **LearnedReference operational axes (declared in Tier 1 nouns, indexed
   here):** `RefreshPolicy`, `DriftSeverity`, `LearnMode`,
   `LearnedReferenceSource` — `LearnedReferenceOperational.swift`.
+- **Dataset handle types (MX-TAB-4):** `DatasetColumnSummary` (column schema
+  summary: `name: String`, `dataType: String`), `DatasetHandleContent` (JSON payload
+  for `contentKind == .dataset` drawers: `datasetId: UUID`, `columns`, `rowCount`,
+  `sourceDescription`, plus reserved `tableSignature`/`columnSignatures` for
+  MX-TAB-5), and the module-level constant `datasetHandleEmbeddingModelID = "dataset-handle"`
+  (sentinel that satisfies the non-empty embeddingModelID invariant for handle
+  drawers, which carry no vector embedding) — `DatasetHandle.swift`.
+  `DatasetHandleContent.encode() throws -> String` / `decode(from:) throws`
+  round-trip the JSON payload for `Drawer.content` storage.
+  Rust: `pub struct DatasetColumnSummary`, `pub struct DatasetHandleContent` (serde
+  `rename_all = "camelCase"`), `pub const DATASET_HANDLE_EMBEDDING_MODEL_ID` —
+  `dataset_handle.rs`.
+- **Vocabulary gate (estate write-gate arming):** `LocusKitVocabulary` — a `public enum`
+  namespace (`LocusKitVocabulary.swift`) that declares two members:
+  `public static let unionSlots: Set<FieldSlot>` — the operational and provenance field
+  slots for drawer estates, with their legal value sets per cookbook §2.4 / §2.5
+  (12 slots covering `capture_channel`, `content_kind` including the MX-TAB-3 `.dataset`
+  raw 7, `feature_flags`, `state_extension`, `lineage_clustering`, `source_type`, `channel`,
+  `prov_capture_channel`, `confirmation`, `confidence`, `sensitivity_at_capture`,
+  `enrichment_status`). The adjective-bitmap slots (state / sensitivity / exportability / trust)
+  are substrate-owned and supplied by the `AuditGate` itself — `LocusKitVocabulary` declares
+  only the consumer operational and provenance slots.
+  `public static func frozen() -> Result<Vocabulary, VocabularyError>` — freezes `unionSlots`
+  via `VocabularyValidator.freeze`; called at estate open to arm the `AuditGate` before any
+  write is admitted. Static and known-valid; always succeeds.
+  Rust: module `vocabulary` in `vocabulary.rs` — `pub fn union_slots() -> Vec<FieldSlot>` and
+  `pub fn frozen() -> Result<Vocabulary, VocabularyError>` (free functions; Swift-enum-namespace /
+  Rust free-fn module sanctioned shape). Both legs carry identical slot declarations and legal
+  value sets; the gate uses `union_slots()` / `frozen()` identically at estate open and per-write
+  validation time.
+- **Default wings (estate provisioning):** `DefaultWings.swift` — module-level public constants
+  and a struct used at estate provision time (ADR-016):
+  `public let defaultWingName: String = "Agentic Memory"` — the default wing for `capture`
+  when no explicit wing is supplied; all new captures without an explicit wing land here.
+  `public let hintRoom: String = "AI_Charter_Hint"` — room name for per-wing hint drawers.
+  `public let hintUDCCode: String = "001"` — UDC class code stamped on hint drawers.
+  `public let hintAddedBy: String = "estate-provision"` — actor string for hint drawer
+  provenance (honest provenance only — no code branches on this value).
+  `public struct WingDefinition: Sendable, Equatable { name: String; hint: String }` — a wing
+  name paired with its hint text.
+  `public let defaultWings: [WingDefinition]` — the seven wings seeded at estate provision
+  (`"Agentic Memory"`, `"User Canon"`, `"Source Corpus"`, `"Personal"`, `"Professional"`,
+  `"Projects"`, `"Temp"`). These are suggestions, not a fixed schema; the AI may create any
+  additional wing; nothing enforces this set as complete.
+  Rust: `default_wings.rs` — `pub const DEFAULT_WING_NAME: &str`, `pub struct WingDefinition
+  { name: &'static str, hint: &'static str }`, `pub const DEFAULT_WINGS: &[WingDefinition]`.
+  Hint text is verbatim-identical in both ports.
 - **Taxonomy summaries:** `WingSummary`, `RoomSummary` (computed
   `GROUP BY` projections; no wings/rooms table) — `Summaries.swift`.
 - **Rust-only helper shapes:** `BitmapAuditPair`, `RoomBundle`,
@@ -787,6 +906,10 @@ public enum LocusKitError: Error, Sendable, Equatable {
     case disciplineViolation(from: Int, to: Int, reason: String)
     case corruptStoredValue(table: String, column: String, storedText: String)
     case notSupported(String)
+    // A dataset handle exists for `datasetId` but its state is in cluster B
+    // (withdrawn/superseded/decayed/expired). Thrown by
+    // Estate.resolveActiveDatasetHandle(datasetId:) (MX-TAB-4).
+    case withdrawnDatasetHandle(datasetId: UUID)
 }
 public enum EstateError: Error, Sendable, Equatable {
     case substrateUnavailable(String)
@@ -796,8 +919,9 @@ public enum EstateError: Error, Sendable, Equatable {
 ```
 **Rust:** `pub enum LocusKitError` and `pub enum EstateError` mirror these
 cases (`error.rs`, `estate.rs`). `corruptStoredValue` ↔ `CorruptStoredValue
-{ table, column, stored_text }`; `notSupported` ↔ `NotSupported`. Meaning:
-SPEC § 6.
+{ table, column, stored_text }`; `notSupported` ↔ `NotSupported`;
+`withdrawnDatasetHandle` ↔ `WithdrawnDatasetHandle { dataset_id: Uuid }`.
+Meaning: SPEC § 6.
 
 **Manifest `estate_uuid` classification at open.** Opening a `DrawerStore`
 (Swift) / `DrawerStoreCore` (Rust) resolves the store's stamping identity
@@ -1088,8 +1212,8 @@ future pass can decide whether Rust should narrow it to `pub(crate)`.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
 | Recall-filtered result | `FrameFilteredDrawers` (`EstateTypes.swift:27`) | `FrameFilteredDrawers` (`estate_verbs.rs:84`) | Swift public struct / Rust pub struct | identical 2-field struct: `admissible: [Drawer]`/`Vec<Drawer>`, `loadedIDs: Set<String>`/`loaded_ids: HashSet<String>` — the return type of `Estate.recall(frame:)` carrying the admissible drawers and the full set of IDs loaded from storage | `EstateTests.swift` (recall paths) ↔ `lp0_vectors.rs::lp0_recall_*` | Confirmed |
-| Source catalog entry | `SourceCatalogEntry` (`SourceCatalogEntry.swift:50`) | `SourceCatalogEntry` (`source_catalog_entry.rs:75`) | both public/pub | identical 6-field struct: `id`, `kind: SourceKind`/`SourceKind`, `handle`, `displayName`/`display_name`, `addedAt`/`added_at` (Date/i64 ISO8601-TEXT seam — sanctioned), `metadata: [String:String]`/`BTreeMap<String,String>` | `EstateTests.swift` (source-catalog paths) ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
-| Source kind | `SourceKind` (`SourceCatalogEntry.swift:103`) | `SourceKind` (`source_catalog_entry.rs:42`) | both public/pub | identical 4-case enum stored as Int raw value: `.user`/`User`=0, `.federation`/`Federation`=1, `.householdPairing`/`HouseholdPairing`=2, `.fleetPairing`/`FleetPairing`=3; Swift lowerCamel / Rust UpperCamel — idiom | `EstateTests.swift` ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
+| Source catalog entry | `SourceCatalogEntry` (`SourceCatalogEntry.swift:50`) | `SourceCatalogEntry` (`source_catalog_entry.rs:75`) | both public/pub | identical 6-field struct: `id`, `kind: SourceKind`/`SourceKind`, `handle`, `latticeAnchor`/`lattice_anchor: LatticeAnchor` (the genuine anchor `learn` inherits), `firstSeen`/`first_seen` (Date/i64 ISO8601-TEXT seam — sanctioned), `addedBy`/`added_by: String` | `EstateTests.swift` (source-catalog paths) ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
+| Source kind | `SourceKind` (`SourceCatalogEntry.swift:103`) | `SourceKind` (`source_catalog_entry.rs:42`) | both public/pub | identical 6-case enum stored as Int raw value: `.user`/`User`=0, `.federation`/`Federation`=1, `.householdPairing`/`HouseholdPairing`=2, `.fleetPairing`/`FleetPairing`=3, `.tierInheritance`/`TierInheritance`=4, `.pairedEstate`/`PairedEstate`=5; Swift lowerCamel / Rust UpperCamel — idiom | `EstateTests.swift` ↔ `source_catalog_entry.rs #[cfg(test)]` | Confirmed |
 | Recall internal-read fault seam | `Estate.RecallInternalRead` (`Estate.swift:66`, nested public enum; `_testForceInternalReadError` stored property) | `RecallInternalRead` (`estate.rs:100`, `#[cfg(any(test, feature = "test-seams"))]` pub enum; `_test_force_internal_read_error: AtomicU8` field) | Swift public nested in `Estate` actor / Rust pub (test-seams only) | 5-case test fault-injection seam (`liveRows`/`LiveRows`, `roomFingerprints`/`RoomFingerprints`, `roomDrawerRead`/`RoomDrawerRead`, `bitmapEval`/`BitmapEval`, `traceWrite`/`TraceWrite`); Swift lowerCamel / Rust UpperCamel — idiom. Present in both ports; Rust gates behind `#[cfg(any(test, feature="test-seams"))]` (not in the production binary). The seam declaration lives on `Estate` in both ports (Swift stored property, Rust `AtomicU8` field) — not on `EstateVerbs`, which is an extension/impl that cannot own stored properties. | `EstateRecallFaultTests.swift` ↔ `estate_recall_fault_tests.rs` (recall degraded-stage suite) | Confirmed (test-seam; production binary excludes the Rust enum) |
 | Wing provisioning definition | `WingDefinition` (DefaultWings.swift:48, `public struct`) | `WingDefinition` (default_wings.rs:48, `pub struct`) | public / pub | identical concept; two fields: `name` (String / `&'static str`), `hint` (String / `&'static str`) — the wing's role-description text, seeded as a NORMAL drawer in the wing's `AI_Charter_Hint` room (no special room/provenance/embedding; see ADR-016 §2 amendment 2026-06-23). Swift uses owned `String`; Rust uses static string literals — same semantic values at runtime. Seeded at estate provision as the seven ADR-016 default wings. NT-L1. | `EstateTests.swift` (provision path) ↔ `node_store_tests.rs` (estate provision exercises WingDefinition) | Confirmed |
 | Snapshot attestation (LocusKit-homed) | — | `SnapshotAttestation` (merkle_rollup.rs:269, `pub struct`) | — / pub | **Layering note:** Rust port places `SnapshotAttestation` in `LocusKit/merkle_rollup.rs`. The Swift equivalent is `PersistenceKit.SnapshotAttestation` (SnapshotRegistry.swift:47). Relocate to PersistenceKit Rust in a future parity mission (NT-P1/L4). Until relocated, this row documents the Rust declaration site so the concordance audit does not flag it as an undocumented gap. | `MerkleRollupTests.swift` ↔ `merkle_rollup_tests.rs` | Documented (layering mismatch — see PersistenceKit concordance for Swift counterpart) |
@@ -1234,6 +1358,54 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.13.0 -- 2026-07-16
+Closed CRITICAL documentation gaps identified by the post-pass verifier:
+
+- **Estate dataset-handle verbs added to Tier 1** (`DatasetHandle.swift` /
+  `estate_verbs.rs`): `captureDatasetHandle`, `findDatasetHandles`,
+  `resolveActiveDatasetHandle`, `patchDatasetHandleSignatures`, `drawerById`,
+  `appendAuditEvent` — all are `public extension Estate` methods consumed by
+  GeniusLocusKit and absent from both Tier 1 and the previous Tier 2 entry for
+  dataset handles. Swift signatures, behavioral notes (SPEC B-13/B-14/B-15
+  cross-references), and Rust counterparts (`estate_verbs.rs` / `dataset_handle.rs`)
+  are now documented in the Estate code block and the Rust parity paragraph.
+- **`LocusKitVocabulary` added to Tier 2** (`LocusKitVocabulary.swift` /
+  `vocabulary.rs`): `public enum` namespace that declares `unionSlots: Set<FieldSlot>`
+  and `frozen() -> Result<Vocabulary, VocabularyError>`, called at estate open to
+  arm the `AuditGate`. Rust: module-level free functions `union_slots()` / `frozen()`
+  in `vocabulary.rs`.
+- **`DefaultWings` surface added to Tier 2** (`DefaultWings.swift` /
+  `default_wings.rs`): `defaultWingName`, `hintRoom`, `hintUDCCode`, `hintAddedBy`,
+  `WingDefinition`, `defaultWings` — the estate-provisioning constants and struct.
+  Rust: `DEFAULT_WING_NAME`, `WingDefinition`, `DEFAULT_WINGS` in `default_wings.rs`.
+
+### 1.12.0 -- 2026-07-16
+MX-TAB-4 and HLC/ADR-017 audit-model corrections:
+
+- **Drawer struct**: `wing: String` and `room: String` fields replaced by
+  `parentNodeId: String` (ADR-017 node-tree containment). Display names are
+  resolved via `DrawerStore.resolveNodeNames(parentNodeIds:)` when needed; they
+  are no longer stored on the struct. Init signature updated accordingly.
+- **RecallFrame.asOf**: type changed from `Date?` to `HLC?` (§11 clock decision
+  — state is keyed on HLC, not wall-clock). Init default updated.
+- **Audit model**: `AuditRow`, `AuditActor`, and `BitmapColumn` replaced by
+  `AuditEvent` from `SubstrateTypes` (G-Set CRDT audit row, cookbook §5.1).
+  `Estate.auditTrail(rowID:)` return type is now `[AuditEvent]` (internal).
+  The wall-clock range form `auditTrail(since:until:)` was dropped — HLC is the
+  ordering axis. `Estate.bitmapState` parameter label changed `at:` → `asOf:`
+  and type `Date` → `HLC`; reconstruction now uses `AuditLogFold.projectStateAt`
+  rather than XOR-fold. `BitmapState.asOf` is `HLC`, not `Date`.
+- **ContentKind.dataset = 7** added (MX-TAB-3).
+- **LocusKitError.withdrawnDatasetHandle(datasetId: UUID)** added (MX-TAB-4);
+  thrown by `Estate.resolveActiveDatasetHandle(datasetId:)`.
+- **Dataset handle types** added to Tier 2: `DatasetColumnSummary`,
+  `DatasetHandleContent`, `datasetHandleEmbeddingModelID` (`DatasetHandle.swift`
+  / `dataset_handle.rs`).
+- **SourceCatalogEntry concordance fields** corrected: was `displayName`,
+  `addedAt`, `metadata`; actual fields are `latticeAnchor`, `firstSeen`, `addedBy`.
+- **SourceKind concordance** corrected: was "4-case enum" omitting
+  `.tierInheritance=4` and `.pairedEstate=5`; corrected to 6-case.
 
 ### 1.11.0 -- 2026-06-25
 Added the `Estate` consumer metadata surface (`meta(key:)` / `setMeta(key:value:)`

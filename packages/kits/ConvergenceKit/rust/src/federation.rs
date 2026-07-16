@@ -639,20 +639,35 @@ impl SyncEngine for FederationSyncEngine {
         let mut pulled = 0;
         let mut conflicts = 0;
         for envelope in envelopes {
-            // Only accept envelopes from explicitly paired peers. Signature
-            // verification proves key ownership; this check enforces the
-            // pairing authorization boundary before applying any records.
-            // Without this gate an attacker can craft a valid self-signed
-            // envelope (ADR-013) and inject records even without a pairing
-            // handshake — the signature alone does not prove authorization.
-            if !self
+            // SECURITY (F-3 class): `envelope.sender_public_key` is a field
+            // the sender controls and must never be trusted as the verification
+            // key. Resolve the registered peer from the pairing registry using
+            // the envelope's claimed key, then carry the REGISTERED key forward
+            // for all subsequent checks. `sender_public_key` is advisory: if it
+            // matches a registry entry we proceed; if it diverges from the
+            // registered key we reject. Trust derives from the pairing registry,
+            // not from the envelope's own fields. Mirrors Swift pull().
+            let registered_key: [u8; ed25519_dalek::PUBLIC_KEY_LENGTH] = match self
                 .state
                 .paired_peers
                 .iter()
-                .any(|peer| peer.public_key == envelope.sender_public_key)
+                .find(|peer| peer.public_key == envelope.sender_public_key)
             {
+                Some(p) => p.public_key,
+                None => {
+                    conflicts += 1;
+                    continue; // sender not in pairing registry
+                }
+            };
+            // Advisory-field check: envelope's claimed sender key must equal the
+            // registered peer key. The `find` above guarantees this when the
+            // peer list is keyed by public key, but the explicit comparison makes
+            // the security intent visible: if the lookup mechanism ever changes
+            // (e.g. a UUID peer-id lookup returning a different registered key),
+            // a mismatch here is a federation-auth rejection, not a silent pass.
+            if envelope.sender_public_key != registered_key {
                 conflicts += 1;
-                continue;
+                continue; // federation-auth: claimed sender key does not match registry
             }
 
             // Reject unknown payload kinds to avoid misinterpreting future
@@ -665,14 +680,18 @@ impl SyncEngine for FederationSyncEngine {
 
             // Verify signature over canonical bytes (not raw payload).
             // The sender signed envelope_signing_bytes(...); we reproduce
-            // the same bytes here for verification.
+            // the same bytes here. SECURITY: use the REGISTERED peer key
+            // (`registered_key`) as the sender key in the canonical bytes
+            // and as the verification key — not `envelope.sender_public_key`.
+            // The advisory check above confirms they are equal, but trust
+            // derives from the pairing registry, not from the envelope.
             let signing_bytes = envelope_signing_bytes(
-                &envelope.sender_public_key,
+                &registered_key,               // registered peer key, not envelope claim
                 envelope.payload_kind,
                 &envelope.payload,
                 &envelope.hlc,
             );
-            if !verify_signature(&envelope.signature, &signing_bytes, &envelope.sender_public_key) {
+            if !verify_signature(&envelope.signature, &signing_bytes, &registered_key) {
                 conflicts += 1;
                 continue;
             }

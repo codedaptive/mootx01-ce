@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-14
-version: 1.0.0
+version: 1.3-draft
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -55,7 +55,7 @@ Four library products: `ConvergenceKit`, `ConvergenceKitNone`,
 - `src/federation.rs` — `FederationSyncEngine`, `Relay` (transport
   trait), `FederationRelay` (in-process `impl Relay`), `SignedEnvelope`,
   `PayloadKind`, `envelope_signing_bytes`, `LocalIdentity`,
-  `PeerIdentity`, `verify_signature`
+  `PeerIdentity`, `verify_signature`, `PairedPeer`
 - `src/pairing.rs` — `HyperplaneFamilySpec`, `PairingProposal`,
   `PairingAcceptance`, `proposal_signing_bytes`
 
@@ -118,6 +118,10 @@ public enum ConflictPolicy: String, Sendable, Codable {
     case appendOnly            // (eventID, hlc) idempotent; audit log; remote deletes rejected
     case localWins             // receiver discards remote on conflict; remote deletes rejected
     case remoteWins            // receiver overwrites local on conflict unconditionally
+    // (v1.2-draft) per-column HLC LWW; wire carries columnHLCs map (B-8).
+    // Array/blob columns are atomic whole values — concurrent writes to the
+    // same column lose the lower-HLC side. Requires Rust twin per C-8.
+    case fieldLevelLWW
 }
 
 public struct SyncedTable: Sendable, Codable {
@@ -125,16 +129,26 @@ public struct SyncedTable: Sendable, Codable {
     public let direction: SyncDirection
     public let primaryKeyColumn: String
     public let conflictPolicy: ConflictPolicy
+    /// (v1.2-draft) columns excluded from sync; locally recomputed on every device.
+    /// Matches Playground Rule 4: derived columns never sync.
+    public let excludedColumns: Set<String>
     public init(name: String, direction: SyncDirection = .bidirectional,
-                primaryKeyColumn: String, conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC)
+                primaryKeyColumn: String, conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC,
+                excludedColumns: Set<String> = [])
 }
 
-public struct SyncManifest: Sendable, Codable {
+public struct SyncManifest: Sendable {
     public let kitID: String
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
-    public init(kitID: String, schemaVersion: Int, zoneIdentifier: String, tables: [SyncedTable])
+    /// (v1.2-draft) optional hook run after each inbound pull batch applies;
+    /// use to restore cross-row or cross-table structural invariants that
+    /// sync cannot maintain (Playground Rule 3). Not `Codable` — closures
+    /// cannot be serialized; set at construction only.
+    public var postApplyIntegrityHook: ((any Storage) async -> Void)?
+    public init(kitID: String, schemaVersion: Int, zoneIdentifier: String, tables: [SyncedTable],
+                postApplyIntegrityHook: ((any Storage) async -> Void)? = nil)
     public func table(named name: String) -> SyncedTable?
 }
 ```
@@ -143,18 +157,23 @@ public struct SyncManifest: Sendable, Codable {
 
 ```rust
 pub enum SyncDirection { Bidirectional, PushOnly, PullOnly }
-pub enum ConflictPolicy { LastWriterWinsByHLC, AppendOnly, LocalWins, RemoteWins }
+pub enum ConflictPolicy {
+    LastWriterWinsByHLC, AppendOnly, LocalWins, RemoteWins,
+    FieldLevelLWW,  // (v1.2-draft) per-column HLC LWW; see B-8
+}
 
 pub struct SyncedTable {
     pub name: String,
     pub direction: SyncDirection,           // serde default: Bidirectional
     pub primary_key_column: String,
     pub conflict_policy: ConflictPolicy,     // serde default: LastWriterWinsByHLC
+    pub excluded_columns: HashSet<String>,   // (v1.2-draft) serde default: empty
 }
 impl SyncedTable {
     pub fn new(name: impl Into<String>, primary_key_column: impl Into<String>) -> Self;
     pub fn with_direction(self, direction: SyncDirection) -> Self;
     pub fn with_conflict_policy(self, policy: ConflictPolicy) -> Self;
+    pub fn with_excluded_columns(self, cols: impl IntoIterator<Item = impl Into<String>>) -> Self; // (v1.2-draft)
 }
 
 pub struct SyncManifest {
@@ -162,6 +181,8 @@ pub struct SyncManifest {
     pub schema_version: i32,
     pub zone_identifier: String,
     pub tables: Vec<SyncedTable>,
+    // (v1.2-draft) post-apply hook: Rust equivalent is a boxed fn; not serializable.
+    // pub post_apply_hook: Option<Box<dyn Fn(&dyn Storage) -> Result<(), SyncError> + Send>>,
 }
 impl SyncManifest {
     pub fn new(kit_id: impl Into<String>, schema_version: i32,
@@ -169,6 +190,15 @@ impl SyncManifest {
     pub fn table_named(&self, name: &str) -> Option<&SyncedTable>;
 }
 ```
+
+**Note (v1.2-draft) — `TableChange.origin`:** ConvergenceKit's echo
+suppression (SPEC I-10) depends on an `origin: ChangeOrigin` field added
+to PersistenceKit's `TableChange` type. `ChangeOrigin` is either `local`
+(all caller-initiated writes) or `syncApply` (writes issued by
+`applyInbound`). This field is a planned PersistenceKit type extension
+delivered in mission P1-M1; do not edit `PersistenceKit` documentation
+to add it here. See `PERSISTENCEKIT_INTERFACE.md` for the full signature
+when P1-M1 lands.
 
 ### `SyncReceipt`, `SyncEvent`, `SyncState`
 
@@ -346,6 +376,28 @@ impl NoSyncEngine { pub fn new() -> Self; }   // also Default
 public final class CloudKitSyncEngine: SyncEngine, Sendable {
     /// Pass nil to resolve CKContainer.default() at enable() time.
     public init(containerIdentifier: String? = nil)
+
+    // (v1.2-draft) host-app accelerator surface — correctness does NOT
+    // depend on nudge delivery; the engine is always sound under polling
+    // alone (B-11). These entry points are for host apps that hold APNs
+    // entitlements and want to reduce inbound latency.
+
+    /// Nudge the engine to run a pull cycle immediately, bypassing the
+    /// current idle-cadence timer. Call from the host app's silent-push
+    /// handler after receiving a CloudKit zone-change notification.
+    public func nudge() async
+
+    /// Register a `CKRecordZoneSubscription` for the engine's sync zone
+    /// in the given database. The subscription delivers silent-push
+    /// wakeups to the host app; the host app calls `nudge()` on receipt.
+    /// Safe to call multiple times; re-registration is idempotent.
+    public func registerZoneSubscription(database: CKDatabase) async throws
+
+    /// Process a remote-notification `userInfo` dict from the host app's
+    /// `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`.
+    /// Returns `true` if the notification was a CloudKit zone-change event
+    /// for this engine's zone and a nudge was issued; `false` otherwise.
+    public func handleRemoteNotification(userInfo: [AnyHashable: Any]) async -> Bool
 }
 
 public enum CKRecordMapping {
@@ -357,13 +409,31 @@ public enum CKRecordMapping {
     public static func decode(_ record: CKRecord) throws -> DecodedRecord
 }
 
-public struct DecodedRecord: Sendable {
-    public let table: String
-    public let rowKey: UUID
-    public let values: [String: TypedValue]
+/// Sync metadata extracted from the `_sync*` reserved fields of a CKRecord.
+/// Carried separately from `values` so `values` remains clean (no `_sync*` keys)
+/// while the engine retains what it needs for conflict resolution and HLC
+/// persistence.
+public struct SyncMeta: Sendable {
     public let hlc: HLC
     public let schemaVersion: Int
     public let kitID: String
+}
+
+/// Decoded CKRecord: app-data values plus sync metadata. `hlc`, `schemaVersion`,
+/// and `kitID` are computed convenience accessors backed by `syncMeta`.
+public struct DecodedRecord: Sendable {
+    public let table: String
+    public let rowKey: UUID
+    /// App-data values. Contains no `_sync*` keys.
+    public let values: [String: TypedValue]
+    /// Sync metadata extracted during decode.
+    public let syncMeta: SyncMeta
+    /// Convenience: `syncMeta.hlc`
+    public var hlc: HLC { syncMeta.hlc }
+    /// Convenience: `syncMeta.schemaVersion`
+    public var schemaVersion: Int { syncMeta.schemaVersion }
+    /// Convenience: `syncMeta.kitID`
+    public var kitID: String { syncMeta.kitID }
 }
 ```
 
@@ -463,6 +533,12 @@ impl FederationSyncEngine {
     /// subscribes the storage observer and auto-populates the outbox on every
     /// observed write — parity with the Swift port (SPEC § 5, B-7).
     pub fn enqueue(&mut self, record: SyncRecord) -> SyncResult<()>;
+    /// Record a paired peer. The relay is shared at construction; this call
+    /// only registers the peer's public key and family so `push` knows who
+    /// to route to. Must be called symmetrically on both engines (Swift parity:
+    /// `pair(with:via:family:)` calls `acceptPeering` on the remote engine).
+    pub fn pair(&mut self, peer: &FederationSyncEngine,
+                family: HyperplaneFamilySpec) -> SyncResult<()>;
 }
 
 // Transport abstraction (hosted-sync hook): the engine holds `Arc<dyn
@@ -471,6 +547,10 @@ impl FederationSyncEngine {
 pub trait Relay: Send + Sync {
     fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
+    /// Deliver to one specific peer (by public key). Used by `push` to route
+    /// envelopes only to explicitly paired peers rather than broadcasting to
+    /// all relay participants.
+    fn send_to(&self, from: &PeerIdentity, to_public_key: &[u8; 32], envelope: SignedEnvelope);
 }
 
 pub struct FederationRelay { /* … */ }                         // also Default
@@ -480,6 +560,7 @@ impl FederationRelay {
 impl Relay for FederationRelay {
     fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
+    fn send_to(&self, from: &PeerIdentity, to_public_key: &[u8; 32], envelope: SignedEnvelope);
 }
 
 /// Discriminator for the opaque payload carried by `SignedEnvelope`.
@@ -517,6 +598,17 @@ impl LocalIdentity {
 }
 
 pub fn verify_signature(signature: &[u8], data: &[u8], peer_public_key: &[u8]) -> bool;
+
+/// A peer that has been explicitly paired via `pair()`. Re-exported from
+/// `federation.rs` via `pub use federation::*`. The engine only pushes when
+/// at least one `PairedPeer` exists; `push` returns an empty receipt when
+/// `paired_peers` is empty. No Swift public counterpart — the Swift analog
+/// (`FederationStateActor.PairedPeer`) is an internal actor-nested type.
+#[derive(Debug, Clone)]
+pub struct PairedPeer {
+    pub public_key: [u8; 32],
+    pub family: HyperplaneFamilySpec,
+}
 
 pub struct HyperplaneFamilySpec { pub seed: u64, pub dimension: u32 }
 impl HyperplaneFamilySpec {
@@ -563,6 +655,22 @@ public enum SyncError: Error, Sendable, Equatable {
     case peerUnreachable(identity: String)
     case authenticationFailed(detail: String)
     case unsupportedTable(name: String)
+    /// CloudKit-only. A CKRecord whose `recordName` could not be parsed as
+    /// a UUID. Fabricating a UUID from a corrupt recordName would create a
+    /// phantom local row that diverges on every subsequent sync round; the
+    /// pull loop quarantines the record, counts it as a conflict, and
+    /// continues to the next record rather than aborting the batch.
+    case corruptRemoteIdentity(recordName: String)
+    /// (v1.2-draft) CloudKit-only. The device's `(slot, epoch)` pair has
+    /// been superseded: the slot was evicted and its epoch bumped while this
+    /// device was inactive. Raised before any inbound records are applied.
+    /// Recovery: the engine re-claims a fresh slot, re-mints pending outbox
+    /// entries under the new identity, then resumes the pull cycle.
+    case reenrollRequired(slot: Int, staleEpoch: Int, currentEpoch: Int)
+    /// (v1.2-draft) CloudKit-only. All 15 assignable node-ID slots (1–15)
+    /// are occupied by recently-active devices. No records are applied.
+    /// Surfaced loud to the caller; the engine retries after a slot is freed.
+    case slotExhausted(activeCount: Int)
 }
 ```
 
@@ -610,7 +718,9 @@ cargo test -p convergence-kit
 ```
 
 Test files: `tests/none_engine_tests.rs`, `tests/federation_tests.rs`,
-`tests/wire_format_tests.rs`.
+`tests/federation_lww_tests.rs`, `tests/federation_inbound_event_tests.rs`,
+`tests/federation_observer_outbox_tests.rs`, `tests/wire_format_tests.rs`,
+`tests/json_conformance_tests.rs`.
 
 ## § 6 — Examples
 
@@ -669,9 +779,9 @@ sanctioned port difference.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
 | Sync direction | `SyncDirection` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncDirection` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw lowerCamel cases / Rust UpperCamel cases — identical variant set | Confirmed |
-| Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; same 4 variants, both default LWW-by-HLC | Confirmed |
-| Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`); serde defaults mirror Swift defaults | Confirmed |
-| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32` | Confirmed |
+| Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; 4 shipped variants + `fieldLevelLWW` (v1.2-draft, both ports); both default LWW-by-HLC | Confirmed (shipped) / Draft (`fieldLevelLWW`) |
+| Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`, `with_excluded_columns` v1.2-draft); `excludedColumns: Set<String>` (Swift) / `excluded_columns: HashSet<String>` (Rust) — serde default empty (v1.2-draft) | Confirmed (shipped) / Draft (`excludedColumns`) |
+| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32`; `postApplyIntegrityHook` Swift-only closure (v1.2-draft) — Rust `post_apply_hook` deferred | Confirmed (shipped) / Draft (hook) |
 
 ### Cycle result + observation value types
 
@@ -702,8 +812,8 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Federation engine | `FederationSyncEngine` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationSyncEngine` (`rust/src/federation.rs`) | public final class / pub struct | Both ports auto-populate the outbox by subscribing the storage observer at `enable` (SPEC § 5, B-7); Rust also exposes an explicit `enqueue` for direct-record callers; `init()` vs `new(identity, relay)`; Swift `pair(with:via:family:)` | Confirmed |
-| Transport abstraction | `Relay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `Relay` (`rust/src/federation.rs`) | public protocol / pub trait | Same hosted-relay seam, different verb shape: Swift inbox `send`/`drain` (poll) / Rust `register`(→`Receiver`)/`broadcast` (push). Both carry the signed envelope; bound `Sendable` vs `Send + Sync` | Confirmed |
+| Federation engine | `FederationSyncEngine` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationSyncEngine` (`rust/src/federation.rs`) | public final class / pub struct | Both ports auto-populate the outbox by subscribing the storage observer at `enable` (SPEC § 5, B-7); Rust also exposes an explicit `enqueue` for direct-record callers; `init()` vs `new(identity, relay)`. Both ports have a `pair` method: Swift `pair(with:via:family:)` takes a peer engine, relay, and family and calls `acceptPeering` on the remote to make it symmetric; Rust `pair(&mut self, peer:, family:)` takes a peer ref and records the public key — relay is shared at construction so no relay arg; each side must call `pair` on the other. | Confirmed |
+| Transport abstraction | `Relay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `Relay` (`rust/src/federation.rs`) | public protocol / pub trait | Same hosted-relay seam, different verb shape: Swift inbox `send`/`drain` (poll) / Rust `register`(→`Receiver`)/`broadcast` + `send_to` (push, targeted). Rust has an additional `send_to(from:to_public_key:envelope:)` that routes to one specific peer by public key — used by `push` to honor the pairing boundary. Both carry the signed envelope; bound `Sendable` vs `Send + Sync` | Confirmed |
 | In-process relay | `FederationRelay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationRelay` (`rust/src/federation.rs`) | public final class / pub struct | Swift `NSLock`-guarded inboxes / Rust `Mutex` + mpsc senders (+`Default`); same in-process semantics | Confirmed |
 | Signed wire envelope | `SignedEnvelope` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`), `PayloadKind` (same file), `envelopeSigningBytes(...)` (same file) | `SignedEnvelope` (`rust/src/federation.rs`), `PayloadKind` (same file), `envelope_signing_bytes` (same file) | public struct+enum+func / pub struct+enum+fn | Unified batch envelope: both ports carry `sender_public_key` (32B Ed25519), `payload_kind` (C1 tag: `syncRecordBatch`=0x01), opaque `payload` (JSON `[SyncRecord]` batch), `signature` (Ed25519 over canonical bytes — NOT raw JSON), `hlc` (batch-level). Canonical signing bytes are deterministic and byte-identical cross-port; golden vector in both test suites. `payload_kind` is the C1 extension point for `fieldWriteEventBatch`. Shape rule: Swift `Data`/`UInt8` vs Rust `Vec<u8>`/`u8` — same encoding | Confirmed |
 | Peer identity | `PeerIdentity` (`Sources/ConvergenceKitFederation/FederationIdentity.swift`) | `PeerIdentity` (`rust/src/federation.rs`) | public struct / pub struct | Swift `publicKey: Data` (32B Ed25519) / Rust `public_key: [u8;32]` | Confirmed |
@@ -723,7 +833,7 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; same 10 categories. Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed |
+| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; 10 shared categories + Swift-only CloudKit cases: `corruptRemoteIdentity(recordName:)` (shipped), `reenrollRequired(slot:staleEpoch:currentEpoch:)` (v1.2-draft), `slotExhausted(activeCount:)` (v1.2-draft). Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed (shared) / Draft (new Swift-only cases) |
 | Result alias | (Swift: `throws` — no result type) | `SyncResult<T>` (`rust/src/types.rs`) | n/a / pub type alias | Swift uses `throws`; Rust port has no async runtime so it returns `Result<T, SyncError>` aliased as `SyncResult` — sanctioned async/throws ↔ Result seam | Confirmed |
 
 ### CloudKit backend — Apple-platform-bound (Exempt)
@@ -734,16 +844,42 @@ only Federation/None have Rust ports).
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
+| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit); (v1.2-draft) adds `nudge()`, `registerZoneSubscription(database:)`, `handleRemoteNotification(userInfo:)` host-app accelerator surface (B-11) | Exempt |
 | CKRecord ↔ row mapping | `CKRecordMapping` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public enum / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
-| Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
-| CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
+| Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — stored: `table`, `rowKey`, `values`, `syncMeta: SyncMeta`; computed: `hlc`, `schemaVersion`, `kitID` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). `hlc`/`schemaVersion`/`kitID` are computed accessors backed by `syncMeta`, not stored fields. | Exempt |
+| CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — fields: `hlc: HLC`, `schemaVersion: Int`, `kitID: String` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). Introduced to separate sync metadata from app-data values in `DecodedRecord`. | Exempt |
 
 ---
 
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.3-draft -- 2026-07-16
+- Added `ConflictPolicy.fieldLevelLWW` (Swift and Rust; v1.2-draft) to § 2.
+- Added `SyncedTable.excludedColumns` / `excluded_columns` (Swift and Rust;
+  v1.2-draft) and `with_excluded_columns` Rust builder to § 2.
+- Changed `SyncManifest` from `Codable` to non-Codable (closure property
+  `postApplyIntegrityHook` is not serializable); added `postApplyIntegrityHook`
+  (Swift-only, v1.2-draft) to § 2.
+- Added `TableChange.origin` cross-reference note to § 2 (PersistenceKit
+  P1-M1; do not edit PersistenceKit docs here).
+- Added `SyncError.reenrollRequired(slot:staleEpoch:currentEpoch:)` and
+  `SyncError.slotExhausted(activeCount:)` (Swift-only, CloudKit, v1.2-draft)
+  to § 4.
+- Added `CloudKitSyncEngine` host-app accelerator surface: `nudge()`,
+  `registerZoneSubscription(database:)`, `handleRemoteNotification(userInfo:)`
+  (v1.2-draft) to § 2.
+- Updated concordance table in § 7 for all of the above.
+
+### 1.1 -- 2026-07-16
+- Added Swift-only `SyncError.corruptRemoteIdentity(recordName:)` case to § 4 (CloudKit pull guard, thrown when `recordName` cannot parse as UUID).
+- Added `SyncMeta` public struct to CloudKit backend types in § 2.
+- Fixed `DecodedRecord` signature: `syncMeta: SyncMeta` is the stored property; `hlc`/`schemaVersion`/`kitID` are computed `var` accessors, not stored `let` fields.
+- Added `send_to(from:to_public_key:envelope:)` to Rust `Relay` trait and `FederationRelay` implementation in § 2.
+- Added Rust `FederationSyncEngine.pair` method to § 2.
+- Expanded Rust test-file list in § 5 (four additional test files).
+- Updated concordance table in § 7 for all of the above.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

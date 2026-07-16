@@ -198,7 +198,7 @@ impl Estate {
     ///
     /// Operational bitmap (cookbook §2.4 v0.6 layout):
     ///   - bits 0–5:   `capture_channel` (contiguous raw 0..5)
-    ///   - bits 6–11:  `content_kind`    (contiguous raw 0..6)
+    ///   - bits 6–11:  `content_kind`    (contiguous raw 0..7)
     ///   - bits 12–23: `feature_flags`   (DrawerFeatureFlags bitset, pre-shifted)
     ///
     /// Adjective bitmap:
@@ -244,7 +244,7 @@ impl Estate {
 
         // Operational bitmap assembly (cookbook §2.4 v0.6 layout):
         //   bits 0–5   capture_channel (contiguous raw 0..5)
-        //   bits 6–11  content_kind    (contiguous raw 0..6)
+        //   bits 6–11  content_kind    (contiguous raw 0..7)
         //   bits 12–23 feature_flags   (DrawerFeatureFlags bitset)
         // Per DrawerOperational.swift / spec § 5.6.
         //
@@ -1740,6 +1740,307 @@ impl Estate {
         };
         self.store
             .seal_expunge_orphan_for_sweep(row_id, &changed_by, now)
+    }
+
+    // -----------------------------------------------------------------------
+    // Dataset handle verb surface (MX-TAB-4)
+    // -----------------------------------------------------------------------
+
+    /// Return the drawer for `row_id`, or `None` when no row exists.
+    ///
+    /// Tombstoned and content-zeroed rows are returned unfiltered so the
+    /// caller can inspect state after an expunge. Used by the GLK coordinator's
+    /// `expunge` to read the drawer content BEFORE the storage expunge zeroes
+    /// the blob, enabling the dataset-erase cascade to extract `dataset_id`
+    /// from a `ContentKind::Dataset` handle.
+    ///
+    /// Mirrors Swift `Estate.drawerById(rowID:)` in `DatasetHandle.swift`.
+    pub fn drawer_by_id(&self, row_id: &str) -> Result<Option<crate::drawer::Drawer>, LocusKitError> {
+        self.store.get_drawer(row_id)
+    }
+
+    /// Append an arbitrary audit event to this estate's audit log.
+    ///
+    /// The underlying storage operation is identical to `seal_expunge_audit` —
+    /// both call the DrawerStore's audit-append path. The distinct name signals
+    /// the different semantic intent at the call site: `seal_expunge_audit`
+    /// closes a deferred expunge event; `append_audit_event` records
+    /// supplementary events such as the dataset table-drop that accompanies
+    /// an erase of a `ContentKind::Dataset` handle.
+    ///
+    /// Mirrors Swift `Estate.appendAuditEvent(_:)` in `DatasetHandle.swift`.
+    pub fn append_audit_event(
+        &self,
+        event: &substrate_lib::verbs::AuditEvent,
+    ) -> Result<(), LocusKitError> {
+        // Delegates to seal_expunge_audit because both operations are
+        // audit-log appends — DrawerStore exposes no separate generic-append
+        // method, and introducing one would require changes to every
+        // DrawerStore conformer. The semantic distinction lives in the verb
+        // string inside the AuditEvent, not in the storage path.
+        self.store.seal_expunge_audit(event)
+    }
+
+    /// Construct and append a supplementary audit event derived from an
+    /// existing (unsealed) event, using a caller-supplied verb and reason.
+    ///
+    /// This is the only correct way for the GLK coordinator to append
+    /// side-channel audit events (such as "datasetTableDrop") without needing
+    /// direct access to `substrate_lib` — which is a LocusKit-layer dep, not a
+    /// GLK dep. The coordinator passes the `unsealed_event` it already holds
+    /// from `estate.expunge()`; this method computes the deterministic
+    /// `event_id` (SHA-256 content-ID over the wire fields) and appends.
+    ///
+    /// Append failure is returned to the caller but is intentionally swallowed
+    /// by the GLK coordinator (mirrors Swift: `catch { os_log.error }` pattern)
+    /// so tombstone step-3 sealing can still proceed.
+    ///
+    /// Used by: `GeniusLocusKit::coordinator::expunge` Step 2.5.
+    pub fn append_supplementary_audit(
+        &self,
+        from: &substrate_lib::verbs::AuditEvent,
+        verb: &str,
+        reason: &str,
+    ) -> Result<(), LocusKitError> {
+        let event_id = substrate_lib::audit_gate::content_id(
+            from.estate_uuid,
+            from.row_id,
+            &from.hlc,
+            verb,
+            from.after_bitmaps,
+            from.after_lattice_anchor,
+        );
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id,
+            estate_uuid: from.estate_uuid,
+            row_id: from.row_id,
+            hlc: from.hlc,
+            verb: verb.to_string(),
+            before_bitmaps: None,
+            after_bitmaps: from.after_bitmaps,
+            before_lattice_anchor: None,
+            after_lattice_anchor: from.after_lattice_anchor,
+            actor: from.actor.clone(),
+            reason: Some(reason.to_string()),
+        };
+        self.store.seal_expunge_audit(&event)
+    }
+
+    /// Return all drawers with `content_kind() == ContentKind::Dataset` that
+    /// reference `dataset_id`, ordered by `filed_at` ascending (the natural
+    /// `allDrawers` order).
+    ///
+    /// Performs a full-corpus scan in v1 because dataset handles are rare
+    /// (O(datasets), not O(drawers)). A targeted index is deferred to a
+    /// future mission if the corpus grows large enough to require it.
+    ///
+    /// Mirrors Swift `Estate.findDatasetHandles(datasetId:)` in
+    /// `DatasetHandle.swift`.
+    pub fn find_dataset_handles(
+        &self,
+        dataset_id: uuid::Uuid,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        let all = self.store.all_drawers()?;
+        let handles = all
+            .into_iter()
+            .filter(|d| {
+                if d.content_kind() != crate::drawer_operational::ContentKind::Dataset {
+                    return false;
+                }
+                match crate::dataset_handle::DatasetHandleContent::decode(&d.content) {
+                    Ok(h) => h.dataset_id == dataset_id,
+                    Err(_) => false,
+                }
+            })
+            .collect();
+        Ok(handles)
+    }
+
+    /// Return the active dataset handle for `dataset_id`, or an error.
+    ///
+    /// - When no handle exists: returns `LocusKitError::DrawerNotFound`.
+    /// - When all handles are in cluster B (Withdrawn, Superseded, etc.):
+    ///   returns `LocusKitError::WithdrawnDatasetHandle`.
+    /// - When an active (cluster A) handle exists: returns it.
+    ///
+    /// Withdrawal is a belief-state change, NOT a destructive erase. The
+    /// backing dataset table is NOT dropped by this call. Use GLK `expunge`
+    /// to erase both the handle and the table.
+    ///
+    /// Mirrors Swift `Estate.resolveActiveDatasetHandle(datasetId:)` in
+    /// `DatasetHandle.swift`.
+    pub fn resolve_active_dataset_handle(
+        &self,
+        dataset_id: uuid::Uuid,
+    ) -> Result<crate::drawer::Drawer, LocusKitError> {
+        // bit_field is re-exported from substrate_kernel; bitmap_ops only
+        // shadows it locally and the re-export is private.
+        use substrate_kernel::bit_field;
+        let handles = self.find_dataset_handles(dataset_id)?;
+        if handles.is_empty() {
+            return Err(LocusKitError::DrawerNotFound {
+                id: dataset_id.to_string(),
+            });
+        }
+        // Search for a cluster-A (currently believed) non-tombstoned handle.
+        // Bits 0–5 of adjective_bitmap encode the State raw value (cookbook §2.3).
+        if let Some(active) = handles.iter().find(|d| {
+            if d.tombstoned_at.is_some() {
+                return false;
+            }
+            let state_raw = bit_field::extract_field(d.adjective_bitmap, 0, 6);
+            let state = crate::adjectives::State::from_raw(state_raw);
+            state.is_cluster_a()
+        }) {
+            return Ok(active.clone());
+        }
+        // All handles are withdrawn, superseded, expired, or tombstoned.
+        Err(LocusKitError::WithdrawnDatasetHandle { dataset_id })
+    }
+
+    /// Create a dataset handle drawer — the only authorised path for
+    /// drawers with `content_kind() == ContentKind::Dataset`.
+    ///
+    /// ## Why a dedicated creation seam
+    ///
+    /// The FDC classifier (`run_n_fdc`) is explicitly barred from emitting
+    /// `ContentKind::Dataset` and skips dataset-kind drawers. The ordinary
+    /// `capture(frame, now)` path validates `embedding_model_id` is non-empty
+    /// and `content` is non-empty — dataset handles need both a sentinel
+    /// model ID and structured JSON content, which `capture` does not produce.
+    ///
+    /// ## Sensitivity floor invariant (v1)
+    ///
+    /// Rows appended to the backing table are expected to carry sensitivity
+    /// at or below `sensitivity_raw`. Enforcement is deferred to MX-TAB-5.
+    ///
+    /// ## Parameters
+    ///
+    /// - `dataset_id`: UUID of the already-created dataset in the DatasetStore.
+    /// - `columns`: Column schema summary at creation time.
+    /// - `row_count`: Row count at creation time. Informational; may drift.
+    /// - `source_description`: Human-readable provenance.
+    /// - `wing`: Wing name. `None` resolves to the estate's default wing.
+    /// - `room`: Room name. Must be non-empty.
+    /// - `added_by`: Actor identifier. Must be non-empty.
+    /// - `sensitivity_raw`: `AdjectiveSensitivity` raw value (0/16/32/48).
+    /// - `udc_code`: UDC classification code. Must be non-empty (I-5).
+    /// - `now`: Epoch seconds timestamp from the caller.
+    ///
+    /// Mirrors Swift `Estate.captureDatasetHandle(...)` in `DatasetHandle.swift`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_dataset_handle(
+        &self,
+        dataset_id: uuid::Uuid,
+        columns: Vec<crate::dataset_handle::DatasetColumnSummary>,
+        row_count: i64,
+        source_description: &str,
+        wing: Option<&str>,
+        room: &str,
+        added_by: &str,
+        sensitivity_raw: i64,
+        udc_code: &str,
+        now: i64,
+    ) -> Result<crate::drawer::Drawer, LocusKitError> {
+        // bit_field is re-exported from substrate_kernel; bitmap_ops only
+        // shadows it locally and the re-export is private.
+        use substrate_kernel::bit_field;
+        use crate::dataset_handle::{DatasetHandleContent, DATASET_HANDLE_EMBEDDING_MODEL_ID};
+        use crate::default_wings::DEFAULT_WING_NAME;
+        use crate::drawer::Drawer;
+        use crate::drawer_operational::{CaptureChannel, ContentKind};
+        use crate::provenance::SourceType;
+        use uuid::Uuid;
+
+        if room.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "captureDatasetHandle: room must not be empty".to_string(),
+            ));
+        }
+        if added_by.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "captureDatasetHandle: added_by must not be empty".to_string(),
+            ));
+        }
+        if udc_code.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "captureDatasetHandle: udc_code must not be empty (spec I-5)".to_string(),
+            ));
+        }
+
+        // Encode handle payload as JSON for Drawer.content.
+        let handle_content = DatasetHandleContent {
+            dataset_id,
+            columns,
+            row_count,
+            source_description: source_description.to_string(),
+            table_signature: None,
+            column_signatures: None,
+        };
+        let content_json = handle_content
+            .encode()
+            .map_err(LocusKitError::InvalidContent)?;
+
+        // Operational bitmap (cookbook §2.4 v0.6):
+        //   bits 0–5   capture_channel — Typed (raw 0)
+        //   bits 6–11  content_kind    — Dataset (raw 7)
+        //   bits 12–23 feature_flags   — none in v1
+        let op_bitmap = bit_field::write_field(
+            ContentKind::Dataset.raw_value(),
+            bit_field::write_field(CaptureChannel::Typed.raw_value(), 0, 0, 6),
+            6,
+            6,
+        );
+
+        // Adjective bitmap (cookbook §2.3 v0.6):
+        //   bits 0–5   state       — Active (raw 0)
+        //   bits 6–11  sensitivity — caller-supplied scale-gapped raw
+        //   bits 12–17 exportability — Private (raw 0)
+        //   bits 18–23 trust       — Verbatim (raw 0)
+        let adj_bitmap = bit_field::write_field(sensitivity_raw, 0, 6, 6);
+
+        // Provenance bitmap (cookbook §2.5):
+        //   bits 0–5   source_type — User (raw 0)
+        //   all other fields default to 0
+        let provenance_bitmap = bit_field::write_field(SourceType::User.raw_value(), 0, 0, 6);
+
+        // Resolve wing/room to node IDs via NodeStore.
+        let wing_name = wing
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| DEFAULT_WING_NAME.to_string());
+        let node_store = self.node_store.as_ref().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "captureDatasetHandle: NodeStore not available — estate not fully initialized"
+                    .to_string(),
+            )
+        })?;
+        let root = node_store.root_node()?.ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable(
+                "captureDatasetHandle: estate root node not found — estate not provisioned"
+                    .to_string(),
+            )
+        })?;
+        let wing_node = node_store.create_node(&wing_name, root.id, now)?;
+        let room_node = node_store.create_node(room, wing_node.id, now)?;
+
+        let drawer_id = Uuid::new_v4().to_string();
+        let mut drawer = Drawer::new(
+            drawer_id,
+            content_json,
+            room_node.id.to_string(),
+            added_by.to_string(),
+            now,
+            DATASET_HANDLE_EMBEDDING_MODEL_ID.to_string(),
+        );
+        drawer.adjective_bitmap = adj_bitmap;
+        drawer.operational_bitmap = op_bitmap;
+        drawer.provenance = provenance_bitmap;
+        drawer.lineage_id = Uuid::new_v4();
+        drawer.udc_code = udc_code.to_string();
+        drawer.event_time = now;
+
+        self.store.add_drawer(&drawer, now)?;
+        Ok(drawer)
     }
 
     // -----------------------------------------------------------------------

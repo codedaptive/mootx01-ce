@@ -87,6 +87,7 @@ const CONTENT_KIND_TABLE: &[(ContentKind, i64)] = &[
     (ContentKind::StructuredJson, 4),
     (ContentKind::ImageCaption, 5),
     (ContentKind::FingerprintOnly, 6), // NEW in v0.6
+    (ContentKind::Dataset, 7),         // NEW per MX-TAB-3
 ];
 
 #[test]

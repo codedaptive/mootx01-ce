@@ -3,11 +3,19 @@
 //! Every failure mode LocusKit surfaces is enumerated here so callers can
 //! recover specifically — for example, treating a missing drawer as a
 //! routine query miss while still propagating SQLite failures.
+//!
+//! MX-TAB-4 (2026-07-11): added `WithdrawnDatasetHandle` (case 12) to
+//! support `Estate::resolve_active_dataset_handle` for drawers with
+//! `content_kind() == ContentKind::Dataset`.
 
 /// Errors returned by LocusKit operations.
 ///
-/// Maps exactly to the Swift `LocusKitError` enum. All eleven cases are
+/// Maps exactly to the Swift `LocusKitError` enum. All twelve cases are
 /// present; associated-value types match the Swift definitions.
+///
+/// MX-TAB-4 added `WithdrawnDatasetHandle` as case 12. The comment
+/// "Maps exactly to Swift LocusKitError" and the count in the
+/// `all_twelve_cases_are_distinct` test are the authoritative parity check.
 ///
 /// `DisciplineViolation` carries `from` and `to` as `i64` (matching the
 /// Swift `Int` raw values) rather than as typed `State` cases so the
@@ -90,6 +98,14 @@ pub enum LocusKitError {
     /// producing data does not exist. Mirrors Swift
     /// `LocusKitError.notSupported`.
     NotSupported(String),
+
+    /// A dataset handle exists for `dataset_id` but its belief state is
+    /// in cluster B (Withdrawn, Superseded, Decayed, or Expired) — the
+    /// dataset is no longer actively believed. The backing table is NOT
+    /// dropped by withdrawal; it persists until the handle is erased via
+    /// GLK `expunge`. Returned by `Estate::resolve_active_dataset_handle`
+    /// (MX-TAB-4). Mirrors Swift `LocusKitError.withdrawnDatasetHandle`.
+    WithdrawnDatasetHandle { dataset_id: uuid::Uuid },
 }
 
 impl std::fmt::Display for LocusKitError {
@@ -137,6 +153,9 @@ impl std::fmt::Display for LocusKitError {
             ),
             LocusKitError::NotSupported(msg) => {
                 write!(f, "NotSupported: {}", msg)
+            }
+            LocusKitError::WithdrawnDatasetHandle { dataset_id } => {
+                write!(f, "WithdrawnDatasetHandle: dataset_id='{}'", dataset_id)
             }
         }
     }
@@ -243,8 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn all_eleven_cases_are_distinct() {
+    fn all_twelve_cases_are_distinct() {
         // Confirm no two different cases compare equal — basic sanity check.
+        // MX-TAB-4: count updated from 11 to 12 for WithdrawnDatasetHandle.
         let variants: Vec<LocusKitError> = vec![
             LocusKitError::DatabaseUnavailable("x".to_string()),
             LocusKitError::DrawerNotFound {
@@ -276,8 +296,12 @@ mod tests {
                 stored_text: "NOT-A-UUID".to_string(),
             },
             LocusKitError::NotSupported("feature not yet implemented".to_string()),
+            // MX-TAB-4: new case 12
+            LocusKitError::WithdrawnDatasetHandle {
+                dataset_id: uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            },
         ];
-        assert_eq!(variants.len(), 11);
+        assert_eq!(variants.len(), 12);
         for (i, a) in variants.iter().enumerate() {
             for (j, b) in variants.iter().enumerate() {
                 if i == j {

@@ -61,8 +61,6 @@ public final class AppModel {
     /// Attach the shared bridge over a durable SQLite estate, then preload the
     /// tool surface for "The Top".
     public func start() async {
-        let url = Self.defaultDatabaseURL()
-        await GatewayRuntime.shared.configure(databaseURL: url)
         do {
             let attached = try await GatewayRuntime.shared.bridge()
             bridge = attached
@@ -99,13 +97,7 @@ public final class AppModel {
     /// sandbox container, so each install gets its own estate.
     /// (`homeDirectoryForCurrentUser` is macOS-only, so it is not used here.)
     static func defaultDatabaseURL() -> URL {
-        let base = (try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )) ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("mootx01/mootx01.sqlite")
+        EstateConfigurationResolver.defaultDatabaseURL()
     }
 
     // MARK: Capture / Recall

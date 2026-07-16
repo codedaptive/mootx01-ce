@@ -161,4 +161,81 @@ struct FederationPairingTests {
         try await engineVictim.disable()
         try await engineTrusted.disable()
     }
+
+    /// F-3 security gate: an attacker crafts an envelope that CLAIMS to be
+    /// from a registered peer (by setting senderPublicKey to the registered
+    /// peer's key) but computes the canonical signing bytes using the
+    /// ATTACKER'S key and signs with the attacker's private key.
+    ///
+    /// The receiver must verify against the REGISTERED peer key (from the
+    /// pairing registry). Because the signing bytes include the sender key
+    /// in canonical position, and the attacker used their own key there
+    /// instead of the registered peer's key, the signature does not verify
+    /// against the registered key — the envelope is rejected.
+    ///
+    /// This proves that `pull()` uses the registry-sourced key for
+    /// verification, not just the envelope's claimed `senderPublicKey`.
+    @Test("pull rejects envelope spoofing registered peer key but signed by attacker key")
+    func pullRejectsEnvelopeWithSpoofedSenderKeyAndAttackerSignature() async throws {
+        let storageVictim = try await makeStorage()
+        let storageTrusted = try await makeStorage()
+        let engineVictim = FederationSyncEngine()
+        let engineTrusted = FederationSyncEngine()
+        // Attacker identity — NOT paired with victim.
+        let attackerIdentity = LocalIdentity()
+
+        let manifest = makeManifest()
+        try await engineVictim.enable(manifest: manifest, storage: storageVictim)
+        try await engineTrusted.enable(manifest: manifest, storage: storageTrusted)
+
+        let relay = FederationRelay()
+        let family = HyperplaneFamilySpec(seed: 0xDEADC0DE)
+        try await engineVictim.pair(with: engineTrusted, via: relay, family: family)
+        // Attacker is NOT paired with victim.
+
+        let victimPubKey = await engineVictim.identity.publicKey
+        // The registered peer's public key: victim knows this from pairing.
+        let registeredPeerKey = await engineTrusted.identity.publicKey
+
+        // Forge: the attacker computes signing bytes using the ATTACKER'S key
+        // (not the registered peer's key), then signs with the attacker's
+        // private key. The envelope header claims senderPublicKey equals the
+        // registered peer's key to pass the pairing-registry lookup.
+        //
+        // When pull() verifies against the REGISTERED key (the fix), it
+        // recomputes signing bytes with the registered peer's key. Those bytes
+        // differ from what the attacker signed (attacker used their own key in
+        // the bytes), so the signature does not verify — rejected.
+        let fakeBatch = try JSONEncoder().encode([String]())
+        let batchHLC = PackedHLC(HLC(physicalTime: 2000, logicalCount: 1, nodeID: 0))
+        // Signing bytes use the ATTACKER's key, not the registered peer's key.
+        let attackerSigningBytes = envelopeSigningBytes(
+            senderPublicKey: attackerIdentity.publicKey,
+            payloadKind: .syncRecordBatch,
+            payload: fakeBatch,
+            hlc: batchHLC
+        )
+        let attackerSignature = try attackerIdentity.sign(attackerSigningBytes)
+        // Envelope claims to be from the registered peer but carries the
+        // attacker's signature (produced over attacker-key signing bytes).
+        let forgedEnvelope = SignedEnvelope(
+            senderPublicKey: registeredPeerKey,      // spoof: claims registered peer's key
+            payloadKind: .syncRecordBatch,
+            payload: fakeBatch,
+            signature: attackerSignature,            // signed by attacker using attacker's key bytes
+            hlc: batchHLC
+        )
+
+        // Inject into victim's inbox. Because senderPublicKey matches a
+        // registered peer, the pairing-registry check passes — only
+        // signature verification (against the registered key) catches this.
+        relay.send(to: victimPubKey, message: forgedEnvelope)
+
+        let receipt = try await engineVictim.pull()
+        #expect(receipt.pulled == 0, "forged sender key claim must not apply records")
+        #expect(receipt.conflicts == 1, "rejected envelope must be counted as conflict")
+
+        try await engineVictim.disable()
+        try await engineTrusted.disable()
+    }
 }

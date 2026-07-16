@@ -1,8 +1,8 @@
 ---
 title: EideticLib Specification
-version: 1.0.0
+version: 1.2.0
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for EideticLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -103,11 +103,27 @@ fixed input term, `lookup` returns a byte-identical `Anchor` on every call
 and across both ports for artifact-resident inputs. No clock and no
 randomness enters the lookup path.
 
-**I-3 (no fallback code):** when the FDC encoder matches nothing, `lookup`
-returns an **empty anchor** (`code == ""`, `wikidataQID == nil`,
-`confidence == 0`, the live FDC signatures version) — never a guessed or
-default code. The empty anchor (a legitimate "unresolved" result) is
-distinct from a failed FDC-artifact load: a missing data bundle is a
+**I-3 (unresolved-input behavior — two distinct paths):** the FDC encoder
+uses hierarchy-first resolution and can return either `nil` or a code, so
+`lookup` has two distinct non-error result paths:
+
+- **Encoder returns `nil` (truly empty concept bag):** when the input is
+  the empty string, or when tokenisation strips all tokens leaving an empty
+  concept bag, `FDC.encodeAnchor` returns `nil`. `lookup` maps that to an
+  **empty anchor**: `code == ""`, `wikidataQID == nil`, `confidence == 0`,
+  plus the live FDC signatures version. The empty anchor is a legitimate
+  "unresolvable input" result and is pinned by the cross-port conformance
+  gate (the `empty_string` vector).
+- **Encoder returns `"000"` (hierarchy-first unclassified sentinel):** when
+  a non-empty concept bag forms but has no specific class-signature overlap,
+  the FDC encoder's hierarchy-first resolver returns the root Generalities
+  code `"000"` rather than `nil`. `lookup` carries that as a resolved
+  anchor: `code == "000"`, `wikidataQID == nil`, `confidence == 32`
+  (medium). This is a shipped, pinned, user-observable behavior verified by
+  the cross-port conformance gate vectors `nonsense_token` and
+  `punctuation_only_drops_to_empty`.
+
+Neither path is an error. A failed FDC-artifact load is a
 build/configuration error, not a runtime condition, so `lookup` terminates
 the process with `fatalError` (Swift) / `panic!` (Rust) rather than
 returning any sentinel anchor. A persisted sentinel identity is a
@@ -141,6 +157,13 @@ dependency-free reimplementation of LatticeLib's `Code.isWellFormed` and
 agrees with it bit-for-bit on the shared conformance vectors. The
 `maxExtensionDigits` constant (8) is locked across both implementations.
 
+**I-10 (non-recording lookup result identity):** `lookup(_:recordNovel:)` and
+`lookup(_:contentKind:recordNovel:)` return a byte-identical `Anchor` to the
+base `lookup(_:)` for the same term and artifact bundle. The `recordNovel`
+parameter controls a side effect only (novel-token pool accumulation in
+LatticeLib's `sharedNovelCache`); it has no influence on the resolved code,
+Q-ID, confidence, or data version.
+
 **I-9 (sentence segmentation parity):** `EideticLib.sentencesByDelimiter`
 (Swift) and `eidetic_lib::segmenter::sentences` (Rust) implement the same
 delimiter-based algorithm and produce byte-identical segmentation for
@@ -165,10 +188,11 @@ and matches it against the pinned FDC signatures, returning an FDC code
 builds an `Anchor` carrying that code, the dominant concept Q-ID, the
 medium confidence (B-3), and the live FDC signatures version.
 
-**B-3 (confidence mapping):** a resolved FDC code → `32` (medium); no
-match → empty anchor at `0` (I-3). The FDC encoder does not produce a
-calibrated per-result confidence, so resolved codes are reported uniformly
-at medium.
+**B-3 (confidence mapping):** a resolved FDC code (including the `"000"`
+hierarchy-first sentinel) → `32` (medium); encoder returns `nil` (empty
+concept bag) → empty anchor at `0` (I-3). The FDC encoder does not produce
+a calibrated per-result confidence, so all resolved codes — including
+`"000"` — are reported uniformly at medium.
 
 **B-4 (Q-ID carry):** the concept bag's dominant Wikidata Q-ID is carried
 as `Anchor.wikidataQID`. When the encoder surfaces no dominant Q-ID, the
@@ -178,6 +202,23 @@ field is `nil`.
 knownCodes:)` returns `.malformed` if the grammar rejects the code,
 `.known` if it is well-formed and in `knownCodes`, else `.pending`. The
 grammar is three ASCII digits, optionally a dot and 1…8 ASCII digits.
+
+**B-6 (non-recording lookup):** `lookup(term, recordNovel: false)` (Swift) /
+`lookup_no_record(term)` (Rust) produces an `Anchor` byte-identical to the
+base `lookup` result but suppresses novel-token accumulation in LatticeLib's
+shared novel cache. This variant MUST be used when classifying user-supplied
+memory content at capture time so that plaintext tokens never reach the pool
+submitter pipeline, even when `LATTICE_POOL_DIR` is configured.
+
+**B-7 (content-kind lookup):** `lookup(term, contentKind: .code, recordNovel:)` /
+`lookup_no_record_with_kind(term, FdcContentKind::Code)` routes through the
+FDC content-kind encoder. For `contentKind == .code` (Rust: `FdcContentKind::Code`),
+any non-empty term is anchored at FDC code `005` (Computer science / programming
+— the general class for code artifacts), with a language Q-ID when language
+detection is decisive. For `contentKind == .text` / `FdcContentKind::Text`, the
+path is identical to the base `lookup`. The content-kind overload always suppresses
+novel-token accumulation (behaves as `recordNovel: false` regardless of the flag
+passed in Swift).
 
 **B-10 (sentence segmentation: reference and routed entry):**
 `sentencesByDelimiter(text)` splits on `.`, `!`, `?`, and newline,
@@ -205,9 +246,14 @@ the `MOOTx01Error` umbrella.
 the same term and bundled FDC signatures version on repeated calls (I-2).
 Verified in `LatticeLookupTests` / `EideticLibTests`.
 
-**C-2 (no fallback code):** a term the FDC encoder does not match yields
-the empty anchor (`code == ""`, `confidence == 0`) — a legitimate
-unresolved result, never a guessed code, and never a sentinel (I-3).
+**C-2 (unresolved-input conformance):** the two distinct paths from I-3
+are both pinned by the cross-port conformance gate (`lookup_vectors.json`):
+the empty string yields the empty anchor (`code == ""`, `confidence == 0`);
+a non-empty term with no specific signature overlap yields the
+hierarchy-first sentinel (`code == "000"`, `confidence == 32`,
+`wikidataQID == nil`). Neither result is a guessed or fabricated code —
+`"000"` is the FDC encoder's hierarchy root, not a default invented by
+EideticLib (I-3).
 
 **C-4 (grammar parity):** `LatticeCodeGrammar.isWellFormed` agrees with
 LatticeLib's `Code.isWellFormed` on the shared conformance vectors, and
@@ -232,6 +278,22 @@ that don't exercise language-specific edge cases. Verified in Swift
 `SegmenterTests` and Rust `tests/segmenter_tests.rs`.
 
 ## Changelog
+
+### 1.2.0 -- 2026-07-16
+Corrected I-3, B-3, and C-2 to document the two distinct unresolved-input
+paths: encoder returns `nil` (truly empty concept bag) → empty anchor
+(`code == ""`, confidence 0); encoder returns `"000"` via hierarchy-first
+resolution (non-empty concept bag, no specific signature overlap) →
+anchor with `code == "000"` at confidence 32. Both paths are pinned by the
+cross-port conformance gate. Previously I-3, B-3, and C-2 incorrectly
+described only the `code == ""` path, omitting the shipped `"000"` sentinel
+behavior.
+
+### 1.1.0 -- 2026-07-16
+Added I-10 (non-recording lookup result identity); added B-6 (non-recording
+lookup behavioral contract) and B-7 (content-kind lookup behavioral contract)
+to cover the `recordNovel` overloads and the `EideticContentKind`-keyed
+content-aware path that shipped in the GLK capture seam.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
