@@ -129,6 +129,12 @@ actor CloudKitStateActor {
         // Ensure the _ck_sync_meta side table exists before any pull (#12 fix).
         try await Self.ensureSyncMetaTable(storage: storage)
 
+        // Ensure the _ck_change_token side table exists, then restore the
+        // persisted token so the first pull resumes from where the previous
+        // process left off rather than re-pulling the entire zone. R5.
+        try await TokenStore.ensure(storage: storage)
+        serverChangeToken = try await TokenStore.load(zoneName: manifest.zoneIdentifier, storage: storage)
+
         // Start observing each declared table that is not pull-only.
         for table in manifest.tables where table.direction != .pullOnly {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
@@ -282,6 +288,24 @@ actor CloudKitStateActor {
                 deletedIDs.append(deletion.recordID)
             }
             newToken = result.changeToken
+        } catch let ckError as CKError where ckError.code == .changeTokenExpired {
+            // The server has invalidated the token (zone history truncated or
+            // token too old). Clear the persisted token and reset in-memory
+            // state, then re-pull from scratch. Safe: applyInbound is
+            // idempotent under all four conflict policies — remoteWins,
+            // localWins, appendOnly, and lastWriterWinsByHLC all handle
+            // duplicate inbound records correctly without data loss.
+            //
+            // The guard on serverChangeToken != nil prevents infinite
+            // recursion: if we had no token, changeTokenExpired is
+            // unexpected and we surface it rather than looping.
+            guard serverChangeToken != nil else {
+                throw SyncError.transportFailure(detail: "changeTokenExpired on a nil token — unexpected: \(ckError)")
+            }
+            logger.info("changeTokenExpired for zone \(manifest.zoneIdentifier) — clearing token and re-pulling from scratch")
+            try? await TokenStore.clear(zoneName: manifest.zoneIdentifier, storage: storage)
+            serverChangeToken = nil
+            return try await pull()
         } catch {
             throw SyncError.transportFailure(detail: "recordZoneChanges: \(error)")
         }
@@ -331,6 +355,13 @@ actor CloudKitStateActor {
         }
 
         serverChangeToken = newToken
+        // Persist the updated token so the next process launch resumes from
+        // here rather than re-pulling the full zone. R5. A save failure is
+        // non-fatal — the pull succeeded; worst case is a redundant full-zone
+        // pull on next launch.
+        if let token = newToken {
+            try? await TokenStore.save(token: token, zoneName: manifest.zoneIdentifier, storage: storage)
+        }
         let receipt = SyncReceipt(pushed: 0, pulled: appliedCount, conflicts: conflicts)
         lastPullAt = Date()
         if appliedCount > 0 {
