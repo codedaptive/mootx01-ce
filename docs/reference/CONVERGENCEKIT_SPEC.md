@@ -172,6 +172,14 @@ at write time. ConvergenceKit's outbound observer discards events where
 `origin == syncApply`. Consumer-visible guarantee: hook-observed writes
 and local writes always carry `origin == local` and are never discarded.
 
+*Implementation note (CVK-ICLOUD P1-M1, 2026-07-16):* The mechanism is now
+implemented and passing tests. `PersistenceKit.RowStore` exposes `insertSync` /
+`upsertSync` / `deleteSync`; ConvergenceKit's `applyInbound` calls these paths
+(both CloudKit and Federation backends). The CloudKitStateActor and
+FederationStateActor `recordOutbound` methods guard on `change.origin != .syncApply`.
+The `(v1.2-draft)` status marker will be flipped to active in P5-M4 once full
+iCloud end-to-end integration testing confirms convergence on live devices.
+
 **I-11 (device slot identity) (v1.2-draft):** HLC node IDs are
 registry-assigned `(slot, epoch)` pairs. Slots 1–15 are assignable;
 node 0 is permanently reserved (shipped code fabricated HLCs with node 0,
@@ -364,9 +372,15 @@ configured test container.
 
 ## Changelog
 
-### 1.2-draft -- 2026-07-16
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P1-M1)
 - Added I-10 (no-echo), I-11 (device slot identity), I-12 (durable
   pipeline) to § 4.
+- Added implementation note to I-10: echo suppression is now implemented
+  (CVK-ICLOUD P1-M1). PersistenceKit stamped origin tag, ConvergenceKit
+  `applyInbound` uses sync-tagged write paths, `recordOutbound` discards
+  `.syncApply` changes in both CloudKit and Federation backends. The
+  `(v1.2-draft)` marker on I-10 will flip to active in P5-M4 after
+  end-to-end live-device validation.
 - Added B-8 (fieldLevelLWW), B-9 (tombstoned deletes), B-10 (schema-skew
   posture), B-11 (convergence loop), B-12 (side-table governance), and
   Note N4 (CloudKit exclusivity) to § 5.

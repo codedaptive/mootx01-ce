@@ -186,6 +186,13 @@ actor CloudKitStateActor {
     /// a fresh mint — ensuring that the logical ordering established at observe
     /// time is preserved all the way to the wire.
     func recordOutbound(_ change: TableChange) async {
+        // Echo suppression (I-10, CVK-ICLOUD P1-M1): discard changes that
+        // originated from applyInbound. Without this guard, every inbound
+        // sync write fires the storage observer, re-enters the outbox,
+        // and is pushed back to the sending device — two live machines
+        // ping-pong forever. The .syncApply origin is stamped by the
+        // RowStore sync-tagged write paths (upsertSync / insertSync / deleteSync).
+        guard change.origin != .syncApply else { return }
         guard let storage else { return }
 
         // Mint HLC if the observation did not carry one (the InMemory and

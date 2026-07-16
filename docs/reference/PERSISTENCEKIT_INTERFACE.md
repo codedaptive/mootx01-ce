@@ -3,7 +3,7 @@ title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-28
-version: 1.8.0
+version: 1.9.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -228,6 +228,14 @@ public protocol RowStore: Sendable {
     func beginTransaction() async throws
     func commitTransaction() async throws
     func rollbackTransaction() async throws
+    // Sync-tagged write paths (SPEC B-19, CVK-ICLOUD P1-M1). Emit
+    // TableChange with origin: .syncApply so ConvergenceKit's outbound
+    // observer can discard inbound-sync writes (echo suppression, I-10).
+    // Default implementations delegate to the ordinary write paths
+    // (correct for non-sync conformers — origin tag is not needed there).
+    func insertSync(table: String, values: [String: TypedValue]) async throws -> RowHandle
+    func upsertSync(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle
+    @discardableResult func deleteSync(table: String, where: StoragePredicate) async throws -> Int
 }
 public extension RowStore {
     func query(table: String, where predicate: StoragePredicate?) async throws -> [StorageRow] // orderBy [], no paging
@@ -251,8 +259,11 @@ with `insert`, `upsert`, `update`, `delete`, `query`, `count`, plus
 `query_projected_skip_corrupt(table, columns, predicate, order_by, limit, offset)` (projected + corrupt-skip),
 as-of temporal variants `query_as_of`, `query_projected_as_of`, `query_skip_corrupt_as_of`
 (all gated — return `StorageError::FeatureGated` for `AsOf` coordinate),
-and explicit transaction boundary `begin_transaction() / commit_transaction() / rollback_transaction()`
-(no-op defaults; `SqliteRowStore` overrides with `BEGIN IMMEDIATE / COMMIT / ROLLBACK`).
+explicit transaction boundary `begin_transaction() / commit_transaction() / rollback_transaction()`
+(no-op defaults; `SqliteRowStore` overrides with `BEGIN IMMEDIATE / COMMIT / ROLLBACK`),
+and sync-tagged write paths `insert_sync`, `upsert_sync`, `delete_sync` with default
+implementations that delegate to `insert` / `upsert` / `delete` (Rust federation uses
+`pulling: Arc<AtomicBool>` for echo suppression; the defaults are correct for all backends).
 All non-temporal methods return `StorageResult<…>`.
 `StorageRow { values: HashMap<String, TypedValue> }`, `RowHandle { table, key }`.
 
@@ -316,14 +327,26 @@ empty-stream default.
 ```swift
 public enum StorageEvent: Sendable, Hashable { case insert, update, delete }
 
+/// Origin of a TableChange — identifies whether the write was local or
+/// an inbound sync application. Used by ConvergenceKit's outbound observer
+/// to suppress the echo loop (I-10, SPEC B-19, CVK-ICLOUD P1-M1).
+public enum ChangeOrigin: Sendable, Hashable {
+    case local      // ordinary write — default
+    case syncApply  // write from applyInbound — must not re-enter outbound queue
+}
+
 public struct TableChange: Sendable {
     public let table: String
     public let event: StorageEvent
     public let rowKey: RowKey?
     public let values: [String: TypedValue]?
     public let hlc: HLC?
+    /// Origin of this change. Defaults to .local; set to .syncApply by the
+    /// insertSync / upsertSync / deleteSync paths (SPEC B-19).
+    public let origin: ChangeOrigin
     public init(table: String, event: StorageEvent, rowKey: RowKey? = nil,
-                values: [String: TypedValue]? = nil, hlc: HLC? = nil)
+                values: [String: TypedValue]? = nil, hlc: HLC? = nil,
+                origin: ChangeOrigin = .local)
 }
 
 public protocol StorageObserver: Sendable {
@@ -336,7 +359,8 @@ public final class NoOpObserver: StorageObserver, Sendable {
 }
 ```
 **Rust:** `pub enum StorageEvent { Insert, Update, Delete }`,
-`pub struct TableChange { table, event, row_key, values, hlc }`,
+`pub enum ChangeOrigin { Local (default), SyncApply }`,
+`pub struct TableChange { table, event, row_key, values, hlc, origin: ChangeOrigin }`,
 `pub trait StorageObserver`, `pub struct NoOpObserver`.
 
 #### `DatasetStore` / `DatasetSchema` / `DatasetIndexDeclaration` / `ColumnStats`
@@ -1342,6 +1366,17 @@ dependency). IntellectusLib has zero in-repo dependencies, so the
 *End of PersistenceKit Interface.*
 
 ## Changelog
+
+### 1.9.0 -- 2026-07-16
+CVK-ICLOUD P1-M1: Added `ChangeOrigin` enum (`case local`, `case syncApply`)
+and `origin: ChangeOrigin` field to `TableChange` in both ports (default `.local`).
+Added sync-tagged write methods to `RowStore`: `insertSync` / `upsertSync` /
+`deleteSync` (Swift) and `insert_sync` / `upsert_sync` / `delete_sync` (Rust),
+each with default implementations that delegate to the ordinary write paths.
+These emit `origin: .syncApply` / `ChangeOrigin::SyncApply` so ConvergenceKit's
+outbound observer can discard `applyInbound` writes (echo suppression, SPEC B-19,
+I-10). Updated § 2 Tier 1 RowStore block and StorageObserver block; updated Rust
+concordance for both.
 
 ### 1.7.0 -- 2026-07-16
 MX-TAB-1: Added DatasetStore protocol and its associated types — DatasetSchema,

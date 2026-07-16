@@ -30,8 +30,8 @@ use uuid::Uuid;
 
 use crate::{
     AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore,
-    ColumnType, EstateConfiguration, EstateEncryptionConfig, IndexDeclaration, IsolationLevel,
-    OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration,
+    ChangeOrigin, ColumnType, EstateConfiguration, EstateEncryptionConfig, IndexDeclaration,
+    IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration,
     Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
     StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
@@ -1358,6 +1358,7 @@ impl RowStore for TxRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1427,6 +1428,7 @@ impl RowStore for TxRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1474,6 +1476,7 @@ impl RowStore for TxRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(changed as usize)
@@ -1502,6 +1505,7 @@ impl RowStore for TxRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(changed as usize)
@@ -1982,6 +1986,7 @@ impl RowStore for PgRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -2049,6 +2054,7 @@ impl RowStore for PgRowStore {
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -2096,6 +2102,7 @@ impl RowStore for PgRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(changed as usize)
@@ -2123,6 +2130,7 @@ impl RowStore for PgRowStore {
                 row_key: None,
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
             });
         }
         Ok(changed as usize)
