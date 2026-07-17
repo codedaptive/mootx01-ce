@@ -20,15 +20,17 @@
 //   would apply to any shared relay backend, not only CloudKit. Using
 //   the core kitID keeps the table visible to any future backend.
 //
-// Consolidation note (adjudication A11):
-//   A shared SideSchema struct that collects all ConvergenceKit side
-//   tables (_ck_sync_meta, _ck_device_identity, and any future tables)
-//   into one versioned SchemaDeclaration will land in P1-M4. Until then
-//   each side table migrates independently with kitID "ConvergenceKit"
-//   and schema version 1. The P1-M4 consolidation MUST be additive-
-//   compatible with both tables' column sets (no column renames or type
-//   changes — only additions). Do not add Bool columns or REAL dates
-//   before P1-M4 closes this gap.
+// Consolidation note (adjudication A11, current state):
+//   CKSideSchema (SideSchema.swift) consolidates most _ck_* side tables
+//   (_ck_sync_meta, _ck_outbox, _ck_change_token, _ck_sync_meta_cols,
+//   _ck_pending_skew). _ck_device_identity is the remaining holdout: it
+//   still carries its own SchemaDeclaration here (kitID "ConvergenceKit",
+//   version 1) because the earmarked consolidation version was superseded
+//   when fieldLevelLWW took v6. Folding this table into CKSideSchema is
+//   tracked in docs/status/CVK_ICLOUD/TRACKED_FOLLOWUPS.md (A11 row).
+//   Any change here must remain additive-compatible with CKSideSchema's
+//   column-set rules (no renames or type changes; no Bool columns; TEXT
+//   ISO8601 dates).
 
 import Foundation
 import PersistenceKit

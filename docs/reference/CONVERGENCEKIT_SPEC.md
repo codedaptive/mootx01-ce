@@ -124,7 +124,9 @@ prior successful `enable`. Calling them while disabled raises
 **I-2 (disable idempotency):** `disable` always succeeds, may be called
 when already disabled, and tears down all observation tasks, subscriber
 continuations, and pending-outbound state. Teardown of the observation
-tasks is awaited (Swift) / joined (Rust) before `disable` returns, so no
+tasks is cooperatively cancelled (Swift: `task.cancel()`; the drain
+debouncer and poll scheduler ARE awaited to completion) / joined (Rust)
+before `disable` returns, so no
 write observed after `disable` can land in the outbox — the disable
 boundary is deterministic on both ports. After `disable`, `state` is
 `disabled`.
