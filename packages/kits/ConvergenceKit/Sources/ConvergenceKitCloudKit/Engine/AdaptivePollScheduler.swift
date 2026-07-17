@@ -11,6 +11,7 @@
 // DESIGN:
 //   - Injected sleep function (testable: pass { _ in } to run loop at max speed)
 //   - Injected pull closure (testable: pass a fake that returns controlled receipts)
+//   - Injected RetryPolicy + jitter source (testable: pass deterministic values)
 //   - Owned Task that runs the poll loop
 //   - nudge() interrupts the current sleep immediately, fires a pull, resets to fast
 //
@@ -21,13 +22,17 @@
 //   only the sleep sub-task is interrupted. This gives true immediate-pull
 //   semantics without terminating the loop.
 //
-// CKRERROR BACKOFF (tracked follow-up — see comment in runLoop):
-//   When the push path receives a .retryableBackoff(retryAfter:) result from
-//   CKErrorTaxonomy, the engine should delay future pull cycles to avoid
-//   hammering a throttled CloudKit endpoint. The seam for this is
-//   recordThrottled(retryAfterMs:) on the policy — not yet wired. Tracked
-//   in docs/status/CVK_ICLOUD/TRACKED_FOLLOWUPS.md (scheduler retryableBackoff
-//   wiring item).
+// CKRERROR BACKOFF (CVK-WB6):
+//   When the pull closure throws, CKErrorTaxonomy classifies the error:
+//     .retryableBackoff(retryAfter:) — consecutive retryable failures grow the
+//       backoff floor via RetryPolicy (exponential, capped, ±jitter). The next
+//       sleep is max(tier interval, backoffFloor), honouring retryAfterSeconds
+//       as a minimum floor. Success resets the attempt counter and backoff floor.
+//     .reclaim / .conflict / .permanent — surface via log, tier cadence unchanged,
+//       backoff state left untouched. These errors are unusual on the pull path
+//       (they originate on the push path) but classified for completeness.
+//   All inputs to the delay computation are injected (RetryPolicy, jitterSource)
+//   so tests can drive the full backoff arc deterministically.
 //
 // NUDGE CONTRACT (SPEC B-11, INTERFACE § 2):
 //   nudge() → immediate pull + reset to fast tier.
@@ -76,10 +81,28 @@ public actor AdaptivePollScheduler {
     private var _loopTask: Task<Void, Never>?
     private var _sleepTask: Task<Void, Never>?
 
+    // MARK: - CKError backoff state
+
+    /// Number of consecutive retryable pull failures since the last success.
+    /// Drives RetryPolicy's exponential backoff schedule (CVK-WB6).
+    private var _retryAttempt: Int = 0
+
+    /// Minimum sleep floor (ms) computed from RetryPolicy after the last
+    /// retryable failure. The effective sleep is max(tier interval, _backoffFloorMs).
+    /// Reset to 0 on pull success.
+    private var _backoffFloorMs: Int64 = 0
+
     // MARK: - Injected dependencies
 
     private let _pull: SchedulerPullFn
     private let _sleep: SchedulerSleepFn
+    private let _retryPolicy: RetryPolicy
+    /// Jitter source injected for deterministic testing.
+    ///
+    /// Production default: `{ Double.random(in: 0..<1) }`.
+    /// Tests: pass a fixed value (e.g. `{ 0.5 }`) to pin jitter to zero
+    /// when using `jitterFraction: 0.0`, or to a known offset otherwise.
+    private let _jitterSource: @Sendable () -> Double
 
     // MARK: - Init
 
@@ -91,12 +114,21 @@ public actor AdaptivePollScheduler {
     ///   - sleep: Sleep function. Production default: `Task.sleep(for:)`.
     ///            Tests: pass `{ _ in }` for immediate-return so the loop
     ///            runs as fast as the async runtime allows.
+    ///   - retryPolicy: Backoff policy applied to consecutive retryable failures.
+    ///                  Default is `RetryPolicy.default` (1 s base, 60 s cap, ±20% jitter).
+    ///   - jitterSource: Returns a value in [0, 1) used by RetryPolicy's jitter
+    ///                   computation. Default: `Double.random(in: 0..<1)`.
+    ///                   Tests: pass a fixed closure for determinism.
     public init(
         pull: @escaping SchedulerPullFn,
-        sleep: @escaping SchedulerSleepFn = { d in try await Task.sleep(for: d) }
+        sleep: @escaping SchedulerSleepFn = { d in try await Task.sleep(for: d) },
+        retryPolicy: RetryPolicy = .default,
+        jitterSource: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
     ) {
-        self._pull  = pull
-        self._sleep = sleep
+        self._pull         = pull
+        self._sleep        = sleep
+        self._retryPolicy  = retryPolicy
+        self._jitterSource = jitterSource
     }
 
     // MARK: - Lifecycle
@@ -166,25 +198,20 @@ public actor AdaptivePollScheduler {
 
     private func runLoop() async {
         while !Task.isCancelled {
-            let intervalMs = _policy.nextIntervalMs
-            let interval   = Duration.milliseconds(intervalMs)
+            // Effective sleep: tier interval or backoff floor, whichever is larger.
+            // After a retryable error the backoff floor stretches the sleep beyond
+            // the tier cadence; it resets to 0 on success (CVK-WB6).
+            let tierIntervalMs = _policy.nextIntervalMs
+            let effectiveMs    = max(tierIntervalMs, _backoffFloorMs)
+            let interval       = Duration.milliseconds(effectiveMs)
 
-            // Sleep for the current tier's interval, or until nudge() cancels
-            // the sleep sub-task.
+            // Sleep for the effective interval, or until nudge() cancels the sub-task.
             //
             // Why a separate sub-task instead of Task.sleep directly:
             //   nudge() must be able to interrupt the sleep without cancelling
             //   the entire loop. By sleeping in a child Task, nudge() can
             //   cancel ONLY the sleep; the parent loop task stays alive and
             //   proceeds to pull immediately after the sub-task exits.
-            //
-            // NOTE — CKError throttle override (tracked follow-up):
-            //   When the push path surfaces retryableBackoff(retryAfter:), the
-            //   engine should call a future recordThrottled(retryAfterMs:) method
-            //   on this policy to override `intervalMs` with the server-suggested
-            //   floor. The seam for that wire is here: replace `intervalMs` with
-            //   `max(intervalMs, throttleFloorMs)` before constructing `interval`.
-            //   Until that follow-up ships, the tier cadence governs unconditionally.
             let sleepTask = Task { [_sleep, interval] in
                 do {
                     try await _sleep(interval)
@@ -199,20 +226,41 @@ public actor AdaptivePollScheduler {
 
             if Task.isCancelled { break }
 
-            // Pull and update tier based on result.
+            // Pull and update tier + backoff state based on result.
             do {
                 let receipt = try await _pull()
+                // Success: clear backoff state so the next sleep returns to tier cadence.
+                _retryAttempt   = 0
+                _backoffFloorMs = 0
                 if receipt.pulled > 0 {
                     _policy.recordNonEmptyPull(nowMs: nowMs())
                 } else {
                     _policy.recordEmptyPull(nowMs: nowMs())
                 }
             } catch {
-                // Pull failure (notEnabled, transport error, etc.).
-                // Treat as empty pull for tier purposes — the scheduler
-                // should not promote on errors, and should not crash.
-                // CKError-specific backoff will be added in P3-M4.
-                _policy.recordEmptyPull(nowMs: nowMs())
+                let errorClass = CKErrorClass.classify(error)
+                switch errorClass {
+                case .retryableBackoff(let retryAfter):
+                    // Retryable (throttle, network unavailable, etc.): grow the
+                    // backoff floor exponentially, honouring retryAfterSeconds as
+                    // a minimum floor. Tier treats this as an empty pull (no
+                    // promotion; may decay if outside activity window).
+                    let backoffDelay = _retryPolicy.delay(
+                        forAttempt:          _retryAttempt,
+                        suggestedRetryAfter: retryAfter,
+                        jitterSource:        _jitterSource
+                    )
+                    _backoffFloorMs = Int64(backoffDelay * 1_000)
+                    _retryAttempt  += 1
+                    _policy.recordEmptyPull(nowMs: nowMs())
+
+                default:
+                    // Non-retryable on the pull path (reclaim / conflict / permanent):
+                    // surface via caller diagnostics if needed; tier cadence unchanged;
+                    // backoff state unchanged. These classes originate on the push path —
+                    // seeing them here is unusual but should not cause cascading backoff.
+                    _policy.recordEmptyPull(nowMs: nowMs())
+                }
             }
         }
     }

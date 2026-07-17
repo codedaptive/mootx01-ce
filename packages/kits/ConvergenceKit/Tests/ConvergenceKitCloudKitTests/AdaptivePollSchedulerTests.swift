@@ -24,6 +24,7 @@
 
 import Testing
 import Foundation
+import CloudKit
 import ConvergenceKit
 import PersistenceKit
 import PersistenceKitInMemory
@@ -284,11 +285,255 @@ struct AdaptivePollSchedulerIntegrationTests {
     // from inside the harness loop, which is out of scope for this mission.
 }
 
+// MARK: - CKError backoff tests (CVK-WB6)
+
+/// Tests that AdaptivePollScheduler honours CKError backoff via RetryPolicy.
+///
+/// Design notes:
+///   - sleep is recorded-and-immediate: `{ d in await recorder.record(d) }`.
+///     This lets the loop run at maximum async speed while capturing the
+///     effective sleep duration passed by the scheduler.
+///   - retryPolicy and jitterSource are both injected for determinism.
+///     `jitterFraction: 0.0` pins jitter to zero regardless of jitterSource.
+///   - Effective interval = max(tier interval, backoff floor). Tests observe
+///     the sleep duration at index N to verify the correct floor is applied.
+///   - Sleep/pull index correspondence (0-based): sleep[N] is recorded right
+///     before pull[N+1] executes, so when pullCount >= K, sleeps[0..K-1]
+///     are guaranteed to be in the recorder.
+///
+/// .serialized: instant-sleep schedulers spin the async runtime at max speed;
+/// concurrent suites would starve each other's Task.yield() loops.
+@Suite("AdaptivePollScheduler — CKError backoff (CVK-WB6)", .serialized)
+struct AdaptivePollSchedulerBackoffTests {
+
+    // MARK: - Harness helper: records durations without blocking
+
+    private actor IntervalRecorder {
+        private var _durations: [Duration] = []
+        func record(_ d: Duration) { _durations.append(d) }
+        var durations: [Duration] { _durations }
+        var count: Int { _durations.count }
+    }
+
+    // MARK: - Tests
+
+    @Test("throttle with retryAfterSeconds=30 stretches next poll interval to 30 s")
+    func throttleWithRetryAfterStretchesNextInterval() async throws {
+        // RetryPolicy: baseDelay=1s, jitterFraction=0 → delay(attempt:0)=1s.
+        // Since 1s < retryAfterSeconds(30s), the backoff floor becomes 30_000ms.
+        // fast-tier interval = 20_000ms < 30_000ms → sleep[2]=30_000ms.
+        let recorder  = IntervalRecorder()
+        let callCount = Counter()
+
+        let scheduler = AdaptivePollScheduler(
+            pull: {
+                let n = await callCount.incrementAndGet()
+                switch n {
+                case 1:
+                    // Non-empty pull → tier becomes fast (20 s interval).
+                    return SyncReceipt(pushed: 0, pulled: 1, conflicts: 0)
+                case 2:
+                    // Rate-limit with 30 s server hint → backoffFloor = 30_000 ms.
+                    throw CKError(.requestRateLimited,
+                                  userInfo: [CKErrorRetryAfterKey: NSNumber(value: 30.0)])
+                default:
+                    return .empty
+                }
+            },
+            sleep: { d in await recorder.record(d) },
+            retryPolicy: RetryPolicy(baseDelay: 1.0, maxDelay: 60.0, jitterFraction: 0.0),
+            jitterSource: { 0.5 }
+        )
+        await scheduler.start()
+
+        // Three pull completions guarantee sleep[0..2] are all recorded.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            await Task.yield()
+            if await callCount.value >= 3 { break }
+        }
+        await scheduler.stop()
+
+        let durations = await recorder.durations
+        // sleep[0]=idle(300 000ms), sleep[1]=fast(20 000ms),
+        // sleep[2]=max(fast 20 000, backoff floor 30 000)=30 000ms.
+        #expect(durations.count >= 3,
+                "expected ≥3 recorded sleep durations; got \(durations.count)")
+        if durations.count >= 3 {
+            #expect(durations[2] == .milliseconds(30_000),
+                    "sleep after rate-limit should honour retryAfter=30 s; got \(durations[2])")
+        }
+    }
+
+    @Test("consecutive retryable failures grow backoff delay to the policy cap")
+    func consecutiveFailuresGrowDelayToCap() async throws {
+        // RetryPolicy: baseDelay=30s, maxDelay=60s, jitterFraction=0.
+        //   attempt 0: delay = 30s > fast(20s) → sleep[2] = 30_000ms
+        //   attempt 1: delay = 60s (capped)    → sleep[3] = 60_000ms
+        let recorder  = IntervalRecorder()
+        let callCount = Counter()
+
+        let scheduler = AdaptivePollScheduler(
+            pull: {
+                let n = await callCount.incrementAndGet()
+                if n == 1 {
+                    return SyncReceipt(pushed: 0, pulled: 1, conflicts: 0) // → fast tier
+                }
+                throw CKError(.networkFailure, userInfo: [:])  // retryableBackoff(nil)
+            },
+            sleep: { d in await recorder.record(d) },
+            retryPolicy: RetryPolicy(baseDelay: 30.0, maxDelay: 60.0, jitterFraction: 0.0),
+            jitterSource: { 0.5 }
+        )
+        await scheduler.start()
+
+        // Four pull completions guarantee sleep[0..3] are all recorded.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            await Task.yield()
+            if await callCount.value >= 4 { break }
+        }
+        await scheduler.stop()
+
+        let durations = await recorder.durations
+        // sleep[3] = max(fast 20_000, backoff floor after attempt 1 = 60_000) = 60_000ms.
+        #expect(durations.count >= 4,
+                "expected ≥4 recorded sleep durations; got \(durations.count)")
+        if durations.count >= 4 {
+            #expect(durations[3] == .milliseconds(60_000),
+                    "sleep at policy cap should be 60 000 ms; got \(durations[3])")
+        }
+    }
+
+    @Test("success after retryable failures resets backoff floor to zero")
+    func successResetsAttemptCounter() async throws {
+        // After one failure backoffFloor=30_000ms; after a success it resets to 0
+        // and the next sleep returns to the fast-tier cadence (20_000ms).
+        let recorder  = IntervalRecorder()
+        let callCount = Counter()
+
+        let scheduler = AdaptivePollScheduler(
+            pull: {
+                let n = await callCount.incrementAndGet()
+                switch n {
+                case 1:
+                    return SyncReceipt(pushed: 0, pulled: 1, conflicts: 0) // → fast
+                case 2:
+                    throw CKError(.networkFailure, userInfo: [:]) // → backoffFloor=30_000ms
+                case 3:
+                    return SyncReceipt(pushed: 0, pulled: 1, conflicts: 0) // reset floor
+                default:
+                    return .empty
+                }
+            },
+            sleep: { d in await recorder.record(d) },
+            retryPolicy: RetryPolicy(baseDelay: 30.0, maxDelay: 60.0, jitterFraction: 0.0),
+            jitterSource: { 0.5 }
+        )
+        await scheduler.start()
+
+        // Four pull completions guarantee sleep[0..3] are all recorded.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            await Task.yield()
+            if await callCount.value >= 4 { break }
+        }
+        await scheduler.stop()
+
+        let durations = await recorder.durations
+        // sleep[2] = max(fast 20_000, backoffFloor 30_000) = 30_000ms (backoff in effect)
+        // sleep[3] = max(fast 20_000, backoffFloor 0)      = 20_000ms (reset after success)
+        #expect(durations.count >= 4,
+                "expected ≥4 recorded sleep durations; got \(durations.count)")
+        if durations.count >= 4 {
+            #expect(durations[2] == .milliseconds(30_000),
+                    "sleep while backoff active should be 30 000 ms; got \(durations[2])")
+            #expect(durations[3] == .milliseconds(20_000),
+                    "sleep after success should reset to fast-tier 20 000 ms; got \(durations[3])")
+        }
+    }
+
+    @Test("non-retryable pull error does not stretch the next poll interval")
+    func nonRetryableDoesNotStretchInterval() async throws {
+        // A permanent CKError (badContainer) is non-retryable; backoff state stays 0.
+        // The next sleep must remain at the fast-tier cadence (20_000ms), not stretch.
+        let recorder  = IntervalRecorder()
+        let callCount = Counter()
+
+        let scheduler = AdaptivePollScheduler(
+            pull: {
+                let n = await callCount.incrementAndGet()
+                if n == 1 {
+                    return SyncReceipt(pushed: 0, pulled: 1, conflicts: 0) // → fast
+                }
+                if n == 2 {
+                    throw CKError(.badContainer, userInfo: [:]) // permanent → non-retryable
+                }
+                return .empty
+            },
+            sleep: { d in await recorder.record(d) },
+            retryPolicy: RetryPolicy(baseDelay: 30.0, maxDelay: 60.0, jitterFraction: 0.0),
+            jitterSource: { 0.5 }
+        )
+        await scheduler.start()
+
+        // Three pull completions guarantee sleep[0..2] are all recorded.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            await Task.yield()
+            if await callCount.value >= 3 { break }
+        }
+        await scheduler.stop()
+
+        let durations = await recorder.durations
+        // sleep[2] = max(fast 20_000, backoffFloor 0) = 20_000ms — backoff NOT applied.
+        #expect(durations.count >= 3,
+                "expected ≥3 recorded sleep durations; got \(durations.count)")
+        if durations.count >= 3 {
+            #expect(durations[2] == .milliseconds(20_000),
+                    "non-retryable error must not stretch interval; got \(durations[2])")
+        }
+    }
+
+    @Test("stop() is deterministic even when pull throws retryable errors")
+    func teardownDeterministicAfterErrors() async throws {
+        let callCount = Counter()
+        let scheduler = AdaptivePollScheduler(
+            pull: {
+                await callCount.increment()
+                throw CKError(.networkUnavailable, userInfo: [:])
+            },
+            sleep: { _ in },
+            retryPolicy: RetryPolicy(baseDelay: 0.001, maxDelay: 0.01, jitterFraction: 0.0),
+            jitterSource: { 0.5 }
+        )
+        await scheduler.start()
+
+        // Let several error cycles run.
+        let warmup = ContinuousClock.now.advanced(by: .milliseconds(50))
+        while ContinuousClock.now < warmup { await Task.yield() }
+
+        await scheduler.stop()
+        let countAfterStop = await callCount.value
+
+        // Yield further — should observe no additional pulls.
+        let settle = ContinuousClock.now.advanced(by: .milliseconds(50))
+        while ContinuousClock.now < settle { await Task.yield() }
+
+        let countFinal = await callCount.value
+        // Allow one extra pull for any pull in-flight at the exact stop moment.
+        #expect(countFinal <= countAfterStop + 1,
+                "no pulls after stop(); before=\(countAfterStop) after=\(countFinal)")
+    }
+}
+
 // MARK: - Test helper: thread-safe counter
 
 /// Thread-safe increment counter for asserting pull call counts in tests.
 actor Counter {
     private var _value: Int = 0
     func increment() { _value += 1 }
+    /// Increment and return the new value atomically within the actor.
+    func incrementAndGet() -> Int { _value += 1; return _value }
     var value: Int { _value }
 }

@@ -420,6 +420,14 @@ handlers call it via `handleRemoteNotification(userInfo:)` (P3-M3).
 `enablePolling: Bool = false` (default) on `CloudKitSyncEngine.init`
 prevents interference with existing tests that drive push/pull manually.
 
+*Implementation note (CVK-WB6):* CKError backoff wired. Pull errors
+are classified by `CKErrorTaxonomy`; retryable failures (throttle,
+network) apply `RetryPolicy` exponential backoff with injected jitter
+source. Effective sleep = `max(tier interval, backoffFloor)`, honouring
+`retryAfterSeconds` as a hard floor. Success resets the attempt counter;
+non-retryable errors (reclaim, conflict, permanent) leave tier cadence
+unchanged.
+
 *Implementation note (CVK-ICLOUD P3-M3):* The zone-subscription
 accelerator is shipped. `ZoneSubscription.swift` extends
 `CloudKitStateActor` with `registerZoneSubscription()` /
