@@ -42,6 +42,35 @@ import os
 
 private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
 
+// MARK: - SyncRecord → DecodedRecord conversion (skew-queue replay, R9)
+
+extension SyncRecord {
+    /// Convert this SyncRecord back to a DecodedRecord for replay through
+    /// CloudKitStateActor.applyInbound (R9, CVK-ICLOUD P3-M4).
+    ///
+    /// Used by the skew-queue replay path in enable(): records held in
+    /// _ck_pending_skew are SyncRecord (the shared wire format); the
+    /// CloudKit inbound apply path takes DecodedRecord.
+    ///
+    /// isTombstone is reconstructed from `syncDeleted`: if the field was true
+    /// when the record was enqueued, it is true on replay. The field is nil
+    /// (not a tombstone) for normal insert/update records.
+    func asDecodedRecord() -> DecodedRecord {
+        DecodedRecord(
+            table: table,
+            rowKey: rowKey,
+            values: values?.asTypedValues ?? [:],
+            syncMeta: SyncMeta(
+                hlc: hlc.asHLC,
+                schemaVersion: schemaVersion,
+                kitID: kitID
+            ),
+            isTombstone: syncDeleted == true,
+            columnHLCs: columnHLCs
+        )
+    }
+}
+
 // MARK: - State actor
 
 actor CloudKitStateActor {
@@ -150,11 +179,55 @@ actor CloudKitStateActor {
         }
 
         // Ensure all ConvergenceKit side tables exist (consolidated schema, B-12).
-        // CKSideSchema v3 covers _ck_sync_meta (v1), _ck_outbox (v2, plus
-        // retry_count and is_parked columns added in v3), and _ck_change_token
-        // (v3, consolidated from TokenStore.swift in P1-M6 adjudication A11).
+        // CKSideSchema v7 covers _ck_sync_meta (v1), _ck_outbox (v2+), _ck_change_token (v3),
+        // _ck_sync_meta_cols (v6, fieldLevelLWW), and _ck_pending_skew (v7, R9).
         // A separate TokenStore.ensure call is no longer needed.
         try await CKSideSchema.ensure(storage: storage)
+
+        // Schema-skew replay (R9, CVK-ICLOUD P3-M4).
+        //
+        // The _ck_pending_skew table holds records from previous pull cycles
+        // where the sender was on a newer schema than the receiver. Now that
+        // enable() has been called with a (potentially updated) manifest, replay
+        // any records whose schema_version equals the current manifest version.
+        //
+        // Echo suppression is active by construction: the observer tasks are
+        // not yet started (see below), so replay writes via applyInbound
+        // (upsertSync / deleteSync) cannot re-enter the outbox (I-10).
+        let skewReady = try await SkewReplay.drainReady(
+            currentVersion: manifest.schemaVersion,
+            from: storage,
+            sideTable: CKSideSchema.pendingSkewTable
+        )
+        if !skewReady.isEmpty {
+            logger.info("skew-queue replay: \(skewReady.count) held record(s) ready for schema v\(manifest.schemaVersion)")
+            var replayedIDs: [UUID] = []
+            for (id, record) in skewReady {
+                guard let syncedTable = manifest.table(named: record.table) else { continue }
+                guard syncedTable.direction != .pushOnly else { continue }
+                do {
+                    try await applyInbound(record.asDecodedRecord(), syncedTable: syncedTable, storage: storage)
+                    replayedIDs.append(id)
+                } catch {
+                    logger.warning("skew replay failed for \(record.table)/\(record.rowKey): \(String(describing: error))")
+                }
+            }
+            try await SkewReplay.deleteApplied(
+                ids: replayedIDs,
+                from: storage,
+                sideTable: CKSideSchema.pendingSkewTable
+            )
+            logger.info("skew-queue replay: applied \(replayedIDs.count)/\(skewReady.count) records")
+        }
+        // Emit recordsHeldForMigration for any records remaining in the queue
+        // (i.e. records whose schemaVersion is still newer than this manifest).
+        let skewStillHeld = try await SkewReplay.countHeld(
+            from: storage,
+            sideTable: CKSideSchema.pendingSkewTable
+        )
+        if skewStillHeld > 0 {
+            emit(.recordsHeldForMigration(count: skewStillHeld))
+        }
 
         // Drain any outbox leftovers from a previous process life so the next
         // push cycle picks them up without waiting for a new local write. The

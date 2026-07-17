@@ -199,6 +199,19 @@ public enum SyncEvent: Sendable {
     case peerConnected(identity: String)
     case peerDisconnected(identity: String, reason: String)
     case error(SyncError)
+    /// Records held in the schema-skew queue (R9, CVK-ICLOUD P3-M4).
+    ///
+    /// Emitted during pull when inbound records have a schemaVersion GREATER
+    /// than the local manifest version (the sender is on a newer schema).
+    /// Also emitted from enable() when records still-held in the queue have
+    /// a schemaVersion that is still newer than the now-enabled manifest.
+    ///
+    /// `count` is the number of records currently held — zero is not emitted.
+    /// The held records are replayed automatically on the next enable() after
+    /// the consumer updates its manifest's schemaVersion to match.
+    ///
+    /// Rust twin: `RecordsHeldForMigration { count: usize }`.
+    case recordsHeldForMigration(count: Int)
 }
 
 /// Coarse state for UI bindings.

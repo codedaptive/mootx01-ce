@@ -227,6 +227,13 @@ public enum SyncEvent: Sendable {
     case peerConnected(identity: String)
     case peerDisconnected(identity: String, reason: String)
     case error(SyncError)
+    /// Emitted when ≥1 record was held in the schema-skew queue during a
+    /// pull cycle (future-schema records), or when the queue is non-empty
+    /// after enable-time replay (records waiting for a further schema bump).
+    /// count: total entries held/remaining across all schema versions.
+    /// SPEC: B-3, B-10. Rust twin: SyncEvent::RecordsHeldForMigration.
+    /// CVK-ICLOUD P3-M4.
+    case recordsHeldForMigration(count: Int)
 }
 
 public enum SyncState: Sendable {
@@ -253,6 +260,9 @@ pub enum SyncEvent {
     PeerConnected { identity: String },
     PeerDisconnected { identity: String, reason: String },
     Error(SyncError),
+    /// Records held in the schema-skew queue (R9, CVK-ICLOUD P3-M4).
+    /// Swift twin: SyncEvent.recordsHeldForMigration(count:). SPEC B-3, B-10.
+    RecordsHeldForMigration { count: usize },
 }
 
 pub enum SyncState {
@@ -997,6 +1007,13 @@ calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
   `registerZoneSubscription`/`handleRemoteNotification` marked future-only.
 - Added `AdaptivePollScheduler` and `PollTier`/`PollTierPolicy` rows to
   concordance table.
+
+### 1.3-draft -- 2026-07-16 (updated CVK-ICLOUD P3-M4)
+- Added `SyncEvent.recordsHeldForMigration(count: Int)` to `SyncEvent` enum
+  (Swift); added `SyncEvent::RecordsHeldForMigration { count: usize }` to Rust
+  `SyncEvent`. Emitted by CloudKit and Federation backends when future-schema
+  records are held in the pending-skew queue during pull, or when the queue
+  remains non-empty after enable-time replay. SPEC B-3, B-10.
 
 ### 1.3-draft -- 2026-07-16
 - Added `ConflictPolicy.fieldLevelLWW` (Swift and Rust; v1.2-draft) to § 2.

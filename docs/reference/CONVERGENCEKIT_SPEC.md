@@ -135,10 +135,17 @@ mutates storage by a side channel; the receive-side `StorageObserver`
 fires as a consequence of the apply, waking downstream watchers.
 
 **I-4 (kit and schema gate):** an inbound record is accepted only if its
-`kitID` and `schemaVersion` equal the receiver manifest's. A `kitID`
-mismatch is `kitMismatch`; a `schemaVersion` mismatch is
-`schemaMismatch`. Either rejects the record (the record does not apply;
-it is counted as a conflict and may be retried after an app update).
+`kitID` matches and its `schemaVersion` is compatible with the receiver's
+manifest. A `kitID` mismatch is `kitMismatch` and rejects the record as a
+conflict. A `schemaVersion` mismatch is directional: a record whose version
+is **strictly newer** than the receiver's is held in the persistent pending-skew
+queue (`_ck_pending_skew` / `_fed_pending_skew`) rather than rejected — it is
+not counted as a conflict, and it is replayed from the queue during the next
+`enable()` call after the receiver's schema migrates to the matching version
+(see B-10). A record whose version is **strictly older** than the receiver's is
+rejected as a `schemaMismatch` and counted as a conflict; applying it would
+overwrite newer-schema columns with missing-field defaults. Equal `schemaVersion`
+is the normal accept path.
 
 **I-5 (direction honoured):** for a table declared `pullOnly`, local
 changes are not shipped on `push`. For a table declared `pushOnly`,
@@ -210,10 +217,13 @@ A rejected or unverifiable inbound record increments `conflicts`, not
 
 **B-3 (event stream):** `subscribe` yields `SyncEvent` values as
 activity happens: `remoteChangesApplied(count:)` after a pull applies
-≥1 record, `pushCompleted(receipt:)` after a push, and
-`peerConnected` / `peerDisconnected` for Federation pairing. Closing the
-stream stops the subscription. The CloudKit and Federation backends
-buffer the newest 256 events.
+≥1 record, `pushCompleted(receipt:)` after a push,
+`peerConnected` / `peerDisconnected` for Federation pairing, and
+`recordsHeldForMigration(count:)` when ≥1 future-schema record was held in
+the pending-skew queue during a pull cycle, or when the skew queue is
+non-empty after enable-time replay (B-10). Closing the stream stops the
+subscription. The CloudKit and Federation backends buffer the newest 256 events.
+Rust twin: `SyncEvent::RecordsHeldForMigration { count: usize }` (CVK-ICLOUD P3-M4).
 
 **B-4 (conflict policy at the apply boundary):** the receiver applies
 each inbound record under the table's `ConflictPolicy`:
@@ -304,12 +314,24 @@ R7 lands, not the row itself. Note on `pushOnly` and tombstones: a
 accepts inbound deletes. Consumers who need delete propagation on
 `pushOnly`-declared tables must use soft-delete bitmap columns instead.
 
-**B-10 (schema-skew posture) (v1.2-draft):** A record whose
-`schemaVersion` is newer than the local receiver's is not rejected as a
-conflict; it is held in a persisted pending queue and replayed after the
-local schema migrates to the matching version. Records whose
-`schemaVersion` is strictly older than the local receiver's are rejected
-as conflicts per I-4.
+**B-10 (schema-skew pending queue) (v1.2-draft):** A record whose
+`schemaVersion` is strictly newer than the local receiver's is not rejected
+as a conflict. Instead it is enqueued in the durable pending-skew side table
+(`_ck_pending_skew` on CloudKit, `_fed_pending_skew` on Federation) for
+deferred replay. Enqueue uses `upsertSync` (echo-suppressed origin) so the
+held record is never re-entered into the outbox. The queue is capped at 512
+entries; when the cap is exceeded, the oldest entries by `received_at` are
+evicted. During `enable()`, after the side schema is ensured and the manifest
+is loaded, the engine drains all queue entries whose `schema_version` matches
+the current manifest version and replays them through `applyInbound` under the
+normal conflict policy. Successfully replayed entries are deleted from the queue.
+Entries held for schema versions not yet reached by the local estate remain in
+the queue for the next `enable()` cycle. After replay, if the queue is still
+non-empty, `SyncEvent.recordsHeldForMigration(count:)` is emitted so subscribers
+can surface a "waiting for app update" indicator. Records whose
+`schemaVersion` is strictly older than the local receiver's are rejected as
+`schemaMismatch` and counted as a conflict (I-4).
+Implementation: `PendingSkewQueue.swift`, `SkewReplay.swift` (CVK-ICLOUD P3-M4).
 
 **B-11 (convergence loop) (v1.2-draft):** The outbox drains on a
 debounced cadence after local writes to prevent per-keystroke push storms.
@@ -364,9 +386,10 @@ side table increments the version; migrations are additive. No two
 `SchemaDeclaration` entries share the same version number with different
 table sets. Consolidation state: `_ck_sync_meta`, `_ck_outbox`, and
 `_ck_change_token` are consolidated as of v3; `_ck_device_identity`
-still carries its own declaration (planned v4 consolidation) and
-`_ck_pending_skew` does not yet exist (arrives with the schema-skew
-queue, planned v5).
+still carries its own declaration (planned v4 consolidation);
+`_ck_pending_skew` was added at v7 via a v6→v7 migration (v4/v5 earmarks
+were superseded by the v3→v6 jump for `_ck_sync_meta_cols` and
+`_ck_device_identity`). (CVK-ICLOUD P3-M4)
 
 **B-13 (slot registry claim/heartbeat/fence contract) (v1.2-draft):**
 The CloudKit device slot registry (N2) enforces the following behavioral
@@ -452,7 +475,7 @@ Errors are the `SyncError` enum (shape in INTERFACE § 4). Categories:
 |---|---|---|
 | `notEnabled` | `push`/`pull`/`subscribe` before `enable` | abort; caller must enable first |
 | `alreadyEnabled` | second `enable` without `disable` | abort; caller must disable first |
-| `schemaMismatch(expected,received)` | inbound record's schema version ≠ receiver's | reject record; retry post-app-update |
+| `schemaMismatch(expected,received)` | inbound record's schema version is strictly OLDER than receiver's (downgrade apply) | reject record; counted as conflict (B-10; future-schema records are held, not rejected) |
 | `kitMismatch(expected,received)` | inbound record's kit ID ≠ receiver's | reject record; cross-kit safety guard |
 | `transportFailure(detail)` | CloudKit `modifyRecords` / `recordZoneChanges` failure | surface; retry the cycle |
 | `decodingFailure(detail)` | malformed wire bytes / missing metadata field | reject record; counted as conflict |
@@ -516,9 +539,21 @@ changes; a `pullOnly` table never ships local changes (I-5).
 `localWins`, and `remoteWins` each behave per B-4 on the conformance
 fixtures.
 
-**C-5 (kit/schema rejection):** an inbound record with a mismatched
-`kitID` or `schemaVersion` is rejected and counted as a conflict, and
-does not mutate storage (I-4, B-2).
+**C-5 (kit/schema gate):** an inbound record with a mismatched `kitID` is
+rejected and counted as a conflict (I-4). An inbound record whose
+`schemaVersion` is strictly older than the receiver's is rejected and counted
+as a conflict. An inbound record whose `schemaVersion` is strictly newer than
+the receiver's is enqueued in the pending-skew queue, not counted as a conflict,
+and not applied to storage. In no case does a rejected or held record mutate the
+user table (I-4, B-2, B-10).
+
+**C-15 (skew-queue hold and replay):** given a record in the cloud with
+`schemaVersion` = N+1 and a receiver with manifest `schemaVersion` = N: the
+record is held in `_ck_pending_skew` (or `_fed_pending_skew`) during pull and
+does not appear in the user table; on disable/re-enable with manifest
+`schemaVersion` = N+1, the record is replayed through `applyInbound` and
+appears in the user table; the queue entry is deleted after successful replay;
+the outbox stays empty after replay (echo suppression, I-10). (CVK-ICLOUD P3-M4)
 
 **C-6 (None semantics):** the None backend's `push`/`pull` return
 `SyncReceipt.empty` when enabled and `subscribe` never emits (B-1).
@@ -560,6 +595,29 @@ configured test container.
   `AdaptivePollScheduler` (actor; injected sleep + pull closures; nudge seam),
   `CloudKitSyncEngine.nudge()` (external accelerator seam; B-11 contract),
   and `enablePolling: Bool = false` on `CloudKitSyncEngine.init`.
+
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P3-M4)
+- Updated I-4 (kit and schema gate): future-schema records (schemaVersion > manifest)
+  are now held in the pending-skew queue rather than rejected as conflicts; only
+  downgrade-schema records (schemaVersion < manifest) are rejected as schemaMismatch.
+- Updated B-3 (event stream): added `recordsHeldForMigration(count:)` event (emitted
+  on pull when future-schema records are held, and on enable() when the queue is
+  non-empty after replay); added Rust twin reference.
+- Rewrote B-10 (schema-skew posture → schema-skew pending queue): added queue cap
+  (512 entries, oldest-eviction), enable-time replay semantics, echo-suppressed enqueue,
+  deleteApplied cleanup, and still-held notification.
+- Updated B-12 (side-table governance): corrected `_ck_pending_skew` arrival version
+  to v7 (via v6→v7 migration); removed stale "planned v5" forward reference.
+- Updated C-5 (kit/schema gate): split into kitID rejection vs. schema-version routing
+  (future-schema = hold, downgrade = conflict).
+- Added C-15 (skew-queue hold and replay): hold-then-replay conformance requirement.
+- Updated § 6 error table: `schemaMismatch` now describes the downgrade-only trigger.
+- Implementation: `PendingSkewQueue.swift`, `SkewReplay.swift`, `SideSchema.swift`
+  (v7 + pendingSkewTable), `PullCycle.swift` (split schema check), `CloudKitStateActor.swift`
+  (enable-time replay), `FederationSyncEngine.swift` (`_fed_pending_skew`, v3 schema,
+  pull+enable updates), `SyncTypes.swift` (`recordsHeldForMigration`), `rust/src/types.rs`
+  (`RecordsHeldForMigration`). Tests: `SkewQueueTests.swift` (8 unit tests),
+  `SkewIntegrationTests.swift` (5 CK integration tests).
 
 ### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P2-M2)
 - Added B-14 (column projection) to § 5: `excludedColumns` field on

@@ -13,6 +13,34 @@ import os
 
 private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
 
+// MARK: - DecodedRecord → SyncRecord conversion (skew-queue enqueue, R9)
+
+extension DecodedRecord {
+    /// Convert this DecodedRecord to a SyncRecord for storage in the
+    /// pending-skew queue.
+    ///
+    /// Event kind is conservative: tombstones map to `.delete` (syncDeleted = true);
+    /// live records map to `.update`. The upsert semantics of applyInbound handle
+    /// both insert-new-row and update-existing-row via `.update` correctly under
+    /// all four conflict policies.
+    ///
+    /// The full column-HLC map is preserved so replay restores per-column
+    /// ordering for fieldLevelLWW tables.
+    fileprivate func asSyncRecord() -> SyncRecord {
+        SyncRecord(
+            table: table,
+            event: isTombstone ? .delete : .update,
+            rowKey: rowKey,
+            values: values.isEmpty ? nil : SyncValueMap(values),
+            hlc: PackedHLC(syncMeta.hlc),
+            schemaVersion: syncMeta.schemaVersion,
+            kitID: syncMeta.kitID,
+            syncDeleted: isTombstone ? true : nil,
+            columnHLCs: columnHLCs
+        )
+    }
+}
+
 // MARK: - Pull
 
 extension CloudKitStateActor {
@@ -72,6 +100,10 @@ extension CloudKitStateActor {
 
         var appliedCount = 0
         var conflicts = 0
+        // Count of records held in the skew queue this pull cycle (R9).
+        // Incremented for each future-schema record; never decremented.
+        // Used to emit SyncEvent.recordsHeldForMigration after the loop.
+        var skewHeldCount = 0
 
         // Collect row keys per table for the post-apply integrity hook (R3).
         // Tombstone records are deletions from the consumer's point of view,
@@ -86,9 +118,34 @@ extension CloudKitStateActor {
                 guard decoded.kitID == manifest.kitID else {
                     throw SyncError.kitMismatch(expected: manifest.kitID, received: decoded.kitID)
                 }
-                guard decoded.schemaVersion == manifest.schemaVersion else {
-                    throw SyncError.schemaMismatch(expected: manifest.schemaVersion, received: decoded.schemaVersion)
+                // Schema-skew split (R9, CVK-ICLOUD P3-M4):
+                //
+                // Future-schema (sender on newer schema than receiver):
+                //   Enqueue in _ck_pending_skew. NOT a conflict — the record is valid
+                //   and will be replayed on enable() after the receiver's schema updates.
+                //   `continue` advances to the next record without applying or counting
+                //   this record toward appliedCount.
+                //
+                // Downgrade-apply (sender on older schema than receiver):
+                //   WHY reject: applying an older-schema record could overwrite newer-schema
+                //   columns with missing-field defaults, silently corrupting data. The sender
+                //   resends with the current schema after it updates. Count as conflict.
+                if decoded.schemaVersion > manifest.schemaVersion {
+                    let syncRecord = decoded.asSyncRecord()
+                    try await PendingSkewQueue.enqueue(
+                        syncRecord,
+                        to: storage,
+                        sideTable: CKSideSchema.pendingSkewTable
+                    )
+                    skewHeldCount += 1
+                    continue
+                } else if decoded.schemaVersion < manifest.schemaVersion {
+                    throw SyncError.schemaMismatch(
+                        expected: manifest.schemaVersion,
+                        received: decoded.schemaVersion
+                    )
                 }
+                // decoded.schemaVersion == manifest.schemaVersion — normal apply path.
                 guard let syncedTable = manifest.table(named: decoded.table) else {
                     throw SyncError.unsupportedTable(name: decoded.table)
                 }
@@ -108,6 +165,13 @@ extension CloudKitStateActor {
                 logger.error("pull apply failed (other): \(String(describing: error))")
                 conflicts += 1
             }
+        }
+
+        // Emit recordsHeldForMigration when at least one future-schema record
+        // was enqueued this cycle (R9). Subscribers can use this to surface a
+        // "waiting for app update" indicator in the UI.
+        if skewHeldCount > 0 {
+            emit(.recordsHeldForMigration(count: skewHeldCount))
         }
 
         // Legacy CKRecord.ID deletions: arrives when a record is deleted outside

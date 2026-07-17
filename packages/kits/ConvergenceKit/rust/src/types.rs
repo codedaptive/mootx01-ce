@@ -245,6 +245,19 @@ pub enum SyncEvent {
     PeerConnected { identity: String },
     PeerDisconnected { identity: String, reason: String },
     Error(SyncError),
+    /// Records held in the schema-skew queue (R9, CVK-ICLOUD P3-M4).
+    ///
+    /// Emitted during pull when inbound records have a `schema_version` greater
+    /// than the local manifest version (the sender is on a newer schema). Also
+    /// emitted from enable() when records still-held in the queue have a
+    /// `schema_version` that is still newer than the now-enabled manifest.
+    ///
+    /// `count` is the number of records currently held — zero is not emitted.
+    /// The held records are replayed automatically on the next `enable()` after
+    /// the consumer updates its manifest's `schema_version` to match.
+    ///
+    /// Swift twin: `SyncEvent.recordsHeldForMigration(count: Int)`.
+    RecordsHeldForMigration { count: usize },
 }
 
 /// Coarse state for UI bindings.

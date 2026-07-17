@@ -265,10 +265,50 @@ actor FederationStateActor {
         if isEnabled { throw SyncError.alreadyEnabled }
         self.manifest = manifest
         self.storage = storage
-        // Ensure the _fed_sync_meta side table exists before any pull.
-        // Mirrors the CloudKit engine's ensureSyncMetaTable call in enable() so
-        // the LWW side-table path is available from the first apply (A6 unification).
+        // Ensure Federation side tables exist: _fed_sync_meta (v1), _fed_sync_meta_cols
+        // (v2), and _fed_pending_skew (v3, R9). Mirrors the CloudKit engine's
+        // CKSideSchema.ensure call in enable().
         try await Self.ensureFedSyncMetaTable(storage: storage)
+
+        // Schema-skew replay (R9, CVK-ICLOUD P3-M4).
+        //
+        // Drain records from _fed_pending_skew whose schema_version matches the
+        // now-active manifest version. Echo suppression is active by construction:
+        // observer tasks are not yet started, so applyInbound writes (upsertSync /
+        // deleteSync) cannot re-enter the outbox (I-10).
+        let skewReady = try await SkewReplay.drainReady(
+            currentVersion: manifest.schemaVersion,
+            from: storage,
+            sideTable: Self.fedPendingSkewTable
+        )
+        if !skewReady.isEmpty {
+            logger.info("fed skew-queue replay: \(skewReady.count) held record(s) ready for schema v\(manifest.schemaVersion)")
+            var replayedIDs: [UUID] = []
+            for (id, record) in skewReady {
+                guard let syncedTable = manifest.table(named: record.table) else { continue }
+                guard syncedTable.direction != .pushOnly else { continue }
+                do {
+                    try await applyInbound(record, syncedTable: syncedTable, storage: storage)
+                    replayedIDs.append(id)
+                } catch {
+                    logger.warning("fed skew replay failed for \(record.table)/\(record.rowKey): \(String(describing: error))")
+                }
+            }
+            try await SkewReplay.deleteApplied(
+                ids: replayedIDs,
+                from: storage,
+                sideTable: Self.fedPendingSkewTable
+            )
+            logger.info("fed skew-queue replay: applied \(replayedIDs.count)/\(skewReady.count) records")
+        }
+        let skewStillHeld = try await SkewReplay.countHeld(
+            from: storage,
+            sideTable: Self.fedPendingSkewTable
+        )
+        if skewStillHeld > 0 {
+            emit(.recordsHeldForMigration(count: skewStillHeld))
+        }
+
         for table in manifest.tables where table.direction != .pullOnly {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
             let task = Task { [weak self] in
@@ -489,6 +529,8 @@ actor FederationStateActor {
         guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
         var appliedCount = 0
         var conflicts = 0
+        // Count of records held in _fed_pending_skew this pull cycle (R9).
+        var fedSkewHeldCount = 0
         // Collect row keys per table for the post-apply integrity hook (R3).
         var appliedByTable: [String: [UUID]] = [:]
         var deletedByTable: [String: [UUID]] = [:]
@@ -556,9 +598,31 @@ actor FederationStateActor {
                         guard record.kitID == manifest.kitID else {
                             throw SyncError.kitMismatch(expected: manifest.kitID, received: record.kitID)
                         }
-                        guard record.schemaVersion == manifest.schemaVersion else {
-                            throw SyncError.schemaMismatch(expected: manifest.schemaVersion, received: record.schemaVersion)
+                        // Schema-skew split (R9, CVK-ICLOUD P3-M4):
+                        //
+                        // Future-schema (sender on newer schema than receiver):
+                        //   Enqueue in _fed_pending_skew. NOT a conflict — the record is
+                        //   valid and replayed on enable() after the receiver updates.
+                        //
+                        // Downgrade-apply (sender on older schema than receiver):
+                        //   Reject. Applying an older-schema record could overwrite
+                        //   newer-schema columns with missing-field defaults. Sender
+                        //   resends after updating. Count as conflict.
+                        if record.schemaVersion > manifest.schemaVersion {
+                            try await PendingSkewQueue.enqueue(
+                                record,
+                                to: storage,
+                                sideTable: Self.fedPendingSkewTable
+                            )
+                            fedSkewHeldCount += 1
+                            continue
+                        } else if record.schemaVersion < manifest.schemaVersion {
+                            throw SyncError.schemaMismatch(
+                                expected: manifest.schemaVersion,
+                                received: record.schemaVersion
+                            )
                         }
+                        // record.schemaVersion == manifest.schemaVersion — normal apply path.
                         guard let syncedTable = manifest.table(named: record.table) else {
                             throw SyncError.unsupportedTable(name: record.table)
                         }
@@ -578,6 +642,12 @@ actor FederationStateActor {
                     }
                 }
             }
+        }
+
+        // Emit recordsHeldForMigration when at least one future-schema record
+        // was enqueued this cycle (R9).
+        if fedSkewHeldCount > 0 {
+            emit(.recordsHeldForMigration(count: fedSkewHeldCount))
         }
 
         lastPullAt = Date()
@@ -805,14 +875,20 @@ actor FederationStateActor {
     /// Mirrors `_ck_sync_meta_cols` added to CKSideSchema at v6.
     static let fedSyncMetaColsTable = "_fed_sync_meta_cols"
 
-    /// Create the `_fed_sync_meta` and `_fed_sync_meta_cols` side tables.
+    /// Side table name for Federation pending-skew queue (R9, CVK-ICLOUD P3-M4).
+    /// Mirrors `_ck_pending_skew` added to CKSideSchema at v7.
+    static let fedPendingSkewTable = "_fed_pending_skew"
+
+    /// Create the Federation side tables: _fed_sync_meta, _fed_sync_meta_cols,
+    /// and _fed_pending_skew.
     ///
     /// Must be called from `enable()` before any `applyInbound`. Mirrors
-    /// `CloudKitStateActor.ensureSyncMetaTable`. Marked `internal` (not private)
-    /// so tests that call `applyInbound` directly can call this in their setup.
+    /// `CKSideSchema.ensure`. Marked `internal` (not private) so tests that
+    /// call `applyInbound` directly can call this in their setup.
     ///
     /// - v1: `_fed_sync_meta` row-grain HLC (original)
     /// - v2: `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (CVK-ICLOUD P2-M1)
+    /// - v3: `_fed_pending_skew` schema-skew pending queue (R9, CVK-ICLOUD P3-M4)
     static func ensureFedSyncMetaTable(storage: any Storage) async throws {
         let fedSyncMetaDecl = TableDeclaration(
             name: fedSyncMetaTable,
@@ -848,14 +924,43 @@ actor FederationStateActor {
             primaryKey: ["table_name", "primary_key", "column_name"]
         )
 
+        // _fed_pending_skew schema (v3 — schema-skew pending queue, R9, CVK-ICLOUD P3-M4):
+        //   id             — UUID primary key assigned at enqueue time.
+        //   table_name     — application table the record belongs to.
+        //   row_key        — UUID as TEXT (primary key of the application row).
+        //   schema_version — schemaVersion from the wire record (sender's version).
+        //                    INT, not Bool, per schema invariants.
+        //   received_at    — ISO8601 wall-clock TEXT for oldest-eviction ordering.
+        //                    Date storage is TEXT (ISO8601) per schema invariants.
+        //   payload        — JSON-encoded SyncRecord (full wire format).
+        let fedPendingSkewDecl = TableDeclaration(
+            name: fedPendingSkewTable,
+            columns: [
+                ColumnDeclaration(name: "id",             type: .uuid, nullable: false),
+                ColumnDeclaration(name: "table_name",     type: .text, nullable: false),
+                ColumnDeclaration(name: "row_key",        type: .text, nullable: false),
+                ColumnDeclaration(name: "schema_version", type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
+                ColumnDeclaration(name: "received_at",    type: .text, nullable: false),
+                ColumnDeclaration(name: "payload",        type: .blob, nullable: false),
+            ],
+            primaryKey: ["id"]
+        )
+
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitFederation",
-            version: 2,
-            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl],
+            version: 3,
+            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl],
             migrations: [
                 // v1 → v2: add per-column HLC side table for fieldLevelLWW.
                 Migration(fromVersion: 1, toVersion: 2, operations: [
                     .createTable(fedSyncMetaColsDecl),
+                ]),
+                // v2 → v3: add pending-skew queue (R9, CVK-ICLOUD P3-M4).
+                // Holds future-schema records until a schema update makes them
+                // applicable. Drained by SkewReplay.drainReady at enable() time.
+                Migration(fromVersion: 2, toVersion: 3, operations: [
+                    .createTable(fedPendingSkewDecl),
                 ]),
             ]
         )
