@@ -434,7 +434,7 @@ impl RowStore for InMemoryRowStore {
         table: &str,
         values: BTreeMap<String, TypedValue>,
     ) -> StorageResult<RowHandle> {
-        let (key, stored, in_txn) = {
+        let (key, stored, changed, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -453,6 +453,8 @@ impl RowStore for InMemoryRowStore {
             let mut stored = values;
             materialize_generated(&generated, &mut stored);
             t.rows.insert(key, stored.clone());
+            // changedColumns for insert = all stored column names (CVK-WB4).
+            let changed: std::collections::HashSet<String> = stored.keys().cloned().collect();
             // Buffer notification if in a transaction (SECFIX-WS2-PK F2).
             let in_txn = state.in_transaction;
             if in_txn {
@@ -463,9 +465,10 @@ impl RowStore for InMemoryRowStore {
                     values: Some(stored.clone()),
                     hlc: None,
                     origin: ChangeOrigin::Local,
+                    changed_columns: Some(changed.clone()),
                 });
             }
-            (key, stored, in_txn)
+            (key, stored, changed, in_txn)
         };
         if !in_txn {
             self.hub.emit(TableChange {
@@ -475,6 +478,7 @@ impl RowStore for InMemoryRowStore {
                 values: Some(stored),
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                changed_columns: Some(changed),
             });
         }
         Ok(RowHandle::new(table, key))
@@ -486,7 +490,7 @@ impl RowStore for InMemoryRowStore {
         values: BTreeMap<String, TypedValue>,
         conflict_columns: &[String],
     ) -> StorageResult<RowHandle> {
-        let (key, event, emitted_values, in_txn) = {
+        let (key, event, emitted_values, changed_cols, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
                 .tables
@@ -508,20 +512,30 @@ impl RowStore for InMemoryRowStore {
                 })
                 .map(|(k, _)| *k);
             let generated = t.declaration.generated_columns.clone();
-            let (key, ev, vals) = if let Some(k) = existing_key {
+            let (key, ev, vals, changed) = if let Some(k) = existing_key {
                 let row = t.rows.get_mut(&k).unwrap();
+                // Capture old values before mutation for changedColumns diff (CVK-WB4).
+                let old_row = row.clone();
                 for (col, v) in values.into_iter() {
                     row.insert(col, v);
                 }
                 materialize_generated(&generated, row);
                 let merged = row.clone();
-                (k, StorageEvent::Update, merged)
+                // changedColumns = columns whose value differs from the pre-upsert row.
+                let changed: std::collections::HashSet<String> = merged
+                    .keys()
+                    .filter(|col| old_row.get(*col) != merged.get(*col))
+                    .cloned()
+                    .collect();
+                (k, StorageEvent::Update, merged, changed)
             } else {
                 let key = Self::resolve_key(t, &values);
                 let mut stored = values;
                 materialize_generated(&generated, &mut stored);
                 t.rows.insert(key, stored.clone());
-                (key, StorageEvent::Insert, stored)
+                // changedColumns for upsert-as-insert = all stored column names.
+                let changed: std::collections::HashSet<String> = stored.keys().cloned().collect();
+                (key, StorageEvent::Insert, stored, changed)
             };
             // Buffer notification if in a transaction (SECFIX-WS2-PK F2).
             let in_txn = state.in_transaction;
@@ -533,9 +547,10 @@ impl RowStore for InMemoryRowStore {
                     values: Some(vals.clone()),
                     hlc: None,
                     origin: ChangeOrigin::Local,
+                    changed_columns: Some(changed.clone()),
                 });
             }
-            (key, ev, vals, in_txn)
+            (key, ev, vals, changed, in_txn)
         };
         if !in_txn {
             self.hub.emit(TableChange {
@@ -545,6 +560,7 @@ impl RowStore for InMemoryRowStore {
                 values: Some(emitted_values),
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                changed_columns: Some(changed_cols),
             });
         }
         Ok(RowHandle::new(table, key))
@@ -556,7 +572,8 @@ impl RowStore for InMemoryRowStore {
         values: BTreeMap<String, TypedValue>,
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
-        let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
+        // Notification payload: (key, merged_row, changed_columns) — CVK-WB4.
+        let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>, std::collections::HashSet<String>)> = Vec::new();
         let (count, in_txn) = {
             let mut state = self.state.lock().unwrap();
             let t = state
@@ -580,17 +597,26 @@ impl RowStore for InMemoryRowStore {
                 .collect();
             for k in matching_keys {
                 let row = t.rows.get_mut(&k).unwrap();
+                // Capture old values before mutation for changedColumns diff (CVK-WB4).
+                // The pre-update row is available here without an extra read.
+                let old_row = row.clone();
                 for (col, v) in values.iter() {
                     row.insert(col.clone(), v.clone());
                 }
                 materialize_generated(&generated, row);
-                notifications.push((k, row.clone()));
+                let merged = row.clone();
+                let changed: std::collections::HashSet<String> = merged
+                    .keys()
+                    .filter(|col| old_row.get(*col) != merged.get(*col))
+                    .cloned()
+                    .collect();
+                notifications.push((k, merged, changed));
                 count += 1;
             }
             // Buffer notifications when inside a transaction (SECFIX-WS2-PK F2).
             let in_txn = state.in_transaction;
             if in_txn {
-                for (key, row) in &notifications {
+                for (key, row, changed) in &notifications {
                     state.pending_row_events.push(TableChange {
                         table: table.to_string(),
                         event: StorageEvent::Update,
@@ -598,13 +624,14 @@ impl RowStore for InMemoryRowStore {
                         values: Some(row.clone()),
                         hlc: None,
                         origin: ChangeOrigin::Local,
+                        changed_columns: Some(changed.clone()),
                     });
                 }
             }
             (count, in_txn)
         };
         if !in_txn {
-            for (key, row) in notifications {
+            for (key, row, changed) in notifications {
                 self.hub.emit(TableChange {
                     table: table.to_string(),
                     event: StorageEvent::Update,
@@ -612,6 +639,7 @@ impl RowStore for InMemoryRowStore {
                     values: Some(row),
                     hlc: None,
                     origin: ChangeOrigin::Local,
+                    changed_columns: Some(changed),
                 });
             }
         }
@@ -654,6 +682,8 @@ impl RowStore for InMemoryRowStore {
                         values: Some(row.clone()),
                         hlc: None,
                         origin: ChangeOrigin::Local,
+                        // changedColumns for delete = None (CVK-WB4).
+                        changed_columns: None,
                     });
                 }
             }
@@ -668,6 +698,8 @@ impl RowStore for InMemoryRowStore {
                     values: Some(row),
                     hlc: None,
                     origin: ChangeOrigin::Local,
+                    // changedColumns for delete = None (CVK-WB4).
+                    changed_columns: None,
                 });
             }
         }
