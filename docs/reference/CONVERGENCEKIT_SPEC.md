@@ -313,9 +313,29 @@ as conflicts per I-4.
 
 **B-11 (convergence loop) (v1.2-draft):** The outbox drains on a
 debounced cadence after local writes to prevent per-keystroke push storms.
-Inbound: adaptive tiered polling is the correctness path — fast cadence
-immediately after observed remote activity, backing off to idle cadence
-when the zone has been quiet. Zone-subscription push
+
+*Outbound drain leg (implemented, CVK-ICLOUD P3-M1):*
+`OutboxDrainDebouncer` is a pure actor scheduler that coalesces rapid
+outbox writes into one push cycle. `arm()` is called after each
+successful `OutboxStore.append` in `recordOutbound()`. If no further
+arm() call arrives within the `coalescingWindow` (2 s — coalesces
+batch upserts and interactive single-row edits into one push), the
+trigger fires and calls `push()`. The `maxLatency` ceiling (10 s —
+prevents indefinite deferral under a sustained write stream) bounds
+trigger latency from the burst's first arm() regardless of ongoing write
+activity. On `SyncError.transportFailure` the trigger re-arms with a
+single-step backoff delay (`RetryPolicy.default.delay(forAttempt: 0)`,
+~1 s ±20% jitter); the multi-step retry arc is owned by
+`AdaptivePollScheduler` (P3-M2). `cancel()` is async and awaited by
+`disable()` before clearing engine state (I-2 deterministic teardown).
+Federation does not apply a symmetric debouncer: the federation outbound
+path uses an in-memory `pendingOutbound` array (not a durable outbox) and
+a synchronous relay transport — the debouncer's durable-append trigger
+pattern is not symmetrically applicable.
+
+*Inbound poll leg (draft):* adaptive tiered polling is the correctness
+path — fast cadence immediately after observed remote activity, backing
+off to idle cadence when the zone has been quiet. Zone-subscription push
 (`CKRecordZoneSubscription`) is an optional latency accelerator for host
 apps holding APNs entitlements; a silent-push wakeup nudges the engine
 to drain a pull cycle sooner than idle cadence would. All multi-device
