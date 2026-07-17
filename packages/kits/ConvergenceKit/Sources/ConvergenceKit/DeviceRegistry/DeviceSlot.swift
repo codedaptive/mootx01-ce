@@ -2,11 +2,12 @@
 //
 // Model for a single entry in the shared device slot registry (N2).
 //
-// The HLC node field is 4 bits (spec B-6, 48/12/4 layout), giving
-// 16 addressable values. Slot 0 is permanently reserved: legacy shipped
-// code fabricated HLCs with nodeID 0, so no registry-assigned identity
-// may ever be ambiguous against those historical writes. That leaves
-// slots 1–15 for concurrent live machines.
+// The HLC node field is 4 bits in the CKRecordMapping.packed() CloudKit wire
+// layout (spec B-6: physical 48b | logical 12b | node 4b), giving 16
+// addressable values. Slot 0 is permanently reserved: legacy shipped code
+// fabricated HLCs with nodeID 0, so no registry-assigned identity may ever
+// be ambiguous against those historical writes. That leaves slots 1–15 for
+// concurrent live machines.
 //
 // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md §N2
 

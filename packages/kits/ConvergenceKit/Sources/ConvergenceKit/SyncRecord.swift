@@ -47,7 +47,7 @@ public struct SyncRecord: Sendable, Codable {
     /// absent (Rust `#[serde(default)]` provides the same null default).
     public let syncDeleted: Bool?
 
-    /// Per-column HLC map for the `fieldLevelLWW` conflict policy (B-8, v1.2-draft).
+    /// Per-column HLC map for the `fieldLevelLWW` conflict policy (B-8).
     ///
     /// WHY wire-carried (not receiver-derived — A7):
     /// The sender knows exactly which columns were written and at which

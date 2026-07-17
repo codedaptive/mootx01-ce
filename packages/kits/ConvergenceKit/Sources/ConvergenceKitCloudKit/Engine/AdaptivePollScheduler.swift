@@ -21,21 +21,23 @@
 //   only the sleep sub-task is interrupted. This gives true immediate-pull
 //   semantics without terminating the loop.
 //
-// CKRERROR BACKOFF (future — see comment in runLoop):
+// CKRERROR BACKOFF (tracked follow-up — see comment in runLoop):
 //   When the push path receives a .retryableBackoff(retryAfter:) result from
-//   CKErrorTaxonomy (P1-M6), the engine should delay future pull cycles to
-//   avoid hammering a throttled CloudKit endpoint. The seam for this is
-//   recordThrottled(retryAfterMs:) on the policy — not yet wired; planned P3-M4.
+//   CKErrorTaxonomy, the engine should delay future pull cycles to avoid
+//   hammering a throttled CloudKit endpoint. The seam for this is
+//   recordThrottled(retryAfterMs:) on the policy — not yet wired. Tracked
+//   in docs/status/CVK_ICLOUD/TRACKED_FOLLOWUPS.md (scheduler retryableBackoff
+//   wiring item).
 //
 // NUDGE CONTRACT (SPEC B-11, INTERFACE § 2):
 //   nudge() → immediate pull + reset to fast tier.
 //   Callers:
-//     P3-M3 — OutboxDrainDebouncer fires nudge() after each local push so the
-//              remote peer sees the write sooner than idle cadence would deliver.
-//     Future — APNs/local IPC wakeup handler calls nudge() rather than pull()
-//              directly, delegating tier accounting to the scheduler.
+//     OutboxDrainDebouncer fires nudge() after each local push so the remote
+//     peer sees the write sooner than idle cadence would deliver (P3-M1).
+//     APNs/local IPC wakeup handler calls nudge() via handleRemoteNotification
+//     (P3-M3), delegating tier accounting to the scheduler.
 //
-// SPEC: CONVERGENCEKIT_SPEC.md § 5 B-11 (convergence loop) (v1.2-draft).
+// SPEC: CONVERGENCEKIT_SPEC.md § 5 B-11 (convergence loop).
 // INTERFACE: CONVERGENCEKIT_INTERFACE.md § 2 CloudKitSyncEngine — nudge().
 
 import Foundation
@@ -176,13 +178,13 @@ public actor AdaptivePollScheduler {
             //   cancel ONLY the sleep; the parent loop task stays alive and
             //   proceeds to pull immediately after the sub-task exits.
             //
-            // NOTE — CKError throttle override (planned P3-M4):
+            // NOTE — CKError throttle override (tracked follow-up):
             //   When the push path surfaces retryableBackoff(retryAfter:), the
             //   engine should call a future recordThrottled(retryAfterMs:) method
             //   on this policy to override `intervalMs` with the server-suggested
             //   floor. The seam for that wire is here: replace `intervalMs` with
             //   `max(intervalMs, throttleFloorMs)` before constructing `interval`.
-            //   Until P3-M4, the tier cadence governs unconditionally.
+            //   Until that follow-up ships, the tier cadence governs unconditionally.
             let sleepTask = Task { [_sleep, interval] in
                 do {
                     try await _sleep(interval)

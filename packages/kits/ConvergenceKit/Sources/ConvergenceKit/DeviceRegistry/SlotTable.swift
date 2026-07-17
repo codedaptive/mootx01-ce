@@ -202,10 +202,12 @@ public struct SlotTable: Sendable {
         // Convert wall-clock to milliseconds for comparison with HLC physicalTime.
         //
         // CRITICAL: lastActiveHLC round-trips through HLC.packed, whose physical
-        // field is 40 bits (HLC.swift: `phys & 0xFF_FFFF_FFFF`; layout is
-        // node 8 | logical 16 | physical 40 — NOT the 48/12/4 that older spec
-        // prose claims). A full-width 2026 Unix-ms value (~1.75e12) exceeds
-        // 2^40 (~1.10e12), so the unpacked physicalTime is truncated. Comparing
+        // field is 40 bits (HLC.swift: `phys & 0xFF_FFFF_FFFF`; this is the
+        // SubstrateTypes layout — node 8b | logical 16b | physical 40b — as
+        // defined in spec B-6, distinct from the CKRecordMapping CloudKit wire
+        // layout which uses physical 48b | logical 12b | node 4b). A full-width
+        // 2026 Unix-ms value (~1.75e12) exceeds 2^40 (~1.10e12), so the
+        // unpacked physicalTime is truncated. Comparing
         // it against full-width now-millis makes every slot look ~35 years
         // stale — every non-ghost slot becomes permanently eviction-eligible,
         // silently defeating fenced eviction (Adams P1 review, CRITICAL #1).

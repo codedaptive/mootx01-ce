@@ -1,6 +1,6 @@
 ---
 title: ConvergenceKit Playground Rules
-version: v0.1
+version: v0.2
 status: active
 date: 2026-07-16
 description: "Consumer contract for kit authors composing PersistenceKit and ConvergenceKit for sync: ten rules, examples, policy decision table, and capability matrix."
@@ -31,9 +31,7 @@ Each rule states:
 
 Examples are labeled **[SHIPPED]** when they use only the public API that
 is in the released `SyncTypes.swift` (four `ConflictPolicy` cases, base
-`SyncedTable` and `SyncManifest` fields). They are labeled
-**[DRAFT: v1.2]** when they depend on v1.2-draft surfaces
-(`fieldLevelLWW`, `excludedColumns`, `postApplyIntegrityHook`).
+`SyncedTable` and `SyncManifest` fields). All examples use the public API shipped in ConvergenceKit v1.2.
 See the SPEC invariants cross-referenced as I-N and behavioral contracts
 as B-N throughout.
 
@@ -127,11 +125,9 @@ After a partial pull, chapter rows may exist with no matching order entry.
 Restore cross-row or cross-table state in a hook that runs after each full
 pull batch completes.
 
-**EXAMPLE [DRAFT: v1.2] — `postApplyIntegrityHook` requires
-`SyncManifest` v1.2 and is not in the shipped `SyncManifest.init`:**
+**EXAMPLE [SHIPPED] — `postApplyIntegrityHook` shipped in ConvergenceKit v1.2:**
 ```swift
-// v1.2-draft: postApplyIntegrityHook parameter is not in the shipped init.
-// When v1.2 ships, pass the hook at construction.
+// postApplyIntegrityHook shipped in ConvergenceKit v1.2 (CVK-ICLOUD P5-M4).
 var manifest = SyncManifest(
     kitID: "CorpusKit",
     schemaVersion: 3,
@@ -154,7 +150,7 @@ if receipt.pulled > 0 {
 ```
 
 Cross-reference: SPEC I-3 (apply-through-storage); SPEC B-10 (schema-skew
-posture, v1.2-draft); decision doc N3 (convergence loop), R3 requirement.
+pending queue); decision doc N3 (convergence loop), R3 requirement.
 
 ---
 
@@ -174,10 +170,9 @@ serialized into the outbound `SyncRecord`. As a shipped workaround,
 avoid storing derived values in PersistenceKit at all — compute them at
 read time or in a separate non-synced table.
 
-**EXAMPLE [DRAFT: v1.2] — `excludedColumns` requires `SyncedTable` v1.2
-and is not in the shipped `SyncedTable.init`:**
+**EXAMPLE [SHIPPED] — `excludedColumns` shipped in ConvergenceKit v1.2:**
 ```swift
-// v1.2-draft: excludedColumns parameter is not in the shipped init.
+// excludedColumns shipped in ConvergenceKit v1.2 (CVK-ICLOUD P5-M4).
 SyncedTable(
     name: "drawers",
     primaryKeyColumn: "id",
@@ -190,7 +185,7 @@ SyncedTable(
 PersistenceKit. Compute them at read time.
 
 Cross-reference: SPEC I-5 (direction honoured); SPEC B-8 (`fieldLevelLWW`
-`excludedColumns`, v1.2-draft); decision doc R2 requirement.
+`excludedColumns`); decision doc R2 requirement.
 
 ---
 
@@ -235,7 +230,7 @@ Cross-reference: SPEC B-4 (`appendOnly` idempotent upsert on primary key).
 ### Rule 6 — Deletes are tombstoned LWW; `pushOnly` tables silently swallow remote tombstones
 
 **WHY:** `lastWriterWinsByHLC` applies HLC ordering to both upserts and
-deletes (SPEC B-4, v1.2-draft B-9). A device that edits a row at HLC T=5
+deletes (SPEC B-4, B-9). A device that edits a row at HLC T=5
 beats a concurrent delete at T=4: the row survives. This is correct LWW
 behavior — edit-beats-delete is the contract, not delete-always-wins.
 
@@ -273,7 +268,7 @@ SyncedTable(
 ```
 
 Cross-reference: SPEC I-5 (direction honoured); SPEC B-4 (LWW delete
-gate); SPEC B-9 (tombstoned deletes, v1.2-draft); Kong review Q3 finding
+gate); SPEC B-9 (tombstoned deletes); Kong review Q3 finding
 (pushOnly + tombstone asymmetric delete semantics, A8).
 
 ---
@@ -306,7 +301,7 @@ via `HLCGenerator`; ConvergenceKit's `SyncRecord` carries a `PackedHLC`
 that unpacks to `HLC`.
 
 Cross-reference: SPEC I-6 (HLC determinism); SPEC B-6 (packed HLC layout; shipped
-layout is 40-bit physical / 16-bit logical / 8-bit node per HLC.swift; B-6 prose reconciliation pending); decision doc N2 (device slot identity, v1.2-draft); Kong
+layout is 40-bit physical / 16-bit logical / 8-bit node per `SubstrateTypes.HLC.packed` — the CloudKit wire layout `CKRecordMapping.packed()` uses physical 48b | logical 12b | node 4b; both defined in B-6); decision doc N2 (device slot identity); Kong
 review Q5 finding (Rule 7 N2 prerequisite note, A10).
 
 ---
@@ -323,7 +318,7 @@ mutation.
 **INSTEAD:** Increment `schemaVersion` whenever you add, remove, or rename
 a column. Keep the version number identical in the manifest and the
 PersistenceKit schema migration. Old devices discard newer records as
-conflicts (shipped, per I-4) until they update. With B-10 (v1.2-draft),
+conflicts, per I-4, until they update. With B-10 (shipped, v1.2):
 newer records are held in a durable pending queue and replayed after the
 local schema migrates to match.
 
@@ -339,12 +334,12 @@ SyncManifest(
 )
 // A device still on schemaVersion 3 receives these records:
 //   Shipped (I-4):        schemaMismatch → counted as conflict, record dropped.
-//   v1.2-draft (B-10):   schemaMismatch → held in pending queue,
-//                         replayed after local schema migrates to 4.
+//   v1.2 (B-10, shipped): future-schema records held in pending queue,
+//                          replayed after local schema migrates to 4.
 ```
 
 Cross-reference: SPEC I-4 (kit and schema gate); SPEC B-10 (schema-skew
-posture, v1.2-draft); decision doc R9 requirement.
+pending queue); decision doc R9 requirement.
 
 ---
 
@@ -353,7 +348,7 @@ posture, v1.2-draft); decision doc R9 requirement.
 **WHY:** CloudKit has no Rust API. The no-FFI constraint between Swift and
 Rust legs is immutable (N4). The Rust vertical's multi-machine story is
 Federation. Wire-format additions — new `SyncRecord` fields, new
-`TypedValue` cases, the v1.2-draft `columnHLCs` field for
+`TypedValue` cases, the v1.2 `columnHLCs` field for
 `fieldLevelLWW` — still carry byte-identical Rust twins per C-8, because
 the shared wire format is not CloudKit-specific.
 
@@ -382,7 +377,7 @@ exclusivity).
 ### Rule 10 — Under `fieldLevelLWW`, array and blob columns are atomic whole values; concurrent appends lose the lower-HLC write
 
 *Added by the Kong architecture review (CVK-ICLOUD P0-M2, Q5 finding
-A9). Applies when `fieldLevelLWW` ships as part of v1.2.*
+A9). `fieldLevelLWW` shipped in ConvergenceKit v1.2.*
 
 **WHY:** `fieldLevelLWW` applies last-writer-wins at the column grain —
 not at the element grain within an array. Two devices both append to a
@@ -397,15 +392,14 @@ with list-valued fields.
 table, not as array columns on a `fieldLevelLWW` table. Each element is a
 row with a UUID primary key. Both appends survive as distinct rows.
 
-**EXAMPLE [DRAFT: v1.2] — `fieldLevelLWW` requires `ConflictPolicy` v1.2
-and is not in the shipped `ConflictPolicy`:**
+**EXAMPLE [SHIPPED] — `fieldLevelLWW` shipped in ConvergenceKit v1.2:**
 ```swift
 // WRONG — array column under fieldLevelLWW loses concurrent appends.
-// (v1.2-draft — fieldLevelLWW is not in the shipped ConflictPolicy)
+// fieldLevelLWW is in the shipped ConflictPolicy as of v1.2.
 SyncedTable(
     name: "entities",
     primaryKeyColumn: "id",
-    conflictPolicy: .fieldLevelLWW   // v1.2-draft
+    conflictPolicy: .fieldLevelLWW   // shipped v1.2
 )
 // Schema: entities(id UUID, name TEXT, tags ARRAY)
 // Device A appends "swift" to tags at HLC T=5.
@@ -426,7 +420,7 @@ SyncedTable(
 // Read: SELECT value FROM entity_tags WHERE entity_id = ?
 ```
 
-Cross-reference: SPEC B-8 (`fieldLevelLWW`, v1.2-draft); Kong review Q5
+Cross-reference: SPEC B-8 (`fieldLevelLWW`); Kong review Q5
 finding (array/blob LWW semantics under fieldLevelLWW, A9).
 
 ---
@@ -440,10 +434,10 @@ of my data?"
 |---|---|---|---|
 | Append-only observations (events, audit log, messages, activity) | `appendOnly` | `bidirectional` | Remote deletes silently rejected. A row that exists on any device is never removed by sync. |
 | Mutable entities (any field may be overwritten) | `lastWriterWinsByHLC` | `bidirectional` | The entire row is the LWW unit. Most-recent write wins at the row grain. |
-| Mutable entities with independent per-field edits *(v1.2-draft)* | `fieldLevelLWW` | `bidirectional` | Each column is the LWW unit. Do not use for array or blob columns — see Rule 10. |
+| Mutable entities with independent per-field edits | `fieldLevelLWW` | `bidirectional` | Each column is the LWW unit. Do not use for array or blob columns — see Rule 10. |
 | Counters | `appendOnly` on a separate event table | `bidirectional` | Fold locally via aggregate query. Never sync the counter column directly — see Rule 5. |
 | Soft-deletable rows | `lastWriterWinsByHLC` + soft-delete bitmap column | `bidirectional` | Set a bitmap bit on delete. Never hard-delete synced rows if delete propagation is needed — see Rule 6. |
-| Mutable entities with derived columns *(v1.2-draft)* | `lastWriterWinsByHLC` + `excludedColumns` | `bidirectional` | Exclude recomputed columns from sync. Recompute locally on every device — see Rule 4. |
+| Mutable entities with derived columns | `lastWriterWinsByHLC` + `excludedColumns` | `bidirectional` | Exclude recomputed columns from sync. Recompute locally on every device — see Rule 4. |
 | Configuration pushed from one authoritative device | `lastWriterWinsByHLC` | `pushOnly` | Inbound changes are silently skipped. Remote deletes are swallowed inbound — see Rule 6 pushOnly caveat. Use soft-delete if delete propagation is needed. |
 | Read-only reference data pulled from a server | `remoteWins` | `pullOnly` | Local writes are never shipped. Remote overwrites unconditionally. |
 
@@ -456,7 +450,7 @@ of my data?"
 A consumer composing PersistenceKit and ConvergenceKit may rely on:
 
 **Per-row eventual convergence.** Given identical `schemaVersion`, no
-version skew, and the slot registry active (N2, v1.2-draft), any two
+version skew, and the slot registry active (N2), any two
 devices sharing the same `SyncManifest` will eventually converge to the
 same row values for all `bidirectional` tables after enough push/pull
 cycles.
@@ -468,13 +462,13 @@ without knowing sync exists.
 
 **Substrate HLC ordering.** Within a single device, HLC is strictly
 monotonically increasing (SPEC I-6). Across devices, HLC ordering is
-sound when node IDs are unique (N2 slot registry, v1.2-draft). HLC
+sound when node IDs are unique (N2 slot registry). HLC
 provides the only total order that survives a sync round-trip.
 
 **Version-skew protection.** A `schemaVersion` mismatch does not corrupt
 local storage. Shipped behavior (SPEC I-4): mismatched records are
-rejected as conflicts. With B-10 (v1.2-draft): mismatched records are
-held in a durable queue and replayed after local schema migration.
+rejected as conflicts. With B-10 (shipped, v1.2): mismatched records are
+held in a durable queue and replayed after local schema migration (B-10).
 
 **Schema gate before apply.** `kitID` and `schemaVersion` mismatches are
 rejected before any storage mutation (SPEC I-4). A record from a different
@@ -505,7 +499,7 @@ delivered at that call. Convergence is eventual.
 table is silently swallowed inbound on all peers (Rule 6 pushOnly caveat).
 Use soft-delete bitmap columns if remote delete visibility is required.
 
-**Array-append merges under `fieldLevelLWW` (v1.2-draft).** Concurrent
+**Array-append merges under `fieldLevelLWW`.** Concurrent
 writes to an array or blob column from two devices are atomic at the column
 grain. The lower-HLC write is discarded in its entirety (Rule 10).
 
@@ -513,10 +507,9 @@ grain. The lower-HLC write is discarded in its entirety (Rule 10).
 different order than they were written. Do not assume SQL `rowid` or
 wall-clock sequence is preserved across devices (Rule 7).
 
-**Stale-insert resurrection prevention (v1.2-draft).** Before SPEC B-9
-ships, a stale insert for a previously hard-deleted `(table, rowKey)` may
-resurrect the row. After B-9, the tombstone HLC persists in the side table
-and gates stale inserts.
+**Stale-insert resurrection prevention.** SPEC B-9 (shipped v1.2) persists
+the tombstone HLC in the side table after a hard-delete; a stale insert
+for the same `(table, rowKey)` is gated and cannot resurrect the row.
 
 ---
 
@@ -526,18 +519,80 @@ and gates stale inserts.
 |---|---|
 | Rule 1 (UUID primary key) | I-4 (kit and schema gate); B-6 (CloudKit record naming) |
 | Rule 2 (policy follows shape) | B-4 (conflict policy at the apply boundary) |
-| Rule 3 (no cross-row invariants; post-apply hook) | I-3 (apply-through-storage); B-10 (schema-skew posture, v1.2-draft) |
-| Rule 4 (derived columns never sync) | I-5 (direction honoured); B-8 (`fieldLevelLWW` `excludedColumns`, v1.2-draft) |
+| Rule 3 (no cross-row invariants; post-apply hook) | I-3 (apply-through-storage); B-10 (schema-skew pending queue) |
+| Rule 4 (derived columns never sync) | I-5 (direction honoured); B-8 (`fieldLevelLWW` `excludedColumns`) |
 | Rule 5 (no increment semantics) | B-4 (`appendOnly` idempotent upsert on primary key) |
-| Rule 6 (deletes tombstoned LWW; pushOnly caveat) | I-5 (direction honoured); B-4 (LWW delete gate); B-9 (tombstoned deletes, v1.2-draft) |
-| Rule 7 (HLC ordering only; N2 prerequisite) | I-6 (HLC determinism); B-6 (packed HLC layout — shipped 40/16/8 phys/logical/node); N2 (slot registry, v1.2-draft) |
-| Rule 8 (version skew pauses sync) | I-4 (kit and schema gate); B-10 (schema-skew posture, v1.2-draft) |
+| Rule 6 (deletes tombstoned LWW; pushOnly caveat) | I-5 (direction honoured); B-4 (LWW delete gate); B-9 (tombstoned deletes) |
+| Rule 7 (HLC ordering only; N2 prerequisite) | I-6 (HLC determinism); B-6 (HLC packing layouts — CKRecordMapping.packed() 48/12/4 and SubstrateTypes.HLC.packed 8/16/40); N2 (slot registry) |
+| Rule 8 (version skew pauses sync) | I-4 (kit and schema gate); B-10 (schema-skew pending queue) |
 | Rule 9 (iCloud Swift-vertical only) | B-6 (CloudKit); B-7 (Federation); C-8 (wire round-trip parity) |
-| Rule 10 (array/blob atomic under fieldLevelLWW) | B-8 (`fieldLevelLWW`, v1.2-draft) |
+| Rule 10 (array/blob atomic under fieldLevelLWW) | B-8 (`fieldLevelLWW`) |
+
+---
+
+---
+
+## Consumer Advisory: Sensitivity-Gated Sync
+
+### The Pattern
+
+Some estates sync only rows below a configurable sensitivity ceiling (for
+example, a "normal" drawer syncs, but a "restricted" one does not). This
+gating lives in the **estate layer** — not inside ConvergenceKit —
+because ConvergenceKit is estate-type-free and has no concept of
+adjective bitmaps or sensitivity tiers.
+
+The shipped implementation is `SensitivityFilteredStorage` (shipped in
+CVK-ICLOUD P5-M1; see `docs/status/CVK_ICLOUD/P5-M1.md`). It wraps the
+underlying `Storage` and filters two paths:
+
+- **Outbound:** The storage observer's `TableChange` events for
+  above-ceiling rows are suppressed before they reach the outbox. The
+  engine's outbound observer feeds entirely from these events, so
+  above-ceiling rows never enter the outbox and never cross the wire.
+- **Inbound:** `rowStore.insertSync` / `upsertSync` — the paths
+  `applyInbound` uses — are intercepted. An inbound record whose
+  adjective_bitmap exceeds the ceiling throws `SensitivityCeilingError`;
+  `PullCycle` catches it as a per-record conflict and continues. The row
+  is not written locally.
+
+### Critical Invariant
+
+The wrapper **must** be the exact handle passed to
+`engine.enable(manifest:storage:)`. If the raw storage is passed instead,
+integrity-hook repair writes (`postApplyIntegrityHook` writes carry
+`origin == .local` and flow into the outbox — SPEC C-9 / I-3 / R3) on
+above-ceiling rows bypass the filtered observer and leak above-ceiling
+content through the hook path even though the initial change event was
+filtered. Passing the wrapper as the single handle is the enforcement
+mechanism, not a convenience.
+
+### Known Limitation (Tracked Follow-Up)
+
+When a row's tier rises above the ceiling after initial sync (a "normal"
+drawer promoted to "restricted"), the current implementation suppresses
+further outbound changes but does NOT emit a retraction tombstone to peers
+that already received the row. Peers retain the last-synced snapshot.
+Retraction requires an "emit delete CKRecord for this rowKey" path that
+does not yet exist in `CloudKitSyncEngine`. Tracked as a follow-up mission
+(see `docs/status/CVK_ICLOUD/TRACKED_FOLLOWUPS.md`).
 
 ---
 
 ## Changelog
+
+### v0.2 -- 2026-07-17 (CVK-ICLOUD P5-M4)
+- Promoted all `[DRAFT: v1.2]` example labels to `[SHIPPED]`
+  (`fieldLevelLWW`, `excludedColumns`, `postApplyIntegrityHook` — all
+  shipped in ConvergenceKit v1.2).
+- Removed `(v1.2-draft)` markers from Policy Decision Table, Capability
+  Matrix, and SPEC cross-reference table.
+- Updated B-6 cross-ref in Rule 7 to name both HLC packing layouts
+  explicitly per SPEC §5 B-6 revision (CVK-ICLOUD P4-M6).
+- Updated stale-insert note in MUST NOT (B-9 is shipped).
+- Added Consumer Advisory: Sensitivity-Gated Sync (P5-M1 precedent;
+  critical wrapper-must-be-single-handle invariant; tier-rise retraction
+  tracked follow-up).
 
 ### v0.1 -- 2026-07-16
 Initial document. Establishes ten playground rules for consumers composing
