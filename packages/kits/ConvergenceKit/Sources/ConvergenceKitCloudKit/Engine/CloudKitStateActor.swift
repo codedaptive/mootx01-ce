@@ -67,9 +67,16 @@ actor CloudKitStateActor {
     /// SlotClaimOperation and EpochFence directly through their own injectable parameters.
     ///
     /// All engine call sites that previously used `container.privateCloudDatabase`
-    /// directly now go through this seam. P4-M1 will add a test-injection constructor
-    /// to CloudKitSyncEngine for full engine integration tests.
+    /// directly now go through this seam.
     var database: (any CloudKitDatabaseProtocol)?
+
+    /// Test-injection point for the CloudKit database seam.
+    ///
+    /// When non-nil, `enable()` uses this value instead of resolving
+    /// `container.privateCloudDatabase`. Must be set BEFORE calling `enable()`.
+    /// Only for use in ConvergenceKitCloudKitTests/Harness/ (P4 series).
+    /// Production code must never set this — it remains nil in all non-test paths.
+    var _testDatabase: (any CloudKitDatabaseProtocol)? = nil
 
     var manifest: SyncManifest?
     var storage: (any Storage)?
@@ -115,11 +122,12 @@ actor CloudKitStateActor {
         self.manifest = manifest
         self.storage = storage
 
-        // Resolve the database seam from the container's private database.
-        // All engine operations that reach CloudKit go through this seam.
-        // CKDatabase conforms to CloudKitDatabaseProtocol via the retroactive
-        // extension in Transport/CloudKitDatabaseProtocol.swift.
-        let db = container.privateCloudDatabase
+        // Resolve the database seam. Tests inject a fake via _testDatabase before
+        // calling enable(); production code leaves _testDatabase nil and resolves
+        // the container's private database at enable-time. CKDatabase conforms to
+        // CloudKitDatabaseProtocol via the retroactive extension in
+        // Transport/CloudKitDatabaseProtocol.swift.
+        let db = _testDatabase ?? container.privateCloudDatabase
         self.database = db
 
         // Setup zone in private database.
