@@ -1359,6 +1359,8 @@ impl RowStore for TxRowStore {
             values: Some(values),
             hlc: None,
             origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1429,6 +1431,8 @@ impl RowStore for TxRowStore {
             values: Some(values),
             hlc: None,
             origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1477,6 +1481,8 @@ impl RowStore for TxRowStore {
                 values: None,
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)
@@ -1506,6 +1512,8 @@ impl RowStore for TxRowStore {
                 values: None,
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)
@@ -1987,6 +1995,8 @@ impl RowStore for PgRowStore {
             values: Some(values),
             hlc: None,
             origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -2055,6 +2065,8 @@ impl RowStore for PgRowStore {
             values: Some(values),
             hlc: None,
             origin: ChangeOrigin::Local,
+            // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+            changed_columns: None,
         });
         Ok(RowHandle::new(table, key))
     }
@@ -2103,6 +2115,8 @@ impl RowStore for PgRowStore {
                 values: None,
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                // Postgres backend does not implement pre-read diff; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)
@@ -2131,6 +2145,8 @@ impl RowStore for PgRowStore {
                 values: None,
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all (CVK-WB4).
+                changed_columns: None,
             });
         }
         Ok(changed as usize)

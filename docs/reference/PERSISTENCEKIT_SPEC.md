@@ -596,6 +596,40 @@ write (`.local` / `Local`) or a write performed during inbound sync application
   `applyInbound` writes and prevent the multi-device echo loop (I-10,
   CVK-ICLOUD P1-M1). Observers uninterested in origin may ignore the field.
 
+**B-20 (changedColumns stamping — CVK-WB4):** Every `TableChange` emitted by
+the InMemory and SQLite backends carries a `changedColumns: Set<String>?`
+(`changed_columns: Option<HashSet<String>>` in Rust) field that identifies
+which columns actually changed in the write. The contract per operation:
+
+- **insert:** `changedColumns` = `Some(Set(values.keys))` — all written columns.
+  No pre-existing row exists; every column in the insert dict is "changed" from
+  the nothing that was there before.
+- **update:** `changedColumns` = `Some(columns where newValue != oldValue)` —
+  only the columns whose value actually changed relative to the stored row before
+  the UPDATE. A value present in the SET clause but equal to the stored value is
+  NOT included. The backend performs a pre-read (O(1) in InMemory — old row
+  already in memory; O(1) in SQLite — `SELECT` by primary key before `UPDATE`)
+  to compute the diff.
+- **upsert (insert path):** `changedColumns` = `Some(Set(values.keys))` — same
+  as insert; no pre-existing row. The pre-read (`SELECT` by conflict columns)
+  confirms the row is absent.
+- **upsert (update path):** `changedColumns` = `Some(columns where newValue !=
+  oldValue)` — diff against the pre-existing row, same as update.
+- **delete:** `changedColumns` = `nil` / `None` — delete tombstones carry no
+  column-level granularity; the row is gone.
+
+The PostgreSQL backend always emits `changed_columns: None` (conservative /
+backward-compatible); pre-read diff is not implemented there.
+
+Consumers that do not use `changedColumns` may ignore the field: the field is
+additive and does not change existing `TableChange` semantics. ConvergenceKit
+uses `changedColumns` for two behaviors (CVK-WB4): (1) mixed-column storm-kill
+precision — when `changedColumns` is present and every changed column is in the
+excluded-columns set, the outbound change is dropped even if non-changed sync
+columns survive the projection strip; (2) fieldLevelLWW stamp precision — only
+the columns in `changedColumns` receive a new column-level HLC stamp in the
+outbound `SyncRecord`, preventing false HLC advancement on unchanged columns.
+
 ## § 6 — Error model (conceptual)
 
 Errors are surfaced as `StorageError` (Swift) / `StorageError` (Rust).

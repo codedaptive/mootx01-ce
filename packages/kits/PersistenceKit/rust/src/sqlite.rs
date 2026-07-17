@@ -1369,6 +1369,109 @@ fn fetch_matching_keys(
     .unwrap_or_default()
 }
 
+/// Fetch the full column values for the first row matching `conflict_columns`
+/// from `values`. Returns `None` if no matching row exists or on error.
+///
+/// Used by `upsert` to compute `changed_columns` before the INSERT ON CONFLICT.
+/// Cost: one O(1) SELECT on the conflict-column index. The Mutex serializes
+/// writes so there is no interleaving between this read and the upsert.
+fn fetch_row_by_conflict_columns(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    values: &BTreeMap<String, TypedValue>,
+    conflict_columns: &[String],
+) -> Option<BTreeMap<String, TypedValue>> {
+    if conflict_columns.is_empty() {
+        return None;
+    }
+    let pairs: Vec<(&String, &TypedValue)> = conflict_columns
+        .iter()
+        .filter_map(|col| values.get(col).map(|v| (col, v)))
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let where_sql = pairs
+        .iter()
+        .map(|(col, _)| format!("\"{col}\" = ?"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql} LIMIT 1");
+    let binds: Vec<SqlValue> = pairs.iter().map(|(_, v)| to_sql(v)).collect();
+    let mut stmt = conn.prepare_cached(&sql).ok()?;
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(params_from_iter(binds)).ok()?;
+    let row = rows.next().ok()??;
+    let mut result: BTreeMap<String, TypedValue> = BTreeMap::new();
+    for (i, name) in col_names.iter().enumerate() {
+        let vref = row.get_ref(i).ok()?;
+        let kit = table_column_type(schema, table, name);
+        if let Ok(v) = read_value(vref, kit, table, name) {
+            result.insert(name.clone(), v);
+        }
+    }
+    Some(result)
+}
+
+/// Fetch full column values for every row matching `predicate`.
+/// Returns a map of `RowKey → BTreeMap<String, TypedValue>`.
+///
+/// Used by `update` to compute `changed_columns` (diff between pre-update
+/// row and SET values — CVK-WB4). Cost: one `SELECT *` before the `UPDATE`.
+/// The Mutex serializes writes so there is no interleaving. On any error
+/// the function returns an empty map; `update` then falls back to `changed_columns: None`.
+fn fetch_matching_rows_with_values(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    predicate: &StoragePredicate,
+) -> std::collections::HashMap<RowKey, BTreeMap<String, TypedValue>> {
+    let pk_col = schema
+        .and_then(|s| s.tables.iter().find(|t| t.name == table))
+        .and_then(|t| t.primary_key.first().cloned())
+        .unwrap_or_else(|| "row_id".to_string());
+    let mut binds: Vec<SqlValue> = Vec::new();
+    let where_sql = match compile_predicate(predicate, &mut binds) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql}");
+    let mut stmt = match conn.prepare_cached(&sql) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows_q = match stmt.query(params_from_iter(binds)) {
+        Ok(r) => r,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let mut result = std::collections::HashMap::new();
+    while let Ok(Some(row)) = rows_q.next() {
+        let mut row_map: BTreeMap<String, TypedValue> = BTreeMap::new();
+        let mut row_key: Option<RowKey> = None;
+        for (i, name) in col_names.iter().enumerate() {
+            let vref = match row.get_ref(i) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let kit = table_column_type(schema, table, name);
+            if let Ok(v) = read_value(vref, kit, table, name) {
+                if name == &pk_col {
+                    if let TypedValue::Uuid(u) = &v {
+                        row_key = Some(*u);
+                    }
+                }
+                row_map.insert(name.clone(), v);
+            }
+        }
+        if let Some(k) = row_key {
+            result.insert(k, row_map);
+        }
+    }
+    result
+}
+
 /// Resolve the row's primary key: a single-column UUID primary key reads
 /// the UUID from the row; anything else gets a fresh v4.
 fn extract_row_key(
@@ -1451,6 +1554,8 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        // changedColumns for insert = all written column names (CVK-WB4).
+        let changed_cols: std::collections::HashSet<String> = values.keys().cloned().collect();
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Insert,
@@ -1458,6 +1563,7 @@ impl RowStore for SqliteRowStore {
             values: Some(values),
             hlc: None,
             origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1514,6 +1620,11 @@ impl RowStore for SqliteRowStore {
                 sql.push_str(&format!(" DO UPDATE SET {}", updates.join(", ")));
             }
         }
+        // Pre-read existing row for changedColumns diff BEFORE the upsert (CVK-WB4).
+        // One O(1) SELECT on the conflict-column index. The Mutex serializes writes
+        // so there is no interleaving between this read and the INSERT ON CONFLICT.
+        let existing_row = fetch_row_by_conflict_columns(
+            &guard.conn, guard.schema.as_ref(), table, &values, conflict_columns);
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
         // prepare_cached: the SQL text for a given (table, column-set) shape is
         // identical across a bulk loop, so the statement parses ONCE and replays
@@ -1527,6 +1638,13 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        let changed_cols: std::collections::HashSet<String> = if let Some(old) = &existing_row {
+            // Upsert-as-update: stamp only columns that differ from the stored row.
+            values.keys().filter(|col| old.get(*col) != values.get(*col)).cloned().collect()
+        } else {
+            // Upsert-as-insert: all written columns are new.
+            values.keys().cloned().collect()
+        };
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Update,
@@ -1534,6 +1652,7 @@ impl RowStore for SqliteRowStore {
             values: Some(values),
             hlc: None,
             origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1560,11 +1679,11 @@ impl RowStore for SqliteRowStore {
             validate_sql_identifier(k)?;
         }
         let guard = self.inner.lock().unwrap();
-        // Pre-query row keys before mutating. The `values` map carries only
-        // the SET columns (not the primary key). The Mutex serializes all
-        // operations so no interleaving is possible between this SELECT and
-        // the UPDATE.
-        let matched_keys = fetch_matching_keys(&guard.conn, guard.schema.as_ref(), table, predicate);
+        // Pre-read full row values BEFORE mutating for changedColumns diff (CVK-WB4).
+        // One SELECT * per update; the Mutex serializes all operations so no
+        // interleaving is possible between this read and the UPDATE.
+        // On error (empty map) each notification falls back to changed_columns: None.
+        let pre_rows = fetch_matching_rows_with_values(&guard.conn, guard.schema.as_ref(), table, predicate);
         let keys: Vec<&String> = values.keys().collect();
         let set_clause = keys
             .iter()
@@ -1582,14 +1701,21 @@ impl RowStore for SqliteRowStore {
             .map_err(|e| map_sql_err(e, table))?
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
-        for key in matched_keys {
+        for (key, old_row) in &pre_rows {
+            // Compute changed columns: those whose stored value differed from the SET values.
+            let changed_cols: std::collections::HashSet<String> = values
+                .keys()
+                .filter(|col| old_row.get(*col) != values.get(*col))
+                .cloned()
+                .collect();
             self.observers.emit(&TableChange {
                 table: table.to_string(),
                 event: StorageEvent::Update,
-                row_key: Some(key),
+                row_key: Some(*key),
                 values: None,
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                changed_columns: Some(changed_cols),
             });
         }
         Ok(changed)
@@ -1624,6 +1750,8 @@ impl RowStore for SqliteRowStore {
                 values: None,
                 hlc: None,
                 origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all.
+                changed_columns: None,
             });
         }
         Ok(changed)

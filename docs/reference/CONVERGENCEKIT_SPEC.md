@@ -312,9 +312,12 @@ last-writer-wins at the column grain using per-column HLCs. Shipped in
   ColumnHLCMap?` field. `ColumnHLCMap` is a `{entries: {colName:
   PackedHLC}}` JSON wrapper. The field is omitted when nil (backward
   compat: row-grain LWW applied instead, using `SyncRecord.hlc`).
-- **Capture:** the sender (outbox observer) stamps ALL present value
-  columns with the capture HLC. Per-column identity is a future
-  refinement once `TableChange` gains `changedColumns` support.
+- **Capture:** the sender (outbox observer) stamps columns based on
+  `TableChange.changedColumns` (SPEC B-20, CVK-WB4). When `changedColumns`
+  is present, only the columns in that set receive a new column-level HLC
+  stamp (`ColumnHLCMap.stampAll(keys: changedCols, hlc:)`). When `changedColumns`
+  is nil (delete, PostgreSQL backend, or third-party conformers), the fallback
+  is to stamp ALL present value columns — preserving prior behavior.
 - **Apply:** the receiver applies a column iff incoming column HLC >=
   local column HLC (stored in `_ck_sync_meta_cols` on CloudKit,
   `_fed_sync_meta_cols` on Federation). Missing local HLC = first write,
@@ -510,9 +513,18 @@ contract for every device that participates in a multi-device estate:
 omitted when empty for backward compatibility. Two enforcement points per backend:
 
 1. **Outbound (before outbox enqueue):** the outbox entry strips all excluded
-   columns from the record's values before append. If, after stripping, the only
-   remaining value is the primary key (storm-kill condition), the update is not
-   enqueued at all — a derived-column recompute generates zero outbound traffic.
+   columns from the record's values before append. Two storm-kill evaluation paths
+   (CVK-WB4, Scorandum Q1 closed):
+
+   - **Precision kill** (when `TableChange.changedColumns` is present): if
+     `changedColumns.allSatisfy({ excludedColumns.contains($0) })`, the write is
+     suppressed even when non-changed sync columns survive the projection strip
+     (e.g., a derived-column recompute that reads and re-saves sync columns in the
+     merged row). This closes the mixed-column false-enqueue gap.
+   - **Classic kill** (fallback when `changedColumns` is nil): if, after stripping,
+     the only remaining value is the primary key (`Projection.isStormKill`), the
+     update is not enqueued.
+
    Delete events (tombstones) are never suppressed regardless of `excludedColumns`.
 
 2. **Inbound (before conflict-policy switch in `applyInbound`):** excluded columns
