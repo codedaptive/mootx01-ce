@@ -100,6 +100,22 @@ public final class CloudKitSyncEngine: SyncEngine, Sendable {
         return stream
     }
 
+    /// Attach-guaranteed variant of `subscribe()`.
+    ///
+    /// `subscribe()` attaches its continuation to the state actor via an
+    /// unstructured Task, so an event emitted immediately after `subscribe()`
+    /// returns can race the attachment and be missed (observed as a test
+    /// deadlock under parallel test load, 2026-07-17). This variant awaits
+    /// the attachment before returning, guaranteeing that every event emitted
+    /// AFTER it returns is delivered. The protocol's `subscribe()` keeps its
+    /// non-async shape (SPEC B-3 / INTERFACE); use this from tests and any
+    /// caller that emits immediately after subscribing.
+    public func subscribeAttached() async -> AsyncStream<SyncEvent> {
+        let (stream, continuation) = AsyncStream<SyncEvent>.makeStream(bufferingPolicy: .bufferingOldest(256))
+        await stateActor.attachSubscriber(continuation)
+        return stream
+    }
+
     public var state: SyncState {
         get async { await stateActor.currentState }
     }

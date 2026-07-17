@@ -121,6 +121,18 @@ public protocol CloudKitDatabaseProtocol: Sendable {
         deleting recordZoneIDsToDelete: [CKRecordZone.ID]
     ) async throws -> (saveResults: [CKRecordZone.ID: Result<CKRecordZone, any Error>],
                        deleteResults: [CKRecordZone.ID: Result<Void, any Error>])
+
+    /// Modify subscriptions.
+    ///
+    /// Used by `ZoneSubscription` to register and deregister
+    /// `CKRecordZoneSubscription`s idempotently. The subscription ID is
+    /// derived from the zone name (fixed, deterministic), so saving an
+    /// already-existing subscription is a no-op on the CloudKit server.
+    func modifySubscriptions(
+        saving subscriptionsToSave: [CKSubscription],
+        deleting subscriptionIDsToDelete: [CKSubscription.ID]
+    ) async throws -> (saveResults: [CKSubscription.ID: Result<CKSubscription, any Error>],
+                       deleteResults: [CKSubscription.ID: Result<Void, any Error>])
 }
 
 // MARK: - CKDatabase conformance

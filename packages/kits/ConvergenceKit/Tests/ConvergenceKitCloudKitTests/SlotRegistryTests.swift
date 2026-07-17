@@ -144,6 +144,18 @@ actor FakeCloudKitDatabase: CloudKitDatabaseProtocol {
     ) {
         return ([:], [:])
     }
+
+    // No-op subscription implementation — slot registry tests do not exercise
+    // zone subscriptions. Required by CloudKitDatabaseProtocol (P3-M3).
+    func modifySubscriptions(
+        saving subscriptionsToSave: [CKSubscription],
+        deleting subscriptionIDsToDelete: [CKSubscription.ID]
+    ) async throws -> (
+        saveResults: [CKSubscription.ID: Result<CKSubscription, any Error>],
+        deleteResults: [CKSubscription.ID: Result<Void, any Error>]
+    ) {
+        return ([:], [:])
+    }
 }
 
 // MARK: - Test helpers

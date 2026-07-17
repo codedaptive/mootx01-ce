@@ -212,6 +212,16 @@ public enum SyncEvent: Sendable {
     ///
     /// Rust twin: `RecordsHeldForMigration { count: usize }`.
     case recordsHeldForMigration(count: Int)
+    /// A CloudKit silent-push notification arrived for this engine's zone
+    /// and the engine responded by nudging the poll scheduler.
+    ///
+    /// Emitted by `CloudKitSyncEngine.handleRemoteNotification(userInfo:)`
+    /// BEFORE the nudge fires, so observers can distinguish a push-accelerated
+    /// pull from a cadence-scheduled pull.
+    ///
+    /// This case is CloudKit-only. The None and Federation backends never emit it.
+    /// Spec: CONVERGENCEKIT_SPEC.md § 5 B-3 (event stream).
+    case remoteWakeReceived
 }
 
 /// Coarse state for UI bindings.

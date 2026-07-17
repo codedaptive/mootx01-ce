@@ -44,6 +44,10 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
     /// ObjectIdentifier for each stored record; used for CAS semantics.
     private var storedIdentifiers: [CKRecord.ID: ObjectIdentifier] = [:]
 
+    /// Saved subscriptions, keyed by subscription ID.
+    /// ZoneSubscription tests use this to assert idempotency and deregistration.
+    private var savedSubscriptions: [CKSubscription.ID: CKSubscription] = [:]
+
     /// Optional fault queue. Set before a test phase to script errors on
     /// specific operation targets; leave nil for the normal (no-fault) path.
     var faults: FaultInjector?
@@ -73,6 +77,18 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
     func allDataRecords() -> [CKRecord] {
         store.values.filter { $0.recordType != "_ck_device_slot" }
     }
+
+    // MARK: - Subscription test helpers
+
+    /// Number of subscriptions currently saved.
+    var subscriptionCount: Int { savedSubscriptions.count }
+
+    /// Return the saved subscription for a given ID, or nil.
+    func subscription(withID id: CKSubscription.ID) -> CKSubscription? {
+        savedSubscriptions[id]
+    }
+
+    // MARK: - Data record test helpers
 
     /// Data records filtered to a specific zone.
     func dataRecords(in zoneID: CKRecordZone.ID) -> [CKRecord] {
@@ -261,5 +277,28 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
             saveResults[zone.zoneID] = .success(zone)
         }
         return (saveResults, [:])
+    }
+
+    func modifySubscriptions(
+        saving subscriptionsToSave: [CKSubscription],
+        deleting subscriptionIDsToDelete: [CKSubscription.ID]
+    ) async throws -> (
+        saveResults: [CKSubscription.ID: Result<CKSubscription, any Error>],
+        deleteResults: [CKSubscription.ID: Result<Void, any Error>]
+    ) {
+        // Record saves — idempotent: saving the same subscription ID again
+        // overwrites the existing entry, matching real CloudKit semantics.
+        var saveResults: [CKSubscription.ID: Result<CKSubscription, any Error>] = [:]
+        for sub in subscriptionsToSave {
+            savedSubscriptions[sub.subscriptionID] = sub
+            saveResults[sub.subscriptionID] = .success(sub)
+        }
+        // Record deletes.
+        var deleteResults: [CKSubscription.ID: Result<Void, any Error>] = [:]
+        for id in subscriptionIDsToDelete {
+            savedSubscriptions.removeValue(forKey: id)
+            deleteResults[id] = .success(())
+        }
+        return (saveResults, deleteResults)
     }
 }

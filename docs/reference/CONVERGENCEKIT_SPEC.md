@@ -221,9 +221,13 @@ activity happens: `remoteChangesApplied(count:)` after a pull applies
 `peerConnected` / `peerDisconnected` for Federation pairing, and
 `recordsHeldForMigration(count:)` when ≥1 future-schema record was held in
 the pending-skew queue during a pull cycle, or when the skew queue is
-non-empty after enable-time replay (B-10). Closing the stream stops the
-subscription. The CloudKit and Federation backends buffer the newest 256 events.
-Rust twin: `SyncEvent::RecordsHeldForMigration { count: usize }` (CVK-ICLOUD P3-M4).
+non-empty after enable-time replay (B-10; Rust twin:
+`SyncEvent::RecordsHeldForMigration { count: usize }`, CVK-ICLOUD P3-M4),
+and `remoteWakeReceived` when a CloudKit silent-push notification is
+received and consumed by the engine (emitted before the nudge() that
+follows; CloudKit-only — never emitted by NoSyncEngine or
+FederationSyncEngine). Closing the stream stops the subscription. The
+CloudKit and Federation backends buffer the newest 256 events.
 
 **B-4 (conflict policy at the apply boundary):** the receiver applies
 each inbound record under the table's `ConflictPolicy`:
@@ -355,7 +359,7 @@ path uses an in-memory `pendingOutbound` array (not a durable outbox) and
 a synchronous relay transport — the debouncer's durable-append trigger
 pattern is not symmetrically applicable.
 
-*Inbound poll leg (draft):* adaptive tiered polling is the correctness
+*Inbound poll leg:* adaptive tiered polling is the correctness
 path — fast cadence immediately after observed remote activity, backing
 off to idle cadence when the zone has been quiet. Zone-subscription push
 (`CKRecordZoneSubscription`) is an optional latency accelerator for host
@@ -372,11 +376,27 @@ activity to prevent premature decay. `AdaptivePollScheduler` (in
 drives the loop with injected sleep and pull closures, an interruptible
 sleep sub-task for `nudge()`, and deterministic start/stop semantics.
 `CloudKitSyncEngine.nudge()` is THE SEAM for external accelerators:
-P3-M3 `OutboxDrainDebouncer` wires it after push; future APNs/IPC
-handlers call it to advance the pull cycle without waiting for idle
-cadence. `enablePolling: Bool = false` (default) on
-`CloudKitSyncEngine.init` prevents interference with existing tests
-that drive push/pull manually.
+`OutboxDrainDebouncer` wires it after push (P3-M1); APNs silent-push
+handlers call it via `handleRemoteNotification(userInfo:)` (P3-M3).
+`enablePolling: Bool = false` (default) on `CloudKitSyncEngine.init`
+prevents interference with existing tests that drive push/pull manually.
+
+*Implementation note (CVK-ICLOUD P3-M3):* The zone-subscription
+accelerator is shipped. `ZoneSubscription.swift` extends
+`CloudKitStateActor` with `registerZoneSubscription()` /
+`deregisterZoneSubscription()` and surfaces them on
+`CloudKitSyncEngine`. Subscription ID is deterministically derived
+("ck-zone-wake-<zoneIdentifier>") so registration is idempotent.
+Routes through the `CloudKitDatabaseProtocol` seam — no direct
+`CKDatabase` argument required. `RemoteWake.swift` extends
+`CloudKitSyncEngine` with `handleRemoteNotification(userInfo:)`: parses
+the dict-based CloudKit zone-change payload (`userInfo["ck"]["met"]["zid"]`),
+verifies the zone matches this engine's manifest, emits
+`SyncEvent.remoteWakeReceived`, and calls `nudge()`. The engine does
+NOT touch UIApplication or NSApplication — APNs registration is the
+host app's responsibility. Both files import only Foundation and
+CloudKit so the kit builds unchanged for the resident launchd process
+(which holds no APNs entitlements).
 
 **B-12 (side-table governance) (v1.2-draft):** All `_ck_*` side tables —
 `_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_device_identity`,
@@ -588,6 +608,16 @@ None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P3-M3)
+- Updated B-3 (event stream): added `remoteWakeReceived` case emitted by
+  the CloudKit engine when a silent-push notification is consumed.
+- Updated B-11 (convergence loop): changed "inbound poll leg (draft)" to
+  "inbound poll leg" (implemented); added P3-M3 implementation note
+  documenting zone subscription registration/deregistration
+  (`ZoneSubscription.swift`), remote-notification accelerator
+  (`RemoteWake.swift`), dict-based payload parsing, host-app contract,
+  and no-UIKit/AppKit constraint.
 
 ### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P3-M2)
 - Added implementation note to B-11 (convergence loop): documents shipped
