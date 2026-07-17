@@ -266,6 +266,28 @@ public struct SyncValueBox: Sendable {
 }
 
 extension SyncValueBox: Codable {
+
+    /// Maximum nesting depth for `SyncValueBox.array` on both encode and decode.
+    ///
+    /// WHY 3: LocusKit's actual usage is ≤2 (an array-of-scalars inside an
+    /// array-of-rows). 3 gives one level of headroom. Deeper nesting is either
+    /// adversarial inbound data or a local bug — in both cases it should fail
+    /// loudly (DecodingError / EncodingError) rather than exhaust the stack or
+    /// ship a hostile payload downstream (CVK-WC5, Perkins defense-in-depth).
+    static let syncValueBoxMaxArrayDepth = 3
+
+    /// Returns the deepest array nesting level within `items`.
+    ///
+    /// Array([scalars]) → 1. Array([Array([scalars])]) → 2. Etc.
+    /// Non-array elements contribute 0 and are ignored when computing the max.
+    private static func arrayNestingDepth(of items: [SyncValueBox]) -> Int {
+        let childMax = items.compactMap { item -> Int? in
+            guard case .array(let inner) = item.payload else { return nil }
+            return arrayNestingDepth(of: inner)
+        }.max() ?? 0
+        return 1 + childMax
+    }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(kind, forKey: .kind)
@@ -312,11 +334,37 @@ extension SyncValueBox: Codable {
         case .fingerprint(let v):
             try container.encode(v, forKey: .payload)
         case .array(let v):
+            // Depth cap: refuse to encode arrays nested deeper than the max.
+            // A local bug that produces deep nesting should fail loudly at
+            // encode rather than ship a payload that peers will reject on decode.
+            let nestingDepth = Self.arrayNestingDepth(of: v)
+            guard nestingDepth <= Self.syncValueBoxMaxArrayDepth else {
+                throw EncodingError.invalidValue(
+                    nestingDepth,
+                    EncodingError.Context(
+                        codingPath: container.codingPath + [CodingKeys.payload],
+                        debugDescription:
+                            "SyncValueBox array nesting depth \(nestingDepth) exceeds " +
+                            "maximum \(Self.syncValueBoxMaxArrayDepth) (CVK-WC5). " +
+                            "LocusKit usage is ≤2; deeper nesting is adversarial or corrupt."
+                    )
+                )
+            }
             try container.encode(v, forKey: .payload)
         }
     }
 
     public init(from decoder: Decoder) throws {
+        try self.init(from: decoder, depth: 0)
+    }
+
+    /// Depth-tracked decode. Called recursively for nested arrays.
+    ///
+    /// `depth` is the number of enclosing `array` layers at the call site.
+    /// When `depth` reaches `syncValueBoxMaxArrayDepth`, any further `array`
+    /// element throws a DecodingError — the record is counted as a per-record
+    /// conflict by the engine, never a crash or stack exhaustion.
+    private init(from decoder: Decoder, depth: Int) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         kind = try container.decode(String.self, forKey: .kind)
         switch kind {
@@ -345,7 +393,28 @@ extension SyncValueBox: Codable {
         case "fingerprint":
             payload = .fingerprint(try container.decode(FingerprintWire.self, forKey: .payload))
         case "array":
-            payload = .array(try container.decode([SyncValueBox].self, forKey: .payload))
+            // Depth cap: reject arrays nested deeper than syncValueBoxMaxArrayDepth.
+            // depth is the number of array layers enclosing this node. If we decoded
+            // this element we'd be at depth+1, so check depth >= max (not >).
+            guard depth < Self.syncValueBoxMaxArrayDepth else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .payload, in: container,
+                    debugDescription:
+                        "SyncValueBox array nesting depth \(depth + 1) exceeds " +
+                        "maximum \(Self.syncValueBoxMaxArrayDepth) (CVK-WC5). " +
+                        "LocusKit usage is ≤2; depth >\(Self.syncValueBoxMaxArrayDepth) " +
+                        "is adversarial or corrupt input. Counted as per-record conflict."
+                )
+            }
+            // Decode elements manually via superDecoder() so we can pass depth+1
+            // to each child, tracking nesting without decoder.userInfo mutation.
+            var arrayContainer = try container.nestedUnkeyedContainer(forKey: .payload)
+            var elements: [SyncValueBox] = []
+            while !arrayContainer.isAtEnd {
+                let elementDecoder = try arrayContainer.superDecoder()
+                elements.append(try SyncValueBox(from: elementDecoder, depth: depth + 1))
+            }
+            payload = .array(elements)
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container,

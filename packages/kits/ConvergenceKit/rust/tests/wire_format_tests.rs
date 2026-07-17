@@ -107,6 +107,76 @@ fn typed_value_array_roundtrips() {
     assert_eq!(v, back);
 }
 
+// ── SyncValueBox depth cap (CVK-WC5, Perkins defense-in-depth) ──────────────
+//
+// SYNC_VALUE_BOX_MAX_ARRAY_DEPTH = 3. A depth-3 array round-trips cleanly;
+// a depth-4 array is rejected on both encode and decode (never a crash).
+
+/// Helper: build a SyncValueBox::Array nested `depth` levels deep.
+/// The innermost array contains a single Int(42) element.
+fn make_nested_array(depth: usize) -> SyncValueBox {
+    let mut inner = SyncValueBox::Array(vec![SyncValueBox::Int(42)]);
+    for _ in 1..depth {
+        inner = SyncValueBox::Array(vec![inner]);
+    }
+    inner
+}
+
+/// Depth-3 array encodes and decodes without error.
+/// Verifies the cap allows legitimate usage (LocusKit usage is ≤2, 3 = headroom).
+#[test]
+fn sync_value_box_array_depth3_roundtrips() {
+    let v = make_nested_array(3);
+    assert_eq!(v.array_nesting_depth(), 3, "depth should be 3");
+    let json = serde_json::to_string(&v).expect("depth-3 encode must succeed");
+    let back: SyncValueBox = serde_json::from_str(&json).expect("depth-3 decode must succeed");
+    assert_eq!(back.array_nesting_depth(), 3);
+}
+
+/// Depth-4 decode is rejected with a descriptive error, not a crash or accept.
+#[test]
+fn sync_value_box_array_depth4_decode_rejected() {
+    // Handcrafted depth-4 JSON: array → array → array → array → Int(42).
+    let json = r#"{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"int","payload":42}]}]}]}]}"#;
+    let result: Result<SyncValueBox, _> = serde_json::from_str(json);
+    assert!(
+        result.is_err(),
+        "depth-4 decode must return Err, not Ok"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("depth") || err_msg.contains("4") || err_msg.contains("maximum"),
+        "error message must mention depth or maximum, got: {err_msg}"
+    );
+}
+
+/// Depth-4 encode is rejected with a descriptive error, not silently shipped.
+#[test]
+fn sync_value_box_array_depth4_encode_rejected() {
+    let v = make_nested_array(4);
+    assert_eq!(v.array_nesting_depth(), 4, "depth should be 4");
+    let result = serde_json::to_string(&v);
+    assert!(
+        result.is_err(),
+        "depth-4 encode must return Err, not Ok"
+    );
+}
+
+/// Cross-leg golden: depth-3 JSON string produced by the Rust encoder is
+/// decodable and encodes to a stable form. The same JSON is used in the
+/// Swift cross-leg golden test (`syncValueBoxArrayDepth3CrossLegGolden`).
+#[test]
+fn sync_value_box_array_depth3_cross_leg_golden() {
+    // Canonical depth-3 golden: array → array → array([int(42)])
+    // This exact JSON must also round-trip in Swift (CVK-WC5 cross-leg parity).
+    let golden = r#"{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"int","payload":42}]}]}]}"#;
+    let decoded: SyncValueBox = serde_json::from_str(golden).expect("depth-3 golden must decode");
+    assert_eq!(decoded.array_nesting_depth(), 3);
+    // Re-encode and verify it matches the golden (stable round-trip)
+    let re_encoded = serde_json::to_string(&decoded).expect("re-encode must succeed");
+    assert_eq!(re_encoded, golden, "depth-3 round-trip must be byte-identical");
+}
+
 #[test]
 fn sync_value_map_roundtrips() {
     let mut m = BTreeMap::new();
