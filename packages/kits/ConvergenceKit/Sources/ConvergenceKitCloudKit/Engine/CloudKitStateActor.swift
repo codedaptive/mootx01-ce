@@ -433,14 +433,24 @@ actor CloudKitStateActor {
         if !excluded.isEmpty, let rawValues = change.values {
             let stripped = Projection.outboundStrip(values: rawValues, excluded: excluded)
             if change.event == .update {
-                // Storm kill: after stripping, if only the primary key remains there is
-                // nothing sync-meaningful to ship — the update touched only excluded
-                // (derived/cached) columns. Storage emits the full merged row, so the
-                // PK is always present in `stripped`; `isStormKill` checks that nothing
-                // beyond the PK survived the strip. Zero OutboxStore writes for
-                // derived-column recomputes.
+                // Storm kill: no sync-meaningful columns survived exclusion.
+                //
+                // Precision path (CVK-WB4, Scorandum Q1 closed): when changedColumns
+                // is present, check whether every column that was ACTUALLY written in
+                // this event is excluded. This catches mixed-column writes (e.g. a score
+                // recompute that carries title in the merged row snapshot but did not
+                // actually change it). Without this check, `isStormKill` would see title
+                // in `stripped` and let the entry through even though the write was
+                // entirely in excluded columns.
+                //
+                // Classic fallback (changedColumns nil = unknown/all): check whether only
+                // the primary key survived the strip. This is the pre-CVK-WB4 behavior.
                 let pkColumn = manifest?.table(named: change.table)?.primaryKeyColumn ?? ""
-                if Projection.isStormKill(stripped: stripped, primaryKeyColumn: pkColumn) {
+                if let changedCols = change.changedColumns {
+                    if changedCols.allSatisfy({ excluded.contains($0) }) {
+                        return
+                    }
+                } else if Projection.isStormKill(stripped: stripped, primaryKeyColumn: pkColumn) {
                     return
                 }
             }
@@ -464,27 +474,33 @@ actor CloudKitStateActor {
             valuesData = nil
         }
 
-        // For fieldLevelLWW tables, stamp ALL present value columns with the
-        // capture HLC and encode as a ColumnHLCMap blob.
+        // For fieldLevelLWW tables, stamp columns with the capture HLC and encode
+        // as a ColumnHLCMap blob.
         //
-        // WHY stamp all columns (not just changed ones):
-        // PersistenceKit's TableChange does not carry a changedColumns field —
-        // only the full row snapshot at the time of the event is available.
-        // Stamping all present columns is correct but coarse: a column that
-        // was not actually changed in this write gets a new HLC equal to the
-        // capture HLC, which may be newer than the column's true last-write HLC.
-        // This does not cause data loss — it only means the receiver cannot
-        // distinguish "this column was written now" from "this column existed in
-        // the row but was not touched." The practical effect is conservative:
-        // the receiver applies more columns than strictly necessary (anything
-        // whose stored HLC is older than the capture HLC), which is safe.
-        // A future refinement: add changedColumns to TableChange in PersistenceKit.
+        // Precision path (CVK-WB4): when changedColumns is present, stamp ONLY the
+        // columns that were actually written in this event (intersection of
+        // changedColumns with the projection-stripped key set). Columns present in
+        // the row snapshot but not written retain their existing remote HLC — they
+        // are not displaced by a coarser "stamp all" that would falsely advance an
+        // unchanged column's HLC and suppress a later legitimate write from a peer.
+        //
+        // Fallback (changedColumns nil = unknown/all): stamp all present columns.
+        // This is the pre-CVK-WB4 behavior and remains correct — it is conservative
+        // (the receiver applies more columns than strictly necessary) but safe.
         let columnHLCsData: Data?
         if let stripped = effectiveValues,
            let syncedTable = manifest?.table(named: change.table),
            syncedTable.conflictPolicy == .fieldLevelLWW {
+            let keysToStamp: [String]
+            if let changedCols = change.changedColumns {
+                // Stamp only columns that were actually changed and survived projection.
+                keysToStamp = stripped.keys.filter { changedCols.contains($0) }
+            } else {
+                // Unknown: stamp all projected columns (backward-compatible fallback).
+                keysToStamp = Array(stripped.keys)
+            }
             let colMap = ColumnHLCMap.stampAll(
-                keys: stripped.keys,
+                keys: keysToStamp,
                 hlc: PackedHLC(hlc)
             )
             columnHLCsData = try? JSONEncoder().encode(colMap)

@@ -361,14 +361,21 @@ actor FederationStateActor {
         if !excluded.isEmpty, let rawValues = change.values {
             let stripped = Projection.outboundStrip(values: rawValues, excluded: excluded)
             if change.event == .update {
-                // Storm kill: after stripping, if only the primary key remains there is
-                // nothing sync-meaningful to ship. The update touched only excluded
-                // columns (derived values, caches). Storage emits the full merged row
-                // so `stripped` always has the PK — `isStormKill` checks that nothing
-                // beyond the PK survived the strip. A derived-column recompute generates
-                // zero outbound traffic.
+                // Storm kill: no sync-meaningful columns survived exclusion.
+                //
+                // Precision path (CVK-WB4, Scorandum Q1 closed): when changedColumns
+                // is present, check whether every actually-changed column is excluded.
+                // This catches mixed-column writes (e.g. a score recompute that carries
+                // title in the merged row snapshot but did not actually change it).
+                //
+                // Classic fallback (changedColumns nil = unknown/all): check whether
+                // only the primary key survived the strip (pre-CVK-WB4 behavior).
                 let pkColumn = manifest?.table(named: change.table)?.primaryKeyColumn ?? ""
-                if Projection.isStormKill(stripped: stripped, primaryKeyColumn: pkColumn) {
+                if let changedCols = change.changedColumns {
+                    if changedCols.allSatisfy({ excluded.contains($0) }) {
+                        return
+                    }
+                } else if Projection.isStormKill(stripped: stripped, primaryKeyColumn: pkColumn) {
                     return
                 }
             }
@@ -378,7 +385,8 @@ actor FederationStateActor {
                 rowKey: change.rowKey,
                 values: stripped,
                 hlc: change.hlc,
-                origin: change.origin
+                origin: change.origin,
+                changedColumns: change.changedColumns
             )
             pendingOutbound.append(strippedChange)
             return
@@ -443,15 +451,27 @@ actor FederationStateActor {
             // HLC persistence) rather than a normal upsert. Matches the A6
             // unification contract and the Rust wire format (C-8 parity).
             let syncDeleted: Bool? = eventKind == .delete ? true : nil
-            // For fieldLevelLWW tables, stamp all present value columns with the
-            // capture HLC (same coarse-stamp rationale as CloudKitStateActor.recordOutbound —
-            // TableChange has no changedColumns field).
+            // For fieldLevelLWW tables, stamp columns with the capture HLC.
+            //
+            // Precision path (CVK-WB4): when changedColumns is present, stamp only
+            // the columns that were actually written (intersection of changedColumns
+            // with the projected key set). Columns present in the row snapshot but not
+            // changed retain their existing remote HLC — they are not displaced.
+            //
+            // Fallback (changedColumns nil = unknown/all): stamp all projected columns
+            // (pre-CVK-WB4 behavior; conservative but safe).
             let columnHLCs: ColumnHLCMap?
             if let raw = change.values,
                let syncedTable = manifest.table(named: change.table),
                syncedTable.conflictPolicy == .fieldLevelLWW,
                eventKind != .delete {
-                columnHLCs = ColumnHLCMap.stampAll(keys: raw.keys, hlc: PackedHLC(hlc))
+                let keysToStamp: [String]
+                if let changedCols = change.changedColumns {
+                    keysToStamp = raw.keys.filter { changedCols.contains($0) }
+                } else {
+                    keysToStamp = Array(raw.keys)
+                }
+                columnHLCs = ColumnHLCMap.stampAll(keys: keysToStamp, hlc: PackedHLC(hlc))
             } else {
                 columnHLCs = nil
             }
