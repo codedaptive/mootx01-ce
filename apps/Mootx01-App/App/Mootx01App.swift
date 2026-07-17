@@ -31,6 +31,10 @@ import BackgroundTasks
 struct Mootx01App: App {
     #if os(macOS)
     @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var delegate
+    #elseif os(iOS)
+    // APNs push accelerator (CVK-ICLOUD P5-M2): iOS delegate receives remote
+    // notification callbacks that SwiftUI's App protocol does not expose.
+    @UIApplicationDelegateAdaptor(IOSAppDelegate.self) private var iosDelegate
     #endif
     @Environment(\.scenePhase) private var scenePhase
     @State private var model = AppModel()
@@ -174,7 +178,27 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(for: .seconds(3_600))
             }
         }
+
+        // APNs push accelerator (CVK-ICLOUD P5-M2): register for remote
+        // notifications so CloudKit zone-subscription silent pushes arrive.
+        // Graceful: if entitlement is absent or the user denies (macOS shows no
+        // prompt for data-delivery-only pushes), registration silently fails and
+        // polling continues. The resident launchd process cannot hold APNs
+        // entitlements; registration MUST happen here, in the host app.
+        // See ConvergenceKit/ZoneSubscription.swift HOST APP CONTRACT, item 2.
+        NSApplication.shared.registerForRemoteNotifications()
     }
+
+    // APNs push accelerator (CVK-ICLOUD P5-M2): forward zone-change silent
+    // pushes to MootSyncDriver, which delegates to CloudKitSyncEngine.
+    // CloudKitSyncEngine.handleRemoteNotification(userInfo:) verifies the zone
+    // name, emits SyncEvent.remoteWakeReceived, and calls nudge() to fire an
+    // immediate pull and reset the poll tier to fast.
+    func application(_ application: NSApplication,
+                     didReceiveRemoteNotification userInfo: [String: Any]) {
+        Task { await MootSyncDriver.shared.handleRemoteNotification(userInfo: userInfo) }
+    }
+
     /// M-MXA-7 termination policy: with menu-bar mode ON the app survives
     /// its last window closing (headless mining executor, ruling D9); with
     /// it OFF the pre-M-MXA-7 quit-on-close behavior is preserved.
@@ -182,6 +206,65 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
         MenuBarPolicy.shouldTerminateAfterLastWindowClosed(
             menuBarModeEnabled: MenuBarPolicy.isEnabled()
         )
+    }
+}
+#endif
+
+#if os(iOS)
+// APNs push accelerator (CVK-ICLOUD P5-M2): UIApplicationDelegate adaptor to
+// handle CloudKit silent-push notifications on iOS/iPadOS.
+//
+// WHY A SEPARATE DELEGATE CLASS:
+// SwiftUI's App protocol exposes scene-phase change callbacks but not
+// UIApplicationDelegate's push-specific callbacks. An `@UIApplicationDelegateAdaptor`
+// bridges the gap without abandoning SwiftUI's lifecycle. The delegate class is
+// app-private (no public API surface); it handles only APNs registration results
+// and notification forwarding.
+//
+// UIBackgroundModes remote-notification must be declared in project.yml (done) so
+// the OS wakes the app for silent pushes even when in the background.
+final class IOSAppDelegate: NSObject, UIApplicationDelegate {
+
+    // Register for APNs at launch so zone-subscription silent pushes start
+    // arriving as soon as possible. Graceful: Simulator returns an error via
+    // didFailToRegisterForRemoteNotificationsWithError; production devices without
+    // a provisioned iCloud container also fail. Polling continues in both cases.
+    // See ZoneSubscription.swift HOST APP CONTRACT, item 2.
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        application.registerForRemoteNotifications()
+        return true
+    }
+
+    // APNs registration result (advisory log only — failure here means
+    // polling continues without push acceleration; user sees nothing).
+    func application(_ application: UIApplication,
+                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        // CloudKit manages token delivery to its servers via CKContainer
+        // internally; the host app does not need to forward the token anywhere.
+        // Logging the hex is useful for debugging silent-push delivery issues.
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        _ = hex // suppress unused-result; token logged via OS Instruments if needed
+    }
+
+    func application(_ application: UIApplication,
+                     didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        // Failure is expected in Simulator (no APNs) and on devices without an
+        // iCloud-registered bundle ID. Polling continues unchanged.
+        // No user-visible error — push acceleration is best-effort (B-11).
+    }
+
+    // Forward zone-change silent pushes to MootSyncDriver (P5-M2).
+    // completionHandler receives .newData if the engine consumed the push
+    // (zone matched → nudge fired); .noData otherwise (wrong zone, not a
+    // CloudKit push, engine not yet enabled).
+    func application(_ application: UIApplication,
+                     didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        Task {
+            let consumed = await MootSyncDriver.shared.handleRemoteNotification(userInfo: userInfo)
+            completionHandler(consumed ? .newData : .noData)
+        }
     }
 }
 #endif

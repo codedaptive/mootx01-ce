@@ -167,6 +167,10 @@ targets:
           - com.codedaptive.mootx01.mining.refresh
         UIBackgroundModes:
           - fetch
+          # CVK-ICLOUD P5-M2: silent-push zone-change notifications require
+          # remote-notification mode so the OS wakes the app to handle
+          # CKRecordZoneSubscription payloads without user interaction.
+          - remote-notification
         CFBundleURLTypes:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:

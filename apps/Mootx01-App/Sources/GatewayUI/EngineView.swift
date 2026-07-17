@@ -1,4 +1,5 @@
 import SwiftUI
+import MootGateway
 #if os(macOS)
 import AppKit
 #endif
@@ -37,6 +38,8 @@ struct EngineView: View {
 
                 portableServerPanel
 
+                syncPanel
+
                 discoveryPanel
             }
             .padding(20)
@@ -45,6 +48,17 @@ struct EngineView: View {
             discovery.stop()
             Task { await portable.stop() }
         }
+    }
+
+    // MARK: - Sync status tile (CVK-ICLOUD P5-M2)
+
+    /// Minimal iCloud sync status tile. Shows container, push-accelerated state,
+    /// and last sync time for this session. Tier tracking (AdaptivePollScheduler
+    /// internal state) is not exposed by the engine's public surface; see
+    /// CloudKitSyncEngine.swift — a follow-up can surface it when the scheduler
+    /// exposes currentTier publicly.
+    private var syncPanel: some View {
+        SyncTileView()
     }
 
     private var portableServerPanel: some View {
@@ -230,4 +244,72 @@ struct EngineView: View {
         }
     }
     #endif
+}
+
+// MARK: - SyncTileView (CVK-ICLOUD P5-M2)
+//
+// Minimal iCloud sync status tile for the Engine tab.
+//
+// DESIGN RATIONALE:
+// MootSyncDriver is an actor; its internal state (enabled, cloudKitEngine,
+// last-sync receipt) is not directly observable from a SwiftUI view without
+// either (a) adding @Observable conformance to the actor or (b) a bridging
+// observable wrapper object. Adding that infrastructure is out of P5-M2 scope
+// (the mission says "minimal"). This tile therefore:
+//   - Shows the configured container identifier (static property — no await).
+//   - Tracks last-synced time LOCALLY via @State from a manual "Sync now" tap.
+//   - Does NOT show pushed/pulled counts (syncNow() returns Bool, not a receipt).
+//   - Does NOT show AdaptivePollScheduler tier (not yet exposed publicly).
+//
+// A follow-up can add a SyncStatusMonitor @Observable bridge and expose counts
+// and tier if the diagnostic value justifies the surface area.
+
+private struct SyncTileView: View {
+    @State private var lastSynced: Date? = nil
+    @State private var syncRunning = false
+
+    var body: some View {
+        GroupBox(String(localized: "iCloud sync")) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(String(localized: "CloudKit zone-subscription silent push accelerates the poll loop. Each zone-change notification fires an immediate pull and resets to the fast poll tier. Polling alone is the correctness guarantee — push is best-effort."))
+                    .font(.caption).foregroundStyle(.secondary)
+
+                HStack(spacing: 6) {
+                    Image(systemName: "icloud")
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text(MootSyncDriver.containerIdentifier)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                HStack {
+                    Button(syncRunning
+                           ? String(localized: "Syncing…")
+                           : String(localized: "Sync now")) {
+                        Task {
+                            syncRunning = true
+                            _ = await MootSyncDriver.shared.syncNow()
+                            lastSynced = Date()
+                            syncRunning = false
+                        }
+                    }
+                    .disabled(syncRunning)
+                    Spacer()
+                    if let date = lastSynced {
+                        Text(date.formatted(.relative(presentation: .named)))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(String(localized: "Last synced"))
+                    } else {
+                        Text(String(localized: "not synced this session"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(6)
+        }
+    }
 }
