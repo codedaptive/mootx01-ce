@@ -1,11 +1,11 @@
 ---
 title: LatticeLib Interface
-version: 1.2.1
+version: 1.4.0
 description: Public API surface for LatticeLib in both the Swift and Rust ports.
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-17
+date: 2026-07-16
 package: LatticeLib
 languages: [swift, rust]
 relates_to:
@@ -70,18 +70,30 @@ The module surface (version) plus the Step-1 word-class entry point
 
 ```swift
 public enum LatticeLib {
-    public static let version: String                 // "0.1.0"
+    public static let version: String                 // "1.0.0"
 }
 public extension LatticeLib {
-    // Parameterless overload — uses platform default for novel tokens
-    // (Apple: NLTagger; non-Apple: HMM). Legacy / build-time tooling path.
+    // Cross-platform default: always uses the deterministic HMM/Viterbi tagger
+    // for novel tokens on ALL platforms (including Apple). NLTagger is opt-in
+    // only via the `tagger: .nlTagger` overload.
     static func wordClass(_ token: String) -> WordClass
+
+    // No-record variant: identical result to `wordClass(_:)` but novel-token
+    // results are NOT accumulated into the pool cache. Use when classifying
+    // user-memory content that must not leak plaintext tokens to the pool
+    // pipeline (the FDC anchor-encode seam). Mirrors Rust `word_class_no_record`.
+    static func wordClass(_ token: String, recordNovel: Bool) -> WordClass
 
     // Estate-choice overload (Layer-2a) — threads the tagger choice from
     // EstateConfiguration.novelTokenTagger (bridged to LatticeLib.NovelTokenTaggerChoice).
     // .hmm: always uses the deterministic HMM/Viterbi tagger (cross-platform).
     // .nlTagger: uses NLTagger on Apple; falls back to HMM on non-Apple builds.
     static func wordClass(_ token: String, tagger: NovelTokenTaggerChoice) -> WordClass
+
+    // Estate-choice + no-record: combines tagger choice with pool suppression.
+    // Used by the distillation extractor to classify private content without
+    // leaking tokens to the pool pipeline.
+    static func wordClass(_ token: String, tagger: NovelTokenTaggerChoice, recordNovel: Bool) -> WordClass
 
     static func taggerEnabled(osVersion:minOSVersion:) -> Bool
 }
@@ -105,6 +117,66 @@ overload. `NovelTokenTaggerChoice { Hmm, NlTagger }` exists in
 `word_class.rs`; on Rust both variants dispatch to HMM (NaturalLanguage is absent).
 The `hmm_tag_with_choice` free function is the novel-token-only dispatch primitive.
 
+#### `FDCContentKind` / `FdcContentKind`
+
+Discriminates text-document input from source-code input. Passed to the
+content-aware `encodeAnchor` overloads so the runtime can apply the FDC `005`
+anchor rule (explicit code content always maps to `005`) before the general
+bag/signature pipeline runs.
+
+```swift
+public enum FDCContentKind: Equatable, Sendable {
+    case text   // ordinary text input — full pipeline
+    case code   // source code — anchors at FDC 005, language Q-ID refinement
+}
+```
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdcContentKind { Text, Code }
+```
+
+Both ports are used by the same content-aware encode seam:
+`FDC.encodeAnchor(_:contentKind:recordNovel:)` (Swift) /
+`Fdc::encode_anchor_for_content_no_record(_, content_kind)` (Rust). Confirmed
+parity — identical two-case discriminant; idiomatic casing differs (Swift `.text`/`.code`,
+Rust `::Text`/`::Code`).
+
+#### `FDCCodeLanguage` / `FdcCodeLanguage` and `FDCCodeLanguageDetector` / `detect_code_language`
+
+Deterministic programming-language identification for the FDC `005` code
+refinement path. When `contentKind == .code` (or when the bag encoder produces
+`005` from text), the detector checks for a fenced-code-block hint first (the
+opening fence line `\`\`\`rust`, etc.) and then scores signal phrases. A
+language is returned only when a single definition exceeds a score threshold of
+`3` with no tie; ambiguous or unrecognized text returns `nil`/`None`. The
+detector recognizes 13 languages: Objective-C, TypeScript, JavaScript, Swift,
+Rust, Python, Kotlin, Go, Ruby, C#, C++, C, and Java. Detection is local and
+rule-based — no network access; Q-IDs are pinned public Wikidata identifiers.
+
+```swift
+public struct FDCCodeLanguage: Equatable, Sendable {
+    public let identifier: String    // e.g. "swift", "rust", "python"
+    public let label: String         // human-readable, e.g. "Swift", "Rust"
+    public let wikidataQID: String   // e.g. "Q17118377" (pinned Wikidata ID)
+}
+public enum FDCCodeLanguageDetector {
+    public static func detect(in text: String) -> FDCCodeLanguage?
+}
+```
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FdcCodeLanguage {
+    pub identifier: &'static str,
+    pub label: &'static str,
+    pub wikidata_qid: &'static str,
+}
+pub fn detect_code_language(text: &str) -> Option<FdcCodeLanguage>;
+```
+
+Both ports are confirmed parity — same 13 definitions, same fenced-hint
+priority, same signal-phrase scoring and threshold, same tie-break rule. Swift
+field `wikidataQID` / Rust field `wikidata_qid` — idiomatic casing only.
+
 #### `FDC` / `Fdc`
 
 The runtime entry point: load the pinned artifacts once and encode text.
@@ -112,13 +184,23 @@ The runtime entry point: load the pinned artifacts once and encode text.
 ```swift
 public enum FDC {
     public static let stopThreshold: Int                      // 1
+    public static let classifierVersion: String               // "4.2.0"
+    // Standard encode — uses HMM for novel tokens, records to pool cache.
     public static func encode(_ text: String) -> String?
+    // Explicit tagger overload — used by cross-runtime conformance tests and
+    // estates that pin novel-token classification policy.
+    public static func encode(_ text: String, taggerChoice: NovelTokenTaggerChoice) -> String?
+    // Standard encodeAnchor — text input, records novel tokens.
     public static func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?)
+    // Non-recording variant: identical result, novel tokens NOT accumulated in
+    // the pool cache. Use for user-memory content (GLK capture seam).
+    public static func encodeAnchor(_ text: String, recordNovel: Bool) -> (code: String?, conceptQID: String?)
+    // Content-aware + non-recording: applies FDC 005 anchor rule for code content.
+    public static func encodeAnchor(_ text: String, contentKind: FDCContentKind, recordNovel: Bool) -> (code: String?, conceptQID: String?)
     public static func ancestors(of code: String) -> [String]
     public static func label(for code: String) -> String?
     public static var isAvailable: Bool
     public static var dataVersion: String
-    public static let classifierVersion: String
     public static var recalculationVersion: String
     public static func semanticCandidates(_ text: String, limit: Int) -> [FDCSemanticCandidate]
     public static func semanticDecision(_ text: String) -> FDCSemanticDecision?
@@ -128,11 +210,24 @@ public enum FDC {
 ```
 ```rust
 pub struct Fdc;
-// encode / encode_anchor / ancestors / is_available / data_version / label
-// semantic_candidates / semantic_decision / semantic_model_version / semantic_model_sha256
 impl Fdc {
+    pub const CLASSIFIER_VERSION: &'static str;           // "4.2.0"
+    pub fn encode(text: &str) -> Option<String>;
+    pub fn encode_anchor(text: &str) -> (Option<String>, Option<String>);
+    // Non-recording: identical result, novel tokens NOT accumulated.
+    pub fn encode_anchor_no_record(text: &str) -> (Option<String>, Option<String>);
+    // Content-aware non-recording: applies FDC 005 anchor rule for code input.
+    pub fn encode_anchor_for_content_no_record(text: &str, content_kind: FdcContentKind) -> (Option<String>, Option<String>);
     pub fn ancestors(code: &str) -> Vec<String>;
     pub fn label(code: &str) -> Option<String>;
+    pub fn is_available() -> bool;
+    pub fn data_version() -> &'static str;
+    pub fn recalculation_version() -> String;
+    pub fn version() -> &'static str;
+    pub fn semantic_candidates(text: &str, limit: usize) -> Vec<FdcSemanticCandidate>;
+    pub fn semantic_decision(text: &str) -> Option<FdcSemanticDecision>;
+    pub fn semantic_model_version() -> &'static str;
+    pub fn semantic_model_sha256() -> &'static str;
 }
 ```
 
@@ -191,6 +286,40 @@ pure, deterministic, and conformance-stable. Consumed by LocusKit's
 `DrawerFingerprint` to fill the lattice-block `qidClosureHash` slot (the
 `FNV.hash16` of the sorted, `"|"`-joined closure).
 
+#### `FDCSignatureSources` / `FdcSignatureSources`
+
+Source-owned signature terms for one FDC code, separated from inherited
+ancestor terms so that label/title/article evidence can be weighted without
+letting broad ancestor recall certify a narrow heading. Passed to
+`FDCMatcher.init` as the `sourceSignatures` dictionary; the Rust side receives
+source terms pre-bundled inside `FdcSignatures` (the parsed artifact) via
+`FdcMatcher::new_with_mode_and_hierarchy` and
+`FdcMatcher::new_with_mode_hierarchy_and_semantic`.
+
+```swift
+public struct FDCSignatureSources: Sendable {
+    public let label:   Set<String>   // label-derived terms for this code
+    public let alias:   Set<String>   // alias/redirect-derived terms
+    public let title:   Set<String>   // heading/title-derived terms
+    public let article: Set<String>   // article body-derived terms
+    public init(label: Set<String>, alias: Set<String>,
+                title: Set<String>, article: Set<String>)
+}
+```
+```rust
+// lattice_lib::fdc_signatures::FdcSignatureSources
+// pub struct; module fdc_signatures is pub but FdcSignatureSources is not
+// re-exported at the crate root. Rust callers pass &FdcSignatures (which
+// bundles source_terms: HashMap<String, FdcSignatureSources>) rather than
+// constructing this type directly.
+pub struct FdcSignatureSources {
+    pub label:   HashSet<String>,
+    pub alias:   HashSet<String>,
+    pub title:   HashSet<String>,
+    pub article: HashSet<String>,
+}
+```
+
 #### `FDCMatcher` / `FdcMatcher`
 
 Steps 4–5: score the concept bag against code signatures, then descend the
@@ -201,15 +330,140 @@ public struct FDCMatcher: Sendable {
     public enum ScoreMode: Sendable { case raw, idf, cosine, idfCosine }
     public let stopThreshold: Int
     public let scoreMode: ScoreMode
-    public init(lexicon:frame:signatures:stopThreshold:scoreMode:)
+    /// When true, production classification ranks source-owned evidence and
+    /// returns the deepest supported common ancestor; false reproduces v1/v2
+    /// bag/frame-descent behavior. Mirrors Rust `use_hierarchical_resolution`.
+    public let useHierarchicalResolution: Bool
+    /// Maximum number of codes allowed to share the argmax score before the
+    /// result is treated as UNRESOLVED. Set to 4. Mirrors Rust
+    /// `MAX_TIED_WINNERS_FOR_CLASSIFICATION`.
+    public static let maximumTiedWinnersForClassification: Int = 4
+    public init(
+        lexicon: CanonicalizationLexicon,
+        frame: FDCFrame,
+        signatures: [String: Set<String>],
+        sourceSignatures: [String: FDCSignatureSources] = [:],
+        stopThreshold: Int = 1,
+        scoreMode: ScoreMode = .raw,
+        useHierarchicalResolution: Bool = false,
+        semanticRanker: FDCSemanticRanker? = nil
+    )
     public func encode(_ text: String) -> String?
     public func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?)
 }
 ```
 ```rust
+pub const MAX_TIED_WINNERS_FOR_CLASSIFICATION: usize = 4;   // fdc_matcher.rs
 pub enum ScoreMode { Raw, Idf, Cosine, IdfCosine }
-pub struct FdcMatcher { /* new / new_with_mode / encode / encode_anchor */ }
+pub struct FdcMatcher {
+    pub stop_threshold: usize,
+    pub score_mode: ScoreMode,
+    pub use_hierarchical_resolution: bool,
+    // private: semantic_ranker, lexicon, frame, interning tables
+}
+impl FdcMatcher {
+    // Staged constructors (each delegates to the next):
+    pub fn new(lexicon, frame, signatures: &FdcSignatures, stop_threshold) -> Self;
+    pub fn new_with_mode(lexicon, frame, signatures, stop_threshold, score_mode) -> Self;
+    pub fn new_with_mode_and_hierarchy(
+        lexicon, frame, signatures, stop_threshold, score_mode,
+        use_hierarchical_resolution: bool) -> Self;
+    pub fn new_with_mode_hierarchy_and_semantic(
+        lexicon, frame, signatures, stop_threshold, score_mode,
+        use_hierarchical_resolution: bool,
+        semantic_ranker: Option<Arc<FdcSemanticRanker>>) -> Self;
+    pub fn encode(&self, text: &str) -> Option<String>;
+    pub fn encode_anchor(&self, text: &str) -> (Option<String>, Option<String>);
+}
 ```
+
+#### `FDCSemanticRanker` / `FdcSemanticRanker` — and `FDCSemanticCandidate`, `FDCSemanticDecision`, `FDCSemanticRanker.Metadata`
+
+The portable integer semantic micro-ranker for the FDC hierarchy. Loaded from
+two bundled artifacts: a JSON metadata file and a compact binary sparse-matrix
+model. Used by the bundled `FDC`/`Fdc` runtime (powering `semanticCandidates` /
+`semanticDecision`) and directly by `FDCMatcher` when `semanticRanker` is
+supplied. The ranker uses byte-defined ASCII tokenization and FNV-1a hashing so
+Swift and Rust produce identical feature IDs, scores, and top-k order without
+floating-point inference.
+
+`FDCSemanticCandidate` and `FDCSemanticDecision` are the result types returned by
+`rank` and `hierarchyDecision`. `FDCSemanticRanker.Metadata` / `FdcSemanticMetadata`
+carries the artifact provenance and dimensional parameters needed to interpret the
+model.
+
+```swift
+public struct FDCSemanticCandidate: Equatable, Sendable {
+    public let code: String
+    public let score: Int64            // normalized: raw_score * 1_000_000 / norm
+    public let matchedFeatures: Int
+    public init(code: String, score: Int64, matchedFeatures: Int)
+}
+public struct FDCSemanticDecision: Equatable, Sendable {
+    public let code: String
+    public let mainClass: String       // 3-digit main-class ancestor (e.g. "500")
+    public let score: Int64
+    public let runnerUpScore: Int64
+    public let matchedFeatures: Int
+    public init(code: String, mainClass: String, score: Int64,
+                runnerUpScore: Int64, matchedFeatures: Int)
+}
+public struct FDCSemanticRanker: Sendable {
+    public struct Metadata: Decodable, Sendable {
+        public let version: String
+        public let featureSchema: String   // "ascii-word-bigram-affix-fnv1a-v1"
+        public let featureCount: Int       // power-of-two hash dimension
+        public let codeCount: Int
+        public let entryCount: Int
+        public let codes: [String]
+        public let norms: [Int]
+        public let modelSHA256: String
+    }
+    public let metadata: Metadata
+    // Returns nil when metadata/model are invalid or the SHA256 check fails.
+    public init?(metadataData: Data, modelData: Data)
+    // Score all codes against text; returns up to `limit` candidates ranked
+    // by score desc, matchedFeatures desc, code asc. Default limit = 8.
+    public func rank(_ text: String, limit: Int = 8) -> [FDCSemanticCandidate]
+    // Derive conservative hierarchy evidence from a pre-ranked candidate list.
+    // Returns nil when the top candidate has fewer than 8 matched features.
+    public func hierarchyDecision(_ text: String, frame: FDCFrame) -> FDCSemanticDecision?
+}
+```
+```rust
+// Re-exported at crate root: FdcSemanticCandidate, FdcSemanticDecision, FdcSemanticRanker
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdcSemanticCandidate {
+    pub code: String, pub score: i64, pub matched_features: usize
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdcSemanticDecision {
+    pub code: String, pub main_class: String,
+    pub score: i64, pub runner_up_score: i64, pub matched_features: usize
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct FdcSemanticMetadata {    // Swift: FDCSemanticRanker.Metadata
+    pub version: String, pub feature_schema: String,
+    pub feature_count: usize, pub code_count: usize, pub entry_count: usize,
+    pub codes: Vec<String>, pub norms: Vec<i64>, pub model_sha256: String,
+}
+pub struct FdcSemanticRanker {
+    pub metadata: FdcSemanticMetadata,
+    // private: offsets: Vec<u32>, code_indices: Vec<u16>, weights: Vec<u8>
+}
+impl FdcSemanticRanker {
+    pub fn from_artifacts(metadata_json: &[u8], model: &[u8]) -> Option<Self>;
+    pub fn rank(&self, text: &str, limit: usize) -> Vec<FdcSemanticCandidate>;
+    pub fn hierarchy_decision(&self, text: &str, frame: &FdcFrame)
+        -> Option<FdcSemanticDecision>;
+}
+```
+
+Rust note: the Swift nested `FDCSemanticRanker.Metadata` is a flat `FdcSemanticMetadata`
+struct in Rust. Both have the same 8 fields (snake_case / camelCase idiom). `init?` ↔
+`from_artifacts` — both return `nil`/`None` on SHA256 mismatch or malformed model.
+Parity is byte-identical: same feature schema, same ASCII tokenizer, same FNV-1a
+hash, same integer scoring, same hierarchy thresholds.
 
 #### `CanonicalizationLexicon`
 
@@ -288,7 +542,7 @@ public enum WordClassTableCache {
 ```
 ```rust
 pub struct WordClassTable { /* table_version, min_os_version, snapshot_date, nouns, verbs */ }
-pub struct WordClassTableCache { pub noun_set, verb_set: HashSet<String>; /* from_json / word_class */ }  // Clone
+pub struct WordClassTableCache { pub noun_set, verb_set: HashSet<String>; /* from_json / word_class / word_class_no_record / word_class_with_tagger */ }  // Clone
 // Writable-artifact helpers:
 pub const BUNDLED_TABLE_JSON: &[u8];                      // compile-time bundled bytes
 pub fn load_writable_table(artifact_path: &Path) -> Option<WordClassTable>;  // writable only
@@ -297,6 +551,7 @@ pub fn load_with_precedence(artifact_path: &Path) -> Option<WordClassTableCache>
 pub fn global_table() -> Arc<WordClassTableCache>;        // brief read-lock, Arc clone, no torn read
 pub fn table_version() -> u64;                            // 0 = seed; bumped per swap
 pub fn word_class(token: &str) -> WordClass;              // table-first, reads the live holder
+pub fn word_class_no_record(token: &str) -> WordClass;    // same result; pool accumulation suppressed
 pub fn seed_global_table(artifact_path: &Path);           // startup seed (no version bump)
 pub fn swap_global_table(new_cache: WordClassTableCache); // atomic publish + version bump
 pub fn swap_global_table_from_precedence(artifact_path: &Path) -> Option<u64>;  // post-reduce swap
@@ -497,9 +752,16 @@ The weighted concept bag (`conceptID|surface -> count`) and its builder
 ```swift
 public typealias ConceptBag = [String: Int]
 public enum BagBuilder {
-    // Legacy / build-time overload — uses platform default for novel tokens.
+    // Cross-platform default: HMM for novel tokens, records to pool cache.
     public static func bag(_ text: String, lexicon: CanonicalizationLexicon,
                            keep: Set<WordClass> = [.noun, .verb]) -> ConceptBag
+
+    // Non-recording variant: identical result, novel tokens NOT accumulated in
+    // the pool cache. Use for user-memory content at the GLK capture seam.
+    // Mirrors Rust `build_bag_no_record` / `build_encoder_bag_no_record`.
+    public static func bag(_ text: String, lexicon: CanonicalizationLexicon,
+                           keep: Set<WordClass> = [.noun, .verb],
+                           recordNovel: Bool) -> ConceptBag
 
     // Estate-choice overload (Layer-2a): threads tagger choice from EstateConfiguration.
     // Thread `PersistenceKit.EstateConfiguration.novelTokenTagger` (bridged to
@@ -514,6 +776,10 @@ public enum BagBuilder {
 pub type ConceptBag = HashMap<String, usize>;
 pub fn build_bag(text, lexicon, table, keep_classes) -> ConceptBag;
 pub fn build_encoder_bag(text, lexicon, table) -> ConceptBag;
+// Non-recording variants: byte-identical result, pool accumulation suppressed.
+// Mirrors Swift `BagBuilder.bag(_:lexicon:keep:recordNovel: false)`.
+pub fn build_bag_no_record(text, lexicon, table, keep_classes) -> ConceptBag;
+pub fn build_encoder_bag_no_record(text, lexicon, table) -> ConceptBag;
 // Layer-2a tagger-choice overloads:
 pub fn build_bag_with_tagger(text, lexicon, table, keep_classes, choice: NovelTokenTaggerChoice) -> ConceptBag;
 pub fn build_encoder_bag_with_tagger(text, lexicon, table, choice) -> ConceptBag;
@@ -701,10 +967,14 @@ stated, not silently dropped.
 | Module surface / version | `LatticeLib` (`LatticeLib.swift:12`) | (no namespace type; free fns in modules) | Swift public / Rust modules | Swift enum-namespace / Rust free-fn modules — idiom | N/A (structural) | Confirmed |
 | Word-class Step-1 entry | `LatticeLib.wordClass` (`WordClassTagger.swift:45`) | `WordClassTableCache::word_class` (`word_class_table.rs`) | both public | Swift method on `LatticeLib` ext / Rust method on cache; table fast path identical, novel-token path divergent (see Exempt row) | `FDCConformanceTests.swift::allConformanceVectorsMatch` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
 | Runtime encoder entry | `FDC` (`FDCRuntime.swift:15`) | `Fdc` (`fdc_runtime.rs:96`) | both public | Swift enum statics / Rust unit struct assoc fns — idiom (FDC/Fdc); `encode`/`encodeAnchor`/`ancestors`/`isAvailable`/`dataVersion` identical | `FDCRuntimeTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
-| Semantic micro-ranker | `FDCSemanticRanker` / `FDC.semanticCandidates` / `semanticDecision` | `FdcSemanticRanker` / `Fdc::semantic_candidates` / `semantic_decision` | both public | Same binary parser, ASCII/FNV features, integer scores, hierarchy thresholds, and tie-breaks | `FDCSemanticRankerTests.swift` / `fdc_semantic_conformance_test.rs` shared 12-vector fixture | **Confirmed** |
+| Semantic micro-ranker | `FDCSemanticRanker` (`FDCSemanticRanker.swift:48`) / `FDC.semanticCandidates` / `semanticDecision` | `FdcSemanticRanker` (`fdc_semantic_ranker.rs:64`) / `Fdc::semantic_candidates` / `semantic_decision` | both public | Swift `init?(metadataData:modelData:)` / Rust `from_artifacts(metadata_json, model)` — idiom; both return nil on SHA256 or validation failure; `rank(_:limit:)` / `rank(&str, usize)` — identical scoring and sort; `hierarchyDecision(_:frame:)` / `hierarchy_decision` — identical hierarchy thresholds and tie-breaks; `metadata: Metadata` / `metadata: FdcSemanticMetadata` (public stored property) | `FDCSemanticRankerTests.swift` / `fdc_semantic_conformance_test.rs` shared 12-vector fixture | **Confirmed** |
+| Semantic candidate | `FDCSemanticCandidate` (`FDCSemanticRanker.swift:11`) | `FdcSemanticCandidate` (`fdc_semantic_ranker.rs:31`) | both public | Swift `struct` with `code: String`, `score: Int64`, `matchedFeatures: Int` / Rust `struct` with `code`, `score: i64`, `matched_features: usize` — idiom; score is normalized (raw × 1_000_000 / norm) | `FDCSemanticRankerTests.swift` / `fdc_semantic_conformance_test.rs` | **Confirmed** |
+| Semantic decision | `FDCSemanticDecision` (`FDCSemanticRanker.swift:26`) | `FdcSemanticDecision` (`fdc_semantic_ranker.rs:37`) | both public | Swift `struct` with `code`, `mainClass`, `score`, `runnerUpScore`, `matchedFeatures` / Rust `struct` with `code`, `main_class`, `score`, `runner_up_score`, `matched_features` — idiomatic casing only | `FDCSemanticRankerTests.swift` / `fdc_semantic_conformance_test.rs` | **Confirmed** |
+| Semantic ranker metadata | `FDCSemanticRanker.Metadata` (`FDCSemanticRanker.swift:49`) | `FdcSemanticMetadata` (`fdc_semantic_ranker.rs:46`) | both public | Swift nested struct (8 public stored properties) / Rust flat pub struct with serde rename attrs; same fields: `version`, `featureSchema`/`feature_schema`, `featureCount`/`feature_count`, `codeCount`/`code_count`, `entryCount`/`entry_count`, `codes`, `norms`, `modelSHA256`/`model_sha256`; accessed via `FDCSemanticRanker.metadata` / `FdcSemanticRanker.metadata` | (structural — covered by semantic conformance tests) | **Confirmed** |
 | FDC ancestor façade | `FDC.ancestors(of:)` (`FDCRuntime.swift`) | `Fdc::ancestors` (`fdc_runtime.rs`) | both public | Swift static func / Rust associated fn on `Fdc` — idiom; delegates to `FDCFrame.ancestors(of:)` / `FdcFrame::ancestors`; returns `[]`/`vec![]` when artifacts unavailable; consumers use this façade — decimal hierarchy math lives only in `FDCFrame`/`FdcFrame` | `FdcProviderTests.swift::FdcAncestorsTests` (7 tests via `FDC.ancestors`) / `fdc_runtime.rs` (delegation to `FdcFrame::ancestors` already tested in `fdc_frame.rs::tests`) | **Confirmed** |
 | Frame label lookup | `FDC.label(for:)` (`FDCRuntime.swift`) | `Fdc::label` (`fdc_runtime.rs`) | both public | Swift static func / Rust associated fn on `Fdc` — idiom; returns the human-readable label for a UDC/MDCC code; integer codes walk to 3-digit parent before frame lookup; `nil`/`None` for empty or unknown input | `FDCRuntimeTests.swift::label*` / `fdc_runtime.rs::tests::label_*` (4 tests) | **Confirmed** |
-| Signature matcher | `FDCMatcher` (`FDCMatcher.swift:20`) | `FdcMatcher` (`fdc_matcher.rs:67`) | both public | Swift `init` / Rust `new`+`new_with_mode` — idiom; encode/encodeAnchor identical | `FDCMatcherTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
+| Signature matcher | `FDCMatcher` (`FDCMatcher.swift:47`) | `FdcMatcher` (`fdc_matcher.rs:317`) | both public | Swift single `init(lexicon:frame:signatures:sourceSignatures:stopThreshold:scoreMode:useHierarchicalResolution:semanticRanker:)` (all params have defaults) / Rust staged constructors `new` → `new_with_mode` → `new_with_mode_and_hierarchy` → `new_with_mode_hierarchy_and_semantic` — idiom; public stored properties `stop_threshold`/`score_mode`/`use_hierarchical_resolution` (Swift: `stopThreshold`/`scoreMode`/`useHierarchicalResolution`); `MAX_TIED_WINNERS_FOR_CLASSIFICATION` (Rust) / `maximumTiedWinnersForClassification` (Swift) = 4; encode/encodeAnchor identical | `FDCMatcherTests.swift` / `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
+| Source signature map | `FDCSignatureSources` (`FDCMatcher.swift:33`) | `FdcSignatureSources` (`fdc_signatures.rs:30`) | Swift public / Rust pub (module-public; not re-exported at crate root) | Swift 4-property struct (`label`/`alias`/`title`/`article`: `Set<String>`) with public memberwise init / Rust identical shape (`HashSet<String>`); Swift callers construct directly for `FDCMatcher.init` `sourceSignatures` param; Rust callers pass `&FdcSignatures` (which bundles `source_terms: HashMap<String, FdcSignatureSources>`) rather than a separate map | `FDCMatcherTests.swift` (hierarchy paths) | Confirmed |
 | Score mode | `FDCMatcher.ScoreMode` (`FDCMatcher.swift:39`) | `ScoreMode` (`fdc_matcher.rs:53`) | both public | Swift nested `FDCMatcher.ScoreMode` / Rust flat `ScoreMode`; cases raw/idf/cosine/idfCosine identical | `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
 | Canonicalization lexicon | `CanonicalizationLexicon` (`Lexicon.swift:30`) | `CanonicalizationLexicon` (`lexicon.rs:16`) | both public | identical (Codable JSON / `from_json`+`lookup`) | `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
 | Frame entry | `FDCEntry` (`FDCFrame.swift:17`) | `FdcEntry` (`fdc_frame.rs:14`) | both public | identical shape; idiom FDCEntry/FdcEntry | `fdc_conformance_test.rs::fdc_conformance_all_vectors_match` | Confirmed |
@@ -737,11 +1007,27 @@ stated, not silently dropped.
 | Reduce seed-if-absent | `PoolReducer.seedWritableArtifactIfAbsent` (private, `PoolReducer.swift`) | `seed_writable_artifact_if_absent` (private, `pool_reducer.rs`) | both internal | seeds writable artifact from bundled table when absent on first run; idempotent (pre-existing file left untouched) | `NovelTokenEffectivenessTests.swift::seedIfAbsentCreatesArtifact` / `novel_token_effectiveness_test.rs::seed_if_absent_creates_artifact` | **Confirmed** |
 | Novel-token tagger selector | `NovelTokenTaggerChoice` (`NovelTokenTaggerChoice.swift:23`) | `NovelTokenTaggerChoice` (`word_class.rs:166`) | both public / pub | identical 2-case enum (`hmm`/`Hmm`, `nlTagger`/`NlTagger`); Swift lowerCamel / Rust UpperCamel — idiom. `Default` = `hmm`/`Hmm` on both ports. `NlTagger` case is a no-op in Rust (routes to HMM; Apple NaturalLanguage absent on server) — behaviour parity: non-Apple path is identical. PersistenceKit carries an independent mirrored copy (`persistence_kit::NovelTokenTaggerChoice`); consumers bridge via a trivial switch. | `tag_conformance.json` (28 vectors — cross-port HMM gate includes table-miss novel tokens); `fdc_conformance.json` (65 vectors) | **Confirmed** |
 | Production pool submitter | `NovelPoolSubmitter` (`NovelPoolSubmitter.swift:43`) | — (`novel_pool_submitter.rs`: free functions `local_dir_submitter`, `default_submitter`, `default_pool_dir`, `default_table_artifact`) | Swift public enum-namespace / Rust pub free functions | Swift wraps the operations as a caseless-enum namespace (`make(poolDirectory:)`, `makeDefault()`, `poolDirectory()`, `tableArtifactURL()`); Rust exposes identical functionality as module-level free functions (no namespace type) — sanctioned stateless-namespace idiom. Pool-dir resolution logic is identical on both ports (env-var → XDG/AppSupport → default), as is the fire-and-forget write-and-log contract. | `NovelTokenEffectivenessTests.swift` (pool write path exercised) / `novel_pool_submitter.rs #[cfg(test)]` | **Confirmed (Swift namespace / Rust free-fn idiom)** |
+| Content kind discriminant | `FDCContentKind` (`FDCRuntime.swift:14`) | `FdcContentKind` (`fdc_runtime.rs:41`) | both public | Swift enum `.text`/`.code` / Rust enum `::Text`/`::Code` — idiomatic casing only; same two-case discriminant used by content-aware `encodeAnchor` overloads and `encode_anchor_for_content_no_record` | Used in `FDCRuntimeTests.swift` content-kind paths / `fdc_runtime.rs` content-kind dispatch | **Confirmed** |
+| Code-language struct | `FDCCodeLanguage` (`FDCCodeLanguage.swift:6`) | `FdcCodeLanguage` (`fdc_code_language.rs:6`) | both public | Swift `struct` with `identifier`, `label`, `wikidataQID` (camelCase) / Rust `struct` with `identifier`, `label`, `wikidata_qid` (snake_case) — idiomatic casing; same 13 pinned definitions and Q-IDs | `FDCCodeLanguage.swift` / `fdc_code_language.rs` definitions agree; exercised via `FDCRuntimeTests.swift` code-content paths | **Confirmed** |
+| Code-language detector | `FDCCodeLanguageDetector.detect(in:)` (`FDCCodeLanguage.swift:117`) | `detect_code_language(text: &str)` (`fdc_code_language.rs:273`) | Swift public enum static / Rust pub free fn — idiom | Same logic: fenced-hint priority → signal-phrase scoring → threshold ≥3, no-tie rule; returns `nil`/`None` for ambiguous or unrecognized input; 13 definitions, identical Q-IDs; Rust field `wikidata_qid` / Swift `wikidataQID` — naming only | Exercised via runtime `FDCRuntimeTests.swift` code-anchor paths / `fdc_runtime.rs` tests | **Confirmed** |
+| Non-recording encode path | `FDC.encodeAnchor(_:recordNovel:)` / `FDC.encodeAnchor(_:contentKind:recordNovel:)` / `BagBuilder.bag(_:lexicon:keep:recordNovel:)` / `LatticeLib.wordClass(_:recordNovel:)` (`FDCRuntime.swift`, `ConceptBag.swift`, `WordClassTagger.swift`) | `Fdc::encode_anchor_no_record` / `Fdc::encode_anchor_for_content_no_record` / `build_bag_no_record` / `build_encoder_bag_no_record` / `word_class_no_record` free fn / `WordClassTableCache::word_class_no_record` method (`fdc_runtime.rs`, `concept_bag.rs`, `word_class_table.rs`) | both public | All no-record variants produce byte-identical results to their recording counterparts; only the `SHARED_NOVEL_CACHE.record` side effect is suppressed for novel tokens. Used by the GLK capture seam (`EncodeIntake`/`capture_with_mode`) to prevent user-memory content from leaking plaintext tokens to the pool pipeline (secfix/fdc-pool). Table-resident tokens are never recorded regardless of the flag. | Privacy path tested in `FDCRuntimeTests.swift` / `concept_bag.rs` `build_bag_no_record` tests | **Confirmed** |
+| Non-recording word-class entry (free fn) | `LatticeLib.wordClass(_:recordNovel:)` (`WordClassTagger.swift:211`) | `word_class_no_record(token: &str)` (`word_class_table.rs:338`) and `WordClassTableCache::word_class_no_record` method (`word_class_table.rs:192`) | Swift public / Rust public | Same fast path (verb-before-noun table lookup); novel tokens classified via HMM (Swift) / HMM (Rust) with SHARED_NOVEL_CACHE.record omitted. Result is byte-identical to the recording path. | `WordClassTagger.swift` tests / `word_class_table.rs` tests | **Confirmed** |
 
 ### Drift summary
 
 There are no remaining runtime DRIFT rows. All public Swift runtime concepts now
-have a Rust counterpart.
+have a Rust counterpart. Six rows added in v1.3.0: `FDCContentKind`/`FdcContentKind`,
+`FDCCodeLanguage`/`FdcCodeLanguage`, `FDCCodeLanguageDetector`/`detect_code_language`,
+the non-recording encode path (four Swift overloads / five Rust functions), and
+the non-recording `wordClass`/`word_class_no_record` free-fn pair.
+
+Five rows added or updated in v1.4.0: `FDCSignatureSources`/`FdcSignatureSources` (new
+row — source-owned signature map); "Signature matcher" row updated to list
+`useHierarchicalResolution`/`use_hierarchical_resolution`, all Rust staged constructors,
+and `maximumTiedWinnersForClassification`/`MAX_TIED_WINNERS_FOR_CLASSIFICATION`;
+`FDCSemanticCandidate`/`FdcSemanticCandidate`, `FDCSemanticDecision`/`FdcSemanticDecision`,
+and `FDCSemanticRanker.Metadata`/`FdcSemanticMetadata` added as explicit rows supplementing
+the existing "Semantic micro-ranker" row.
 
 `FDC.ancestors(of:)` / `Fdc::ancestors` (ancestor chain façade delegating to
 `FDCFrame.ancestors` / `FdcFrame::ancestors`) is present in both ports and
@@ -786,6 +1072,39 @@ non-Apple `.other` stub and records into `SHARED_NOVEL_CACHE`.
 *End of LatticeLib Interface.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-07-16
+Closed five critical API gaps identified in a second verification pass.
+Added `FDCSignatureSources` / `FdcSignatureSources` (§ 2 type entry + concordance row):
+the source-owned signature map type passed to `FDCMatcher.init` as `sourceSignatures`.
+Fixed `FDCMatcher` § 2 block to show the complete eight-parameter `init` signature
+(previously showed five — `sourceSignatures`, `useHierarchicalResolution`, and
+`semanticRanker` were absent) and added `public let useHierarchicalResolution: Bool`
+and `public static let maximumTiedWinnersForClassification: Int = 4` to the stored
+members. Rust `FdcMatcher` block updated with all four staged constructors and the
+public `use_hierarchical_resolution: bool` field; `MAX_TIED_WINNERS_FOR_CLASSIFICATION`
+constant added. Added `FDCSemanticRanker` / `FdcSemanticRanker` as a full § 2 type
+entry documenting `init?` / `from_artifacts`, `rank`, `hierarchyDecision`, and the
+public `metadata` property; added `FDCSemanticCandidate`, `FDCSemanticDecision`, and
+the nested `FDCSemanticRanker.Metadata` / `FdcSemanticMetadata` struct in the same
+entry. Added concordance rows for all newly documented types. No existing API removed;
+no version in any source file changed.
+
+### 1.3.0 -- 2026-07-16
+Added the non-recording encode path surface that landed with the secfix/fdc-pool
+privacy fix: `FDC.encodeAnchor(_:recordNovel:)`, `FDC.encodeAnchor(_:contentKind:recordNovel:)`,
+`FDC.encode(_:taggerChoice:)` (Swift); `Fdc::encode_anchor_no_record`,
+`Fdc::encode_anchor_for_content_no_record` (Rust). Added `BagBuilder.bag(_:lexicon:keep:recordNovel:)`
+(Swift) and `build_bag_no_record`/`build_encoder_bag_no_record` (Rust).
+Added `LatticeLib.wordClass(_:recordNovel:)`, `LatticeLib.wordClass(_:tagger:recordNovel:)` (Swift)
+and `word_class_no_record` free fn + `WordClassTableCache::word_class_no_record` method (Rust).
+Added `FDCContentKind`/`FdcContentKind` (content-kind discriminant, used by content-aware encode overloads).
+Added `FDCCodeLanguage`/`FdcCodeLanguage` and `FDCCodeLanguageDetector`/`detect_code_language`
+(programming-language detector for FDC 005 refinement). Corrected the `wordClass(_:)` description:
+the parameterless overload always uses HMM on all platforms (including Apple); the previous wording
+incorrectly stated "Apple: NLTagger". Corrected `LatticeLib.version` to `"1.0.0"`.
+Added full Rust `Fdc` impl listing including `CLASSIFIER_VERSION`, `recalculation_version`,
+and `version`. Added six concordance rows and updated the drift summary. No existing API removed.
 
 ### 1.2.1 -- 2026-06-17
 Replaced the hand-specified HMM priors in `HMMTagger` / `hmm_tag` with weights

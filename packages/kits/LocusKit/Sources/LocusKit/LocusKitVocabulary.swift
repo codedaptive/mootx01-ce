@@ -35,7 +35,7 @@ public enum LocusKitVocabulary {
         FieldSlot(column: .operational, shift: 0,  width: 6,  label: "capture_channel",
                   legalValues: [0, 1, 2, 3, 4, 5]),
         FieldSlot(column: .operational, shift: 6,  width: 6,  label: "content_kind",
-                  legalValues: [0, 1, 2, 3, 4, 5, 6]),
+                  legalValues: [0, 1, 2, 3, 4, 5, 6, 7]),  // 7 = .dataset (MX-TAB-3)
         FieldSlot(column: .operational, shift: 12, width: 12, label: "feature_flags"),       // bitset
         FieldSlot(column: .operational, shift: 24, width: 1,  label: "state_extension"),     // flag
         FieldSlot(column: .operational, shift: 25, width: 1,  label: "lineage_clustering"),  // flag

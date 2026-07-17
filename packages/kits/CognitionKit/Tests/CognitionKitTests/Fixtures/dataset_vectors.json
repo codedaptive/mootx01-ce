@@ -1,0 +1,53 @@
+{
+  "version": "1.0",
+  "description": "Cross-leg conformance fixture for MX-TAB-6 dataset lens entry points. Read by DatasetCohesionTests (Swift) and dataset_conformance.rs (Rust). Both legs assert the same expectedTopAnomalyRowIndex and expectedScoreRanking.",
+  "datasetCohesion": {
+    "description": "10-row fixture. Columns: score (numeric f64), category (categorical ASCII), label (categorical non-ASCII, exercises byte-order discipline). One planted outlier at row 9.",
+    "derivation": {
+      "note": "Hand-derived. Score column: sorted=[2,2,2,6,6,6,10,10,10,100], n=10, median=(sorted[4]+sorted[5])/2=(6+6)/2=6.0. Deviations from 6.0: {2→4 (×3), 6→0 (×3), 10→4 (×3), 100→94 (×1)}. Sorted devs=[0,0,0,4,4,4,4,4,4,94], MAD=(devs[4]+devs[5])/2=(4+4)/2=4.0. scaledMAD=1.4826*4.0. Numeric signals: rows0-2=4/scaledMAD, rows3-5=0, rows6-8=4/scaledMAD, row9=94/scaledMAD. Category freqs: A=6/10=0.6, B=3/10=0.3, C=1/10=0.1. Label freqs: αλφα=6/10=0.6, βήτα=3/10=0.3, γάμα=1/10=0.1. Rarity=-log2(p): A/αλφα≈0.7370, B/βήτα≈1.7370, C/γάμα≈3.3219. Row scores: rows0-2=4/scaledMAD+2*0.7370, rows3-5=0+2*0.7370, rows6-8=4/scaledMAD+2*1.7370, row9=94/scaledMAD+2*3.3219. Since 94/scaledMAD>>4/scaledMAD and 3.3219>1.7370>0.7370: row9>>rows6-8>rows0-2>rows3-5."
+    },
+    "rows": [
+      {"score": 2.0, "category": "A", "label": "αλφα"},
+      {"score": 2.0, "category": "A", "label": "αλφα"},
+      {"score": 2.0, "category": "A", "label": "αλφα"},
+      {"score": 6.0, "category": "A", "label": "αλφα"},
+      {"score": 6.0, "category": "A", "label": "αλφα"},
+      {"score": 6.0, "category": "A", "label": "αλφα"},
+      {"score": 10.0, "category": "B", "label": "βήτα"},
+      {"score": 10.0, "category": "B", "label": "βήτα"},
+      {"score": 10.0, "category": "B", "label": "βήτα"},
+      {"score": 100.0, "category": "C", "label": "γάμα"}
+    ],
+    "expectedTopAnomalyRowIndex": 9,
+    "expectedScoreGroups": [
+      {"rowIndices": [9], "rank": 1},
+      {"rowIndices": [6, 7, 8], "rank": 2},
+      {"rowIndices": [0, 1, 2], "rank": 3},
+      {"rowIndices": [3, 4, 5], "rank": 4}
+    ],
+    "expectedRows3to5ScoreContributions": {
+      "numericSignal": 0.0,
+      "categoricalRarityPerColumn": "−log2(0.6)≈0.7370"
+    }
+  },
+  "datasetComplexity": {
+    "description": "9-element column with one null. Category values for entropy test.",
+    "columnValues": ["A", null, "A", "A", "A", "A", "B", "B", "B", "C"],
+    "expectedNonNullCount": 9,
+    "expectedNullCount": 1,
+    "expectedEntropyGt": 0.0,
+    "note": "Entropy computed by NeuronKit.complexity over Float32 counts [5,3,1] (for A,B,C after null exclusion). Exact Float32 value depends on NeuronKit internals; test uses >0 assertion."
+  },
+  "datasetAssociations": {
+    "description": "4-row dataset with two perfectly co-occurring columns.",
+    "rows": [
+      {"color": "red", "fruit": "apple"},
+      {"color": "red", "fruit": "apple"},
+      {"color": "blue", "fruit": "blueberry"},
+      {"color": "blue", "fruit": "blueberry"}
+    ],
+    "expectedRuleCount": 2,
+    "expectedLabels": ["color:blue", "color:red", "fruit:apple", "fruit:blueberry"],
+    "note": "4 rows, 4 distinct labels (color:blue, color:red, fruit:apple, fruit:blueberry). color:red always co-occurs with fruit:apple; color:blue with fruit:blueberry. At zero thresholds, 2 bidirectional rules expected (red→apple, blue→blueberry or their reverses)."
+  }
+}

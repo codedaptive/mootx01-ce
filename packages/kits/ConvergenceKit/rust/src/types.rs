@@ -1,6 +1,10 @@
 //! Core ConvergenceKit types.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use uuid::Uuid;
+use persistence_kit::Storage;
 
 /// Direction of replication per synced table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,6 +44,10 @@ pub enum ConflictPolicy {
     LocalWins,
     /// Receiver overwrites local on conflict.
     RemoteWins,
+    /// (v1.2-draft) Per-column HLC last-writer-wins. See B-8 in
+    /// CONVERGENCEKIT_SPEC.md and FieldLWW/ in the Swift source.
+    /// Serialises as "fieldLevelLWW" (camelCase via serde rename_all).
+    FieldLevelLWW,
 }
 
 /// Declaration of a single synced table within a manifest.
@@ -53,6 +61,11 @@ pub struct SyncedTable {
     pub primary_key_column: String,
     #[serde(default = "default_conflict_policy")]
     pub conflict_policy: ConflictPolicy,
+    /// (v1.2-draft, R2) Columns excluded from sync. Locally recomputed on every device.
+    /// Exclusion semantics only — not inclusion. JSON key "excludedColumns"; omitted when
+    /// empty for backward compat (serde default = empty set). Swift twin: `excludedColumns`.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub excluded_columns: HashSet<String>,
 }
 
 fn default_direction() -> SyncDirection {
@@ -70,6 +83,7 @@ impl SyncedTable {
             direction: SyncDirection::Bidirectional,
             primary_key_column: primary_key_column.into(),
             conflict_policy: ConflictPolicy::LastWriterWinsByHLC,
+            excluded_columns: HashSet::new(),
         }
     }
 
@@ -82,11 +96,60 @@ impl SyncedTable {
         self.conflict_policy = policy;
         self
     }
+
+    /// Builder: set columns to exclude from sync. Locally recomputed on every device.
+    pub fn with_excluded_columns(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.excluded_columns = columns.into_iter().map(Into::into).collect();
+        self
+    }
 }
+
+/// Summary of one inbound pull batch delivered to the post-apply integrity hook.
+///
+/// The hook receives this value after every pull in which at least one record
+/// was applied. The `storage` handle is the same `Arc<dyn Storage>` the pull
+/// used; writes made through it do NOT carry the pull guard (`pulling` flag),
+/// so they are treated as local mutations and flow into the observer workers'
+/// outbox — satisfying the hook-writes-must-ship invariant (Kong Q2
+/// adjudication).
+///
+/// ## Atomicity caveat
+///
+/// PersistenceKit exposes no batch-transaction API. The hook runs after all
+/// batch records have been applied but NOT in a containing transaction. Design
+/// hooks to be idempotent.
+pub struct AppliedBatch {
+    /// PersistenceKit storage the pull applied against.
+    pub storage: Arc<dyn Storage>,
+    /// Row keys upserted (inserted or updated) during this batch, keyed by
+    /// table name. Rows rejected by LWW do not appear here.
+    pub applied_by_table: HashMap<String, Vec<Uuid>>,
+    /// Row keys whose tombstones were applied (hard-deleted), keyed by table.
+    pub deleted_by_table: HashMap<String, Vec<Uuid>>,
+}
+
+/// Hook type: a shareable, cloneable sync callback invoked once per pull batch.
+/// `Arc<dyn Fn>` is Clone (pointer clone), so `SyncManifest: Clone`.
+/// Closures that implement `Fn(&AppliedBatch) -> Result<(), SyncError>` are
+/// `Send + Sync` when all captured data is `Send + Sync`.
+pub type IntegrityHookFn = Arc<dyn Fn(&AppliedBatch) -> Result<(), SyncError> + Send + Sync>;
 
 /// Declarative configuration for a sync session.
 /// JSON contract: camelCase field names matching Swift's property names.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// ## Not fully Debug-derived
+///
+/// `SyncManifest` no longer derives `Debug` automatically because
+/// `Arc<dyn Fn(...)>` does not implement `Debug`. A manual `Debug` impl is
+/// provided below that prints the hook presence without the closure body.
+///
+/// ## post_apply_integrity_hook — not serialised
+///
+/// The hook field uses `#[serde(skip)]` so it is omitted from JSON output
+/// and defaults to `None` on deserialization. `SyncManifest` JSON remains
+/// the same wire-compatible shape as before (kitID, schemaVersion,
+/// zoneIdentifier, tables). The hook is a local runtime callback only.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncManifest {
     /// Serializes as "kitID" to match Swift's property name (not "kitId").
@@ -95,6 +158,24 @@ pub struct SyncManifest {
     pub schema_version: i32,
     pub zone_identifier: String,
     pub tables: Vec<SyncedTable>,
+    /// (v1.2-draft) Optional callback invoked once per pull batch AFTER all
+    /// inbound records have been applied. See `AppliedBatch` for the contract.
+    /// Not serialised — closures cannot be transmitted over the wire.
+    #[serde(skip)]
+    pub post_apply_integrity_hook: Option<IntegrityHookFn>,
+}
+
+impl std::fmt::Debug for SyncManifest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncManifest")
+            .field("kit_id", &self.kit_id)
+            .field("schema_version", &self.schema_version)
+            .field("zone_identifier", &self.zone_identifier)
+            .field("tables", &self.tables)
+            .field("post_apply_integrity_hook",
+                   &self.post_apply_integrity_hook.as_ref().map(|_| "<hook>"))
+            .finish()
+    }
 }
 
 impl SyncManifest {
@@ -109,7 +190,13 @@ impl SyncManifest {
             schema_version,
             zone_identifier: zone_identifier.into(),
             tables,
+            post_apply_integrity_hook: None,
         }
+    }
+
+    pub fn with_integrity_hook(mut self, hook: IntegrityHookFn) -> Self {
+        self.post_apply_integrity_hook = Some(hook);
+        self
     }
 
     pub fn table_named(&self, name: &str) -> Option<&SyncedTable> {
@@ -191,6 +278,27 @@ pub enum SyncError {
     PeerUnreachable { identity: String },
     AuthenticationFailed { detail: String },
     UnsupportedTable { name: String },
+    // ── N2 slot-registry errors (v1.2-draft) ──────────────────────────────
+    // Vocabulary parity with the Swift leg. These variants are thrown by the
+    // CloudKit backend (Swift-only; CloudKit has no Rust API per N4). They
+    // exist in the Rust error enum so error-handling code and tests can
+    // reference the vocabulary without depending on CloudKit.
+    //
+    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+
+    /// This device's (slot, epoch) pair has been superseded: the slot was
+    /// evicted and its epoch bumped while the device was inactive. Raised
+    /// before any inbound records are applied. (Swift CloudKit engine only;
+    /// present here for vocabulary parity. Never thrown by Rust code.)
+    ReenrollRequired {
+        slot: i32,
+        stale_epoch: i64,
+        current_epoch: i64,
+    },
+    /// All 15 assignable node-ID slots (1–15) are occupied by recently-active
+    /// devices. No records are applied. (Swift CloudKit engine only; present
+    /// here for vocabulary parity. Never thrown by Rust code.)
+    SlotExhausted { active_count: usize },
 }
 
 impl std::fmt::Display for SyncError {
@@ -212,6 +320,17 @@ impl std::fmt::Display for SyncError {
                 write!(f, "authentication failed: {}", detail)
             }
             SyncError::UnsupportedTable { name } => write!(f, "unsupported table: {}", name),
+            // N2 slot-registry errors — vocabulary parity with Swift leg
+            SyncError::ReenrollRequired { slot, stale_epoch, current_epoch } => {
+                write!(
+                    f,
+                    "reenroll required: slot {} stale epoch {} current epoch {}",
+                    slot, stale_epoch, current_epoch
+                )
+            }
+            SyncError::SlotExhausted { active_count } => {
+                write!(f, "slot exhausted: {} active devices", active_count)
+            }
         }
     }
 }

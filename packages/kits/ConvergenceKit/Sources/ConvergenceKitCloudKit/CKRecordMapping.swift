@@ -38,9 +38,46 @@ public enum CKRecordMapping {
         CKRecord.ID(recordName: rowKey.uuidString, zoneID: zone)
     }
 
+    /// Build a tombstone CKRecord for a delete event.
+    ///
+    /// WHY a tombstone CKRecord instead of CKRecord.ID deletion:
+    /// CKRecord.ID deletions carry no record type, so the pull path cannot
+    /// route them to the correct manifest table — they fan out to every
+    /// non-pushOnly table (D1 defect). A typed tombstone CKRecord encodes
+    /// the table name in its `recordType` (`kitID_tableName`), giving the
+    /// pull path the routing information it needs. The delete HLC is stored
+    /// in `_syncHLC` so the receiver applies the same LWW gate as for
+    /// upserts (D2 fix) and persists the HLC in `_ck_sync_meta` after
+    /// hard-deleting the row (A6 adjudication, stale-resurrect guard).
+    public static func tombstoneRecord(
+        rowKey: UUID,
+        table: String,
+        kitID: String,
+        deleteHLC: HLC,
+        schemaVersion: Int,
+        zone: CKRecordZone.ID
+    ) -> CKRecord {
+        let id = recordID(rowKey: rowKey, zone: zone)
+        let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: id)
+        // Tombstone marker: receiver detects _syncDeleted == 1 and routes through
+        // the tombstone apply path rather than a normal upsert.
+        record[SyncTombstone.deletedFieldKey] = NSNumber(value: 1)
+        // Delete HLC: lets the receiver gate against stale resurrections via the
+        // standard LWW comparison and persist the HLC in _ck_sync_meta after delete.
+        record["_syncHLC"] = packed(deleteHLC) as NSNumber
+        record["_syncSchemaVersion"] = NSNumber(value: schemaVersion)
+        record["_syncKitID"] = kitID as NSString
+        return record
+    }
+
     /// Convert a row to a CKRecord. Reserved field names
-    /// (_syncHLC, _syncSchemaVersion, _syncKitID) carry sync metadata
-    /// so the receiver can apply conflict policy and schema check.
+    /// (_syncHLC, _syncSchemaVersion, _syncKitID, _syncColumnHLCs) carry
+    /// sync metadata so the receiver can apply conflict policy and schema check.
+    ///
+    /// - Parameters:
+    ///   - columnHLCs: Per-column HLC map for `fieldLevelLWW` records. When
+    ///     non-nil and non-empty, encoded as a JSON blob in `_syncColumnHLCs`.
+    ///     Nil or empty for non-fieldLevelLWW records — field is omitted.
     public static func record(
         from values: [String: TypedValue],
         table: String,
@@ -48,7 +85,8 @@ public enum CKRecordMapping {
         hlc: HLC,
         schemaVersion: Int,
         kitID: String,
-        zone: CKRecordZone.ID
+        zone: CKRecordZone.ID,
+        columnHLCs: ColumnHLCMap? = nil
     ) throws -> CKRecord {
         let recordID = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: recordID)
@@ -59,10 +97,22 @@ public enum CKRecordMapping {
         record["_syncHLC"] = packed(hlc) as NSNumber
         record["_syncSchemaVersion"] = NSNumber(value: schemaVersion)
         record["_syncKitID"] = kitID as NSString
+        // _syncColumnHLCs: present only for fieldLevelLWW records (B-8, v1.2-draft).
+        // JSON-encoded ColumnHLCMap blob. Omitted when nil or empty so non-fieldLevelLWW
+        // records stay compact on the wire.
+        if let map = columnHLCs, !map.isEmpty,
+           let data = try? JSONEncoder().encode(map) {
+            record["_syncColumnHLCs"] = data as NSData
+        }
         return record
     }
 
     /// Decode sync metadata + values from a CKRecord.
+    ///
+    /// Sets `DecodedRecord.isTombstone = true` when the record carries
+    /// `_syncDeleted == 1`. Tombstone records are applied through the
+    /// standard LWW gate; on a win the row is hard-deleted and the HLC
+    /// persists in `_ck_sync_meta` (A6 adjudication).
     public static func decode(_ record: CKRecord) throws -> DecodedRecord {
         guard let hlcPacked = (record["_syncHLC"] as? NSNumber)?.int64Value else {
             throw SyncError.decodingFailure(detail: "missing _syncHLC on \(record.recordID.recordName)")
@@ -84,6 +134,19 @@ public enum CKRecordMapping {
             throw SyncError.corruptRemoteIdentity(recordName: record.recordID.recordName)
         }
 
+        // Detect tombstone marker. _syncDeleted is filtered from values below
+        // (all _sync* keys are excluded) so it does not leak into the app schema.
+        let isTombstone = (record[SyncTombstone.deletedFieldKey] as? NSNumber)?.intValue == 1
+
+        // Decode per-column HLC map for fieldLevelLWW records (B-8, v1.2-draft).
+        // Absent on non-fieldLevelLWW records and on records from older peers.
+        let columnHLCs: ColumnHLCMap?
+        if let data = record["_syncColumnHLCs"] as? Data {
+            columnHLCs = try? JSONDecoder().decode(ColumnHLCMap.self, from: data)
+        } else {
+            columnHLCs = nil
+        }
+
         var values: [String: TypedValue] = [:]
         for key in record.allKeys() {
             if key.hasPrefix("_sync") { continue }
@@ -97,7 +160,9 @@ public enum CKRecordMapping {
             table: tableName,
             rowKey: rowKey,
             values: values,
-            syncMeta: SyncMeta(hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+            syncMeta: SyncMeta(hlc: hlc, schemaVersion: schemaVersion, kitID: kitID),
+            isTombstone: isTombstone,
+            columnHLCs: columnHLCs
         )
     }
 
@@ -203,6 +268,38 @@ public struct DecodedRecord: Sendable {
     public let values: [String: TypedValue]
     /// Sync metadata extracted during decode.
     public let syncMeta: SyncMeta
+    /// True when this record represents a delete tombstone (`_syncDeleted == 1`).
+    ///
+    /// WHY: the tombstone flag routes this record to the tombstone apply path
+    /// in `applyInbound` — LWW gate → hard-delete row → persist delete HLC in
+    /// `_ck_sync_meta` (A6 adjudication). Without the flag the receiver would
+    /// attempt a normal upsert on an empty values map, creating a phantom row.
+    /// Defaults to false for normal (non-delete) records.
+    public var isTombstone: Bool = false
+
+    /// Per-column HLC map decoded from `_syncColumnHLCs` (B-8, v1.2-draft).
+    ///
+    /// Non-nil only for `fieldLevelLWW` records where the sender populated
+    /// the column HLC map. Nil on non-fieldLevelLWW records and on records
+    /// from older peers that do not support the field (backward-compat).
+    /// ApplyInbound uses this map for the `.fieldLevelLWW` policy arm.
+    public var columnHLCs: ColumnHLCMap?
+
+    public init(
+        table: String,
+        rowKey: UUID,
+        values: [String: TypedValue],
+        syncMeta: SyncMeta,
+        isTombstone: Bool = false,
+        columnHLCs: ColumnHLCMap? = nil
+    ) {
+        self.table = table
+        self.rowKey = rowKey
+        self.values = values
+        self.syncMeta = syncMeta
+        self.isTombstone = isTombstone
+        self.columnHLCs = columnHLCs
+    }
 
     /// HLC of the record — convenience accessor backed by `syncMeta`.
     public var hlc: HLC { syncMeta.hlc }

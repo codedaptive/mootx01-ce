@@ -56,6 +56,20 @@ private func removeSQLite(at url: URL) {
 
 // MARK: - Tests
 
+/// Poll `condition` up to ~5 s (50 × 100 ms) rather than waiting one fixed
+/// interval for the observer AsyncStream to drain into the dirty-set.
+/// `observe()` registers synchronously, but delivery runs on a detached task,
+/// and under the parallel full-lane's load that task can land past any single
+/// fixed sleep — the flake class fixed in 9629d17a (ObserverSink) and 14d4dc4a
+/// (PK-TEST-01). Returns as soon as the condition holds; the trailing
+/// assertion then confirms it (and reports the real value if it never did).
+private func pollObserver(_ condition: () async -> Bool) async throws {
+    for _ in 0..<50 where !(await condition()) {
+        try await Task.sleep(nanoseconds: 100_000_000) // 100 ms
+    }
+}
+
+
 @Suite("SnapshotReplicationTests")
 struct SnapshotReplicationTests {
 
@@ -102,7 +116,7 @@ struct SnapshotReplicationTests {
         )
 
         // Small delay for observer to accumulate dirty set.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver { await session.dirtySet.count() >= 3 }
 
         // Replicate.
         let cursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)

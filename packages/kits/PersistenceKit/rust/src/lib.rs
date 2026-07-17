@@ -24,6 +24,7 @@ pub mod blob_store;
 pub mod cache_config;
 pub mod cache_invalidator;
 pub mod caching_row_store;
+pub mod dataset_store;
 pub mod encryption;
 pub mod error;
 // gc_pin and snapshot_registry types accessed via module path (like replication).

@@ -72,6 +72,7 @@ struct OperationalBitmapConformanceTests {
         (.structuredJSON,  4),
         (.imageCaption,    5),
         (.fingerprintOnly, 6),   // NEW in v0.6
+        (.dataset,         7),   // NEW per MX-TAB-3
     ]
 
     @Test("ContentKind raw values match cookbook §2.4")

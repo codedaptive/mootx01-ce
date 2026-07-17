@@ -1,8 +1,8 @@
 ---
 title: EngramLib Specification
-version: 1.0.0
+version: 1.0.1
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for EngramLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -84,15 +84,27 @@ engram opaquely and construct it through the provided initializers, not
 by reaching into blocks.
 
 **I-2 (statelessness):** the static API holds no mutable state and is
-thread-safe; every static call obtains and discards its own kernel.
+thread-safe. In the Swift port the kernel is resolved once at module
+load time and shared as a stateless `Sendable` value
+(`_engramLibCachedKernel`); in the Rust port the static functions
+construct a fresh kernel per call via `PortableKernel::for_current_platform()`.
+Both strategies are correct because the kernel is stateless — every
+static call is thread-safe and produces the same result regardless of
+which reuse strategy the port uses.
 
 **I-3 (Session equivalence):** a `Session` produces results identical
 to the static methods for every operation; it differs only in holding a
 kernel instance for reuse. `Session` is `Sendable`.
 
-**I-4 (delegation):** all compute delegates to SubstrateLib kernels;
-EngramLib introduces no independent math and therefore inherits
-SubstrateLib's scalar-reference and cross-port parity guarantees
+**I-4 (delegation):** compute delegates to SubstrateLib kernels for
+all non-trivial operations (distance, batch distance, top-K nearest,
+OR-reduce over a set). The pairwise-union overloads (`union(_:_:)` in
+Swift, `union_pair` in Rust) operate directly on the substrate
+`Fingerprint256` block representation without a kernel dispatch call —
+the operation is a bitwise OR of four 64-bit words and is trivially
+correct without a kernel intermediary. For everything else, EngramLib
+introduces no independent math and therefore inherits SubstrateLib's
+scalar-reference and cross-port parity guarantees
 (`SUBSTRATELIB_SPEC.md`, I-7).
 
 ## § 5 — Behavioral contracts
@@ -143,6 +155,16 @@ nearest, within, and union for every shared test vector (inherits
 `SUBSTRATELIB_SPEC.md`, I-7).
 
 ## Changelog
+
+### 1.0.1 -- 2026-07-16
+Corrected I-2: the Swift static API caches the kernel at module scope
+(a stateless `Sendable` value resolved once at load); the Rust static
+functions construct a fresh kernel per call. The previous text
+incorrectly claimed every static call obtains and discards its own
+kernel. Corrected I-4: pairwise-union overloads (`union(_:_:)` Swift /
+`union_pair` Rust) operate directly on the `Fingerprint256` block
+representation without a kernel dispatch call; qualified the
+"all compute delegates to kernels" claim accordingly.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

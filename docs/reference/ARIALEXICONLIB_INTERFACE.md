@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-15
-version: 1.0.1
+version: 1.0.2
 description: Public API surface for AriaLexiconLib in both the Swift and Rust ports.
 spec_type: kit
 package: AriaLexiconLib
@@ -36,7 +36,10 @@ purpose: |
 
 Naming differs by port convention: Swift `Verb.capture`, Rust
 `Verb::Capture`; Swift `CaseIterable.allCases`, Rust `Verb::ALL`. The
-case *set* and order are identical (SPEC § 7, C-5).
+case *set* and order are identical (SPEC § 7, C-5). On the wire both
+ports emit the same camelCase strings: Swift through `Codable` on the
+`String` raw values, Rust through serde (`rename_all = "camelCase"`)
+and the `as_str()` accessors (SPEC § 7, C-6).
 
 ## § 2 — Public types
 
@@ -63,12 +66,14 @@ public enum Noun: String, CaseIterable, Sendable, Codable {
 **Rust:**
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Noun { Drawer, Tunnel, KgFact, Vector, DiaryEntry, Proposal, Association, LearnedReference }
 
 impl Noun {
     pub const ALL: [Noun; 8];        // declaration order
     pub const PRIMARY: Noun;         // == Noun::Drawer
+    pub fn as_str(self) -> &'static str;  // wire string == Swift rawValue
     pub fn role(self) -> NounRole;
 }
 ```
@@ -91,7 +96,8 @@ public enum NounRole: String, CaseIterable, Sendable, Codable {
 **Rust:**
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum NounRole { Primary, Rung, Structure, Product }
 ```
 
@@ -113,11 +119,13 @@ public enum Verb: String, CaseIterable, Sendable, Codable {
 **Rust:**
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Verb { Capture, Reanchor, Mutate, Withdraw, Expunge, Recall, Propose, Associate, Learn }
 
 impl Verb {
     pub const ALL: [Verb; 9];     // declaration order
+    pub fn as_str(self) -> &'static str;  // wire string == Swift rawValue
     pub fn flow(self) -> Flow;
 }
 ```
@@ -139,7 +147,8 @@ public enum Flow: String, CaseIterable, Sendable, Codable {
 **Rust:**
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Flow { CallerDriven, SubstrateDriven, GroundingDriven }
 ```
 
@@ -163,10 +172,14 @@ public enum Adjective: String, CaseIterable, Sendable, Codable {
 **Rust:**
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Adjective { State, Trust, Sensitivity, Exportability }
 
-impl Adjective { pub const ALL: [Adjective; 4]; }
+impl Adjective {
+    pub const ALL: [Adjective; 4];
+    pub fn as_str(self) -> &'static str;  // wire string == Swift rawValue
+}
 ```
 
 ### `AriaLexiconLib` (Swift) / `GRAMMAR` (Rust)
@@ -246,7 +259,11 @@ cargo test -p aria-lexicon-lib
 
 (Tests live in `src/lib.rs` under `#[cfg(test)] mod tests`: verb count,
 adjective count, primary noun, role partition, flow partition,
-acceptance matrix, applicability, grammar.)
+acceptance matrix, applicability, grammar, `as_str()` wire conformance
+for every noun/verb/adjective variant, serde wire-string checks for all
+five enums, full round-trip checks for `Noun` and `Verb`, and one-value
+round-trip spot checks for `Flow` and `NounRole`; `Adjective` has
+wire-string match tests but no dedicated deserialization round-trip.)
 
 ## § 6 — Examples
 
@@ -324,6 +341,7 @@ Two concepts differ in *shape* by language idiom, not in content:
 | Adjective categories (the 4) | `Adjective` enum | `Adjective` enum | identical case set (state/trust/sensitivity/exportability) | category count fixed at four (I-2); four categories are state/trust/sensitivity/exportability |
 | The grammar sentence | `AriaLexiconLib.grammar` | `GRAMMAR` const | Swift caseless-enum namespace static `let` / Rust module-level `const` — content identical | grammar sentence is stated |
 | Verb-noun acceptance matrix | `Acceptance` enum: `verbs(for:)` / `accepts(_:_:)` | free fns `accepted_verbs` / `accepts` | Swift caseless-enum namespace with statics / Rust free functions; Swift returns `Set<Verb>` (unordered) / Rust returns ordered `Vec<Verb>` — membership is the contract, not order | acceptance matrix matches spec; accepts agrees with membership everywhere (conformance gate, C-3) |
+| Wire strings | `rawValue` + `Codable` synthesis | `as_str()` on `Noun`/`Verb`/`Adjective` + serde `rename_all = "camelCase"` on all five enums | Swift raw values ARE the case names; Rust maps PascalCase variants to the same camelCase strings (idiom) | every variant's wire string byte-identical across ports (C-6; `as_str()` and serde output pinned per variant in Rust tests) |
 
 Every concept is present in both ports and behavior-bound by a conformance
 test; there are no platform-specific bindings in this lib.
@@ -333,6 +351,9 @@ test; there are no platform-specific bindings in this lib.
 *End of AriaLexiconLib Interface.*
 
 ## Changelog
+
+### 1.0.2 -- 2026-07-16
+§ 5 Rust test description corrected: the claim "serde round-trip checks for all five enums" overstated coverage. Full round-trip tests exist for `Noun` and `Verb` only; `Flow` and `NounRole` have one-value spot checks; `Adjective` has wire-string match tests but no deserialization round-trip.
 
 ### 1.0.1 -- 2026-06-15
 Renamed `§ 8 — Swift/Rust symbol map` to `§ 8 — Swift/Rust Concordance` so the concordance audit detects the section. No content changed.
