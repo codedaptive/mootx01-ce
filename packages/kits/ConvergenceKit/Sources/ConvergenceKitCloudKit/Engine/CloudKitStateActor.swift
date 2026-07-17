@@ -281,11 +281,40 @@ actor CloudKitStateActor {
         let packedHLC = Int64(bitPattern: hlc.packed)
 
         // Encode values as a JSON SyncValueMap blob for transport-agnostic storage.
+        let rawValues = change.values
         let valuesData: Data?
-        if let rawValues = change.values {
-            valuesData = try? JSONEncoder().encode(SyncValueMap(rawValues))
+        if let raw = rawValues {
+            valuesData = try? JSONEncoder().encode(SyncValueMap(raw))
         } else {
             valuesData = nil
+        }
+
+        // For fieldLevelLWW tables, stamp ALL present value columns with the
+        // capture HLC and encode as a ColumnHLCMap blob.
+        //
+        // WHY stamp all columns (not just changed ones):
+        // PersistenceKit's TableChange does not carry a changedColumns field —
+        // only the full row snapshot at the time of the event is available.
+        // Stamping all present columns is correct but coarse: a column that
+        // was not actually changed in this write gets a new HLC equal to the
+        // capture HLC, which may be newer than the column's true last-write HLC.
+        // This does not cause data loss — it only means the receiver cannot
+        // distinguish "this column was written now" from "this column existed in
+        // the row but was not touched." The practical effect is conservative:
+        // the receiver applies more columns than strictly necessary (anything
+        // whose stored HLC is older than the capture HLC), which is safe.
+        // A future refinement: add changedColumns to TableChange in PersistenceKit.
+        let columnHLCsData: Data?
+        if let raw = rawValues,
+           let syncedTable = manifest?.table(named: change.table),
+           syncedTable.conflictPolicy == .fieldLevelLWW {
+            let colMap = ColumnHLCMap.stampAll(
+                keys: raw.keys,
+                hlc: PackedHLC(hlc)
+            )
+            columnHLCsData = try? JSONEncoder().encode(colMap)
+        } else {
+            columnHLCsData = nil
         }
 
         let enqueuedAt = ISO8601DateFormatter().string(from: Date())
@@ -296,7 +325,8 @@ actor CloudKitStateActor {
             event: SyncEventKind(from: change.event),
             valuesData: valuesData,
             packedHLC: packedHLC,
-            enqueuedAt: enqueuedAt
+            enqueuedAt: enqueuedAt,
+            columnHLCsData: columnHLCsData
         )
 
         do {

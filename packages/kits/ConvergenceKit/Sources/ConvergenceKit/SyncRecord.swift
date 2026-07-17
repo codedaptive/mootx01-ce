@@ -47,11 +47,25 @@ public struct SyncRecord: Sendable, Codable {
     /// absent (Rust `#[serde(default)]` provides the same null default).
     public let syncDeleted: Bool?
 
+    /// Per-column HLC map for the `fieldLevelLWW` conflict policy (B-8, v1.2-draft).
+    ///
+    /// WHY wire-carried (not receiver-derived — A7):
+    /// The sender knows exactly which columns were written and at which
+    /// HLC. The receiver does not: it sees only the full row snapshot.
+    /// Receivers must not fabricate column HLCs from the row-grain HLC —
+    /// that would treat all columns as written simultaneously, erasing the
+    /// finer-grained write ordering the protocol is designed to preserve.
+    ///
+    /// Nil when `conflictPolicy != .fieldLevelLWW` or when the sender does
+    /// not support field-level LWW (backward-compat: treat as row-grain LWW).
+    /// Omitted from JSON when nil (C-8 parity with Rust `skip_serializing_if`).
+    public let columnHLCs: ColumnHLCMap?
+
     /// Explicit CodingKeys documenting the cross-port JSON contract.
     /// Rust serde renames match these exact strings (`rename_all = "camelCase"`
     /// plus explicit `rename = "kitID"` for the ID suffix convention).
     private enum CodingKeys: String, CodingKey {
-        case table, event, rowKey, values, hlc, schemaVersion, kitID, syncDeleted
+        case table, event, rowKey, values, hlc, schemaVersion, kitID, syncDeleted, columnHLCs
     }
 
     public init(
@@ -62,7 +76,8 @@ public struct SyncRecord: Sendable, Codable {
         hlc: PackedHLC,
         schemaVersion: Int,
         kitID: String,
-        syncDeleted: Bool? = nil
+        syncDeleted: Bool? = nil,
+        columnHLCs: ColumnHLCMap? = nil
     ) {
         self.table = table
         self.event = event
@@ -72,6 +87,7 @@ public struct SyncRecord: Sendable, Codable {
         self.schemaVersion = schemaVersion
         self.kitID = kitID
         self.syncDeleted = syncDeleted
+        self.columnHLCs = columnHLCs
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -85,6 +101,8 @@ public struct SyncRecord: Sendable, Codable {
         try container.encode(kitID, forKey: .kitID)
         // Omit syncDeleted when nil — Rust serde `skip_serializing_if = "Option::is_none"` parity.
         try container.encodeIfPresent(syncDeleted, forKey: .syncDeleted)
+        // Omit columnHLCs when nil — present only for fieldLevelLWW records.
+        try container.encodeIfPresent(columnHLCs, forKey: .columnHLCs)
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +116,8 @@ public struct SyncRecord: Sendable, Codable {
         kitID = try container.decode(String.self, forKey: .kitID)
         // Absent in JSON from older peers — defaults to nil (not a tombstone).
         syncDeleted = try container.decodeIfPresent(Bool.self, forKey: .syncDeleted)
+        // Absent when sender does not support fieldLevelLWW — backward compat.
+        columnHLCs = try container.decodeIfPresent(ColumnHLCMap.self, forKey: .columnHLCs)
     }
 }
 

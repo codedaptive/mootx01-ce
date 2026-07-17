@@ -40,6 +40,10 @@ pub enum ConflictPolicy {
     LocalWins,
     /// Receiver overwrites local on conflict.
     RemoteWins,
+    /// (v1.2-draft) Per-column HLC last-writer-wins. See B-8 in
+    /// CONVERGENCEKIT_SPEC.md and FieldLWW/ in the Swift source.
+    /// Serialises as "fieldLevelLWW" (camelCase via serde rename_all).
+    FieldLevelLWW,
 }
 
 /// Declaration of a single synced table within a manifest.

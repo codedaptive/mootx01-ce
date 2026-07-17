@@ -43,6 +43,20 @@ public struct OutboxEntry: Sendable {
     /// delete events (there are no values to send for a deletion).
     public let valuesData: Data?
 
+    /// JSON-encoded ColumnHLCMap for `fieldLevelLWW` outbox entries; nil for
+    /// non-fieldLevelLWW tables or delete events.
+    ///
+    /// Populated by `CloudKitStateActor.recordOutbound` when the synced table
+    /// uses `conflictPolicy == .fieldLevelLWW`. The push path (PushCycle)
+    /// decodes this and passes it to `CKRecordMapping.record(...)` so the
+    /// `_syncColumnHLCs` field is present in the CKRecord on the wire.
+    ///
+    /// WHY pre-encoded (not a live ColumnHLCMap):
+    /// Mirrors `valuesData` — the outbox stores opaque JSON blobs so the push
+    /// path can re-encode to any transport format without schema coupling.
+    /// Decoding only happens in PushCycle when building the CKRecord.
+    public let columnHLCsData: Data?
+
     /// Packed HLC for this change (48-bit physical | 12-bit logical |
     /// 4-bit node, packed into Int64). Used by the coalescing logic:
     /// when two entries for the same (tableName, rowKey) exist, the one
@@ -75,7 +89,8 @@ public struct OutboxEntry: Sendable {
         packedHLC: Int64,
         enqueuedAt: String,
         retryCount: Int = 0,
-        isParked: Bool = false
+        isParked: Bool = false,
+        columnHLCsData: Data? = nil
     ) {
         self.id = id
         self.tableName = tableName
@@ -86,5 +101,6 @@ public struct OutboxEntry: Sendable {
         self.enqueuedAt = enqueuedAt
         self.retryCount = retryCount
         self.isParked = isParked
+        self.columnHLCsData = columnHLCsData
     }
 }
