@@ -26,17 +26,16 @@
 //         _ck_outbox          Gains retry_count and is_parked columns (R6, CVK-ICLOUD P1-M6)
 //   v6 — _ck_sync_meta_cols  Per-column HLC side table for fieldLevelLWW (B-8, CVK-ICLOUD P2-M1)
 //         _ck_outbox          Gains column_hlcs blob column (JSON-encoded ColumnHLCMap)
-// Planned additions in later missions:
-//   v4 — _ck_device_identity  Device-slot registry (N2)        ← earmarked, not yet implemented
-//   v5 — _ck_pending_skew     Schema-skew pending queue (R9)   ← earmarked, not yet implemented
+//   v7 — _ck_pending_skew    Schema-skew pending queue (R9, CVK-ICLOUD P3-M4)
+// Earmarks now superseded:
+//   v4 — _ck_device_identity  Device-slot registry (N2)      ← earmark superseded by v6→v7 jump
+//   v5 — _ck_pending_skew     Schema-skew pending queue (R9) ← landed at v7 instead (see below)
 //
-// WHY v6 skips v4 and v5:
-// v4 and v5 are earmarked for future missions. Their missions will insert
-// migrations in the correct sequence when they land. The version counter is
-// monotonically increasing and need not be contiguous — PersistenceKit's
-// migrate(to:) applies each Migration(fromVersion:toVersion:) in sequence
-// regardless of gaps. Using v6 now avoids a version conflict with the
-// earmarked v4/v5 slots.
+// WHY v7 for _ck_pending_skew (not v5):
+// v4 and v5 were earmarked before P2-M1 landed. P2-M1 added _ck_sync_meta_cols
+// at v6 using a v3→v6 jump (skipping the earmarks). Since v6 is already
+// deployed, _ck_pending_skew must land at v7 via a v6→v7 migration. The
+// version counter is monotonically increasing and need not be contiguous.
 //
 // Call ensure(storage:) once per enable(); it is idempotent — all backends
 // use IF NOT EXISTS semantics via migrate(to:).
@@ -89,6 +88,17 @@ public enum CKSideSchema {
     /// path to determine which columns from the incoming record should overwrite
     /// local state. Added in v6 (CVK-ICLOUD P2-M1).
     public static let syncMetaColsTable = "_ck_sync_meta_cols"
+
+    /// Pending-skew queue for future-schema records (R9, CVK-ICLOUD P3-M4).
+    ///
+    /// Schema: (id UUID PK, table_name TEXT, row_key TEXT,
+    ///          schema_version INT, received_at TEXT, payload BLOB).
+    ///
+    /// One row per held record. Populated by PendingSkewQueue.enqueue when
+    /// a pull receives a record whose schemaVersion > manifest.schemaVersion.
+    /// Drained by SkewReplay.drainReady at enable() time when schema_version
+    /// equals the newly-enabled manifest version. Added in v7.
+    public static let pendingSkewTable = "_ck_pending_skew"
 
     // MARK: - Schema declaration (internal — callers use ensure)
 
@@ -193,13 +203,37 @@ public enum CKSideSchema {
             primaryKey: ["table_name", "primary_key", "column_name"]
         )
 
+        // _ck_pending_skew schema (v7 — schema-skew pending queue, R9, CVK-ICLOUD P3-M4):
+        //   id             — UUID primary key assigned at enqueue time.
+        //   table_name     — application table the record belongs to.
+        //   row_key        — UUID as TEXT (primary key of the application row).
+        //   schema_version — schemaVersion from the wire record (sender's version).
+        //                    INT, not Bool, per schema invariants.
+        //   received_at    — ISO8601 wall-clock TEXT for oldest-eviction ordering.
+        //                    Date storage is TEXT (ISO8601) per schema invariants.
+        //   payload        — JSON-encoded SyncRecord (full wire format; round-trips
+        //                    through JSONDecoder().decode(SyncRecord.self, from:)).
+        let pendingSkewDecl = TableDeclaration(
+            name: pendingSkewTable,
+            columns: [
+                ColumnDeclaration(name: "id",             type: .uuid, nullable: false),
+                ColumnDeclaration(name: "table_name",     type: .text, nullable: false),
+                ColumnDeclaration(name: "row_key",        type: .text, nullable: false),
+                ColumnDeclaration(name: "schema_version", type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
+                ColumnDeclaration(name: "received_at",    type: .text, nullable: false),
+                ColumnDeclaration(name: "payload",        type: .blob, nullable: false),
+            ],
+            primaryKey: ["id"]
+        )
+
         return SchemaDeclaration(
             kitID: "ConvergenceKit",
-            version: 6,
-            tables: [syncMetaDecl, outboxDecl, changeTokenDecl, syncMetaColsDecl],
+            version: 7,
+            tables: [syncMetaDecl, outboxDecl, changeTokenDecl, syncMetaColsDecl, pendingSkewDecl],
             migrations: [
                 // v1 → v2: add durable outbox table.
-                // The tables array handles v0 → v6 fresh installs via IF NOT EXISTS.
+                // The tables array handles v0 → v7 fresh installs via IF NOT EXISTS.
                 Migration(fromVersion: 1, toVersion: 2, operations: [
                     .createTable(outboxDecl),
                 ]),
@@ -219,13 +253,20 @@ public enum CKSideSchema {
                 //   - Add column_hlcs blob to _ck_outbox (sender stamps column HLCs
                 //     at capture time; push path passes them to CKRecordMapping).
                 // WHY from v3 directly to v6:
-                // v4 (_ck_device_identity, N2) and v5 (_ck_pending_skew, R9) are
-                // earmarked but not yet implemented. Their missions will add
-                // Migration(fromVersion:4, toVersion:5) etc. when they land.
+                // v4 (_ck_device_identity, N2) and v5 (_ck_pending_skew, R9) were
+                // earmarked but the P2-M1 mission jumped to v6, skipping both.
                 // Devices already at v3 advance to v6 via this migration.
                 Migration(fromVersion: 3, toVersion: 6, operations: [
                     .createTable(syncMetaColsDecl),
                     .addColumn(table: outboxTable, column: columnHLCsDecl),
+                ]),
+                // v6 → v7: schema-skew pending queue (R9, CVK-ICLOUD P3-M4).
+                //   - Add _ck_pending_skew table. Holds future-schema records
+                //     from pull cycles until a schema update makes them applicable.
+                //     Cap at 512 entries (Playground Rule 8 relief valve);
+                //     oldest entries evicted by PendingSkewQueue.evictIfNeeded.
+                Migration(fromVersion: 6, toVersion: 7, operations: [
+                    .createTable(pendingSkewDecl),
                 ]),
             ]
         )

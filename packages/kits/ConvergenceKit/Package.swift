@@ -85,7 +85,13 @@ let package = Package(
         // Test targets.
         .testTarget(
             name: "ConvergenceKitTests",
-            dependencies: ["ConvergenceKit", "SubstrateTypes"],
+            dependencies: [
+                "ConvergenceKit",
+                "SubstrateTypes",
+                // SkewQueueTests uses InMemoryStorage to exercise PendingSkewQueue
+                // and SkewReplay in isolation (CVK-ICLOUD P3-M4).
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+            ],
             path: "Tests/ConvergenceKitTests"
         ),
         .testTarget(
