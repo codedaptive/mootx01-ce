@@ -353,6 +353,28 @@ contract for every device that participates in a multi-device estate:
    epoch atomically via a CAS save; a race loss retries. When no candidate
    qualifies, `slotExhausted(activeCount:)` is thrown.
 
+**B-14 (column projection) (v1.2-draft):** `SyncedTable` carries an
+`excludedColumns: Set<String>` field (Swift) / `excluded_columns: HashSet<String>`
+(Rust). Exclusion semantics only (not inclusion). JSON key `"excludedColumns"`;
+omitted when empty for backward compatibility. Two enforcement points per backend:
+
+1. **Outbound (before outbox enqueue):** the outbox entry strips all excluded
+   columns from the record's values before append. If, after stripping, the only
+   remaining value is the primary key (storm-kill condition), the update is not
+   enqueued at all — a derived-column recompute generates zero outbound traffic.
+   Delete events (tombstones) are never suppressed regardless of `excludedColumns`.
+
+2. **Inbound (before conflict-policy switch in `applyInbound`):** excluded columns
+   are dropped from the inbound record before the policy switch. A peer on a
+   different manifest version may send columns this manifest marks excluded;
+   dropping them prevents overwriting locally-computed derived values with stale
+   remote copies. The drop is logged at warning level with the column list.
+
+`Projection.outboundStrip`, `Projection.isAllExcluded`, and `Projection.isStormKill`
+(Swift) / `outbound_strip_change` (Rust) are the canonical implementations.
+The `with_excluded_columns` builder on `SyncedTable` (both legs) is the ergonomic
+construction path (see CONVERGENCEKIT_INTERFACE.md §SyncedTable).
+
 **Note N4 (CloudKit exclusivity) (v1.2-draft):** The CloudKit backend is
 Swift-vertical only, following the same precedent as Metal compute kernels.
 CloudKit has no Rust API, and the no-FFI constraint between Swift and Rust
@@ -447,13 +469,48 @@ is rejected at pull and its records do not apply (I-7).
 `SyncValueMap` / `SyncValueBox` and the Rust version agrees with the Swift version on the discriminated encoding (B-5). The CloudKit HLC pack/unpack
 is lossless within the 48/12/4-bit layout (B-6).
 
+**C-9 (echo suppression):** an inbound write from `applyInbound` does not
+re-enter the outbox. After a push-pull cycle, the receiving side has zero
+pending outbound entries attributable to the received records (I-10).
+
+**C-10 (LWW tombstone persistence):** a delete event carries its HLC into
+the side table after the hard-delete so that a stale insert arriving later
+is still rejected (A6 unification, B-9).
+
+**C-11 (column projection) (v1.2-draft):** given a manifest with
+`excludedColumns = ["derived"]` on a table:
+- An outbound update that changes ONLY `"derived"` is not enqueued (storm kill).
+- A peer that sends `"derived"` in an inbound record: the column is dropped
+  before `applyInbound`; the local value of `"derived"` is not overwritten.
+- A `SyncedTable` with non-empty `excludedColumns` round-trips losslessly
+  through JSON; a legacy JSON payload without `"excludedColumns"` decodes to
+  an empty set (backward compat). Empty `excludedColumns` is omitted from JSON.
+- Delete events propagate regardless of `excludedColumns`.
+
 The conformance fixtures run with InMemory PersistenceKit underneath.
 None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
 
-<<<<<<< HEAD
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P2-M2)
+- Added B-14 (column projection) to § 5: `excludedColumns` field on
+  `SyncedTable`, two-point enforcement (outbound strip + storm kill; inbound
+  drop with warning), delete unaffected, backward-compatible JSON encoding.
+- Added C-9 (echo suppression), C-10 (LWW tombstone persistence), C-11
+  (column projection) conformance requirements to § 7.
+- Implementation: `Projection.swift` (pure helpers), `SyncTypes.swift`
+  (`excludedColumns` field + Codable), CloudKit `recordOutbound` +
+  `applyInbound`, Federation `recordOutbound` + `applyInbound`, Rust
+  `SyncedTable.excluded_columns` + `with_excluded_columns` + `outbound_strip_change`
+  + inbound projection in `apply_record`. Tests: `ProjectionTests.swift`
+  (21 tests covering strip, isAllExcluded, isStormKill, engine outbound/inbound,
+  manifest round-trip). (CVK-ICLOUD P2-M2 R2)
+
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P2-M4)
+- Added `docs/reference/CONVERGENCEKIT_PLAYGROUND_RULES.md` to
+  `relates_to`. Consumer contract document (CVK-ICLOUD P2-M4).
+
 ### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P1-M6)
 - Added per-record push error taxonomy subsection to § 6: four postures
   (`retryableBackoff`, `reclaim`, `conflict`, `permanent`), outbox action
@@ -479,11 +536,6 @@ configured test container.
 ### 1.1 -- 2026-07-16
 - Added `corruptRemoteIdentity(recordName)` to § 6 error model (CloudKit-only; per-record quarantine, does not abort the pull cycle).
 - Clarified which error categories are per-cycle vs. cycle-aborting.
-=======
-### 1.0.1 -- 2026-07-16
-Added `docs/reference/CONVERGENCEKIT_PLAYGROUND_RULES.md` to `relates_to`.
-Consumer contract document (CVK-ICLOUD P2-M4). No behavioral content changed.
->>>>>>> worktree-agent-a7e1911aebfec7426
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

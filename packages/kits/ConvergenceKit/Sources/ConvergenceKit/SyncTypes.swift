@@ -45,23 +45,64 @@ public struct SyncedTable: Sendable, Codable {
     public let direction: SyncDirection
     public let primaryKeyColumn: String
     public let conflictPolicy: ConflictPolicy
+    /// (v1.2-draft) Columns excluded from sync. These are locally recomputed
+    /// on every device (scores, caches, derived values). Excluding them prevents
+    /// sync storms: when an observer fires on a local compute update, the excluded
+    /// columns are stripped from the outbox entry before it is persisted, so no
+    /// outbound traffic is generated for data the receiver immediately recomputes.
+    ///
+    /// Exclusion semantics only — not inclusion: every column NOT in this set is
+    /// synced. An inclusion list is a later additive change; it would require a
+    /// schema-level registry of all sync-eligible columns that is not available
+    /// at the ConvergenceKit layer.
+    ///
+    /// JSON contract: "excludedColumns" key; omitted from the wire when empty
+    /// so existing serialised manifests decode without error (backward compatible).
+    /// Rust twin: `excluded_columns: HashSet<String>` with serde default empty.
+    public let excludedColumns: Set<String>
 
     /// Explicit CodingKeys documenting the cross-port JSON contract.
     /// Rust serde renames match these exact strings.
     private enum CodingKeys: String, CodingKey {
-        case name, direction, primaryKeyColumn, conflictPolicy
+        case name, direction, primaryKeyColumn, conflictPolicy, excludedColumns
     }
 
     public init(
         name: String,
         direction: SyncDirection = .bidirectional,
         primaryKeyColumn: String,
-        conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC
+        conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC,
+        excludedColumns: Set<String> = []
     ) {
         self.name = name
         self.direction = direction
         self.primaryKeyColumn = primaryKeyColumn
         self.conflictPolicy = conflictPolicy
+        self.excludedColumns = excludedColumns
+    }
+
+    /// Custom decode: `excludedColumns` is optional in JSON so existing
+    /// serialised manifests (without the key) decode with an empty set.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        direction = try c.decode(SyncDirection.self, forKey: .direction)
+        primaryKeyColumn = try c.decode(String.self, forKey: .primaryKeyColumn)
+        conflictPolicy = try c.decode(ConflictPolicy.self, forKey: .conflictPolicy)
+        excludedColumns = try c.decodeIfPresent(Set<String>.self, forKey: .excludedColumns) ?? []
+    }
+
+    /// Custom encode: omit `excludedColumns` when empty to keep the wire
+    /// representation compact and compatible with older receivers.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(direction, forKey: .direction)
+        try c.encode(primaryKeyColumn, forKey: .primaryKeyColumn)
+        try c.encode(conflictPolicy, forKey: .conflictPolicy)
+        if !excludedColumns.isEmpty {
+            try c.encode(excludedColumns, forKey: .excludedColumns)
+        }
     }
 }
 

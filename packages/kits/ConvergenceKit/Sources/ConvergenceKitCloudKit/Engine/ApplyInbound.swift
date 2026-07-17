@@ -8,6 +8,12 @@ import Foundation
 import ConvergenceKit
 import PersistenceKit
 import SubstrateTypes
+import os
+
+// File-scoped logger for apply-inbound diagnostics. Uses the same subsystem
+// and category as the parent actor so all CloudKit engine events appear
+// under one filter in Console.app.
+private let applyLogger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
 
 extension CloudKitStateActor {
 
@@ -68,12 +74,33 @@ extension CloudKitStateActor {
         }
 
         // Normal (non-tombstone) apply path.
+
+        // Inbound projection (R2, CVK-ICLOUD P2-M2): drop excluded columns before
+        // the conflict-policy switch. A peer on a different manifest version may
+        // send columns this manifest marks excluded. Writing them would overwrite
+        // locally-computed derived values with stale remote copies, defeating
+        // the purpose of projection.
+        let inboundValues: [String: TypedValue]
+        if !syncedTable.excludedColumns.isEmpty {
+            let droppedKeys = decoded.values.keys.filter { syncedTable.excludedColumns.contains($0) }
+            if !droppedKeys.isEmpty {
+                let keyList = droppedKeys.sorted().joined(separator: ", ")
+                applyLogger.warning("inbound projection: dropping \(droppedKeys.count) excluded column(s) for table '\(syncedTable.name)': \(keyList)")
+            }
+            inboundValues = Projection.outboundStrip(
+                values: decoded.values,
+                excluded: syncedTable.excludedColumns
+            )
+        } else {
+            inboundValues = decoded.values
+        }
+
         switch syncedTable.conflictPolicy {
         case .appendOnly:
             // Audit log style. Idempotent upsert with the row key as primary.
             _ = try await storage.rowStore.upsertSync(
                 table: decoded.table,
-                values: decoded.values,
+                values: inboundValues,
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
 
@@ -90,7 +117,7 @@ extension CloudKitStateActor {
             }
             _ = try await storage.rowStore.upsertSync(
                 table: decoded.table,
-                values: decoded.values,
+                values: inboundValues,
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
             // Persist the sync HLC in the side table for future comparisons.
@@ -103,7 +130,7 @@ extension CloudKitStateActor {
         case .remoteWins:
             _ = try await storage.rowStore.upsertSync(
                 table: decoded.table,
-                values: decoded.values,
+                values: inboundValues,
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
 
@@ -114,7 +141,7 @@ extension CloudKitStateActor {
                 where: .eq(Column(table: decoded.table, name: syncedTable.primaryKeyColumn), .uuid(decoded.rowKey))
             )
             if (existing ?? 0) == 0 {
-                _ = try await storage.rowStore.insertSync(table: decoded.table, values: decoded.values)
+                _ = try await storage.rowStore.insertSync(table: decoded.table, values: inboundValues)
             }
         }
     }

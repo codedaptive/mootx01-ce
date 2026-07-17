@@ -21,7 +21,7 @@ use ed25519_dalek::{
 };
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -447,6 +447,11 @@ impl FederationSyncEngine {
             let pulling = Arc::clone(&self.state.pulling);
             let schema_version = manifest.schema_version;
             let kit_id = manifest.kit_id.clone();
+            // Column projection (R2, CVK-ICLOUD P2-M2): capture excluded columns and
+            // the PK column from the table declaration so the observer closure can
+            // strip them before enqueuing. Cloned at start_observers time; no lock needed.
+            let excluded_columns: HashSet<String> = table.excluded_columns.clone();
+            let pk_column = table.primary_key_column.clone();
 
             let handle = std::thread::spawn(move || {
                 // 100ms tick bounds shutdown latency without busy-spinning.
@@ -465,6 +470,10 @@ impl FederationSyncEngine {
                             if pulling.load(Ordering::Acquire) {
                                 continue;
                             }
+                            // Column projection (R2): apply outbound strip and
+                            // storm-kill before converting to a SyncRecord.
+                            let change = outbound_strip_change(change, &excluded_columns, &pk_column);
+                            let Some(change) = change else { continue };
                             if let Some(record) =
                                 change_to_record(change, schema_version, &kit_id, &hlc_generator)
                             {
@@ -873,11 +882,39 @@ fn apply_record(
     // Normal (non-tombstone) Insert/Update path.
     match record.event {
         SyncEventKind::Insert | SyncEventKind::Update => {
-            let mut values: BTreeMap<String, TypedValue> = record
+            let raw_values: BTreeMap<String, TypedValue> = record
                 .values
                 .as_ref()
                 .map(|v| v.clone().into_typed())
                 .unwrap_or_default();
+
+            // Inbound projection (R2, CVK-ICLOUD P2-M2): drop excluded columns before
+            // the conflict-policy switch. A peer on a different manifest version may
+            // send columns this manifest marks excluded. Writing them would overwrite
+            // locally-computed derived values with stale remote copies.
+            let mut values: BTreeMap<String, TypedValue> = if !synced_table.excluded_columns.is_empty() {
+                let dropped: Vec<_> = raw_values
+                    .keys()
+                    .filter(|k| synced_table.excluded_columns.contains(*k))
+                    .cloned()
+                    .collect();
+                if !dropped.is_empty() {
+                    // Log at warn-equivalent (eprintln for now; adopt tracing when wired).
+                    eprintln!(
+                        "[ConvergenceKit] inbound projection: dropping {} excluded column(s) for table '{}': {}",
+                        dropped.len(),
+                        synced_table.name,
+                        dropped.join(", ")
+                    );
+                }
+                raw_values
+                    .into_iter()
+                    .filter(|(k, _)| !synced_table.excluded_columns.contains(k))
+                    .collect()
+            } else {
+                raw_values
+            };
+
             // Guarantee the primary key column is present so the storage
             // backend can resolve the row key even when `values` is sparse.
             values
@@ -935,6 +972,45 @@ fn apply_record(
         SyncEventKind::Delete => {}
     }
     Ok(())
+}
+
+/// Outbound column projection (R2, CVK-ICLOUD P2-M2).
+///
+/// Strips `excluded_columns` from `change.values` before the change enters the
+/// outbox. Returns `None` (storm kill) when the change is an update and, after
+/// stripping, only the primary key remains — i.e. every changed column was
+/// excluded and there is nothing sync-meaningful to ship.
+///
+/// Parity with Swift `FederationStateActor.recordOutbound`: same two enforcement
+/// points (strip + storm-kill), same semantics for delete unaffected.
+fn outbound_strip_change(
+    mut change: TableChange,
+    excluded: &HashSet<String>,
+    pk_column: &str,
+) -> Option<TableChange> {
+    if excluded.is_empty() {
+        return Some(change);
+    }
+    let Some(raw_values) = change.values.take() else {
+        // Delete: no values to strip; tombstone must propagate.
+        return Some(change);
+    };
+    let stripped: BTreeMap<String, TypedValue> = raw_values
+        .into_iter()
+        .filter(|(k, _)| !excluded.contains(k))
+        .collect();
+
+    // Storm kill: after stripping, if only the PK remains (or nothing at all),
+    // every changed column was excluded. Nothing meaningful to sync for an update.
+    // Deletes are handled above (values is None → returned early).
+    if change.event == StorageEvent::Update {
+        let has_non_pk = stripped.keys().any(|k| k != pk_column);
+        if !has_non_pk {
+            return None; // storm kill
+        }
+    }
+    change.values = Some(stripped);
+    Some(change)
 }
 
 /// Map an observed `TableChange` to a `SyncRecord` for the outbox.

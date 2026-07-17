@@ -309,6 +309,40 @@ actor FederationStateActor {
         // ping-pong forever. The .syncApply origin is stamped by the
         // RowStore sync-tagged write paths (upsertSync / insertSync / deleteSync).
         guard change.origin != .syncApply else { return }
+
+        // Column projection (R2, CVK-ICLOUD P2-M2): strip excluded columns
+        // before enqueueing. Excluded columns are locally recomputed on every
+        // device (scores, caches, derived values); syncing them creates outbound
+        // traffic proportional to local compute — a sync storm.
+        //
+        // Deletes are unaffected: a delete carries no column values, and the
+        // tombstone must still propagate so remote replicas GC the row.
+        let excluded = manifest?.table(named: change.table)?.excludedColumns ?? []
+        if !excluded.isEmpty, let rawValues = change.values {
+            let stripped = Projection.outboundStrip(values: rawValues, excluded: excluded)
+            if change.event == .update {
+                // Storm kill: after stripping, if only the primary key remains there is
+                // nothing sync-meaningful to ship. The update touched only excluded
+                // columns (derived values, caches). Storage emits the full merged row
+                // so `stripped` always has the PK — `isStormKill` checks that nothing
+                // beyond the PK survived the strip. A derived-column recompute generates
+                // zero outbound traffic.
+                let pkColumn = manifest?.table(named: change.table)?.primaryKeyColumn ?? ""
+                if Projection.isStormKill(stripped: stripped, primaryKeyColumn: pkColumn) {
+                    return
+                }
+            }
+            let strippedChange = TableChange(
+                table: change.table,
+                event: change.event,
+                rowKey: change.rowKey,
+                values: stripped,
+                hlc: change.hlc,
+                origin: change.origin
+            )
+            pendingOutbound.append(strippedChange)
+            return
+        }
         pendingOutbound.append(change)
     }
 
@@ -618,7 +652,24 @@ actor FederationStateActor {
         }
 
         // Normal (non-tombstone) insert/update path.
-        let values = record.values?.asTypedValues ?? [:]
+
+        // Inbound projection (R2, CVK-ICLOUD P2-M2): drop excluded columns before
+        // the conflict-policy switch. A peer on a different manifest version may
+        // send columns this manifest marks excluded. Writing them would overwrite
+        // locally-computed derived values with stale remote copies.
+        let rawInboundValues = record.values?.asTypedValues ?? [:]
+        let values: [String: TypedValue]
+        if !syncedTable.excludedColumns.isEmpty {
+            let droppedKeys = rawInboundValues.keys.filter { syncedTable.excludedColumns.contains($0) }
+            if !droppedKeys.isEmpty {
+                let keyList = droppedKeys.sorted().joined(separator: ", ")
+                logger.warning("inbound projection: dropping \(droppedKeys.count) excluded column(s) for table '\(syncedTable.name)': \(keyList)")
+            }
+            values = Projection.outboundStrip(values: rawInboundValues, excluded: syncedTable.excludedColumns)
+        } else {
+            values = rawInboundValues
+        }
+
         switch syncedTable.conflictPolicy {
         case .appendOnly:
             _ = try await storage.rowStore.upsertSync(
