@@ -37,7 +37,7 @@ public enum ConflictPolicy: String, Sendable, Codable {
     case localWins
     /// Receiver overwrites local on conflict.
     case remoteWins
-    /// (v1.2-draft) Per-column HLC last-writer-wins. Each column in the
+    /// Per-column HLC last-writer-wins. Each column in the
     /// incoming record is applied only when its HLC is >= the locally
     /// stored per-column HLC. Column HLCs are wire-carried (never derived
     /// by the receiver — A7 binding). Tombstone HLC must be >= ALL local
@@ -52,7 +52,7 @@ public struct SyncedTable: Sendable, Codable {
     public let direction: SyncDirection
     public let primaryKeyColumn: String
     public let conflictPolicy: ConflictPolicy
-    /// (v1.2-draft) Columns excluded from sync. These are locally recomputed
+    /// Columns excluded from sync. These are locally recomputed
     /// on every device (scores, caches, derived values). Excluding them prevents
     /// sync storms: when an observer fires on a local compute update, the excluded
     /// columns are stripped from the outbox entry before it is persisted, so no
@@ -134,7 +134,7 @@ public struct SyncManifest: Sendable {
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
 
-    /// (v1.2-draft) Optional callback invoked once per pull batch AFTER all
+    /// Optional callback invoked once per pull batch AFTER all
     /// inbound records have been applied. Use it to restore cross-row or
     /// cross-table structural invariants that row-grain conflict policies
     /// cannot maintain (Playground Rule 3, R3).
@@ -251,7 +251,7 @@ public enum SyncError: Error, Sendable, Equatable {
     /// logs it, and continues to the next record rather than aborting the batch.
     case corruptRemoteIdentity(recordName: String)
 
-    // ── N2 slot-registry errors (v1.2-draft) ──────────────────────────────
+    // ── N2 slot-registry errors ─────────────────────────────────────────────
     // CloudKit-only. Vocabulary is mirrored in the Rust SyncError enum for
     // cross-port parity even though the CloudKit backend is Swift-only (N4).
     // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
@@ -265,7 +265,7 @@ public enum SyncError: Error, Sendable, Equatable {
     /// with the old (colliding) nodeID would produce LWW ties that different
     /// replicas resolve differently.
     ///
-    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4 (v1.2-draft stub).
+    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4.
     case reenrollRequired(slot: Int, staleEpoch: Int, currentEpoch: Int)
 
     /// All 15 assignable node-ID slots (1–15) are occupied by recently-active
@@ -274,6 +274,6 @@ public enum SyncError: Error, Sendable, Equatable {
     /// because the real ceiling is 15 concurrent machines and hitting it is
     /// an operational signal that warrants attention.
     ///
-    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4 (v1.2-draft stub).
+    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4.
     case slotExhausted(activeCount: Int)
 }

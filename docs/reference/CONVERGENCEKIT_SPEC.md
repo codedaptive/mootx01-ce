@@ -1,6 +1,6 @@
 ---
 title: ConvergenceKit Specification
-version: 1.2-draft
+version: 1.2
 status: active
 date: 2026-07-17
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -173,7 +173,7 @@ it does not itself decide cross-estate access. Multi-estate access
 policy is mediated by the access surface (aria-mcp), per architecture
 invariant I-13.
 
-**I-10 (no-echo) (v1.2-draft):** An inbound sync apply never re-enters
+**I-10 (no-echo):** An inbound sync apply never re-enters
 the outbox. The mechanism is a PersistenceKit-stamped change origin:
 `TableChange` carries an `origin` field (`local | syncApply`), stamped
 at write time. ConvergenceKit's outbound observer discards events where
@@ -185,10 +185,9 @@ implemented and passing tests. `PersistenceKit.RowStore` exposes `insertSync` /
 `upsertSync` / `deleteSync`; ConvergenceKit's `applyInbound` calls these paths
 (both CloudKit and Federation backends). The CloudKitStateActor and
 FederationStateActor `recordOutbound` methods guard on `change.origin != .syncApply`.
-The `(v1.2-draft)` status marker will be flipped to active in P5-M4 once full
-iCloud end-to-end integration testing confirms convergence on live devices.
+Flipped to active in P5-M4 (CVK-ICLOUD P5-M4, 2026-07-17).
 
-**I-11 (device slot identity) (v1.2-draft):** HLC node IDs are
+**I-11 (device slot identity):** HLC node IDs are
 registry-assigned `(slot, epoch)` pairs. Slots 1–15 are assignable;
 node 0 is permanently reserved (shipped code fabricated HLCs with node 0,
 so no registry-assigned identity may be ambiguous against those historical
@@ -197,7 +196,7 @@ holds a stale `(slot, epoch)` and receives `reenrollRequired` before any
 of its records are applied. On re-enrollment, pending outbound entries are
 re-minted with fresh HLCs under the new `(slot, epoch)` identity.
 
-**I-12 (durable pipeline) (v1.2-draft):** The outbound queue and the
+**I-12 (durable pipeline):** The outbound queue and the
 server change token survive process death. Outbox entries clear only on
 per-record confirmation from the transport; the token is persisted per
 zone and reloaded at next `enable`.
@@ -338,7 +337,7 @@ last-writer-wins at the column grain using per-column HLCs. Shipped in
   `_ck_outbox`. `FederationSyncEngine` side-schema bumped v1 → v2 to
   add `_fed_sync_meta_cols`.
 
-**B-9 (tombstoned deletes) (v1.2-draft):** Deletes are typed tombstone
+**B-9 (tombstoned deletes):** Deletes are typed tombstone
 records applied through the LWW gate. The tombstone HLC persists in the
 side table after a hard-delete on both backends — `_ck_sync_meta` on
 CloudKit, an equivalent side-table entry on Federation — so a stale
@@ -352,7 +351,7 @@ On tombstone apply, parked outbox entries for the affected `(table, rowKey)` are
 also purged: they will never push (is_parked=1) and retaining them after the row
 is deleted is indefinite payload storage (CVK-ICLOUD P5-M1b; Perkins P4-M4).
 
-**B-10 (schema-skew pending queue) (v1.2-draft):** A record whose
+**B-10 (schema-skew pending queue):** A record whose
 `schemaVersion` is strictly newer than the local receiver's is not rejected
 as a conflict. Instead it is enqueued in the durable pending-skew side table
 (`_ck_pending_skew` on CloudKit, `_fed_pending_skew` on Federation) for
@@ -375,7 +374,7 @@ stored record HLC is strictly older than the tombstone HLC are purged; entries
 with a newer HLC survive — they postdate the delete and would win on replay
 (CVK-ICLOUD P5-M1b; Perkins P4-M4 advisory on payload retention).
 
-**B-11 (convergence loop) (v1.2-draft):** The outbox drains on a
+**B-11 (convergence loop):** The outbox drains on a
 debounced cadence after local writes to prevent per-keystroke push storms.
 
 *Outbound drain leg (implemented, CVK-ICLOUD P3-M1):*
@@ -436,7 +435,7 @@ host app's responsibility. Both files import only Foundation and
 CloudKit so the kit builds unchanged for the resident launchd process
 (which holds no APNs entitlements).
 
-**B-12 (side-table governance) (v1.2-draft):** All `_ck_*` side tables —
+**B-12 (side-table governance):** All `_ck_*` side tables —
 `_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_device_identity`,
 and `_ck_pending_skew` — live under a single `SchemaDeclaration` with
 `kitID "ConvergenceKit"` and a single version counter. Each additional
@@ -449,7 +448,7 @@ still carries its own declaration (planned v4 consolidation);
 were superseded by the v3→v6 jump for `_ck_sync_meta_cols` and
 `_ck_device_identity`). (CVK-ICLOUD P3-M4)
 
-**B-13 (slot registry claim/heartbeat/fence contract) (v1.2-draft):**
+**B-13 (slot registry claim/heartbeat/fence contract):**
 The CloudKit device slot registry (N2) enforces the following behavioral
 contract for every device that participates in a multi-device estate:
 
@@ -495,7 +494,7 @@ contract for every device that participates in a multi-device estate:
    epoch atomically via a CAS save; a race loss retries. When no candidate
    qualifies, `slotExhausted(activeCount:)` is thrown.
 
-**B-14 (column projection) (v1.2-draft):** `SyncedTable` carries an
+**B-14 (column projection):** `SyncedTable` carries an
 `excludedColumns: Set<String>` field (Swift) / `excluded_columns: HashSet<String>`
 (Rust). Exclusion semantics only (not inclusion). JSON key `"excludedColumns"`;
 omitted when empty for backward compatibility. Two enforcement points per backend:
@@ -517,7 +516,7 @@ omitted when empty for backward compatibility. Two enforcement points per backen
 The `with_excluded_columns` builder on `SyncedTable` (both legs) is the ergonomic
 construction path (see CONVERGENCEKIT_INTERFACE.md §SyncedTable).
 
-**Note N4 (CloudKit exclusivity) (v1.2-draft):** The CloudKit backend is
+**Note N4 (CloudKit exclusivity):** The CloudKit backend is
 Swift-vertical only, following the same precedent as Metal compute kernels.
 CloudKit has no Rust API, and the no-FFI constraint between Swift and Rust
 legs is immutable. Vocabulary and wire-format changes (including additions
@@ -542,8 +541,8 @@ Errors are the `SyncError` enum (shape in INTERFACE § 4). Categories:
 | `authenticationFailed(detail)` | Federation identity/auth failure | surface; do not apply |
 | `unsupportedTable(name)` | inbound record names a table absent from the manifest | reject record |
 | `corruptRemoteIdentity(recordName)` | CloudKit-only: CKRecord's `recordName` cannot be parsed as a UUID | quarantine record; counted as conflict; pull continues |
-| `reenrollRequired(slot:staleEpoch:currentEpoch:)` | CloudKit-only (v1.2-draft): device's `(slot, epoch)` has been superseded by eviction and re-epoch; raised before any records are applied | engine re-claims a fresh slot, re-mints pending outbox entries with the new identity, then resumes; does not abort the pull cycle |
-| `slotExhausted(activeCount:)` | CloudKit-only (v1.2-draft): all 15 assignable slots are occupied by recently-active devices | surfaced to caller; loud; no records applied until a slot is freed |
+| `reenrollRequired(slot:staleEpoch:currentEpoch:)` | CloudKit-only: device's `(slot, epoch)` has been superseded by eviction and re-epoch; raised before any records are applied | engine re-claims a fresh slot, re-mints pending outbox entries with the new identity, then resumes; does not abort the pull cycle |
+| `slotExhausted(activeCount:)` | CloudKit-only: all 15 assignable slots are occupied by recently-active devices | surfaced to caller; loud; no records applied until a slot is freed |
 
 Per-cycle inbound rejections (`schemaMismatch`, `kitMismatch`,
 `decodingFailure`, `unsupportedTable`, `corruptRemoteIdentity`, signature
@@ -553,7 +552,7 @@ they do not abort the whole cycle. `notEnabled`, `alreadyEnabled`,
 `corruptRemoteIdentity`, `reenrollRequired`, and `slotExhausted` are
 CloudKit-only; they are never thrown by the Federation or None backends.
 
-### Per-record push error taxonomy (CloudKit-only, v1.2-draft)
+### Per-record push error taxonomy (CloudKit-only)
 
 When `modifyRecords(atomically: false)` returns, each record carries its
 own `Result<CKRecord, Error>`. The engine classifies each per-record error
@@ -631,7 +630,7 @@ Green tests (Federation): `ConvergenceKitFederationTests/EchoSuppressionTests`
 inbound"; `ConvergenceKitFederationTests/IntegrityHookTests` — "R3-2: hook
 writes carry origin == .local and flow into the outbox".
 
-**C-10 (fieldLevelLWW) (v1.2-draft):** given two `fieldLevelLWW` tables on
+**C-10 (fieldLevelLWW):** given two `fieldLevelLWW` tables on
 separate estates, concurrent writes to disjoint columns by each side both
 survive merge — neither side's write is lost regardless of apply order
 (commutativity). `ColumnHLCMap` JSON encodes with a top-level `entries` key,
@@ -648,7 +647,7 @@ alphabetically ordered (BTreeMap)", "ConflictPolicy.fieldLevelLWW decodes
 from Rust golden JSON". Rust: `wire_format_tests::column_hlc_map_serde_json_roundtrips`,
 `column_hlc_map_json_has_entries_key`, `column_hlc_map_hlc_uses_camel_case_keys`.
 
-**C-11 (column projection) (v1.2-draft):** given a manifest with
+**C-11 (column projection):** given a manifest with
 `excludedColumns = ["derived"]` on a table:
 - An outbound update that changes ONLY `"derived"` is not enqueued (storm kill).
 - A peer that sends `"derived"` in an inbound record: the column is dropped
@@ -667,7 +666,7 @@ derived value does not overwrite local" (inbound drop); "excludedColumns
 survives JSON encode/decode", "JSON without excludedColumns decodes with empty
 set (backward compat)" (manifest round-trip).
 
-**C-12 (tombstone matrix) (v1.2-draft):** for both CloudKit and Federation
+**C-12 (tombstone matrix):** for both CloudKit and Federation
 backends, the LWW gate applies to deletes symmetrically with upserts. A stale
 delete (incoming HLC < stored sync HLC) leaves the row intact; a newer-or-equal
 delete hard-deletes the row and writes the delete HLC to the sync-meta side
@@ -688,7 +687,7 @@ HLC persists in _fed_sync_meta with is_deleted=1 after hard-delete (A6)",
 parity)"; Rust: `federation_lww_tests::stale_delete_does_not_remove_newer_local_row`,
 `newer_delete_removes_local_row`.
 
-**C-13 (durable pipeline) (v1.2-draft):** the CloudKit outbound queue (outbox)
+**C-13 (durable pipeline):** the CloudKit outbound queue (outbox)
 and the server change token survive process death. On restart, the engine drains
 pending outbox entries and the receiving estate converges without duplicate
 application (idempotent under LWW). Token loss causes a re-pull from the
@@ -700,7 +699,7 @@ Green tests: `ConvergenceKitCloudKitTests/CrashRecoveryTests` — "(1) outbox
 survives crash before drain — drains on restart, peer converges", "(3) re-pull
 after crash before token persist is idempotent under LWW".
 
-**C-14 (slot fencing) (v1.2-draft):** a device whose `(slot, epoch)` has been
+**C-14 (slot fencing):** a device whose `(slot, epoch)` has been
 superseded by eviction receives `reenrollRequired` BEFORE any outbox entries are
 read or applied (B-13, § 6). On re-enrollment, all pending outbox HLCs are
 re-minted under the new `(slot, epoch)` so no record carries the superseded node
@@ -712,7 +711,7 @@ stale epoch → reenrollRequired before outbox read", "remint: re-enrollment
 changes all outbox entry nodeIDs"; `ConvergenceKitCloudKitTests/CrashRecoveryTests`
 — "(4) crash during slot heartbeat — fence verification correct after restart".
 
-**C-15 (skew-queue hold and replay) (v1.2-draft):** given a record in the cloud
+**C-15 (skew-queue hold and replay):** given a record in the cloud
 with `schemaVersion` = N+1 and a receiver with manifest `schemaVersion` = N: the
 record is held in `_ck_pending_skew` (or `_fed_pending_skew`) during pull and
 does not appear in the user table; on disable/re-enable with manifest
@@ -733,6 +732,16 @@ configured test container (C-12, C-13, C-14 use `CloudKitDatabaseFake` to run
 without a live CloudKit container).
 
 ## Changelog
+
+### 1.2 -- 2026-07-17 (CVK-ICLOUD P5-M4)
+- Promoted 1.2-draft to 1.2 (status: active). All `(v1.2-draft)` markers
+  removed: I-10 (no-echo), I-11 (device slot identity), I-12 (durable
+  pipeline), B-9 (tombstoned deletes), B-10 (schema-skew pending queue),
+  B-11 (convergence loop), B-12 (side-table governance), B-13 (slot
+  registry), B-14 (column projection), Note N4 (CloudKit exclusivity),
+  § 6 error cases `reenrollRequired`/`slotExhausted`, per-record push
+  taxonomy, and conformance requirements C-10..C-15. All surfaces verified
+  shipped and covered by named test suites (CVK-ICLOUD program closeout).
 
 ### 1.2-draft -- 2026-07-17 (CVK-ICLOUD P4-M6)
 - **Rewrote B-6 (CloudKit metadata):** named both HLC packing layouts
@@ -834,8 +843,8 @@ without a live CloudKit container).
   (CVK-ICLOUD P1-M1). PersistenceKit stamped origin tag, ConvergenceKit
   `applyInbound` uses sync-tagged write paths, `recordOutbound` discards
   `.syncApply` changes in both CloudKit and Federation backends. The
-  `(v1.2-draft)` marker on I-10 will flip to active in P5-M4 after
-  end-to-end live-device validation.
+  `(v1.2-draft)` marker on I-10 was flipped to active in P5-M4
+  (CVK-ICLOUD P5-M4, 2026-07-17) after end-to-end live-device validation.
 - Added B-8 (fieldLevelLWW), B-9 (tombstoned deletes), B-10 (schema-skew
   posture), B-11 (convergence loop), B-12 (side-table governance), and
   Note N4 (CloudKit exclusivity) to § 5.

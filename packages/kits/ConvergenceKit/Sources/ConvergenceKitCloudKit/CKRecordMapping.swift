@@ -122,7 +122,7 @@ public enum CKRecordMapping {
         record["_syncHLC"] = packed(hlc) as NSNumber
         record["_syncSchemaVersion"] = NSNumber(value: schemaVersion)
         record["_syncKitID"] = kitID as NSString
-        // _syncColumnHLCs: present only for fieldLevelLWW records (B-8, v1.2-draft).
+        // _syncColumnHLCs: present only for fieldLevelLWW records (B-8).
         // JSON-encoded ColumnHLCMap blob. Omitted when nil or empty so non-fieldLevelLWW
         // records stay compact on the wire.
         if let map = columnHLCs, !map.isEmpty,
@@ -173,7 +173,7 @@ public enum CKRecordMapping {
         // (all _sync* keys are excluded) so it does not leak into the app schema.
         let isTombstone = (record[SyncTombstone.deletedFieldKey] as? NSNumber)?.intValue == 1
 
-        // Decode per-column HLC map for fieldLevelLWW records (B-8, v1.2-draft).
+        // Decode per-column HLC map for fieldLevelLWW records (B-8).
         // Absent on non-fieldLevelLWW records and on records from older peers.
         let columnHLCs: ColumnHLCMap?
         if let data = record["_syncColumnHLCs"] as? Data {
@@ -381,7 +381,7 @@ public struct DecodedRecord: Sendable {
     /// Defaults to false for normal (non-delete) records.
     public var isTombstone: Bool = false
 
-    /// Per-column HLC map decoded from `_syncColumnHLCs` (B-8, v1.2-draft).
+    /// Per-column HLC map decoded from `_syncColumnHLCs` (B-8).
     ///
     /// Non-nil only for `fieldLevelLWW` records where the sender populated
     /// the column HLC map. Nil on non-fieldLevelLWW records and on records

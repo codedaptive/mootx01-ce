@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-07-17
-version: 1.6-draft
+version: 1.6
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -133,7 +133,7 @@ public struct SyncedTable: Sendable, Codable {
     public let direction: SyncDirection
     public let primaryKeyColumn: String
     public let conflictPolicy: ConflictPolicy
-    /// (v1.2-draft) columns excluded from sync; locally recomputed on every device.
+    /// Columns excluded from sync; locally recomputed on every device.
     /// Matches Playground Rule 4: derived columns never sync.
     public let excludedColumns: Set<String>
     public init(name: String, direction: SyncDirection = .bidirectional,
@@ -146,7 +146,7 @@ public struct SyncManifest: Sendable {
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
-    /// (v1.2-draft) optional hook run after each inbound pull batch applies;
+    /// Optional hook run after each inbound pull batch applies;
     /// use to restore cross-row or cross-table structural invariants that
     /// sync cannot maintain (Playground Rule 3). Not `Codable` — closures
     /// cannot be serialized; set at construction only.
@@ -163,7 +163,7 @@ public struct SyncManifest: Sendable {
 pub enum SyncDirection { Bidirectional, PushOnly, PullOnly }
 pub enum ConflictPolicy {
     LastWriterWinsByHLC, AppendOnly, LocalWins, RemoteWins,
-    FieldLevelLWW,  // (v1.2-draft) per-column HLC LWW; see B-8
+    FieldLevelLWW,  // per-column HLC LWW; see B-8
 }
 
 pub struct SyncedTable {
@@ -171,13 +171,13 @@ pub struct SyncedTable {
     pub direction: SyncDirection,           // serde default: Bidirectional
     pub primary_key_column: String,
     pub conflict_policy: ConflictPolicy,     // serde default: LastWriterWinsByHLC
-    pub excluded_columns: HashSet<String>,   // (v1.2-draft) serde default: empty
+    pub excluded_columns: HashSet<String>,   // serde default: empty
 }
 impl SyncedTable {
     pub fn new(name: impl Into<String>, primary_key_column: impl Into<String>) -> Self;
     pub fn with_direction(self, direction: SyncDirection) -> Self;
     pub fn with_conflict_policy(self, policy: ConflictPolicy) -> Self;
-    pub fn with_excluded_columns(self, cols: impl IntoIterator<Item = impl Into<String>>) -> Self; // (v1.2-draft)
+    pub fn with_excluded_columns(self, cols: impl IntoIterator<Item = impl Into<String>>) -> Self;
 }
 
 pub struct SyncManifest {
@@ -185,7 +185,8 @@ pub struct SyncManifest {
     pub schema_version: i32,
     pub zone_identifier: String,
     pub tables: Vec<SyncedTable>,
-    // (v1.2-draft) post-apply hook: Rust equivalent is a boxed fn; not serializable.
+    // post-apply hook: Rust equivalent would be a boxed fn; not serializable.
+    // Deferred — Swift ships postApplyIntegrityHook; Rust port does not carry it.
     // pub post_apply_hook: Option<Box<dyn Fn(&dyn Storage) -> Result<(), SyncError> + Send>>,
 }
 impl SyncManifest {
@@ -195,14 +196,12 @@ impl SyncManifest {
 }
 ```
 
-**Note (v1.2-draft) — `TableChange.origin`:** ConvergenceKit's echo
-suppression (SPEC I-10) depends on an `origin: ChangeOrigin` field added
-to PersistenceKit's `TableChange` type. `ChangeOrigin` is either `local`
-(all caller-initiated writes) or `syncApply` (writes issued by
-`applyInbound`). This field is a planned PersistenceKit type extension
-delivered in mission P1-M1; do not edit `PersistenceKit` documentation
-to add it here. See `PERSISTENCEKIT_INTERFACE.md` for the full signature
-when P1-M1 lands.
+**Note — `TableChange.origin`:** ConvergenceKit's echo suppression (SPEC
+I-10) depends on an `origin: ChangeOrigin` field on PersistenceKit's
+`TableChange` type. `ChangeOrigin` is either `local` (all caller-initiated
+writes) or `syncApply` (writes issued by `applyInbound`). Shipped in
+P1-M1 (CVK-ICLOUD P1-M1, 2026-07-16); see `PERSISTENCEKIT_INTERFACE.md`
+for the full `ChangeOrigin` signature.
 
 ### `SyncReceipt`, `SyncEvent`, `SyncState`
 
@@ -755,13 +754,13 @@ public enum SyncError: Error, Sendable, Equatable {
     /// pull loop quarantines the record, counts it as a conflict, and
     /// continues to the next record rather than aborting the batch.
     case corruptRemoteIdentity(recordName: String)
-    /// (v1.2-draft) CloudKit-only. The device's `(slot, epoch)` pair has
+    /// CloudKit-only. The device's `(slot, epoch)` pair has
     /// been superseded: the slot was evicted and its epoch bumped while this
     /// device was inactive. Raised before any inbound records are applied.
     /// Recovery: the engine re-claims a fresh slot, re-mints pending outbox
     /// entries under the new identity, then resumes the pull cycle.
     case reenrollRequired(slot: Int, staleEpoch: Int, currentEpoch: Int)
-    /// (v1.2-draft) CloudKit-only. All 15 assignable node-ID slots (1–15)
+    /// CloudKit-only. All 15 assignable node-ID slots (1–15)
     /// are occupied by recently-active devices. No records are applied.
     /// Surfaced loud to the caller; the engine retries after a slot is freed.
     case slotExhausted(activeCount: Int)
@@ -874,8 +873,8 @@ sanctioned port difference.
 |---|---|---|---|---|---|
 | Sync direction | `SyncDirection` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncDirection` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw lowerCamel cases / Rust UpperCamel cases — identical variant set | Confirmed |
 | Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; 5 variants including `fieldLevelLWW` / `FieldLevelLWW`; both default LWW-by-HLC; wire encodes as camelCase "fieldLevelLWW" (both legs) | Confirmed |
-| Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`, `with_excluded_columns` v1.2-draft); `excludedColumns: Set<String>` (Swift) / `excluded_columns: HashSet<String>` (Rust) — serde default empty (v1.2-draft) | Confirmed (shipped) / Draft (`excludedColumns`) |
-| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32`; `postApplyIntegrityHook` Swift-only closure (v1.2-draft) — Rust `post_apply_hook` deferred | Confirmed (shipped) / Draft (hook) |
+| Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`, `with_excluded_columns`); `excludedColumns: Set<String>` (Swift) / `excluded_columns: HashSet<String>` (Rust) — serde default empty | Confirmed |
+| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32`; `postApplyIntegrityHook` Swift-only closure (shipped; Rust `post_apply_hook` deferred — closures not serializable) | Confirmed |
 
 ### Cycle result + observation value types
 
@@ -928,7 +927,7 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; 10 shared categories + Swift-only CloudKit cases: `corruptRemoteIdentity(recordName:)` (shipped), `reenrollRequired(slot:staleEpoch:currentEpoch:)` (v1.2-draft), `slotExhausted(activeCount:)` (v1.2-draft). Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed (shared) / Draft (new Swift-only cases) |
+| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; 10 shared categories + Swift-only CloudKit cases: `corruptRemoteIdentity(recordName:)` (shipped), `reenrollRequired(slot:staleEpoch:currentEpoch:)` (CloudKit-only, shipped), `slotExhausted(activeCount:)` (CloudKit-only, shipped). Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed |
 | Result alias | (Swift: `throws` — no result type) | `SyncResult<T>` (`rust/src/types.rs`) | n/a / pub type alias | Swift uses `throws`; Rust port has no async runtime so it returns `Result<T, SyncError>` aliased as `SyncResult` — sanctioned async/throws ↔ Result seam | Confirmed |
 
 ### CloudKit backend — Apple-platform-bound (Exempt)
@@ -1033,6 +1032,14 @@ calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.6 -- 2026-07-17 (CVK-ICLOUD P5-M4)
+- Promoted 1.6-draft to 1.6 (status: active). All `(v1.2-draft)` markers
+  removed: `excludedColumns` / `postApplyIntegrityHook` / `FieldLevelLWW`
+  (all shipped in CVK-ICLOUD P2-M1..P2-M2); `reenrollRequired` /
+  `slotExhausted` (shipped P3-M3/P4-M5); `TableChange.origin` note
+  updated from forward-reference to shipped status (P1-M1). Conformance
+  table Status cells updated to "Confirmed" throughout.
 
 ### 1.6-draft -- 2026-07-17 (CVK-ICLOUD P4-M6)
 - Updated `purpose` frontmatter: corrected SPEC conformance range from

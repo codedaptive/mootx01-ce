@@ -29,7 +29,7 @@
 //     mid  → idle   (zone clearly quiet; conserve battery/network)
 //     idle → idle   (already at floor)
 //
-// SPEC: CONVERGENCEKIT_SPEC.md § 5 B-11 (convergence loop) (v1.2-draft).
+// SPEC: CONVERGENCEKIT_SPEC.md § 5 B-11 (convergence loop).
 // INTERFACE: CONVERGENCEKIT_INTERFACE.md § 2 AdaptivePollScheduler + nudge().
 
 import Foundation
