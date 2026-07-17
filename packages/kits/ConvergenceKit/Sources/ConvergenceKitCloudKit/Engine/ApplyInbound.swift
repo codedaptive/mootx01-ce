@@ -110,7 +110,7 @@ extension CloudKitStateActor {
         // send columns this manifest marks excluded. Writing them would overwrite
         // locally-computed derived values with stale remote copies, defeating
         // the purpose of projection.
-        let inboundValues: [String: TypedValue]
+        var inboundValues: [String: TypedValue]
         if !syncedTable.excludedColumns.isEmpty {
             let droppedKeys = decoded.values.keys.filter { syncedTable.excludedColumns.contains($0) }
             if !droppedKeys.isEmpty {
@@ -124,6 +124,17 @@ extension CloudKitStateActor {
         } else {
             inboundValues = decoded.values
         }
+
+        // Primary-key type coercion (P4-M1 harness finding): CKRecord fields are
+        // lossy for the uuid/text discriminator — CKRecordMapping stores .uuid as
+        // an NSString and decodes it back as .text. Without coercion, a pulled
+        // row lands with a .text primary key while locally-written rows carry
+        // .uuid, so upsert conflict detection misses the existing row and the
+        // receiver DUPLICATES it, and tombstone delete predicates (.uuid) miss
+        // pulled rows entirely. The recordName IS the row UUID (decoded.rowKey),
+        // so restoring the PK's uuid type here is exact, not heuristic. Full
+        // non-PK uuid-column fidelity through CKRecord is scoped in P4-M2.
+        inboundValues[syncedTable.primaryKeyColumn] = .uuid(decoded.rowKey)
 
         switch syncedTable.conflictPolicy {
         case .appendOnly:
