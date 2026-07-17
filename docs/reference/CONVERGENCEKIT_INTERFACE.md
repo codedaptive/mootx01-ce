@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-14
-version: 1.4-draft
+version: 1.5-draft
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -227,6 +227,11 @@ public enum SyncEvent: Sendable {
     case peerConnected(identity: String)
     case peerDisconnected(identity: String, reason: String)
     case error(SyncError)
+    /// A CloudKit silent-push notification arrived for this engine's zone
+    /// and the engine responded by nudging the poll scheduler. Emitted
+    /// before the pull that follows nudge(). CloudKit-only: never emitted
+    /// by NoSyncEngine or FederationSyncEngine.
+    case remoteWakeReceived
 }
 
 public enum SyncState: Sendable {
@@ -253,6 +258,9 @@ pub enum SyncEvent {
     PeerConnected { identity: String },
     PeerDisconnected { identity: String, reason: String },
     Error(SyncError),
+    /// Vocabulary-parity arm for CloudKit remote-wake. Never constructed
+    /// on the Rust side (CloudKit is Swift-only per § 7 Exempt).
+    RemoteWakeReceived,
 }
 
 pub enum SyncState {
@@ -416,28 +424,63 @@ impl NoSyncEngine { pub fn new() -> Self; }   // also Default
 ```swift
 public final class CloudKitSyncEngine: SyncEngine, Sendable {
     /// Pass nil to resolve CKContainer.default() at enable() time.
-    public init(containerIdentifier: String? = nil)
+    /// enablePolling: false (default) — polling does not auto-start; the
+    /// host app or test drives push/pull manually. Pass true to start
+    /// AdaptivePollScheduler on enable() (intended for production use only).
+    public init(containerIdentifier: String? = nil, enablePolling: Bool = false)
 
-    // (v1.2-draft) host-app accelerator surface — correctness does NOT
-    // depend on nudge delivery; the engine is always sound under polling
-    // alone (B-11). These entry points are for host apps that hold APNs
-    // entitlements and want to reduce inbound latency.
+    // Host-app accelerator surface (shipped CVK-ICLOUD P3-M2/P3-M3).
+    // Correctness does NOT depend on nudge delivery; the engine is always
+    // sound under polling alone (SPEC B-11). These entry points are for
+    // host apps that hold APNs entitlements and want to reduce inbound
+    // latency.
 
     /// Nudge the engine to run a pull cycle immediately, bypassing the
-    /// current idle-cadence timer. Call from the host app's silent-push
-    /// handler after receiving a CloudKit zone-change notification.
+    /// current idle-cadence timer. If a scheduler is running, delegates
+    /// to it (interrupt sleep + pull). If no scheduler is running
+    /// (enablePolling: false), fires a one-shot pull directly.
     public func nudge() async
 
-    /// Register a `CKRecordZoneSubscription` for the engine's sync zone
-    /// in the given database. The subscription delivers silent-push
-    /// wakeups to the host app; the host app calls `nudge()` on receipt.
-    /// Safe to call multiple times; re-registration is idempotent.
-    public func registerZoneSubscription(database: CKDatabase) async throws
+    /// Register a `CKRecordZoneSubscription` for the engine's sync zone.
+    ///
+    /// Idempotent: the subscription ID is derived from the zone name
+    /// ("ck-zone-wake-<zoneIdentifier>") so CloudKit deduplicates on
+    /// repeated saves. Safe to call on every app launch without tracking
+    /// whether the subscription was already registered.
+    ///
+    /// Routes through the `CloudKitDatabaseProtocol` seam (no `CKDatabase`
+    /// argument needed; the seam resolves the correct database internally).
+    ///
+    /// Host-app responsibilities before calling:
+    /// 1. Declare the `com.apple.developer.icloud-services` → CloudKit entitlement.
+    /// 2. Call `UIApplication.registerForRemoteNotifications()` (or AppKit equivalent).
+    /// 3. Forward notification payloads via `handleRemoteNotification(userInfo:)`.
+    public func registerZoneSubscription() async throws
+
+    /// Remove the zone subscription for this engine's zone.
+    /// Safe to call even if no subscription is currently registered.
+    public func deregisterZoneSubscription() async throws
 
     /// Process a remote-notification `userInfo` dict from the host app's
     /// `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`.
+    ///
     /// Returns `true` if the notification was a CloudKit zone-change event
-    /// for this engine's zone and a nudge was issued; `false` otherwise.
+    /// for this engine's zone (emits `SyncEvent.remoteWakeReceived` and
+    /// calls `nudge()`); `false` if unrelated (wrong zone, unparseable,
+    /// or engine not enabled). A `false` return is not an error — it means
+    /// the notification was not for this engine.
+    ///
+    /// Call pattern:
+    /// ```swift
+    /// func application(_ app: UIApplication,
+    ///                  didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+    ///                  fetchCompletionHandler handler: @escaping (UIBackgroundFetchResult) -> Void) {
+    ///     Task {
+    ///         let consumed = await engine.handleRemoteNotification(userInfo: userInfo)
+    ///         handler(consumed ? .newData : .noData)
+    ///     }
+    /// }
+    /// ```
     public func handleRemoteNotification(userInfo: [AnyHashable: Any]) async -> Bool
 }
 
@@ -829,7 +872,7 @@ sanctioned port difference.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
 | Cycle receipt | `SyncReceipt` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncReceipt` (`rust/src/types.rs`) | public struct / pub struct | Swift `timestamp: Date` / Rust `timestamp_secs: i64` (Unix epoch); counts `Int` vs `usize`; both expose `empty` | Confirmed |
-| Event-stream payload | `SyncEvent` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncEvent` (`rust/src/types.rs`) | public enum / pub enum | Swift labelled-associated cases / Rust struct-variant cases; same 5 variants | Confirmed |
+| Event-stream payload | `SyncEvent` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncEvent` (`rust/src/types.rs`) | public enum / pub enum | Swift labelled-associated cases / Rust struct-variant cases; 6 variants: 5 shared + `remoteWakeReceived` (Swift) / `RemoteWakeReceived` (Rust parity arm, never constructed on Rust side — CloudKit is Swift-only) | Confirmed |
 | Coarse UI state | `SyncState` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncState` (`rust/src/types.rs`) | public enum / pub enum | Swift `case error` / Rust `Errored`; Swift `Date?` / Rust `Option<i64>` secs; same 4 states | Confirmed |
 
 ### Wire format (`SyncRecord` and TypedValue boxing)
@@ -968,7 +1011,7 @@ calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit). `init(containerIdentifier:enablePolling:)` added P3-M2. `nudge()` shipped P3-M2 (B-11 seam). Future: `registerZoneSubscription(database:)`, `handleRemoteNotification(userInfo:)` (APNs accelerators, not yet shipped) | Exempt |
+| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit). `init(containerIdentifier:enablePolling:)` P3-M2. `nudge()` P3-M2 (B-11 seam). `registerZoneSubscription()`, `deregisterZoneSubscription()`, `handleRemoteNotification(userInfo:)` shipped P3-M3 (zone subscription + remote-wake accelerator). | Exempt |
 | Adaptive poll scheduler | `AdaptivePollScheduler` (`Sources/ConvergenceKitCloudKit/Engine/AdaptivePollScheduler.swift`) | — | public actor / — | Rust: none — Apple platform binding. `SchedulerPullFn`, `SchedulerSleepFn` typealias. Injected sleep for testability. Shipped P3-M2 | Exempt |
 | Poll tier policy | `PollTierPolicy`, `PollTier` (`Sources/ConvergenceKit/Loop/PollTierPolicy.swift`) | — | public struct, public enum / — | Rust: none — CloudKit-specific. Pure table, no OS calls, `nowMs: Int64` injection. Shipped P3-M2 | Exempt |
 | CKRecord ↔ row mapping | `CKRecordMapping` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public enum / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
@@ -980,6 +1023,18 @@ calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.5-draft -- 2026-07-16 (CVK-ICLOUD P3-M3)
+- Added `SyncEvent.remoteWakeReceived` (Swift) and `SyncEvent::RemoteWakeReceived`
+  (Rust parity arm, never constructed on Rust side) to § 2 `SyncEvent` listing.
+- Updated `SyncEvent` concordance row: 5 → 6 variants; parity-arm note added.
+- Updated `CloudKitSyncEngine` in § 2: corrected `init` signature to
+  `init(containerIdentifier:enablePolling:)`, replaced future-only
+  `registerZoneSubscription(database:)` and `handleRemoteNotification` with
+  shipped signatures (`registerZoneSubscription()` — no CKDatabase arg,
+  routes through the protocol seam; `deregisterZoneSubscription()` new;
+  `handleRemoteNotification(userInfo:)` now with full host-app call pattern).
+- Updated `CloudKitSyncEngine` concordance table row: P3-M3 APIs marked shipped.
 
 ### 1.4-draft -- 2026-07-16 (CVK-ICLOUD P3-M2)
 - Added `CloudKitSyncEngine.init(containerIdentifier:enablePolling:)` —

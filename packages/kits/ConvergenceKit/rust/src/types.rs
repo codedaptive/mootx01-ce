@@ -245,6 +245,12 @@ pub enum SyncEvent {
     PeerConnected { identity: String },
     PeerDisconnected { identity: String, reason: String },
     Error(SyncError),
+    /// A CloudKit silent-push notification arrived for the engine's zone and
+    /// the engine responded by nudging the poll scheduler. Vocabulary-parity
+    /// twin of Swift `SyncEvent.remoteWakeReceived`. CloudKit is Swift-only
+    /// (§ 7 Exempt); this arm is present for cross-port vocabulary parity only
+    /// and is never constructed or matched on the Rust side.
+    RemoteWakeReceived,
 }
 
 /// Coarse state for UI bindings.
