@@ -59,6 +59,27 @@ public struct TableChange: Sendable {
     /// Defaults to `.local`; set to `.syncApply` by the sync-tagged write
     /// paths (`insertSync`, `upsertSync`, `deleteSync`) used by `applyInbound`.
     public let origin: ChangeOrigin
+    /// The set of column names that actually changed in this write.
+    ///
+    /// - `nil` (default): unknown — treat as "all columns potentially changed."
+    ///   Backends that do not read the pre-write row stamp `nil` here. Consumers
+    ///   must fall back to whole-row semantics.
+    /// - Non-nil: the exact set of columns whose stored value differed between
+    ///   the pre-write and post-write row. For inserts this is all columns in the
+    ///   stored row. For deletes this is always `nil` (no column-level information
+    ///   is meaningful on a tombstone).
+    ///
+    /// Stamped by both InMemory and SQLite backends (CVK-WB4). SQLite update and
+    /// upsert paths pre-read the existing row to compute the diff; the comment in
+    /// each call site explains the O(n) read cost and why it is acceptable.
+    ///
+    /// Consumed by ConvergenceKit:
+    ///   - `recordOutbound` storm-kill: when present and every changed column is
+    ///     excluded, the outbox entry is dropped even for mixed-column tables
+    ///     (Scorandum Q1 closed).
+    ///   - `fieldLevelLWW` stamping: only changed columns receive a new HLC; when
+    ///     nil, all present columns are stamped (original coarse behavior).
+    public let changedColumns: Set<String>?
 
     public init(
         table: String,
@@ -66,7 +87,8 @@ public struct TableChange: Sendable {
         rowKey: RowKey? = nil,
         values: [String: TypedValue]? = nil,
         hlc: HLC? = nil,
-        origin: ChangeOrigin = .local
+        origin: ChangeOrigin = .local,
+        changedColumns: Set<String>? = nil
     ) {
         self.table = table
         self.event = event
@@ -74,6 +96,7 @@ public struct TableChange: Sendable {
         self.values = values
         self.hlc = hlc
         self.origin = origin
+        self.changedColumns = changedColumns
     }
 }
 

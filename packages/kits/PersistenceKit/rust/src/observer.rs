@@ -74,6 +74,16 @@ pub struct TableChange {
     /// for writes from `apply_inbound` so the outbound observer can discard
     /// them (echo suppression, I-10).
     pub origin: ChangeOrigin,
+    /// The set of column names that actually changed in this write.
+    ///
+    /// - `None` (default): unknown — treat as "all columns potentially changed."
+    ///   Backends that do not read the pre-write row stamp `None`.
+    /// - `Some(set)`: exact set of columns whose stored value differed between
+    ///   the pre-write and post-write row. For inserts this is all columns in
+    ///   the stored row. For deletes this is always `None`.
+    ///
+    /// Mirrors the Swift `changedColumns: Set<String>?` field (CVK-WB4).
+    pub changed_columns: Option<std::collections::HashSet<String>>,
 }
 
 // MARK: - BlobEvent / BlobChange

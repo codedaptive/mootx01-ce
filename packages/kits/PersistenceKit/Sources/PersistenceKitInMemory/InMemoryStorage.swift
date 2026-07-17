@@ -330,7 +330,12 @@ actor InMemoryStateActor {
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored, origin: origin))
+        // changedColumns for insert = all stored column names (every column in the
+        // row is "new"). Passed through to ConvergenceKit for precision LWW stamping.
+        await notify(TableChange(
+            table: table, event: .insert, rowKey: key, values: stored, origin: origin,
+            changedColumns: Set(stored.keys)
+        ))
         return RowHandle(table: table, key: key)
     }
 
@@ -355,14 +360,24 @@ actor InMemoryStateActor {
             merged = Self.materializeGenerated(t.declaration, merged)
             t.rows[existingKey] = merged
             state.tables[table] = t
-            await notify(TableChange(table: table, event: .update, rowKey: existingKey, values: merged, origin: origin))
+            // changedColumns for upsert-as-update = columns whose value differs
+            // between the pre-upsert row and the merged result.
+            let changed = Set(merged.keys.filter { existingRow[$0] != merged[$0] })
+            await notify(TableChange(
+                table: table, event: .update, rowKey: existingKey, values: merged,
+                origin: origin, changedColumns: changed
+            ))
             return RowHandle(table: table, key: existingKey)
         }
         let key = resolveOrAllocateKey(table: t, values: values)
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored, origin: origin))
+        // changedColumns for upsert-as-insert = all stored column names (new row).
+        await notify(TableChange(
+            table: table, event: .insert, rowKey: key, values: stored, origin: origin,
+            changedColumns: Set(stored.keys)
+        ))
         return RowHandle(table: table, key: key)
     }
 
@@ -380,7 +395,14 @@ actor InMemoryStateActor {
             for (col, v) in values { merged[col] = v }
             merged = Self.materializeGenerated(t.declaration, merged)
             t.rows[k] = merged
-            notifications.append(TableChange(table: table, event: .update, rowKey: k, values: merged))
+            // changedColumns for update = columns whose value differs between the
+            // pre-update row and the merged result. The pre-update `row` is
+            // available here before the merge, so no extra read is needed.
+            let changed = Set(merged.keys.filter { row[$0] != merged[$0] })
+            notifications.append(TableChange(
+                table: table, event: .update, rowKey: k, values: merged,
+                changedColumns: changed
+            ))
             count += 1
         }
         state.tables[table] = t
@@ -403,7 +425,12 @@ actor InMemoryStateActor {
         var notifications: [TableChange] = []
         for (k, row) in t.rows where PredicateEvaluator.evaluate(predicate, against: row) {
             t.rows.removeValue(forKey: k)
-            notifications.append(TableChange(table: table, event: .delete, rowKey: k, values: row, origin: origin))
+            // changedColumns for delete = nil. Column-level information is not
+            // meaningful on a tombstone; consumers use the rowKey only.
+            notifications.append(TableChange(
+                table: table, event: .delete, rowKey: k, values: row, origin: origin,
+                changedColumns: nil
+            ))
             count += 1
         }
         state.tables[table] = t
