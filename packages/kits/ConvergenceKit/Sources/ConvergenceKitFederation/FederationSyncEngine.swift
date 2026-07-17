@@ -713,6 +713,15 @@ actor FederationStateActor {
             case .remoteWins:
                 // Remote delete wins unconditionally; hard-delete the row.
                 _ = try? await storage.rowStore.deleteSync(table: record.table, where: predicate)
+                // P5-M1b: purge stale skew-queue entries and parked outbox entries.
+                // remoteWins applies the tombstone without an HLC gate; purge older-HLC
+                // skew entries and all parked outbox entries for this row.
+                _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
+                    tableName: record.table, rowKey: record.rowKey,
+                    tombstoneHLC: record.hlc,
+                    from: storage, sideTable: Self.fedPendingSkewTable)
+                _ = try? await OutboxStore.deleteMatchingParked(
+                    tableName: record.table, rowKey: record.rowKey.uuidString, from: storage)
             case .lastWriterWinsByHLC:
                 // HLC gate: stale delete (incoming HLC < side-table HLC) must not
                 // remove a newer local row (D2 fix). Side table persists the HLC
@@ -730,6 +739,16 @@ actor FederationStateActor {
                     storage: storage, table: record.table,
                     primaryKey: record.rowKey, hlc: record.hlc.asHLC,
                     schemaVersion: record.schemaVersion, kitID: record.kitID)
+                // P5-M1b: purge stale skew-queue entries and parked outbox entries.
+                // The tombstone won the LWW gate; older-HLC skew entries are already
+                // superseded (they would be rejected on replay by the same gate).
+                // Parked outbox entries are indefinite retention after row deletion.
+                _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
+                    tableName: record.table, rowKey: record.rowKey,
+                    tombstoneHLC: record.hlc,
+                    from: storage, sideTable: Self.fedPendingSkewTable)
+                _ = try? await OutboxStore.deleteMatchingParked(
+                    tableName: record.table, rowKey: record.rowKey.uuidString, from: storage)
 
             case .fieldLevelLWW:
                 // Tombstone interplay (edit-beats-delete): tombstone wins only when
@@ -752,6 +771,14 @@ actor FederationStateActor {
                     storage: storage, table: record.table,
                     primaryKey: record.rowKey, hlc: record.hlc.asHLC,
                     schemaVersion: record.schemaVersion, kitID: record.kitID)
+                // P5-M1b: purge stale skew-queue entries and parked outbox entries.
+                // tombstoneHLC is already declared above in this arm; reuse it.
+                _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
+                    tableName: record.table, rowKey: record.rowKey,
+                    tombstoneHLC: tombstoneHLC,
+                    from: storage, sideTable: Self.fedPendingSkewTable)
+                _ = try? await OutboxStore.deleteMatchingParked(
+                    tableName: record.table, rowKey: record.rowKey.uuidString, from: storage)
             }
             return
         }

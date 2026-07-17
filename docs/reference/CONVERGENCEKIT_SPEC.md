@@ -348,6 +348,9 @@ R7 lands, not the row itself. Note on `pushOnly` and tombstones: a
 `pushOnly` table (I-5) silently swallows remote tombstones; it never
 accepts inbound deletes. Consumers who need delete propagation on
 `pushOnly`-declared tables must use soft-delete bitmap columns instead.
+On tombstone apply, parked outbox entries for the affected `(table, rowKey)` are
+also purged: they will never push (is_parked=1) and retaining them after the row
+is deleted is indefinite payload storage (CVK-ICLOUD P5-M1b; Perkins P4-M4).
 
 **B-10 (schema-skew pending queue) (v1.2-draft):** A record whose
 `schemaVersion` is strictly newer than the local receiver's is not rejected
@@ -367,6 +370,10 @@ can surface a "waiting for app update" indicator. Records whose
 `schemaVersion` is strictly older than the local receiver's are rejected as
 `schemaMismatch` and counted as a conflict (I-4).
 Implementation: `PendingSkewQueue.swift`, `SkewReplay.swift` (CVK-ICLOUD P3-M4).
+On tombstone apply, pending-skew entries for the affected `(table, rowKey)` whose
+stored record HLC is strictly older than the tombstone HLC are purged; entries
+with a newer HLC survive — they postdate the delete and would win on replay
+(CVK-ICLOUD P5-M1b; Perkins P4-M4 advisory on payload retention).
 
 **B-11 (convergence loop) (v1.2-draft):** The outbox drains on a
 debounced cadence after local writes to prevent per-keystroke push storms.

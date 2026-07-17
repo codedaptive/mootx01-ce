@@ -255,6 +255,61 @@ public enum OutboxStore {
         return rows.compactMap { decodeRow($0) }.filter { $0.isParked }
     }
 
+    // MARK: - Tombstone purge (P5-M1b)
+
+    /// Purge parked outbox entries for a (tableName, rowKey) after a tombstone wins.
+    ///
+    /// WHY only parked entries are removed:
+    /// Parked entries (is_parked = 1) have permanently failed transport delivery
+    /// and will never be pushed. Once a remote tombstone wins the LWW gate and
+    /// hard-deletes the local row, these parked payloads can never be reconciled —
+    /// retaining them is indefinite storage waste (Perkins P4-M4 advisory).
+    ///
+    /// WHY active entries are NOT removed:
+    /// A NEWER active outbox entry for the same (table, rowKey) would have beaten
+    /// the tombstone LWW gate and prevented the tombstone from applying in the first
+    /// place (the caller never reaches this path in that scenario). At tombstone-apply
+    /// time, no newer active entry exists for this row; if one were present, the
+    /// tombstone would not have won.
+    ///
+    /// Uses `deleteSync` so the purge does not produce a new outbox entry (I-10).
+    ///
+    /// - Parameters:
+    ///   - tableName: Application table of the deleted row.
+    ///   - rowKey: UUID string of the deleted row (matches the TEXT column format).
+    ///   - storage: The local PersistenceKit storage.
+    /// - Returns: Number of parked entries removed.
+    @discardableResult
+    public static func deleteMatchingParked(
+        tableName: String,
+        rowKey: String,
+        from storage: any Storage
+    ) async throws -> Int {
+        // Query parked entries for (table_name, row_key) first; delete by id so
+        // we touch only the targeted rows and avoid a broad DELETE without a PK gate.
+        let parked = try await storage.rowStore.query(
+            table: table,
+            where: .and([
+                .eq(Column(table: table, name: "table_name"), .text(tableName)),
+                .eq(Column(table: table, name: "row_key"),    .text(rowKey)),
+                .eq(Column(table: table, name: "is_parked"),  .int(1)),
+            ])
+        )
+        guard !parked.isEmpty else { return 0 }
+
+        var purgedCount = 0
+        for row in parked {
+            guard case .uuid(let entryID) = row["id"] else { continue }
+            // deleteSync so this internal purge does not emit a new outbox entry (I-10).
+            _ = try? await storage.rowStore.deleteSync(
+                table: table,
+                where: .eq(Column(table: table, name: "id"), .uuid(entryID))
+            )
+            purgedCount += 1
+        }
+        return purgedCount
+    }
+
     // MARK: - Drain leftovers on enable
 
     /// Read all pending outbox entries that survived from a previous process

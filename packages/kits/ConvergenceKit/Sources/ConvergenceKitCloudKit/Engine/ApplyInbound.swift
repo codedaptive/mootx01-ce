@@ -48,6 +48,16 @@ extension CloudKitStateActor {
                     .uuid(decoded.rowKey)
                 )
                 _ = try? await storage.rowStore.deleteSync(table: decoded.table, where: predicate)
+                // P5-M1b: purge stale skew-queue and parked-outbox payloads for this row.
+                // remoteWins has no HLC gate — tombstone applies unconditionally — so purge
+                // all older skew entries (any HLC < the tombstone's HLC) and all parked outbox entries.
+                let tombstoneHLCRW = PackedHLC(decoded.syncMeta.hlc)
+                _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
+                    tableName: decoded.table, rowKey: decoded.rowKey,
+                    tombstoneHLC: tombstoneHLCRW,
+                    from: storage, sideTable: CKSideSchema.pendingSkewTable)
+                _ = try? await OutboxStore.deleteMatchingParked(
+                    tableName: decoded.table, rowKey: decoded.rowKey.uuidString, from: storage)
             case .lastWriterWinsByHLC:
                 // LWW gate: a stale tombstone (incoming HLC < local `_ck_sync_meta` HLC)
                 // must not delete a newer local row (D2 fix).
@@ -69,6 +79,19 @@ extension CloudKitStateActor {
                     primaryKey: decoded.rowKey,
                     hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
                     kitID: decoded.syncMeta.kitID)
+                // P5-M1b: purge stale skew-queue entries and parked outbox entries.
+                // The tombstone has won the LWW gate; any pending-skew entries whose
+                // record HLC is older than the tombstone are already superseded and
+                // would be rejected by the same gate on replay. Parked outbox entries
+                // for this row will never be pushed (is_parked = 1) — retaining them
+                // after the row is deleted is indefinite payload retention (Perkins P4-M4).
+                let tombstoneHLCLWW = PackedHLC(decoded.syncMeta.hlc)
+                _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
+                    tableName: decoded.table, rowKey: decoded.rowKey,
+                    tombstoneHLC: tombstoneHLCLWW,
+                    from: storage, sideTable: CKSideSchema.pendingSkewTable)
+                _ = try? await OutboxStore.deleteMatchingParked(
+                    tableName: decoded.table, rowKey: decoded.rowKey.uuidString, from: storage)
 
             case .fieldLevelLWW:
                 // Tombstone interplay: edit-beats-delete rule.
@@ -99,6 +122,14 @@ extension CloudKitStateActor {
                     primaryKey: decoded.rowKey,
                     hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
                     kitID: decoded.syncMeta.kitID)
+                // P5-M1b: purge stale skew-queue entries and parked outbox entries.
+                // tombstoneHLC is already declared above in this arm; reuse it.
+                _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
+                    tableName: decoded.table, rowKey: decoded.rowKey,
+                    tombstoneHLC: tombstoneHLC,
+                    from: storage, sideTable: CKSideSchema.pendingSkewTable)
+                _ = try? await OutboxStore.deleteMatchingParked(
+                    tableName: decoded.table, rowKey: decoded.rowKey.uuidString, from: storage)
             }
             return
         }
