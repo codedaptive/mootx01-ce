@@ -259,6 +259,16 @@ so `null`, `bool`, `int`, `bitmap`, `float`, `text`, `blob`, `uuid`,
 serialization. The `bitmap`-vs-`int` and `json`-vs-`blob` distinctions
 are preserved by the discriminator tag.
 
+*Wire note (CVK-WC5):* `SyncValueBox.array` nesting is capped at depth 3
+on both encode and decode in both the Swift and Rust legs. LocusKit's
+actual usage is ≤2 (an array-of-scalars inside an array-of-rows); depth 3
+gives one level of headroom. A record whose array payload exceeds depth 3
+is rejected as a `decodingFailure` (counted as a per-record conflict, B-4
+error table) on inbound; the encoder refuses to ship such a record outbound.
+This cap is defense-in-depth against adversarial or corrupt payloads that
+would otherwise exhaust the call stack on recursive decode (Perkins review,
+CVK-WC5).
+
 **B-6 (CloudKit metadata):** the CloudKit mapper drives record mapping
 from the manifest, not from per-entity hardcoding. Each table maps to
 record type `kitID_tableName`; sync metadata travels in reserved fields
