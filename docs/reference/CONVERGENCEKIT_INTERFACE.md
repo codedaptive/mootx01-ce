@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.5-draft
+date: 2026-07-17
+version: 1.6-draft
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -14,7 +14,7 @@ purpose: |
   format and TypedValue boxing, the SyncReceipt / SyncEvent / SyncState
   value types, the SyncError enum, and the three backends (None,
   CloudKit, Federation). The companion SPEC carries the behavioral
-  contracts (invariants I-1…I-9, conformance C-1…C-8).
+  contracts (invariants I-1…I-12, conformance C-1…C-15).
 ---
 
 # ConvergenceKit Interface
@@ -1033,6 +1033,15 @@ calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.6-draft -- 2026-07-17 (CVK-ICLOUD P4-M6)
+- Updated `purpose` frontmatter: corrected SPEC conformance range from
+  C-1…C-8 to C-1…C-15 to reflect the executable conformance table added
+  in SPEC P4-M6 (C-9..C-15 with named green tests).
+- `subscribeAttached()` NOT added: method was specified for this pass but
+  does not exist in `CloudKitSyncEngine.swift` at this revision. Per
+  SPEC-BEFORE-REALITY, the INTERFACE is not updated until the
+  implementation lands.
 
 ### 1.5-draft -- 2026-07-16 (CVK-ICLOUD P3-M3)
 - Added `SyncEvent.remoteWakeReceived` (Swift) and `SyncEvent::RemoteWakeReceived`
