@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use persistence_kit::{Column, RowStore, Storage, StorageEvent, StoragePredicate, TableChange, TypedValue};
+use persistence_kit::{Column, OrderClause, RowStore, Storage, StorageEvent, StoragePredicate, TableChange, TypedValue};
 
 // ----- identity -----
 
@@ -532,10 +532,41 @@ impl SyncEngine for FederationSyncEngine {
         }
         let inbox = self.relay.register(self.peer_identity.clone());
         self.state.inbox = Some(inbox);
-        // Ensure the _fed_sync_meta side table exists before any apply. Mirrors
-        // the Swift engine's ensureFedSyncMetaTable call in enable() (A6 unification).
+        // Ensure the _fed_sync_meta side tables exist before any apply. At v3
+        // this also creates _fed_pending_skew (CVK-WC3). Mirrors Swift's
+        // ensureFedSyncMetaTable call in enable() (A6 unification + WC3 parity).
         ensure_fed_sync_meta_table(&*storage)
             .map_err(|e| SyncError::TransportFailure { detail: format!("ensure _fed_sync_meta: {}", e) })?;
+
+        // Schema-skew replay (CVK-WC3, R9).
+        //
+        // Drain records from _fed_pending_skew whose schema_version equals the
+        // now-active manifest version. Echo suppression is active by construction:
+        // observer workers are not yet started (start_observers runs below), so
+        // the apply_record writes cannot re-enter the outbox. This mirrors
+        // Swift FederationStateActor.enable() skew-replay block.
+        {
+            let row_store = storage.row_store();
+            let ready = fed_skew_drain_ready(&row_store, manifest.schema_version);
+            if !ready.is_empty() {
+                let mut replayed_ids: Vec<Uuid> = Vec::new();
+                for (entry_id, record) in &ready {
+                    let Some(synced_table) = manifest.table_named(&record.table) else { continue };
+                    if synced_table.direction == SyncDirection::PushOnly { continue }
+                    if apply_record(record, synced_table, &storage).is_ok() {
+                        replayed_ids.push(*entry_id);
+                    }
+                }
+                let _ = fed_skew_delete_applied(&row_store, &replayed_ids);
+            }
+            // Emit RecordsHeldForMigration when records with a STILL-higher
+            // schema_version remain in the queue after this replay cycle.
+            let still_held = fed_skew_count_held(&row_store).unwrap_or(0);
+            if still_held > 0 {
+                self.emit(SyncEvent::RecordsHeldForMigration { count: still_held });
+            }
+        }
+
         // Subscribe the observer workers BEFORE marking enabled so the
         // write-capture path is live the moment the engine reports enabled.
         self.start_observers(&manifest, &storage)?;
@@ -654,6 +685,8 @@ impl SyncEngine for FederationSyncEngine {
 
         let mut pulled = 0;
         let mut conflicts = 0;
+        // Count of records held in _fed_pending_skew this pull cycle (CVK-WC3, R9).
+        let mut skew_held_count: usize = 0;
         // Collect row keys per table for the post-apply integrity hook (R3).
         let mut applied_by_table: HashMap<String, Vec<Uuid>> = HashMap::new();
         let mut deleted_by_table: HashMap<String, Vec<Uuid>> = HashMap::new();
@@ -730,10 +763,40 @@ impl SyncEngine for FederationSyncEngine {
                     conflicts += 1;
                     continue;
                 }
-                if record.schema_version != manifest.schema_version {
+                // Schema-skew split (CVK-WC3, R9):
+                //
+                // Future-schema (sender on newer schema than receiver):
+                //   Enqueue in _fed_pending_skew. NOT a conflict — the record is
+                //   valid and will be replayed on enable() after the receiver
+                //   updates its manifest schema_version to match.
+                //
+                // Downgrade-apply (sender on OLDER schema than receiver):
+                //   Reject. Applying an older-schema record could overwrite
+                //   newer-schema columns with missing-field defaults. Count
+                //   as conflict so callers know something was skipped.
+                //
+                // Equal: normal apply path (schema versions match).
+                //
+                // Mirrors Swift FederationStateActor.pull() schema-skew split.
+                if record.schema_version > manifest.schema_version {
+                    let row_store = storage.row_store();
+                    if fed_skew_enqueue(&row_store, record).is_ok() {
+                        skew_held_count += 1;
+                    } else {
+                        // Enqueue failure (storage error): count as conflict so
+                        // the receipt accurately reflects that this record was
+                        // not applied.
+                        conflicts += 1;
+                    }
+                    continue;
+                } else if record.schema_version < manifest.schema_version {
+                    // Sender is on an older schema than receiver. Applying would
+                    // risk clobbering newer-schema columns with missing-field
+                    // defaults. Sender must update its schema before retrying.
                     conflicts += 1;
                     continue;
                 }
+                // record.schema_version == manifest.schema_version — normal apply.
                 // Look up the synced table; reject records for unknown tables.
                 let synced_table = match manifest.table_named(&record.table) {
                     Some(t) => t,
@@ -774,6 +837,12 @@ impl SyncEngine for FederationSyncEngine {
         // cleared so that hook-originated repair writes flow into the outbox
         // (hook-writes-must-ship, Kong Q2 adjudication).
         self.state.pulling.store(false, Ordering::Release);
+
+        // Emit RecordsHeldForMigration when at least one future-schema record
+        // was enqueued this cycle (CVK-WC3, R9). Mirrors Swift pull() behavior.
+        if skew_held_count > 0 {
+            self.emit(SyncEvent::RecordsHeldForMigration { count: skew_held_count });
+        }
 
         // Post-apply integrity hook (R3): invoked once per batch when at least
         // one record was applied. A hook error counts as ONE additional conflict
@@ -854,6 +923,12 @@ fn apply_record(
             ConflictPolicy::RemoteWins => {
                 // Remote delete wins unconditionally.
                 let _ = row_store.delete(&record.table, &predicate);
+                // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
+                // remoteWins applies without an HLC gate; purge all older-HLC skew entries
+                // since they would be overridden by this delete on replay. Mirrors
+                // Swift FederationStateActor.applyInbound remoteWins tombstone arm.
+                let _ = fed_skew_delete_older_than(
+                    &row_store, &record.table, &record.row_key, record.hlc);
             }
             ConflictPolicy::LastWriterWinsByHLC => {
                 // HLC gate: stale delete (incoming HLC < side-table HLC) must not
@@ -876,6 +951,13 @@ fn apply_record(
                     record.hlc.into(),
                 )
                 .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
+                // The tombstone won the LWW gate; older-HLC skew entries are already
+                // superseded (they would be rejected on replay by the same gate).
+                // Mirrors Swift FederationStateActor.applyInbound lastWriterWinsByHLC
+                // tombstone arm (PendingSkewQueue.deleteMatchingOlderThan call).
+                let _ = fed_skew_delete_older_than(
+                    &row_store, &record.table, &record.row_key, record.hlc);
             }
             ConflictPolicy::FieldLevelLWW => {
                 // Tombstone interplay (edit-beats-delete): the tombstone wins only
@@ -899,6 +981,12 @@ fn apply_record(
                         record.hlc.into(),
                     )
                     .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
+                    // The tombstone won the edit-beats-delete gate; older-HLC skew entries
+                    // are already superseded and would lose again on replay. Mirrors
+                    // Swift FederationStateActor.applyInbound fieldLevelLWW tombstone arm.
+                    let _ = fed_skew_delete_older_than(
+                        &row_store, &record.table, &record.row_key, record.hlc);
                 }
                 // If tombstone_wins returns false, a local column HLC is strictly
                 // greater than the tombstone — edit-beats-delete; keep the row.
@@ -1185,17 +1273,42 @@ const FED_SYNC_META_TABLE: &str = "_fed_sync_meta";
 /// col_hlc encoding, and PK structure are byte-identical to the Swift side.
 const FED_SYNC_META_COLS_TABLE: &str = "_fed_sync_meta_cols";
 
-/// Ensure both Federation side tables exist.
+/// Side table name for Federation pending-skew queue (CVK-WC3, schema v3).
+///
+/// Holds future-schema records (sender schema_version > local manifest) that
+/// cannot be applied immediately. On enable(), records whose schema_version
+/// equals the newly-active manifest version are replayed through apply_record.
+///
+/// Schema (mirrors Swift `_fed_pending_skew`):
+///   id             UUID    — primary key assigned at enqueue time.
+///   table_name     TEXT    — application table the record belongs to.
+///   row_key        TEXT    — UUID as TEXT (PK of the application row).
+///   schema_version INT     — schemaVersion from the wire record (sender's version).
+///   received_at    TEXT    — ISO8601 wall-clock for oldest-eviction ordering.
+///                            DATE storage is TEXT per schema invariants.
+///   payload        BLOB    — JSON-encoded SyncRecord (full wire format).
+///
+/// Mirrors Swift `FederationStateActor.fedPendingSkewTable` = "_fed_pending_skew".
+const FED_PENDING_SKEW_TABLE: &str = "_fed_pending_skew";
+
+/// Maximum number of held entries before oldest-eviction fires (Playground Rule 8).
+///
+/// When exceeded, the oldest entries by received_at are evicted. The evicted
+/// records are not permanently lost: the peer resends after the remote estate
+/// updates its schema. Mirrors Swift `PendingSkewQueue.cap = 512`.
+const FED_SKEW_QUEUE_CAP: usize = 512;
+
+/// Ensure all three Federation side tables exist (v3, CVK-WC3).
 ///
 /// Called from `enable()` before any `apply_record`. Uses `storage.migrate()`
 /// which is forward-only and idempotent.
 ///
-/// Schema version 2 governs both tables:
+/// Schema version history:
 ///   v1 — `_fed_sync_meta`      row-grain HLC for A6 LWW gate + tombstone block
 ///   v2 — `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (B-8 parity)
+///   v3 — `_fed_pending_skew`   schema-skew hold queue (CVK-WC3, parity with Swift v3)
 ///
-/// Mirrors Swift `FederationStateActor.ensureFedSyncMetaTable` (which the Swift
-/// comment refers to as "v2" upon adding `_fed_sync_meta_cols`). Returns an error
+/// Mirrors Swift `FederationStateActor.ensureFedSyncMetaTable`. Returns an error
 /// string on failure (caller converts to SyncError).
 fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
     use persistence_kit::{ColumnDeclaration, Migration, SchemaDeclaration, SchemaOperation, TableDeclaration};
@@ -1231,10 +1344,33 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             "column_name".to_string(),
         ],
     );
+    // _fed_pending_skew: schema-skew hold queue (v3, CVK-WC3).
+    // Mirrors Swift `_fed_pending_skew` in FederationStateActor.ensureFedSyncMetaTable.
+    // Holds future-schema records until enable() replays them after schema update.
+    let skew_table = TableDeclaration::new(
+        FED_PENDING_SKEW_TABLE,
+        vec![
+            // id: UUID primary key assigned at enqueue time.
+            ColumnDeclaration::uuid("id"),
+            // table_name: application table the record belongs to.
+            ColumnDeclaration::text("table_name"),
+            // row_key: UUID as TEXT (primary key of the application row).
+            ColumnDeclaration::text("row_key"),
+            // schema_version: schemaVersion from the wire record (sender's version).
+            // INT (not Bool) per schema invariants.
+            ColumnDeclaration::int("schema_version").with_default(TypedValue::Int(0)),
+            // received_at: ISO8601 wall-clock TEXT for oldest-eviction ordering.
+            // Date storage is TEXT (ISO8601) per schema invariants.
+            ColumnDeclaration::text("received_at"),
+            // payload: JSON-encoded SyncRecord (full wire format).
+            ColumnDeclaration::blob("payload"),
+        ],
+        vec!["id".to_string()],
+    );
     let schema = SchemaDeclaration::new(
         "ConvergenceKitFederation",
-        2,
-        vec![meta_table, cols_table.clone()],
+        3,
+        vec![meta_table, cols_table.clone(), skew_table.clone()],
     )
     .with_migrations(vec![
         // v1 → v2: add _fed_sync_meta_cols per-column HLC side table
@@ -1243,6 +1379,14 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             from_version: 1,
             to_version: 2,
             operations: vec![SchemaOperation::CreateTable(cols_table)],
+        },
+        // v2 → v3: add _fed_pending_skew schema-skew hold queue (CVK-WC3).
+        // Holds future-schema records until enable() replays them after the
+        // local manifest schema version is updated. Mirrors Swift v2→v3 migration.
+        Migration {
+            from_version: 2,
+            to_version: 3,
+            operations: vec![SchemaOperation::CreateTable(skew_table)],
         },
     ]);
     storage.migrate(&schema).map_err(|e| e.to_string())
@@ -1434,6 +1578,274 @@ fn clear_fed_column_hlcs(
     // Best-effort: ignore errors (row may already be absent; stale entries
     // would only affect future re-inserts, not correctness of current deletes).
     let _ = row_store.delete(FED_SYNC_META_COLS_TABLE, &predicate);
+}
+
+// ─── _fed_pending_skew helpers (CVK-WC3) ──────────────────────────────────────
+
+/// Enqueue a SyncRecord in `_fed_pending_skew`.
+///
+/// Writes the entry with a fresh UUID primary key and the current wall-clock
+/// time (ISO8601) in `received_at`, then calls `fed_skew_evict_if_needed` to
+/// keep the table at or below `FED_SKEW_QUEUE_CAP`.
+///
+/// All side-table writes flow through the default `upsert` path (not
+/// `upsert_sync`) because the Rust engine suppresses echo via the
+/// `pulling: AtomicBool` flag, not the sync-tagged write variants.
+///
+/// Mirrors Swift `PendingSkewQueue.enqueue(_:to:sideTable:)`.
+fn fed_skew_enqueue(
+    row_store: &Arc<dyn RowStore>,
+    record: &SyncRecord,
+) -> Result<(), String> {
+    let payload = serde_json::to_vec(record).map_err(|e| e.to_string())?;
+    let id = Uuid::new_v4();
+    let received_at = iso8601_utc_now();
+    let mut values = BTreeMap::new();
+    values.insert("id".to_string(),             TypedValue::Uuid(id));
+    values.insert("table_name".to_string(),     TypedValue::Text(record.table.clone()));
+    values.insert("row_key".to_string(),        TypedValue::Text(record.row_key.to_string()));
+    values.insert("schema_version".to_string(), TypedValue::Int(record.schema_version as i64));
+    values.insert("received_at".to_string(),    TypedValue::Text(received_at));
+    values.insert("payload".to_string(),        TypedValue::Blob(payload));
+    row_store
+        .upsert(FED_PENDING_SKEW_TABLE, values, &["id".to_string()])
+        .map_err(|e| e.to_string())?;
+    let _ = fed_skew_evict_if_needed(row_store);
+    Ok(())
+}
+
+/// Evict the oldest entries when `_fed_pending_skew` exceeds the cap.
+///
+/// Oldest is defined by `received_at` ascending (ISO8601 sorts lexicographically,
+/// equivalent to chronological oldest-first). Best-effort: errors are silently
+/// ignored. Mirrors Swift `PendingSkewQueue.evictIfNeeded(cap:from:sideTable:)`.
+fn fed_skew_evict_if_needed(row_store: &Arc<dyn RowStore>) {
+    let total = match row_store.count(FED_PENDING_SKEW_TABLE, None) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    if total <= FED_SKEW_QUEUE_CAP {
+        return;
+    }
+    let excess = total - FED_SKEW_QUEUE_CAP;
+    // Fetch the oldest `excess` entries by received_at ascending.
+    let order = OrderClause::ascending(Column::new(FED_PENDING_SKEW_TABLE, "received_at"));
+    let oldest = match row_store.query(
+        FED_PENDING_SKEW_TABLE,
+        None,
+        &[order],
+        Some(excess),
+        None,
+    ) {
+        Ok(rows) => rows,
+        Err(_) => return,
+    };
+    let ids: Vec<TypedValue> = oldest
+        .iter()
+        .filter_map(|row| row.get("id").cloned())
+        .filter(|v| matches!(v, TypedValue::Uuid(_)))
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let predicate = StoragePredicate::In(
+        Column::new(FED_PENDING_SKEW_TABLE.to_string(), "id".to_string()),
+        ids,
+    );
+    let _ = row_store.delete(FED_PENDING_SKEW_TABLE, &predicate);
+}
+
+/// Fetch all entries from `_fed_pending_skew` whose `schema_version` equals
+/// `current_version`. Does NOT delete the entries — the caller must confirm
+/// successful apply by passing IDs to `fed_skew_delete_applied`.
+///
+/// Entries with corrupt payloads are silently skipped (the entry remains in
+/// the table for the next enable() attempt). Mirrors Swift
+/// `SkewReplay.drainReady(currentVersion:from:sideTable:)`.
+fn fed_skew_drain_ready(
+    row_store: &Arc<dyn RowStore>,
+    current_version: i32,
+) -> Vec<(Uuid, SyncRecord)> {
+    let predicate = StoragePredicate::Eq(
+        Column::new(FED_PENDING_SKEW_TABLE.to_string(), "schema_version".to_string()),
+        TypedValue::Int(current_version as i64),
+    );
+    let rows = match row_store.query(FED_PENDING_SKEW_TABLE, Some(&predicate), &[], None, None) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    for row in rows {
+        let id = match row.get("id") {
+            Some(TypedValue::Uuid(u)) => *u,
+            _ => continue,
+        };
+        let payload = match row.get("payload") {
+            Some(TypedValue::Blob(b)) => b.clone(),
+            _ => continue,
+        };
+        let record: SyncRecord = match serde_json::from_slice(&payload) {
+            Ok(r) => r,
+            Err(_) => continue,  // corrupt payload: skip, leave for next enable()
+        };
+        result.push((id, record));
+    }
+    result
+}
+
+/// Delete entries with the given IDs from `_fed_pending_skew`.
+///
+/// Called after successful `apply_record` for each replayed entry. Uses
+/// `delete` (not `delete_sync`) because Rust echo suppression is handled
+/// by the `pulling` flag, not the sync-tagged write paths.
+///
+/// Mirrors Swift `SkewReplay.deleteApplied(ids:from:sideTable:)`.
+fn fed_skew_delete_applied(
+    row_store: &Arc<dyn RowStore>,
+    ids: &[Uuid],
+) {
+    if ids.is_empty() {
+        return;
+    }
+    let id_values: Vec<TypedValue> = ids.iter().map(|u| TypedValue::Uuid(*u)).collect();
+    let predicate = StoragePredicate::In(
+        Column::new(FED_PENDING_SKEW_TABLE.to_string(), "id".to_string()),
+        id_values,
+    );
+    let _ = row_store.delete(FED_PENDING_SKEW_TABLE, &predicate);
+}
+
+/// Return the total number of entries in `_fed_pending_skew`, regardless
+/// of schema_version. Used to emit `RecordsHeldForMigration` after replay
+/// when higher-version records still remain. Mirrors Swift
+/// `SkewReplay.countHeld(from:sideTable:)`.
+fn fed_skew_count_held(
+    row_store: &Arc<dyn RowStore>,
+) -> Result<usize, String> {
+    row_store
+        .count(FED_PENDING_SKEW_TABLE, None)
+        .map_err(|e| e.to_string())
+}
+
+/// Purge skew-queue entries for a (table_name, row_key) pair whose stored
+/// record HLC is strictly OLDER than the winning tombstone HLC.
+///
+/// WHY only older entries are removed:
+/// A future-schema entry whose HLC is >= the tombstone represents a write
+/// that postdates (or ties) the delete. On replay (after a schema update),
+/// that newer record may win the LWW gate and override the delete — removing
+/// it here would silence a legitimate re-create. Only entries the tombstone
+/// would already defeat on replay are safe to discard.
+///
+/// P5-M1b parity: mirrors Swift
+/// `PendingSkewQueue.deleteMatchingOlderThan(tableName:rowKey:tombstoneHLC:from:sideTable:)`.
+fn fed_skew_delete_older_than(
+    row_store: &Arc<dyn RowStore>,
+    table_name: &str,
+    row_key: &Uuid,
+    tombstone_hlc: PackedHLC,
+) {
+    // Query all entries for this (table_name, row_key). Per-row count is
+    // typically 0–2, so decoding all payloads to compare HLCs is inexpensive.
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_PENDING_SKEW_TABLE.to_string(), "table_name".to_string()),
+            TypedValue::Text(table_name.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_PENDING_SKEW_TABLE.to_string(), "row_key".to_string()),
+            TypedValue::Text(row_key.to_string()),
+        ),
+    ]);
+    let rows = match row_store.query(FED_PENDING_SKEW_TABLE, Some(&predicate), &[], None, None) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let tombstone: HLC = tombstone_hlc.into();
+    for row in rows {
+        let id = match row.get("id") {
+            Some(TypedValue::Uuid(u)) => *u,
+            _ => continue,
+        };
+        let payload = match row.get("payload") {
+            Some(TypedValue::Blob(b)) => b.clone(),
+            _ => continue,
+        };
+        let record: SyncRecord = match serde_json::from_slice(&payload) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let record_hlc: HLC = record.hlc.into();
+        // Only purge entries that the tombstone would defeat on replay.
+        // Entries with HLC >= tombstone survive (they postdate the delete).
+        if record_hlc < tombstone {
+            let id_pred = StoragePredicate::Eq(
+                Column::new(FED_PENDING_SKEW_TABLE.to_string(), "id".to_string()),
+                TypedValue::Uuid(id),
+            );
+            let _ = row_store.delete(FED_PENDING_SKEW_TABLE, &id_pred);
+        }
+    }
+}
+
+/// Format current UTC wall-clock time as an ISO8601 string.
+///
+/// Used for `received_at` in `_fed_pending_skew` entries so eviction ordering
+/// is chronological (ISO8601 strings sort lexicographically). Mirrors Swift's
+/// `ISO8601DateFormatter().string(from: Date())` used in PendingSkewQueue.enqueue.
+///
+/// Implemented without chrono to avoid a new dependency. Accuracy is to the
+/// second; subsecond precision is not needed for eviction ordering.
+fn iso8601_utc_now() -> String {
+    let total_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let sec = (total_secs % 60) as u8;
+    let total_mins = total_secs / 60;
+    let min = (total_mins % 60) as u8;
+    let total_hours = total_mins / 60;
+    let hour = (total_hours % 24) as u8;
+    let days = total_hours / 24;  // days since 1970-01-01
+    let (year, month, day) = epoch_days_to_date(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, min, sec
+    )
+}
+
+/// Convert days-since-epoch (1970-01-01) to a (year, month, day) calendar date.
+/// Implements the proleptic Gregorian calendar; correct for years 1970–2099
+/// (the only range relevant to received_at timestamps).
+fn epoch_days_to_date(mut days: u64) -> (u32, u8, u8) {
+    let mut year: u32 = 1970;
+    loop {
+        let days_in_year: u64 = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap_year(year);
+    let month_lengths: [u8; 12] = [
+        31, if leap { 29 } else { 28 },
+        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    ];
+    let mut month: u8 = 1;
+    for &mlen in &month_lengths {
+        if days < mlen as u64 {
+            break;
+        }
+        days -= mlen as u64;
+        month += 1;
+    }
+    (year, month, days as u8 + 1)
+}
+
+/// Returns true if `year` is a leap year in the Gregorian calendar.
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 // ─── pure fieldLevelLWW merge logic ───────────────────────────────────────────
