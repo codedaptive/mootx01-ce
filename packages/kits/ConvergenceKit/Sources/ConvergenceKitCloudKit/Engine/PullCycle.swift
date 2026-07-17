@@ -112,6 +112,23 @@ extension CloudKitStateActor {
         var appliedByTable: [String: [UUID]] = [:]
         var deletedByTable: [String: [UUID]] = [:]
 
+        // Batch pre-load _ck_sync_meta for the entire pulled batch (CVK-WB5 perf Q5).
+        //
+        // WHY: applyInbound issues one readSyncHLC query per record in the
+        // lastWriterWinsByHLC (and fieldLevelLWW row-grain) path. For a batch of N
+        // records, this is N sequential queries. The batch pre-load reduces this to
+        // one query + N in-memory dict lookups, saving approximately N-1 storage
+        // actor hops per pull cycle.
+        //
+        // Decode is attempted with `try?` here (not counted as a conflict) because
+        // any records that fail to decode will be counted as conflicts in the main
+        // loop below where the error is properly classified.
+        let batchKeys: [(table: String, rowKey: UUID)] = pulledRecords.compactMap { record in
+            guard let decoded = try? CKRecordMapping.decode(record) else { return nil }
+            return (table: decoded.table, rowKey: decoded.rowKey)
+        }
+        let preloadedSyncHLCs = try? await readSyncHLCs(batch: batchKeys, storage: storage)
+
         for record in pulledRecords {
             do {
                 let decoded = try CKRecordMapping.decode(record)
@@ -151,7 +168,8 @@ extension CloudKitStateActor {
                 }
                 guard syncedTable.direction != .pushOnly else { continue }
 
-                try await applyInbound(decoded, syncedTable: syncedTable, storage: storage)
+                try await applyInbound(decoded, syncedTable: syncedTable, storage: storage,
+                                       preloadedSyncHLCs: preloadedSyncHLCs)
                 appliedCount += 1
                 if decoded.isTombstone {
                     deletedByTable[decoded.table, default: []].append(decoded.rowKey)

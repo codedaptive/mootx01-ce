@@ -19,10 +19,20 @@ extension CloudKitStateActor {
 
     // Internal (not private) so the LWW tests can call it directly
     // via @testable import without going through the CloudKit stack.
+    //
+    // `preloadedSyncHLCs`: optional batch-preloaded map of "\(table)|\(rowKey.uuidString)"
+    // → HLC, produced by SyncMetaStore.readSyncHLCs(batch:) in PullCycle.pull() before
+    // the apply loop. When present, _ck_sync_meta lookups for the LWW gate consult the
+    // map instead of issuing a per-row query — reducing pull-cycle storage I/O from O(N)
+    // queries to 1 batch query + O(N) dict lookups (CVK-WB5 perf Q5).
+    //
+    // Direct callers (LWW tests, skew replay) omit this parameter (default nil) and fall
+    // back to the per-row readSyncHLC path, preserving unchanged semantics.
     func applyInbound(
         _ decoded: DecodedRecord,
         syncedTable: SyncedTable,
-        storage: any Storage
+        storage: any Storage,
+        preloadedSyncHLCs: [String: HLC]? = nil
     ) async throws {
         // All writes use the sync-tagged variants (upsertSync / insertSync /
         // deleteSync) so the emitted TableChange carries origin: .syncApply.
@@ -61,9 +71,10 @@ extension CloudKitStateActor {
             case .lastWriterWinsByHLC:
                 // LWW gate: a stale tombstone (incoming HLC < local `_ck_sync_meta` HLC)
                 // must not delete a newer local row (D2 fix).
-                let localHLC = try await readSyncHLC(
-                    storage: storage, table: decoded.table,
-                    primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn)
+                let localHLC = try await cachedOrReadSyncHLC(
+                    table: decoded.table, rowKey: decoded.rowKey,
+                    pkColumn: syncedTable.primaryKeyColumn,
+                    storage: storage, preloaded: preloadedSyncHLCs)
                 if let localHLC, decoded.hlc < localHLC {
                     return // stale tombstone — local is newer, keep the row
                 }
@@ -182,9 +193,10 @@ extension CloudKitStateActor {
             // table. If the remote HLC is older than the local HLC, the remote record
             // is skipped (the local row is newer). The side table entry exists even
             // after a delete (tombstone HLC), so a stale resurrect is also gated.
-            let localHLC = try await readSyncHLC(
-                storage: storage, table: decoded.table,
-                primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn)
+            let localHLC = try await cachedOrReadSyncHLC(
+                table: decoded.table, rowKey: decoded.rowKey,
+                pkColumn: syncedTable.primaryKeyColumn,
+                storage: storage, preloaded: preloadedSyncHLCs)
             if let localHLC, decoded.hlc < localHLC {
                 return // local is newer — skip remote
             }
@@ -263,9 +275,10 @@ extension CloudKitStateActor {
             // Also update the row-grain HLC in _ck_sync_meta when this record's
             // row HLC is newer. This guards against stale-resurrect at the row grain
             // when a peer sends a delete for this row after a fieldLevelLWW write.
-            let existingRowHLC = try await readSyncHLC(
-                storage: storage, table: decoded.table,
-                primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn)
+            let existingRowHLC = try await cachedOrReadSyncHLC(
+                table: decoded.table, rowKey: decoded.rowKey,
+                pkColumn: syncedTable.primaryKeyColumn,
+                storage: storage, preloaded: preloadedSyncHLCs)
             if existingRowHLC == nil || decoded.hlc > (existingRowHLC ?? decoded.hlc) {
                 try await writeSyncHLC(
                     storage: storage, table: decoded.table,
@@ -274,5 +287,31 @@ extension CloudKitStateActor {
                     kitID: decoded.syncMeta.kitID)
             }
         }
+    }
+
+    // MARK: - Private helpers
+
+    /// Return the sync HLC for (table, rowKey) from the preloaded map when available,
+    /// falling back to a per-row `_ck_sync_meta` query when the map is absent.
+    ///
+    /// WHY this indirection:
+    /// The pull cycle pre-loads `_ck_sync_meta` for the entire batch via
+    /// `readSyncHLCs(batch:)` (one query) and passes the result as
+    /// `preloadedSyncHLCs`. Inside `applyInbound`, all three LWW-gated paths call
+    /// this helper instead of `readSyncHLC` directly, so the batch path pays zero
+    /// extra queries while the fallback path (tests, skew replay, direct calls)
+    /// retains the original single-row semantics without any change to their callers.
+    ///
+    /// Key format mirrors `readSyncHLCs`: `"\(table)|\(rowKey.uuidString)"`.
+    private func cachedOrReadSyncHLC(
+        table: String, rowKey: UUID, pkColumn: String,
+        storage: any Storage,
+        preloaded: [String: HLC]?
+    ) async throws -> HLC? {
+        if let preloaded {
+            // Key absent → no entry in _ck_sync_meta (same semantic as nil from readSyncHLC).
+            return preloaded["\(table)|\(rowKey.uuidString)"]
+        }
+        return try await readSyncHLC(storage: storage, table: table, primaryKey: rowKey, pkColumn: pkColumn)
     }
 }

@@ -14,8 +14,10 @@
 //
 // Governance: each additional _ck_* table increments the version. Migrations
 // are additive — a new table is added via Migration(fromVersion:toVersion:)
-// with a .createTable operation; new columns use .addColumn.
+// with a .createTable operation; new columns use .addColumn; new indices use
+// .addIndex.
 // The `tables` array reflects the FULL schema at the current version;
+// the `indices` array declares ALL indices that must exist after ensure();
 // migrations fill in the delta for devices already at a prior version.
 //
 // Current side tables:
@@ -27,6 +29,12 @@
 //   v6 — _ck_sync_meta_cols  Per-column HLC side table for fieldLevelLWW (B-8, CVK-ICLOUD P2-M1)
 //         _ck_outbox          Gains column_hlcs blob column (JSON-encoded ColumnHLCMap)
 //   v7 — _ck_pending_skew    Schema-skew pending queue (R9, CVK-ICLOUD P3-M4)
+//   v8 — idx_ck_outbox_table_row  Secondary index on _ck_outbox(table_name, row_key)
+//                                  (CVK-WB5 perf Q3). Accelerates OutboxStore.append's
+//                                  coalescing lookup: the WHERE (table_name = ?, row_key = ?)
+//                                  predicate does a sequential scan on unindexed estates.
+//                                  With this composite index, the coalescing query becomes
+//                                  an O(log N) index seek instead of O(N) scan.
 // Earmarks now superseded:
 //   v4 — _ck_device_identity  Device-slot registry (N2)      ← earmark superseded by v6→v7 jump
 //   v5 — _ck_pending_skew     Schema-skew pending queue (R9) ← landed at v7 instead (see below)
@@ -227,13 +235,33 @@ public enum CKSideSchema {
             primaryKey: ["id"]
         )
 
+        // Secondary index on _ck_outbox(table_name, row_key).
+        //
+        // WHY this index (CVK-WB5 perf Q3):
+        // OutboxStore.append issues a WHERE (table_name = ?, row_key = ?) query per
+        // write to detect an existing entry for coalescing. Without an index, the
+        // storage engine scans every row in _ck_outbox on each append. With this
+        // composite index, the coalescing lookup becomes an O(log N) seek instead
+        // of O(N) scan — meaningful at large outbox sizes (hot-row workloads,
+        // offline accumulation).
+        //
+        // Declared in SchemaDeclaration.indices (not inside TableDeclaration) so the
+        // backend emits CREATE INDEX IF NOT EXISTS at open(schema:) time for fresh
+        // installs. The v7→v8 migration adds it for devices already deployed.
+        let outboxTableRowIndex = IndexDeclaration(
+            name: "idx_ck_outbox_table_row",
+            table: outboxTable,
+            columns: ["table_name", "row_key"]
+        )
+
         return SchemaDeclaration(
             kitID: "ConvergenceKit",
-            version: 7,
+            version: 8,
             tables: [syncMetaDecl, outboxDecl, changeTokenDecl, syncMetaColsDecl, pendingSkewDecl],
+            indices: [outboxTableRowIndex],
             migrations: [
                 // v1 → v2: add durable outbox table.
-                // The tables array handles v0 → v7 fresh installs via IF NOT EXISTS.
+                // The tables array handles v0 → v8 fresh installs via IF NOT EXISTS.
                 Migration(fromVersion: 1, toVersion: 2, operations: [
                     .createTable(outboxDecl),
                 ]),
@@ -267,6 +295,12 @@ public enum CKSideSchema {
                 //     oldest entries evicted by PendingSkewQueue.evictIfNeeded.
                 Migration(fromVersion: 6, toVersion: 7, operations: [
                     .createTable(pendingSkewDecl),
+                ]),
+                // v7 → v8: secondary index on _ck_outbox(table_name, row_key).
+                //   (CVK-WB5 perf Q3). Devices at v7 receive the index here;
+                //   fresh installs get it from SchemaDeclaration.indices above.
+                Migration(fromVersion: 7, toVersion: 8, operations: [
+                    .addIndex(outboxTableRowIndex),
                 ]),
             ]
         )
