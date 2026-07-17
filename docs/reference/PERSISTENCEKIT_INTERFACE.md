@@ -344,9 +344,13 @@ public struct TableChange: Sendable {
     /// Origin of this change. Defaults to .local; set to .syncApply by the
     /// insertSync / upsertSync / deleteSync paths (SPEC B-19).
     public let origin: ChangeOrigin
+    /// Columns that actually changed in this write (SPEC B-20, CVK-WB4).
+    /// nil = unknown / all (delete, PostgreSQL backend, third-party conformers).
+    /// Present on InMemory and SQLite backends for insert, update, and upsert.
+    public let changedColumns: Set<String>?
     public init(table: String, event: StorageEvent, rowKey: RowKey? = nil,
                 values: [String: TypedValue]? = nil, hlc: HLC? = nil,
-                origin: ChangeOrigin = .local)
+                origin: ChangeOrigin = .local, changedColumns: Set<String>? = nil)
 }
 
 public protocol StorageObserver: Sendable {
@@ -360,7 +364,7 @@ public final class NoOpObserver: StorageObserver, Sendable {
 ```
 **Rust:** `pub enum StorageEvent { Insert, Update, Delete }`,
 `pub enum ChangeOrigin { Local (default), SyncApply }`,
-`pub struct TableChange { table, event, row_key, values, hlc, origin: ChangeOrigin }`,
+`pub struct TableChange { table, event, row_key, values, hlc, origin: ChangeOrigin, changed_columns: Option<HashSet<String>> }`,
 `pub trait StorageObserver`, `pub struct NoOpObserver`.
 
 #### `DatasetStore` / `DatasetSchema` / `DatasetIndexDeclaration` / `ColumnStats`
@@ -897,7 +901,7 @@ struct inside `IncrementalReplicationSession.swift`.
 | `AuditLog` (protocol) | `AuditLog` (trait) | Append-only HLC-ordered audit. `append`, `appendBatch`/`append_batch`, `iterate`, `eventsForRow`/`events_for_row`, `count`. |
 | `StorageObserver` (protocol) | `StorageObserver` (trait) | Change notification. `observe(table:events:)` / `observe(table, events)`. Swift returns `AsyncStream<TableChange>`; Rust returns `mpsc::Receiver<TableChange>` — sanctioned seam. |
 | `StorageEvent` | `StorageEvent` | Three cases: `insert`/`Insert`, `update`/`Update`, `delete`/`Delete`. |
-| `TableChange` | `TableChange` | Row change notification: `table`, `event`, `rowKey`/`row_key`, `values`, `hlc`. |
+| `TableChange` | `TableChange` | Row change notification: `table`, `event`, `rowKey`/`row_key`, `values`, `hlc`, `origin`, `changedColumns`/`changed_columns` (SPEC B-19, B-20). |
 | `BlobEvent` | `BlobEvent` | Two cases: `put`/`Put`, `delete`/`Delete`. |
 | `BlobChange` | `BlobChange` | Blob change notification: `key`, `event`, `bytes`. `bytes` is `Data?`/`Option<Vec<u8>>`; carries payload on `put`, nil/None on `delete`. |
 | `NoOpObserver` | `NoOpObserver` | Empty-stream default `StorageObserver` conformer. |
