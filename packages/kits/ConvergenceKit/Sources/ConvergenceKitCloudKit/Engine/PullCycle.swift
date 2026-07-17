@@ -73,6 +73,13 @@ extension CloudKitStateActor {
         var appliedCount = 0
         var conflicts = 0
 
+        // Collect row keys per table for the post-apply integrity hook (R3).
+        // Tombstone records are deletions from the consumer's point of view,
+        // so they land in deletedByTable even though they arrive through the
+        // typed-record path rather than the legacy CKRecord.ID deletion path.
+        var appliedByTable: [String: [UUID]] = [:]
+        var deletedByTable: [String: [UUID]] = [:]
+
         for record in pulledRecords {
             do {
                 let decoded = try CKRecordMapping.decode(record)
@@ -89,6 +96,11 @@ extension CloudKitStateActor {
 
                 try await applyInbound(decoded, syncedTable: syncedTable, storage: storage)
                 appliedCount += 1
+                if decoded.isTombstone {
+                    deletedByTable[decoded.table, default: []].append(decoded.rowKey)
+                } else {
+                    appliedByTable[decoded.table, default: []].append(decoded.rowKey)
+                }
             } catch let err as SyncError {
                 logger.error("pull apply failed: \(String(describing: err))")
                 conflicts += 1
@@ -118,8 +130,23 @@ extension CloudKitStateActor {
                 // Use deleteSync so the emitted TableChange carries origin: .syncApply,
                 // preventing the deletion from re-entering the outbox (I-10).
                 _ = try? await storage.rowStore.deleteSync(table: syncedTable.name, where: predicate)
+                // Track for post-apply hook: legacy deletions attributed per-table.
+                deletedByTable[syncedTable.name, default: []].append(rowKey)
             }
             appliedCount += 1
+        }
+
+        // Post-apply integrity hook (R3): invoked once per batch when at least
+        // one record was applied. Hook throws count as one additional conflict
+        // but never abort the cycle. Hook writes carry origin == .local and
+        // flow into the outbox (hook-writes-must-ship, Kong Q2).
+        if appliedCount > 0 {
+            let batch = AppliedBatch(
+                storage: storage,
+                appliedByTable: appliedByTable,
+                deletedByTable: deletedByTable
+            )
+            conflicts += await invokeIntegrityHook(manifest.postApplyIntegrityHook, batch: batch)
         }
 
         serverChangeToken = newToken

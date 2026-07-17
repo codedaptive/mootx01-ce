@@ -81,43 +81,36 @@ struct FederationJSONConformanceTests {
         #expect(record.hlc.nodeID == 1)
     }
 
-    // MARK: - SyncManifest
+    // MARK: - SyncedTable (replaces former SyncManifest Codable conformance tests)
+    //
+    // SyncManifest is NOT Codable: it carries postApplyIntegrityHook, a closure
+    // that cannot be serialised. SyncManifest is a local configuration object —
+    // it is never transmitted over the wire. The cross-port wire contract for
+    // the manifest's nested data is verified through SyncedTable, which IS Codable
+    // and IS exchanged (embedded in SyncRecord batch headers in some transports).
 
-    @Test("SyncManifest encodes camelCase field names")
-    func syncManifestFieldNames() throws {
-        let manifest = SyncManifest(
-            kitID: "TestKit",
-            schemaVersion: 1,
-            zoneIdentifier: "zone-1",
-            tables: [SyncedTable(name: "t", primaryKeyColumn: "id")]
-        )
-        let json = try JSONEncoder().encode(manifest)
+    @Test("SyncedTable encodes camelCase field names matching Rust serde_rename_all = camelCase")
+    func syncedTableFieldNames() throws {
+        let table = SyncedTable(name: "drawers", primaryKeyColumn: "row_id")
+        let json = try JSONEncoder().encode(table)
         let dict = try JSONSerialization.jsonObject(with: json) as! [String: Any]
-        #expect(dict.keys.contains("kitID"))
-        #expect(dict.keys.contains("schemaVersion"))
-        #expect(dict.keys.contains("zoneIdentifier"))
-        #expect(!dict.keys.contains("kit_id"))
-        #expect(!dict.keys.contains("schema_version"))
-        #expect(!dict.keys.contains("zone_identifier"))
-        let tables = dict["tables"] as! [[String: Any]]
-        #expect(tables[0].keys.contains("primaryKeyColumn"))
-        #expect(tables[0].keys.contains("conflictPolicy"))
-        #expect(!tables[0].keys.contains("primary_key_column"))
+        #expect(dict.keys.contains("primaryKeyColumn"))
+        #expect(dict.keys.contains("conflictPolicy"))
+        #expect(!dict.keys.contains("primary_key_column"))
+        #expect(!dict.keys.contains("conflict_policy"))
     }
 
-    /// Decode the exact JSON that Rust produces for a SyncManifest.
-    @Test("SyncManifest decodes Rust golden JSON")
-    func syncManifestDecodeRustGolden() throws {
+    /// Decode the exact JSON that Rust produces for a SyncedTable.
+    @Test("SyncedTable decodes Rust golden JSON")
+    func syncedTableDecodeRustGolden() throws {
         let golden = """
-        {"kitID":"TestKit","schemaVersion":1,"zoneIdentifier":"zone-1","tables":[{"name":"drawers","direction":"bidirectional","primaryKeyColumn":"row_id","conflictPolicy":"lastWriterWinsByHLC"}]}
+        {"name":"drawers","direction":"bidirectional","primaryKeyColumn":"row_id","conflictPolicy":"lastWriterWinsByHLC"}
         """
-        let manifest = try JSONDecoder().decode(SyncManifest.self, from: Data(golden.utf8))
-        #expect(manifest.kitID == "TestKit")
-        #expect(manifest.schemaVersion == 1)
-        #expect(manifest.zoneIdentifier == "zone-1")
-        #expect(manifest.tables[0].name == "drawers")
-        #expect(manifest.tables[0].primaryKeyColumn == "row_id")
-        #expect(manifest.tables[0].conflictPolicy == .lastWriterWinsByHLC)
+        let table = try JSONDecoder().decode(SyncedTable.self, from: Data(golden.utf8))
+        #expect(table.name == "drawers")
+        #expect(table.primaryKeyColumn == "row_id")
+        #expect(table.conflictPolicy == .lastWriterWinsByHLC)
+        #expect(table.direction == .bidirectional)
     }
 
     // MARK: - SyncValueBox
