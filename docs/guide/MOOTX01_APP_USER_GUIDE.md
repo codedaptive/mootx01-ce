@@ -187,12 +187,11 @@ Sync requires two things:
 
 1. You are **signed into iCloud** on every device.
 2. You are running a build of MOOTx01 that has the iCloud container enabled.
-   Sync is off by default — the app does nothing with iCloud until it is
-   explicitly configured at launch. A build that has not been set up for sync
-   works fully on a single device and makes no iCloud calls.
+   Sync is off by default — the app does nothing with iCloud until you
+   enable it in the Engine tab.
 
-If both conditions are met, sync starts automatically. There is no in-app
-toggle to turn it on or off in this release.
+Once both conditions are met, open the **Engine** tab, find the **iCloud Sync**
+toggle, and turn it on. The setting persists across launches.
 
 ### What syncs — and what never leaves the machine
 
@@ -290,14 +289,23 @@ that persist across multiple beats are usually caused by a temporary CloudKit
 error — check iCloud status and your connection.
 
 **Sync not starting at all:** verify both conditions in "Before you begin"
-above. The app makes no iCloud calls — and shows no sync status — until the
-build is configured for sync.
+above, and confirm the **iCloud Sync** toggle in the Engine tab is turned on.
+The app makes no iCloud calls — and shows no sync status — until both the
+build supports sync and the toggle is on.
+
+### Turning iCloud Sync on or off
+
+Open the **Engine** tab and look for the **iCloud Sync** section. There is a
+toggle labelled **iCloud Sync**. Turn it on to enable syncing; turn it off to
+stop. The change takes effect immediately — toggling off stops the sync engine
+and stops the app from forwarding push notifications to CloudKit; toggling on
+fires an immediate sync beat.
+
+The setting is saved and respected on every future launch. A device that has
+never enabled sync makes no iCloud calls and requires no iCloud container
+entitlement.
 
 ### What is not ready yet
-
-**No in-app toggle.** Sync is enabled or disabled at the build level. There is
-no in-app settings screen to turn sync on or off or to choose which devices
-participate. This is a tracked gap.
 
 **Tier-rise retraction.** If you raise a memory's privacy level from Normal or
 Elevated to Restricted or Secret after it has already synced to another

@@ -246,17 +246,18 @@ struct EngineView: View {
     #endif
 }
 
-// MARK: - SyncTileView (CVK-ICLOUD P5-M2)
+// MARK: - SyncTileView (CVK-ICLOUD P5-M2, toggle CVK-WB2)
 //
-// Minimal iCloud sync status tile for the Engine tab.
+// iCloud sync tile for the Engine tab. CVK-WB2 adds a user-facing toggle
+// so sync can be enabled or disabled without a code change.
 //
 // DESIGN RATIONALE:
 // MootSyncDriver is an actor; its internal state (enabled, cloudKitEngine,
 // last-sync receipt) is not directly observable from a SwiftUI view without
 // either (a) adding @Observable conformance to the actor or (b) a bridging
-// observable wrapper object. Adding that infrastructure is out of P5-M2 scope
-// (the mission says "minimal"). This tile therefore:
+// observable wrapper object. This tile therefore:
 //   - Shows the configured container identifier (static property — no await).
+//   - Shows the user's toggle setting (@AppStorage — synchronous read).
 //   - Tracks last-synced time LOCALLY via @State from a manual "Sync now" tap.
 //   - Does NOT show pushed/pulled counts (syncNow() returns Bool, not a receipt).
 //   - Does NOT show AdaptivePollScheduler tier (not yet exposed publicly).
@@ -265,12 +266,52 @@ struct EngineView: View {
 // and tier if the diagnostic value justifies the surface area.
 
 private struct SyncTileView: View {
+    /// Persisted user preference. Bound to the toggle; also read at app launch
+    /// in Mootx01App to configure the driver before the first syncNow() beat.
+    @AppStorage(SyncPolicy.defaultsKey) private var syncEnabled = false
     @State private var lastSynced: Date? = nil
     @State private var syncRunning = false
 
     var body: some View {
         GroupBox(String(localized: "iCloud sync")) {
             VStack(alignment: .leading, spacing: 10) {
+
+                // CVK-WB2: user-facing toggle. Persisted via @AppStorage so the
+                // choice survives app restarts. onChange wires configure() + syncNow()
+                // so the driver reacts immediately without waiting for the next beat.
+                Toggle(
+                    String(localized: "sync.toggle.label", defaultValue: "iCloud Sync"),
+                    isOn: $syncEnabled
+                )
+                .accessibilityLabel(String(localized: "sync.toggle.a11y.label",
+                                           defaultValue: "iCloud Sync"))
+                .accessibilityHint(String(localized: "sync.toggle.a11y.hint",
+                                          defaultValue: "When on, Normal and Elevated memories sync across your Apple devices via iCloud."))
+                .onChange(of: syncEnabled) { _, newValue in
+                    Task {
+                        // configure() is idempotent when re-applied with the same value.
+                        // Toggling off tears down the active engine and clears the APNs
+                        // forwarding reference (MootSyncDriver.configure implementation).
+                        await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: newValue))
+                        if newValue {
+                            // Fire an immediate sync beat so the user sees a result
+                            // instead of waiting for the next ambient beat.
+                            _ = await MootSyncDriver.shared.syncNow()
+                            lastSynced = Date()
+                        }
+                    }
+                }
+
+                // Status line — reflects the stored preference, not live driver state
+                // (driver state requires async bridging, out of scope for this tile).
+                Text(syncEnabled
+                     ? String(localized: "sync.status.enabled",
+                               defaultValue: "Enabled — Normal and Elevated memories will sync to iCloud.")
+                     : String(localized: "sync.status.disabled",
+                               defaultValue: "Disabled — memories stay on this device."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Text(String(localized: "CloudKit zone-subscription silent push accelerates the poll loop. Each zone-change notification fires an immediate pull and resets to the fast poll tier. Polling alone is the correctness guarantee — push is best-effort."))
                     .font(.caption).foregroundStyle(.secondary)
 
@@ -295,7 +336,9 @@ private struct SyncTileView: View {
                             syncRunning = false
                         }
                     }
-                    .disabled(syncRunning)
+                    // Disable "Sync now" when sync is off — the driver is in .disabled
+                    // config and syncNow() would return false immediately.
+                    .disabled(syncRunning || !syncEnabled)
                     Spacer()
                     if let date = lastSynced {
                         Text(date.formatted(.relative(presentation: .named)))
