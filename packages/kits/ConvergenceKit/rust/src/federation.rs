@@ -208,12 +208,17 @@ pub trait Relay: Send + Sync {
     /// Deliver a signed envelope to every registered peer except `from`.
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
     /// Deliver a signed envelope to a specific registered peer.
+    ///
+    /// Returns `Ok(())` on successful delivery, or `Err(String)` on transport
+    /// failure (WC2 — enables the retain-on-failure contract in `push()`).
+    /// The in-process `FederationRelay` never returns `Err`; a hosted relay
+    /// (WC7) may return `Err` on network errors.
     fn send_to(
         &self,
         from: &PeerIdentity,
         to_public_key: &[u8; PUBLIC_KEY_LENGTH],
         envelope: SignedEnvelope,
-    );
+    ) -> Result<(), String>;
 }
 
 /// In-process federation relay (the local/test `Relay`). Federation
@@ -253,7 +258,7 @@ impl Relay for FederationRelay {
         from: &PeerIdentity,
         to_public_key: &[u8; PUBLIC_KEY_LENGTH],
         envelope: SignedEnvelope,
-    ) {
+    ) -> Result<(), String> {
         let inboxes = self.inboxes.lock().unwrap();
         for (id, tx) in inboxes.iter() {
             if id == from || &id.public_key != to_public_key {
@@ -262,6 +267,7 @@ impl Relay for FederationRelay {
             // Best-effort: drop send errors (receiver gone).
             let _ = tx.send(envelope.clone());
         }
+        Ok(())
     }
 }
 
@@ -286,11 +292,10 @@ struct EngineState {
     /// Explicitly paired peers. Mirrors Swift's `FederationStateActor.peers`.
     /// Push is gated on this list being non-empty.
     paired_peers: Vec<PairedPeer>,
-    /// Pending records awaiting the next push. Shared (`Arc<Mutex<…>>`) because
-    /// the observer worker threads append to it on every observed write while
-    /// the engine drains it on `push`. Mirrors the Swift `pendingOutbound`
-    /// array on `FederationStateActor`, which the actor's observer tasks fill.
-    outbox: Arc<Mutex<Vec<SyncRecord>>>,
+    // WC2: in-memory outbox removed. Outbound SyncRecords are durably stored in
+    // the `_fed_outbox` SQLite side table. Observer workers write entries there;
+    // push() reads entries without consuming them, then confirms (deletes) on
+    // success or retains on transport failure. Mirrors Swift's WC2 design.
     /// HLC generator used to mint a monotonic timestamp for an observed change
     /// that arrives without one (the InMemory observer emits `hlc: None`).
     /// Shared with the worker threads so all auto-populated records draw from
@@ -347,7 +352,7 @@ impl FederationSyncEngine {
                 last_pull_secs: None,
                 inbox: None,
                 paired_peers: Vec::new(),
-                outbox: Arc::new(Mutex::new(Vec::new())),
+                // WC2: no in-memory outbox; _fed_outbox side table used instead.
                 // Random low node id in [1, 15], matching the Swift actor's
                 // `HLCGenerator(nodeID: Int32.random(in: 1...0x0F))`.
                 hlc_generator: Arc::new(Mutex::new(HLCGenerator::new(
@@ -373,11 +378,28 @@ impl FederationSyncEngine {
     /// observer-worker setup in `enable`). This explicit entry point remains
     /// available for callers that mint `SyncRecord`s directly (tests, and
     /// out-of-band replays that do not flow through a storage write).
+    ///
+    /// WC2: entry is durably persisted to `_fed_outbox` rather than
+    /// accumulated in an in-memory `Vec`. Coalescing by (table, row_key)
+    /// newest-HLC matches the observer path.
     pub fn enqueue(&mut self, record: SyncRecord) -> SyncResult<()> {
         if !self.state.enabled {
             return Err(SyncError::NotEnabled);
         }
-        self.state.outbox.lock().unwrap().push(record);
+        let storage = self.state.storage.as_ref().ok_or(SyncError::NotEnabled)?;
+        let payload = serde_json::to_vec(&record).map_err(|e| SyncError::EncodingFailure {
+            detail: format!("enqueue: encode SyncRecord: {}", e),
+        })?;
+        let entry = FedOutboxEntry {
+            id: Uuid::new_v4(),
+            table_name: record.table.clone(),
+            row_key: record.row_key.to_string(),
+            packed_hlc: record.hlc.physical_time,
+            payload,
+            enqueued_at: iso8601_utc_now(),
+        };
+        fed_outbox_append(&*storage.row_store(), &entry, FED_OUTBOX_TABLE)
+            .map_err(|e| SyncError::TransportFailure { detail: format!("enqueue: outbox append: {}", e) })?;
         Ok(())
     }
 
@@ -441,7 +463,10 @@ impl FederationSyncEngine {
                 .observe(&table.name, events.clone())
                 .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
 
-            let outbox = Arc::clone(&self.state.outbox);
+            // WC2: observer workers write directly to `_fed_outbox` in storage
+            // rather than appending to an in-memory Vec. Each worker gets its own
+            // Arc clone so the row_store() handle is independent per thread.
+            let worker_storage = Arc::clone(storage);
             let hlc_generator = Arc::clone(&self.state.hlc_generator);
             let stop = Arc::clone(&self.state.observer_stop);
             let pulling = Arc::clone(&self.state.pulling);
@@ -469,6 +494,11 @@ impl FederationSyncEngine {
                             // mutation. Suppressing here prevents a sync echo
                             // where inbound records are re-enqueued and pushed
                             // back to the peer that originally sent them.
+                            // Echo suppression (I-10): the `pulling` flag mirrors
+                            // Swift's `change.origin != .syncApply` guard —
+                            // inbound-write-triggered changes are suppressed at
+                            // observe time, so entries in the durable outbox are
+                            // by construction local writes only.
                             if pulling.load(Ordering::Acquire) {
                                 continue;
                             }
@@ -476,10 +506,29 @@ impl FederationSyncEngine {
                             // storm-kill before converting to a SyncRecord.
                             let change = outbound_strip_change(change, &excluded_columns, &pk_column);
                             let Some(change) = change else { continue };
+                            // WC2: encode the SyncRecord at observe time (not push time)
+                            // and append to the durable _fed_outbox side table.
+                            // Coalescing by (table_name, row_key) newest-packed_hlc
+                            // bounds hot-row growth in high-write workloads.
                             if let Some(record) =
                                 change_to_record(change, schema_version, &kit_id, &hlc_generator, conflict_policy)
                             {
-                                outbox.lock().unwrap().push(record);
+                                if let Ok(payload) = serde_json::to_vec(&record) {
+                                    let entry = FedOutboxEntry {
+                                        id: Uuid::new_v4(),
+                                        table_name: record.table.clone(),
+                                        row_key: record.row_key.to_string(),
+                                        packed_hlc: record.hlc.physical_time,
+                                        payload,
+                                        enqueued_at: iso8601_utc_now(),
+                                    };
+                                    // Best-effort: log failure, continue — a missed outbox
+                                    // write is recoverable on the next push cycle.
+                                    let row_store = worker_storage.row_store();
+                                    if let Err(e) = fed_outbox_append(&*row_store, &entry, FED_OUTBOX_TABLE) {
+                                        eprintln!("[federation] observer: outbox append failed for {}/{}: {}", record.table, record.row_key, e);
+                                    }
+                                }
                             }
                         }
                         // Timed out: loop back and re-check the stop flag.
@@ -567,6 +616,15 @@ impl SyncEngine for FederationSyncEngine {
             }
         }
 
+        // Drain-on-enable (WC2): check for outbox entries that survived from a
+        // prior process lifetime. Informational — the host triggers push() to
+        // deliver them. No entries are consumed here; push() reads-without-clearing.
+        if let Ok(n) = fed_outbox_count(&*storage.row_store(), FED_OUTBOX_TABLE) {
+            if n > 0 {
+                eprintln!("[federation] enable: {} durable outbox entry(ies) survived from prior process — next push() will deliver them", n);
+            }
+        }
+
         // Subscribe the observer workers BEFORE marking enabled so the
         // write-capture path is live the moment the engine reports enabled.
         self.start_observers(&manifest, &storage)?;
@@ -583,9 +641,12 @@ impl SyncEngine for FederationSyncEngine {
         // the actor cancels its observer tasks in `disable`).
         self.stop_observers();
         self.state.manifest = None;
+        // WC2: do NOT clear the durable _fed_outbox on disable. Outbox entries
+        // survive the disable/enable cycle so the next enable() can drain them
+        // via push(). This is the "durability across engine reopen" contract
+        // (DUR-1 / DUR-4). Storage is dropped after the workers are stopped.
         self.state.storage = None;
         self.state.inbox = None;
-        self.state.outbox.lock().unwrap().clear();
         self.state.paired_peers.clear();
         Ok(())
     }
@@ -599,7 +660,32 @@ impl SyncEngine for FederationSyncEngine {
         if self.state.paired_peers.is_empty() {
             return Ok(SyncReceipt::empty());
         }
-        let to_send: Vec<SyncRecord> = std::mem::take(&mut *self.state.outbox.lock().unwrap());
+        // Clone the Arc so we can call self.next_batch_hlc() (which takes &mut self)
+        // later without a borrow conflict. The Arc clone is cheap — no data copy.
+        let storage = self.state.storage.clone().ok_or(SyncError::NotEnabled)?;
+
+        // Read durable outbox entries (WC2). SyncRecords were encoded at observe
+        // time; each entry payload is a JSON-encoded SyncRecord. read_batch does
+        // NOT delete entries — they remain until confirm is called after successful
+        // relay delivery (retain-on-failure contract).
+        let outbox_entries = fed_outbox_read_batch(&*storage.row_store(), FED_OUTBOX_TABLE)
+            .map_err(|e| SyncError::TransportFailure { detail: format!("push: outbox read: {}", e) })?;
+
+        // Decode each entry payload back to SyncRecord for batching.
+        let mut to_send: Vec<SyncRecord> = Vec::new();
+        let mut entry_ids: Vec<Uuid> = Vec::new();
+        for entry in &outbox_entries {
+            match serde_json::from_slice::<SyncRecord>(&entry.payload) {
+                Ok(record) => {
+                    to_send.push(record);
+                    entry_ids.push(entry.id);
+                }
+                Err(e) => {
+                    eprintln!("[federation] push: decode outbox payload failed for entry {} — skipping: {}", entry.id, e);
+                }
+            }
+        }
+
         let record_count = to_send.len();
         if record_count == 0 {
             let receipt = SyncReceipt::now(0, 0, 0);
@@ -640,12 +726,29 @@ impl SyncEngine for FederationSyncEngine {
             signature,
             hlc: batch_hlc,
         };
-        // Route only to explicitly paired peers rather than broadcasting to
-        // all registered relay participants. Broadcasting allowed unpaired
-        // observers to receive every push; send_to enforces the pairing
-        // authorization boundary at the push path. Mirrors the Swift port.
+
+        // Deliver to each paired peer. send_to now returns Result<(), String>
+        // (WC2 — enables the retain-on-failure contract). FederationRelay never
+        // returns Err; a hosted relay (WC7) may return Err on network errors.
+        //
+        // Confirmation strategy: if ALL peers receive successfully, confirm
+        // (delete) the outbox entries. If ANY peer's send_to returns Err, retain
+        // all entries for the next push cycle's retry. LWW idempotency at the
+        // receiver absorbs re-delivery.
+        let mut any_peer_failed = false;
         for peer in &self.state.paired_peers {
-            self.relay.send_to(&self.peer_identity, &peer.public_key, envelope.clone());
+            if let Err(e) = self.relay.send_to(&self.peer_identity, &peer.public_key, envelope.clone()) {
+                eprintln!("[federation] push: relay send_to failed: {} — entries retained for retry", e);
+                any_peer_failed = true;
+            }
+        }
+
+        // Confirm outbox entries on success; retain on failure.
+        if !any_peer_failed {
+            let row_store = storage.row_store();
+            if let Err(e) = fed_outbox_confirm(&*row_store, &entry_ids, FED_OUTBOX_TABLE) {
+                eprintln!("[federation] push: outbox confirm failed: {}", e);
+            }
         }
 
         let receipt = SyncReceipt::now(record_count, 0, 0);
@@ -1354,7 +1457,142 @@ const FED_SKEW_QUEUE_CAP: usize = 512;
 /// At-rest posture: covered by SQLCipher per ADR-014 on the estate file.
 const FED_IDENTITY_TABLE: &str = "_fed_identity";
 
-/// Ensure all four Federation side tables exist (v4: WC3 skew + WC1 identity).
+/// Side table name for the Federation durable outbox (WC2).
+/// Stores post-encoded SyncRecord payloads pending relay delivery.
+/// Columns: id UUID PK, table_name TEXT, row_key TEXT, packed_hlc INT,
+/// payload BLOB (JSON SyncRecord), enqueued_at TEXT (ISO8601).
+/// Entries are written at observe time and confirmed (deleted) after
+/// successful relay.send_to; retained on transport failure for retry.
+const FED_OUTBOX_TABLE: &str = "_fed_outbox";
+
+// ---- _fed_outbox helpers (WC2) ----
+
+/// A single pending outbound record in the Federation durable outbox.
+/// Mirrors Swift `FedOutboxEntry`. The payload blob is a JSON-encoded
+/// `SyncRecord` — the complete wire unit delivered to the relay transport.
+struct FedOutboxEntry {
+    id: Uuid,
+    table_name: String,
+    row_key: String,
+    /// Int64 bit-pattern of `PackedHLC.as_i64()`. Used for coalescing:
+    /// the entry with the lower packed_hlc is discarded when two entries
+    /// share the same (table_name, row_key). MSB-node layout per SPEC §4.
+    packed_hlc: i64,
+    /// JSON-encoded SyncRecord — pre-encoded at observe time.
+    payload: Vec<u8>,
+    /// ISO8601 wall-clock TEXT (schema invariant: never REAL). Observability only.
+    enqueued_at: String,
+}
+
+/// Append `entry` to the `_fed_outbox` table with coalescing.
+///
+/// Coalescing rule (newest-wins by packed_hlc): if an entry already exists for
+/// the same (table_name, row_key) and its packed_hlc is strictly less than
+/// `entry.packed_hlc`, the existing entry is deleted and `entry` is inserted.
+/// If the existing entry's packed_hlc is >= entry's, the append is a no-op
+/// (stale write, preserve the newer existing entry).
+///
+/// Mirrors Swift `FedOutboxStore.append(entry:to:table:)`.
+fn fed_outbox_append(
+    row_store: &dyn RowStore,
+    entry: &FedOutboxEntry,
+    table: &str,
+) -> Result<(), String> {
+    let pred = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(table.to_string(), "table_name".to_string()),
+            TypedValue::Text(entry.table_name.clone()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(table.to_string(), "row_key".to_string()),
+            TypedValue::Text(entry.row_key.clone()),
+        ),
+    ]);
+    let existing = row_store.query(table, Some(&pred), &[], None, None).map_err(|e| e.to_string())?;
+    if let Some(row) = existing.into_iter().next() {
+        if let Some(TypedValue::Int(existing_hlc)) = row.get("packed_hlc") {
+            if *existing_hlc >= entry.packed_hlc {
+                // Existing entry is already newer-or-equal — skip (stale write).
+                return Ok(());
+            }
+        }
+        // Incoming is newer: delete the stale entry and insert the new one.
+        if let Some(TypedValue::Uuid(old_id)) = row.get("id") {
+            let del_pred = StoragePredicate::Eq(
+                Column::new(table.to_string(), "id".to_string()),
+                TypedValue::Uuid(*old_id),
+            );
+            row_store.delete(table, &del_pred).map_err(|e| e.to_string())?;
+        }
+    }
+    // Insert the entry (no existing row, or stale row was deleted above).
+    let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+    values.insert("id".to_string(), TypedValue::Uuid(entry.id));
+    values.insert("table_name".to_string(), TypedValue::Text(entry.table_name.clone()));
+    values.insert("row_key".to_string(), TypedValue::Text(entry.row_key.clone()));
+    values.insert("packed_hlc".to_string(), TypedValue::Int(entry.packed_hlc));
+    values.insert("payload".to_string(), TypedValue::Blob(entry.payload.clone()));
+    values.insert("enqueued_at".to_string(), TypedValue::Text(entry.enqueued_at.clone()));
+    row_store.insert(table, values).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read all pending outbox entries ordered by packed_hlc ascending
+/// (oldest first for chronological delivery ordering).
+///
+/// Does NOT delete the entries — they remain until `fed_outbox_confirm` is
+/// called after successful relay delivery (retain-on-failure contract).
+/// Mirrors Swift `FedOutboxStore.readBatch(from:table:)`.
+fn fed_outbox_read_batch(
+    row_store: &dyn RowStore,
+    table: &str,
+) -> Result<Vec<FedOutboxEntry>, String> {
+    use persistence_kit::OrderDirection;
+    let order = [OrderClause {
+        column: Column::new(table.to_string(), "packed_hlc".to_string()),
+        direction: OrderDirection::Ascending,
+    }];
+    let rows = row_store.query(table, None, &order, None, None).map_err(|e| e.to_string())?;
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = match row.get("id") { Some(TypedValue::Uuid(u)) => *u, _ => continue };
+        let table_name = match row.get("table_name") { Some(TypedValue::Text(s)) => s.clone(), _ => continue };
+        let row_key = match row.get("row_key") { Some(TypedValue::Text(s)) => s.clone(), _ => continue };
+        let packed_hlc = match row.get("packed_hlc") { Some(TypedValue::Int(i)) => *i, _ => continue };
+        let payload = match row.get("payload") { Some(TypedValue::Blob(b)) => b.clone(), _ => continue };
+        let enqueued_at = match row.get("enqueued_at") { Some(TypedValue::Text(s)) => s.clone(), _ => continue };
+        entries.push(FedOutboxEntry { id, table_name, row_key, packed_hlc, payload, enqueued_at });
+    }
+    Ok(entries)
+}
+
+/// Delete outbox entries by UUID after successful relay delivery.
+/// Mirrors Swift `FedOutboxStore.confirm(ids:from:table:)`.
+fn fed_outbox_confirm(
+    row_store: &dyn RowStore,
+    ids: &[Uuid],
+    table: &str,
+) -> Result<(), String> {
+    for id in ids {
+        let pred = StoragePredicate::Eq(
+            Column::new(table.to_string(), "id".to_string()),
+            TypedValue::Uuid(*id),
+        );
+        row_store.delete(table, &pred).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Count pending outbox entries. Used by enable() for drain-on-enable logging.
+/// Mirrors Swift `FedOutboxStore.count(from:table:)`.
+fn fed_outbox_count(
+    row_store: &dyn RowStore,
+    table: &str,
+) -> Result<usize, String> {
+    row_store.count(table, None).map_err(|e| e.to_string())
+}
+
+/// Ensure all five Federation side tables exist (v5: WC3 skew + WC1 identity + WC2 outbox).
 ///
 /// Called from `enable()` before any `apply_record`. Uses `storage.migrate()`
 /// which is forward-only and idempotent.
@@ -1363,6 +1601,8 @@ const FED_IDENTITY_TABLE: &str = "_fed_identity";
 ///   v1 — `_fed_sync_meta`      row-grain HLC for A6 LWW gate + tombstone block
 ///   v2 — `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (B-8 parity)
 ///   v3 — `_fed_pending_skew`   schema-skew hold queue (CVK-WC3, parity with Swift v3)
+///   v4 — `_fed_identity`       persistent estate Ed25519 identity (I-8, WC1)
+///   v5 — `_fed_outbox`         durable outbound SyncRecord queue (WC2)
 ///
 /// Mirrors Swift `FederationStateActor.ensureFedSyncMetaTable`. Returns an error
 /// string on failure (caller converts to SyncError).
@@ -1439,10 +1679,28 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
         ],
         vec!["key_id".to_string()],
     );
+    // v5 (WC2): durable outbound SyncRecord queue.
+    // Replaces the in-memory `outbox: Arc<Mutex<Vec<SyncRecord>>>` field.
+    // packed_hlc: signed Int64 bit-cast of PackedHLC.as_i64() (MSB-node layout
+    //   per SPEC §4). Used for coalescing: same (table_name, row_key) keeps
+    //   the entry with the higher packed_hlc.
+    // enqueued_at: ISO8601 TEXT per schema invariants (never REAL).
+    let outbox_table = TableDeclaration::new(
+        FED_OUTBOX_TABLE,
+        vec![
+            ColumnDeclaration::uuid("id"),
+            ColumnDeclaration::text("table_name"),
+            ColumnDeclaration::text("row_key"),
+            ColumnDeclaration::int("packed_hlc").with_default(TypedValue::Int(0)),
+            ColumnDeclaration::blob("payload"),
+            ColumnDeclaration::text("enqueued_at"),
+        ],
+        vec!["id".to_string()],
+    );
     let schema = SchemaDeclaration::new(
         "ConvergenceKitFederation",
-        4,
-        vec![meta_table, cols_table.clone(), skew_table.clone(), identity_table.clone()],
+        5,
+        vec![meta_table, cols_table.clone(), skew_table.clone(), identity_table.clone(), outbox_table.clone()],
     )
     .with_migrations(vec![
         // v1 → v2: add _fed_sync_meta_cols per-column HLC side table
@@ -1466,6 +1724,14 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             from_version: 3,
             to_version: 4,
             operations: vec![SchemaOperation::CreateTable(identity_table)],
+        },
+        // v4 → v5: add _fed_outbox durable outbound queue (WC2).
+        // Replaces the in-memory pendingOutbound. Entries survive process restart
+        // (drain-on-enable, retain-on-failure). Mirrors Swift v4→v5.
+        Migration {
+            from_version: 4,
+            to_version: 5,
+            operations: vec![SchemaOperation::CreateTable(outbox_table)],
         },
     ]);
     storage.migrate(&schema).map_err(|e| e.to_string())

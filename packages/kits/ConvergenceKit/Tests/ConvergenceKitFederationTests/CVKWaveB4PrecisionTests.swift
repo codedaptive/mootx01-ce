@@ -219,13 +219,23 @@ struct ChangedColumnsPropagationTests {
 
         await actor.recordOutbound(change)
 
-        // The entry in pendingOutbound must carry changedColumns: {"title"}.
-        // This is how push() later stamps ONLY "title" in the fieldLevelLWW
-        // columnHLCs map, preventing "body" from receiving a false HLC advance.
-        let pending = await actor.pendingOutbound
-        #expect(pending.count == 1, "one change must be enqueued")
-        let enqueued = try #require(pending.first)
-        #expect(enqueued.changedColumns == Set(["title"]),
-            "changedColumns must propagate from TableChange through strippedChange")
+        // WC2: changedColumns now manifests in the durable outbox (_fed_outbox) as
+        // the columnHLCs map on the stored SyncRecord — only "title" is stamped,
+        // not "body". The old assertion checked pendingOutbound[0].changedColumns;
+        // the new assertion checks the SyncRecord's columnHLCs.entries.
+        //
+        // Because recordOutbound is `async` and FedOutboxStore.append is awaited
+        // inside it, the outbox entry is present by the time this await returns.
+        let outboxCount = try await FedOutboxStore.count(
+            from: storage, table: "_fed_outbox")
+        #expect(outboxCount == 1, "one outbox entry must be appended for the change")
+
+        // Decode the stored SyncRecord and verify columnHLCs covers only "title".
+        let entries = try await FedOutboxStore.readBatch(from: storage, table: "_fed_outbox")
+        let firstEntry = try #require(entries.first, "outbox entry must be readable")
+        let record = try JSONDecoder().decode(SyncRecord.self, from: firstEntry.payload)
+        let columnKeys = record.columnHLCs.map { Set($0.entries.keys) } ?? Set<String>()
+        #expect(columnKeys == Set(["title"]),
+            "precision fieldLevelLWW stamping must stamp only 'title', not 'body' (changedColumns propagated)")
     }
 }

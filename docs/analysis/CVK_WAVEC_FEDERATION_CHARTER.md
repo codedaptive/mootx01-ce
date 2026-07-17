@@ -99,7 +99,7 @@ Wave A/B behaviors and their current Federation parity. "FED" means "Federation 
 | Schema-skew pending queue | B-10, C-15 | YES (_fed_pending_skew v3) | NO (rejects as conflict) | **DRIFT** |
 | TombstoneGC | B-9 note | YES (gcIfDue after pull) | NO | **DRIFT** |
 | Side-schema version | B-12 | v4 | v4 | **PARITY (WC1)** |
-| Durable outbox | I-12, B-11 | NO (in-memory) | NO (in-memory) | PARITY (both missing) |
+| Durable outbox | I-12, B-11 | YES (_fed_outbox v5) | YES (_fed_outbox v5) | **PARITY (WC2)** |
 | Identity persistence | I-8 | YES (_fed_identity v4) | YES (_fed_identity v4) | **PARITY (WC1)** |
 | Peer persistence | I-8 | NO | NO | PARITY (both missing) |
 | Signed pairing handshake | B-7 | TYPED NOT WIRED | TYPED NOT WIRED | PARITY (both missing) |
@@ -185,7 +185,14 @@ new engine against same storage. Public key matches across both enables.
 
 ---
 
-### WC2 — Federation durable outbox (DURABILITY)
+### ~~WC2 — Federation durable outbox (DURABILITY)~~ DONE (CVK-WC2, 2026-07-17)
+
+**Completed:** `_fed_outbox` durable side table added to both Swift and Rust legs.
+`pendingOutbound: [TableChange]` removed; `FedOutboxStore` (Swift) / `fed_outbox_*` helpers
+(Rust) replace it. Schema v5 both legs. `Relay.send` now `throws` (Swift) /
+`Result<(), String>` (Rust) — enables retain-on-failure contract. 5 DUR tests both legs
+(durability, push-failure-retains, coalescing, drain-on-enable, echo-still-suppressed-after-reload).
+88 Swift / 123 Rust tests, both exit 0. SPEC B-11 and I-12 updated (v1.3).
 
 **Scope:** Replace `pendingOutbound: [TableChange]` with a SQLite-backed `_fed_outbox` table
 using the existing OutboxStore infrastructure. Swift only (Rust in-memory outbox is lower

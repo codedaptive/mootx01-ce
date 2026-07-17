@@ -1,6 +1,6 @@
 ---
 title: ConvergenceKit Specification
-version: 1.2
+version: 1.3
 status: active
 date: 2026-07-17
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -200,10 +200,14 @@ holds a stale `(slot, epoch)` and receives `reenrollRequired` before any
 of its records are applied. On re-enrollment, pending outbound entries are
 re-minted with fresh HLCs under the new `(slot, epoch)` identity.
 
-**I-12 (durable pipeline):** The outbound queue and the
-server change token survive process death. Outbox entries clear only on
-per-record confirmation from the transport; the token is persisted per
-zone and reloaded at next `enable`.
+**I-12 (durable pipeline):** The outbound queue survives process death.
+Outbox entries clear only on per-record confirmation from the transport;
+they are retained on failure and retried on the next push cycle. For
+CloudKit: the server change token is persisted per zone and reloaded at
+next `enable`. For Federation: the `_fed_outbox` SQLite side table
+(Wave C, WC2; both legs, side-schema v5) plays the same role — entries
+written at observe time survive `disable()`/`enable()` cycles and process
+restarts, and are drained by the next `push()` after re-enable.
 
 ## § 5 — Behavioral contracts
 
@@ -413,10 +417,14 @@ single-step backoff delay (`RetryPolicy.default.delay(forAttempt: 0)`,
 ~1 s ±20% jitter); the multi-step retry arc is owned by
 `AdaptivePollScheduler` (P3-M2). `cancel()` is async and awaited by
 `disable()` before clearing engine state (I-2 deterministic teardown).
-Federation does not apply a symmetric debouncer: the federation outbound
-path uses an in-memory `pendingOutbound` array (not a durable outbox) and
-a synchronous relay transport — the debouncer's durable-append trigger
-pattern is not symmetrically applicable.
+Federation does not apply a symmetric debouncer: the Federation outbound
+path uses the durable `_fed_outbox` SQLite side table (Wave C, WC2; both
+Swift and Rust legs, Federation side-schema v5) and a synchronous relay
+transport. The debouncer's durable-append trigger is still deferred until
+the hosted relay (WC7) introduces meaningful async latency. Until then,
+`push()` is host-triggered. Outbox entries survive `disable()`/`enable()`
+cycles and process restarts; entries are confirmed-deleted only on
+successful relay delivery, retaining on failure (retry-on-next-push).
 
 *Inbound poll leg:* adaptive tiered polling is the correctness
 path — fast cadence immediately after observed remote activity, backing

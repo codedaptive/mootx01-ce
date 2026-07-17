@@ -211,7 +211,13 @@ public struct SignedEnvelope: Sendable, Codable {
 /// this protocol is that extension point.
 public protocol Relay: Sendable {
     /// Deliver a signed envelope to a recipient's inbox.
-    func send(to recipient: Data, message: SignedEnvelope)
+    ///
+    /// Throws on transport failure (e.g. network error from a hosted relay
+    /// conformer). The in-process `FederationRelay` never throws. When
+    /// `send` throws, `push()` retains the outbox entries in `_fed_outbox`
+    /// for the next push cycle's retry — this is the "retain on failure"
+    /// contract that the durable outbox (WC2) makes possible.
+    func send(to recipient: Data, message: SignedEnvelope) throws
     /// Drain (and clear) the recipient's pending inbound envelopes.
     func drain(for recipient: Data) -> [SignedEnvelope]
 }
@@ -224,7 +230,7 @@ public final class FederationRelay: Relay, @unchecked Sendable {
 
     public init() {}
 
-    public func send(to recipient: Data, message: SignedEnvelope) {
+    public func send(to recipient: Data, message: SignedEnvelope) throws {
         lock.lock()
         defer { lock.unlock() }
         inboxes[recipient, default: []].append(message)
@@ -252,7 +258,10 @@ actor FederationStateActor {
     var lastPushAt: Date?
     var lastPullAt: Date?
     var observerTasks: [Task<Void, Never>] = []
-    var pendingOutbound: [TableChange] = []
+    // pendingOutbound removed (WC2): replaced by durable _fed_outbox side table.
+    // See FedOutboxStore.swift. recordOutbound now appends a JSON-encoded SyncRecord
+    // to _fed_outbox via FedOutboxStore.append. push() reads from _fed_outbox and
+    // confirms entries on successful relay delivery.
     var subscribers: [AsyncStream<SyncEvent>.Continuation] = []
     var peers: [PairedPeer] = []
     var hlcGenerator = HLCGenerator(nodeID: Int32.random(in: 1...0x0F))
@@ -269,13 +278,23 @@ actor FederationStateActor {
         self.manifest = manifest
         self.storage = storage
         // Ensure Federation side tables exist: _fed_sync_meta (v1), _fed_sync_meta_cols
-        // (v2), _fed_pending_skew (v3, R9), and _fed_identity (v4, WC1). Mirrors the
-        // CloudKit engine's CKSideSchema.ensure call in enable().
+        // (v2), _fed_pending_skew (v3, R9), _fed_identity (v4, WC1), and _fed_outbox
+        // (v5, WC2 durable outbox). Mirrors the CloudKit engine's CKSideSchema.ensure
+        // call in enable().
         try await Self.ensureFedSyncMetaTable(storage: storage)
 
         // Load or mint the persistent estate Ed25519 identity (I-8, WC1).
         // Must run after ensureFedSyncMetaTable so _fed_identity exists.
         try await loadOrMintIdentity(storage: storage)
+
+        // Drain-on-enable (WC2): check for outbox entries that survived from a prior
+        // process lifetime. This is informational — the host triggers push() to deliver
+        // them. No entries are consumed here; push() reads-without-clearing.
+        let leftoverCount = (try? await FedOutboxStore.count(
+            from: storage, table: Self.fedOutboxTable)) ?? 0
+        if leftoverCount > 0 {
+            logger.info("federation: \(leftoverCount) durable outbox entry(ies) survived from prior process — next push() will deliver them")
+        }
 
         // Schema-skew replay (R9, CVK-ICLOUD P3-M4).
         //
@@ -320,6 +339,9 @@ actor FederationStateActor {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
             let task = Task { [weak self] in
                 for await change in stream {
+                    // recordOutbound is async (WC2: appends to the durable _fed_outbox).
+                    // The await hop into the actor context is correct; errors are
+                    // handled internally in recordOutbound with try?.
                     await self?.recordOutbound(change)
                 }
             }
@@ -342,20 +364,33 @@ actor FederationStateActor {
         for task in tasks { _ = await task.value }
         for sub in subscribers { sub.finish() }
         subscribers.removeAll()
-        pendingOutbound.removeAll()
+        // _fed_outbox entries survive disable: they are a durable queue that outlives
+        // the engine lifecycle (WC2). On re-enable, enable() counts leftover entries
+        // and logs; the host triggers push() to deliver them. Clearing peers and
+        // storage here does NOT clear the on-disk outbox.
         peers.removeAll()
         manifest = nil
         storage = nil
     }
 
-    func recordOutbound(_ change: TableChange) {
+    func recordOutbound(_ change: TableChange) async {
         // Echo suppression (I-10, CVK-ICLOUD P1-M1): discard changes that
         // originated from applyInbound. Without this guard, every inbound
-        // sync write fires the storage observer, re-enters pendingOutbound,
+        // sync write fires the storage observer, re-enters the outbox,
         // and is pushed back to the sending peer — two live machines
         // ping-pong forever. The .syncApply origin is stamped by the
         // RowStore sync-tagged write paths (upsertSync / insertSync / deleteSync).
+        //
+        // ECHO SUPPRESSION INVARIANT ON RESTART (WC2): entries loaded from
+        // _fed_outbox on engine restart are SyncRecords minted at observe
+        // time — before this guard. No re-evaluation is needed: durability
+        // does not break echo suppression.
         guard change.origin != .syncApply else { return }
+        guard let manifest, let storage = self.storage else { return }
+        guard let syncedTable = manifest.table(named: change.table) else { return }
+        // Pull-only tables do not originate local writes.
+        guard syncedTable.direction != .pullOnly else { return }
+        guard let rowKey = change.rowKey else { return }
 
         // Column projection (R2, CVK-ICLOUD P2-M2): strip excluded columns
         // before enqueueing. Excluded columns are locally recomputed on every
@@ -364,7 +399,8 @@ actor FederationStateActor {
         //
         // Deletes are unaffected: a delete carries no column values, and the
         // tombstone must still propagate so remote replicas GC the row.
-        let excluded = manifest?.table(named: change.table)?.excludedColumns ?? []
+        var effectiveChange = change
+        let excluded = syncedTable.excludedColumns
         if !excluded.isEmpty, let rawValues = change.values {
             let stripped = Projection.outboundStrip(values: rawValues, excluded: excluded)
             if change.event == .update {
@@ -377,7 +413,7 @@ actor FederationStateActor {
                 //
                 // Classic fallback (changedColumns nil = unknown/all): check whether
                 // only the primary key survived the strip (pre-CVK-WB4 behavior).
-                let pkColumn = manifest?.table(named: change.table)?.primaryKeyColumn ?? ""
+                let pkColumn = syncedTable.primaryKeyColumn
                 if let changedCols = change.changedColumns {
                     if changedCols.allSatisfy({ excluded.contains($0) }) {
                         return
@@ -386,7 +422,7 @@ actor FederationStateActor {
                     return
                 }
             }
-            let strippedChange = TableChange(
+            effectiveChange = TableChange(
                 table: change.table,
                 event: change.event,
                 rowKey: change.rowKey,
@@ -395,10 +431,83 @@ actor FederationStateActor {
                 origin: change.origin,
                 changedColumns: change.changedColumns
             )
-            pendingOutbound.append(strippedChange)
+        }
+
+        // Convert TableChange → SyncRecord at observe time (WC2 key design).
+        //
+        // WHY encode at observe time (not at push time):
+        // The durable outbox stores self-contained wire units so the push drain
+        // is a straight read → batch → sign → send with no re-processing.
+        // Echo suppression fires at observe time; the SyncRecord carries no
+        // origin field, but by construction only origin != .syncApply changes
+        // reach this point. Durability is safe.
+        //
+        // Prefer the HLC that already ordered the change. If the observation
+        // carried none, mint a monotonic one through the generator.
+        let hlc = effectiveChange.hlc ?? hlcGenerator.send(now: nowMillis())
+        let eventKind = SyncEventKind(from: effectiveChange.event)
+        // Tombstone flag: set syncDeleted = true for delete events so the
+        // receiver knows to apply the tombstone path (LWW gate + side-table
+        // HLC persistence). Matches the A6 unification contract.
+        let syncDeleted: Bool? = eventKind == .delete ? true : nil
+        // For fieldLevelLWW tables, stamp columns with the capture HLC.
+        //
+        // Precision path (CVK-WB4): when changedColumns is present, stamp only
+        // the columns that were actually written. Columns in the row snapshot but
+        // not changed retain their existing remote HLC — they are not displaced.
+        let columnHLCs: ColumnHLCMap?
+        if let raw = effectiveChange.values,
+           syncedTable.conflictPolicy == .fieldLevelLWW,
+           eventKind != .delete {
+            let keysToStamp: [String]
+            if let changedCols = effectiveChange.changedColumns {
+                keysToStamp = raw.keys.filter { changedCols.contains($0) }
+            } else {
+                keysToStamp = Array(raw.keys)
+            }
+            columnHLCs = ColumnHLCMap.stampAll(keys: keysToStamp, hlc: PackedHLC(hlc))
+        } else {
+            columnHLCs = nil
+        }
+        let record = SyncRecord(
+            table: effectiveChange.table,
+            event: eventKind,
+            rowKey: rowKey,
+            values: effectiveChange.values.map { SyncValueMap($0) },
+            hlc: PackedHLC(hlc),
+            schemaVersion: manifest.schemaVersion,
+            kitID: manifest.kitID,
+            syncDeleted: syncDeleted,
+            columnHLCs: columnHLCs
+        )
+
+        // Encode the SyncRecord to JSON and append to the durable outbox.
+        // Coalescing by (table_name, row_key) newest-HLC in FedOutboxStore.append
+        // bounds hot-row growth in high-write workloads — mirrors CloudKit OutboxStore.
+        guard let payload = try? JSONEncoder().encode(record) else {
+            logger.warning("federation recordOutbound: JSON encode failed for \(change.table)/\(rowKey) — entry dropped")
             return
         }
-        pendingOutbound.append(change)
+        let packedHLC = Int64(bitPattern: hlc.packed)
+        let entry = FedOutboxEntry(
+            id: UUID(),
+            tableName: record.table,
+            rowKey: rowKey.uuidString,
+            packedHLC: packedHLC,
+            payload: payload,
+            enqueuedAt: iso8601Now()
+        )
+        do {
+            try await FedOutboxStore.append(entry: entry, to: storage, table: Self.fedOutboxTable)
+        } catch {
+            logger.warning("federation recordOutbound: outbox append failed for \(change.table)/\(rowKey): \(error)")
+        }
+    }
+
+    /// ISO8601 timestamp for the current moment. Used by recordOutbound to stamp
+    /// enqueued_at on durable outbox entries.
+    private func iso8601Now() -> String {
+        ISO8601DateFormatter().string(from: Date())
     }
 
     func attachSubscriber(_ continuation: AsyncStream<SyncEvent>.Continuation) {
@@ -434,70 +543,33 @@ actor FederationStateActor {
     }
 
     func push() async throws -> SyncReceipt {
-        guard isEnabled, let manifest else { throw SyncError.notEnabled }
+        // Manifest presence guards that the engine was configured before push.
+        // The actual SyncRecord fields were stamped at observe time in recordOutbound;
+        // push() only reads, packs, signs, and delivers — no per-record manifest access.
+        guard isEnabled, manifest != nil else { throw SyncError.notEnabled }
         if peers.isEmpty {
             return SyncReceipt.empty
         }
+        guard let storage = self.storage else { throw SyncError.notEnabled }
 
-        // Build SyncRecords from pendingOutbound.
+        // Read durable outbox entries (WC2). SyncRecords were encoded at observe
+        // time in recordOutbound; each entry's payload is a JSON-encoded SyncRecord.
+        // readBatch does NOT delete entries — they survive until confirm() is called
+        // after successful relay delivery (retain-on-failure contract).
+        let outboxEntries = try await FedOutboxStore.readBatch(
+            from: storage, table: Self.fedOutboxTable)
+
+        // Decode each entry's payload back to SyncRecord for batching.
         var records: [SyncRecord] = []
-        let pending = pendingOutbound
-        pendingOutbound.removeAll()
-        for change in pending {
-            guard let syncedTable = manifest.table(named: change.table) else { continue }
-            guard syncedTable.direction != .pullOnly else { continue }
-            guard let rowKey = change.rowKey else { continue }
-            // Prefer the HLC that already ordered the change. If the
-            // observation carried none, mint a monotonic one through
-            // the generator. Use send(now:), not currentTime():
-            // currentTime() is a read-only snapshot that does not
-            // advance the clock, so two HLC-less changes in the same
-            // batch would collide on an identical timestamp. send()
-            // advances the logical counter and takes the clock as a
-            // parameter, keeping the engine deterministic.
-            let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
-            let eventKind = SyncEventKind(from: change.event)
-            // Tombstone flag: set syncDeleted = true for delete events so the
-            // receiver knows to apply the tombstone path (LWW gate + side-table
-            // HLC persistence) rather than a normal upsert. Matches the A6
-            // unification contract and the Rust wire format (C-8 parity).
-            let syncDeleted: Bool? = eventKind == .delete ? true : nil
-            // For fieldLevelLWW tables, stamp columns with the capture HLC.
-            //
-            // Precision path (CVK-WB4): when changedColumns is present, stamp only
-            // the columns that were actually written (intersection of changedColumns
-            // with the projected key set). Columns present in the row snapshot but not
-            // changed retain their existing remote HLC — they are not displaced.
-            //
-            // Fallback (changedColumns nil = unknown/all): stamp all projected columns
-            // (pre-CVK-WB4 behavior; conservative but safe).
-            let columnHLCs: ColumnHLCMap?
-            if let raw = change.values,
-               let syncedTable = manifest.table(named: change.table),
-               syncedTable.conflictPolicy == .fieldLevelLWW,
-               eventKind != .delete {
-                let keysToStamp: [String]
-                if let changedCols = change.changedColumns {
-                    keysToStamp = raw.keys.filter { changedCols.contains($0) }
-                } else {
-                    keysToStamp = Array(raw.keys)
-                }
-                columnHLCs = ColumnHLCMap.stampAll(keys: keysToStamp, hlc: PackedHLC(hlc))
-            } else {
-                columnHLCs = nil
+        var entryIDs: [UUID] = []
+        for entry in outboxEntries {
+            do {
+                let record = try JSONDecoder().decode(SyncRecord.self, from: entry.payload)
+                records.append(record)
+                entryIDs.append(entry.id)
+            } catch {
+                logger.warning("federation push: decode outbox payload failed for entry \(entry.id) — skipping")
             }
-            let record = SyncRecord(
-                table: change.table,
-                event: eventKind,
-                rowKey: rowKey,
-                values: change.values.map { SyncValueMap($0) },
-                hlc: PackedHLC(hlc),
-                schemaVersion: manifest.schemaVersion,
-                kitID: manifest.kitID,
-                syncDeleted: syncDeleted,
-                columnHLCs: columnHLCs
-            )
-            records.append(record)
         }
 
         if records.isEmpty {
@@ -515,9 +587,8 @@ actor FederationStateActor {
             throw SyncError.encodingFailure(detail: "encode SyncRecords: \(error)")
         }
 
-        // Batch-level HLC: advance the clock once more. Records that already
-        // carried change.hlc are not incorporated into the generator before this
-        // mint, so strict ordering after every record HLC is not guaranteed.
+        // Batch-level HLC: advance the clock once more so the envelope timestamp
+        // is strictly ordered after all record HLCs in the batch.
         let batchHLC = PackedHLC(hlcGenerator.send(now: nowMillis()))
 
         // Build canonical signing bytes and sign with sender's Ed25519 key.
@@ -544,10 +615,30 @@ actor FederationStateActor {
             hlc: batchHLC
         )
 
+        // Deliver to each paired peer. Relay.send now throws on transport failure
+        // (WC2 — enables "retain on failure" semantic). The in-process relay never
+        // throws; a hosted relay (WC7) may throw on network error.
+        //
+        // Confirmation strategy: if ALL peers receive the envelope successfully,
+        // confirm (delete) the outbox entries. If ANY peer's send throws, retain
+        // all entries for the next push cycle's retry. Partial delivery to some
+        // peers is acceptable — LWW idempotency at the receiver absorbs re-delivery.
         var pushedCount = 0
+        var anyPeerFailed = false
         for peer in peers {
-            peer.relay.send(to: peer.publicKey, message: envelope)
-            pushedCount += records.count
+            do {
+                try peer.relay.send(to: peer.publicKey, message: envelope)
+                pushedCount += records.count
+            } catch {
+                logger.warning("federation push: relay send to peer \(peer.publicKey.base64EncodedString().prefix(8)) failed: \(error) — entries retained for retry")
+                anyPeerFailed = true
+            }
+        }
+
+        // Confirm outbox entries on success; leave them on failure (retain-on-failure).
+        // For the in-process relay (WC2), send never fails, so confirm is always called.
+        if !anyPeerFailed {
+            try await FedOutboxStore.confirm(ids: entryIDs, from: storage, table: Self.fedOutboxTable)
         }
 
         lastPushAt = Date()
@@ -950,7 +1041,15 @@ actor FederationStateActor {
     /// follow-up for Swift only; Rust leg stores in-estate for parity.
     static let fedIdentityTable = "_fed_identity"
 
-    /// Create the Federation side tables through schema v4.
+    /// Side table name for the Federation durable outbox (WC2).
+    /// Stores post-encoded SyncRecord payloads pending relay delivery.
+    /// Columns: id UUID PK, table_name TEXT, row_key TEXT, packed_hlc INT,
+    /// payload BLOB (JSON SyncRecord), enqueued_at TEXT (ISO8601).
+    /// Entries are written at observe time and confirmed (deleted) after
+    /// successful relay.send; retained on transport failure for retry.
+    static let fedOutboxTable = "_fed_outbox"
+
+    /// Create the Federation side tables through schema v5.
     ///
     /// Must be called from `enable()` before any `applyInbound`. Mirrors
     /// `CKSideSchema.ensure`. Marked `internal` (not private) so tests that
@@ -960,6 +1059,7 @@ actor FederationStateActor {
     /// - v2: `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (CVK-ICLOUD P2-M1)
     /// - v3: `_fed_pending_skew` schema-skew pending queue (R9, CVK-ICLOUD P3-M4)
     /// - v4: `_fed_identity` persistent estate Ed25519 identity (I-8, WC1)
+    /// - v5: `_fed_outbox` durable outbound SyncRecord queue (WC2)
     static func ensureFedSyncMetaTable(storage: any Storage) async throws {
         let fedSyncMetaDecl = TableDeclaration(
             name: fedSyncMetaTable,
@@ -1033,10 +1133,32 @@ actor FederationStateActor {
             primaryKey: ["key_id"]
         )
 
+        // _fed_outbox: durable outbound SyncRecord queue (WC2).
+        // Stores post-encoded SyncRecord payloads (JSON BLOB) pending relay delivery.
+        // packed_hlc: Int64 bit-cast of SubstrateTypes.HLC.packed (UInt64 MSB-node
+        //   layout per SPEC §4). Used for coalescing: same (table_name, row_key) pair
+        //   keeps the entry with the higher packed_hlc; stale entries are deleted on
+        //   append. packed_hlc INT DEFAULT 0 (signed, not UInt — matches PersistenceKit
+        //   .int TypedValue).
+        // enqueued_at: ISO8601 TEXT wall-clock timestamp (schema invariant: never REAL).
+        let fedOutboxDecl = TableDeclaration(
+            name: fedOutboxTable,
+            columns: [
+                ColumnDeclaration(name: "id",          type: .uuid, nullable: false),
+                ColumnDeclaration(name: "table_name",  type: .text, nullable: false),
+                ColumnDeclaration(name: "row_key",     type: .text, nullable: false),
+                ColumnDeclaration(name: "packed_hlc",  type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
+                ColumnDeclaration(name: "payload",     type: .blob, nullable: false),
+                ColumnDeclaration(name: "enqueued_at", type: .text, nullable: false),
+            ],
+            primaryKey: ["id"]
+        )
+
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitFederation",
-            version: 4,
-            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl, fedIdentityDecl],
+            version: 5,
+            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl, fedIdentityDecl, fedOutboxDecl],
             migrations: [
                 // v1 → v2: add per-column HLC side table for fieldLevelLWW.
                 Migration(fromVersion: 1, toVersion: 2, operations: [
@@ -1053,6 +1175,12 @@ actor FederationStateActor {
                 // ensure returns.
                 Migration(fromVersion: 3, toVersion: 4, operations: [
                     .createTable(fedIdentityDecl),
+                ]),
+                // v4 → v5: add _fed_outbox durable outbound queue (WC2).
+                // Replaces the in-memory pendingOutbound: [TableChange] array.
+                // Entries survive process restart (drain-on-enable, retain-on-failure).
+                Migration(fromVersion: 4, toVersion: 5, operations: [
+                    .createTable(fedOutboxDecl),
                 ]),
             ]
         )
