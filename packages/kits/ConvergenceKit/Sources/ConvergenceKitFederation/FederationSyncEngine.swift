@@ -689,6 +689,10 @@ actor FederationStateActor {
         if appliedCount > 0 {
             emit(.remoteChangesApplied(count: appliedCount))
         }
+        // Scheduled tombstone GC (CVK-WB7): after each successful pull, compact
+        // stale _fed_sync_meta tombstone entries if the daily interval has elapsed.
+        // Non-fatal: a GC failure is swallowed so it never interrupts pull.
+        try? await gcIfDue(nowMs: nowMillis())
         return receipt
     }
 
@@ -916,7 +920,9 @@ actor FederationStateActor {
     // MARK: - _fed_sync_meta side table (A6 unification)
 
     /// Side table name for Federation row-grain HLC. Mirrors `_ck_sync_meta`.
-    private static let fedSyncMetaTable = "_fed_sync_meta"
+    // Internal (not private) so tests can pass this to TombstoneGC.compact
+    // directly via gcIfDue(storage:nowMs:) with @testable import.
+    static let fedSyncMetaTable = "_fed_sync_meta"
 
     /// Side table name for Federation per-column HLC (fieldLevelLWW).
     /// Mirrors `_ck_sync_meta_cols` added to CKSideSchema at v6.
@@ -1079,5 +1085,89 @@ actor FederationStateActor {
     /// assigning lastPushAt and lastPullAt on receipts.
     private func nowMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    // MARK: - Tombstone GC (CVK-WB7)
+    //
+    // Periodic compaction of stale tombstone HLC entries in _fed_sync_meta.
+    // Called at the end of each successful pull() cycle via gcIfDue(nowMs:
+    // nowMillis()). Non-fatal: errors are swallowed by the pull() caller.
+    //
+    // STORAGE CHOICE — _fed_sync_meta sentinel row:
+    // _fed_sync_meta is keyed by (table_name, primary_key). We insert a
+    // sentinel row with table_name='_gc_state', primary_key='_tombstone_sweep'.
+    // Underscore-prefixed names cannot collide with real application table
+    // names (application tables come from the SyncManifest and use plain
+    // identifiers). The sync_hlc column stores the last-GC wall time in ms
+    // directly (not as a packed HLC) — this is an internal convention limited
+    // to the sentinel row. Adding a new side table would require a schema
+    // version bump and migration; reusing the existing table is both minimal
+    // and correct for a single sentinel value.
+    //
+    // CRITICAL INVARIANT: SyncTombstone.gcRetentionSeconds (30 d) MUST exceed
+    // the slot-eviction long window (P1-M3 DeviceSlotRegistry, not yet shipped).
+    // A device offline during its slot window must still find tombstone HLCs
+    // when it reconnects, otherwise stale inserts can resurrect deleted rows
+    // (A6 adjudication). The 30 d window provides a conservative buffer;
+    // once P1-M3 ships, verify gcRetentionSeconds >= that constant.
+
+    private static let gcSentinelTableName  = "_gc_state"
+    private static let gcSentinelPrimaryKey = "_tombstone_sweep"
+
+    /// Run tombstone GC if the daily interval has elapsed. Production entry
+    /// point: reads `self.storage`.
+    func gcIfDue(nowMs: Int64) async throws {
+        guard let storage else { return }
+        try await gcIfDue(storage: storage, nowMs: nowMs)
+    }
+
+    /// Testable GC entry point. Takes `storage` explicitly so unit tests can
+    /// exercise GC without calling `enable()`.
+    func gcIfDue(storage: any Storage, nowMs: Int64) async throws {
+        let lastGCMs = try await readFedLastGCMs(from: storage)
+        guard (nowMs - lastGCMs) >= TombstoneGCSchedule.gcIntervalMs else { return }
+
+        _ = try await TombstoneGC.compact(
+            from: storage,
+            sideTable: Self.fedSyncMetaTable,
+            nowMillis: nowMs
+        )
+        try await writeFedLastGCMs(nowMs, to: storage)
+    }
+
+    private func readFedLastGCMs(from storage: any Storage) async throws -> Int64 {
+        let rows = try await storage.rowStore.query(
+            table: Self.fedSyncMetaTable,
+            where: .and([
+                .eq(Column(table: Self.fedSyncMetaTable, name: "table_name"),
+                    .text(Self.gcSentinelTableName)),
+                .eq(Column(table: Self.fedSyncMetaTable, name: "primary_key"),
+                    .text(Self.gcSentinelPrimaryKey))
+            ])
+        )
+        guard let row = rows.first,
+              case .int(let ms) = row["sync_hlc"] else {
+            // No prior GC run — return 0 so (nowMs - 0) is always >= gcIntervalMs.
+            return 0
+        }
+        return ms
+    }
+
+    private func writeFedLastGCMs(_ ms: Int64, to storage: any Storage) async throws {
+        // upsertSync: marks the write as .syncApply origin so recordOutbound's
+        // echo-suppression gate drops it. The sentinel row has no application
+        // meaning and must never be pushed to peers.
+        _ = try await storage.rowStore.upsertSync(
+            table: Self.fedSyncMetaTable,
+            values: [
+                "table_name":     .text(Self.gcSentinelTableName),
+                "primary_key":    .text(Self.gcSentinelPrimaryKey),
+                "sync_hlc":       .int(ms),
+                "schema_version": .int(0),
+                "kit_id":         .text(""),
+                "is_deleted":     .int(0),
+            ],
+            conflictColumns: ["table_name", "primary_key"]
+        )
     }
 }

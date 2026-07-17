@@ -12,6 +12,8 @@
 //   - Injected sleep function (testable: pass { _ in } to run loop at max speed)
 //   - Injected pull closure (testable: pass a fake that returns controlled receipts)
 //   - Injected RetryPolicy + jitter source (testable: pass deterministic values)
+//   - Injected nowMs clock (testable: pass a synthetic clock for time-sensitive tests)
+//   - Optional injected gcFn (testable: pass a fake to verify GC trigger timing)
 //   - Owned Task that runs the poll loop
 //   - nudge() interrupts the current sleep immediately, fires a pull, resets to fast
 //
@@ -44,6 +46,8 @@
 //
 // SPEC: CONVERGENCEKIT_SPEC.md § 5 B-11 (convergence loop).
 // INTERFACE: CONVERGENCEKIT_INTERFACE.md § 2 CloudKitSyncEngine — nudge().
+// GC wiring: CVK-WB7 — gcFn is called after each successful pull with
+//   the current nowMs value; the closure decides whether GC is due.
 
 import Foundation
 import ConvergenceKit
@@ -60,6 +64,16 @@ public typealias SchedulerPullFn = @Sendable () async throws -> SyncReceipt
 /// Tests: `{ _ in }` — returns immediately, letting the loop run at max
 ///                       speed driven by async Task.yield() scheduling.
 public typealias SchedulerSleepFn = @Sendable (Duration) async throws -> Void
+
+/// GC closure: called with the current wall-clock ms after each successful pull.
+/// The closure checks whether the GC interval has elapsed and runs
+/// `TombstoneGC.compact` if so. Errors are swallowed by the caller —
+/// a GC failure is non-fatal to the convergence loop.
+///
+/// Production: wraps `CloudKitStateActor.gcIfDue(nowMs:)`.
+/// Tests: pass a fake that records calls or asserts timing.
+/// Nil (default): GC is disabled for this scheduler instance.
+public typealias SchedulerGCFn = @Sendable (Int64) async throws -> Void
 
 // MARK: - AdaptivePollScheduler
 
@@ -103,6 +117,19 @@ public actor AdaptivePollScheduler {
     /// Tests: pass a fixed value (e.g. `{ 0.5 }`) to pin jitter to zero
     /// when using `jitterFraction: 0.0`, or to a known offset otherwise.
     private let _jitterSource: @Sendable () -> Double
+    /// Wall-clock source in milliseconds since Unix epoch.
+    ///
+    /// Production default: real system clock.
+    /// Tests: pass a synthetic closure to control "due" / "not due"
+    /// decisions in both tier accounting and GC scheduling without
+    /// real-time delays. Both `nudge()` and the GC check use this same
+    /// injection so the two features stay temporally consistent in tests.
+    private let _nowMs: @Sendable () -> Int64
+    /// Optional GC closure. Called with the current nowMs after each
+    /// successful pull. The closure decides whether the daily GC interval
+    /// has elapsed and runs compaction if so. Nil disables GC for this
+    /// scheduler instance.
+    private let _gcFn: SchedulerGCFn?
 
     // MARK: - Init
 
@@ -123,12 +150,16 @@ public actor AdaptivePollScheduler {
         pull: @escaping SchedulerPullFn,
         sleep: @escaping SchedulerSleepFn = { d in try await Task.sleep(for: d) },
         retryPolicy: RetryPolicy = .default,
-        jitterSource: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
+        jitterSource: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
+        nowMs: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) },
+        gcFn: SchedulerGCFn? = nil
     ) {
         self._pull         = pull
         self._sleep        = sleep
         self._retryPolicy  = retryPolicy
         self._jitterSource = jitterSource
+        self._nowMs        = nowMs
+        self._gcFn         = gcFn
     }
 
     // MARK: - Lifecycle
@@ -177,7 +208,7 @@ public actor AdaptivePollScheduler {
     ///   - Future APNs wakeup handlers call nudge() rather than pull() directly
     ///   - Local IPC from a companion process calls nudge() to accelerate pull
     public func nudge() {
-        _policy.recordNudge(nowMs: nowMs())
+        _policy.recordNudge(nowMs: _nowMs())
         // Interrupt the sleep so the pull fires immediately.
         _sleepTask?.cancel()
     }
@@ -202,6 +233,7 @@ public actor AdaptivePollScheduler {
             // After a retryable error the backoff floor stretches the sleep beyond
             // the tier cadence; it resets to 0 on success (CVK-WB6).
             let tierIntervalMs = _policy.nextIntervalMs
+            let nowMillis      = _nowMs()
             let effectiveMs    = max(tierIntervalMs, _backoffFloorMs)
             let interval       = Duration.milliseconds(effectiveMs)
 
@@ -233,9 +265,17 @@ public actor AdaptivePollScheduler {
                 _retryAttempt   = 0
                 _backoffFloorMs = 0
                 if receipt.pulled > 0 {
-                    _policy.recordNonEmptyPull(nowMs: nowMs())
+                    _policy.recordNonEmptyPull(nowMs: nowMillis)
                 } else {
-                    _policy.recordEmptyPull(nowMs: nowMs())
+                    _policy.recordEmptyPull(nowMs: nowMillis)
+                }
+                // Scheduled tombstone GC (CVK-WB7): after each successful pull, fire
+                // the GC closure with the current nowMs. The closure checks whether the
+                // daily interval has elapsed and runs TombstoneGC.compact if so.
+                // Non-fatal: a GC failure (storage error, etc.) is swallowed here so the
+                // convergence loop is never interrupted by background maintenance.
+                if let gcFn = _gcFn {
+                    try? await gcFn(nowMillis)
                 }
             } catch {
                 let errorClass = CKErrorClass.classify(error)
@@ -252,28 +292,25 @@ public actor AdaptivePollScheduler {
                     )
                     _backoffFloorMs = Int64(backoffDelay * 1_000)
                     _retryAttempt  += 1
-                    _policy.recordEmptyPull(nowMs: nowMs())
+                    _policy.recordEmptyPull(nowMs: nowMillis)
 
                 default:
                     // Non-retryable on the pull path (reclaim / conflict / permanent):
                     // surface via caller diagnostics if needed; tier cadence unchanged;
                     // backoff state unchanged. These classes originate on the push path —
                     // seeing them here is unusual but should not cause cascading backoff.
-                    _policy.recordEmptyPull(nowMs: nowMs())
+                    _policy.recordEmptyPull(nowMs: nowMillis)
                 }
             }
         }
     }
 
-    // MARK: - Clock helper
-
-    /// Current wall-clock in milliseconds since Unix epoch.
-    ///
-    /// Matches the `nowMillis()` convention in EngineClock.swift. Kept here
-    /// (rather than using EngineClock) because PollTierPolicy is in the core
-    /// ConvergenceKit module and the scheduler is in ConvergenceKitCloudKit —
-    /// the scheduler provides its own clock rather than calling into the actor.
-    private func nowMs() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1000)
-    }
 }
+// MARK: - Clock note
+//
+// The scheduler's clock is the `_nowMs` injected closure. Production default:
+// `{ Int64(Date().timeIntervalSince1970 * 1000) }` — same convention as
+// `nowMillis()` in EngineClock.swift. Using an injected closure rather than a
+// private method means tests that need to control the "due / not due" decision
+// for both GC and tier accounting can pass a synthetic clock to the initialiser
+// without subclassing or other indirection.

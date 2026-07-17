@@ -37,15 +37,21 @@ public enum SyncTombstone {
     public static let deletedFieldKey = "_syncDeleted"
 
     /// Minimum seconds a tombstone HLC entry persists in the side table
-    /// before GC may compact it. 30 days (2 592 000 seconds).
+    /// before GC may compact it. 90 days (7 776 000 seconds).
     ///
-    /// This value MUST exceed the slot-eviction long window defined by
-    /// P1-M3 (DeviceSlotRegistry). Until P1-M3 ships, 30 days provides
-    /// a conservative offline buffer. If P1-M3 sets a longer window,
-    /// update this constant to match.
+    /// This value MUST STRICTLY exceed `SlotLongInactivityWindow` (30
+    /// days, SlotTable.swift): a device idle just under the eviction
+    /// window can return, re-enroll, and pull — and must still find
+    /// every tombstone minted while it was away, or deleted rows would
+    /// silently resurrect from its stale local copy. Equality is NOT
+    /// sufficient (a device evicted at exactly the window boundary
+    /// could race a GC sweep at the same boundary), so retention is 3×
+    /// the eviction window (raised from 30d at the CVK-WB7 merge gate,
+    /// 2026-07-17). If the eviction window ever changes, this constant
+    /// must move with it, staying strictly greater.
     ///
     /// WHY seconds (not Date): the side table stores HLC physical-time
     /// in milliseconds since epoch. GC converts this to a wall-clock
     /// age and compares against the threshold in seconds.
-    public static let gcRetentionSeconds: Int64 = 2_592_000
+    public static let gcRetentionSeconds: Int64 = 7_776_000
 }

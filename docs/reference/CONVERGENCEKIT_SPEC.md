@@ -355,6 +355,9 @@ accepts inbound deletes. Consumers who need delete propagation on
 On tombstone apply, parked outbox entries for the affected `(table, rowKey)` are
 also purged: they will never push (is_parked=1) and retaining them after the row
 is deleted is indefinite payload storage (CVK-ICLOUD P5-M1b; Perkins P4-M4).
+Side-table tombstone HLC entries older than `SyncTombstone.gcRetentionSeconds`
+are compacted by a daily `TombstoneGC.compact` sweep scheduled in the convergence
+loop after each successful pull cycle (CVK-WB7).
 
 **B-10 (schema-skew pending queue):** A record whose
 `schemaVersion` is strictly newer than the local receiver's is not rejected

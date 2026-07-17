@@ -67,10 +67,21 @@ public final class CloudKitSyncEngine: SyncEngine, Sendable {
             // Create a default scheduler whose pull closure calls this engine's
             // pull() method. The closure captures a weak reference so there is no
             // retain cycle between the engine and the scheduler.
-            let scheduler = AdaptivePollScheduler(pull: { [weak self] in
-                guard let self else { return .empty }
-                return try await self.pull()
-            })
+            //
+            // gcFn: after each successful pull the scheduler calls gcIfDue on the
+            // state actor with the scheduler's current nowMs value. The state actor
+            // checks whether the daily GC interval has elapsed and runs
+            // TombstoneGC.compact for _ck_sync_meta if so (CVK-WB7).
+            let scheduler = AdaptivePollScheduler(
+                pull: { [weak self] in
+                    guard let self else { return .empty }
+                    return try await self.pull()
+                },
+                gcFn: { [weak self] nowMs in
+                    guard let self else { return }
+                    try await self.stateActor.gcIfDue(nowMs: nowMs)
+                }
+            )
             await _schedulerBox.set(scheduler)
             await scheduler.start()
         }
