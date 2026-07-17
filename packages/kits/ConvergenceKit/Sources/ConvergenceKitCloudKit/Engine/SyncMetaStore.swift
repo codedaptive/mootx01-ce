@@ -29,6 +29,10 @@ extension CloudKitStateActor {
     }
 
     /// Read the persisted sync HLC for a specific row.
+    ///
+    /// Single-row path. Used by direct callers (tests, skew replay). For the
+    /// CloudKit pull loop, prefer `readSyncHLCs(batch:)` to amortise the query
+    /// cost across the entire batch.
     func readSyncHLC(
         storage: any Storage, table: String, primaryKey: UUID, pkColumn: String
     ) async throws -> HLC? {
@@ -42,6 +46,51 @@ extension CloudKitStateActor {
         guard let row = rows.first,
               case .int(let packed) = row["sync_hlc"] else { return nil }
         return HLC(packed: UInt64(bitPattern: packed))
+    }
+
+    /// Batch-read sync HLCs for a set of (table, rowKey) pairs in one query.
+    ///
+    /// Used by `PullCycle.pull()` to pre-load `_ck_sync_meta` for the entire
+    /// inbound batch before the per-record apply loop, reducing pull-cycle storage
+    /// I/O from O(N) queries to 1 query + O(N) in-memory lookups (CVK-WB5 perf Q5).
+    ///
+    /// - Returns: A dictionary keyed by `"\(table)|\(rowKey.uuidString)"`.
+    ///   A key's presence means a sync HLC was found; absent key means no entry
+    ///   (equivalent to `nil` from `readSyncHLC`).
+    ///
+    /// - Note: The query uses `primary_key IN [...]` so it fetches in one round-trip.
+    ///   Results are then grouped by `(table_name, primary_key)` in Swift for
+    ///   correctness across tables that share a row UUID (extremely unlikely in
+    ///   practice, but the composite primary key of `_ck_sync_meta` requires it).
+    func readSyncHLCs(
+        batch: [(table: String, rowKey: UUID)],
+        storage: any Storage
+    ) async throws -> [String: HLC] {
+        guard !batch.isEmpty else { return [:] }
+
+        // Collect unique primary_key strings for the IN predicate.
+        // Distinct de-duplication is unnecessary — the IN clause handles repeats.
+        let primaryKeyValues = batch.map { TypedValue.text($0.rowKey.uuidString) }
+
+        // One query: WHERE primary_key IN (...). Rows from different tables that
+        // happen to share the same UUID are filtered by table_name in Swift below.
+        let rows = try await storage.rowStore.query(
+            table: Self.syncMetaTable,
+            where: .in(Column(table: Self.syncMetaTable, name: "primary_key"), primaryKeyValues)
+        )
+
+        // Build the result dictionary. Key format: "\(table_name)|\(primary_key)".
+        var result: [String: HLC] = [:]
+        for row in rows {
+            guard
+                case .text(let tableName)  = row["table_name"],
+                case .text(let primaryKey) = row["primary_key"],
+                case .int(let packed)      = row["sync_hlc"]
+            else { continue }
+            let key = "\(tableName)|\(primaryKey)"
+            result[key] = HLC(packed: UInt64(bitPattern: packed))
+        }
+        return result
     }
 
     /// Persist the sync HLC for a specific row after a successful upsert.
