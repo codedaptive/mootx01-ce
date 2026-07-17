@@ -84,14 +84,62 @@ public enum OutboxStore {
             }
 
             // Incoming is newer: delete the stale entry and insert the new one.
-            if case .uuid(let oldID) = existingRow["id"] {
+            // For fieldLevelLWW entries, MERGE column HLC maps so that columns
+            // present only in the stale entry are not silently discarded.
+            //
+            // WHY merge rather than replace:
+            // The outbox coalesces hot-row writes into a single entry (newest HLC
+            // wins). But the "newer" write may cover only a subset of columns
+            // written in the "stale" entry. Replacing column HLCs entirely would
+            // drop the per-column records for the older-but-not-yet-pushed columns,
+            // and the receiver would see an incomplete column HLC map — it would
+            // treat the missing columns as "first write" and potentially apply
+            // a stale value from a concurrent peer. Merging keeps the highest HLC
+            // per column, guaranteeing the CKRecord carries the full column timeline.
+            var entryToInsert = entry
+            if let existingID = existingRow["id"], case .uuid(let oldID) = existingID {
+                // Decode the stale entry's column HLCs, if any.
+                let staleColumnHLCsData: Data?
+                switch existingRow["column_hlcs"] {
+                case .blob(let d): staleColumnHLCsData = d
+                default:           staleColumnHLCsData = nil
+                }
+
+                if let staleData = staleColumnHLCsData,
+                   let incomingData = entry.columnHLCsData,
+                   let staleMap = try? JSONDecoder().decode(ColumnHLCMap.self, from: staleData),
+                   let incomingMap = try? JSONDecoder().decode(ColumnHLCMap.self, from: incomingData) {
+                    // Both entries have column HLC data — merge keeping newest per column.
+                    let merged = staleMap.merge(with: incomingMap)
+                    if let mergedData = try? JSONEncoder().encode(merged) {
+                        entryToInsert = OutboxEntry(
+                            id: entry.id,
+                            tableName: entry.tableName,
+                            rowKey: entry.rowKey,
+                            event: entry.event,
+                            valuesData: entry.valuesData,
+                            packedHLC: entry.packedHLC,
+                            enqueuedAt: entry.enqueuedAt,
+                            retryCount: entry.retryCount,
+                            isParked: entry.isParked,
+                            columnHLCsData: mergedData
+                        )
+                    }
+                }
+                // No merge needed if only one side has column HLC data (or neither does);
+                // the incoming entry's columnHLCsData is used as-is.
+
                 _ = try await storage.rowStore.delete(
                     table: table,
                     where: .eq(Column(table: table, name: "id"), .uuid(oldID))
                 )
             }
+
+            try await insertEntry(entryToInsert, to: storage)
+            return
         }
 
+        // No existing entry for (tableName, rowKey) — insert fresh.
         try await insertEntry(entry, to: storage)
     }
 
@@ -274,7 +322,19 @@ public enum OutboxStore {
                 valuesData: entry.valuesData,
                 packedHLC: Int64(bitPattern: newHLC.packed),
                 // Preserve original enqueue time for observability (not for ordering).
-                enqueuedAt: entry.enqueuedAt
+                enqueuedAt: entry.enqueuedAt,
+                retryCount: 0,
+                isParked: false,
+                // WHY columnHLCsData is preserved as-is (not re-minted):
+                // Column HLCs are logical timestamps identifying which column was
+                // written at which point in the HLC timeline — they record events,
+                // not device identity. Re-enrollment changes only the nodeID used
+                // for future outbox HLCs; the column HLC timeline from capture
+                // time remains valid. The receiver uses column HLCs for per-column
+                // LWW comparison, not for device identity. Passing stale column HLCs
+                // would cause the receiver to reject re-minted columns whose HLCs
+                // appear older than the local side-table record. Preserve as-is.
+                columnHLCsData: entry.columnHLCsData
             )
             try await insertEntry(reminted, to: storage)
         }
@@ -298,6 +358,10 @@ public enum OutboxStore {
         ]
         if let blob = entry.valuesData {
             values["values"] = .blob(blob)
+        }
+        // column_hlcs is nullable; only set when present (fieldLevelLWW entries).
+        if let colBlob = entry.columnHLCsData {
+            values["column_hlcs"] = .blob(colBlob)
         }
         // Use insert (not upsert) because coalescing already guarantees no
         // existing entry for this (table_name, row_key) by the time we reach
@@ -331,6 +395,13 @@ public enum OutboxStore {
         let isParked: Bool
         if case .int(let p) = row["is_parked"] { isParked = p != 0 } else { isParked = false }
 
+        // column_hlcs is nullable; absent on rows written before v6 migration.
+        let columnHLCsData: Data?
+        switch row["column_hlcs"] {
+        case .blob(let d): columnHLCsData = d
+        default:           columnHLCsData = nil
+        }
+
         return OutboxEntry(
             id: id,
             tableName: tableName,
@@ -340,7 +411,8 @@ public enum OutboxStore {
             packedHLC: hlc,
             enqueuedAt: enqueuedAt,
             retryCount: retryCount,
-            isParked: isParked
+            isParked: isParked,
+            columnHLCsData: columnHLCsData
         )
     }
 }

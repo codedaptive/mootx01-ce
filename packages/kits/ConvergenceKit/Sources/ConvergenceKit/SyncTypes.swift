@@ -37,6 +37,13 @@ public enum ConflictPolicy: String, Sendable, Codable {
     case localWins
     /// Receiver overwrites local on conflict.
     case remoteWins
+    /// (v1.2-draft) Per-column HLC last-writer-wins. Each column in the
+    /// incoming record is applied only when its HLC is >= the locally
+    /// stored per-column HLC. Column HLCs are wire-carried (never derived
+    /// by the receiver — A7 binding). Tombstone HLC must be >= ALL local
+    /// column HLCs for the delete to win (edit-beats-delete rule).
+    /// See B-8 in CONVERGENCEKIT_SPEC.md and FieldLWW/ for implementation.
+    case fieldLevelLWW
 }
 
 /// Declaration of a single synced table within a manifest.

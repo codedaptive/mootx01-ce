@@ -71,8 +71,13 @@ public enum CKRecordMapping {
     }
 
     /// Convert a row to a CKRecord. Reserved field names
-    /// (_syncHLC, _syncSchemaVersion, _syncKitID) carry sync metadata
-    /// so the receiver can apply conflict policy and schema check.
+    /// (_syncHLC, _syncSchemaVersion, _syncKitID, _syncColumnHLCs) carry
+    /// sync metadata so the receiver can apply conflict policy and schema check.
+    ///
+    /// - Parameters:
+    ///   - columnHLCs: Per-column HLC map for `fieldLevelLWW` records. When
+    ///     non-nil and non-empty, encoded as a JSON blob in `_syncColumnHLCs`.
+    ///     Nil or empty for non-fieldLevelLWW records — field is omitted.
     public static func record(
         from values: [String: TypedValue],
         table: String,
@@ -80,7 +85,8 @@ public enum CKRecordMapping {
         hlc: HLC,
         schemaVersion: Int,
         kitID: String,
-        zone: CKRecordZone.ID
+        zone: CKRecordZone.ID,
+        columnHLCs: ColumnHLCMap? = nil
     ) throws -> CKRecord {
         let recordID = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: recordID)
@@ -91,6 +97,13 @@ public enum CKRecordMapping {
         record["_syncHLC"] = packed(hlc) as NSNumber
         record["_syncSchemaVersion"] = NSNumber(value: schemaVersion)
         record["_syncKitID"] = kitID as NSString
+        // _syncColumnHLCs: present only for fieldLevelLWW records (B-8, v1.2-draft).
+        // JSON-encoded ColumnHLCMap blob. Omitted when nil or empty so non-fieldLevelLWW
+        // records stay compact on the wire.
+        if let map = columnHLCs, !map.isEmpty,
+           let data = try? JSONEncoder().encode(map) {
+            record["_syncColumnHLCs"] = data as NSData
+        }
         return record
     }
 
@@ -125,6 +138,15 @@ public enum CKRecordMapping {
         // (all _sync* keys are excluded) so it does not leak into the app schema.
         let isTombstone = (record[SyncTombstone.deletedFieldKey] as? NSNumber)?.intValue == 1
 
+        // Decode per-column HLC map for fieldLevelLWW records (B-8, v1.2-draft).
+        // Absent on non-fieldLevelLWW records and on records from older peers.
+        let columnHLCs: ColumnHLCMap?
+        if let data = record["_syncColumnHLCs"] as? Data {
+            columnHLCs = try? JSONDecoder().decode(ColumnHLCMap.self, from: data)
+        } else {
+            columnHLCs = nil
+        }
+
         var values: [String: TypedValue] = [:]
         for key in record.allKeys() {
             if key.hasPrefix("_sync") { continue }
@@ -139,7 +161,8 @@ public enum CKRecordMapping {
             rowKey: rowKey,
             values: values,
             syncMeta: SyncMeta(hlc: hlc, schemaVersion: schemaVersion, kitID: kitID),
-            isTombstone: isTombstone
+            isTombstone: isTombstone,
+            columnHLCs: columnHLCs
         )
     }
 
@@ -253,6 +276,30 @@ public struct DecodedRecord: Sendable {
     /// attempt a normal upsert on an empty values map, creating a phantom row.
     /// Defaults to false for normal (non-delete) records.
     public var isTombstone: Bool = false
+
+    /// Per-column HLC map decoded from `_syncColumnHLCs` (B-8, v1.2-draft).
+    ///
+    /// Non-nil only for `fieldLevelLWW` records where the sender populated
+    /// the column HLC map. Nil on non-fieldLevelLWW records and on records
+    /// from older peers that do not support the field (backward-compat).
+    /// ApplyInbound uses this map for the `.fieldLevelLWW` policy arm.
+    public var columnHLCs: ColumnHLCMap?
+
+    public init(
+        table: String,
+        rowKey: UUID,
+        values: [String: TypedValue],
+        syncMeta: SyncMeta,
+        isTombstone: Bool = false,
+        columnHLCs: ColumnHLCMap? = nil
+    ) {
+        self.table = table
+        self.rowKey = rowKey
+        self.values = values
+        self.syncMeta = syncMeta
+        self.isTombstone = isTombstone
+        self.columnHLCs = columnHLCs
+    }
 
     /// HLC of the record — convenience accessor backed by `syncMeta`.
     public var hlc: HLC { syncMeta.hlc }

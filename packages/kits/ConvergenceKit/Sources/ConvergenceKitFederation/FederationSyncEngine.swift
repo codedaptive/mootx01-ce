@@ -403,6 +403,18 @@ actor FederationStateActor {
             // HLC persistence) rather than a normal upsert. Matches the A6
             // unification contract and the Rust wire format (C-8 parity).
             let syncDeleted: Bool? = eventKind == .delete ? true : nil
+            // For fieldLevelLWW tables, stamp all present value columns with the
+            // capture HLC (same coarse-stamp rationale as CloudKitStateActor.recordOutbound —
+            // TableChange has no changedColumns field).
+            let columnHLCs: ColumnHLCMap?
+            if let raw = change.values,
+               let syncedTable = manifest.table(named: change.table),
+               syncedTable.conflictPolicy == .fieldLevelLWW,
+               eventKind != .delete {
+                columnHLCs = ColumnHLCMap.stampAll(keys: raw.keys, hlc: PackedHLC(hlc))
+            } else {
+                columnHLCs = nil
+            }
             let record = SyncRecord(
                 table: change.table,
                 event: eventKind,
@@ -411,7 +423,8 @@ actor FederationStateActor {
                 hlc: PackedHLC(hlc),
                 schemaVersion: manifest.schemaVersion,
                 kitID: manifest.kitID,
-                syncDeleted: syncDeleted
+                syncDeleted: syncDeleted,
+                columnHLCs: columnHLCs
             )
             records.append(record)
         }
@@ -647,6 +660,28 @@ actor FederationStateActor {
                     storage: storage, table: record.table,
                     primaryKey: record.rowKey, hlc: record.hlc.asHLC,
                     schemaVersion: record.schemaVersion, kitID: record.kitID)
+
+            case .fieldLevelLWW:
+                // Tombstone interplay (edit-beats-delete): tombstone wins only when
+                // its HLC is >= ALL local per-column HLCs.
+                let localColumnHLCs = try await ColumnHLCStore.readAll(
+                    from: storage, sideTable: Self.fedSyncMetaColsTable,
+                    tableName: record.table, primaryKey: record.rowKey)
+                let tombstoneHLC = record.hlc  // PackedHLC
+                if !FieldLWWMerge.tombstoneWins(
+                    tombstoneHLC: tombstoneHLC, localColumnHLCs: localColumnHLCs) {
+                    return // edit-beats-delete: a local column was written later
+                }
+                _ = try? await storage.rowStore.deleteSync(table: record.table, where: predicate)
+                // Clear per-column side table — row is gone.
+                try? await ColumnHLCStore.clearAll(
+                    from: storage, sideTable: Self.fedSyncMetaColsTable,
+                    tableName: record.table, primaryKey: record.rowKey)
+                // A6: persist tombstone HLC in row-grain side table.
+                try await writeFedTombstoneHLC(
+                    storage: storage, table: record.table,
+                    primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                    schemaVersion: record.schemaVersion, kitID: record.kitID)
             }
             return
         }
@@ -715,47 +750,114 @@ actor FederationStateActor {
             if (existing ?? 0) == 0 {
                 _ = try await storage.rowStore.insertSync(table: record.table, values: values)
             }
+
+        case .fieldLevelLWW:
+            // Per-column LWW apply. Mirrors the CloudKit ApplyInbound arm.
+            let localColumnHLCs = try await ColumnHLCStore.readAll(
+                from: storage, sideTable: Self.fedSyncMetaColsTable,
+                tableName: record.table, primaryKey: record.rowKey)
+
+            let incomingColumnHLCs = record.columnHLCs ?? ColumnHLCMap()
+            let incomingRowHLC = record.hlc  // PackedHLC
+
+            let (columnsToApply, updatedColumnHLCs) = FieldLWWMerge.merge(
+                incomingValues: values,
+                incomingColumnHLCs: incomingColumnHLCs,
+                incomingRowHLC: incomingRowHLC,
+                localColumnHLCs: localColumnHLCs
+            )
+
+            if !columnsToApply.isEmpty {
+                var upsertValues = columnsToApply
+                upsertValues[syncedTable.primaryKeyColumn] = .uuid(record.rowKey)
+                _ = try await storage.rowStore.upsertSync(
+                    table: record.table,
+                    values: upsertValues,
+                    conflictColumns: [syncedTable.primaryKeyColumn]
+                )
+            }
+
+            if !updatedColumnHLCs.isEmpty {
+                try await ColumnHLCStore.writeAll(
+                    map: updatedColumnHLCs,
+                    to: storage, sideTable: Self.fedSyncMetaColsTable,
+                    tableName: record.table, primaryKey: record.rowKey)
+            }
+
+            // Also update row-grain HLC in _fed_sync_meta for stale-resurrect guard.
+            let existingRowHLC = try await readFedSyncHLC(
+                storage: storage, table: record.table, primaryKey: record.rowKey)
+            if existingRowHLC == nil || record.hlc.asHLC > (existingRowHLC ?? record.hlc.asHLC) {
+                try await writeFedSyncHLC(
+                    storage: storage, table: record.table,
+                    primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                    schemaVersion: record.schemaVersion, kitID: record.kitID)
+            }
         }
     }
 
     // MARK: - _fed_sync_meta side table (A6 unification)
 
-    /// Side table name for Federation. Mirrors `_ck_sync_meta` in the CloudKit
-    /// engine — both backends use a side table to persist sync HLCs so the HLC
-    /// survives hard-deletes and provides the stale-resurrect guard (A6).
+    /// Side table name for Federation row-grain HLC. Mirrors `_ck_sync_meta`.
     private static let fedSyncMetaTable = "_fed_sync_meta"
 
-    /// Create the `_fed_sync_meta` side table if it does not exist.
+    /// Side table name for Federation per-column HLC (fieldLevelLWW).
+    /// Mirrors `_ck_sync_meta_cols` added to CKSideSchema at v6.
+    static let fedSyncMetaColsTable = "_fed_sync_meta_cols"
+
+    /// Create the `_fed_sync_meta` and `_fed_sync_meta_cols` side tables.
     ///
     /// Must be called from `enable()` before any `applyInbound`. Mirrors
     /// `CloudKitStateActor.ensureSyncMetaTable`. Marked `internal` (not private)
     /// so tests that call `applyInbound` directly can call this in their setup.
+    ///
+    /// - v1: `_fed_sync_meta` row-grain HLC (original)
+    /// - v2: `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (CVK-ICLOUD P2-M1)
     static func ensureFedSyncMetaTable(storage: any Storage) async throws {
+        let fedSyncMetaDecl = TableDeclaration(
+            name: fedSyncMetaTable,
+            columns: [
+                ColumnDeclaration(name: "table_name",    type: .text, nullable: false),
+                ColumnDeclaration(name: "primary_key",   type: .text, nullable: false),
+                ColumnDeclaration(name: "sync_hlc",      type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
+                ColumnDeclaration(name: "schema_version",type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
+                ColumnDeclaration(name: "kit_id",        type: .text, nullable: false,
+                                  defaultValue: .text("")),
+                // is_deleted: 1 for tombstone entries (delete HLC that outlives
+                // the row). Used by GC to identify entries eligible for compaction
+                // after SyncTombstone.gcRetentionSeconds.
+                ColumnDeclaration(name: "is_deleted",    type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
+            ],
+            primaryKey: ["table_name", "primary_key"]
+        )
+
+        // _fed_sync_meta_cols: per-column HLC for fieldLevelLWW (v2, CVK-ICLOUD P2-M1).
+        // Schema mirrors _ck_sync_meta_cols in CKSideSchema v6.
+        let fedSyncMetaColsDecl = TableDeclaration(
+            name: fedSyncMetaColsTable,
+            columns: [
+                ColumnDeclaration(name: "table_name",  type: .text, nullable: false),
+                ColumnDeclaration(name: "primary_key", type: .text, nullable: false),
+                ColumnDeclaration(name: "column_name", type: .text, nullable: false),
+                ColumnDeclaration(name: "col_hlc",     type: .int,  nullable: false,
+                                  defaultValue: .int(0)),
+            ],
+            primaryKey: ["table_name", "primary_key", "column_name"]
+        )
+
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitFederation",
-            version: 1,
-            tables: [
-                TableDeclaration(
-                    name: fedSyncMetaTable,
-                    columns: [
-                        ColumnDeclaration(name: "table_name", type: .text, nullable: false),
-                        ColumnDeclaration(name: "primary_key", type: .text, nullable: false),
-                        ColumnDeclaration(name: "sync_hlc", type: .int, nullable: false,
-                                          defaultValue: .int(0)),
-                        ColumnDeclaration(name: "schema_version", type: .int, nullable: false,
-                                          defaultValue: .int(0)),
-                        ColumnDeclaration(name: "kit_id", type: .text, nullable: false,
-                                          defaultValue: .text("")),
-                        // is_deleted: 1 for tombstone entries (delete HLC that outlives
-                        // the row). Used by GC to identify entries eligible for compaction
-                        // after SyncTombstone.gcRetentionSeconds.
-                        ColumnDeclaration(name: "is_deleted", type: .int, nullable: false,
-                                          defaultValue: .int(0)),
-                    ],
-                    primaryKey: ["table_name", "primary_key"]
-                ),
-            ],
-            indices: []
+            version: 2,
+            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl],
+            migrations: [
+                // v1 → v2: add per-column HLC side table for fieldLevelLWW.
+                Migration(fromVersion: 1, toVersion: 2, operations: [
+                    .createTable(fedSyncMetaColsDecl),
+                ]),
+            ]
         )
         // migrate(to:) is ADDITIVE — creates missing tables/columns without clobbering
         // the application schema. This matches the CloudKit engine's pattern.

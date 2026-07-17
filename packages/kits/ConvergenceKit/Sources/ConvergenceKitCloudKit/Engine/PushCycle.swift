@@ -113,6 +113,14 @@ extension CloudKitStateActor {
                     logger.error("push: values decode failed for entry \(entry.id): \(error)")
                     continue
                 }
+                // Decode column HLC map for fieldLevelLWW outbox entries (B-8, v1.2-draft).
+                // Nil when absent — non-fieldLevelLWW tables or entries written before v6.
+                let columnHLCs: ColumnHLCMap?
+                if let colData = entry.columnHLCsData {
+                    columnHLCs = try? JSONDecoder().decode(ColumnHLCMap.self, from: colData)
+                } else {
+                    columnHLCs = nil
+                }
                 do {
                     let record = try CKRecordMapping.record(
                         from: values,
@@ -121,7 +129,8 @@ extension CloudKitStateActor {
                         hlc: hlc,
                         schemaVersion: manifest.schemaVersion,
                         kitID: manifest.kitID,
-                        zone: zoneID
+                        zone: zoneID,
+                        columnHLCs: columnHLCs
                     )
                     saved.append(record)
                     recordToEntryID[record.recordID] = entry.id

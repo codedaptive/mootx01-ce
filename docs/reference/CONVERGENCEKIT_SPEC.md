@@ -258,14 +258,40 @@ registers the other. Pairing rides a `Relay` transport abstraction
 implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
 `Relay` conformer requiring no change to the engine.
 
-**B-8 (fieldLevelLWW) (v1.2-draft):** `ConflictPolicy.fieldLevelLWW`
-applies last-writer-wins at the column grain. Per-column HLCs are
-wire-carried in the `SyncRecord` (a new optional `columnHLCs:
-[String: PackedHLC]?` field, requiring a byte-identical Rust twin per
-C-8). Array and blob columns have no merge semantics: concurrent writes
-to the same column from different devices lose the lower-HLC side.
-Consumers who need append-safe semantics on array columns should use
-`appendOnly` tables instead.
+**B-8 (fieldLevelLWW):** `ConflictPolicy.fieldLevelLWW` applies
+last-writer-wins at the column grain using per-column HLCs. Shipped in
+`ConvergenceKit` v1.2 (CVK-ICLOUD P2-M1).
+
+- **Wire format:** `SyncRecord` carries an optional `columnHLCs:
+  ColumnHLCMap?` field. `ColumnHLCMap` is a `{entries: {colName:
+  PackedHLC}}` JSON wrapper. The field is omitted when nil (backward
+  compat: row-grain LWW applied instead, using `SyncRecord.hlc`).
+- **Capture:** the sender (outbox observer) stamps ALL present value
+  columns with the capture HLC. Per-column identity is a future
+  refinement once `TableChange` gains `changedColumns` support.
+- **Apply:** the receiver applies a column iff incoming column HLC >=
+  local column HLC (stored in `_ck_sync_meta_cols` on CloudKit,
+  `_fed_sync_meta_cols` on Federation). Missing local HLC = first write,
+  always applied. Commutativity is guaranteed: the winner per column is
+  always the record with the higher HLC, regardless of apply order.
+- **Tombstone interplay:** an incoming delete beats local field edits
+  only when the tombstone HLC is >= ALL local column HLCs. If any local
+  column HLC is strictly higher, the row was edited after the delete —
+  the edit wins (`FieldLWWMerge.tombstoneWins`).
+- **Outbox coalescing:** when a newer outbox entry for the same (table,
+  row) coalesces with a stale one, column HLC maps are merged (highest
+  per column) so no column update is silently discarded.
+- **Array and blob columns** are atomic whole values — no sub-field
+  addressing. Concurrent writes to the same column lose the lower-HLC
+  side. Use `appendOnly` tables for append-safe array semantics.
+- **Rust parity:** `ColumnHLCMap { entries: BTreeMap<String, PackedHLC>
+  }` in `rust/src/record.rs`; field `column_hlcs: Option<ColumnHLCMap>`
+  on `SyncRecord`; wire contract byte-identical per C-8.
+- **Side-schema version:** `CKSideSchema` bumped v3 → v6 (v4/v5
+  earmarked for device-identity and pending-skew tables). Migration adds
+  `_ck_sync_meta_cols` table and `column_hlcs BLOB` column to
+  `_ck_outbox`. `FederationSyncEngine` side-schema bumped v1 → v2 to
+  add `_fed_sync_meta_cols`.
 
 **B-9 (tombstoned deletes) (v1.2-draft):** Deletes are typed tombstone
 records applied through the LWW gate. The tombstone HLC persists in the

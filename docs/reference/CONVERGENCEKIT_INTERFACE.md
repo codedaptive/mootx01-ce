@@ -29,6 +29,9 @@ purpose: |
     `ConflictPolicy`, `SyncReceipt`, `SyncEvent`, `SyncState`, `SyncError`
   - `SyncRecord.swift` — `SyncRecord`, `SyncEventKind`, `PackedHLC`,
     `SyncValueMap`, `SyncValueBox`, `FingerprintWire`
+  - `FieldLWW/ColumnHLCMap.swift` — `ColumnHLCMap`, `PackedHLC.Comparable`
+  - `FieldLWW/FieldLWWMerge.swift` — `FieldLWWMerge` (pure stateless merge)
+  - `FieldLWW/ColumnHLCStore.swift` — `ColumnHLCStore` (side-table CRUD)
 - `Sources/ConvergenceKitNone/` — `NoSyncEngine` (default, SPEC § 5 B-1)
 - `Sources/ConvergenceKitCloudKit/` — `CloudKitSyncEngine`,
   `CKRecordMapping`, `DecodedRecord`
@@ -49,7 +52,7 @@ Four library products: `ConvergenceKit`, `ConvergenceKitNone`,
   `SyncManifest`, `SyncReceipt`, `SyncEvent`, `SyncState`, `SyncError`,
   `SyncResult`
 - `src/record.rs` — `SyncRecord`, `SyncEventKind`, `PackedHLC`,
-  `FingerprintWire`, `SyncValueBox`, `SyncValueMap`
+  `FingerprintWire`, `SyncValueBox`, `SyncValueMap`, `ColumnHLCMap`
 - `src/engine.rs` — the `SyncEngine` trait
 - `src/none.rs` — `NoSyncEngine`
 - `src/federation.rs` — `FederationSyncEngine`, `Relay` (transport
@@ -118,9 +121,10 @@ public enum ConflictPolicy: String, Sendable, Codable {
     case appendOnly            // (eventID, hlc) idempotent; audit log; remote deletes rejected
     case localWins             // receiver discards remote on conflict; remote deletes rejected
     case remoteWins            // receiver overwrites local on conflict unconditionally
-    // (v1.2-draft) per-column HLC LWW; wire carries columnHLCs map (B-8).
+    // Per-column HLC LWW. Wire carries ColumnHLCMap on SyncRecord (B-8).
     // Array/blob columns are atomic whole values — concurrent writes to the
-    // same column lose the lower-HLC side. Requires Rust twin per C-8.
+    // same column lose the lower-HLC side. Rust twin: FieldLevelLWW (C-8).
+    // Side tables: _ck_sync_meta_cols (CloudKit), _fed_sync_meta_cols (Federation).
     case fieldLevelLWW
 }
 
@@ -304,6 +308,23 @@ public struct SyncValueMap: Sendable, Codable {
     public var asTypedValues: [String: TypedValue] { get }
 }
 
+/// Per-column HLC map for fieldLevelLWW conflict policy (B-8).
+/// Wire shape: {"entries": {"colName": PackedHLC, ...}}
+/// Matches Rust ColumnHLCMap { entries: BTreeMap<String, PackedHLC> }.
+public struct ColumnHLCMap: Sendable, Codable, Equatable {
+    public var entries: [String: PackedHLC]
+    public init(entries: [String: PackedHLC] = [:])
+    /// Merge keeping highest HLC per column. Commutative.
+    public func merge(with other: ColumnHLCMap) -> ColumnHLCMap
+    /// Stamp all given keys with hlc. Used at outbox observe time.
+    public static func stampAll(keys: some Sequence<String>, hlc: PackedHLC) -> ColumnHLCMap
+    public var isEmpty: Bool { get }
+}
+
+/// Comparable conformance for PackedHLC: (physicalTime, logicalCount, nodeID) lexicographic.
+/// Parity: Rust PackedHLC derives PartialOrd on the same field order.
+extension PackedHLC: Comparable { /* < operator */ }
+
 public struct SyncRecord: Sendable, Codable {
     public let table: String
     public let event: SyncEventKind
@@ -312,8 +333,12 @@ public struct SyncRecord: Sendable, Codable {
     public let hlc: PackedHLC
     public let schemaVersion: Int
     public let kitID: String
+    /// Per-column HLC map for fieldLevelLWW tables (B-8). Nil for row-grain
+    /// LWW tables — omitted from JSON encoding (encodeIfPresent).
+    public let columnHLCs: ColumnHLCMap?
     public init(table: String, event: SyncEventKind, rowKey: UUID,
-                values: SyncValueMap?, hlc: PackedHLC, schemaVersion: Int, kitID: String)
+                values: SyncValueMap?, hlc: PackedHLC, schemaVersion: Int, kitID: String,
+                syncDeleted: Bool? = nil, columnHLCs: ColumnHLCMap? = nil)
 }
 ```
 
@@ -342,10 +367,26 @@ impl SyncValueMap {
     pub fn into_typed(self) -> BTreeMap<String, TypedValue>;
 }
 
+/// Per-column HLC map for fieldLevelLWW conflict policy (B-8).
+/// Wire shape: {"entries": {"colName": PackedHLC, ...}} (BTreeMap = alphabetical key order).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ColumnHLCMap {
+    pub entries: BTreeMap<String, PackedHLC>,
+}
+impl ColumnHLCMap {
+    pub fn new() -> Self;
+    pub fn is_empty(&self) -> bool;
+    /// Merge keeping highest HLC per column. Commutative.
+    pub fn merge(&self, other: &ColumnHLCMap) -> ColumnHLCMap;
+}
+
 pub struct SyncRecord {
     pub table: String, pub event: SyncEventKind, pub row_key: Uuid,
     pub values: Option<SyncValueMap>, pub hlc: PackedHLC,
     pub schema_version: i32, pub kit_id: String,
+    /// Per-column HLC map for fieldLevelLWW tables (B-8). None for row-grain
+    /// LWW tables. serde: skip_serializing_if = "Option::is_none", default.
+    pub column_hlcs: Option<ColumnHLCMap>,
 }
 impl SyncRecord {
     pub fn new(table: impl Into<String>, event: SyncEventKind, row_key: Uuid,
@@ -779,7 +820,7 @@ sanctioned port difference.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
 | Sync direction | `SyncDirection` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncDirection` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw lowerCamel cases / Rust UpperCamel cases — identical variant set | Confirmed |
-| Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; 4 shipped variants + `fieldLevelLWW` (v1.2-draft, both ports); both default LWW-by-HLC | Confirmed (shipped) / Draft (`fieldLevelLWW`) |
+| Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; 5 variants including `fieldLevelLWW` / `FieldLevelLWW`; both default LWW-by-HLC; wire encodes as camelCase "fieldLevelLWW" (both legs) | Confirmed |
 | Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`, `with_excluded_columns` v1.2-draft); `excludedColumns: Set<String>` (Swift) / `excluded_columns: HashSet<String>` (Rust) — serde default empty (v1.2-draft) | Confirmed (shipped) / Draft (`excludedColumns`) |
 | Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32`; `postApplyIntegrityHook` Swift-only closure (v1.2-draft) — Rust `post_apply_hook` deferred | Confirmed (shipped) / Draft (hook) |
 
@@ -795,7 +836,8 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Wire record | `SyncRecord` (`Sources/ConvergenceKit/SyncRecord.swift`) | `SyncRecord` (`rust/src/record.rs`) | public struct / pub struct | identical fields; `rowKey: UUID` vs `row_key: Uuid`; Codable JSON ↔ serde_json wire-compatible | Confirmed |
+| Wire record | `SyncRecord` (`Sources/ConvergenceKit/SyncRecord.swift`) | `SyncRecord` (`rust/src/record.rs`) | public struct / pub struct | identical fields; `rowKey: UUID` vs `row_key: Uuid`; `columnHLCs: ColumnHLCMap?` vs `column_hlcs: Option<ColumnHLCMap>` (B-8); Codable JSON ↔ serde_json wire-compatible | Confirmed |
+| Column HLC map | `ColumnHLCMap` (`Sources/ConvergenceKit/FieldLWW/ColumnHLCMap.swift`) | `ColumnHLCMap` (`rust/src/record.rs`) | public struct / pub struct | Swift `[String: PackedHLC]` under `entries` key / Rust `BTreeMap<String, PackedHLC>` under `entries` key; both JSON-encode as `{"entries":{…}}`. Rust BTreeMap = alphabetical key order for deterministic encoding (C-8). | Confirmed |
 | Event kind | `SyncEventKind` (`Sources/ConvergenceKit/SyncRecord.swift`) | `SyncEventKind` (`rust/src/record.rs`) | public enum / pub enum | Swift `init(from:)`/`asStorageEvent` / Rust `From`/`Into<StorageEvent>`; same insert/update/delete | Confirmed |
 | Packed HLC | `PackedHLC` (`Sources/ConvergenceKit/SyncRecord.swift`) | `PackedHLC` (`rust/src/record.rs`) | public struct / pub struct | Swift `Int64`/`Int32` fields / Rust `i64`/`i32`; both bridge `HLC` | Confirmed |
 | Fingerprint wire | `FingerprintWire` (`Sources/ConvergenceKit/SyncRecord.swift`) | `FingerprintWire` (`rust/src/record.rs`) | public struct / pub struct | Swift 4×`UInt64` blocks / Rust 4×`u64`; both bridge `Fingerprint256` | Confirmed |

@@ -69,6 +69,36 @@ extension CloudKitStateActor {
                     primaryKey: decoded.rowKey,
                     hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
                     kitID: decoded.syncMeta.kitID)
+
+            case .fieldLevelLWW:
+                // Tombstone interplay: edit-beats-delete rule.
+                // The tombstone wins only when its HLC is >= ALL local per-column
+                // HLCs. If any column was written after the delete (local column HLC
+                // > tombstone HLC), the row survives.
+                let localColumnHLCs = try await ColumnHLCStore.readAll(
+                    from: storage, sideTable: CKSideSchema.syncMetaColsTable,
+                    tableName: decoded.table, primaryKey: decoded.rowKey)
+                let tombstoneHLC = PackedHLC(decoded.syncMeta.hlc)
+                if !FieldLWWMerge.tombstoneWins(
+                    tombstoneHLC: tombstoneHLC, localColumnHLCs: localColumnHLCs) {
+                    return // edit-beats-delete: a local column was written later
+                }
+                // Tombstone wins: hard-delete the row and clear column HLC side table.
+                let predicate = StoragePredicate.eq(
+                    Column(table: decoded.table, name: syncedTable.primaryKeyColumn),
+                    .uuid(decoded.rowKey)
+                )
+                _ = try? await storage.rowStore.deleteSync(table: decoded.table, where: predicate)
+                // Clear column-grain side table entries — row is gone.
+                try? await ColumnHLCStore.clearAll(
+                    from: storage, sideTable: CKSideSchema.syncMetaColsTable,
+                    tableName: decoded.table, primaryKey: decoded.rowKey)
+                // A6: persist tombstone HLC in _ck_sync_meta for stale-resurrect guard.
+                try await writeTombstoneHLC(
+                    storage: storage, table: decoded.table,
+                    primaryKey: decoded.rowKey,
+                    hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                    kitID: decoded.syncMeta.kitID)
             }
             return
         }
@@ -142,6 +172,63 @@ extension CloudKitStateActor {
             )
             if (existing ?? 0) == 0 {
                 _ = try await storage.rowStore.insertSync(table: decoded.table, values: inboundValues)
+            }
+
+        case .fieldLevelLWW:
+            // Per-column LWW apply. Read local column HLCs from the side table,
+            // compute which incoming columns win, apply them, and persist the
+            // updated column HLC map. See FieldLWWMerge for the commutativity proof.
+            let localColumnHLCs = try await ColumnHLCStore.readAll(
+                from: storage, sideTable: CKSideSchema.syncMetaColsTable,
+                tableName: decoded.table, primaryKey: decoded.rowKey)
+
+            // Wire-carried column HLCs (A7: receiver must not fabricate them).
+            // Fall back to empty map when absent (backward-compat with older senders).
+            let incomingColumnHLCs = decoded.columnHLCs ?? ColumnHLCMap()
+            let incomingRowHLC = PackedHLC(decoded.syncMeta.hlc)
+
+            let (columnsToApply, updatedColumnHLCs) = FieldLWWMerge.merge(
+                incomingValues: decoded.values,
+                incomingColumnHLCs: incomingColumnHLCs,
+                incomingRowHLC: incomingRowHLC,
+                localColumnHLCs: localColumnHLCs
+            )
+
+            if !columnsToApply.isEmpty {
+                // Apply only the winning columns as an upsert on the primary key.
+                // This writes a partial row update — PersistenceKit's upsert preserves
+                // columns not included in `columnsToApply`.
+                var upsertValues = columnsToApply
+                upsertValues[syncedTable.primaryKeyColumn] = .uuid(decoded.rowKey)
+                _ = try await storage.rowStore.upsertSync(
+                    table: decoded.table,
+                    values: upsertValues,
+                    conflictColumns: [syncedTable.primaryKeyColumn]
+                )
+            }
+
+            // Persist updated column HLCs regardless of whether any columns were
+            // applied. The map may be updated even when no columns win (e.g., the
+            // incoming HLC ties with local, updating the stored HLC to the incoming).
+            if !updatedColumnHLCs.isEmpty {
+                try await ColumnHLCStore.writeAll(
+                    map: updatedColumnHLCs,
+                    to: storage, sideTable: CKSideSchema.syncMetaColsTable,
+                    tableName: decoded.table, primaryKey: decoded.rowKey)
+            }
+
+            // Also update the row-grain HLC in _ck_sync_meta when this record's
+            // row HLC is newer. This guards against stale-resurrect at the row grain
+            // when a peer sends a delete for this row after a fieldLevelLWW write.
+            let existingRowHLC = try await readSyncHLC(
+                storage: storage, table: decoded.table,
+                primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn)
+            if existingRowHLC == nil || decoded.hlc > (existingRowHLC ?? decoded.hlc) {
+                try await writeSyncHLC(
+                    storage: storage, table: decoded.table,
+                    primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn,
+                    hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                    kitID: decoded.syncMeta.kitID)
             }
         }
     }

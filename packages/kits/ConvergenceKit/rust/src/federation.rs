@@ -12,7 +12,7 @@
 //! follows the per-table ConflictPolicy on the local manifest.
 
 use crate::engine::SyncEngine;
-use crate::record::{PackedHLC, SyncEventKind, SyncRecord, SyncValueMap};
+use crate::record::{ColumnHLCMap, PackedHLC, SyncEventKind, SyncRecord, SyncValueMap};
 use crate::types::{AppliedBatch, ConflictPolicy, SyncDirection, SyncedTable, SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
 use substrate_types::hlc::{HLC, HLCGenerator};
 use ed25519_dalek::{
@@ -452,6 +452,8 @@ impl FederationSyncEngine {
             // strip them before enqueuing. Cloned at start_observers time; no lock needed.
             let excluded_columns: HashSet<String> = table.excluded_columns.clone();
             let pk_column = table.primary_key_column.clone();
+            // Capture conflict_policy for fieldLevelLWW column HLC stamping.
+            let conflict_policy = table.conflict_policy;
 
             let handle = std::thread::spawn(move || {
                 // 100ms tick bounds shutdown latency without busy-spinning.
@@ -475,7 +477,7 @@ impl FederationSyncEngine {
                             let change = outbound_strip_change(change, &excluded_columns, &pk_column);
                             let Some(change) = change else { continue };
                             if let Some(record) =
-                                change_to_record(change, schema_version, &kit_id, &hlc_generator)
+                                change_to_record(change, schema_version, &kit_id, &hlc_generator, conflict_policy)
                             {
                                 outbox.lock().unwrap().push(record);
                             }
@@ -875,6 +877,28 @@ fn apply_record(
                 )
                 .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
             }
+            ConflictPolicy::FieldLevelLWW => {
+                // Tombstone interplay (edit-beats-delete): tombstone wins only when
+                // its HLC is >= ALL local per-column HLCs. The Rust test engine does
+                // not maintain a persistent column-grain side table; it uses the
+                // row-grain HLC from _fed_sync_meta as a conservative proxy.
+                // A full column-grain implementation requires PersistenceKit columnar
+                // upsert support scheduled for a future mission.
+                if let Some(local_hlc) = read_fed_sync_hlc(&row_store, &record.table, &record.row_key) {
+                    let incoming: HLC = record.hlc.into();
+                    if incoming < local_hlc {
+                        return Ok(()); // row-grain proxy: local is newer
+                    }
+                }
+                let _ = row_store.delete(&record.table, &predicate);
+                write_fed_tombstone_hlc(
+                    &row_store,
+                    &record.table,
+                    &record.row_key,
+                    record.hlc.into(),
+                )
+                .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+            }
         }
         return Ok(());
     }
@@ -965,6 +989,30 @@ fn apply_record(
                             .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                     }
                 }
+                ConflictPolicy::FieldLevelLWW => {
+                    // Per-column LWW apply. The Rust test engine uses the row-grain
+                    // HLC as a proxy (no persistent column-grain side table yet).
+                    // The column_hlcs field is decoded from the wire for conformance
+                    // testing; the apply path here is conservative (row-grain gate).
+                    // A full column-grain implementation is a future mission item.
+                    if let Some(local_hlc) = read_fed_sync_hlc(&row_store, &record.table, &record.row_key) {
+                        let incoming: HLC = record.hlc.into();
+                        if incoming < local_hlc {
+                            // Row-grain proxy says stale — skip.
+                            return Ok(());
+                        }
+                    }
+                    row_store
+                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    write_fed_sync_hlc(
+                        &row_store,
+                        &record.table,
+                        &record.row_key,
+                        record.hlc.into(),
+                    )
+                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                }
             }
         }
         // Delete is handled by the tombstone path above; this arm is unreachable
@@ -1029,6 +1077,7 @@ fn change_to_record(
     schema_version: i32,
     kit_id: &str,
     hlc_generator: &Arc<Mutex<HLCGenerator>>,
+    conflict_policy: ConflictPolicy,
 ) -> Option<SyncRecord> {
     let row_key = change.row_key?;
     let hlc = match change.hlc {
@@ -1040,6 +1089,26 @@ fn change_to_record(
     // receiver applies the tombstone path (LWW gate + _fed_sync_meta persistence).
     // Matches Swift FederationStateActor.push() and the wire contract (C-8 parity).
     let sync_deleted = if event == SyncEventKind::Delete { Some(true) } else { None };
+
+    // For fieldLevelLWW tables, stamp all present value columns with the capture HLC.
+    // Mirrors Swift FederationStateActor.push() stamping logic (coarse stamp — no
+    // changedColumns field on TableChange in PersistenceKit).
+    let column_hlcs: Option<ColumnHLCMap> =
+        if conflict_policy == ConflictPolicy::FieldLevelLWW && event != SyncEventKind::Delete {
+            let raw = change.values.as_ref();
+            if let Some(raw_values) = raw {
+                let mut entries = std::collections::BTreeMap::new();
+                for key in raw_values.keys() {
+                    entries.insert(key.clone(), PackedHLC::from(hlc));
+                }
+                Some(ColumnHLCMap { entries })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     let values = change.values.map(SyncValueMap::from_typed);
     let mut record = SyncRecord::new(
         change.table,
@@ -1051,6 +1120,7 @@ fn change_to_record(
         kit_id,
     );
     record.sync_deleted = sync_deleted;
+    record.column_hlcs = column_hlcs;
     Some(record)
 }
 
