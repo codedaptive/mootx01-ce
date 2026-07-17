@@ -83,3 +83,8 @@ All existing `TableChange(...)` construction sites remain valid; the new paramet
 - RESCOPE_REQUIRED: 0
 
 The `changedColumns` field is purely additive with a `nil` default. All construction sites that do not explicitly set it remain valid and compile unchanged. Sites are updated to stamp accurate column sets, unlocking precision storm-kill and fieldLevelLWW stamping in ConvergenceKit.
+
+> Post-review note (Adams Wave B): the baseline test counts above were
+> taken from a multi-kit context and overstate the single-kit baseline
+> (CVK Swift was 221 at the time, not 438). Counts are informational;
+> the site classifications are the load-bearing content.

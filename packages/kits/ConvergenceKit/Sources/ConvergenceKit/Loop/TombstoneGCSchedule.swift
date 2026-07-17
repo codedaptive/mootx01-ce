@@ -23,7 +23,7 @@ public enum TombstoneGCSchedule {
     ///
     /// WHY 24 h: GC pressure is tiny — tombstones accumulate at the delete
     /// rate, not the overall write rate. The retention window is 90d-scale
-    /// (SyncTombstone.gcRetentionSeconds = 30 d). A daily sweep is far more
+    /// (SyncTombstone.gcRetentionSeconds = 90 d). A daily sweep is far more
     /// frequent than needed to keep tombstone count bounded; choosing a longer
     /// interval would not meaningfully reduce I/O because the retention window
     /// is 1 200× the GC interval, and every qualifying sweep is cheap (a

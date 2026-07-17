@@ -7,7 +7,10 @@ import MootGateway
 // Tests the UserDefaults-backed SyncPolicy type that persists the user's
 // iCloud sync preference. Pattern mirrors MenuBarPolicyTests (M-MXA-7).
 
-@Suite("SyncPolicy — defaults and persistence (CVK-WB2)")
+// .serialized: both tests share the "cvk-wb2-sync-policy" UserDefaults
+// suite; parallel execution let one test's removePersistentDomain fire
+// between another's set/read pair (Adams Wave B CRITICAL #1).
+@Suite("SyncPolicy — defaults and persistence (CVK-WB2)", .serialized)
 struct SyncPolicyTests {
 
     @Test("default is false when the key is absent (first run)")

@@ -1104,11 +1104,11 @@ actor FederationStateActor {
     // version bump and migration; reusing the existing table is both minimal
     // and correct for a single sentinel value.
     //
-    // CRITICAL INVARIANT: SyncTombstone.gcRetentionSeconds (30 d) MUST exceed
+    // CRITICAL INVARIANT: SyncTombstone.gcRetentionSeconds (90 d) MUST STRICTLY exceed
     // the slot-eviction long window (P1-M3 DeviceSlotRegistry, not yet shipped).
     // A device offline during its slot window must still find tombstone HLCs
     // when it reconnects, otherwise stale inserts can resurrect deleted rows
-    // (A6 adjudication). The 30 d window provides a conservative buffer;
+    // (A6 adjudication). The 90 d window (3x the eviction window) provides a conservative buffer;
     // once P1-M3 ships, verify gcRetentionSeconds >= that constant.
 
     private static let gcSentinelTableName  = "_gc_state"

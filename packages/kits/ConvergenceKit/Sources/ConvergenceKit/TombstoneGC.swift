@@ -15,9 +15,10 @@
 // should have synced well within the retention window.
 //
 // WHY the retention window matters:
-// The window must exceed the slot-eviction long window in P1-M3. Until
-// P1-M3 ships, 30 days (SyncTombstone.gcRetentionSeconds) provides a
-// conservative offline buffer.
+// The window must STRICTLY exceed the slot-eviction long window
+// (SlotLongInactivityWindow, 30 d): 90 days (SyncTombstone.
+// gcRetentionSeconds, 3x the eviction window) guarantees a device that
+// returns near the eviction boundary still finds every tombstone.
 
 import Foundation
 import PersistenceKit

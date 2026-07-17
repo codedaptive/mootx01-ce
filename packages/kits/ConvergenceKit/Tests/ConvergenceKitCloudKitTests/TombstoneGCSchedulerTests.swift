@@ -214,3 +214,19 @@ struct TombstoneGCSchedulerTests {
                 "entry inside retention window must survive GC")
     }
 }
+
+// MARK: - Retention/eviction invariant (Adams Wave B W3)
+
+@Suite("TombstoneGC retention invariant")
+struct TombstoneGCRetentionInvariantTests {
+    /// The safety relationship itself, asserted as a test so a future
+    /// constant change cannot silently break it: tombstone retention must
+    /// STRICTLY exceed the slot-eviction long window, or a device evicted
+    /// at the boundary could return, re-enroll, and miss deletes GC'd at
+    /// the same boundary (stale-resurrect hazard).
+    @Test("gcRetentionSeconds strictly exceeds SlotLongInactivityWindow")
+    func retentionStrictlyExceedsEvictionWindow() {
+        #expect(SyncTombstone.gcRetentionSeconds > Int64(SlotLongInactivityWindow),
+                "tombstone retention must be strictly greater than the slot-eviction long window")
+    }
+}

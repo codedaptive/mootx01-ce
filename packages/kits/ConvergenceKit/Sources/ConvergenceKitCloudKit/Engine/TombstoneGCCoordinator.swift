@@ -24,7 +24,7 @@
 // slot-eviction long window (P1-M3 DeviceSlotRegistry, not yet shipped). A
 // fenced-out device that is offline must not miss a delete — if its tombstone
 // HLC is GC'd before the device resumes syncing, a stale insert can resurrect
-// the deleted row, violating the A6 adjudication. The 30 d retention window
+// the deleted row, violating the A6 adjudication. The 90 d retention window
 // (2 592 000 s) provides a conservative offline buffer that dwarfs the current
 // maximum offline expectation; once P1-M3 ships its slot-eviction constant,
 // verify gcRetentionSeconds >= that value.
@@ -67,12 +67,12 @@ extension CloudKitStateActor {
         // Read the persisted last-GC time from the sentinel row.
         let lastGCMs = try await readLastGCMs(from: storage)
 
-        // CRITICAL INVARIANT: gcRetentionSeconds (30 d = 2 592 000 s) MUST
+        // CRITICAL INVARIANT: gcRetentionSeconds (90 d = 7 776 000 s) MUST STRICTLY
         // exceed the slot-eviction long window once P1-M3 ships. A device
         // offline during the retention window must still find its tombstone
         // when it reconnects so stale inserts are gated (A6).
-        // The interval check (24 h vs. 30 d) is separate: once per day is
-        // safe because we only GC entries older than 30 d, not all tombstones.
+        // The interval check (24 h vs. 90 d) is separate: once per day is
+        // safe because we only GC entries older than 90 d, not all tombstones.
         guard (nowMs - lastGCMs) >= TombstoneGCSchedule.gcIntervalMs else { return }
 
         // Compact stale tombstone entries from the CloudKit sync-meta table.
