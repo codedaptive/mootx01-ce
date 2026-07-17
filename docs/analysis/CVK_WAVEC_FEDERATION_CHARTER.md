@@ -336,6 +336,18 @@ Signed proposal verified; unsigned proposal rejected as conflict.
 
 ---
 
+### ~~WC7a — SyncServer wire protocol spec (DESIGN GATE)~~ DONE (CVK-WC7a, 2026-07-17)
+
+**Completed:** `docs/reference/FEDERATION_SYNCSERVER_WIRE_PROTOCOL.md` v0.1 authored.
+Three endpoints specified (register, send, inbox-poll). SignedEnvelope JSON schema
+exact (base64 fields, hlc struct, payloadKind uint8). Bearer-token auth documented.
+At-least-once delivery + idempotency via `(senderPublicKey, hlc)` dedup key.
+Poll-first (30 s active / 5 min idle cadence guidance). 7-day retention window.
+SyncError taxonomy mapped. Conformance checklist covers both FederationRelay (reference)
+and future HostedRelay (contract-test framing). I-9 boundary cited. WC7 is unblocked.
+
+---
+
 ### WC7 — Hosted relay client conformer (TRANSPORT)
 
 **Scope:** Deliver a production `Relay` conformer that speaks HTTPS (or gRPC). Requires a
