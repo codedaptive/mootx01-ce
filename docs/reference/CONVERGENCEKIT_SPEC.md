@@ -341,6 +341,21 @@ apps holding APNs entitlements; a silent-push wakeup nudges the engine
 to drain a pull cycle sooner than idle cadence would. All multi-device
 behavior is sound under polling alone.
 
+*Implementation note (CVK-ICLOUD P3-M2):* The poll leg is shipped.
+`PollTierPolicy` (in `Sources/ConvergenceKit/Loop/`) is the pure
+adaptive tier decision table: fast (20 s), mid (90 s), idle (5 min),
+with a 2-minute activity window that holds fast tier after observed
+activity to prevent premature decay. `AdaptivePollScheduler` (in
+`Sources/ConvergenceKitCloudKit/Engine/`) is the owning actor that
+drives the loop with injected sleep and pull closures, an interruptible
+sleep sub-task for `nudge()`, and deterministic start/stop semantics.
+`CloudKitSyncEngine.nudge()` is THE SEAM for external accelerators:
+P3-M3 `OutboxDrainDebouncer` wires it after push; future APNs/IPC
+handlers call it to advance the pull cycle without waiting for idle
+cadence. `enablePolling: Bool = false` (default) on
+`CloudKitSyncEngine.init` prevents interference with existing tests
+that drive push/pull manually.
+
 **B-12 (side-table governance) (v1.2-draft):** All `_ck_*` side tables —
 `_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_device_identity`,
 and `_ck_pending_skew` — live under a single `SchemaDeclaration` with
@@ -538,6 +553,13 @@ None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P3-M2)
+- Added implementation note to B-11 (convergence loop): documents shipped
+  `PollTierPolicy` (pure tier table: fast/mid/idle + 2-min activity window),
+  `AdaptivePollScheduler` (actor; injected sleep + pull closures; nudge seam),
+  `CloudKitSyncEngine.nudge()` (external accelerator seam; B-11 contract),
+  and `enablePolling: Bool = false` on `CloudKitSyncEngine.init`.
 
 ### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P2-M2)
 - Added B-14 (column projection) to § 5: `excludedColumns` field on
