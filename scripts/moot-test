@@ -159,6 +159,25 @@ run_glk_latency() {
     --filter EncodeDrainNearRealtimeTests --filter EncodeIntakeTests)
 }
 
+# ConvergenceKit P4-M5 performance benchmarks: gated behind MOOT_PERF_BENCH=1
+# (suites self-skip via .enabled(if:) on a bare `swift test`). Running them
+# serially and in isolation matches the GLK_LATENCY_TESTS pattern and ensures
+# timing numbers are meaningful rather than contended.
+# See: packages/kits/ConvergenceKit/Tests/ConvergenceKitCloudKitTests/CVK_ICLOUD_P4M5_PerfTests.swift
+run_perf_bench() {
+  local dir="packages/kits/ConvergenceKit"
+  if [[ ! -d "$dir" ]]; then
+    echo "-- skip CVK perf benchmarks (missing $dir)"
+    return 0
+  fi
+  echo "-- swift test (CVK perf benchmarks, MOOT_PERF_BENCH=1, isolated): $dir"
+  (cd "$dir" && MOOT_PERF_BENCH=1 swift test --no-parallel \
+    --filter Q1StormResistanceTests \
+    --filter Q2CoalescingTests \
+    --filter Q3PerWriteOverheadTests \
+    --filter Q5SideTableTests)
+}
+
 run_apple_app_ios() {
   local app_dir="apps/Mootx01-App"
   local project="$app_dir/Mootx01-App.xcodeproj"
@@ -294,5 +313,6 @@ case "$cmd" in
   path) run_path "${1:-}" ;;
   changed) run_changed "${1:-}" ;;
   glk-latency) run_glk_latency ;;
+  perf-bench) run_perf_bench ;;
   *) usage >&2; exit 2 ;;
 esac

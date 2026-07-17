@@ -35,7 +35,7 @@ BASE    ?= origin/develop/1.0.x
         test-product test-product-swift test-product-rust test-product-python \
         test-validation test-validation-swift test-validation-rust test-validation-python \
         test-one test-changed test-full test-all test-checks test-glk-latency test-topology-zoom \
-        test-apple-app-ios \
+        test-perf-bench test-apple-app-ios \
         conformance release pkg list clean clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
@@ -154,6 +154,15 @@ test-all: test-full
 # and EncodeIntakeTests.swift.
 test-glk-latency:
 	@$(TEST_RUNNER) glk-latency
+
+# CVK perf benchmarks: gated behind MOOT_PERF_BENCH=1 (self-skip on a bare
+# `swift test` via .enabled(if:) on each @Suite). The four Q1/Q2/Q3/Q5
+# suites pushed the ConvergenceKit CloudKit bundle from 2s to ~77s. The
+# isolated pass below runs them alone, serially, where timing numbers mean
+# what they claim. See the file header in
+# Tests/ConvergenceKitCloudKitTests/CVK_ICLOUD_P4M5_PerfTests.swift.
+test-perf-bench:
+	@$(TEST_RUNNER) perf-bench
 
 # ── Static-asset lint gate ─────────────────────────────────────────────────────
 # Verifies that apps/moot-mgr/Sources/MootManager/StaticAssets.swift is in sync

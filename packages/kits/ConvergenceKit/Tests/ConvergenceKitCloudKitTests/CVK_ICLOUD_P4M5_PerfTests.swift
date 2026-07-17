@@ -15,6 +15,21 @@
 //   is used throughout — network I/O, SQLite overhead, and real CloudKit
 //   latency are out-of-scope for this in-process pass.
 //
+// GATED BEHIND MOOT_PERF_BENCH=1 (skipped by default):
+//   Each suite carries `.enabled(if: ProcessInfo.processInfo.environment["MOOT_PERF_BENCH"] == "1", ...)`.
+//   A bare `swift test` skips all four suites automatically, keeping the CloudKit
+//   test bundle in the single-digit-second range. To run benchmarks:
+//
+//     MOOT_PERF_BENCH=1 swift test --no-parallel \
+//       --filter Q1StormResistanceTests --filter Q2CoalescingTests \
+//       --filter Q3PerWriteOverheadTests --filter Q5SideTableTests
+//
+//   Or from the repo root: `make test-perf-bench`
+//
+//   The gate follows the same pattern as GeniusLocusKit's GLK_LATENCY_TESTS
+//   (EncodeDrainNearRealtimeTests.swift / EncodeIntakeTests.swift), using
+//   `.enabled(if:)` on the @Suite declaration rather than a --filter alias alone.
+//
 // SERIALIZED:
 //   The suite is marked .serialized to avoid task-pool contention that
 //   would inflate timing measurements in the parallel swift-testing runner.
@@ -112,7 +127,9 @@ private func makeEnabledEngine(
 ///   ContinuousClock poll loop (no Task.sleep) waits up to 5 s for the observer
 ///   task to process the write. InMemoryStorage. Platform: macOS arm64 (M-series).
 @Suite("Q1: Sync-storm resistance — excludedColumns projection storm-kill gate",
-       .serialized)
+       .serialized,
+       .enabled(if: ProcessInfo.processInfo.environment["MOOT_PERF_BENCH"] == "1",
+                "Perf benchmark suite — run with MOOT_PERF_BENCH=1 or `make test-perf-bench`"))
 struct Q1StormResistanceTests {
 
     /// Storage with an extra `score` column that is declared excluded.
@@ -332,7 +349,10 @@ struct Q1StormResistanceTests {
 /// entry replaces a lower-HLC one, column HLC maps are merged (not replaced).
 /// After N appends to the same (table, row_key) with strictly ascending HLCs,
 /// exactly 1 entry survives.
-@Suite("Q2: Outbox coalescing under hot-row editing", .serialized)
+@Suite("Q2: Outbox coalescing under hot-row editing",
+       .serialized,
+       .enabled(if: ProcessInfo.processInfo.environment["MOOT_PERF_BENCH"] == "1",
+                "Perf benchmark suite — run with MOOT_PERF_BENCH=1 or `make test-perf-bench`"))
 struct Q2CoalescingTests {
 
     @Test("Q2-MEASURE: 100 rapid writes to one row → 1 outbox entry + timing")
@@ -450,7 +470,10 @@ struct Q2CoalescingTests {
 ///   Total: 3 actor hops per write (storage → CKStateActor → storage → debouncer).
 ///   Each hop is ~1 µs under low contention on M-series. At 1k writes:
 ///   ~3ms actor-hop overhead, dominated by OutboxStore.append storage I/O.
-@Suite("Q3: Per-write overhead — durable outbox bottom half", .serialized)
+@Suite("Q3: Per-write overhead — durable outbox bottom half",
+       .serialized,
+       .enabled(if: ProcessInfo.processInfo.environment["MOOT_PERF_BENCH"] == "1",
+                "Perf benchmark suite — run with MOOT_PERF_BENCH=1 or `make test-perf-bench`"))
 struct Q3PerWriteOverheadTests {
 
     @Test("Q3a-MEASURE: 1k writes to distinct rows (no coalescing)")
@@ -594,7 +617,10 @@ struct Q3PerWriteOverheadTests {
 ///   3N actor hops to 2N+1. At 10k rows: current=30k hops, batch-read=20001 hops.
 ///   Delta: ~10k fewer actor hops per 10k-row pull. InMemory actor hops are fast
 ///   (~1µs each) but 10k extra hops = ~10ms. See PERF-FINDING-Q5-BATCH-READ below.
-@Suite("Q5: Side-table growth and batch-apply cost at scale", .serialized)
+@Suite("Q5: Side-table growth and batch-apply cost at scale",
+       .serialized,
+       .enabled(if: ProcessInfo.processInfo.environment["MOOT_PERF_BENCH"] == "1",
+                "Perf benchmark suite — run with MOOT_PERF_BENCH=1 or `make test-perf-bench`"))
 struct Q5SideTableTests {
 
     private static let syncedTable = SyncedTable(
