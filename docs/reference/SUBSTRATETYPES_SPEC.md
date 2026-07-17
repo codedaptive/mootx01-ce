@@ -1,8 +1,8 @@
 ---
 title: SubstrateTypes Specification
-version: 1.1.0
+version: 1.2.0
 status: active
-date: 2026-06-20
+date: 2026-07-16
 description: "Behavioral specification for SubstrateTypes: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -112,7 +112,7 @@ This specification does NOT define:
 - ML algorithms over these types (Bradley-Terry, NMF, FFT,
   Eigenvalue Centrality, the audit-log fold, the matrix decay model,
   feature extractors) — those live in `SUBSTRATEML_SPEC.md`.
-- Orchestration over these types (the nine verbs, the row-state
+- Orchestration over these types (the twelve verbs, the row-state
   automaton, the AuditGate write-gate) — those live in
   `SUBSTRATELIB_SPEC.md`.
 - Persistence schema for these types — that lives in
@@ -162,9 +162,11 @@ canonical source; this section is a navigation aid.
   validation lives in EngramLib.
 - **I-20.** `GSetAuditLog` is a G-Set CRDT; entries are append-only,
   never updated, never deleted.
-- **I-22.** `RowVerb` enumeration is closed: the nine substrate verbs
-  per cookbook §10 are the only legal mutation kinds. New mutation
-  semantics require a cookbook amendment, not a kit-side extension.
+- **I-22.** `RowVerb` enumeration is closed: the twelve automaton verbs
+  (capture, observe, mutate, retract, promote, reject, supersede, decay,
+  expire, contest, resolveContest, tombstone — cookbook §10) are the only
+  legal mutation kinds. New mutation semantics require a cookbook
+  amendment, not a kit-side extension.
 - **I-25.** Each algebra primitive (Hamming, SimHash, OR-reduce, FNV)
   has one canonical implementation, one hard port. Multiple
   hardware-dispatched bodies are admitted; multiple algebraic
@@ -234,9 +236,10 @@ and lives one layer up.
 
 ### § 5.4 RowState, RowVerb, RowStateError
 
-`RowState` enumerates the legal row states; `RowVerb` enumerates the
-nine legal mutation verbs (capture, reanchor, mutate, withdraw,
-expunge, recall, propose, associate, learn — cookbook §10).
+`RowState` enumerates the ten legal row states; `RowVerb` enumerates the
+twelve mutation verbs the automaton accepts (capture, observe, mutate,
+retract, promote, reject, supersede, decay, expire, contest,
+resolveContest, tombstone).
 `RowStateError` is the error type the row-state automaton (in
 SubstrateLib) raises on an illegal transition.
 
@@ -363,6 +366,9 @@ Rust output for the same input, or between either port and the
 shared expectation — fails the conformance gate.
 
 ## Changelog
+
+### 1.2.0 -- 2026-07-16
+Corrected § 5.4: `RowVerb` has twelve verbs (capture, observe, mutate, retract, promote, reject, supersede, decay, expire, contest, resolveContest, tombstone), not nine, and the earlier list of verb names (reanchor, withdraw, expunge, recall, propose, associate, learn) did not match the shipped enum. Corrected `RowState` description from "the legal row states" to "the ten legal row states" for consistency with the scale-gapped raw-value layout.
 
 ### 1.1.0 -- 2026-06-20
 Added five new types for ADR-017 content-integrity and snapshots: ContentHash (§5.8), MerkleRoot (§5.9), SnapshotId (§5.10), AsOfCoordinate (§5.11), MerkleDomain (§5.12). Added three new error types to §6: ContentHashError, MerkleRootError, SnapshotIdError.

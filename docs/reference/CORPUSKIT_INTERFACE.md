@@ -4,7 +4,7 @@ status: active
 authors: MOOTx01 maintainers
 date: 2026-07-12
 spec_type: kit
-version: 1.14.0
+version: 1.16.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -34,14 +34,31 @@ Two library targets plus tests:
   - `Chunker.swift` — `Chunker`, `ChunkerConfiguration`
   - `BM25Index.swift` — `BM25Index` (actor), `BM25Parameters`
   - `BundleStore.swift` — `BundleStore` (actor)
+  - `BasisStore.swift` — `BasisStore` (actor), `PersistedBasis`
+  - `CorpusProviderCountsStore.swift` — `CorpusProviderCountsStore` (actor),
+    `PersistedCounts`, `CountsGrowthAnchor`
+  - `RemovedSourceStore.swift` — `RemovedSourceStore` (actor)
   - `HybridRecall.swift` — `HybridRecall`, `HybridRecallConfiguration`
   - `Tokenizer.swift` — `Tokenizer` protocol + default `keywordTokens`
+  - `TrainableEmbeddingBasis.swift` — `TrainableEmbeddingBasis` protocol
   - `SyncManifest.swift` — `CorpusKitSync`
   - `CorpusKitError.swift` — `CorpusKitError`
-  - `CorpusKit.swift` — module doc
+  - `CorpusKit.swift` — `EmbeddingModel`, `EncodeSpeed`, `FloatLaneOutcome`, `Corpus`
+  - `CorpusIngestQueue.swift` — ingest pipeline extension on `Corpus`
+  - `Engine/` — inverted-index engine types (`BM25Weighting`, `ImpactPosting`,
+    `SparseHit`, `FusedHit`, `Fusion`, `InvertedIndex`, `InvertedIndexStore`, `LaneTag`)
 - `Sources/CorpusKitProviders/` — providers (imply a model bundle):
+  - `DeterministicTokenizer.swift` — `DeterministicTokenizer`
+  - `FdcProvider.swift` — `FDCProvider`, `fdcDimension`, `fdcProjectionSeed`,
+    `fdcNodeVector`
   - `MiniLMTextProvider.swift`, `MPNetTextProvider.swift`,
-    `EmbeddingGemmaProvider.swift`, `DeterministicTokenizer.swift`
+    `EmbeddingGemmaProvider.swift`
+  - `RandomIndexingProvider.swift` — `RandomIndexingProvider`
+  - `PpmiProvider.swift` — `PpmiProvider`
+  - `LsaProvider.swift` — `LsaProvider`
+  - `NmfProvider.swift` — `NmfProvider`
+  - `BasisCodec.swift` — `BasisWriter`, `BasisReader`, `basisFormatVersion`
+  - `DefaultEnsemble.swift` — `CorpusEnsemble`
   - `NLEmbeddingProvider.swift`, `NLContextualEmbeddingProvider.swift`
     (Swift-only, `#if canImport(NaturalLanguage)` — see ADR-019)
 - `Tests/CorpusKitTests/`, `Package.swift`
@@ -474,18 +491,295 @@ impl EmbeddingGemmaProvider {
 impl EmbeddingProvider for EmbeddingGemmaProvider { /* embed, embed_float */ }
 ```
 
+#### `FDCProvider` — Frequency-Discriminating Code (both ports)
+
+The fifth default-ensemble signal. A deterministic, non-trainable provider that
+encodes each chunk as a 256-dimensional float vector by hashing its vocabulary
+terms through a fixed codebook (`fdcNodeVector`). No inference closure; no
+training. Projection seed `fdcProjectionSeed` ("FDCV1P", `0x4644_435F_5631_5F50`).
+
+**Swift:**
+
+```swift
+public let fdcDimension: Int                // 256
+public let fdcProjectionSeed: UInt64        // 0x4644_435F_5631_5F50 ("FDCV1P")
+public func fdcNodeVector(code: String) -> [Float]  // deterministic 256-dim code vector
+
+public final class FDCProvider: EmbeddingProvider, @unchecked Sendable {
+    public let modelID: String              // default "fdc-v1"
+    public let modelVersion: String         // default "1.0.0"
+    public init(modelID: String = "fdc-v1", modelVersion: String = "1.0.0")
+    public func embed(_ text: String) async throws -> Engram
+    public func embedFloat(_ text: String) async throws -> [Float]
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float])
+}
+```
+
+**Rust:** `corpus-kit-providers` ships an equivalent `FdcProvider` with the
+same modelID default, projectionSeed, and 256-dim codebook. Parity status:
+**Confirmed** (covered by `embedding_conformance_tests.rs`).
+
+#### Distributional providers — `CorpusKitProviders` / `corpus-kit-providers`
+
+Four trainable distributional signal providers. All four conform to
+`EmbeddingProvider` and `TrainableEmbeddingBasis`. They form the
+RI / PPMI / LSA / NMF slots of `CorpusEnsemble.defaultEnsemble()`.
+Constants are public for cross-port conformance tests.
+
+**`RandomIndexingProvider`** (slot 0, default signal):
+
+```swift
+public let riDimension: Int                 // 2048
+public let riNonzeros: Int                  // 10
+public let riWindow: Int                    // 4
+public let riProjectionSeed: UInt64         // 0x5249_5F56_315F_4D58 ("RI_V1_MX")
+public func riIndexVector(term: String) -> [Float]
+
+public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendable {
+    public let modelID: String              // default "random-indexing-v1"
+    public let modelVersion: String         // default "1.0.0"
+    public init(modelID: String = "random-indexing-v1", modelVersion: String = "1.0.0",
+                dimension: Int = riDimension, nonzeros: Int = riNonzeros,
+                window: Int = riWindow, projectionSeed: UInt64 = riProjectionSeed)
+    public func train(terms: [String], window: Int = riWindow)
+    public var vocabularySize: Int
+    public func contextVector(forTerm term: String) -> [Float]?
+    public func releaseBasis()  // zero the training data; retains the projection seed
+    // TrainableEmbeddingBasis: trainOnCorpus, serializeBasis, init(deserializing:),
+    //   reconstructBasis(from:), addToCounts, serializeCounts, restoreCounts(from:),
+    //   countsVocabularySize
+    public func embed(_ text: String) async throws -> Engram
+    public func embedFloat(_ text: String) async throws -> [Float]
+    public func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float])
+}
+```
+
+**`PpmiProvider`** (slot 1):
+
+```swift
+public let ppmiDimension: Int               // 2048
+public let ppmiNonzeros: Int                // 10
+public let ppmiWindow: Int                  // 4
+public let ppmiProjectionSeed: UInt64       // 0x5050_4D49_5F56_314D ("PPMI_V1M")
+
+public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
+    public let modelID: String              // default "ppmi-v1"
+    public let modelVersion: String
+    public init(modelID: String = "ppmi-v1", modelVersion: String = "1.0.0",
+                dimension: Int = ppmiDimension, nonzeros: Int = ppmiNonzeros,
+                window: Int = ppmiWindow, projectionSeed: UInt64 = ppmiProjectionSeed)
+    public func train(terms: [String], window: Int = ppmiWindow)
+    public func finalize()  // apply PMI transform; must be called before embed
+    public var vocabularySize: Int
+    public var trainingVocabSize: Int
+    public func ppmiVector(forTerm term: String) -> [Float]?
+    public func releaseBasis()
+    // TrainableEmbeddingBasis surface (same as RI)
+}
+```
+
+**`LsaProvider`** (slot 2):
+
+```swift
+public let lsaProjectionSeed: UInt64        // 0x4C53415F56315F4D ("LSA_V1_M")
+public let lsaDefaultRank: Int              // 64
+
+public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
+    public let modelID: String              // default "lsa-v1"
+    public let modelVersion: String
+    public let rank: Int                    // SVD rank (default lsaDefaultRank)
+    public let reducedVocabCap: Int         // vocabulary cap before SVD
+    public let svdSweeps: Int               // Jacobi sweep count
+    public init(modelID: String = "lsa-v1", modelVersion: String = "1.0.0",
+                rank: Int = lsaDefaultRank, reducedVocabCap: Int = 8192,
+                svdSweeps: Int = 30, projectionSeed: UInt64 = lsaProjectionSeed)
+    public func train(document: String)     // accumulate one document's TF
+    public func finalize()                  // run SVD; must be called before embed
+    public var documentCount: Int
+    public var vocabularySize: Int
+    public var isFinalized: Bool
+    public var effectiveRank: Int
+    public func documentEmbedding(at docIdx: Int) -> [Float]?
+    public func releaseBasis()
+    // TrainableEmbeddingBasis surface (same as RI)
+}
+```
+
+**`NmfProvider`** (slot 3):
+
+```swift
+public let nmfProjectionSeed: UInt64        // 0x4E4D465F56315F4D ("NMF_V1_M")
+public let nmfDefaultRank: Int              // 32
+public let nmfDefaultIterations: Int        // 100
+public let nmfFactorizationSeed: UInt64     // 0xDEAD_BEEF_CAFE_BABE
+
+public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
+    public let modelID: String              // default "nmf-v1"
+    public let modelVersion: String
+    public let rank: Int                    // NMF rank (default nmfDefaultRank)
+    public let reducedVocabCap: Int
+    public let maxIterations: Int           // default nmfDefaultIterations
+    public let seed: UInt64                 // NMF random init seed (default nmfFactorizationSeed)
+    public init(modelID: String = "nmf-v1", modelVersion: String = "1.0.0",
+                rank: Int = nmfDefaultRank, reducedVocabCap: Int = 8192,
+                maxIterations: Int = nmfDefaultIterations,
+                seed: UInt64 = nmfFactorizationSeed,
+                projectionSeed: UInt64 = nmfProjectionSeed)
+    public func train(document: String)
+    public func finalize()
+    public var documentCount: Int
+    public var vocabularySize: Int
+    public var isFinalized: Bool
+    public var effectiveRank: Int
+    public func documentEmbedding(at docIdx: Int) -> [Float]?
+    public func releaseBasis()
+    // TrainableEmbeddingBasis surface (same as RI)
+}
+```
+
+All four distributional providers ship in `corpus-kit-providers` with identical
+constants, default parameters, and `TrainableEmbeddingBasis` surface. Both ports
+are at parity (Confirmed; the basis round-trip produces byte-identical blobs — see
+§ 2 distributional-provider basis serialization and the concordance table).
+
 > **Provider surface (both ports):** Swift and Rust providers conform to
 > VectorKit's `EmbeddingProvider`. Tokenizer stays in CorpusKit as a
 > per-provider implementation detail — not part of VectorKit's contract —
 > preserving VectorKit's pure-compute isolation.
 >
-> The Rust `corpus-kit-providers` crate ships `MiniLMTextProvider`,
-> `MPNetTextProvider`, and `EmbeddingGemmaProvider` alongside
-> `DeterministicTokenizer`. The three named providers use the same
+> The Rust `corpus-kit-providers` crate ships all six provider types:
+> `FDCProvider`, `DeterministicTokenizer`, `MiniLMTextProvider`,
+> `MPNetTextProvider`, `EmbeddingGemmaProvider`, and all four distributional
+> providers (`RandomIndexingProvider`, `PpmiProvider`, `LsaProvider`,
+> `NmfProvider`). The three named CoreML model providers use the same
 > host-inference seam model as Swift: `InferenceFn` (synchronous, token
 > IDs in / pooled float vector out). No ONNX/Candle dependency is added;
 > the kit owns only the tokenizer and projection; model weights remain
 > the host's concern on every platform.
+
+#### Distributional-provider support types (both ports)
+
+`TermDocumentCounts` and `ReducedVocabulary` live in
+`Sources/CorpusKitProviders/` (Swift) and `rust-providers/src/`
+(Rust). They are shared utilities consumed internally by `LsaProvider`
+and `NmfProvider`; they are public API so callers who drive training
+directly (e.g. conformance tests) can read the accumulated counts.
+
+**`TermDocumentCounts`** — encounter-order vocabulary builder plus raw
+TF and DF counts. Both legs agree on vocabulary encounter order and raw
+counts; downstream conformance vectors pin the bit-identical contract.
+
+```swift
+// Sources/CorpusKitProviders/TermDocumentCounts.swift
+public struct TermDocumentCounts {
+    /// term → encounter-order index (deterministic for a fixed training sequence)
+    public private(set) var vocab: [String: Int]
+    /// tfCounts[docIdx][termIdx] = raw count
+    public private(set) var tfCounts: [[Int: Int]]
+    /// dfCounts[termIdx] = number of documents containing that term
+    public private(set) var dfCounts: [Int: Int]
+
+    public init()
+    /// Reconstruct from a persisted vocab + document count without re-tokenizing
+    /// (deserialization path — raw TF rows are training scratch, not serialized).
+    public init(restoredVocab vocab: [String: Int], documentCount: Int)
+
+    /// Tokenize text, assign encounter-order vocab indices, accumulate TF and DF.
+    /// No-op for text that tokenizes to nothing. Does NOT call Date().
+    public mutating func addDocument(_ text: String)
+
+    /// Lightweight anchor variant: grow vocab and document count without
+    /// retaining per-document TF rows or DF counts (incremental counts path P3).
+    /// Does NOT call Date().
+    public mutating func addDocumentForCountsAnchor(_ text: String)
+
+    public var documentCount: Int    { tfCounts.count }
+    public var vocabularySize: Int   { vocab.count }
+}
+```
+
+**Rust** (`corpus-kit-providers`; re-exported at crate root as
+`corpus_kit_providers::TermDocumentCounts`):
+
+```rust
+pub struct TermDocumentCounts {
+    pub vocab: HashMap<String, usize>,          // term → encounter-order index
+    pub tf_counts: Vec<HashMap<usize, usize>>,  // per-document TF counts
+    pub df_counts: HashMap<usize, usize>,       // term → document frequency
+}
+impl TermDocumentCounts {
+    pub fn new() -> Self;
+    /// Mirror of Swift's `init(restoredVocab:documentCount:)`.
+    pub fn from_restored(vocab: HashMap<String, usize>, document_count: usize) -> Self;
+    pub fn add_document(&mut self, text: &str);
+    pub fn add_document_for_counts_anchor(&mut self, text: &str);
+    pub fn document_count(&self) -> usize;
+    pub fn vocabulary_size(&self) -> usize;
+}
+impl Default for TermDocumentCounts { /* new() */ }
+```
+
+**`ReducedVocabulary`** — frozen IDF-reduced vocabulary selection for
+the dense LSA/NMF factorizations (ADR-022). The selection algorithm is
+bit-identical across ports: drop hapax (df < 2), rank remaining terms
+by document frequency descending then UTF-8 byte order ascending, keep
+the top K. Below the cap the full vocabulary is returned unchanged.
+
+```swift
+// Sources/CorpusKitProviders/ReducedVocab.swift
+
+/// Default cap K for the reduced vocabulary (both ports).
+public let defaultReducedVocabCap: Int = 512  // K²·numDocs cost keeps large-corpus reindex in seconds range
+
+/// Frozen reduced vocabulary: ordered kept terms plus maps needed
+/// to remap full-vocab TF rows at train time and query terms at projection time.
+public struct ReducedVocabulary: Sendable {
+    public let keptTerms: [String]           // column i == keptTerms[i]
+    public let termToColumn: [String: Int]   // term → reduced column
+    public let fullIndexToColumn: [Int: Int] // full-vocab index → reduced column
+    public var size: Int { keptTerms.count }
+}
+
+/// Select the shared reduced vocabulary from maintained term-document counts.
+/// No-op when fullVocab.count ≤ cap (small estates, conformance fixtures).
+public func selectReducedVocabulary(
+    vocab: [String: Int],
+    dfCounts: [Int: Int],
+    documentCount N: Int,
+    cap: Int = defaultReducedVocabCap
+) -> ReducedVocabulary
+```
+
+**Rust** (`corpus-kit-providers`; reachable as
+`corpus_kit_providers::reduced_vocab::{ReducedVocabulary, DEFAULT_REDUCED_VOCAB_CAP, select_reduced_vocabulary}`):
+
+```rust
+// rust-providers/src/reduced_vocab.rs; pub mod re-exported from lib.rs
+
+pub const DEFAULT_REDUCED_VOCAB_CAP: usize = 512;  // mirrors Swift defaultReducedVocabCap
+
+pub struct ReducedVocabulary {
+    pub kept_terms: Vec<String>,
+    pub term_to_column: HashMap<String, usize>,
+    pub full_index_to_column: HashMap<usize, usize>,
+}
+impl ReducedVocabulary {
+    pub fn size(&self) -> usize;
+}
+
+pub fn select_reduced_vocabulary(
+    vocab: &HashMap<String, usize>,
+    df_counts: &HashMap<usize, usize>,
+    _document_count: usize,
+    cap: usize,
+) -> ReducedVocabulary;
+```
+
+> **Parity note.** Both ports are at parity. The selection is
+> deterministic and produces identical column assignments on both legs
+> (df descending, then term UTF-8 byte order ascending — Rust `&str` Ord
+> matches Swift's `Array(term.utf8)` compare). Covered by
+> `reduced_vocab.rs` tests.
 
 #### Apple NL providers — Swift-only (ADR-019)
 
@@ -1196,12 +1490,12 @@ public actor Corpus {
     /// (`ProcessInfo.activeProcessorCount` / `std::thread::available_parallelism`),
     /// uniform across platforms and identical Swift↔Rust.
 
-    /// Set (or clear) the `onEncoded` coordination callback, fired after each
-    /// drained batch with the encoded sourceIDs. `nil` when standalone; the
-    /// orchestrator (GeniusLocusKit) sets it to roll up the touched LocusKit
-    /// rooms. CorpusKit never reaches into LocusKit itself. Rust:
-    /// `set_on_encoded(&self, F)`.
-    public func setOnEncoded(_ callback: (@Sendable ([String]) async -> Void)?)
+    /// Coordination callback fired after each drained batch with the encoded
+    /// sourceIDs. `nil` when standalone; the orchestrator (GeniusLocusKit) sets
+    /// it to roll up the touched LocusKit rooms. CorpusKit never reaches into
+    /// LocusKit itself. Rust mirror: `set_on_encoded<F>(&self, callback: F)`
+    /// (a method, not a var, because Rust has no stored-closure-as-property idiom).
+    public var onEncoded: (@Sendable ([String]) async -> Void)?
 
     /// Embed the query and return fused kNN + BM25 results (SPEC B-10).
     /// Runs on the DEFAULT signal (models[0]).
@@ -1267,6 +1561,57 @@ public actor Corpus {
     /// (chunks) are NOT deleted (append-only invariant). Called by
     /// GeniusLocusKit.destroy(storage:corpusStorage:handle:).
     public func destroyRecallIndex() async throws
+
+    /// Scrub verbatim chunk text for a source (SPEC B-15), then remove it from
+    /// recall (delegates to `remove`). Step 1 (scrub) is committed before step
+    /// 2 (recall removal) so content erasure is durable even if remove fails.
+    /// BundleStore rows survive with emptied `text` fields; the append-only
+    /// invariant holds. Rust: `expunge(&self, source_id)`.
+    public func expunge(sourceID: String) async throws
+
+    /// Source-aggregated BM25 recall: returns up to `limit` `(sourceID, score)`
+    /// pairs, one per source, scored by the maximum chunk BM25 score for that
+    /// source. Used by the Hunter BM25 prefilter path (corpus lane).
+    /// Empty query or limit ≤ 0 returns []. Rust: `bm25_top_k_by_source`.
+    public func bm25TopKBySource(query: String, limit: Int) async throws -> [(sourceID: String, score: Float)]
+
+    /// All source IDs currently in the BundleStore (the full stored-chunk
+    /// universe, including removed sources whose rows are preserved by the
+    /// append-only invariant). Used by GLK provision for membership checks.
+    /// Rust: `indexed_source_ids() -> HashSet<String>`.
+    public func indexedSourceIDs() async throws -> Set<String>
+
+    /// Per-corpus and global Merkle roots, delegating to the internal BundleStore.
+    /// See BundleStore.corpusMerkleRoot / globalCorpusMerkleRoot in § 2.
+    public func corpusMerkleRoot(for sourceID: String) async throws -> MerkleRoot
+    public func globalCorpusMerkleRoot() async throws -> MerkleRoot
+
+    // Composition seam (GLK/NeuronKit reach these through the Corpus, not around it):
+
+    /// The estate's shared VectorStore, owned by this Corpus. The composition
+    /// layer (GeniusLocusKit) registers this instance as the estate's shared
+    /// vector lane instead of constructing a second VectorStore over the same
+    /// table. One store, one resident array, one on-disk sidecar.
+    /// Rust: `shared_vector_store(&self) -> Arc<VectorStore>`.
+    public var sharedVectorStore: VectorStore
+
+    /// Embed the query text via the default provider (models[0]) and return the
+    /// binary Engram. Used by GLK composition; not part of the sealed-Corpus
+    /// four-verb SDK surface (SPEC B-8 applies to `recall`, not to this seam).
+    /// Rust: `embed(&self, text) -> CorpusKitResult<Engram>`.
+    public func embed(_ text: String) async throws -> Engram
+
+    /// Float-lane embed via the default provider. Returns the pooled float
+    /// vector before SimHash projection. Rust: `embed_float`.
+    public func embedFloat(_ text: String) async throws -> [Float]
+
+    /// `true` when the default provider supports the float lane (the on-device
+    /// CoreML / host-inference lane). `false` for `.deterministic`.
+    /// Rust: `supports_float(&self) -> bool`.
+    public var supportsFloat: Bool
+
+    /// The modelID of the default provider (models[0]). Rust: `model_id() -> &str`.
+    public var modelID: String
 }
 
 /// Persistence for a trained provider's serialized basis blob (mission 6a-ii-β).
@@ -1318,10 +1663,40 @@ impl Corpus {
     pub fn remove(&self, source_id: &str) -> CorpusKitResult<()>;
     pub fn count(&self) -> CorpusKitResult<usize>;
 
+    /// Scrub verbatim chunk text then remove from recall (SPEC B-15).
+    /// Swift: `expunge(sourceID:)`.
+    pub fn expunge(&self, source_id: &str) -> CorpusKitResult<()>;
+
+    /// Source-aggregated BM25 recall. Swift: `bm25TopKBySource(query:limit:)`.
+    pub fn bm25_top_k_by_source(&self, query: &str, limit: usize) -> Vec<(String, f32)>;
+
+    /// All source IDs in BundleStore. Swift: `indexedSourceIDs()`.
+    pub fn indexed_source_ids(&self) -> CorpusKitResult<std::collections::HashSet<String>>;
+
+    /// Per-corpus and global Merkle roots (delegate to internal BundleStore).
+    pub fn corpus_merkle_root(&self, source_id: &str) -> CorpusKitResult<MerkleRoot>;
+    pub fn global_corpus_merkle_root(&self) -> CorpusKitResult<MerkleRoot>;
+
+    // Composition seam:
+    pub fn shared_vector_store(&self) -> Arc<VectorStore>;
+    pub fn embed(&self, text: &str) -> CorpusKitResult<engram_lib::Engram>;
+    pub fn embed_float(&self, text: &str) -> CorpusKitResult<Vec<f32>>;
+    pub fn supports_float(&self) -> bool;
+    pub fn model_id(&self) -> &str;
+
     // Estate lifecycle primitive:
     /// Clear BM25 + chunk_source_map + all vectors + all basis rows (no orphans).
     /// BundleStore rows preserved (append-only).
     pub fn destroy_recall_index(&self) -> CorpusKitResult<()>;
+
+    // Rust-only bulk-import path (no Swift counterpart):
+    // `ingest_batch_import` uses a sharded phase-P/phase-S pipeline that
+    // parallelizes BM25 shard writes and embeds in private shard SQLite files
+    // before merging — distinct from `ingest_batch`'s serial-write bounded pool.
+    // The queue variants mirror it: `enqueue_ingest_batch_import` /
+    // `import_queue_depth`. Swift handles large imports through `ingestBatch`
+    // directly; these Rust extensions exist for the Rust MCP server import path.
+    pub fn ingest_batch_import(&self, items: &[(String, String, i64)]) -> CorpusKitResult<()>;
 }
 
 /// Persistence for a trained provider's serialized basis blob (mission 6a-ii-β).
@@ -1344,6 +1719,57 @@ impl BasisStore {
     pub fn delete_all(&self) -> CorpusKitResult<()>;
 }
 ```
+
+### `RemovedSourceStore`
+
+Persistence for the set of source IDs whose recall has been suppressed by
+`Corpus.remove`. Because `BundleStore.chunks` is append-only (I-2), a reindex
+would re-embed and re-index a removed source's chunks, resurrecting it in
+recall. `RemovedSourceStore` records which sources are removed so every rebuild
+path (reindex, InvertedIndexStore reload) can exclude them. A source is
+reactivated when it is re-ingested: `Corpus.ingest` calls `clearRemoved` before
+inserting new chunks, so a later reindex includes the source again.
+
+Schema: `removed_sources(source_id TEXT PK, removed_at TEXT ISO8601)`.
+Kit-ID "CorpusKitRemovedSources", version 1. No Bool columns; dates TEXT
+ISO8601. `appendOnly` is false — a reactivation deletes the row.
+
+**Swift:**
+
+```swift
+public actor RemovedSourceStore {
+    public static let schemaDeclaration: SchemaDeclaration  // kit-ID "CorpusKitRemovedSources", v1
+    public init(storage: any Storage)
+    /// Record a removal (UPSERT on source_id PK). `now` is caller-supplied (determinism).
+    public func markRemoved(_ sourceID: String, now: Date) async throws
+    /// Reactivate: delete the removed row so future rebuilds include the source.
+    public func clearRemoved(_ sourceID: String) async throws
+    /// The full set of removed source IDs (the active-chunk filter reads this).
+    public func removedIDs() async throws -> Set<String>
+    /// Delete every removed-source row (used by Corpus.destroyRecallIndex()).
+    public func deleteAll() async throws
+}
+```
+
+**Rust:**
+
+```rust
+pub struct RemovedSourceStore { /* storage: Arc<dyn Storage> */ }
+impl RemovedSourceStore {
+    pub fn schema_declaration() -> SchemaDeclaration;  // kit-ID "CorpusKitRemovedSources", v1
+    pub fn new(storage: Arc<dyn Storage>) -> Self;
+    pub fn mark_removed(&self, source_id: &str, now_secs: i64) -> CorpusKitResult<()>;
+    pub fn clear_removed(&self, source_id: &str) -> CorpusKitResult<()>;
+    pub fn removed_ids(&self) -> CorpusKitResult<HashSet<String>>;
+    pub fn delete_all(&self) -> CorpusKitResult<()>;
+}
+```
+
+Both ports are at parity. `Corpus` owns the `RemovedSourceStore` instance
+internally and drives it through `remove` / `expunge` / `ingest` / `reindex` /
+`destroyRecallIndex`; external callers do not hold a reference to it directly.
+
+---
 
 The Rust `TrainableEmbeddingBasis` trait gains an additive
 `reconstruct_trainable_basis(&self, basis) -> Result<Box<dyn TrainableEmbeddingBasis>>`
@@ -1446,6 +1872,50 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.15.0 -- 2026-07-16
+Surface audit: documented the full public API of both ports.
+
+**Factual correction:** `Corpus.setOnEncoded(_:)` (method) corrected to
+`Corpus.onEncoded` (Swift `var`) — the property form is what the Swift source
+ships. Rust retains `set_on_encoded<F>(&self, callback: F)` (a method), which is
+noted alongside the Swift var.
+
+**Added § 1 layout entries** for source files missing from the layout table:
+`BasisStore.swift`, `CorpusProviderCountsStore.swift`, `RemovedSourceStore.swift`,
+`CorpusIngestQueue.swift`, `TrainableEmbeddingBasis.swift`, `Engine/`, and all
+distributional-provider source files.
+
+**Added `RemovedSourceStore`** — the public actor (Swift) / struct (Rust) that
+persists the set of recall-suppressed source IDs. Schema kit-ID
+"CorpusKitRemovedSources" v1 (`removed_sources(source_id TEXT PK, removed_at TEXT
+ISO8601)`). Four operations: `markRemoved`, `clearRemoved`, `removedIDs`,
+`deleteAll`. Both ports at parity.
+
+**Added `FDCProvider`** — the fifth default-ensemble signal, a deterministic
+256-dim provider conforming to `EmbeddingProvider` (no training, no inference
+closure). Public constants `fdcDimension`, `fdcProjectionSeed`, `fdcNodeVector`.
+
+**Added distributional providers** (`RandomIndexingProvider`, `PpmiProvider`,
+`LsaProvider`, `NmfProvider`) — individually documented with init params, train /
+finalize, diagnostics, `releaseBasis`, and `TrainableEmbeddingBasis` surface
+references. Public constants per provider (dimension, nonzeros, window, seed, rank).
+
+**Added missing `Corpus` methods to § 7 (both ports):**
+- `expunge(sourceID:)` / `expunge(source_id)` — scrub chunk text then remove from recall (SPEC B-15)
+- `bm25TopKBySource(query:limit:)` / `bm25_top_k_by_source` — source-aggregated BM25 recall (Hunter BM25 prefilter lane)
+- `indexedSourceIDs()` / `indexed_source_ids()` — all source IDs in BundleStore
+- `corpusMerkleRoot(for:)` / `corpus_merkle_root` — delegation to BundleStore (Swift doc previously only listed this on BundleStore)
+- `globalCorpusMerkleRoot()` / `global_corpus_merkle_root` — same
+- `sharedVectorStore` / `shared_vector_store()` — the shared VectorStore accessor for GLK composition
+- `embed(_:)` / `embed` — query embed via default provider
+- `embedFloat(_:)` / `embed_float` — float-lane embed
+- `supportsFloat` / `supports_float()` — float-lane capability flag
+- `modelID` / `model_id()` — default provider model ID
+
+**Added Rust-only bulk-import note:** `Corpus::ingest_batch_import` (sharded
+phase-P/phase-S pipeline) and associated queue variants (`enqueue_ingest_batch_import`,
+`import_queue_depth`). No Swift counterpart.
 
 ### 1.14.0 -- 2026-07-12
 Additive (contradiction hunter corpus lane): `Corpus.sourceIDs(forChunkIDs:)`

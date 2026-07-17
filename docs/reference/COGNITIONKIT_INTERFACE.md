@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Interface
-version: 1.3.0
+version: 1.5.0
 status: active
-date: 2026-06-21
+date: 2026-07-16
 description: Public API surface for CognitionKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -115,6 +115,14 @@ public enum RecipeError: Error, Sendable, Equatable, CustomStringConvertible {
     case silentConceptLoss(branchID: BranchID, lostConcepts: [String])
     case tournamentNoWinner(disqualifiedCount: Int)
     case userConfirmationRequired(action: String)
+    /// More plans than the recipe admits (maximum: 20). Each plan derives a
+    /// COW branch and runs concurrent heavy work, so an unbounded count is a
+    /// resource-exhaustion vector. Raised before any branch is derived.
+    case tooManyPlans(count: Int, maximum: Int)
+    /// More origin entries than the recipe admits (maximum: 5000). Each entry
+    /// is captured into every branch, making unbounded input O(plans × entries)
+    /// work. Raised before any branch is derived.
+    case tooManyOriginEntries(count: Int, maximum: Int)
 
     public var description: String { get }
     public var asRunError: RecipeRunError { get }
@@ -148,7 +156,17 @@ pub enum RecipeError {
     SilentConceptLoss { branch_id: String, lost_concepts: Vec<String> },
     TournamentNoWinner { disqualified_count: i64 },
     UserConfirmationRequired { action: String },
+    /// DoS bound: plans.len() > MAX_MIGRATION_PLANS (20). Raised before any
+    /// branch is derived. Mirrors Swift `RecipeError.tooManyPlans`.
+    TooManyPlans { count: usize, maximum: usize },
+    /// DoS bound: origin.len() > MAX_MIGRATION_ORIGIN_ENTRIES (5000). Raised
+    /// before any branch is derived. Mirrors Swift `RecipeError.tooManyOriginEntries`.
+    TooManyOriginEntries { count: usize, maximum: usize },
 }
+
+/// DoS bounds on attacker-influenceable migration input.
+pub const MAX_MIGRATION_PLANS: usize = 20;
+pub const MAX_MIGRATION_ORIGIN_ENTRIES: usize = 5000;
 
 pub struct SubstrateError { pub operation: String, pub detail: String }
 impl SubstrateError { pub fn new(operation: impl Into<String>, detail: impl Into<String>) -> Self; }
@@ -161,7 +179,7 @@ impl From<RecipeError> for RecipeRunError;
 impl From<SubstrateError> for RecipeRunError;
 ```
 
-The `RecipeError` cases and their `Display`/`description` strings match
+The `RecipeError` cases (8 total) and their `Display`/`description` strings match
 across versions byte-for-byte (SPEC § 6). The `SubstrateError` description
 format `"SubstrateError.{operation}: {detail}"` matches across versions.
 The `RecipeRunError` description delegates to the inner type unchanged.
@@ -245,10 +263,12 @@ public enum MigrationOrchestration {
 }
 ```
 
-Throws `duplicatePlanName` (two plans share a name) and
-`insufficientBranches` (empty plans) before deriving any branch; the
-zero-silent-loss gate (SPEC C-5) disqualifies a branch whose recall lost an
-origin concept.
+Throws `insufficientBranches` (empty plans), `tooManyPlans` (plans count
+exceeds MAX_MIGRATION_PLANS = 20), or `tooManyOriginEntries` (origin entries
+exceed MAX_MIGRATION_ORIGIN_ENTRIES = 5000) before deriving any branch —
+these are DoS bounds that protect every caller; throws `duplicatePlanName`
+(two plans share a name) after the bounds check; the zero-silent-loss gate
+(SPEC C-5) disqualifies a branch whose recall lost an origin concept.
 
 **Rust** — `migration_orchestration.rs` / `migration_ranking.rs` /
 `migration_live.rs` mirror the orchestration, ranking, and live-substrate
@@ -256,7 +276,7 @@ binding; the catalog descriptor matches the Swift values (§ 7).
 
 ## § 6 — Reasoning-lens recipes (SPEC § 4.2)
 
-The eighteen lens recipes. **Both ports are authored** (SPEC C-7): the
+The twenty lens recipes. **Both ports are authored** (SPEC C-7): the
 Rust signatures ship in `packages/kits/CognitionKit/rust/src/*_recipe.rs`
 and the Swift versions ship as caseless-`enum` namespaces with a
 `public static func run` in `Sources/CognitionKit/*.swift` (each `…Lens`
@@ -328,12 +348,26 @@ pub fn run_drift(
     frame: RecallFrame, split_at: i64, now: i64,
 ) -> Result<DriftOutput, RecipeRunError>;
 
+// Catalog name: "cohesion" (statistical content-cohesion anomaly detection;
+// previously catalog-named "contradiction" — renamed to distinguish from the
+// explicit KG contradiction lens below).
 pub struct ContradictionOutput { pub outliers: Vec<String>, pub considered: usize }
 pub fn run_contradiction(
     coord: &EstateCoordinator, handle: &EstateHandle,
     frame: RecallFrame, threshold: f32, now: i64,
 ) -> Result<ContradictionOutput, RecipeRunError>;
 ```
+
+**Catalog-only lens entries** (descriptor registered; implementing recipe forthcoming in both ports):
+
+- `cohesion` — "flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out." (`ContradictionOutput` / `run_contradiction` is the backing implementation registered under this name.)
+- `lens_contradiction` — "surface genuine contradictions — drawer pairs linked by a `contradicts` tunnel and KG facts with conflicting objects for the same subject+predicate key."
+
+### Diffusion node layer (ADR-DIFFUSION-001)
+
+**Catalog-only lens entry** (descriptor registered; implementing recipe forthcoming in both ports):
+
+- `node_motion` — "how a single memory has MOVED over time — its mutation volatility (decay-weighted recent-churn mass), its topic trajectory (the UDC anchors it has occupied), whether it reanchored, and a write-time anomaly verdict (churning / reanchored / stable). Reads the memory's fresh audit history."
 
 ### Grounding / trust (category 6)
 
@@ -448,6 +482,374 @@ pub fn run_estate_divergence<F: Fn() -> RecallFrame>(
 ) -> Result<EstateDivergence, RecipeRunError>;
 ```
 
+## § 6a — Distillation-family recipes (SPEC § 4.5)
+
+Three catalog-registered `Recipe`-conforming types that operate on the
+distilled memory tier. All declare empty `requiredCapabilities`. The Rust
+entry points are synchronous over `EstateCoordinator` (async↔sync seam
+sanctioned, same pattern as the live-seam recipes).
+
+### Consolidate
+
+**Swift**
+
+```swift
+public struct Consolidate: Recipe {
+    public struct Input: Sendable {
+        public let clusterID: String?   // accepted no-op; sweep is estate-wide
+        public let includeHeld: Bool    // accepted no-op; sweep skips only tombstoned items
+        public init(clusterID: String? = nil, includeHeld: Bool = false)
+    }
+    public struct Output: Sendable {
+        public let factoidsProduced: Int
+        public init(factoidsProduced: Int)
+    }
+    public let name = "consolidate"
+    public let version = "1.0.0"
+    public let description: String
+    public let requiredCapabilities: [NeuronKitCapability]  // []
+    public init()
+    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
+}
+```
+
+**Rust**
+
+```rust
+pub struct ConsolidateInput { pub cluster_id: Option<String>, pub include_held: bool }
+impl ConsolidateInput { pub fn new() -> Self; }  // defaults: None, false
+
+pub struct ConsolidateOutput { pub factoids_produced: usize }
+
+pub fn run_consolidate(
+    _input: &ConsolidateInput,
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    now: i64,
+) -> Result<ConsolidateOutput, VerbDispatchError>;
+```
+
+`clusterID`/`cluster_id` and `includeHeld`/`include_held` are accepted
+no-ops in both ports. The sweep delegates entirely to
+`GeniusLocusKit.distillItemsSweep` / `EstateCoordinator::distill_items_sweep`,
+which operates estate-wide. Note: Rust returns `VerbDispatchError` (not
+`RecipeRunError`) because the sweep cannot surface a recipe-guard error.
+
+### DistilledRecall
+
+**Swift**
+
+```swift
+public enum DistilledDiscriminationLevel: Sendable, Equatable {
+    case single    // fewer than two results
+    case high      // topGap >= 0.25
+    case medium    // partial separation
+    case low       // effectively unranked
+}
+
+public struct DistilledMatch: Sendable, Equatable, Codable {
+    public let id: String
+    public let prose: String
+    public let confidence: Float32
+    public let sourceCount: Int
+    public let snr: Float32
+    public let deltaType: String?
+    public let uncertain: Bool
+    public let injectionDepth: InjectionDepth
+    public init(id: String, prose: String, confidence: Float32, sourceCount: Int,
+                snr: Float32, deltaType: String?, uncertain: Bool,
+                injectionDepth: InjectionDepth)
+}
+
+public struct DistilledRecall: Recipe {
+    public struct Input: Sendable {
+        public let query: String
+        public let filter: LocusKit.Filter   // default .unconfirmed
+        public let limit: Int                // default 20
+        public let pool: Int                 // default max(limit * 5, 50)
+        public init(query: String, filter: LocusKit.Filter = .unconfirmed,
+                    limit: Int = 20, pool: Int? = nil)
+    }
+    public struct Output: Sendable {
+        public let matches: [DistilledMatch]
+        public let discrimination: DistilledDiscriminationLevel
+        public init(matches: [DistilledMatch], discrimination: DistilledDiscriminationLevel)
+    }
+    public let name = "distilled_recall"
+    public let version = "1.0.0"
+    public let description: String
+    public let requiredCapabilities: [NeuronKitCapability]  // []
+    public init()
+    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
+}
+
+public func classifyDistilledDiscrimination(_ scores: [Double]) -> DistilledDiscriminationLevel
+// (module-internal in practice; public in Rust for testing parity)
+```
+
+**Rust**
+
+```rust
+pub enum DistilledDiscriminationLevel { Single, High, Medium, Low }
+
+pub struct DistilledMatch {
+    pub id: String, pub prose: String, pub confidence: f32,
+    pub source_count: usize, pub snr: f32, pub delta_type: Option<String>,
+    pub uncertain: bool, pub injection_depth: InjectionDepth,
+}
+
+pub struct DistilledRecallInput {
+    pub query: String, pub limit: usize, pub pool: usize, pub filter: Filter,
+}
+impl DistilledRecallInput {
+    pub fn new(query: impl Into<String>) -> Self;
+    pub fn with_limit(query: impl Into<String>, limit: usize) -> Self;
+    pub fn with_filter(query: impl Into<String>, filter: Filter) -> Self;
+}
+
+pub struct DistilledRecallOutput {
+    pub matches: Vec<DistilledMatch>,
+    pub discrimination: DistilledDiscriminationLevel,
+}
+
+pub fn run_distilled_recall(
+    input: &DistilledRecallInput,
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    _now: i64,  // accepted for API parity; unused — Hamming NN is clock-free
+) -> Result<DistilledRecallOutput, RecipeRunError>;
+
+pub fn classify_distilled_discrimination(scores: &[f64]) -> DistilledDiscriminationLevel;
+```
+
+Thresholds: `HIGH_MARGIN = 0.25`, `LOW_MARGIN = 0.05`, `LOW_SPREAD = 0.15`.
+These match across ports byte-for-byte.
+
+### Recollect
+
+**Swift**
+
+```swift
+public struct ExpandedSource: Sendable, Equatable, Codable {
+    public let id: String
+    public let room: String
+    public let content: String
+    public init(id: String, room: String, content: String)
+}
+
+public enum RecollectError: Error, Sendable, Equatable {
+    case notADistilledDrawer(id: String)
+    case factoidNotFound(id: String)
+    case noSourceTunnels(id: String)
+}
+
+public struct Recollect: Recipe {
+    public struct Input: Sendable {
+        public let factoidDrawerID: String
+        public init(factoidDrawerID: String)
+    }
+    public struct Output: Sendable {
+        public let factoidID: String
+        public let prose: String
+        public let confidence: Float32
+        public let sourceCount: Int
+        public let deltaType: String?
+        public let sources: [ExpandedSource]
+        // No public init — Output is constructed internally by run().
+    }
+    public let name = "recollect"
+    public let version = "1.0.0"
+    public let description: String
+    public let requiredCapabilities: [NeuronKitCapability]  // []
+    public init()
+    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
+}
+```
+
+**Rust**
+
+```rust
+pub struct ExpandedSource { pub id: String, pub room: String, pub content: String }
+
+pub enum RecollectError {
+    FactoidNotFound { id: String },
+    NotADistilledDrawer { id: String },
+    NoSourceTunnels { id: String },
+    VerbDispatch(String),  // propagated VerbDispatchError
+}
+impl std::fmt::Display for RecollectError;
+impl From<VerbDispatchError> for RecollectError;
+
+pub struct RecollectInput { pub factoid_drawer_id: String }
+impl RecollectInput { pub fn new(factoid_drawer_id: impl Into<String>) -> Self; }
+
+pub struct RecollectOutput {
+    pub factoid_id: String, pub prose: String, pub confidence: f32,
+    pub source_count: usize, pub delta_type: Option<String>,
+    pub sources: Vec<ExpandedSource>,
+}
+
+pub fn run_recollect(
+    input: &RecollectInput,
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    _now: i64,  // accepted for API compatibility; by-ids hydration is clock-free
+) -> Result<RecollectOutput, RecollectError>;
+```
+
+**Swift/Rust parity note for RecollectError:** Swift raises `RecollectError` (3
+cases); Rust adds a fourth `VerbDispatch(String)` arm to propagate substrate
+I/O errors that Swift surfaces as `throw` (the `async throws` boundary). The
+three structural invariant cases match byte-for-byte in their `Display`/
+`description` strings. There is no `RecipeRunError` wrapper: the error is
+`RecollectError` on both ports.
+
+## § 6b — Dataset analysis utilities (non-catalog)
+
+Standalone analysis namespaces that accept user-supplied column-value rows
+from the tool layer (typically fetched from a `DatasetStore`). These are
+**not catalog-registered Recipe types** — they have no `run(input:estate:kit:)`
+boundary and no capability gate. They are pure stateless functions callable
+directly from the tool layer.
+
+### DatasetAssociations
+
+Dataset-targeted twin of the `association_rules` lens: applies the same
+`MatrixO` + `mineAssociationRules` path over caller-supplied
+`(columnName, value)` row dictionaries instead of Drawer categorical facets.
+Label cap: 64 distinct `"columnName:value"` labels (alphabetical overflow).
+
+**Swift**
+
+```swift
+public enum DatasetAssociations {
+    public struct Output: Sendable {
+        public let rules: [AssociationRuleResult]
+        public let rowCount: Int
+        public let labelOverflow: Bool
+        public init(rules: [AssociationRuleResult], rowCount: Int, labelOverflow: Bool)
+    }
+    public static func run(
+        rows: [[String: String]],
+        thresholds: MiningThresholds
+    ) -> Output
+}
+```
+
+**Rust**
+
+```rust
+pub struct DatasetAssociationsOutput {
+    pub rules: Vec<AssociationRuleResult>,
+    pub row_count: usize,
+    pub label_overflow: bool,
+}
+pub fn run_dataset_associations(
+    rows: &[HashMap<String, String>],
+    thresholds: MiningThresholds,
+) -> DatasetAssociationsOutput;
+```
+
+### DatasetCohesion
+
+Column-value anomaly scorer for dataset rows. Numeric columns use the robust
+z-score (`|x - median| / (1.4826 × MAD)`); categorical columns use
+information-theoretic rarity (`-log₂(count(v) / total_non_null)`). Row
+scores are the sum of per-column signals. Processes up to `scanCap` rows.
+
+**Swift**
+
+```swift
+public enum DatasetColumnValue: Sendable, Equatable {
+    case numeric(Double)
+    case categorical(String)
+    case null
+}
+
+public struct RowAnomalyScore: Sendable, Equatable {
+    public let rowIndex: Int
+    public let score: Double
+    public init(rowIndex: Int, score: Double)
+}
+
+public struct DatasetCohesionOutput: Sendable, Equatable {
+    public let topAnomalies: [RowAnomalyScore]  // sorted score desc, rowIndex asc for ties
+    public let rowsScored: Int
+    public init(topAnomalies: [RowAnomalyScore], rowsScored: Int)
+}
+
+public enum DatasetCohesion {
+    public static let scanCap: Int  // = 10_000
+    public static func run(
+        rows: [[DatasetColumnValue]],
+        topN: Int = 10,
+        maxRows: Int = DatasetCohesion.scanCap
+    ) -> DatasetCohesionOutput
+}
+```
+
+**Rust**
+
+```rust
+pub enum DatasetColumnValue { Numeric(f64), Categorical(String), Null }
+pub struct RowAnomalyScore { pub row_index: usize, pub score: f64 }
+pub struct DatasetCohesionOutput {
+    pub top_anomalies: Vec<RowAnomalyScore>,
+    pub rows_scored: usize,
+}
+pub const SCAN_CAP: usize = 10_000;
+pub fn run_dataset_cohesion(
+    rows: &[Vec<DatasetColumnValue>],
+    top_n: usize,
+    max_rows: usize,
+) -> DatasetCohesionOutput;
+```
+
+All arithmetic is `f64` (Double) on both ports. Sort order: score descending,
+row index ascending for ties — deterministic across ports.
+
+### DatasetComplexity
+
+Dataset-targeted twin of the `complexity` lens: applies the same
+`NeuronKit.complexity` path (Shannon entropy, optional mutual information) over
+caller-supplied `[String?]` column-value arrays instead of recalled Drawer
+label fields. Null values are excluded from entropy computation.
+
+**Swift**
+
+```swift
+public enum DatasetComplexity {
+    public struct ColumnEntropyOutput: Sendable, Equatable {
+        public let result: ComplexityResult  // entropyA; entropyB+mutualInformation when columnB supplied
+        public let nonNullCount: Int         // count of rows where all supplied columns are non-null
+        public let nullCount: Int            // rows excluded due to at least one nil value
+        public init(result: ComplexityResult, nonNullCount: Int, nullCount: Int)
+    }
+    public static func runColumn(
+        columnA: [String?],
+        columnB: [String?]? = nil
+    ) -> ColumnEntropyOutput
+}
+```
+
+**Rust**
+
+```rust
+pub struct ColumnEntropyOutput {
+    pub result: ComplexityResult,
+    pub non_null_count: usize,
+    pub null_count: usize,
+}
+pub fn run_dataset_column_entropy<'a>(
+    column_a: &[Option<&'a str>],
+    column_b: Option<&[Option<&'a str>]>,
+) -> ColumnEntropyOutput;
+```
+
+Distinct-value bins are sorted alphabetically on both ports for determinism.
+`nonNullCount`/`non_null_count` for the two-column case counts rows where
+BOTH columns are non-null.
+
 ## § 7 — The catalog (SPEC § 8)
 
 **Swift**
@@ -485,15 +887,25 @@ pub fn recipe_names() -> Vec<String>;
 The descriptor strings and field shape match across versions byte-for-byte
 (SPEC § 8, C-8). The catalog lists exactly the recipes present in both
 versions; a recipe enters only when both ports land together (SPEC § 8).
-Today that is all twenty-five shipped recipes: the two foundational recipes
-**grounded_synthesis** and **migration_benchmark**, the eighteen reasoning
+Today that is all thirty shipped recipes: the two foundational recipes
+**grounded_synthesis** and **migration_benchmark**; the twenty reasoning
 lenses (`keystones`, `constellation`, `free_association`, `latent_themes`,
-`theme_weather`, `bias`, `drift`, `contradiction`, `trust_grounded_synthesis`,
-`partial_cue_recall`, `anticipate`, `tunnel_successor`, `mind_overlap`,
-`estate_divergence`, `moment`, `rhythm`, `precedence`, `complexity`), the
-three knowledge-discovery recipes `association_rules`, `apriori_rules`, and
-`formal_concepts`, the steerable-fusion recipe `shaped_recall`, and the
-exploratory-recall recipe `recall_exploratory`.
+`theme_weather`, `bias`, `drift`, `cohesion`, `lens_contradiction`,
+`node_motion`, `trust_grounded_synthesis`, `partial_cue_recall`,
+`anticipate`, `tunnel_successor`, `mind_overlap`, `estate_divergence`,
+`moment`, `rhythm`, `precedence`, `complexity`); the three
+knowledge-discovery recipes `association_rules`, `apriori_rules`, and
+`formal_concepts`; the steerable-fusion recipe `shaped_recall`; the
+exploratory-recall recipe `recall_exploratory`; and the three
+distillation-family recipes `consolidate`, `distilled_recall`, and
+`recollect`.
+
+**Catalog-only lens note:** `cohesion`, `lens_contradiction`, and
+`node_motion` are registered as descriptors in both versions but their
+implementing `Recipe` types are forthcoming. `cohesion` is backed by the
+`Contradiction.swift` / `run_contradiction` implementation (the statistical
+content-cohesion anomaly detector registered under its new catalog name);
+`lens_contradiction` and `node_motion` have no implementing body yet.
 
 ---
 
@@ -534,7 +946,7 @@ every row, so it is stated once here rather than repeated:
 | Capability set | `NeuronKitCapability` enum (`NeuronKitCapability.swift:34`) | `NeuronKitCapability` enum (`capability.rs:19`) | public both | 9 cases; camelCase ↔ PascalCase; `rawValue`/`raw_value` strings match byte-for-byte | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
 | Shipped capabilities | `shippedNeuronKitCapabilities` let (`NeuronKitCapability.swift:81`) | `shipped_capabilities()` fn (`capability.rs:82`) | public both | Swift constant `Set` / Rust fn returning `Vec` (same membership) | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
 | Capability verify | `verifyCapabilities(...)` fn (`NeuronKitCapability.swift:93`) | `verify_capabilities(...)` fn (`capability.rs:93`) | public both | Swift `throws` / Rust `Result` — deterministic first-missing order matches | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
-| Recipe error | `RecipeError` enum (`RecipeError.swift:24`) | `RecipeError` enum (`error.rs:18`) | public both | 6 cases — names, payloads, `description`/`Display` strings match byte-for-byte | `RecipeErrorTests.swift` + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
+| Recipe error | `RecipeError` enum (`RecipeError.swift:24`) | `RecipeError` enum (`error.rs:18`) | public both | 8 cases — names, payloads, `description`/`Display` strings match byte-for-byte; includes DoS-guard cases `tooManyPlans`/`TooManyPlans` and `tooManyOriginEntries`/`TooManyOriginEntries` | `RecipeErrorTests.swift` + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
 | Substrate error | `SubstrateError` struct (`RecipeRunError.swift:36`) | `SubstrateError` struct (`error.rs:102`) | public both | `operation: String, detail: String`; `"SubstrateError.{op}: {detail}"` | `RecipeRunErrorTests.swift` + `error.rs #[cfg(test)]` | Confirmed |
 | Run-error wrapper | `RecipeRunError` enum (`RecipeRunError.swift:70`) | `RecipeRunError` enum (`error.rs:135`) | public both | 2 cases `.recipe`/`.substrate`; Swift `init`+`asRunError`, Rust `From` impls | `RecipeRunErrorTests.swift` (15) + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
 | Recipe descriptor | `RecipeDescriptor` struct (`RecipeCatalog.swift:21`) | `RecipeDescriptor` struct (`catalog.rs:20`) | public both | identical fields; Rust serde-renames `required_capabilities`→`requiredCapabilities` | `RecipeCatalogTests.swift` + `catalog.rs #[cfg(test)]` | Confirmed |
@@ -572,9 +984,11 @@ every row, so it is stated once here rather than repeated:
 
 ### Reasoning-lens recipes (SPEC § 4.2)
 
-> NOTE: all eighteen lenses are authored in both ports (Swift
+> NOTE: all twenty lenses are authored in both ports (Swift
 > caseless-`enum` namespaces with a `public static func run`; Rust free
 > `run_*` fns), as § 6 states. Each row below is read-anchored to both.
+> The three catalog-only entries (`cohesion`, `lens_contradiction`,
+> `node_motion`) are described in separate concordance rows below.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
@@ -589,8 +1003,11 @@ every row, so it is stated once here rather than repeated:
 | Dismissal rate | `DismissalRate` struct (`Bias.swift:8`) | *(Rust `BiasReport.dismissal: Vec<(String, f64)>`, `bias_recipe.rs:37`)* | Swift public struct; Rust: inline tuple | Swift names the `(nodeId, rate)` pair as a struct (ADR-017: nodeId = parentNodeId); Rust inlines it as a tuple field in `BiasReport` (sanctioned: same data, Swift gives it a nominal type) | `BiasTests.swift` + `bias_recipe.rs #[cfg(test)]` (report parity) | Confirmed |
 | Drift (surprise) | `Drift` enum (`Drift.swift:29`) | `run_drift` fn (`drift_recipe.rs:38`) | public both | Swift enum-namespace `static run` / Rust free fn | `DriftTests.swift` + `drift_recipe.rs #[cfg(test)]` | Confirmed |
 | Drift output | `DriftOutput` struct (`Drift.swift:7`) | `DriftOutput` struct (`drift_recipe.rs:22`) | public both | `drift: DriftScore`, before/after counts; identical | `DriftTests.swift` + `drift_recipe.rs #[cfg(test)]` | Confirmed |
-| Contradiction (surprise) | `Contradiction` enum (`Contradiction.swift:28`) | `run_contradiction` fn (`contradiction_recipe.rs:32`) | public both | Swift enum-namespace `static run` / Rust free fn | `ContradictionTests.swift` + `contradiction_recipe.rs #[cfg(test)]` | Confirmed |
+| Cohesion / contradiction (surprise) | `Contradiction` enum (`Contradiction.swift:28`) | `run_contradiction` fn (`contradiction_recipe.rs:32`) | public both | Swift enum-namespace `static run` / Rust free fn; catalog name `cohesion` (renamed from `contradiction` — statistical shingle-similarity anomaly detection) | `ContradictionTests.swift` + `contradiction_recipe.rs #[cfg(test)]` | Confirmed |
 | Contradiction output | `ContradictionOutput` struct (`Contradiction.swift:8`) | `ContradictionOutput` struct (`contradiction_recipe.rs:22`) | public both | `outliers: [String]`, `considered: Int`; identical | `ContradictionTests.swift` + `contradiction_recipe.rs #[cfg(test)]` | Confirmed |
+| Cohesion catalog entry | *(literal descriptor in `RecipeCatalog.swift`)* | *(literal descriptor in `catalog.rs`)* | catalog-only both | No dedicated `Recipe` type; backed by `Contradiction`/`run_contradiction`; descriptor registered in both versions | `RecipeCatalogTests.swift` + `catalog.rs #[cfg(test)]` (catalog-all count) | Confirmed |
+| Lens contradiction catalog entry | *(literal descriptor in `RecipeCatalog.swift`)* | *(literal descriptor in `catalog.rs`)* | catalog-only both | Explicit KG contradiction detection; implementing recipe forthcoming; descriptor registered in both versions | `RecipeCatalogTests.swift` + `catalog.rs #[cfg(test)]` (catalog-all count) | Confirmed |
+| Node motion catalog entry | *(literal descriptor in `RecipeCatalog.swift`)* | *(literal descriptor in `catalog.rs`)* | catalog-only both | Diffusion node layer; implementing recipe forthcoming; descriptor registered in both versions | `RecipeCatalogTests.swift` + `catalog.rs #[cfg(test)]` (catalog-all count) | Confirmed |
 | Trust lens (grounding) | `TrustLens` enum (`TrustLens.swift:43`) | `run_trust_grounded_synthesis` fn (`trust_lens_recipe.rs:62`) | public both | Swift enum-namespace `static run` / Rust free fn | `TrustLensTests.swift` + `trust_lens_recipe.rs #[cfg(test)]` | Confirmed |
 | Trust output | `TrustGroundedOutput` struct (`TrustLens.swift:9`) | `TrustGroundedOutput` struct (`trust_lens_recipe.rs:31`) | public both | v1.1.0: `context`, `rankedIDs`/`ranked_ids`, `highTrustCount`/`high_trust_count`, `calibratedConfidences`/`calibrated_confidences` (optional) | `TrustLensTests.swift` + `trust_lens_recipe.rs #[cfg(test)]` | Confirmed |
 | Partial-cue recall (associative) | `PartialCueRecall` enum (`PartialCueRecall.swift:62`) | `run_partial_cue_recall` fn (`feels_like_recipe.rs:59`) | public both | Swift enum-namespace `static run` / Rust free fn | `PartialCueRecallTests.swift` + `feels_like_recipe.rs #[cfg(test)]` | Confirmed |
@@ -629,6 +1046,36 @@ every row, so it is stated once here rather than repeated:
 | Shaped-recall recipe | `ShapedRecall` struct (`ShapedRecall.swift`) | `run_shaped_recall` free fn + `ShapedRecallOutput` struct (`shaped_recall.rs`) | public both | Swift `Recipe` struct (async) `ShapedRecall().run(input:estate:kit:)` with nested `Input` (query/preset/filter/limit) + `Output` (matches/appliedPreset) / Rust free `run_shaped_recall(coord, handle, query, preset, filter, limit, now)` (sync Result) returning `ShapedRecallOutput`. Resolves a named GLK `RecallShape.preset` and runs `.unionBest`/`.matrixAware` recall with it; `"balanced"`/unknown ⇒ unsteered. Reuses `PreciseMatch` for matches. Registered as `shaped_recall` in the catalog. | `ShapedRecallTests.swift` / `shaped_recall.rs #[cfg(test)]` | Confirmed |
 | Exploratory-recall recipe | `ExploratoryRecall` struct (`ExploratoryRecall.swift`) | `run_exploratory_recall` free fn + `ExploratoryRecallOutput` struct (`exploratory_recall_recipe.rs`) | public both | Swift `Recipe` struct (async) with nested `Input` (wing/seedDrawerID/steps/restartProbability/k) + `Output` (results/visitedCount) / Rust free `run_exploratory_recall(coord, handle, wing, seed_drawer_id, steps, restart_probability, k)` (sync Result) returning `ExploratoryRecallOutput`. Both build a RowId adjacency from the tunnel graph, derive the RNG seed via FNV hash64, and delegate to `SubstrateML.RandomWalks.walkWithRestart`/`walk_with_restart`. Excludes seed from results; k=0 returns all. Declares `exploratoryRecall` capability. | `ExploratoryRecallTests.swift` (7 tests) / `exploratory_recall_recipe.rs #[cfg(test)]` (7 tests, CK-ER-1..7) | Confirmed |
 | Exploratory result | `ExploratoryResult` struct (`ExploratoryRecall.swift`) | `ExploratoryResult` struct (`exploratory_recall_recipe.rs`) | public both | `drawerID`/`drawer_id`: UUID string; `visitCount`/`visit_count`: Int/u64 — visit count for that drawer. Sorted descending by visit count, then ascending by drawer id (stable tie-break, cross-version identical). | `ExploratoryRecallTests.swift` + `exploratory_recall_recipe.rs #[cfg(test)]` | Confirmed |
+
+### Distillation-family recipes (SPEC § 4.5)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Consolidate recipe | `Consolidate` struct (`Consolidate.swift:31`) | `run_consolidate` fn + `ConsolidateInput`/`ConsolidateOutput` structs (`consolidate.rs`) | public both | Swift `Recipe` struct (async) / Rust free fn (sync). `clusterID`/`cluster_id` and `includeHeld`/`include_held` are no-ops on both ports (API-stability parameters). Rust error type is `VerbDispatchError` (not `RecipeRunError`) — no recipe-guard error possible. | `ConsolidateTests.swift` + `consolidate.rs #[cfg(test)]` | Confirmed |
+| Consolidate input | `Consolidate.Input` (`Consolidate.swift:36`) | `ConsolidateInput` struct (`consolidate.rs`) | public both | Swift nested / Rust flat; `clusterID`/`cluster_id` (Optional String), `includeHeld`/`include_held` (Bool/bool) | `ConsolidateTests.swift` + `consolidate.rs #[cfg(test)]` | Confirmed |
+| Consolidate output | `Consolidate.Output` (`Consolidate.swift:73`) | `ConsolidateOutput` struct (`consolidate.rs`) | public both | `factoidsProduced`/`factoids_produced`: Int/usize — count of factoid drawers produced | `ConsolidateTests.swift` + `consolidate.rs #[cfg(test)]` | Confirmed |
+| Distilled discrimination level | `DistilledDiscriminationLevel` enum (`DistilledRecall.swift:36`) | `DistilledDiscriminationLevel` enum (`distilled_recall.rs:49`) | public both | 4 cases `single/Single`, `high/High`, `medium/Medium`, `low/Low`; same thresholds (HIGH_MARGIN=0.25, LOW_MARGIN=0.05, LOW_SPREAD=0.15) | `DistilledRecallTests.swift` + `distilled_recall.rs #[cfg(test)]` | Confirmed |
+| Distilled match | `DistilledMatch` struct (`DistilledRecall.swift:48`) | `DistilledMatch` struct (`distilled_recall.rs:64`) | public both | `id`, `prose`, `confidence: Float32/f32`, `sourceCount`/`source_count`, `snr`, `deltaType`/`delta_type` (Optional String), `uncertain`, `injectionDepth`/`injection_depth: InjectionDepth`. Swift additionally conforms to `Codable` (InjectionDepth serialised as raw String name). | `DistilledRecallTests.swift` + `distilled_recall.rs #[cfg(test)]` | Confirmed |
+| DistilledRecall recipe | `DistilledRecall` struct (`DistilledRecall.swift:142`) | `run_distilled_recall` fn + `DistilledRecallInput`/`DistilledRecallOutput` structs (`distilled_recall.rs`) | public both | Swift `Recipe` struct (async) / Rust free fn (sync; `_now` accepted for API parity, unused). Discrimination classifier also public in Rust (`classify_distilled_discrimination`). | `DistilledRecallTests.swift` + `distilled_recall.rs #[cfg(test)]` | Confirmed |
+| Expanded source | `ExpandedSource` struct (`Recollect.swift:23`) | `ExpandedSource` struct (`recollect.rs:56`) | public both | `id: String`, `room: String`, `content: String`; identical. Swift additionally conforms to `Codable`. | `RecollectTests.swift` + `recollect.rs #[cfg(test)]` | Confirmed |
+| Recollect error | `RecollectError` enum (`Recollect.swift:41`) | `RecollectError` enum (`recollect.rs:74`) | public both | Swift: 3 cases (`notADistilledDrawer(id:)`, `factoidNotFound(id:)`, `noSourceTunnels(id:)`). Rust: same 3 structural cases (named fields) + `VerbDispatch(String)` arm for substrate I/O errors (the `async throws` boundary absorbs these in Swift). `Display`/`description` strings match for the 3 structural cases. | `RecollectTests.swift` + `recollect.rs #[cfg(test)]` | Confirmed |
+| Recollect recipe | `Recollect` struct (`Recollect.swift:69`) | `run_recollect` fn + `RecollectInput`/`RecollectOutput` structs (`recollect.rs`) | public both | Swift `Recipe` struct (async throws `RecollectError`) / Rust free fn (`Result<RecollectOutput, RecollectError>`; `_now` accepted for API compatibility, unused). Output fields: `factoidID`/`factoid_id`, `prose`, `confidence`, `sourceCount`/`source_count`, `deltaType`/`delta_type`, `sources: [ExpandedSource]`. | `RecollectTests.swift` + `recollect.rs #[cfg(test)]` | Confirmed |
+
+### Dataset analysis utilities (non-catalog, SPEC § 4b)
+
+Not `Recipe`-conforming. No catalog entry. No capability gate. Pure stateless
+functions intended to be called directly from the tool layer with
+pre-fetched dataset column data.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Dataset associations | `DatasetAssociations` enum (`DatasetAssociations.swift:32`) | `run_dataset_associations` fn + `DatasetAssociationsOutput` struct (`dataset_associations.rs`) | public both | Swift caseless-enum namespace `static run` / Rust free fn. Input: `rows: [[String:String]]` / `rows: &[HashMap<String,String>]`. Label cap 64. Output: `rules: [AssociationRuleResult]`, `rowCount`/`row_count`, `labelOverflow`/`label_overflow`. | `DatasetAssociationsTests.swift` + `dataset_associations.rs #[cfg(test)]` | Confirmed |
+| Dataset cohesion column value | `DatasetColumnValue` enum (`DatasetCohesion.swift:9`) | `DatasetColumnValue` enum (`dataset_cohesion.rs`) | public both | 3 cases `numeric(Double/f64)`, `categorical(String)`, `null/Null`; identical | `DatasetCohesionTests.swift` + `dataset_cohesion.rs #[cfg(test)]` | Confirmed |
+| Row anomaly score | `RowAnomalyScore` struct (`DatasetCohesion.swift:19`) | `RowAnomalyScore` struct (`dataset_cohesion.rs`) | public both | `rowIndex`/`row_index: Int/usize`, `score: Double/f64`; identical. Sort: score desc, index asc for ties — deterministic across ports. | `DatasetCohesionTests.swift` + `dataset_cohesion.rs #[cfg(test)]` | Confirmed |
+| Dataset cohesion output | `DatasetCohesionOutput` struct (`DatasetCohesion.swift:32`) | `DatasetCohesionOutput` struct (`dataset_cohesion.rs`) | public both | `topAnomalies`/`top_anomalies`, `rowsScored`/`rows_scored: Int/usize` | `DatasetCohesionTests.swift` + `dataset_cohesion.rs #[cfg(test)]` | Confirmed |
+| Dataset cohesion scorer | `DatasetCohesion` enum (`DatasetCohesion.swift:92`) | `run_dataset_cohesion` fn + `SCAN_CAP: usize` (`dataset_cohesion.rs`) | public both | Swift caseless-enum namespace; Rust free fn + constant. `scanCap`/`SCAN_CAP = 10_000`. All arithmetic f64/Double — no Float32. | `DatasetCohesionTests.swift` + `dataset_cohesion.rs #[cfg(test)]` | Confirmed |
+| Column entropy output | `DatasetComplexity.ColumnEntropyOutput` struct (`DatasetComplexity.swift:29`) | `ColumnEntropyOutput` struct (`dataset_complexity.rs`) | public both | `result: ComplexityResult`, `nonNullCount`/`non_null_count`, `nullCount`/`null_count: Int/usize`. Swift nested / Rust flat. | `DatasetComplexityTests.swift` + `dataset_complexity.rs #[cfg(test)]` | Confirmed |
+| Dataset column entropy | `DatasetComplexity` enum (`DatasetComplexity.swift:26`) | `run_dataset_column_entropy` fn (`dataset_complexity.rs`) | public both | Swift caseless-enum namespace `static runColumn(columnA:columnB:)` / Rust free `run_dataset_column_entropy<'a>(column_a, column_b)`. Input: `[String?]` / `&[Option<&str>]`. Two-column case: `nullCount` counts rows where EITHER column is nil. Bins sorted alphabetically for determinism. | `DatasetComplexityTests.swift` + `dataset_complexity.rs #[cfg(test)]` | Confirmed |
 
 ### Shared-vector conformance artifact
 
@@ -706,6 +1153,48 @@ disabled.
 *End of CognitionKit Interface.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-07-16
+Closed two missing RecipeError cases in both ports (verifier gap):
+
+- § 4 Swift `RecipeError`: added `tooManyPlans(count: Int, maximum: Int)` and
+  `tooManyOriginEntries(count: Int, maximum: Int)` (cases 7 and 8); both were
+  present in `RecipeError.swift:63,69` but absent from the doc.
+- § 4 Rust `RecipeError`: added `TooManyPlans { count: usize, maximum: usize }` and
+  `TooManyOriginEntries { count: usize, maximum: usize }` (cases 7 and 8); added
+  public constants `MAX_MIGRATION_PLANS = 20` and `MAX_MIGRATION_ORIGIN_ENTRIES = 5000`
+  (`error.rs:65-66`).
+- § 4 prose note: updated case count reference from 6 to 8.
+- § 5 migration benchmark throws description: added `tooManyPlans` and
+  `tooManyOriginEntries` guards (DoS bounds) to the guard sequence, placed before
+  `duplicatePlanName` to match the enforcement order in `migration_orchestration.rs`.
+- Concordance table "Recipe error" row: updated "6 cases" to "8 cases" and named the
+  two new DoS-guard cases.
+
+### 1.4.0 -- 2026-07-16
+Additive audit (MX-TAB dataset series + distillation-family + new lenses):
+
+- § 6 header updated: "eighteen" → "twenty" reasoning-lens recipes.
+- § 6 Surprise: updated `contradiction` entry to reflect catalog rename to
+  `cohesion`; added `lens_contradiction` and `node_motion` as catalog-only
+  lens entries (descriptor registered, implementing recipe forthcoming in both
+  ports).
+- Added § 6a — Distillation-family recipes: full Swift/Rust signatures for
+  `Consolidate`, `DistilledRecall` (with `DistilledDiscriminationLevel` and
+  `DistilledMatch`), and `Recollect` (with `ExpandedSource` and
+  `RecollectError`). Notes the `VerbDispatchError` vs `RecipeRunError`
+  difference in `run_consolidate`, and the extra `VerbDispatch` arm in
+  Rust's `RecollectError`.
+- Added § 6b — Dataset analysis utilities: full Swift/Rust signatures for
+  `DatasetAssociations`, `DatasetCohesion` (with `DatasetColumnValue`,
+  `RowAnomalyScore`, `DatasetCohesionOutput`), and `DatasetComplexity`
+  (with `ColumnEntropyOutput`). Noted as non-catalog, non-Recipe utilities.
+- § 7 catalog count updated: 25 → 30; full catalog listing updated.
+  Added catalog-only lens note.
+- Concordance tables: updated `contradiction` row (catalog name now `cohesion`);
+  added rows for `cohesion`, `lens_contradiction`, and `node_motion` catalog
+  entries; added distillation-family concordance section (7 new rows);
+  added dataset analysis utilities concordance section (7 new rows).
 
 ### 1.3.0 -- 2026-06-21
 ADR-017 native node ID migration (NT-K1): renamed `DismissalRate.room` →

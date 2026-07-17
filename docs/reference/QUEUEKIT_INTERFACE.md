@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-07-03
-version: 1.4.0
+date: 2026-07-16
+version: 1.5.1
 description: Public API surface for QueueKit in both the Swift and Rust ports.
 spec_type: kit
 package: QueueKit
@@ -49,7 +49,11 @@ ConvergenceKit (SPEC § 3, § 8).
 - `src/job.rs` — wire types: `Job`, `JobId`, `StreamId`, `SessionId`,
   `HLC` (consumed from substrate-lib), `ObservationStatus`, `ArtifactRef`, `CodableValue`,
   `SignalFile`, and the encoding free functions
-- `src/backend.rs` — `QueueBackend` trait
+- `src/backend.rs` — `QueueBackend` trait and `WatchHandler` type alias
+- `src/facade.rs` — `QueueKit<B>` facade (mirrors Swift's `QueueKit` class)
+  and `QueueLatencyWindow`
+- `src/drain_lease.rs` — `DrainLease`, `DRAIN_LEASE_TTL_SECS`,
+  `DRAIN_LEASE_HEARTBEAT_SECS`, `wall_now_secs`
 - `src/filesystem.rs` — `FilesystemBackend`
 - `src/persistencekit.rs` — `PersistenceKitBackend` (behaviour-conformant,
   feature `persistencekit`)
@@ -79,6 +83,9 @@ The public entry point; mounts one backend and delegates to it
 public final class QueueKit: Sendable {
     public let backend: any QueueBackend
     public let root: URL?
+    /// Estate tag for queue.* telemetry metrics. Set at mount time by the
+    /// composition layer (e.g. GeniusLocusKit) before any drain calls.
+    nonisolated(unsafe) public var estateTag: String   // default "unknown"
 
     /// Mount the Filesystem backend at `root`: creates the four
     /// maildir subdirectories and sweeps stale tmp/ files (SPEC § 4 I-2, B-7).
@@ -96,9 +103,28 @@ public final class QueueKit: Sendable {
 public let staleTmpThreshold: TimeInterval   // 5 * 60
 ```
 
-**Rust:** the crate exposes the backends directly (`FilesystemBackend`,
-`PersistenceKitBackend`); there is no separate Interface wrapper. Callers
-hold a `Box<dyn QueueBackend>` and call the trait methods of § 3.
+**Rust:** `pub struct QueueKit<B: QueueBackend>` in `src/facade.rs`
+(re-exported from `lib.rs` as `queuekit::QueueKit`). It mirrors the Swift
+facade: same four permanent method names (`send`/`drain`/`watch`/`reply`),
+same drain telemetry via IntellectusLib, and same `estate_tag` field. The
+generic parameter `B` is required because the `watch` method carries a
+generic handler through the `QueueKit` surface — the trait itself uses a
+boxed `WatchHandler` to stay `dyn`-compatible, but the facade's `watch`
+re-introduces the generic so callers do not need to box manually. For the
+common case use `QueueKit<FilesystemBackend>`.
+
+```rust
+pub struct QueueKit<B: QueueBackend> {
+    // fields private; accessed through methods below
+}
+impl<B: QueueBackend> QueueKit<B> {
+    pub fn new(backend: B) -> Self
+    /// Set the estate tag used in queue.* telemetry metrics. Mirrors Swift `estateTag`.
+    pub fn set_estate_tag(&self, tag: &str)
+    /// Access the underlying backend directly (for tests or advanced use).
+    pub fn backend(&self) -> &B
+}
+```
 
 ### `QueueBackend` (protocol)
 
@@ -334,6 +360,101 @@ public struct MissionContext: Sendable, Codable, Hashable {
 
 (No Rust/Python equivalent; it is a caller-domain convenience.)
 
+### `DrainLease`
+
+A stream-keyed heartbeat-TTL drain lease (SPEC I-3, ADR-021 Decision 7, T2).
+Guarantees exactly one drainer per `(estate, stream)` pair. Each stream has an
+independent lease file (`<dir>/<stream>.drain.lease`), so two streams can be
+held concurrently. TTL 15 s; heartbeat cadence 5 s; write-then-re-read race
+resolution; atomic temp+rename write. Filesystem form only (Postgres-estate
+DB-backed lease is deferred).
+
+**Swift:**
+
+```swift
+public struct DrainLease: Sendable {
+    public let leaseURL: URL
+    public let owner: String       // "pid-<PID>-<instanceToken>"
+    public let ttl: TimeInterval
+    public static let heartbeatInterval: TimeInterval   // 5 s
+
+    public init(directory: URL, stream: String, instanceToken: String,
+                ttl: TimeInterval = 15)
+
+    /// Acquire iff absent or expired. Returns true iff this drainer holds it.
+    public func tryAcquire(now: Date) -> Bool
+    /// Refresh the heartbeat while holding the lease.
+    public func heartbeat(now: Date)
+    /// True iff another drainer holds a fresh (non-expired) lease.
+    public func isHeldByOther(now: Date) -> Bool
+    /// Release on clean teardown (removes the lease file immediately).
+    public func release()
+}
+```
+
+**Rust:** `pub struct DrainLease` in `src/drain_lease.rs`; re-exported from
+`lib.rs`. Methods: `new(dir, stream, owner)`, `with_ttl(dir, stream, owner, ttl)`,
+`try_acquire(now_secs: f64) -> bool`, `heartbeat(now_secs: f64)`,
+`is_held_by_other(now_secs: f64) -> bool`, `release()`. Constants:
+`DRAIN_LEASE_TTL_SECS: f64 = 15.0`, `DRAIN_LEASE_HEARTBEAT_SECS: f64 = 5.0`,
+`wall_now_secs() -> f64` (wall-clock helper for the heartbeat loop).
+
+### `QueueLatencyWindow` and `QueueLatencyWindowBox`
+
+Two related types that feed the `reportQueueStats` telemetry function (§ 3).
+`QueueLatencyWindow` accumulates raw drain-latency samples for percentile
+computation; `QueueLatencyWindowBox` wraps it in a `Mutex` so concurrent
+drain calls on the same `QueueKit` instance share one box per estate stream
+without corrupting the sample array.
+
+**Swift:**
+
+```swift
+/// Rolling window of drain-latency samples. NOT synchronised itself —
+/// access goes through QueueLatencyWindowBox.
+public struct QueueLatencyWindow: Sendable {
+    public init(capacity: Int = 100)
+    /// Append a sample (ms), evicting the oldest when over capacity.
+    public mutating func append(_ ms: Double)
+    /// p-th percentile (0–100) of the current window.
+    /// Returns 0 when empty or when `p` is out-of-range / non-finite.
+    public func percentile(_ p: Double) -> Double
+}
+
+/// Thread-safe holder combining the latency window and emission throttle
+/// under a single Mutex. The combined lock makes sample-and-check-throttle
+/// one atomic operation, preventing a concurrent drain from racing between
+/// shouldEmit == true and the subsequent gate update.
+public final class QueueLatencyWindowBox: Sendable {
+    public init(capacity: Int = 100)
+
+    /// Append a latency sample and check the emission throttle atomically.
+    ///
+    /// The sample is ALWAYS appended so the rolling window accumulates every
+    /// drain tick — aggregate p50/p95 reflects all ticks, not only the ones
+    /// that fire an emission.
+    ///
+    /// - Parameters:
+    ///   - ms: Drain latency in milliseconds.
+    ///   - now: Caller-supplied epoch-seconds (never calls Date() internally).
+    ///   - interval: Minimum seconds between Intellectus.report emissions.
+    /// - Returns: `(p50, p95, shouldEmit)` — percentiles from the current
+    ///   window plus a flag that is `true` at most once per `interval`.
+    ///   When `shouldEmit` is `true`, `lastEmissionEpoch` is updated inside
+    ///   the lock.
+    public func sample(_ ms: Double, now: Double, interval: Double)
+        -> (p50: Double, p95: Double, shouldEmit: Bool)
+}
+```
+
+**Rust:** `QueueLatencyWindow` is `pub` in `src/facade.rs` (re-exported from
+`lib.rs`). The Rust `QueueKit<B>` facade holds it as `Mutex<QueueLatencyWindow>`
+directly — there is no separate `QueueLatencyWindowBox` type; thread safety is
+internal to the facade. The `QueueLatencyWindowBox` is a **Swift-only** public
+type (see § 7). Callers do not interact with either type directly on the Rust
+side; telemetry is emitted inline by the Rust `drain` / `drain_for_stream`
+methods.
+
 ### Backends: `FilesystemBackend`, `PersistenceKitBackend`
 
 The two concrete backends (plus InMemory, which is
@@ -345,6 +466,11 @@ The two concrete backends (plus InMemory, which is
 public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
     public let root: URL
     public init(root: URL, hlcGenerator: HLCGenerator) throws
+    // All-streams reclaim: resets every "cur/" file to "new/" on mount after a
+    // crash. Not stream-scoped (maildir has one shared cur/). Called internally
+    // by QueueKit.init(root:) to recover orphaned in-flight jobs.
+    @discardableResult
+    public func reclaimInFlight() async throws -> Int
 }
 
 public let queueKitTableName: String   // "queuekit_jobs"
@@ -361,6 +487,11 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
     // cur job of one batch session in one update. SPEC B-4a. Interface: reply(session:).
     @discardableResult
     public func completeSession(_ session: SessionID, status: ObservationStatus) async throws -> Int
+    // Stream-scoped reclaim: resets every "cur" row for stream back to "new".
+    // Called via QueueKit.reclaimInFlight(stream:). Gate: DrainLease.tryAcquire
+    // must have succeeded for stream before this is called.
+    @discardableResult
+    public func reclaimInFlight(stream: StreamID) async throws -> Int
 }
 ```
 
@@ -388,6 +519,11 @@ Behavioral contracts: SPEC § 5, B-1…B-5.
 ```swift
 extension QueueKit {
     public func send(_ job: Job) async throws                       // SPEC B-1
+    /// Bulk twin of `send`: enqueues all jobs and fsyncs `new/` ONCE. Returns
+    /// the count written. FilesystemBackend overrides for a single durability
+    /// barrier; the default loops `send`. Rust twin: `QueueKit::send_batch`.
+    @discardableResult
+    public func send(batch jobs: [Job]) async throws -> Int
     public func drain() async throws -> [(job: Job, sessionID: SessionID)]   // SPEC B-2 (all streams)
     public func drain(stream: StreamID) async throws -> [(job: Job, sessionID: SessionID)]  // ADR-021 D7 — stream-scoped claim
     public func watch(handler: @escaping @Sendable (Job, SessionID) async throws -> Void) async throws  // SPEC B-3
@@ -400,6 +536,13 @@ extension QueueKit {
     public func reply(to jobID: JobID, status: ObservationStatus, artifacts: [ArtifactRef]) async throws // SPEC B-4
     @discardableResult
     public func reply(session: SessionID, status: ObservationStatus) async throws -> Int  // SPEC B-4a (single-pass batch completion)
+    /// Batch twin of `reply(to:status:artifacts:)`: retires a list of jobs by id
+    /// in one pass. FilesystemBackend overrides with one `cur/` scan and a single
+    /// batched durability barrier. Returns the count completed. Used by corpus
+    /// drain workers on backends without a session fast path. Rust twin:
+    /// `QueueKit::reply_batch`.
+    @discardableResult
+    public func reply(batch completions: [(jobID: JobID, status: ObservationStatus)]) async throws -> Int
     public func inFlight() async throws -> [Job]                    // SPEC B-5
     public func pendingCount() async throws -> Int                  // depth probe (new/ frontier, all streams)
     public func pendingCount(stream: StreamID) async throws -> Int  // ADR-021 D7 — per-stream depth probe
@@ -409,6 +552,14 @@ extension QueueKit {
     public func awaitDrain(stream: StreamID,
                            pollInterval: Duration = .milliseconds(20),
                            timeout: Duration = .seconds(30)) async throws    // stream-scoped twin (ADR-021 D7)
+    /// Reset every stale in-flight ("cur") job for `stream` back to "new" so
+    /// the next drain(stream:) re-claims them. Returns the count reclaimed.
+    /// Gate: call ONLY immediately after DrainLease.tryAcquire succeeds for
+    /// `stream` — the lease guarantees the prior drainer is dead. Delegates to
+    /// PersistenceKitBackend.reclaimInFlight(stream:); returns 0 on other backends.
+    /// Rust twin: `QueueKit::reclaim_in_flight_for_stream`.
+    @discardableResult
+    public func reclaimInFlight(stream: StreamID) async throws -> Int
 }
 ```
 
@@ -453,9 +604,44 @@ processes only its own stream, so the barrier counts
 blocks on other streams' jobs (the post-T4/T6 encode-stall). Same
 progress-based deadline, scoped to the stream's outstanding count.
 
-Rust parity: `QueueBackend::await_drain` / `await_drain_for_stream`
-(trait default impls surfaced on the `QueueKit` facade) implement the
-identical contract, including the progress-based deadline.
+Rust parity: the Rust `QueueKit<B>` facade exposes an identical method set:
+
+```rust
+impl<B: QueueBackend> QueueKit<B> {
+    pub fn send(&self, job: &Job) -> Result<(), QueueError>
+    pub fn send_batch(&self, jobs: &[Job]) -> Result<usize, QueueError>
+    pub fn drain(&self, now_epoch_secs: f64) -> Result<Vec<(Job, SessionId)>, QueueError>
+    pub fn drain_for_stream(&self, stream: &StreamId, now_epoch_secs: f64)
+        -> Result<Vec<(Job, SessionId)>, QueueError>
+    pub fn watch<F>(&self, handler: F) -> Result<(), QueueError>
+        where F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync + 'static
+    pub fn reply(&self, job_id: &JobId, status: ObservationStatus,
+                 artifacts: Vec<ArtifactRef>) -> Result<(), QueueError>
+    #[must_use = "a return of 0 means the caller must fall back to per-job reply"]
+    pub fn reply_session(&self, session: &SessionId, status: ObservationStatus)
+        -> Result<usize, QueueError>
+    pub fn reply_batch(&self, completions: &[(JobId, ObservationStatus)])
+        -> Result<usize, QueueError>
+    pub fn in_flight(&self) -> Result<Vec<Job>, QueueError>
+    pub fn pending_count(&self) -> Result<usize, QueueError>
+    pub fn pending_count_for_stream(&self, stream: &StreamId) -> Result<usize, QueueError>
+    pub fn completed(&self, stream_id: Option<&StreamId>) -> Result<Vec<Job>, QueueError>
+    pub fn reclaim_in_flight_for_stream(&self, stream: &StreamId) -> Result<usize, QueueError>
+    pub fn await_drain(&self, poll_interval: Duration, timeout: Duration) -> Result<(), QueueError>
+    pub fn await_drain_for_stream(&self, stream: &StreamId,
+        poll_interval: Duration, timeout: Duration) -> Result<(), QueueError>
+}
+```
+
+The Rust `drain` and `drain_for_stream` take an explicit `now_epoch_secs: f64`
+(wall-clock epoch seconds) for telemetry emission throttling; the Swift twin
+reads `Date().timeIntervalSince1970` internally. This is a sanctioned signature
+difference: in Rust the caller owns the clock value; in Swift the facade reads
+it internally. The difference is noted in § 7.
+
+`reclaim_in_flight_for_stream` delegates to `PersistenceKitBackend::reclaim_in_flight_for_stream`
+when that backend is compiled in; returns `Ok(0)` for all other backends.
+Gate requirement identical to Swift: call only after `DrainLease::try_acquire` succeeds.
 
 ### `QueueBackend` protocol methods
 
@@ -468,9 +654,19 @@ public verbs to send/drain/watch/reply).
 ```swift
 public protocol QueueBackend: Sendable {
     func write(_ job: Job) async throws
+    // Default loops write; FilesystemBackend overrides with single-fsync bulk path.
+    func writeBatch(_ jobs: [Job]) async throws -> Int
     func drainAvailable() async throws -> [(job: Job, sessionID: SessionID)]
+    // Default delegates to drainAvailable() and filters; backends override for
+    // true per-stream isolation (avoids cross-stream claiming in shared queues).
+    func drainAvailable(stream: StreamID) async throws -> [(job: Job, sessionID: SessionID)]
+    func pendingCount() async throws -> Int
+    // Default delegates to pendingCount(); PK and Filesystem backends override.
+    func pendingCount(stream: StreamID) async throws -> Int
     func watch(handler: @escaping @Sendable (Job, SessionID) async throws -> Void) async throws
     func complete(_ jobID: JobID, status: ObservationStatus, artifacts: [ArtifactRef]) async throws
+    // Default loops complete; FilesystemBackend overrides with one-scan/one-fsync.
+    func completeBatch(_ completions: [(jobID: JobID, status: ObservationStatus)]) async throws -> Int
     func inFlight() async throws -> [Job]
     func completed(streamID: StreamID?) async throws -> [Job]
 }
@@ -479,19 +675,37 @@ public protocol QueueBackend: Sendable {
 **Rust:**
 
 ```rust
+/// Boxed handler type for `watch` — keeps `QueueBackend` dyn-compatible.
+pub type WatchHandler = Box<dyn Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync>;
+
 pub trait QueueBackend: Send + Sync {
     fn write(&self, job: &Job) -> Result<(), QueueError>;
+    // Default loops write; FilesystemBackend overrides with single-fsync bulk path.
+    fn write_batch(&self, jobs: &[Job]) -> Result<usize, QueueError> { /* default */ }
     fn drain_available(&self) -> Result<Vec<(Job, SessionId)>, QueueError>;
+    // Default delegates to drain_available() then filters; backends override.
+    fn drain_available_for_stream(&self, stream: &StreamId)
+        -> Result<Vec<(Job, SessionId)>, QueueError> { /* default */ }
     fn complete(&self, job_id: &JobId, status: ObservationStatus,
                 artifacts: Vec<ArtifactRef>) -> Result<(), QueueError>;
+    // Default loops complete; FilesystemBackend overrides with one-scan/one-fsync.
+    fn complete_batch(&self, completions: &[(JobId, ObservationStatus)])
+        -> Result<usize, QueueError> { /* default */ }
     fn in_flight(&self) -> Result<Vec<Job>, QueueError>;
     fn completed(&self, stream_id: Option<&StreamId>) -> Result<Vec<Job>, QueueError>;
-    // Required, no default: a backend that forgets pending_count / watch must
-    // fail to COMPILE, not at runtime (SDK compile-enforcement ruling). Mirrors
-    // the Swift protocol, where both are bare requirements.
+    // Required, no default: a backend that forgets these must fail to COMPILE.
     fn pending_count(&self) -> Result<usize, QueueError>;
-    fn watch<F>(&self, handler: F) -> Result<(), QueueError>
-    where F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync;
+    fn pending_count_for_stream(&self, stream: &StreamId)
+        -> Result<usize, QueueError> { /* default delegates to pending_count */ }
+    fn watch(&self, handler: WatchHandler) -> Result<(), QueueError>;
+    // Default impls: progress-based deadline poll loop (see § 3 QueueKit docs).
+    fn await_drain(&self, poll_interval: Duration, timeout: Duration)
+        -> Result<(), QueueError> { /* default */ }
+    fn await_drain_for_stream(&self, stream: &StreamId,
+        poll_interval: Duration, timeout: Duration) -> Result<(), QueueError> { /* default */ }
+    // Downcast hook: lets the facade specialise on PersistenceKitBackend for the
+    // session batch-completion fast path (mirrors Swift `backend as? PKBackend`).
+    fn as_any(&self) -> &dyn Any;
 }
 ```
 
@@ -499,6 +713,49 @@ pub trait QueueBackend: Send + Sync {
 `drain_available() -> list[tuple[Job, str]]`, `watch(handler)`,
 `complete(job_id, status, artifacts)`, `in_flight()`,
 `completed(stream_id)` — on the Filesystem backend only.
+
+### `reportQueueStats` (telemetry free function)
+
+A public top-level async function that emits `queue.*` metrics after each
+drain call. Callers (e.g. GeniusLocusKit `StandingSignalScheduler`) call it
+after every `drain(stream:)` invocation, passing the per-stream
+`QueueLatencyWindowBox` maintained across drain calls.
+
+**Swift:**
+
+```swift
+public func reportQueueStats(
+    backend: any QueueBackend,
+    drained: [(job: Job, sessionID: SessionID)],
+    drainStart: Double,
+    now: Double,
+    estateTag: String,
+    window: QueueLatencyWindowBox
+) async
+```
+
+Off-path cost is a single `Atomic<Bool>` load + branch when monitoring is
+disabled — effectively zero overhead. When enabled, `window.sample` is called
+on every drain tick (always accumulating the latency window) but all
+`Intellectus.report` calls are rate-limited to at most once per 30 seconds
+per estate stream (`EMISSION_INTERVAL_S`), preventing the metric-table flood
+observed in production (~6 M rows / 3 h at 100+ drains/sec).
+
+Metrics emitted (namespace `queue.*`; tags `estate` and `kit = "QueueKit"`):
+
+| Metric | Value |
+|---|---|
+| `queue.depth` | Pending count at emission time; omitted if `pendingCount()` fails — `queue.depth_unavailable` (value `1`) emitted instead to keep the failure observable without fabricating a false-zero depth |
+| `queue.drain_count` | `drained.count` |
+| `queue.idle_nonempty` | `1.0` when `depth > 0` and `drained.isEmpty`; `0.0` otherwise; omitted when depth is unknown |
+| `queue.latency_p50_ms` | Median drain latency (ms) over the rolling window since last emission |
+| `queue.latency_p95_ms` | 95th-percentile drain latency (ms) over the rolling window since last emission |
+| `queue.head_of_line_age_s` | Age of the oldest drained job (seconds); `0.0` sentinel when `depth > 0` and drain returned nothing (job age is unknown without reading job records); omitted when depth is unknown and drain is also empty |
+
+**Rust:** telemetry is emitted inline by the Rust `QueueKit<B>::drain` and
+`drain_for_stream` methods — there is no separate `report_queue_stats` free
+function in the Rust port. The emitted metrics and rate-limiting semantics are
+equivalent; the factoring into a free function is Swift-only.
 
 ## § 4 — Errors
 
@@ -519,6 +776,11 @@ public enum QueueError: Error, Sendable {
     case backendUnavailable(detail: String)
     case invalidTerminalStatus(ObservationStatus)
     case drainTimeout(pending: Int, inFlight: Int)   // awaitDrain made no progress within its timeout
+    /// A stream_id, job id, or other caller-supplied identifier contains a path
+    /// separator (`/`, `\`), equals `.` or `..`, or contains an ASCII control
+    /// character. Such identifiers can escape the queue root when used as
+    /// filename components.
+    case invalidIdentifier(id: String, reason: String)
 }
 ```
 
@@ -544,10 +806,13 @@ pub enum QueueError {
     BackendUnavailable(String),
     InvalidTerminalStatus(String),
     DrainTimeout { pending: usize, in_flight: usize },
+    /// Identifier contains a path separator, `.`, `..`, or an ASCII control
+    /// character. Swift parity: `QueueError.invalidIdentifier(id:reason:)`.
+    InvalidIdentifier(String),
 }
 ```
 
-The Rust enum carries all eleven categories one-to-one with the Swift
+The Rust enum carries all twelve categories one-to-one with the Swift
 cases; it collapses each Swift associated `Error`/path value into a
 single `String` message (and `ToolName`/`JobID`/`ObservationStatus`
 payloads into their raw `String`), and renames the stale-tmp age field
@@ -688,6 +953,7 @@ re-reads through `drainAvailable()`, complete guards on `status="cur"`.
 | `staleTmpFile(path:, age:)` | `StaleTmpFile { path: String, age_secs: f64 }` | Swift's `age: TimeInterval` = f64 seconds; Rust field named `age_secs` for clarity |
 | `backendUnavailable(detail:)` | `BackendUnavailable(String)` | |
 | `invalidTerminalStatus(ObservationStatus)` | `InvalidTerminalStatus(String)` | Rust carries the raw status string |
+| `invalidIdentifier(id:, reason:)` | `InvalidIdentifier(String)` | Rust collapses id+reason into one message |
 
 ### Identifier types: `JobId`/`JobID`, `StreamId`/`StreamID`, `SessionId`/`SessionID`
 
@@ -722,6 +988,18 @@ future agents do not re-open the question.
 |---|---|---|
 | `public indirect enum CodableValue: Sendable, Codable, Hashable` | `pub type CodableValue = serde_json::Value` | Recursive JSON-compatible value type. Swift: closed enum cases `null`, `bool(Bool)`, `int(Int)`, `double(Double)`, `string(String)`, `array([CodableValue])`, `object([String:CodableValue])`. Rust: type alias for `serde_json::Value` (same structural shape; isomorphic). Both survive `send()`/`drain()` round-trip verbatim (SPEC § 6). The Swift declaration uses `indirect` because the enum is recursive; the audit regex does not match `public indirect enum` — this is an audit regex limitation, not a parity gap. |
 
+### `QueueKit` facade
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `public final class QueueKit: Sendable` | `pub struct QueueKit<B: QueueBackend>` | Both wrap a backend behind the four permanent method names. |
+| `drain() async throws -> [...]` | `drain(&self, now_epoch_secs: f64) -> Result<[...], QueueError>` | Rust takes `now_epoch_secs` explicitly for telemetry throttling; Swift reads `Date().timeIntervalSince1970` internally. Sanctioned difference. |
+| `drain(stream:) async throws -> [...]` | `drain_for_stream(&self, stream, now_epoch_secs)` | Same `now_epoch_secs` difference as `drain`. |
+| `estateTag: String` (stored property) | `set_estate_tag(&self, tag: &str)` | Swift: read-write stored property; Rust: mutating method (interior mutability via `Mutex<String>`). |
+| `reply(session:status:) -> Int` | `reply_session(&self, session, status) -> Result<usize, QueueError>` annotated `#[must_use]` | Semantics identical; Rust marks it `must_use` to enforce the fallback check. |
+| `reply(batch:) -> Int` | `reply_batch(&self, completions) -> Result<usize, QueueError>` | Job-list batch completion. Same semantics. |
+| `reclaimInFlight(stream:) -> Int` | `reclaim_in_flight_for_stream(&self, stream) -> Result<usize, QueueError>` | Snake-case per Rust idiom. Same gate requirement (DrainLease). |
+
 ### `FilesystemBackend`
 
 | Swift | Rust | Notes |
@@ -743,13 +1021,67 @@ These types are present in the Swift port only. They are legitimately one-langua
 |---|---|---|
 | `MissionContext` | `Sources/QueueKit/Job.swift` | Carries Apple/CI worktree orchestration metadata (missionPath, worktree, branch, autonomyProfile, riskClass, baseCommit, priorTrajectoryID, inheritedSkills). This is a CI/dispatch layer concern embedded in the job extension field; the Rust port has no dispatch-layer concept and does not need to parse it. |
 | `WireFormat` | `Sources/QueueKit/Job.swift` | Caseless-enum namespace for filename construction (`filename(for:)`, `sortableHLC(_:)`) and canonical JSON encoder/decoder. Rust provides equivalent free functions (`filename_for_job`, `sortable_hlc`, `encode_job`, `decode_job`) not as a namespace type; the audit regex does not match free functions by default. |
-| `QueueLatencyWindow` | `Sources/QueueKit/QueueKitTelemetry.swift` / `rust/src/facade.rs` | Rolling latency-sample window for percentile telemetry, in both ports. Concurrent drainers on one queue are legitimate, so access is lock-guarded: Swift wraps it in `QueueLatencyWindowBox` (a `Mutex`-guarded box passed to `reportQueueStats`), Rust holds `Mutex<QueueLatencyWindow>` on the facade. |
+| `QueueLatencyWindowBox` | `Sources/QueueKit/QueueKitTelemetry.swift` | Thread-safe holder combining `QueueLatencyWindow` and the emission throttle under a single `Mutex`, preventing sample-array corruption from concurrent drain calls. The Rust `QueueKit<B>` facade achieves the same thread safety by holding `Mutex<QueueLatencyWindow>` directly — there is no equivalent public box type. See § 2 for the full type entry and `sample(_:now:interval:)` signature. |
+
+### Types present in both Swift and Rust
+
+These types have peers in both ports; they are listed here to record the concordance.
+
+| Swift type | Rust type | Notes |
+|---|---|---|
+| `QueueLatencyWindow` | `pub struct QueueLatencyWindow` (`rust/src/facade.rs`) | Rolling latency-sample window for drain percentile telemetry. Concurrent drainers are legitimate, so access is lock-guarded: Swift wraps it in a `QueueLatencyWindowBox`; Rust holds `Mutex<QueueLatencyWindow>` on the facade. Both are `pub` re-exports. |
+| `DrainLease` | `pub struct DrainLease` (`rust/src/drain_lease.rs`) | Stream-keyed heartbeat-TTL drain lease. TTL, heartbeat interval, and file format are identical across ports (byte-compatible lease file). Swift uses `Date` for `now`; Rust takes `now_secs: f64` directly from the caller. |
 
 ---
 
 *End of QueueKit Interface.*
 
 ## Changelog
+
+### 1.5.1 -- 2026-07-16
+Closed two critical INTERFACE gaps identified by the post-1.5.0 verifier pass:
+
+- **`QueueLatencyWindow` and `QueueLatencyWindowBox`** (§ 2): added full type
+  entries for both public types in `QueueKitTelemetry.swift`. `QueueLatencyWindow`
+  was previously visible only in the § 7 concordance table footnote.
+  `QueueLatencyWindowBox` was mentioned only parenthetically ("Swift wraps it
+  in a `QueueLatencyWindowBox`") with no type entry and no documentation of its
+  public `sample(_:now:interval:)` method. Both entries now include Swift
+  signatures and Rust parity notes. `QueueLatencyWindowBox` added to the
+  Swift-only types table in § 7.
+- **`reportQueueStats`** (§ 3): added the full public top-level async function
+  entry, including its parameter list, the 30-second emission rate-limit
+  rationale, the complete `queue.*` metric table with depth-unavailable sentinel
+  semantics, and the note that Rust emits equivalent telemetry inline in
+  `drain`/`drain_for_stream` with no separate free function.
+
+### 1.5.0 -- 2026-07-16
+Full audit against shipped source. Corrections and additions:
+
+- **Rust has a `QueueKit<B>` facade** (§ 2, § 3, § 7): corrected the wrong claim
+  that "there is no separate Interface wrapper"; the Rust leg has `pub struct
+  QueueKit<B: QueueBackend>` in `src/facade.rs`, mirroring the Swift class.
+  Added Rust facade method signatures and the `drain`/`drain_for_stream`
+  `now_epoch_secs` parameter difference to § 7.
+- **New Swift methods** (§ 3): `send(batch:)`, `reply(batch:)`,
+  `reclaimInFlight(stream:)`, and `estateTag` stored property were missing.
+- **New `DrainLease` type block** (§ 2): `DrainLease` (both ports) was documented
+  only in the changelog; added a full type entry.
+- **Backend methods** (§ 2): `FilesystemBackend.reclaimInFlight()` and
+  `PersistenceKitBackend.reclaimInFlight(stream:)` were missing.
+- **`QueueBackend` protocol/trait** (§ 3): added missing `writeBatch`/
+  `write_batch`, `completeBatch`/`complete_batch`, `drainAvailable(stream:)`/
+  `drain_available_for_stream`, `pendingCount(stream:)`/`pending_count_for_stream`,
+  `await_drain`/`await_drain_for_stream` (Rust trait defaults), `as_any` (Rust
+  required). Fixed the Rust `watch` signature (`WatchHandler` boxed closure, not
+  a generic type parameter — the boxed form keeps the trait `dyn`-compatible).
+- **`QueueError`** (§ 4, § 7): added `invalidIdentifier(id:reason:)` / `InvalidIdentifier`
+  (twelfth category, both ports); corrected "eleven" to "twelve".
+- **§ 1 Rust layout**: added `src/facade.rs` and `src/drain_lease.rs`.
+- **§ 7 concordance**: removed `QueueLatencyWindow` from the "Swift-only" table
+  (it is `pub` in both ports); added a "Types present in both ports" table covering
+  `QueueLatencyWindow` and `DrainLease`; added the `QueueKit` facade concordance
+  table.
 
 ### 1.4.0 -- 2026-07-03
 `awaitDrain` / `await_drain` (global and stream-scoped, both ports) now use a

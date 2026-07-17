@@ -17,25 +17,51 @@ options:
 packages:
   Mootx01:
     path: .
+  # Same package identity the app package's Package.swift uses — the Share
+  # Extension targets link MootIntentKit (spool + CaptureSink) directly and
+  # never touch GatewayUI/MootGateway (they must not host the estate).
+  MootIntentKit:
+    path: ../../packages/apple/MootIntentKit
 
 targets:
   Mootx01-macOS:
     type: application
     platform: macOS
+    # PrivacyInfo.xcprivacy (M-MXA-5): the app-level privacy manifest must land
+    # in the Resources build phase (not Sources) so App Store submission and
+    # Xcode's Generate Privacy Report find it at the bundle root. It is listed
+    # explicitly with buildPhase: resources and excluded from the App/ source
+    # glob so it is not added twice.
     sources:
       - path: App
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: App/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: Assets.xcassets
     dependencies:
       - package: Mootx01
         product: GatewayUI
+      # A4b: the Share-Sheet capture target (spools into the app group;
+      # the app drains at launch/tick).
+      - target: Mootx01-Share-macOS
+      # Tier 3: the recall widget (reads the app-group projection).
+      - target: Mootx01-Widget-macOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.macos
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_NAME: Mootx01
         MARKETING_VERSION: "1.0.18"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+        # M-ING-2: purpose strings for the live miner consent prompts
+        # (EventKit + Contacts). Shown in the system dialog on first live
+        # read; the readers themselves only run from attended sessions.
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads upcoming events to file them into your private, on-device memory estate."
+        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact birthdays to file them into your private, on-device memory estate."
         # Spawning the managed daemon needs no sandbox for this dev prototype.
         ENABLE_APP_SANDBOX: NO
     # App-group container (ADR-014, macOS 15+): when the estate lives in the
@@ -49,6 +75,14 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.codedaptive.mootx01
+        # M-ING-4 courier sync (Scenario A): CloudKit private DB as the
+        # transport for vault export/import. Inert until the container is
+        # provisioned in the developer account — CloudSyncCoordinator no-ops
+        # when accountStatus != available, so this never fabricates a sync.
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.codedaptive.mootx01
+        com.apple.developer.icloud-services:
+          - CloudKit
     # A5: register the mootx01:// URL scheme so MootURLRouter receives
     # x-callback-url calls from other apps. CFBundleURLName is reverse-DNS
     # for uniqueness; CFBundleURLSchemes is what the system matches on.
@@ -59,32 +93,229 @@ targets:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
               - mootx01
+        # Export compliance: the app uses only exempt encryption — SQLCipher
+        # (data protection), CryptoKit (owner-credential hashing), and HTTPS/
+        # TLS via the OS. No proprietary or non-standard cryptography ships,
+        # so ITSAppUsesNonExemptEncryption is false. This lets App Store
+        # Connect accept uploads without the per-build compliance prompt.
+        ITSAppUsesNonExemptEncryption: false
+        # A2 discovery: browse for LAN resident daemons. Both keys are
+        # required for NWBrowser — the OS denies undeclared service types.
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
+        NSBonjourServices:
+          - _mootx01._tcp
 
   Mootx01-iOS:
     type: application
     platform: iOS
+    # PrivacyInfo.xcprivacy (M-MXA-5): same Resources-phase wiring as the
+    # macOS target — see the comment there.
     sources:
       - path: App
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: App/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: Assets.xcassets
     dependencies:
       - package: Mootx01
         product: GatewayUI
+      # A4b: the Share-Sheet capture target (spools into the app group;
+      # the app drains at launch/foreground/refresh).
+      - target: Mootx01-Share-iOS
+      # Tier 3: the recall widget (reads the app-group projection).
+      - target: Mootx01-Widget-iOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_NAME: Mootx01
         MARKETING_VERSION: "1.0.18"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+        # M-ING-2: purpose strings for the live miner consent prompts
+        # (EventKit + Contacts). Shown in the system dialog on first live
+        # read; the readers themselves only run from attended sessions.
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "MOOTx01 reads upcoming events to file them into your private, on-device memory estate."
+        INFOPLIST_KEY_NSContactsUsageDescription: "MOOTx01 reads contact birthdays to file them into your private, on-device memory estate."
+    # A4b: the iOS app joins the same app group as the Share Extension so
+    # ShareInboxDrain can read the spool the extension writes. (The macOS
+    # target already carries the group for ADR-014 estate SIP defense.)
+    entitlements:
+      path: App/Mootx01-iOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+        # M-ING-4 courier sync (Scenario A) — see the macOS target. Inert
+        # until the iCloud container is provisioned; the coordinator no-ops
+        # without an available account.
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.codedaptive.mootx01
+        com.apple.developer.icloud-services:
+          - CloudKit
     # A5: register the mootx01:// URL scheme so MootURLRouter receives
     # x-callback-url calls from other apps. CFBundleURLName is reverse-DNS
     # for uniqueness; CFBundleURLSchemes is what the system matches on.
     info:
       path: derived-Info-iOS.plist
       properties:
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.codedaptive.mootx01.mining.refresh
+        UIBackgroundModes:
+          - fetch
         CFBundleURLTypes:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
               - mootx01
+        # Export compliance: only exempt encryption ships (SQLCipher,
+        # CryptoKit, OS TLS) — see the macOS target for the rationale.
+        ITSAppUsesNonExemptEncryption: false
+        # A2 discovery: browse for LAN resident daemons. Both keys are
+        # required for NWBrowser — iOS denies undeclared service types.
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
+        NSBonjourServices:
+          - _mootx01._tcp
+
+  # Recall widget targets (Tier 3) — WidgetKit extensions rendering the
+  # derived projection (WidgetSnapshotStore) from the app group. One estate,
+  # one host: the widget process reads the projection file, never the estate.
+  Mootx01-Widget-iOS:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: RecallWidget
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: RecallWidget/Mootx01-Widget-iOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.widget
+        PRODUCT_NAME: Mootx01Widget
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Widget-iOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  Mootx01-Widget-macOS:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: RecallWidget
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: RecallWidget/Mootx01-Widget-macOS.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.macos.widget
+        PRODUCT_NAME: Mootx01Widget
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Widget-macOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  # A4b Share-Sheet capture targets — UI-less NSExtension shells over
+  # ShareInboxSpool (MootIntentKit). One estate, one host: these processes
+  # never open the estate; they spool and the app drains.
+  Mootx01-Share-iOS:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: ShareExtension/Mootx01-Share-iOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.share
+        PRODUCT_NAME: Mootx01Share
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Share-iOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          # Bare (unprefixed) class name resolves via @objc(ShareViewController).
+          NSExtensionPrincipalClass: ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+
+  Mootx01-Share-macOS:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: ShareExtension
+    dependencies:
+      - package: MootIntentKit
+        product: MootIntentKit
+    entitlements:
+      path: ShareExtension/Mootx01-Share-macOS.entitlements
+      properties:
+        # Extensions run sandboxed on macOS; the group grants spool access.
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.codedaptive.mootx01
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.macos.share
+        PRODUCT_NAME: Mootx01Share
+        SWIFT_VERSION: "6.0"
+        INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
+    info:
+      path: derived-Info-Share-macOS.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+
+  Mootx01-AppIntentsTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: Mootx01-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.app-intents-tests
+        PRODUCT_NAME: Mootx01-AppIntentsTests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        TEST_TARGET_NAME: Mootx01-iOS

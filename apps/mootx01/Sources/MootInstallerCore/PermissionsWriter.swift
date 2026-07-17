@@ -98,6 +98,8 @@ public enum PermissionsWriter {
         "moot_fact_search", "moot_fact_timeline",
         "moot_connection_search", "moot_connection_map",
         "moot_estate_map", "moot_read_journal", "moot_federated_search",
+        // Dataset reads (MX-TAB-7): query rows / column stats are read-only.
+        "moot_dataset_query", "moot_dataset_stats",
         "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
         "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts", "moot_lens_constellation",
         "moot_lens_contradiction", "moot_lens_divergence", "moot_lens_drift", "moot_lens_free_association",
@@ -125,6 +127,9 @@ public enum PermissionsWriter {
         "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
         "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_consolidate", "moot_synthesize",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
+        // Dataset import (MX-TAB-7): creates a backend table and can read a
+        // csv_path from the filesystem — same Ask posture as palace/vault import.
+        "moot_file_dataset",
         // Monitoring flag mutation (ADR-025 wave 8.2): sets daemon telemetry state
         // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
         "moot_monitoring_status",

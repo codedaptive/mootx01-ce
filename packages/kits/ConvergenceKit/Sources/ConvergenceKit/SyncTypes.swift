@@ -37,6 +37,13 @@ public enum ConflictPolicy: String, Sendable, Codable {
     case localWins
     /// Receiver overwrites local on conflict.
     case remoteWins
+    /// (v1.2-draft) Per-column HLC last-writer-wins. Each column in the
+    /// incoming record is applied only when its HLC is >= the locally
+    /// stored per-column HLC. Column HLCs are wire-carried (never derived
+    /// by the receiver — A7 binding). Tombstone HLC must be >= ALL local
+    /// column HLCs for the delete to win (edit-beats-delete rule).
+    /// See B-8 in CONVERGENCEKIT_SPEC.md and FieldLWW/ for implementation.
+    case fieldLevelLWW
 }
 
 /// Declaration of a single synced table within a manifest.
@@ -45,51 +52,122 @@ public struct SyncedTable: Sendable, Codable {
     public let direction: SyncDirection
     public let primaryKeyColumn: String
     public let conflictPolicy: ConflictPolicy
+    /// (v1.2-draft) Columns excluded from sync. These are locally recomputed
+    /// on every device (scores, caches, derived values). Excluding them prevents
+    /// sync storms: when an observer fires on a local compute update, the excluded
+    /// columns are stripped from the outbox entry before it is persisted, so no
+    /// outbound traffic is generated for data the receiver immediately recomputes.
+    ///
+    /// Exclusion semantics only — not inclusion: every column NOT in this set is
+    /// synced. An inclusion list is a later additive change; it would require a
+    /// schema-level registry of all sync-eligible columns that is not available
+    /// at the ConvergenceKit layer.
+    ///
+    /// JSON contract: "excludedColumns" key; omitted from the wire when empty
+    /// so existing serialised manifests decode without error (backward compatible).
+    /// Rust twin: `excluded_columns: HashSet<String>` with serde default empty.
+    public let excludedColumns: Set<String>
 
     /// Explicit CodingKeys documenting the cross-port JSON contract.
     /// Rust serde renames match these exact strings.
     private enum CodingKeys: String, CodingKey {
-        case name, direction, primaryKeyColumn, conflictPolicy
+        case name, direction, primaryKeyColumn, conflictPolicy, excludedColumns
     }
 
     public init(
         name: String,
         direction: SyncDirection = .bidirectional,
         primaryKeyColumn: String,
-        conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC
+        conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC,
+        excludedColumns: Set<String> = []
     ) {
         self.name = name
         self.direction = direction
         self.primaryKeyColumn = primaryKeyColumn
         self.conflictPolicy = conflictPolicy
+        self.excludedColumns = excludedColumns
+    }
+
+    /// Custom decode: `excludedColumns` is optional in JSON so existing
+    /// serialised manifests (without the key) decode with an empty set.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        direction = try c.decode(SyncDirection.self, forKey: .direction)
+        primaryKeyColumn = try c.decode(String.self, forKey: .primaryKeyColumn)
+        conflictPolicy = try c.decode(ConflictPolicy.self, forKey: .conflictPolicy)
+        excludedColumns = try c.decodeIfPresent(Set<String>.self, forKey: .excludedColumns) ?? []
+    }
+
+    /// Custom encode: omit `excludedColumns` when empty to keep the wire
+    /// representation compact and compatible with older receivers.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(direction, forKey: .direction)
+        try c.encode(primaryKeyColumn, forKey: .primaryKeyColumn)
+        try c.encode(conflictPolicy, forKey: .conflictPolicy)
+        if !excludedColumns.isEmpty {
+            try c.encode(excludedColumns, forKey: .excludedColumns)
+        }
     }
 }
 
 /// Declarative configuration for a sync session. The consumer
 /// declares which PersistenceKit tables sync to which zone with
 /// which conflict policies.
-public struct SyncManifest: Sendable, Codable {
+///
+/// ## Not Codable
+///
+/// `SyncManifest` is NOT `Codable`. The `postApplyIntegrityHook` closure
+/// cannot be serialised, so the whole struct cannot synthesise `Codable`
+/// conformance. `SyncManifest` is a local configuration object — it is
+/// passed to `SyncEngine.enable(manifest:storage:)` and is never transmitted
+/// over the wire. Only `SyncRecord` is the wire format.
+///
+/// Code that previously JSON-encoded a `SyncManifest` for cross-port
+/// conformance testing should instead encode the `SyncedTable` array directly,
+/// or test the `SyncRecord` wire format (which remains `Codable`).
+public struct SyncManifest: Sendable {
     public let kitID: String
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
 
-    /// Explicit CodingKeys documenting the cross-port JSON contract.
-    /// Rust serde renames match these exact strings.
-    private enum CodingKeys: String, CodingKey {
-        case kitID, schemaVersion, zoneIdentifier, tables
-    }
+    /// (v1.2-draft) Optional callback invoked once per pull batch AFTER all
+    /// inbound records have been applied. Use it to restore cross-row or
+    /// cross-table structural invariants that row-grain conflict policies
+    /// cannot maintain (Playground Rule 3, R3).
+    ///
+    /// **Invocation contract (CVK-ICLOUD P2-M3):**
+    /// - Called once per pull cycle, after ALL records in the batch apply.
+    /// - NOT called when the batch applied zero records (empty-batch rule).
+    /// - A throw is logged and counted as ONE additional conflict in the
+    ///   `SyncReceipt`; it does NOT abort the pull cycle.
+    /// - Writes made through `AppliedBatch.storage` use the non-sync-tagged
+    ///   paths (`upsert`, `insert`, `delete`), so they carry `origin == .local`
+    ///   and flow into the outbox — hook-originated repairs ship to peers on
+    ///   the next push cycle (Kong Q2 adjudication: hook-writes-must-ship).
+    ///
+    /// **Atomicity caveat:** PersistenceKit exposes no batch-transaction API.
+    /// The hook runs after the batch applies but NOT inside a containing
+    /// transaction. Design hooks to be idempotent (safe to re-run).
+    ///
+    /// Not `Codable` — closures cannot be serialised; set at construction only.
+    public var postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)?
 
     public init(
         kitID: String,
         schemaVersion: Int,
         zoneIdentifier: String,
-        tables: [SyncedTable]
+        tables: [SyncedTable],
+        postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil
     ) {
         self.kitID = kitID
         self.schemaVersion = schemaVersion
         self.zoneIdentifier = zoneIdentifier
         self.tables = tables
+        self.postApplyIntegrityHook = postApplyIntegrityHook
     }
 
     public func table(named name: String) -> SyncedTable? {
@@ -149,4 +227,30 @@ public enum SyncError: Error, Sendable, Equatable {
     /// The record is quarantined: the pull loop counts it as a conflict,
     /// logs it, and continues to the next record rather than aborting the batch.
     case corruptRemoteIdentity(recordName: String)
+
+    // ── N2 slot-registry errors (v1.2-draft) ──────────────────────────────
+    // CloudKit-only. Vocabulary is mirrored in the Rust SyncError enum for
+    // cross-port parity even though the CloudKit backend is Swift-only (N4).
+    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+
+    /// This device's (slot, epoch) pair has been superseded: the slot was
+    /// evicted and its epoch bumped while this device was inactive.
+    ///
+    /// Recovery: the engine re-claims a fresh slot, re-mints pending outbox
+    /// HLCs under the new nodeID, then resumes the pull cycle. No inbound
+    /// records are applied until re-enrollment is complete — applying records
+    /// with the old (colliding) nodeID would produce LWW ties that different
+    /// replicas resolve differently.
+    ///
+    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4 (v1.2-draft stub).
+    case reenrollRequired(slot: Int, staleEpoch: Int, currentEpoch: Int)
+
+    /// All 15 assignable node-ID slots (1–15) are occupied by recently-active
+    /// devices. No records are applied. The engine retries after a backoff
+    /// period; the error is surfaced to the caller loud (not silently dropped)
+    /// because the real ceiling is 15 concurrent machines and hitting it is
+    /// an operational signal that warrants attention.
+    ///
+    /// Signature matches CONVERGENCEKIT_INTERFACE.md §4 (v1.2-draft stub).
+    case slotExhausted(activeCount: Int)
 }

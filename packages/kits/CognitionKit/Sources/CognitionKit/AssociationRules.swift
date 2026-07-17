@@ -261,6 +261,7 @@ private func contentKindLabel(_ kind: ContentKind) -> String {
     case .structuredJSON: return "kind:structuredJSON"
     case .imageCaption:   return "kind:imageCaption"
     case .fingerprintOnly: return "kind:fingerprintOnly"
+    case .dataset:         return "kind:dataset"
     }
 }
 

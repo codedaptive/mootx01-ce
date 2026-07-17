@@ -113,11 +113,12 @@ struct PermissionsWriterTests {
     /// gains or removes a tool, update BOTH this pinned list and whichever
     /// of `readTools` / `additiveWriteTools` / `mutationTools` /
     /// `destructiveTools` the new tool belongs in.
-    @Test("classify's tier tables are exhaustive over the real 68-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 71-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
             "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
             "moot_connection_search", "moot_consolidate", "moot_drain_status", "moot_dream",
+            "moot_dataset_query", "moot_dataset_stats", "moot_file_dataset",
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
             "moot_fact_search", "moot_fact_timeline", "moot_federated_search", "moot_file_fact",
             "moot_file_memory", "moot_hunt_contradictions",
@@ -138,12 +139,13 @@ struct PermissionsWriterTests {
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
             "moot_write_journal",
         ]
-        // Count guard (see doc comment): 68 as of the contradiction hunter
-        // (moot_hunt_contradictions + moot_review_tunnel).
+        // Count guard (see doc comment): 71 = 68 (contradiction hunter era) +
+        // 3 dataset tools (MX-TAB-7: moot_file_dataset, moot_dataset_query,
+        // moot_dataset_stats).
         // A mismatch here means THIS PINNED LIST is stale relative to
         // tool_list.rs / ToolProjection.swift — fix the pin first, then re-run
         // before trusting the set-difference below.
-        #expect(realTools.count == 68, "pinned tool inventory drifted from the real surface count")
+        #expect(realTools.count == 71, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)
