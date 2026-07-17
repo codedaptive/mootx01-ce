@@ -152,7 +152,9 @@ struct FederationPairingTests {
 
         // Inject the attacker's envelope directly into victim's relay inbox,
         // simulating what a broadcast relay would deliver without pairing checks.
-        relay.send(to: victimPubKey, message: envelope)
+        // relay.send now throws (WC2 — transport-failure contract); FederationRelay
+        // never actually throws, but try is required by the protocol.
+        try relay.send(to: victimPubKey, message: envelope)
 
         let receipt = try await engineVictim.pull()
         #expect(receipt.pulled == 0, "unpaired sender must not inject records")
@@ -229,7 +231,8 @@ struct FederationPairingTests {
         // Inject into victim's inbox. Because senderPublicKey matches a
         // registered peer, the pairing-registry check passes — only
         // signature verification (against the registered key) catches this.
-        relay.send(to: victimPubKey, message: forgedEnvelope)
+        // try required: relay.send now throws in the protocol (WC2 contract).
+        try relay.send(to: victimPubKey, message: forgedEnvelope)
 
         let receipt = try await engineVictim.pull()
         #expect(receipt.pulled == 0, "forged sender key claim must not apply records")
