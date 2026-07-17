@@ -130,7 +130,8 @@ and the implementing mission (P1-M1). No PersistenceKit changes are in
 scope for P0 missions.
 
 **N2 — Device slot registry with fenced eviction.**
-The HLC packs node identity in 4 bits (48/12/4 layout, spec B-6),
+The HLC packs node identity in 4 bits (CKRecordMapping wire layout —
+physical 48b | logical 12b | node 4b — spec B-6),
 yielding 16 addressable node values, of which node 0 is permanently
 reserved: earlier shipped code fabricated HLCs with node 0, so no
 registry-assigned identity may ever be ambiguous against those
@@ -168,12 +169,15 @@ everything the evicted identity ever wrote. The real limit is 15
 simultaneously active machines; hitting it raises `slotExhausted`,
 which is loud, not silent.
 
-Rejected alternative — widening the node field: the 48/12/4 layout
-is specified in B-6 and is conformance-gated byte-identical in both
-Swift and Rust legs of SubstrateLib. Widening is a wire-format break
-with substrate-wide blast radius. The registry provides headroom for
-up to 15 concurrent machines via one side table without touching the
-wire format.
+Rejected alternative — widening the node field: the `CKRecordMapping`
+CloudKit wire layout (physical 48b | logical 12b | node 4b, spec B-6)
+is a CloudKit-only format that limits nodes to 4 bits. Widening would
+break the CloudKit wire format with blast radius across all
+`_ck_sync_meta` and `_ck_outbox` side tables. (Note: `SubstrateTypes.HLC.packed`
+uses a distinct layout — node 8b | logical 16b | physical 40b — and is
+not the gating constraint here; the 4-bit limit is specific to
+CKRecordMapping.) The registry provides headroom for up to 15 concurrent
+machines via one side table without touching the wire format.
 
 **N3 — Convergence loop.**
 Outbound: debounce the outbox drain on local writes to prevent

@@ -2,7 +2,7 @@
 title: ConvergenceKit Specification
 version: 1.2-draft
 status: active
-date: 2026-07-16
+date: 2026-07-17
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -261,8 +261,39 @@ are preserved by the discriminator tag.
 **B-6 (CloudKit metadata):** the CloudKit mapper drives record mapping
 from the manifest, not from per-entity hardcoding. Each table maps to
 record type `kitID_tableName`; sync metadata travels in reserved fields
-(`_syncHLC`, `_syncSchemaVersion`, `_syncKitID`). The HLC packs into one
-sortable `Int64` (48 bits physical, 12 bits logical, 4 bits node).
+(`_syncHLC`, `_syncSchemaVersion`, `_syncKitID`).
+
+Two distinct HLC packing layouts coexist in this package — applied at
+different layers and never mixed:
+
+1. **`CKRecordMapping.packed()` — CloudKit wire format (physical MSB):**
+   `physical(48b)<<16 | logical(12b)<<4 | node(4b)` packed into one
+   sortable `Int64`. The physical time occupies the high 48 bits so
+   CKRecord fields sort chronologically by bare integer compare. The
+   node ID occupies the low 4 bits, which limits the assignable node
+   range to 1–15 (node 0 permanently reserved) as enforced by the slot
+   registry (B-13). Used only inside `CKRecordMapping.packed()` and
+   `CKRecordMapping.unpacked()`, and in the `_syncHLC`, `_ck_sync_meta`,
+   and `_ck_outbox` columns that those helpers write and read.
+
+2. **`SubstrateTypes.HLC.packed` — compact federation/fingerprint form
+   (node MSB):**
+   `node(8b)<<56 | logical(16b)<<40 | physical(40b)` packed into a
+   `UInt64`. The node ID occupies the top 8 bits; the 40-bit physical
+   field covers ~34 years of millisecond timestamps. Used by the
+   Federation backend's outbox entries (`_fed_outbox.packed_hlc`) and
+   by SubstrateLib's tier-contribution fingerprint path (cookbook §
+   12.3). Defined in `SubstrateTypes/Sources/SubstrateTypes/HLC.swift`.
+
+These two layouts are intentionally different: the CKRecordMapping
+layout is optimised for CloudKit sortability (physical MSB); the
+SubstrateTypes layout is optimised for compact node-ID addressing in
+the 8-bit range (node MSB). Side tables in each backend store HLCs from
+their own packing only — no cross-format integer comparison ever occurs.
+`SlotFencingScenarios.swift` provides two clearly-labelled extractor
+helpers as ground-truth references: `p4m3NodeIDOf` (SubstrateTypes
+layout, node in bits 56–63) and `ckRecordNodeIDOf` (CKRecordMapping
+layout, node in low 4 bits).
 
 **B-7 (Federation pairing):** two estates pair by exchanging public keys
 and a shared `HyperplaneFamilySpec` (seed + dimension) so their 256-bit
@@ -567,14 +598,6 @@ the receiver's is enqueued in the pending-skew queue, not counted as a conflict,
 and not applied to storage. In no case does a rejected or held record mutate the
 user table (I-4, B-2, B-10).
 
-**C-15 (skew-queue hold and replay):** given a record in the cloud with
-`schemaVersion` = N+1 and a receiver with manifest `schemaVersion` = N: the
-record is held in `_ck_pending_skew` (or `_fed_pending_skew`) during pull and
-does not appear in the user table; on disable/re-enable with manifest
-`schemaVersion` = N+1, the record is replayed through `applyInbound` and
-appears in the user table; the queue entry is deleted after successful replay;
-the outbox stays empty after replay (echo suppression, I-10). (CVK-ICLOUD P3-M4)
-
 **C-6 (None semantics):** the None backend's `push`/`pull` return
 `SyncReceipt.empty` when enabled and `subscribe` never emits (B-1).
 
@@ -582,16 +605,41 @@ the outbox stays empty after replay (echo suppression, I-10). (CVK-ICLOUD P3-M4)
 is rejected at pull and its records do not apply (I-7).
 
 **C-8 (wire round-trip):** every `TypedValue` case round-trips through
-`SyncValueMap` / `SyncValueBox` and the Rust version agrees with the Swift version on the discriminated encoding (B-5). The CloudKit HLC pack/unpack
-is lossless within the 48/12/4-bit layout (B-6).
+`SyncValueMap` / `SyncValueBox` and the Rust version agrees with the Swift version on the discriminated encoding (B-5). The `CKRecordMapping.packed()` /
+`unpacked()` round-trip is lossless within the CloudKit wire layout
+(physical 48b | logical 12b | node 4b) as specified in B-6; this layout
+is distinct from `SubstrateTypes.HLC.packed` (node 8b | logical 16b |
+physical 40b) and the two are never applied to the same side-table column.
 
 **C-9 (echo suppression):** an inbound write from `applyInbound` does not
 re-enter the outbox. After a push-pull cycle, the receiving side has zero
 pending outbound entries attributable to the received records (I-10).
+Writes issued by the `postApplyIntegrityHook` carry `origin == .local` and
+are NOT suppressed — they propagate outbound normally (I-3, R3).
 
-**C-10 (LWW tombstone persistence):** a delete event carries its HLC into
-the side table after the hard-delete so that a stale insert arriving later
-is still rejected (A6 unification, B-9).
+Green tests (Federation): `ConvergenceKitFederationTests/EchoSuppressionTests`
+— "applyInbound does not re-enter the outbox — echo suppression active",
+"local writes still appear in outbox after applyInbound (no over-suppression)",
+"push-pull cycle: receiving side produces zero outbox entries after applying
+inbound"; `ConvergenceKitFederationTests/IntegrityHookTests` — "R3-2: hook
+writes carry origin == .local and flow into the outbox".
+
+**C-10 (fieldLevelLWW) (v1.2-draft):** given two `fieldLevelLWW` tables on
+separate estates, concurrent writes to disjoint columns by each side both
+survive merge — neither side's write is lost regardless of apply order
+(commutativity). `ColumnHLCMap` JSON encodes with a top-level `entries` key,
+each column mapped to a `PackedHLC` with camelCase field names; Rust
+`BTreeMap` produces alphabetical key order — both legs parse each other's
+output (B-8, wire parity).
+
+Green tests (Swift unit): `ConvergenceKitTests/FieldLWWMergeTests` — "merge:
+disjoint columns — all survive", "disjoint columns: both survive merge with
+different local HLCs", "merge commutativity: A.merge(B) == B.merge(A)";
+`ConvergenceKitConformance/ColumnHLCMapConformanceTests` — "decodes Rust
+golden JSON: single column", "decodes Rust golden JSON: multiple columns
+alphabetically ordered (BTreeMap)", "ConflictPolicy.fieldLevelLWW decodes
+from Rust golden JSON". Rust: `wire_format_tests::column_hlc_map_serde_json_roundtrips`,
+`column_hlc_map_json_has_entries_key`, `column_hlc_map_hlc_uses_camel_case_keys`.
 
 **C-11 (column projection) (v1.2-draft):** given a manifest with
 `excludedColumns = ["derived"]` on a table:
@@ -603,11 +651,110 @@ is still rejected (A6 unification, B-9).
   an empty set (backward compat). Empty `excludedColumns` is omitted from JSON.
 - Delete events propagate regardless of `excludedColumns`.
 
+Green tests: `ConvergenceKitFederationTests/ProjectionTests` — "update with
+all-excluded columns does not enter the outbox" (storm kill outbound), "update
+with some non-excluded columns still enqueues a stripped record" (partial
+outbound strip), "delete is enqueued even when excludedColumns covers all app
+columns" (delete unaffected), "inbound excluded columns are dropped — peer-sent
+derived value does not overwrite local" (inbound drop); "excludedColumns
+survives JSON encode/decode", "JSON without excludedColumns decodes with empty
+set (backward compat)" (manifest round-trip).
+
+**C-12 (tombstone matrix) (v1.2-draft):** for both CloudKit and Federation
+backends, the LWW gate applies to deletes symmetrically with upserts. A stale
+delete (incoming HLC < stored sync HLC) leaves the row intact; a newer-or-equal
+delete hard-deletes the row and writes the delete HLC to the sync-meta side
+table (`_ck_sync_meta` / `_fed_sync_meta`, `is_deleted = 1`) so subsequent
+stale inserts for the same `(table, rowKey)` are gated — a deleted row cannot
+be silently resurrected (B-4, B-9). A `SyncRecord` with `event == .delete`
+serialises `syncDeleted: true` in JSON; the receiving side routes it through the
+tombstone apply path rather than a normal upsert.
+
+Green tests: `ConvergenceKitCloudKitTests/TombstoneLWWTests` — "stale delete
+does not remove a newer local row", "newer delete removes the local row",
+"tombstone HLC persists in _ck_sync_meta with is_deleted=1 after hard-delete",
+"stale resurrect rejected: insert with HLC older than tombstone is dropped
+(A6)"; `ConvergenceKitFederationTests/FederationTombstoneTests` — "tombstone
+HLC persists in _fed_sync_meta with is_deleted=1 after hard-delete (A6)",
+"stale resurrect rejected: insert with HLC older than tombstone is dropped
+(A6)", "SyncRecord with syncDeleted = true round-trips through JSON (C-8 wire
+parity)"; Rust: `federation_lww_tests::stale_delete_does_not_remove_newer_local_row`,
+`newer_delete_removes_local_row`.
+
+**C-13 (durable pipeline) (v1.2-draft):** the CloudKit outbound queue (outbox)
+and the server change token survive process death. On restart, the engine drains
+pending outbox entries and the receiving estate converges without duplicate
+application (idempotent under LWW). Token loss causes a re-pull from the
+beginning of the zone's history, which is idempotent under LWW. CloudKit-backend
+specific; exercised via `CloudKitDatabaseFake` (simulates persistence across
+engine-init boundaries).
+
+Green tests: `ConvergenceKitCloudKitTests/CrashRecoveryTests` — "(1) outbox
+survives crash before drain — drains on restart, peer converges", "(3) re-pull
+after crash before token persist is idempotent under LWW".
+
+**C-14 (slot fencing) (v1.2-draft):** a device whose `(slot, epoch)` has been
+superseded by eviction receives `reenrollRequired` BEFORE any outbox entries are
+read or applied (B-13, § 6). On re-enrollment, all pending outbox HLCs are
+re-minted under the new `(slot, epoch)` so no record carries the superseded node
+identity; the re-minted records then propagate to the remote estate and both
+sides converge. CloudKit-backend specific.
+
+Green tests: `ConvergenceKitCloudKitTests/SlotRegistryTests` — "fence-epoch-mismatch:
+stale epoch → reenrollRequired before outbox read", "remint: re-enrollment
+changes all outbox entry nodeIDs"; `ConvergenceKitCloudKitTests/CrashRecoveryTests`
+— "(4) crash during slot heartbeat — fence verification correct after restart".
+
+**C-15 (skew-queue hold and replay) (v1.2-draft):** given a record in the cloud
+with `schemaVersion` = N+1 and a receiver with manifest `schemaVersion` = N: the
+record is held in `_ck_pending_skew` (or `_fed_pending_skew`) during pull and
+does not appear in the user table; on disable/re-enable with manifest
+`schemaVersion` = N+1, the record is replayed through `applyInbound` and
+appears in the user table; the queue entry is deleted after successful replay;
+the outbox stays empty after replay (echo suppression, I-10). (CVK-ICLOUD P3-M4)
+
+Green tests: `ConvergenceKitTests/SkewQueueTests` — "drainReady: returns only
+entries matching currentVersion", "payload round-trips: SyncRecord survives
+encode→store→decode"; `ConvergenceKitCloudKitTests/SkewIntegrationTests` —
+"hold-then-replay: future-schema record held during pull, applied on re-enable",
+"echo-suppressed: replayed records do not re-enter outbox", "event emission:
+pull emits recordsHeldForMigration for future-schema records".
+
 The conformance fixtures run with InMemory PersistenceKit underneath.
 None and Federation run them unconditionally; CloudKit is gated on a
-configured test container.
+configured test container (C-12, C-13, C-14 use `CloudKitDatabaseFake` to run
+without a live CloudKit container).
 
 ## Changelog
+
+### 1.2-draft -- 2026-07-17 (CVK-ICLOUD P4-M6)
+- **Rewrote B-6 (CloudKit metadata):** named both HLC packing layouts
+  explicitly. `CKRecordMapping.packed()` — CloudKit wire format:
+  physical(48b)<<16 | logical(12b)<<4 | node(4b). `SubstrateTypes.HLC.packed`
+  — compact federation/fingerprint form: node(8b)<<56 | logical(16b)<<40 |
+  physical(40b). Documented that the two layouts are never mixed;
+  cross-referenced `SlotFencingScenarios.swift` labelled extractors as
+  ground truth.
+- **Updated C-8 (wire round-trip):** replaced generic `48/12/4-bit layout`
+  reference with explicit `CKRecordMapping.packed()` CloudKit wire layout
+  as defined in the revised B-6; noted the layout is distinct from
+  `SubstrateTypes.HLC.packed`.
+- **Finalised §7 conformance table with executable C-9..C-15 rows:**
+  each row names ≥1 green test. Numbering is now clean and sequential.
+  - C-9 (echo suppression): expanded to note hook writes are NOT
+    suppressed; added green test names.
+  - C-10 (fieldLevelLWW): new row — disjoint-column merge commutativity
+    and Swift/Rust wire encoding agreement (B-8).
+  - C-11 (column projection): added green test names.
+  - C-12 (tombstone matrix): new row — tombstone LWW gate, side-table HLC
+    persistence, stale-resurrect protection, both legs + wire parity;
+    supersedes old C-10 (LWW tombstone persistence) which is removed.
+  - C-13 (durable pipeline): new row — outbox and server change token
+    survive restart; idempotency under LWW (CloudKit-specific).
+  - C-14 (slot fencing): new row — superseded epoch blocked before outbox
+    read; re-enroll re-mints HLCs (CloudKit-specific).
+  - C-15 (skew-queue hold and replay): moved to correct sequential position
+    (was misplaced after C-5); added green test names. (CVK-ICLOUD P3-M4)
 
 ### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P3-M3)
 - Updated B-3 (event stream): added `remoteWakeReceived` case emitted by
