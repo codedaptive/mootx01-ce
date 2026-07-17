@@ -2,12 +2,13 @@
 title: ConvergenceKit Specification
 version: 1.2-draft
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
   - docs/reference/CONVERGENCEKIT_INTERFACE.md
+  - docs/reference/CONVERGENCEKIT_PLAYGROUND_RULES.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
@@ -452,6 +453,7 @@ configured test container.
 
 ## Changelog
 
+<<<<<<< HEAD
 ### 1.2-draft -- 2026-07-16 (updated 2026-07-16 CVK-ICLOUD P1-M6)
 - Added per-record push error taxonomy subsection to § 6: four postures
   (`retryableBackoff`, `reclaim`, `conflict`, `permanent`), outbox action
@@ -477,6 +479,11 @@ configured test container.
 ### 1.1 -- 2026-07-16
 - Added `corruptRemoteIdentity(recordName)` to § 6 error model (CloudKit-only; per-record quarantine, does not abort the pull cycle).
 - Clarified which error categories are per-cycle vs. cycle-aborting.
+=======
+### 1.0.1 -- 2026-07-16
+Added `docs/reference/CONVERGENCEKIT_PLAYGROUND_RULES.md` to `relates_to`.
+Consumer contract document (CVK-ICLOUD P2-M4). No behavioral content changed.
+>>>>>>> worktree-agent-a7e1911aebfec7426
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
