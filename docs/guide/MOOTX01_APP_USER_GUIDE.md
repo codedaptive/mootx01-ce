@@ -299,14 +299,11 @@ build is configured for sync.
 no in-app settings screen to turn sync on or off or to choose which devices
 participate. This is a tracked gap.
 
-**Tier-rise retraction.** If you raise a memory's privacy level from Normal or
-Elevated to Restricted or Secret after it has already synced to another
-device, the peer device keeps the snapshot it received. It will not receive an
-automatic retraction. The memory on the peer device remains at the privacy
-level it had when it synced. Until retraction ships, the practical guidance is:
-if you want a previously-synced memory gone from a peer, delete it on the peer
-explicitly. This behavior is documented in the engineering notes as a tracked
-follow-up.
+**Tier-rise retraction is now automatic.** If you raise a memory's privacy
+level from Normal or Elevated to Restricted or Secret after it has already
+synced to another device, the app automatically sends a retraction signal to
+your other devices. They will remove their snapshot of that memory. You do not
+need to delete it on the peer explicitly.
 
 ---
 

@@ -122,6 +122,75 @@ private struct FakeSyncStorage: Storage {
     func migrate(to schema: SchemaDeclaration) async throws {}
 }
 
+/// A RowStore that returns a fixed set of rows from query() and a fixed count from delete().
+///
+/// Used for CVK-WB1 deleteSync guard tests that need the guard to see a local row
+/// with known sensitivity (FixedQueryRowStore.query returns the rows you seed; the
+/// default FakeRowStore always returns []). The deleteResult controls what
+/// base.delete() returns so tests can distinguish "guard blocked (returns 0)" from
+/// "guard forwarded (returns deleteResult)".
+private struct FixedQueryRowStore: RowStore {
+    let queryResult: [StorageRow]
+    let deleteResult: Int
+
+    func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        RowHandle(table: table, key: UUID())
+    }
+    @discardableResult
+    func upsert(table: String, values: [String: TypedValue],
+                conflictColumns: [String]) async throws -> RowHandle {
+        RowHandle(table: table, key: UUID())
+    }
+    @discardableResult
+    func update(table: String, values: [String: TypedValue],
+                where predicate: StoragePredicate) async throws -> Int { 0 }
+    func delete(table: String, where predicate: StoragePredicate) async throws -> Int {
+        deleteResult
+    }
+    func query(table: String, where predicate: StoragePredicate?,
+               orderBy: [OrderClause], limit: Int?, offset: Int?) async throws -> [StorageRow] {
+        queryResult
+    }
+    func count(table: String, where predicate: StoragePredicate?) async throws -> Int { 0 }
+    func querySkipCorrupt(table: String, where predicate: StoragePredicate?,
+                          orderBy: [OrderClause], limit: Int?, offset: Int?,
+                          columns: [String]?) async throws -> (rows: [StorageRow], skipped: Int) {
+        (queryResult, 0)
+    }
+    func query(table: String, where predicate: StoragePredicate?,
+               orderBy: [OrderClause], limit: Int?, offset: Int?,
+               columns: [String]?) async throws -> [StorageRow] { queryResult }
+}
+
+/// Storage wrapper that substitutes a FixedQueryRowStore for the rowStore.
+///
+/// Identical to FakeSyncStorage except the caller controls the rowStore used by
+/// SensitivityFilteredStorage, so deleteSync guard tests can seed a local row.
+private struct FixedQueryStorage: Storage {
+    let fixedRowStore: FixedQueryRowStore
+    let seededChanges: [TableChange]
+
+    var configuration: EstateConfiguration {
+        EstateConfiguration(estateID: UUID(), backend: .inMemory)
+    }
+    var rowStore: any RowStore { fixedRowStore }
+    var blobStore: any BlobStore { FakeBlobStore() }
+    var auditLog: any AuditLog { FakeAuditLog() }
+    var observer: any StorageObserver { SeededStorageObserver(changes: seededChanges) }
+
+    func open(schema: SchemaDeclaration) async throws {}
+    func close() async {}
+    func transaction<T: Sendable>(
+        isolation: IsolationLevel,
+        _ block: @Sendable (any StorageTransaction) async throws -> T
+    ) async throws -> T {
+        fatalError("FixedQueryStorage does not support transactions")
+    }
+    func currentSchemaVersion() async throws -> Int { 0 }
+    func currentSchemaVersion(for kitID: String) async throws -> Int { 0 }
+    func migrate(to schema: SchemaDeclaration) async throws {}
+}
+
 // MARK: - Helpers
 
 /// Build an adjective_bitmap Int64 encoding the given sensitivity tier.
@@ -134,15 +203,21 @@ private func adjBitmap(sensitivity: AdjectiveSensitivity) -> TypedValue {
 /// Build a TableChange for the drawers table with the given sensitivity tier.
 private func drawerChange(
     sensitivity: AdjectiveSensitivity,
-    event: StorageEvent = .insert
+    event: StorageEvent = .insert,
+    rowKey: UUID = UUID()
 ) -> TableChange {
     TableChange(
         table: "drawers",
         event: event,
-        rowKey: UUID(),
+        rowKey: rowKey,
         values: ["adjective_bitmap": adjBitmap(sensitivity: sensitivity)],
         origin: .local
     )
+}
+
+/// Build a StorageRow for the drawers table with the given sensitivity tier.
+private func drawerRow(sensitivity: AdjectiveSensitivity) -> StorageRow {
+    StorageRow(values: ["adjective_bitmap": adjBitmap(sensitivity: sensitivity)])
 }
 
 // MARK: - Tests
@@ -344,22 +419,23 @@ struct SensitivityFilteredStorageTests {
         }
     }
 
-    @Test("deleteSync above ceiling passes — tombstone propagation preserved")
-    func deleteSyncRestrictedPasses() async throws {
-        // Tombstone CKRecords carry only row identity (UUID), not content.
-        // Filtering tombstones would prevent restricted-row deletion signals from
-        // reaching local storage. deleteSync is always forwarded.
+    @Test("deleteSync with no local row — passes through (peer deletion for non-local row)")
+    func deleteSyncNoLocalRowPassesThrough() async throws {
+        // When the row targeted by a tombstone is not present in local storage
+        // (FakeRowStore.query() always returns []), the guard finds no local row
+        // and forwards to base.deleteSync(). This covers the normal peer-deletion
+        // path: a peer deletes a below-ceiling row and the tombstone arrives here
+        // after the local copy was already gone.
         let base = FakeSyncStorage(seededChanges: [])
         let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
 
-        // A tombstone delete predicate carries no adjective_bitmap — just the UUID.
         let predicate = StoragePredicate.eq(
             Column(table: "drawers", name: "id"),
             .uuid(UUID())
         )
-        // Should NOT throw — tombstone deletes are always forwarded.
+        // Guard finds no local row → falls through → FakeRowStore.delete() → 0.
         let count = try await filtered.rowStore.deleteSync(table: "drawers", where: predicate)
-        #expect(count == 0, "fake rowStore returns 0 deletes but must not throw")
+        #expect(count == 0, "fake rowStore returns 0 deletes (row absent); must not throw")
     }
 
     @Test("insertSync on table without adjective_bitmap passes — not sensitivity-gated")
@@ -375,6 +451,174 @@ struct SensitivityFilteredStorageTests {
         ]
         let handle = try await filtered.rowStore.insertSync(table: "kg_facts", values: values)
         #expect(handle.table == "kg_facts", "kg_facts insert without adjective_bitmap must pass through")
+    }
+
+    // MARK: CVK-WB1: Tier-rise retraction — observer tombstone emission
+
+    @Test("Above-ceiling UPDATE emits exactly one retraction tombstone (delete event, nil values, local origin)")
+    func observerEmitsTombstoneForAboveCeilingUpdate() async {
+        // Tier-rise scenario: a row's sensitivity was elevated (below ceiling) on a
+        // prior write. The user raises it to restricted (above ceiling). The UPDATE
+        // event arrives at the observer. Expected: observer emits a synthetic delete
+        // (tombstone intent) with nil values and origin .local, keyed on the same
+        // rowKey. The outbox picks it up and sends a tombstone CKRecord to peers.
+        let rowKey = UUID()
+        let upstream = [
+            TableChange(table: "drawers", event: .update, rowKey: rowKey,
+                        values: ["adjective_bitmap": adjBitmap(sensitivity: .restricted)],
+                        origin: .local),
+        ]
+        let base = FakeSyncStorage(seededChanges: upstream)
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        var received: [TableChange] = []
+        for await change in filtered.observer.observe(table: "drawers", events: [.update, .delete]) {
+            received.append(change)
+        }
+
+        // Exactly one tombstone — the original UPDATE content must not leak.
+        #expect(received.count == 1, "expected exactly one retraction tombstone; got \(received.count)")
+        let tombstone = received[0]
+        #expect(tombstone.event == .delete, "tombstone must be a delete event")
+        #expect(tombstone.rowKey == rowKey, "tombstone must carry the same rowKey as the UPDATE")
+        #expect(tombstone.values == nil, "tombstone must not carry content (nil values)")
+        #expect(tombstone.origin == .local, "tombstone must be origin .local so outbox picks it up")
+        #expect(tombstone.table == "drawers", "tombstone must carry the same table name")
+    }
+
+    @Test("Above-ceiling INSERT does not emit retraction tombstone — row was never below-ceiling")
+    func observerNoTombstoneForAboveCeilingInsert() async {
+        // An INSERT with restricted sensitivity means the row was created above-ceiling.
+        // Peers never received it, so no tombstone is needed. This also covers the
+        // existing P5-M1 suppression invariant — INSERT above-ceiling is suppressed.
+        let upstream = [drawerChange(sensitivity: .restricted, event: .insert)]
+        let base = FakeSyncStorage(seededChanges: upstream)
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        var received: [TableChange] = []
+        for await change in filtered.observer.observe(table: "drawers", events: [.insert, .delete]) {
+            received.append(change)
+        }
+        #expect(received.isEmpty, "above-ceiling INSERT must not emit a tombstone or any event")
+    }
+
+    @Test("Above-ceiling DELETE does not emit retraction tombstone — peers already retracted")
+    func observerNoTombstoneForAboveCeilingDelete() async {
+        // A DELETE event with above-ceiling values means the user explicitly deleted a
+        // restricted row. Peers either never received it (case: row was always above-ceiling)
+        // or already received the tier-rise tombstone (case: row was promoted then deleted).
+        // In neither case is an additional tombstone needed; the DELETE is suppressed.
+        let upstream = [drawerChange(sensitivity: .restricted, event: .delete)]
+        let base = FakeSyncStorage(seededChanges: upstream)
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        var received: [TableChange] = []
+        for await change in filtered.observer.observe(table: "drawers", events: [.delete]) {
+            received.append(change)
+        }
+        #expect(received.isEmpty, "above-ceiling DELETE must not emit a tombstone or any event")
+    }
+
+    @Test("Below-ceiling UPDATE passes through as UPDATE — not converted to tombstone")
+    func observerPassesThroughBelowCeilingUpdate() async {
+        // An UPDATE event for an elevated (at-ceiling) row must pass through unchanged,
+        // not be converted to a tombstone. Only above-ceiling UPDATEs trigger retraction.
+        let rowKey = UUID()
+        let upstream = [
+            TableChange(table: "drawers", event: .update, rowKey: rowKey,
+                        values: ["adjective_bitmap": adjBitmap(sensitivity: .elevated)],
+                        origin: .local),
+        ]
+        let base = FakeSyncStorage(seededChanges: upstream)
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        var received: [TableChange] = []
+        for await change in filtered.observer.observe(table: "drawers", events: [.update, .delete]) {
+            received.append(change)
+        }
+
+        #expect(received.count == 1, "at-ceiling UPDATE must pass through; got \(received.count) events")
+        #expect(received[0].event == .update, "event must remain .update, not converted to .delete")
+        #expect(received[0].rowKey == rowKey)
+    }
+
+    @Test("Demotion edge case: above-ceiling UPDATE then below-ceiling UPDATE passes through as UPDATE")
+    func observerDemotionEdgeCase() async {
+        // Sequence: tier-rise UPDATE (restricted) → demotion UPDATE (elevated).
+        // Expected stream: [tombstone DELETE, UPDATE(elevated)].
+        // This verifies the natural re-sync path: after demotion back below-ceiling,
+        // the next local write produces a normal UPDATE that goes to the outbox and
+        // peers receive the row content again.
+        let rowKey = UUID()
+        let upstream = [
+            // First: tier-rise UPDATE (restricted) → must produce tombstone
+            TableChange(table: "drawers", event: .update, rowKey: rowKey,
+                        values: ["adjective_bitmap": adjBitmap(sensitivity: .restricted)],
+                        origin: .local),
+            // Second: demotion UPDATE (elevated) → must pass through as UPDATE
+            TableChange(table: "drawers", event: .update, rowKey: rowKey,
+                        values: ["adjective_bitmap": adjBitmap(sensitivity: .elevated)],
+                        origin: .local),
+        ]
+        let base = FakeSyncStorage(seededChanges: upstream)
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        var received: [TableChange] = []
+        for await change in filtered.observer.observe(table: "drawers", events: [.update, .delete]) {
+            received.append(change)
+        }
+
+        #expect(received.count == 2, "expected [tombstone, UPDATE]; got \(received.count) events")
+        // First event: tombstone from tier-rise
+        #expect(received[0].event == .delete, "first event must be retraction tombstone")
+        #expect(received[0].rowKey == rowKey)
+        #expect(received[0].values == nil, "tombstone must carry no content")
+        // Second event: demotion re-sync (passes through unchanged)
+        #expect(received[1].event == .update, "second event must be the demotion UPDATE")
+        #expect(received[1].rowKey == rowKey)
+        #expect(received[1].values?["adjective_bitmap"] == adjBitmap(sensitivity: .elevated),
+                "demotion UPDATE must carry elevated sensitivity")
+    }
+
+    // MARK: CVK-WB1: Tier-rise retraction — deleteSync self-delivery guard
+
+    @Test("deleteSync blocked when local row is above-ceiling — self-delivery guard")
+    func deleteSyncBlockedWhenAboveCeilingRowExists() async throws {
+        // When the tier-rise tombstone is self-delivered on the next pull cycle,
+        // applyInbound calls deleteSync on the local restricted row. The guard must
+        // detect the above-ceiling local row and return 0 without forwarding to base.
+        // Base.delete() returns deleteResult=1; guard returns 0 if it blocks correctly.
+        let restrictedRow = drawerRow(sensitivity: .restricted)
+        let fixedRowStore = FixedQueryRowStore(queryResult: [restrictedRow], deleteResult: 1)
+        let base = FixedQueryStorage(fixedRowStore: fixedRowStore, seededChanges: [])
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        let predicate = StoragePredicate.eq(
+            Column(table: "drawers", name: "id"),
+            .uuid(UUID())
+        )
+        let count = try await filtered.rowStore.deleteSync(table: "drawers", where: predicate)
+        // Guard must block: return 0, not the base's deleteResult=1.
+        #expect(count == 0, "deleteSync must be blocked for above-ceiling local row (self-delivery guard)")
+    }
+
+    @Test("deleteSync passes through when local row is at-ceiling — peer deletion honored")
+    func deleteSyncPassesThroughWhenAtCeilingRowExists() async throws {
+        // When a peer deletes a below-ceiling (elevated) row and sends a tombstone,
+        // the guard must NOT block it. The elevated row is within the sync ceiling;
+        // peer deletion semantics apply. Base.delete() returns 1 to signal it deleted.
+        let elevatedRow = drawerRow(sensitivity: .elevated)
+        let fixedRowStore = FixedQueryRowStore(queryResult: [elevatedRow], deleteResult: 1)
+        let base = FixedQueryStorage(fixedRowStore: fixedRowStore, seededChanges: [])
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        let predicate = StoragePredicate.eq(
+            Column(table: "drawers", name: "id"),
+            .uuid(UUID())
+        )
+        let count = try await filtered.rowStore.deleteSync(table: "drawers", where: predicate)
+        // Guard must forward: return base's deleteResult=1.
+        #expect(count == 1, "deleteSync must forward for at-ceiling local row (peer deletion honored)")
     }
 
     // MARK: SensitivityCeilingError properties
