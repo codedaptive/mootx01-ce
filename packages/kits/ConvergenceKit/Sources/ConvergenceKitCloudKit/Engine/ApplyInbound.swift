@@ -125,15 +125,16 @@ extension CloudKitStateActor {
             inboundValues = decoded.values
         }
 
-        // Primary-key type coercion (P4-M1 harness finding): CKRecord fields are
-        // lossy for the uuid/text discriminator — CKRecordMapping stores .uuid as
-        // an NSString and decodes it back as .text. Without coercion, a pulled
-        // row lands with a .text primary key while locally-written rows carry
-        // .uuid, so upsert conflict detection misses the existing row and the
-        // receiver DUPLICATES it, and tombstone delete predicates (.uuid) miss
-        // pulled rows entirely. The recordName IS the row UUID (decoded.rowKey),
-        // so restoring the PK's uuid type here is exact, not heuristic. Full
-        // non-PK uuid-column fidelity through CKRecord is scoped in P4-M2.
+        // Primary-key type coercion (belt-and-braces after P4-M2 tag-map fix):
+        // CKRecordMapping now writes a _syncTypeTags map that restores .uuid
+        // discriminators for ALL columns — including the primary key — during
+        // decode (P4-M2). This coercion retains the PK specifically because the
+        // rowKey is authoritative (derived from the CKRecord.ID, not from the
+        // decoded column value), making the coerce exact and not heuristic.
+        // Without this line, records from older peers that lack _syncTypeTags
+        // would still land with a .text PK and fail upsert deduplication.
+        // Belt-and-braces: keep this coercion even when the tag map is present
+        // so the PK is always correct regardless of peer encoder version.
         inboundValues[syncedTable.primaryKeyColumn] = .uuid(decoded.rowKey)
 
         switch syncedTable.conflictPolicy {

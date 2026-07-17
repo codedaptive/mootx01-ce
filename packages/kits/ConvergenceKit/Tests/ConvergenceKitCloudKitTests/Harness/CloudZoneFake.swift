@@ -50,6 +50,12 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
 
     // MARK: - Test helpers
 
+    /// Set (or clear) the fault injector. Tests call this to script failures
+    /// on specific operations. Must be called via `await` from outside the actor.
+    func setFaults(_ newFaults: FaultInjector?) {
+        faults = newFaults
+    }
+
     /// Pre-populate the store with a record, bypassing HLC-aware merge and CAS.
     /// Used to set up initial estate state in tests.
     func seed(record: CKRecord) {
@@ -116,7 +122,53 @@ actor CloudZoneFake: CloudKitDatabaseProtocol {
         saveResults: [CKRecord.ID: Result<CKRecord, any Error>],
         deleteResults: [CKRecord.ID: Result<Void, any Error>]
     ) {
-        if let fault = await faults?.nextFault(for: .modifyRecords) {
+        // Fault injection: only applies to batches that contain at least one data record.
+        // Slot-registry heartbeat calls (all records have type "_ck_device_slot") are
+        // transparent to data-push faults — they must not consume a queued fault that
+        // was intended for the subsequent data modifyRecords call. Without this guard,
+        // a .partialBatchFailure injected for a data push would be consumed by the slot
+        // heartbeat and the data push would receive no fault, causing the test to fail.
+        let hasDataRecords = recordsToSave.contains { $0.recordType != "_ck_device_slot" }
+
+        if hasDataRecords, let fault = await faults?.nextFault(for: .modifyRecords) {
+            // .partialBatchFailure: do NOT throw. Fall through to normal processing
+            // but mark the first `count` DATA records as per-record failures without
+            // updating the store. PushResults.process sees individual failure Results
+            // in saveResults and increments retry_count for those outbox entries.
+            if case .partialBatchFailure(let failCount) = fault {
+                var partialResults: [CKRecord.ID: Result<CKRecord, any Error>] = [:]
+                let perRecordError = NSError(
+                    domain: CKErrorDomain,
+                    code: CKError.Code.networkUnavailable.rawValue,
+                    userInfo: nil
+                )
+                // Count only DATA records against the failure budget; slot records
+                // always succeed regardless of the fault count.
+                var dataFailIdx = 0
+                for record in recordsToSave {
+                    let id = record.recordID
+                    let isSlot = record.recordType == "_ck_device_slot"
+                    if !isSlot && dataFailIdx < failCount {
+                        // Fail this data record at per-record level; do not update store.
+                        partialResults[id] = .failure(perRecordError)
+                        dataFailIdx += 1
+                    } else {
+                        // Normal HLC-aware merge for slot records and non-failing data records.
+                        if !isSlot, let existing = store[id] {
+                            let inHLC = UInt64(bitPattern: (record["_syncHLC"] as? NSNumber)?.int64Value ?? 0)
+                            let exHLC = UInt64(bitPattern: (existing["_syncHLC"] as? NSNumber)?.int64Value ?? 0)
+                            if inHLC < exHLC {
+                                partialResults[id] = .success(existing)
+                                continue
+                            }
+                        }
+                        store[id] = record
+                        storedIdentifiers[id] = ObjectIdentifier(record)
+                        partialResults[id] = .success(record)
+                    }
+                }
+                return (partialResults, [:])
+            }
             throw FaultInjector.makeError(for: fault)
         }
 

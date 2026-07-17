@@ -1,6 +1,6 @@
 // FaultInjector.swift
 //
-// Scripted fault-injection actor for convergence harness tests (CVK-ICLOUD P4-M1).
+// Scripted fault-injection actor for convergence harness tests (CVK-ICLOUD P4-M1/P4-M2).
 // Faults are queued per operation target and dequeued one-at-a-time. The queue
 // is deterministic: tests enqueue a known sequence before running the operation
 // under test, so there is no randomness. Each dequeued fault triggers exactly
@@ -16,13 +16,16 @@
 //   // Next call to cloudZone.modifyRecords throws a network error; subsequent calls pass.
 //
 // Supported fault scripts:
-//   .networkError(detail:)  — throws a generic network-unavailable CKError
-//   .rateLimitError         — throws CKError.Code.requestRateLimited
-//   .changeTokenExpired     — throws CKError.Code.changeTokenExpired (pull path recovery)
-//   .serverRecordChanged    — throws CKError.Code.serverRecordChanged (CAS conflict)
-//
-// P4-M2 and P4-M3 will extend FaultInjector with partial-batch failure support
-// (.partialBatchFailure) and configurable retry behavior.
+//   .networkError(detail:)        — throws a generic network-unavailable CKError
+//   .rateLimitError               — throws CKError.Code.requestRateLimited
+//   .changeTokenExpired           — throws CKError.Code.changeTokenExpired (pull path recovery)
+//   .serverRecordChanged          — throws CKError.Code.serverRecordChanged (CAS conflict)
+//   .partialBatchFailure(count:)  — lets all records through but marks the first `count`
+//                                   as per-record network failures in the saveResults dict.
+//                                   The call itself does NOT throw; per-record errors are
+//                                   surfaced in the result dictionary so PushResults.process
+//                                   can classify them and increment retry_count on affected
+//                                   outbox entries. Subsequent records in the same batch succeed.
 
 import Foundation
 import CloudKit
@@ -33,6 +36,7 @@ import CloudKit
 enum FaultScript: Sendable {
 
     /// Generic network error (timeout, unavailable). Maps to CKError.networkUnavailable.
+    /// Causes the entire modifyRecords / fetch / fetchZoneChanges call to throw.
     case networkError(detail: String)
 
     /// Server-side rate limit. Maps to CKError.requestRateLimited.
@@ -44,6 +48,19 @@ enum FaultScript: Sendable {
 
     /// CAS conflict (slot registry or epoch fence). Maps to CKError.serverRecordChanged.
     case serverRecordChanged
+
+    /// Partial batch failure: the modifyRecords call succeeds at the transport level
+    /// (does NOT throw) but the first `count` records in the batch are returned as
+    /// per-record networkUnavailable failures in the saveResults dictionary.
+    ///
+    /// WHY per-record rather than whole-batch:
+    /// PushResults.process handles the saveResults dict from modifyRecords(atomically:false).
+    /// Partial failures are the expected production shape when some records fail and others
+    /// succeed in the same batch. This fault lets tests verify that:
+    ///   - Failed entries stay in the outbox with incremented retry_count
+    ///   - Succeeded entries are confirmed (removed from outbox)
+    ///   - A second push drains the remaining failed entries → eventual convergence
+    case partialBatchFailure(count: Int)
 }
 
 // MARK: - FaultTarget
@@ -89,6 +106,10 @@ actor FaultInjector {
     /// without needing a FaultInjector reference after dequeuing the fault.
     /// Uses NSError with CKErrorDomain, matching the existing fake pattern in
     /// SlotRegistryTests.FakeCloudKitDatabase.
+    ///
+    /// .partialBatchFailure is NOT handled here — it does not produce a single
+    /// error to throw; instead it produces per-record failures in the saveResults
+    /// dictionary, handled directly in CloudZoneFake.modifyRecords.
     static func makeError(for fault: FaultScript) -> Error {
         let code: CKError.Code
         switch fault {
@@ -100,6 +121,9 @@ actor FaultInjector {
             code = .changeTokenExpired
         case .serverRecordChanged:
             code = .serverRecordChanged
+        case .partialBatchFailure:
+            // Handled separately in CloudZoneFake.modifyRecords; should not reach here.
+            code = .networkUnavailable
         }
         return NSError(domain: CKErrorDomain, code: code.rawValue, userInfo: nil)
     }

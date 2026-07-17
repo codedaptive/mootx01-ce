@@ -327,6 +327,29 @@ actor TwoEstateFixture {
         ).first
     }
 
+    // MARK: - Crash / restart simulation
+
+    /// Simulate an estate crash and restart by disabling the given engine
+    /// and creating a fresh CloudKitSyncEngine backed by the same Storage instance.
+    ///
+    /// Models process death and restart:
+    ///   - engine.disable() cancels observer tasks and clears in-memory state.
+    ///   - A fresh CloudKitSyncEngine is constructed (no retained in-memory queue).
+    ///   - enable(manifest:storage:) on the fresh engine re-loads the durable outbox
+    ///     leftovers (drainLeftovers), restores the server change token, and re-claims
+    ///     a slot — exactly what production does on process restart.
+    ///   - InMemoryStorage keeps its actor's in-memory tables alive across the
+    ///     disable/enable cycle, equivalent to disk-backed storage surviving a restart.
+    ///
+    /// Returns the fresh engine. Callers substitute it for the old engine reference.
+    func restartEngine(_ engine: CloudKitSyncEngine, storage: any Storage) async throws -> CloudKitSyncEngine {
+        try await engine.disable()
+        let fresh = CloudKitSyncEngine(containerIdentifier: nil)
+        await fresh.stateActor.setTestDatabase(cloud)
+        try await fresh.enable(manifest: Self.manifest, storage: storage)
+        return fresh
+    }
+
     // MARK: - assertSyncMetaMatch
 
     /// Assert that both estates have identical _ck_sync_meta entries for `table`.

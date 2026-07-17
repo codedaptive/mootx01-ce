@@ -71,8 +71,9 @@ public enum CKRecordMapping {
     }
 
     /// Convert a row to a CKRecord. Reserved field names
-    /// (_syncHLC, _syncSchemaVersion, _syncKitID, _syncColumnHLCs) carry
-    /// sync metadata so the receiver can apply conflict policy and schema check.
+    /// (_syncHLC, _syncSchemaVersion, _syncKitID, _syncColumnHLCs, _syncTypeTags)
+    /// carry sync metadata so the receiver can apply conflict policy, schema check,
+    /// and restore exact TypedValue discriminators after CKRecord round-trip.
     ///
     /// - Parameters:
     ///   - columnHLCs: Per-column HLC map for `fieldLevelLWW` records. When
@@ -90,6 +91,30 @@ public enum CKRecordMapping {
     ) throws -> CKRecord {
         let recordID = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: recordID)
+
+        // Collect type tags for CKRecord-lossy discriminators BEFORE assigning values.
+        // CKRecord does not carry Swift type metadata, so certain discriminators collapse
+        // to coarser types on the wire:
+        //   .uuid        → NSString → decoded as .text (uuidString value preserved)
+        //   .bitmap      → NSNumber(Int64) → decoded as .int (same ObjC type as .int)
+        //   .hlc         → NSNumber(Int64, packed) → decoded as .int (packed value)
+        //   .json        → NSString or NSData → decoded as .text or .blob
+        //   .fingerprint → NSData (32 bytes) → decoded as .blob
+        // The _syncTypeTags map restores exact discriminators at decode time without
+        // guessing. Non-lossy cases (.null, .bool, .int, .float, .text, .blob,
+        // .timestamp) round-trip with the correct discriminator and need no tag.
+        var typeTags: [String: String] = [:]
+        for (key, value) in values {
+            switch value {
+            case .uuid:        typeTags[key] = "uuid"
+            case .bitmap:      typeTags[key] = "bitmap"
+            case .hlc:         typeTags[key] = "hlc"
+            case .json:        typeTags[key] = "json"
+            case .fingerprint: typeTags[key] = "fingerprint"
+            default:           break
+            }
+        }
+
         for (key, value) in values {
             try assign(value: value, to: record, forKey: key)
         }
@@ -103,6 +128,16 @@ public enum CKRecordMapping {
         if let map = columnHLCs, !map.isEmpty,
            let data = try? JSONEncoder().encode(map) {
             record["_syncColumnHLCs"] = data as NSData
+        }
+        // _syncTypeTags: compact JSON map from column name → discriminator string.
+        // Carries only the lossy discriminators listed above; omitted when all present
+        // column discriminators round-trip cleanly so non-lossy records stay compact.
+        // The _sync prefix ensures decode() filters this field from the app-data values
+        // map automatically (the key.hasPrefix("_sync") guard in the decode loop).
+        if !typeTags.isEmpty,
+           let tagsData = try? JSONEncoder().encode(typeTags),
+           let tagsString = String(data: tagsData, encoding: .utf8) {
+            record["_syncTypeTags"] = tagsString as NSString
         }
         return record
     }
@@ -156,6 +191,75 @@ public enum CKRecordMapping {
                 values[key] = .null
             }
         }
+
+        // Restore lossy TypedValue discriminators from the type-tag map (P4-M2).
+        // CKRecord collapses certain discriminators to coarser types on the wire
+        // (see record(from:) for the full list). The tag map written at encode time
+        // restores the exact discriminator without guessing from runtime value shape.
+        // Absent on records from older peers; decoded values remain in their coarser
+        // form (backward-compat: existing callers that tolerated .text for uuid columns
+        // continue to work).
+        if let tagsString = record["_syncTypeTags"] as? String,
+           let tagsData = tagsString.data(using: .utf8),
+           let typeTags = try? JSONDecoder().decode([String: String].self, from: tagsData) {
+            for (col, tag) in typeTags {
+                guard let v = values[col] else { continue }
+                switch tag {
+                case "uuid":
+                    // .uuid was stored as u.uuidString (NSString), decoded as .text(s).
+                    // Restore to .uuid(u) using the canonical uuidString round-trip.
+                    if case .text(let s) = v, let u = UUID(uuidString: s) {
+                        values[col] = .uuid(u)
+                    }
+                case "bitmap":
+                    // .bitmap was stored as NSNumber(Int64), decoded as .int(i).
+                    // Restore to .bitmap(i); the numeric value is identical.
+                    if case .int(let i) = v {
+                        values[col] = .bitmap(i)
+                    }
+                case "hlc":
+                    // .hlc was stored as packed(h) (Int64 NSNumber), decoded as .int(packed).
+                    // Restore by unpacking the Int64 back to the HLC struct.
+                    if case .int(let packed) = v {
+                        values[col] = .hlc(unpacked(packed))
+                    }
+                case "json":
+                    // .json was stored as NSString (UTF-8) or NSData (non-UTF-8 blob).
+                    // Restore .text(s) → .json(s.data) or .blob(d) → .json(d).
+                    if case .text(let s) = v, let d = s.data(using: .utf8) {
+                        values[col] = .json(d)
+                    } else if case .blob(let d) = v {
+                        values[col] = .json(d)
+                    }
+                case "fingerprint":
+                    // .fingerprint was stored as 32 bytes of NSData (4 x UInt64 LE).
+                    // Restore by reading back the four little-endian UInt64 words.
+                    if case .blob(let d) = v, d.count == 32 {
+                        let fp = d.withUnsafeBytes { ptr -> Fingerprint256 in
+                            func readLE(at byteOffset: Int) -> UInt64 {
+                                var raw: UInt64 = 0
+                                withUnsafeMutableBytes(of: &raw) { dst in
+                                    dst.copyBytes(from: ptr[byteOffset ..< byteOffset + 8])
+                                }
+                                return UInt64(littleEndian: raw)
+                            }
+                            return Fingerprint256(
+                                block0: readLE(at: 0),
+                                block1: readLE(at: 8),
+                                block2: readLE(at: 16),
+                                block3: readLE(at: 24)
+                            )
+                        }
+                        values[col] = .fingerprint(fp)
+                    }
+                default:
+                    // Unknown tag from a future encoder version. Leave the coarser
+                    // discriminator in place (forward-compat: do not crash).
+                    break
+                }
+            }
+        }
+
         return DecodedRecord(
             table: tableName,
             rowKey: rowKey,
