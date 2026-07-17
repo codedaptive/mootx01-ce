@@ -217,15 +217,18 @@ buffer the newest 256 events.
 **B-4 (conflict policy at the apply boundary):** the receiver applies
 each inbound record under the table's `ConflictPolicy`:
 
-- `lastWriterWinsByHLC` — on insert/update: reads the local row's stored
-  `_syncHLC` (reserved column written by every winning apply); if the
-  incoming HLC is strictly less than `_syncHLC` the record is silently
-  dropped; otherwise the row is upserted and `_syncHLC` is written with
+- `lastWriterWinsByHLC` — on insert/update: reads the row's persisted
+  sync HLC from the backend's sync-meta side table (`_ck_sync_meta` /
+  `_fed_sync_meta`, written by every winning apply; the HLC does not
+  live in the application row — see B-9); if the incoming HLC is
+  strictly less than the stored HLC the record is silently dropped;
+  otherwise the row is upserted and the side-table HLC is written with
   the incoming HLC so the next inbound comparison has durable state. On
   delete: the same HLC gate applies — a stale delete (incoming HLC <
-  local `_syncHLC`) is silently rejected; a newer or equal delete
-  hard-deletes the row. Both CloudKit and Federation backends implement
-  this identical comparison semantics.
+  stored HLC) is silently rejected; a newer or equal delete hard-deletes
+  the row and the delete HLC persists in the side table as a tombstone
+  entry (B-9), so stale inserts cannot resurrect the row. Both CloudKit
+  and Federation backends implement this identical comparison semantics.
 - `appendOnly` — upserts idempotently on the primary key (audit-log
   style); remote deletes are silently rejected.
 - `remoteWins` — upserts unconditionally; remote deletes execute without
@@ -297,7 +300,11 @@ and `_ck_pending_skew` — live under a single `SchemaDeclaration` with
 `kitID "ConvergenceKit"` and a single version counter. Each additional
 side table increments the version; migrations are additive. No two
 `SchemaDeclaration` entries share the same version number with different
-table sets.
+table sets. Consolidation state: `_ck_sync_meta`, `_ck_outbox`, and
+`_ck_change_token` are consolidated as of v3; `_ck_device_identity`
+still carries its own declaration (planned v4 consolidation) and
+`_ck_pending_skew` does not yet exist (arrives with the schema-skew
+queue, planned v5).
 
 **B-13 (slot registry claim/heartbeat/fence contract) (v1.2-draft):**
 The CloudKit device slot registry (N2) enforces the following behavioral

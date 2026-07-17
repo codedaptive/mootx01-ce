@@ -100,8 +100,8 @@ public enum CKSideSchema {
         //                 Stored as TEXT, not Bool, per schema invariant.
         //   values      — JSON-encoded SyncValueMap for insert/update; absent
         //                 (null) for delete events.
-        //   hlc         — packed HLC (Int64, 48-bit physical | 12-bit logical |
-        //                 4-bit node) used for coalescing: when two changes for
+        //   hlc         — packed HLC (Int64, 40-bit physical | 16-bit logical |
+        //                 8-bit node — HLC.swift `packed`) used for coalescing: when two changes for
         //                 the same (table_name, row_key) are appended, only the
         //                 entry with the higher HLC survives.
         //   enqueued_at — ISO8601 wall-clock string for observability.

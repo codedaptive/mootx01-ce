@@ -200,13 +200,30 @@ public struct SlotTable: Sendable {
 
         // Long-inactivity slow-path: oldest lastActiveHLC past the window
         // Convert wall-clock to milliseconds for comparison with HLC physicalTime.
-        // HLC.physicalTime is milliseconds since Unix epoch (see SubstrateTypes/HLC.swift).
-        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        //
+        // CRITICAL: lastActiveHLC round-trips through HLC.packed, whose physical
+        // field is 40 bits (HLC.swift: `phys & 0xFF_FFFF_FFFF`; layout is
+        // node 8 | logical 16 | physical 40 — NOT the 48/12/4 that older spec
+        // prose claims). A full-width 2026 Unix-ms value (~1.75e12) exceeds
+        // 2^40 (~1.10e12), so the unpacked physicalTime is truncated. Comparing
+        // it against full-width now-millis makes every slot look ~35 years
+        // stale — every non-ghost slot becomes permanently eviction-eligible,
+        // silently defeating fenced eviction (Adams P1 review, CRITICAL #1).
+        // Fix: mask now-millis into the same 40-bit space so both sides of the
+        // subtraction wrap identically. The window comparison is then correct
+        // except across a 2^40-ms (~35-year) wrap boundary, which the epoch
+        // fence tolerates: a mis-evicted ACTIVE device is fenced loudly at its
+        // next heartbeat and re-enrolls without data loss (A2 re-mint).
+        // BOTH sides are masked: a slot's lastActiveHLC may be full-width
+        // (constructed directly, as in tests) or already truncated (round-
+        // tripped through packed, as real registry records are). Masking both
+        // puts the subtraction in one consistent 40-bit space either way.
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000) & 0xFF_FFFF_FFFF
         let longInactivityMillis = Int64(SlotLongInactivityWindow * 1000)
         let candidates = slots.filter { slot in
             // Exclude zero-HLC slots (ghosts, handled above)
             slot.lastActiveHLC != HLC.zero
-            && (nowMillis - slot.lastActiveHLC.physicalTime) > longInactivityMillis
+            && (nowMillis - (slot.lastActiveHLC.physicalTime & 0xFF_FFFF_FFFF)) > longInactivityMillis
         }
         // Return the slot with the oldest (smallest) lastActiveHLC
         return candidates.min(by: { $0.lastActiveHLC < $1.lastActiveHLC })

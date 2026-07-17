@@ -336,3 +336,51 @@ struct DeviceSlotTests {
         }
     }
 }
+
+// MARK: - 40-bit physicalTime truncation regression (Adams P1 CRITICAL #1)
+
+@Suite("SlotTable: packed-HLC truncation regression")
+struct SlotTableTruncationRegressionTests {
+
+    /// A slot heartbeated moments ago must NOT be eviction-eligible, even when
+    /// its lastActiveHLC has round-tripped through HLC.packed (whose physical
+    /// field is 40 bits, so 2026-scale Unix-ms values are truncated). Before
+    /// the fix, evictionCandidate compared full-width now-millis against the
+    /// truncated physicalTime, making every real-world slot look ~35 years
+    /// stale and permanently eviction-eligible.
+    @Test("recently-active slot with packed-truncated HLC is not evictable at 2026-scale timestamps")
+    func recentlyActivePackedSlotNotEvictable() {
+        // 2026-07-16T00:00:00Z — well above 2^40 ms, so packing truncates.
+        let now = Date(timeIntervalSince1970: 1_784_160_000)
+        let recentMillis = Int64(now.timeIntervalSince1970 * 1000) - 60_000 // 1 min ago
+        let fullWidth = HLC(physicalTime: recentMillis, logicalCount: 0, nodeID: 3)
+        // Round-trip through the packed form, exactly as SlotRecordMapping does.
+        let truncated = HLC(packed: fullWidth.packed)
+        let slot = DeviceSlot(
+            slot: 3, epoch: 1, deviceUUID: UUID(),
+            lastActiveHLC: truncated, claimedAt: now.addingTimeInterval(-3600)
+        )
+        let table = SlotTable(slots: [slot])
+        #expect(table.evictionCandidate(now: now) == nil,
+                "recently-active slot must not be eviction-eligible after packed round-trip")
+    }
+
+    /// The inverse guarantee: a slot genuinely idle beyond the long-inactivity
+    /// window IS still detected after the same packed round-trip (the masked
+    /// comparison preserves real staleness, not just recency).
+    @Test("genuinely stale slot remains evictable after packed round-trip")
+    func genuinelyStaleSlotStillEvictable() {
+        let now = Date(timeIntervalSince1970: 1_784_160_000)
+        // 40 days idle — beyond the 30-day long-inactivity window.
+        let staleMillis = Int64(now.timeIntervalSince1970 * 1000) - 40 * 86_400_000
+        let fullWidth = HLC(physicalTime: staleMillis, logicalCount: 0, nodeID: 4)
+        let truncated = HLC(packed: fullWidth.packed)
+        let slot = DeviceSlot(
+            slot: 4, epoch: 1, deviceUUID: UUID(),
+            lastActiveHLC: truncated, claimedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let table = SlotTable(slots: [slot])
+        #expect(table.evictionCandidate(now: now)?.slot == 4,
+                "genuinely idle slot must remain eviction-eligible")
+    }
+}

@@ -50,7 +50,7 @@ extension CloudKitStateActor {
         storage: any Storage, table: String, primaryKey: UUID, pkColumn: String,
         hlc: HLC, schemaVersion: Int, kitID: String
     ) async throws {
-        _ = try await storage.rowStore.upsert(
+        _ = try await storage.rowStore.upsertSync(
             table: Self.syncMetaTable,
             values: [
                 "table_name": .text(table),
@@ -79,7 +79,7 @@ extension CloudKitStateActor {
         storage: any Storage, table: String, primaryKey: UUID,
         hlc: HLC, schemaVersion: Int, kitID: String
     ) async throws {
-        _ = try await storage.rowStore.upsert(
+        _ = try await storage.rowStore.upsertSync(
             table: Self.syncMetaTable,
             values: [
                 "table_name": .text(table),
