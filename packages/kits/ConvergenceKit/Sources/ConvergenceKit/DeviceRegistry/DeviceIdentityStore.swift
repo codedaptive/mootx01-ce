@@ -20,17 +20,13 @@
 //   would apply to any shared relay backend, not only CloudKit. Using
 //   the core kitID keeps the table visible to any future backend.
 //
-// Consolidation note (adjudication A11, current state):
-//   CKSideSchema (SideSchema.swift) consolidates most _ck_* side tables
-//   (_ck_sync_meta, _ck_outbox, _ck_change_token, _ck_sync_meta_cols,
-//   _ck_pending_skew). _ck_device_identity is the remaining holdout: it
-//   still carries its own SchemaDeclaration here (kitID "ConvergenceKit",
-//   version 1) because the earmarked consolidation version was superseded
-//   when fieldLevelLWW took v6. Folding this table into CKSideSchema is
-//   tracked in docs/status/CVK_ICLOUD/TRACKED_FOLLOWUPS.md (A11 row).
-//   Any change here must remain additive-compatible with CKSideSchema's
-//   column-set rules (no renames or type changes; no Bool columns; TEXT
-//   ISO8601 dates).
+// Consolidation note (adjudication A11, CVK-WB12 — DONE):
+//   CKSideSchema (SideSchema.swift) now consolidates ALL _ck_* side tables,
+//   including _ck_device_identity. The table declaration was moved to
+//   CKSideSchema v9 (v8→v9 migration, additive — IF NOT EXISTS). This file
+//   retains the read/write helpers and the ensureSchema(storage:) entry point
+//   (which delegates to CKSideSchema.ensure) for call-site stability, matching
+//   the pattern established by TokenStore.swift for _ck_change_token.
 
 import Foundation
 import PersistenceKit
@@ -99,9 +95,10 @@ public struct DeviceIdentity: Sendable, Equatable {
 /// must be awaited in an async context.
 public struct DeviceIdentityStore: Sendable {
 
-    // Side table name. Prefixed with `_ck_` to match the established
-    // ConvergenceKit side-table naming convention (cf. `_ck_sync_meta`).
-    private static let tableName = "_ck_device_identity"
+    // Side table name — references the CKSideSchema constant so the single
+    // source of truth for the table name lives in SideSchema.swift.
+    // (cf. TokenStore.tableName = CKSideSchema.changeTokenTable)
+    private static let tableName = CKSideSchema.deviceIdentityTable
 
     // Fixed primary key for the single-row table. This device has exactly
     // one identity per estate; a sentinel constant avoids needing a ROWID
@@ -131,52 +128,20 @@ public struct DeviceIdentityStore: Sendable {
     // MARK: - Schema
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Create the `_ck_device_identity` side table if it does not exist.
+    /// Ensure the `_ck_device_identity` side table exists on `storage`.
     ///
-    /// Call this once before any `DeviceIdentityStore` read or write —
-    /// `CloudKitStateActor.enable()` does so immediately after calling
-    /// `ensureSyncMetaTable`. Calling it multiple times is safe because
-    /// `Storage.migrate(to:)` is additive-only: it creates missing tables
-    /// without touching existing ones or the application's active schema.
+    /// Delegates to `CKSideSchema.ensure(storage:)`, which owns the
+    /// consolidated `SchemaDeclaration` for all ConvergenceKit side tables
+    /// (kitID "ConvergenceKit", version 9 as of CVK-WB12). Kept as a function
+    /// so existing callers compile without modification; CloudKitStateActor
+    /// no longer needs to call it separately because CKSideSchema.ensure is
+    /// already called earlier in the enable path.
     ///
-    /// Do NOT call `Storage.open(schema:)` here — that replaces the active
-    /// schema declaration and would break all application row operations.
-    ///
-    /// Schema invariants enforced here:
-    ///   - No Bool stored columns (operationalBitmap pattern would apply
-    ///     if boolean state were needed; none is needed for this table).
-    ///   - `claimed_at` is TEXT ISO8601, NOT REAL/unix timestamp.
+    /// Calling it multiple times is safe — `Storage.migrate(to:)` is
+    /// additive-only: it creates missing tables without touching existing ones
+    /// or the application's active schema.
     public static func ensureSchema(storage: any Storage) async throws {
-        let schema = SchemaDeclaration(
-            // kitID "ConvergenceKit" (not "ConvergenceKitCloudKit") because
-            // device identity is transport-agnostic. See file header rationale
-            // and adjudication A11 consolidation note.
-            kitID: "ConvergenceKit",
-            version: 1,
-            tables: [
-                TableDeclaration(
-                    name: tableName,
-                    columns: [
-                        // Fixed sentinel key — always "self" for this device.
-                        ColumnDeclaration(name: "id", type: .text, nullable: false),
-                        // Device UUID as a TEXT string (UUID.uuidString).
-                        ColumnDeclaration(name: "device_uuid", type: .text, nullable: false),
-                        // Slot number 1–15 stored as Int64.
-                        ColumnDeclaration(name: "slot", type: .int, nullable: false),
-                        // Epoch counter; starts at 1 on first mint.
-                        ColumnDeclaration(name: "epoch", type: .int, nullable: false,
-                                          defaultValue: .int(1)),
-                        // DATE STORAGE INVARIANT: TEXT ISO8601, never REAL.
-                        // Storing as unix float would lose sub-second precision
-                        // and prevent human readability in DB browsers.
-                        ColumnDeclaration(name: "claimed_at", type: .text, nullable: false),
-                    ],
-                    primaryKey: ["id"]
-                ),
-            ],
-            indices: []
-        )
-        try await storage.migrate(to: schema)
+        try await CKSideSchema.ensure(storage: storage)
     }
 
     // ─────────────────────────────────────────────────────────────────────────

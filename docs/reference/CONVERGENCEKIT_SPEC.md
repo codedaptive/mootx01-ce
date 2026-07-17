@@ -449,17 +449,19 @@ CloudKit so the kit builds unchanged for the resident launchd process
 (which holds no APNs entitlements).
 
 **B-12 (side-table governance):** All `_ck_*` side tables —
-`_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_device_identity`,
-and `_ck_pending_skew` — live under a single `SchemaDeclaration` with
-`kitID "ConvergenceKit"` and a single version counter. Each additional
-side table increments the version; migrations are additive. No two
-`SchemaDeclaration` entries share the same version number with different
-table sets. Consolidation state: `_ck_sync_meta`, `_ck_outbox`, and
-`_ck_change_token` are consolidated as of v3; `_ck_device_identity`
-still carries its own declaration (planned v4 consolidation);
-`_ck_pending_skew` was added at v7 via a v6→v7 migration (v4/v5 earmarks
-were superseded by the v3→v6 jump for `_ck_sync_meta_cols` and
-`_ck_device_identity`). (CVK-ICLOUD P3-M4)
+`_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_sync_meta_cols`,
+`_ck_pending_skew`, and `_ck_device_identity` — live under a single
+`SchemaDeclaration` with `kitID "ConvergenceKit"` and a single version
+counter. Each additional side table increments the version; migrations are
+additive. No two `SchemaDeclaration` entries share the same version number
+with different table sets. Consolidation state: all six tables are
+consolidated as of v9 — `_ck_sync_meta`, `_ck_outbox`, and
+`_ck_change_token` at v3; `_ck_sync_meta_cols` at v6; `_ck_pending_skew`
+at v7 via v6→v7 migration; `_ck_device_identity` at v9 via v8→v9 migration
+(CVK-WB12, A11 final consolidation — previously held its own declaration in
+`DeviceIdentityStore.swift`; v4/v5 earmarks were superseded by the v3→v6
+jump, so the table landed at v9 instead). A11 consolidation is complete.
+(CVK-ICLOUD P3-M4; CVK-WB12)
 
 **B-13 (slot registry claim/heartbeat/fence contract):**
 The CloudKit device slot registry (N2) enforces the following behavioral
