@@ -312,15 +312,48 @@ helpers as ground-truth references: `p4m3NodeIDOf` (SubstrateTypes
 layout, node in bits 56–63) and `ckRecordNodeIDOf` (CKRecordMapping
 layout, node in low 4 bits).
 
-**B-7 (Federation pairing):** two estates pair by exchanging public keys
-and a shared `HyperplaneFamilySpec` (seed + dimension) so their 256-bit
-fingerprints are directly comparable. Pairing is symmetric — each side
-registers the other. Pairing rides a `Relay` transport abstraction
-(INTERFACE § 4): the in-process `FederationRelay` is the local-and-test
-implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
-`Relay` conformer requiring no change to the engine. All signing uses the
-persistent estate identity loaded via `loadOrMintIdentity`/`load_or_mint_identity`
-(I-8, WC1): envelopes signed before the first `enable()` are not possible.
+**B-7 (Federation pairing):** two estates pair through a two-message
+Ed25519 signed handshake:
+
+1. **Proposal:** the proposer constructs a `PairingProposal` carrying its
+   Ed25519 public key, the proposed `HyperplaneFamilySpec` (seed +
+   dimension), and a 16-byte cryptographic nonce. The proposer signs the
+   canonical `proposalSigningBytes` encoding (proposer key || seed LE u64 ||
+   dimension LE u32 || nonce) with its Ed25519 private key and delivers the
+   proposal + signature to the accepter via `acceptPairingProposal`.
+
+2. **Acceptance:** the accepter verifies the proposer's signature using
+   `proposal.proposerPublicKey` / `proposal.proposer_public_key`. On
+   success, the accepter signs the same `proposalSigningBytes` with its
+   own key and returns a `PairingAcceptance` (accepter public key, accepted
+   family, signature-of-proposal).
+
+3. **Proposer verification:** the proposer verifies (a) the accepter's
+   signature using the known-peer public key, (b) `acceptedFamily ==
+   proposedFamily`. Failure on either check → `authenticationFailed`; no
+   peer is registered.
+
+Both sides call `pair()` symmetrically, so each holds the other in its
+paired-peer registry. After a successful pair, the peer is written to the
+`_fed_peers` side table (schema v6, WC6): columns `peer_id` (deterministic
+UUID from first 16 bytes of public key), `public_key` (BLOB, 32 bytes),
+`family_seed` (INT), `family_dimension` (INT), `paired_at` (TEXT ISO8601).
+`enable()` reloads `_fed_peers` into the in-memory peer list so pairing
+survives process restart and estate reopen without re-calling `pair()`.
+
+Pairing rides a `Relay` transport abstraction (INTERFACE § 4): the
+in-process `FederationRelay` is the local-and-test implementation; a hosted
+HTTPS/gRPC SyncServer relay is a drop-in `Relay` conformer requiring no
+change to the engine. All signing uses the persistent estate identity loaded
+via `loadOrMintIdentity`/`load_or_mint_identity` (I-8, WC1): envelopes
+signed before the first `enable()` are not possible.
+
+**Deferred:** peer revocation and key rotation are deferred to a future
+mission. There is no `revoke()` or key-rotation path in v1.0. An estate
+that wishes to unpair must drop its `_fed_peers` row directly and call
+`disable()` + `enable()` to reload the registry. This posture is documented
+here so consumers are not surprised; it is not a TODO for the current
+version.
 
 **B-8 (fieldLevelLWW):** `ConflictPolicy.fieldLevelLWW` applies
 last-writer-wins at the column grain using per-column HLCs. Shipped in
@@ -781,6 +814,19 @@ configured test container (C-12, C-13, C-14 use `CloudKitDatabaseFake` to run
 without a live CloudKit container).
 
 ## Changelog
+
+### 1.3 -- 2026-07-17 (CVK-WC6)
+- **Firmed B-7 (Federation pairing):** expanded from a one-paragraph
+  placeholder to a full three-step description of the wired signed
+  Ed25519 handshake: proposal creation + signing, acceptance verification,
+  family-agreement check, and `authenticationFailed` failure path.
+- **Added `_fed_peers` persistence contract to B-7:** schema v6 side table
+  columns, deterministic peer UUID derivation (first 16 bytes of public
+  key), `enable()` reload guarantee so pairing survives estate reopen.
+- **Added deferred-scope note to B-7:** peer revocation and key rotation
+  are explicitly deferred to a future mission; the temporary workaround
+  (drop `_fed_peers` row + disable/enable) is documented so consumers are
+  not surprised. This is NOT a TODO — it is a deliberate v1.0 scope boundary.
 
 ### 1.2 -- 2026-07-17 (CVK-ICLOUD P5-M4)
 - Promoted 1.2-draft to 1.2 (status: active). All `(v1.2-draft)` markers

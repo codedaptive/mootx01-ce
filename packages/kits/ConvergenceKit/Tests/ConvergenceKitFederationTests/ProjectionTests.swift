@@ -226,14 +226,14 @@ struct FederationOutboundProjectionTests {
         // A 4-column schema with a non-excluded "body" col would NOT storm-kill
         // because after stripping, "body" would remain as non-PK content.
         let storage = try await makeStorageExcludedOnly()
-        let engine = FederationSyncEngine()
         let manifest = makeManifestExcludedOnly()
         let relay = FederationRelay()
-        let peer = FederationSyncEngine()
+        let engine = FederationSyncEngine(relay: relay)
+        let peer = FederationSyncEngine(relay: relay)
         let peerStorage = try await makeStorageExcludedOnly()
         try await peer.enable(manifest: manifest, storage: peerStorage)
         try await engine.enable(manifest: manifest, storage: storage)
-        try await engine.pair(with: peer, via: relay, family: HyperplaneFamilySpec(seed: 0xA1))
+        try await engine.pair(with: peer, family: HyperplaneFamilySpec(seed: 0xA1))
         defer { Task { try? await engine.disable(); try? await peer.disable() } }
 
         let rowID = UUID()
@@ -270,14 +270,14 @@ struct FederationOutboundProjectionTests {
     @Test("update with some non-excluded columns still enqueues a stripped record")
     func partialExclusionStillEnqueues() async throws {
         let storage = try await makeStorage()
-        let engine = FederationSyncEngine()
         let manifest = makeManifest(excludedColumns: ["score", "cache"])
         let relay = FederationRelay()
-        let peer = FederationSyncEngine()
+        let engine = FederationSyncEngine(relay: relay)
+        let peer = FederationSyncEngine(relay: relay)
         let peerStorage = try await makeStorage()
         try await peer.enable(manifest: manifest, storage: peerStorage)
         try await engine.enable(manifest: manifest, storage: storage)
-        try await engine.pair(with: peer, via: relay, family: HyperplaneFamilySpec(seed: 0xA2))
+        try await engine.pair(with: peer, family: HyperplaneFamilySpec(seed: 0xA2))
         defer { Task { try? await engine.disable(); try? await peer.disable() } }
 
         let rowID = UUID()
@@ -306,15 +306,15 @@ struct FederationOutboundProjectionTests {
     @Test("delete is enqueued even when excludedColumns covers all app columns")
     func deleteUnaffectedByProjection() async throws {
         let storage = try await makeStorage()
-        let engine = FederationSyncEngine()
         // Exclude everything except the PK — as aggressive as possible.
         let manifest = makeManifest(excludedColumns: ["body", "score", "cache"])
         let relay = FederationRelay()
-        let peer = FederationSyncEngine()
+        let engine = FederationSyncEngine(relay: relay)
+        let peer = FederationSyncEngine(relay: relay)
         let peerStorage = try await makeStorage()
         try await peer.enable(manifest: manifest, storage: peerStorage)
         try await engine.enable(manifest: manifest, storage: storage)
-        try await engine.pair(with: peer, via: relay, family: HyperplaneFamilySpec(seed: 0xA3))
+        try await engine.pair(with: peer, family: HyperplaneFamilySpec(seed: 0xA3))
         defer { Task { try? await engine.disable(); try? await peer.disable() } }
 
         let rowID = UUID()
@@ -401,13 +401,13 @@ struct FederationInboundProjectionTests {
             )]
         )
 
-        let sender = FederationSyncEngine()
-        let receiver = FederationSyncEngine()
         let relay = FederationRelay()
+        let sender = FederationSyncEngine(relay: relay)
+        let receiver = FederationSyncEngine(relay: relay)
 
         try await sender.enable(manifest: senderManifest, storage: senderStorage)
         try await receiver.enable(manifest: receiverManifest, storage: receiverStorage)
-        try await sender.pair(with: receiver, via: relay, family: HyperplaneFamilySpec(seed: 0xB1))
+        try await sender.pair(with: receiver, family: HyperplaneFamilySpec(seed: 0xB1))
         defer { Task { try? await sender.disable(); try? await receiver.disable() } }
 
         let rowID = UUID()

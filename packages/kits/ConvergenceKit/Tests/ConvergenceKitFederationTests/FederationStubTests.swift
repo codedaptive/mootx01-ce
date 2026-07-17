@@ -47,8 +47,9 @@ struct FederationStubTests {
         try await storageA.open(schema: schema)
         try await storageB.open(schema: schema)
 
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let relay = FederationRelay()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         let manifest = SyncManifest(
             kitID: "PushTest",
             schemaVersion: 1,
@@ -58,9 +59,8 @@ struct FederationStubTests {
         )
         try await engineA.enable(manifest: manifest, storage: storageA)
         try await engineB.enable(manifest: manifest, storage: storageB)
-        let relay = FederationRelay()
         let family = HyperplaneFamilySpec(seed: 0xBEEF_CAFE)
-        try await engineA.pair(with: engineB, via: relay, family: family)
+        try await engineA.pair(with: engineB, family: family)
         defer { Task { try? await engineA.disable(); try? await engineB.disable() } }
 
         let rowID = UUID()

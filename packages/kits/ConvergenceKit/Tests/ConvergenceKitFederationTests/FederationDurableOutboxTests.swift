@@ -144,12 +144,13 @@ struct FederationDurableOutboxTests {
         let storageB = try await makeStorage()
         let relay = FederationRelay()
 
-        // Initial enable and pair.
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        // Initial enable and pair. Engines share the relay at init (WC6:
+        // the relay is engine-level, supplied at construction time).
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
         try await engineB.enable(manifest: makeManifest(), storage: storageB)
-        try await engineA.pair(with: engineB, via: relay,
+        try await engineA.pair(with: engineB,
                                family: HyperplaneFamilySpec(seed: 0xABCD_1234))
 
         // Write a row on A — observer will populate outbox.
@@ -166,9 +167,9 @@ struct FederationDurableOutboxTests {
                 "disable() must NOT clear the durable outbox (entries survive for next push)")
 
         // Re-enable A and re-pair with B on the same storage.
-        let engineA2 = FederationSyncEngine()
+        let engineA2 = FederationSyncEngine(relay: relay)
         try await engineA2.enable(manifest: makeManifest(), storage: storageA)
-        try await engineA2.pair(with: engineB, via: relay,
+        try await engineA2.pair(with: engineB,
                                 family: HyperplaneFamilySpec(seed: 0xABCD_1234))
 
         // Push on reloaded engine: should deliver the surviving entry.
@@ -197,12 +198,13 @@ struct FederationDurableOutboxTests {
         let storageB = try await makeStorage()
         let throwingRelay = ThrowingRelay()
 
-        // Pair A and B with a relay that always fails on send.
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        // Pair A and B with a relay that always fails on send. The relay is
+        // engine-level (WC6), so the failing transport is supplied at init.
+        let engineA = FederationSyncEngine(relay: throwingRelay)
+        let engineB = FederationSyncEngine(relay: throwingRelay)
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
         try await engineB.enable(manifest: makeManifest(), storage: storageB)
-        try await engineA.pair(with: engineB, via: throwingRelay,
+        try await engineA.pair(with: engineB,
                                family: HyperplaneFamilySpec(seed: 0xDEAD_BEEF))
 
         // Write a row — observer populates outbox.
@@ -227,14 +229,14 @@ struct FederationDurableOutboxTests {
         // Repair: switch to a working relay. Re-pair with a standard relay
         // and verify the entries are now delivered.
         let workingRelay = FederationRelay()
-        let engineA2 = FederationSyncEngine()
-        let engineB2 = FederationSyncEngine()
+        let engineA2 = FederationSyncEngine(relay: workingRelay)
+        let engineB2 = FederationSyncEngine(relay: workingRelay)
         // Start fresh engines but reuse storageA so outbox entries carry over.
         try? await engineA.disable()
         try? await engineB.disable()
         try await engineA2.enable(manifest: makeManifest(), storage: storageA)
         try await engineB2.enable(manifest: makeManifest(), storage: storageB)
-        try await engineA2.pair(with: engineB2, via: workingRelay,
+        try await engineA2.pair(with: engineB2,
                                 family: HyperplaneFamilySpec(seed: 0xDEAD_BEEF))
 
         let recoveredPushed = try await pushUntilNonzero(engineA2)
@@ -257,11 +259,11 @@ struct FederationDurableOutboxTests {
         let storageB = try await makeStorage()
         let relay = FederationRelay()
 
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
         try await engineB.enable(manifest: makeManifest(), storage: storageB)
-        try await engineA.pair(with: engineB, via: relay,
+        try await engineA.pair(with: engineB,
                                family: HyperplaneFamilySpec(seed: 0xC0A1_E5CE))
 
         // Write v1 then immediately v2 to the same row.
@@ -299,11 +301,11 @@ struct FederationDurableOutboxTests {
         let storageB = try await makeStorage()
         let relay = FederationRelay()
 
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
         try await engineB.enable(manifest: makeManifest(), storage: storageB)
-        try await engineA.pair(with: engineB, via: relay,
+        try await engineA.pair(with: engineB,
                                family: HyperplaneFamilySpec(seed: 0xFEED_CAFE))
 
         // Write WITHOUT pushing so entries accumulate in the outbox.
@@ -320,14 +322,14 @@ struct FederationDurableOutboxTests {
         // Re-enable: FederationStateActor.enable() calls FedOutboxStore.count()
         // and logs leftover entries. Verify entries are still present (visible
         // to the drain-on-enable logic).
-        let engineA2 = FederationSyncEngine()
+        let engineA2 = FederationSyncEngine(relay: relay)
         try await engineA2.enable(manifest: makeManifest(), storage: storageA)
         let countAfterEnable = try await outboxCount(storageA)
         #expect(countAfterEnable == countAfterDisable,
                 "enable() must NOT consume outbox entries — host triggers push() separately")
 
         // Re-pair and push to drain the leftovers.
-        try await engineA2.pair(with: engineB, via: relay,
+        try await engineA2.pair(with: engineB,
                                 family: HyperplaneFamilySpec(seed: 0xFEED_CAFE))
         let pushed = try await pushUntilNonzero(engineA2)
         #expect(pushed >= 1, "push() must drain the leftover entries after re-enable")
@@ -347,11 +349,11 @@ struct FederationDurableOutboxTests {
         let storageB = try await makeStorage()
         let relay = FederationRelay()
 
-        let engineA = FederationSyncEngine()
-        var engineB: FederationSyncEngine = FederationSyncEngine()
+        let engineA = FederationSyncEngine(relay: relay)
+        var engineB: FederationSyncEngine = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
         try await engineB.enable(manifest: makeManifest(), storage: storageB)
-        try await engineA.pair(with: engineB, via: relay,
+        try await engineA.pair(with: engineB,
                                family: HyperplaneFamilySpec(seed: 0xEC50_1234))
 
         // A writes a row and pushes to B.
@@ -369,9 +371,9 @@ struct FederationDurableOutboxTests {
 
         // Reload B: disable + re-enable on the same storage.
         try await engineB.disable()
-        let engineB2 = FederationSyncEngine()
+        let engineB2 = FederationSyncEngine(relay: relay)
         try await engineB2.enable(manifest: makeManifest(), storage: storageB)
-        try await engineA.pair(with: engineB2, via: relay,
+        try await engineA.pair(with: engineB2,
                                family: HyperplaneFamilySpec(seed: 0xEC50_1234))
         engineB = engineB2
 

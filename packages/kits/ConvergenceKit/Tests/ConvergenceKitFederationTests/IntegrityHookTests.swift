@@ -99,16 +99,15 @@ struct IntegrityHookTests {
         let storageB = try await makeStorage()
 
         let tracker = HookTracker()
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let relay = FederationRelay()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: plainManifest(), storage: storageA)
         try await engineB.enable(
             manifest: manifestWithHook { batch in await tracker.record(batch: batch) },
             storage: storageB
         )
-        let relay = FederationRelay()
-        try await engineA.pair(with: engineB, via: relay,
-                               family: HyperplaneFamilySpec(seed: 0x1234_5678))
+        try await engineA.pair(with: engineB, family: HyperplaneFamilySpec(seed: 0x1234_5678))
         defer { Task { try? await engineA.disable(); try? await engineB.disable() } }
 
         // Engine A inserts a row — the observer populates A's outbox.
@@ -151,8 +150,9 @@ struct IntegrityHookTests {
         // The repair row that the hook writes.
         let repairID = UUID()
 
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let relay = FederationRelay()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: plainManifest(), storage: storageA)
         // B's hook: when a batch arrives, write a repair row to storage.
         // The repair write uses the non-sync-tagged upsert path, so origin == .local.
@@ -166,9 +166,7 @@ struct IntegrityHookTests {
             },
             storage: storageB
         )
-        let relay = FederationRelay()
-        try await engineA.pair(with: engineB, via: relay,
-                               family: HyperplaneFamilySpec(seed: 0xABCD_EF01))
+        try await engineA.pair(with: engineB, family: HyperplaneFamilySpec(seed: 0xABCD_EF01))
         defer { Task { try? await engineA.disable(); try? await engineB.disable() } }
 
         // A inserts → B pulls → hook fires → hook writes repairID into storageB.
@@ -216,17 +214,16 @@ struct IntegrityHookTests {
 
         struct HookError: Error {}
 
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let relay = FederationRelay()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: plainManifest(), storage: storageA)
         // B's hook always throws.
         try await engineB.enable(
             manifest: manifestWithHook { _ in throw HookError() },
             storage: storageB
         )
-        let relay = FederationRelay()
-        try await engineA.pair(with: engineB, via: relay,
-                               family: HyperplaneFamilySpec(seed: 0xDEAD_BEEF))
+        try await engineA.pair(with: engineB, family: HyperplaneFamilySpec(seed: 0xDEAD_BEEF))
         defer { Task { try? await engineA.disable(); try? await engineB.disable() } }
 
         // A inserts → B pulls (hook throws).
