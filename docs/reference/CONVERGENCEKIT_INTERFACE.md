@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-14
-version: 1.3-draft
+version: 1.4-draft
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -884,9 +884,93 @@ CloudKit is an Apple framework with no Rust counterpart by design
 (ConvergenceKit exposes CloudKit/Federation/None behind one protocol;
 only Federation/None have Rust ports).
 
+**`CloudKitSyncEngine` init signature (P3-M2):**
+
+```swift
+public init(containerIdentifier: String? = nil, enablePolling: Bool = false)
+```
+
+`enablePolling: Bool = false` — when `true`, `enable()` auto-starts an
+`AdaptivePollScheduler`. Default `false` preserves existing test behavior
+(manual push/pull drive).
+
+**`CloudKitSyncEngine.nudge()` — external accelerator seam (B-11):**
+
+```swift
+public func nudge() async
+```
+
+Fire an immediate inbound pull and reset the poll tier to `fast`. This is
+THE SEAM for external accelerators (SPEC B-11):
+
+- **P3-M3** — `OutboxDrainDebouncer` calls `nudge()` after each push cycle
+  so the remote peer's response arrives sooner than idle cadence.
+- **Future** — APNs silent-push wakeup handlers call `nudge()` rather than
+  `pull()` directly; the scheduler manages tier accounting.
+- **Future** — Local IPC from a companion process calls `nudge()` to wake
+  the poll loop.
+
+Behavior: if a scheduler is active (`enablePolling: true`), delegates to
+`AdaptivePollScheduler.nudge()` (interrupt sleep + reset tier). If no
+scheduler is running, fires a one-shot `pull()` directly — safe to call
+even without background polling.
+
+**`AdaptivePollScheduler` — the poll loop actor (P3-M2):**
+
+```swift
+public typealias SchedulerPullFn = @Sendable () async throws -> SyncReceipt
+public typealias SchedulerSleepFn = @Sendable (Duration) async throws -> Void
+
+public actor AdaptivePollScheduler {
+    public init(pull: @escaping SchedulerPullFn,
+                sleep: @escaping SchedulerSleepFn = { d in try await Task.sleep(for: d) })
+    public func start()              // idempotent
+    public func stop()               // deterministic; satisfies I-2
+    public func nudge()              // interrupt sleep + reset tier to fast
+    public var currentTier: PollTier { get }
+    public var nextIntervalMs: Int64 { get }
+}
+```
+
+Injection seam: pass `sleep: { _ in }` in tests for immediate-return loops.
+Sleep interruption: `nudge()` cancels an internal sleep sub-task WITHOUT
+cancelling the main loop task.
+
+**`PollTierPolicy` — pure tier decision table (P3-M2):**
+
+```swift
+public enum PollTier: Equatable, Sendable, CustomStringConvertible {
+    case fast   // 20 s — recent remote or local activity
+    case mid    // 90 s — activity receding
+    case idle   // 5 min — zone quiescent
+}
+
+public struct PollTierPolicy: Sendable {
+    public static let fastIntervalMs:     Int64 = 20_000   // 20 s
+    public static let midIntervalMs:      Int64 = 90_000   // 90 s
+    public static let idleIntervalMs:     Int64 = 300_000  // 5 min
+    public static let activityWindowMs:   Int64 = 120_000  // 2 min hold-fast window
+
+    public init()
+    public var tier: PollTier { get }
+    public var lastActivityMs: Int64? { get }
+    public var nextIntervalMs: Int64 { get }
+
+    public mutating func recordNonEmptyPull(nowMs: Int64)  // → fast, stamp activity
+    public mutating func recordEmptyPull(nowMs: Int64)     // → hold fast (in window) or decay
+    public mutating func recordNudge(nowMs: Int64)         // → fast, stamp activity
+}
+```
+
+All mutation methods take `nowMs: Int64` (milliseconds since Unix epoch)
+so the full transition table is deterministically testable without OS time
+calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
+
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit); (v1.2-draft) adds `nudge()`, `registerZoneSubscription(database:)`, `handleRemoteNotification(userInfo:)` host-app accelerator surface (B-11) | Exempt |
+| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit). `init(containerIdentifier:enablePolling:)` added P3-M2. `nudge()` shipped P3-M2 (B-11 seam). Future: `registerZoneSubscription(database:)`, `handleRemoteNotification(userInfo:)` (APNs accelerators, not yet shipped) | Exempt |
+| Adaptive poll scheduler | `AdaptivePollScheduler` (`Sources/ConvergenceKitCloudKit/Engine/AdaptivePollScheduler.swift`) | — | public actor / — | Rust: none — Apple platform binding. `SchedulerPullFn`, `SchedulerSleepFn` typealias. Injected sleep for testability. Shipped P3-M2 | Exempt |
+| Poll tier policy | `PollTierPolicy`, `PollTier` (`Sources/ConvergenceKit/Loop/PollTierPolicy.swift`) | — | public struct, public enum / — | Rust: none — CloudKit-specific. Pure table, no OS calls, `nowMs: Int64` injection. Shipped P3-M2 | Exempt |
 | CKRecord ↔ row mapping | `CKRecordMapping` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public enum / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
 | Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — stored: `table`, `rowKey`, `values`, `syncMeta: SyncMeta`; computed: `hlc`, `schemaVersion`, `kitID` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). `hlc`/`schemaVersion`/`kitID` are computed accessors backed by `syncMeta`, not stored fields. | Exempt |
 | CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — fields: `hlc: HLC`, `schemaVersion: Int`, `kitID: String` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). Introduced to separate sync metadata from app-data values in `DecodedRecord`. | Exempt |
@@ -896,6 +980,23 @@ only Federation/None have Rust ports).
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.4-draft -- 2026-07-16 (CVK-ICLOUD P3-M2)
+- Added `CloudKitSyncEngine.init(containerIdentifier:enablePolling:)` —
+  `enablePolling: Bool = false` opt-in for auto-starting the poll scheduler.
+- Added formal `nudge()` API documentation to CloudKit section (shipped;
+  previously listed as planned in 1.3-draft changelog only).
+- Added `AdaptivePollScheduler` actor (`SchedulerPullFn`, `SchedulerSleepFn`
+  typealias; `start()`, `stop()`, `nudge()`, `currentTier`, `nextIntervalMs`)
+  to CloudKit section. Injected sleep for testability; interruptible sleep
+  sub-task for `nudge()`.
+- Added `PollTierPolicy` struct and `PollTier` enum (pure tier decision
+  table: fast/mid/idle + 2-min activity window; `nowMs: Int64` injection
+  for deterministic testing) to CloudKit section.
+- Updated `CloudKitSyncEngine` concordance table row: `nudge()` shipped,
+  `registerZoneSubscription`/`handleRemoteNotification` marked future-only.
+- Added `AdaptivePollScheduler` and `PollTier`/`PollTierPolicy` rows to
+  concordance table.
 
 ### 1.3-draft -- 2026-07-16
 - Added `ConflictPolicy.fieldLevelLWW` (Swift and Rust; v1.2-draft) to § 2.
