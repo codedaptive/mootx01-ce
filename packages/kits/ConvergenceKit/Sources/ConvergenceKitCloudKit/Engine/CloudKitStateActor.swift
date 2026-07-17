@@ -275,6 +275,36 @@ actor CloudKitStateActor {
         guard change.origin != .syncApply else { return }
         guard let storage else { return }
 
+        // Column projection (R2, CVK-ICLOUD P2-M2): strip excluded columns
+        // before building the outbox entry. Excluded columns are locally
+        // recomputed on every device (scores, caches, derived values); syncing
+        // them creates outbound traffic proportional to local compute — a sync
+        // storm. Killing the entry here, before OutboxStore.append, ensures
+        // zero database writes for derived-column recomputes.
+        //
+        // Deletes are unaffected: a delete carries no column values to strip,
+        // and the tombstone must still propagate so remote replicas GC the row.
+        let excluded = manifest?.table(named: change.table)?.excludedColumns ?? []
+        let effectiveValues: [String: TypedValue]?
+        if !excluded.isEmpty, let rawValues = change.values {
+            let stripped = Projection.outboundStrip(values: rawValues, excluded: excluded)
+            if change.event == .update {
+                // Storm kill: after stripping, if only the primary key remains there is
+                // nothing sync-meaningful to ship — the update touched only excluded
+                // (derived/cached) columns. Storage emits the full merged row, so the
+                // PK is always present in `stripped`; `isStormKill` checks that nothing
+                // beyond the PK survived the strip. Zero OutboxStore writes for
+                // derived-column recomputes.
+                let pkColumn = manifest?.table(named: change.table)?.primaryKeyColumn ?? ""
+                if Projection.isStormKill(stripped: stripped, primaryKeyColumn: pkColumn) {
+                    return
+                }
+            }
+            effectiveValues = stripped
+        } else {
+            effectiveValues = change.values
+        }
+
         // Mint HLC if the observation did not carry one (the InMemory and
         // SQLite observers do not stamp HLCs on TableChange notifications today).
         let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
@@ -282,7 +312,7 @@ actor CloudKitStateActor {
 
         // Encode values as a JSON SyncValueMap blob for transport-agnostic storage.
         let valuesData: Data?
-        if let rawValues = change.values {
+        if let rawValues = effectiveValues {
             valuesData = try? JSONEncoder().encode(SyncValueMap(rawValues))
         } else {
             valuesData = nil

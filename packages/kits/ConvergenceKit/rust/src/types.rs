@@ -1,6 +1,7 @@
 //! Core ConvergenceKit types.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Direction of replication per synced table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,6 +54,11 @@ pub struct SyncedTable {
     pub primary_key_column: String,
     #[serde(default = "default_conflict_policy")]
     pub conflict_policy: ConflictPolicy,
+    /// (v1.2-draft, R2) Columns excluded from sync. Locally recomputed on every device.
+    /// Exclusion semantics only — not inclusion. JSON key "excludedColumns"; omitted when
+    /// empty for backward compat (serde default = empty set). Swift twin: `excludedColumns`.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub excluded_columns: HashSet<String>,
 }
 
 fn default_direction() -> SyncDirection {
@@ -70,6 +76,7 @@ impl SyncedTable {
             direction: SyncDirection::Bidirectional,
             primary_key_column: primary_key_column.into(),
             conflict_policy: ConflictPolicy::LastWriterWinsByHLC,
+            excluded_columns: HashSet::new(),
         }
     }
 
@@ -80,6 +87,12 @@ impl SyncedTable {
 
     pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
         self.conflict_policy = policy;
+        self
+    }
+
+    /// Builder: set columns to exclude from sync. Locally recomputed on every device.
+    pub fn with_excluded_columns(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.excluded_columns = columns.into_iter().map(Into::into).collect();
         self
     }
 }
