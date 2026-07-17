@@ -94,6 +94,9 @@ let package = Package(
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
                 .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
+                // P5-M2 push nudge tests: need @testable access to
+                // CloudKitSyncEngine.cloudKitZoneName (internal method).
+                .product(name: "ConvergenceKitCloudKit", package: "ConvergenceKit"),
             ],
             path: "Tests/MootGatewayTests"
         ),
