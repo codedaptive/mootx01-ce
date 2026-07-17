@@ -83,13 +83,13 @@ struct MixedColumnStormKillTests {
     func mixedColumnScoreOnlyUpdateIsStormKilled() async throws {
         let storage = try await makeMixedStorage()
         let manifest = makeMixedManifest()
-        let engine = FederationSyncEngine()
         let relay = FederationRelay()
-        let peer = FederationSyncEngine()
+        let engine = FederationSyncEngine(relay: relay)
+        let peer = FederationSyncEngine(relay: relay)
         let peerStorage = try await makeMixedStorage()
         try await peer.enable(manifest: manifest, storage: peerStorage)
         try await engine.enable(manifest: manifest, storage: storage)
-        try await engine.pair(with: peer, via: relay, family: HyperplaneFamilySpec(seed: 0xC1))
+        try await engine.pair(with: peer, family: HyperplaneFamilySpec(seed: 0xC1))
         defer { Task { try? await engine.disable(); try? await peer.disable() } }
 
         let rowID = UUID()
@@ -132,13 +132,13 @@ struct MixedColumnStormKillTests {
         // the entry must NOT be storm-killed — the sync column change must propagate.
         let storage = try await makeMixedStorage()
         let manifest = makeMixedManifest()
-        let engine = FederationSyncEngine()
         let relay = FederationRelay()
-        let peer = FederationSyncEngine()
+        let engine = FederationSyncEngine(relay: relay)
+        let peer = FederationSyncEngine(relay: relay)
         let peerStorage = try await makeMixedStorage()
         try await peer.enable(manifest: manifest, storage: peerStorage)
         try await engine.enable(manifest: manifest, storage: storage)
-        try await engine.pair(with: peer, via: relay, family: HyperplaneFamilySpec(seed: 0xC2))
+        try await engine.pair(with: peer, family: HyperplaneFamilySpec(seed: 0xC2))
         defer { Task { try? await engine.disable(); try? await peer.disable() } }
 
         let rowID = UUID()
@@ -199,7 +199,7 @@ struct ChangedColumnsPropagationTests {
         )
 
         let actor = FederationStateActor()
-        try await actor.enable(manifest: manifest, storage: storage)
+        try await actor.enable(manifest: manifest, storage: storage, relay: FederationRelay())
         defer { Task { await actor.disable() } }
 
         let rowID = UUID()

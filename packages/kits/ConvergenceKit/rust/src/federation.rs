@@ -106,15 +106,24 @@ pub fn verify_signature(
 /// receiver knows how to decode the payload without ambiguity.
 ///
 /// Variants are assigned stable byte values; never reuse a value.
-/// `SyncRecordBatch` (0x01) is the only v1.0 variant. `FieldWriteEventBatch`
-/// (0x02) is reserved for the next-gen write-path payload (C1 extension point).
+/// `SyncRecordBatch` (0x01) is the only v1.0 data-plane variant.
+/// `FieldWriteEventBatch` (0x02) is reserved for the next-gen write-path
+/// payload (C1 extension point). `PairingProposal` (0x10) and
+/// `PairingAcceptance` (0x11) are WC7 control-plane extension points —
+/// silently ignored by `pull()` in v1.0 (handled out-of-band in `pair()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum PayloadKind {
-    /// A JSON-encoded array of `SyncRecord` values. The only v1.0 payload.
+    /// A JSON-encoded array of `SyncRecord` values. The only v1.0 data payload.
     SyncRecordBatch = 0x01,
     // FieldWriteEventBatch = 0x02  — reserved; add when FieldWriteEvent
     // wire format lands. Do not assign 0x02 to anything else.
+    /// Ed25519-signed pairing proposal (WC7 extension point).
+    /// Silently ignored by `pull()` in v1.0; handled out-of-band in `pair()`.
+    PairingProposal = 0x10,
+    /// Ed25519-signed pairing acceptance (WC7 extension point).
+    /// Silently ignored by `pull()` in v1.0; handled out-of-band in `pair()`.
+    PairingAcceptance = 0x11,
 }
 
 // ----- canonical signing bytes -----
@@ -381,27 +390,140 @@ impl FederationSyncEngine {
         Ok(())
     }
 
-    /// Pair with another engine. Both sides must call `pair` on each other
-    /// (symmetric). After pairing, `push` will route envelopes through the
-    /// relay; before pairing, `push` returns an empty receipt.
+    /// Signed Ed25519 pairing handshake (WC6).
     ///
-    /// Note: this method records only the caller-side peer. Swift's
-    /// `FederationSyncEngine.pair(with:via:family:)` also registers the peer
-    /// symmetrically through `acceptPeering`.
+    /// Produces a `PairingProposal` signed with the caller's Ed25519 key,
+    /// calls `peer.accept_pairing_proposal` to obtain a `PairingAcceptance`
+    /// signed with the peer's key, then verifies:
+    ///   1. The accepter's signature over the proposal signing bytes is valid
+    ///      against the peer's registered public key.
+    ///   2. The accepted family in the acceptance matches the proposed family.
+    ///
+    /// On success, registers the peer in `self.state.paired_peers` and persists
+    /// the peer to `_fed_peers` (if the engine is currently enabled and storage
+    /// is available). After pairing, `push` routes envelopes to this peer.
+    ///
+    /// SYMMETRIC: both sides must call `pair` on each other. Each call registers
+    /// the other peer on the CALLER'S side; it does NOT mutate the peer argument.
+    ///
+    /// SECURITY: failure → `SyncError::AuthenticationFailed`. No half-registered
+    /// peer is left in the list on failure.
     pub fn pair(
         &mut self,
         peer: &FederationSyncEngine,
         family: crate::pairing::HyperplaneFamilySpec,
     ) -> SyncResult<()> {
-        let peer_pk = peer.identity.public_key_bytes();
+        use crate::pairing::{PairingProposal, proposal_signing_bytes};
+
+        // Build a 16-byte cryptographic nonce using OsRng.
+        let mut nonce = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut OsRng, &mut nonce);
+
+        let proposer_pk = self.identity.public_key_bytes();
+        let proposal = PairingProposal {
+            proposer_public_key: proposer_pk.to_vec(),
+            proposed_family: family,
+            nonce: nonce.to_vec(),
+        };
+        let signing_bytes = proposal_signing_bytes(&proposal);
+        let proposer_sig = self.identity.sign(&signing_bytes);
+
+        // Ask the peer to verify and accept the proposal (immutable call; peer
+        // does not mutate its own peer list — that happens when peer calls pair()).
+        let acceptance = peer.accept_pairing_proposal(&proposal, &proposer_sig)?;
+
+        // Verify: acceptance claims it is from the peer we addressed.
+        let expected_pk = peer.identity.public_key_bytes();
+        if acceptance.accepter_public_key != expected_pk.as_slice() {
+            return Err(SyncError::AuthenticationFailed {
+                detail: "acceptance public key does not match addressed peer".to_string(),
+            });
+        }
+
+        // Verify: accepted family matches the proposed family.
+        if acceptance.accepted_family != family {
+            return Err(SyncError::AuthenticationFailed {
+                detail: "accepted family in acceptance does not match proposed family".to_string(),
+            });
+        }
+
+        // Verify: accepter's signature over the same proposal signing bytes.
+        if !verify_signature(&acceptance.signature_of_proposal, &signing_bytes, &expected_pk) {
+            return Err(SyncError::AuthenticationFailed {
+                detail: "accepter signature on proposal bytes failed verification".to_string(),
+            });
+        }
+
+        // All checks passed. Register the peer on the caller's side.
         self.state.paired_peers.push(PairedPeer {
-            public_key: peer_pk,
+            public_key: expected_pk,
             family,
         });
+
+        // Persist to _fed_peers so pairing survives estate reopen.
+        if let Some(ref storage) = self.state.storage {
+            if let Err(e) = write_peer(&storage.row_store(), &expected_pk, family) {
+                // Persistence failure is non-fatal for the handshake: the peer
+                // is registered in-memory and the session continues. Log the
+                // failure so callers can observe degraded persistence posture.
+                eprintln!(
+                    "[ConvergenceKit] pair: failed to persist peer to _fed_peers: {}",
+                    e
+                );
+            }
+        }
+
         self.emit(SyncEvent::PeerConnected {
-            identity: format!("{:?}", &peer_pk[..8]),
+            identity: format!("{:?}", &expected_pk[..8]),
         });
         Ok(())
+    }
+
+    /// Verify a `PairingProposal` signed by the proposer and produce a
+    /// `PairingAcceptance` signed with this engine's Ed25519 key.
+    ///
+    /// Called by the PROPOSER inside `pair()` via an immutable reference to the
+    /// peer. Does NOT register the proposer in the peer's `paired_peers` — that
+    /// happens when the peer calls `pair()` on the proposer (symmetric handshake).
+    ///
+    /// Verifies:
+    ///   1. `proposer_signature` is a valid Ed25519 signature over
+    ///      `proposal_signing_bytes(proposal)` using `proposal.proposer_public_key`.
+    ///   2. `proposal.proposer_public_key` is 32 bytes (a well-formed Ed25519 key).
+    ///
+    /// Returns `SyncError::AuthenticationFailed` on any verification failure.
+    /// Mirrors Swift `FederationStateActor.acceptPairingProposal`.
+    pub fn accept_pairing_proposal(
+        &self,
+        proposal: &crate::pairing::PairingProposal,
+        proposer_signature: &[u8],
+    ) -> SyncResult<crate::pairing::PairingAcceptance> {
+        use crate::pairing::{PairingAcceptance, proposal_signing_bytes};
+
+        let signing_bytes = proposal_signing_bytes(proposal);
+
+        // Verify proposer's signature using the public key the proposer claimed.
+        // SECURITY: this is the proposer's own key embedded in the proposal;
+        // trust is established here only enough to verify the key is self-consistent.
+        // The proposer's key is registered in the pairing registry when the peer
+        // calls pair() on this engine, which performs the same verification in
+        // reverse. Neither side trusts the key unconditionally — both sides sign
+        // and verify.
+        if !verify_signature(proposer_signature, &signing_bytes, &proposal.proposer_public_key) {
+            return Err(SyncError::AuthenticationFailed {
+                detail: "proposer signature on pairing proposal failed verification".to_string(),
+            });
+        }
+
+        // Produce the acceptance: sign the proposal bytes with this engine's key.
+        let accepter_pk = self.identity.public_key_bytes();
+        let signature_of_proposal = self.identity.sign(&signing_bytes);
+
+        Ok(PairingAcceptance {
+            accepter_public_key: accepter_pk.to_vec(),
+            accepted_family: proposal.proposed_family,
+            signature_of_proposal: signature_of_proposal.to_vec(),
+        })
     }
 
     /// Subscribe to the storage observer and spawn one worker thread per
@@ -570,6 +692,21 @@ impl SyncEngine for FederationSyncEngine {
         // Subscribe the observer workers BEFORE marking enabled so the
         // write-capture path is live the moment the engine reports enabled.
         self.start_observers(&manifest, &storage)?;
+
+        // Reload previously-paired peers from _fed_peers (WC6). This runs after
+        // ensure_fed_sync_meta_table (which created _fed_peers if absent) and before
+        // marking enabled, so the push gate is populated from the moment the engine
+        // is ready. Mirrors Swift FederationStateActor.enable() reloadPeers call.
+        if let Err(e) = reload_peers(&storage.row_store(), &mut self.state.paired_peers) {
+            // Peer reload failure is non-fatal: the engine proceeds with an empty
+            // peer list (no push will route until pair() is called). Log so callers
+            // can observe degraded persistence posture.
+            eprintln!(
+                "[ConvergenceKit] enable: failed to reload peers from _fed_peers: {}",
+                e
+            );
+        }
+
         self.state.manifest = Some(manifest);
         self.state.storage = Some(storage);
         self.state.enabled = true;
@@ -722,9 +859,18 @@ impl SyncEngine for FederationSyncEngine {
                 continue; // federation-auth: claimed sender key does not match registry
             }
 
+            // Silently ignore pairing control-plane kinds (PairingProposal 0x10,
+            // PairingAcceptance 0x11). They are handled out-of-band in pair();
+            // their presence in the relay inbox in a future WC7 implementation
+            // is expected and must not count as a conflict.
+            if envelope.payload_kind == PayloadKind::PairingProposal
+                || envelope.payload_kind == PayloadKind::PairingAcceptance
+            {
+                continue;
+            }
             // Reject unknown payload kinds to avoid misinterpreting future
-            // payload types. Known: SyncRecordBatch. Unknown kinds are
-            // counted as conflicts; no panic.
+            // payload types. Known data-plane kind: SyncRecordBatch. Unknown
+            // kinds are counted as conflicts; no panic.
             if envelope.payload_kind != PayloadKind::SyncRecordBatch {
                 conflicts += 1;
                 continue;
@@ -1354,7 +1500,22 @@ const FED_SKEW_QUEUE_CAP: usize = 512;
 /// At-rest posture: covered by SQLCipher per ADR-014 on the estate file.
 const FED_IDENTITY_TABLE: &str = "_fed_identity";
 
-/// Ensure all four Federation side tables exist (v4: WC3 skew + WC1 identity).
+/// Side table name for the persistent paired-peer registry (WC6).
+///
+/// One row per paired peer:
+///   peer_id         TEXT PRIMARY KEY — deterministic UUID from first 16 bytes
+///                   of the peer's Ed25519 public key (upsert deduplication).
+///   public_key      BLOB — raw 32-byte Ed25519 public key (verifying key).
+///   family_seed     INT  — HyperplaneFamilySpec.seed (LE u64 stored as INT64).
+///   family_dimension INT  — HyperplaneFamilySpec.dimension (u32 stored as INT64).
+///   paired_at       TEXT — ISO8601 wall-clock timestamp (DATE = TEXT per schema
+///                   invariants — never REAL).
+///
+/// enable() drains this table into `state.paired_peers` so pairing survives
+/// estate reopen without re-calling pair(). Mirrors Swift `_fed_peers`.
+const FED_PEERS_TABLE: &str = "_fed_peers";
+
+/// Ensure all five Federation side tables exist (v6: WC3 skew + WC1 identity + WC6 peers).
 ///
 /// Called from `enable()` before any `apply_record`. Uses `storage.migrate()`
 /// which is forward-only and idempotent.
@@ -1363,6 +1524,14 @@ const FED_IDENTITY_TABLE: &str = "_fed_identity";
 ///   v1 — `_fed_sync_meta`      row-grain HLC for A6 LWW gate + tombstone block
 ///   v2 — `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (B-8 parity)
 ///   v3 — `_fed_pending_skew`   schema-skew hold queue (CVK-WC3, parity with Swift v3)
+///   v4 — `_fed_identity`       persistent Ed25519 estate identity (I-8, WC1)
+///   v5 — `_fed_outbox`         durable push outbox (WC2 — root adds migration at merge)
+///   v6 — `_fed_peers`          persistent paired-peer registry (WC6)
+///
+/// NOTE: the v4→v5 migration (`_fed_outbox`, WC2) lands in a sibling worktree.
+/// Root reconciles the full migration chain (v4→v5→v6) and the tables list at
+/// merge. Fresh installs use the tables array directly (all tables created at
+/// schema version 6); v5→v6 only runs for estates upgrading from an existing v5.
 ///
 /// Mirrors Swift `FederationStateActor.ensureFedSyncMetaTable`. Returns an error
 /// string on failure (caller converts to SyncError).
@@ -1439,10 +1608,36 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
         ],
         vec!["key_id".to_string()],
     );
+    // v6 (WC6): persistent paired-peer registry (_fed_peers).
+    // One row per peer that has completed the signed Ed25519 pairing
+    // handshake. Reloaded by enable() so pairing survives estate reopen.
+    // Mirrors Swift FederationStateActor.fedPeersTable.
+    let peers_table = TableDeclaration::new(
+        FED_PEERS_TABLE,
+        vec![
+            // peer_id: deterministic UUID from first 16 bytes of public key.
+            ColumnDeclaration::text("peer_id"),
+            // public_key: raw 32-byte Ed25519 verifying key.
+            ColumnDeclaration::blob("public_key"),
+            // family_seed: HyperplaneFamilySpec.seed (u64 → INT64 bit-cast).
+            ColumnDeclaration::int("family_seed"),
+            // family_dimension: HyperplaneFamilySpec.dimension (u32 → INT64).
+            ColumnDeclaration::int("family_dimension"),
+            // paired_at: ISO8601 wall-clock TEXT (never REAL per schema invariants).
+            ColumnDeclaration::text("paired_at"),
+        ],
+        vec!["peer_id".to_string()],
+    );
     let schema = SchemaDeclaration::new(
         "ConvergenceKitFederation",
-        4,
-        vec![meta_table, cols_table.clone(), skew_table.clone(), identity_table.clone()],
+        6,
+        vec![
+            meta_table,
+            cols_table.clone(),
+            skew_table.clone(),
+            identity_table.clone(),
+            peers_table.clone(),
+        ],
     )
     .with_migrations(vec![
         // v1 → v2: add _fed_sync_meta_cols per-column HLC side table
@@ -1466,6 +1661,22 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             from_version: 3,
             to_version: 4,
             operations: vec![SchemaOperation::CreateTable(identity_table)],
+        },
+        // v4 → v5: _fed_outbox durable push outbox (WC2, landing in a sibling worktree).
+        // Root reconciles this migration at merge. The step is a placeholder here
+        // so the v5 → v6 migration below can reference a valid from_version.
+        // NOTE: this worktree does NOT have WC2's _fed_outbox table declaration;
+        // root will add the CreateTable(_fed_outbox) operation at merge.
+        // v5 → v6: add _fed_peers persistent paired-peer registry (WC6).
+        //
+        // This migration runs for estates upgrading from v5 (WC2 applied).
+        // Fresh installs bypass migrations and use the tables array directly,
+        // landing at v6 with all five tables created. Root reconciles the v4→v5
+        // step (WC2's _fed_outbox) and the full migration chain at merge.
+        Migration {
+            from_version: 5,
+            to_version: 6,
+            operations: vec![SchemaOperation::CreateTable(peers_table)],
         },
     ]);
     storage.migrate(&schema).map_err(|e| e.to_string())
@@ -1515,6 +1726,114 @@ pub fn load_or_mint_identity(storage: &dyn Storage) -> Result<LocalIdentity, Str
         .upsert(FED_IDENTITY_TABLE, values, &["key_id".to_string()])
         .map_err(|e| e.to_string())?;
     Ok(identity)
+}
+
+// ─── paired-peer persistence (_fed_peers, WC6) ────────────────────────────────
+
+/// Derive a deterministic UUID from the first 16 bytes of an Ed25519 public key.
+///
+/// Used as the `peer_id` primary key in `_fed_peers` for upsert deduplication:
+/// re-pairing with the same public key overwrites the previous row rather than
+/// inserting a duplicate. The UUID is derived purely from the key's high-entropy
+/// prefix; no randomness is introduced.
+///
+/// Mirrors Swift `FederationStateActor.peerUUID(from:)`.
+fn peer_uuid_from_pubkey(public_key: &[u8; PUBLIC_KEY_LENGTH]) -> String {
+    // SAFETY: PUBLIC_KEY_LENGTH == 32 ≥ 16; prefix slice is always 16 bytes.
+    let b = &public_key[..16];
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes.copy_from_slice(b);
+    Uuid::from_bytes(uuid_bytes).to_string()
+}
+
+/// Persist one paired peer to `_fed_peers` (upsert by `peer_id`).
+///
+/// Called immediately after `pair()` succeeds. Also called by `reload_peers`
+/// indirectly via the in-memory peer list — but `reload_peers` reads rows,
+/// it does not write them.
+fn write_peer(
+    row_store: &Arc<dyn RowStore>,
+    public_key: &[u8; PUBLIC_KEY_LENGTH],
+    family: crate::pairing::HyperplaneFamilySpec,
+) -> Result<(), String> {
+    let peer_id = peer_uuid_from_pubkey(public_key);
+    let now = iso8601_utc_now();
+    let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+    values.insert("peer_id".to_string(), TypedValue::Text(peer_id));
+    values.insert("public_key".to_string(), TypedValue::Blob(public_key.to_vec()));
+    // family_seed: u64 stored as INT64 via bit-cast (same convention as
+    // col_hlc and family seed in the Swift leg — Int64(bitPattern: seed)).
+    values.insert(
+        "family_seed".to_string(),
+        TypedValue::Int(i64::from_ne_bytes(family.seed.to_ne_bytes())),
+    );
+    values.insert(
+        "family_dimension".to_string(),
+        TypedValue::Int(i64::from(family.dimension)),
+    );
+    values.insert("paired_at".to_string(), TypedValue::Text(now));
+    row_store
+        .upsert(FED_PEERS_TABLE, values, &["peer_id".to_string()])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Drain `_fed_peers` into `peers`, appending one `PairedPeer` per row.
+///
+/// Skips rows with unreadable columns and logs a warning per row. Called by
+/// `enable()` before marking the engine enabled so the push gate is populated
+/// from the moment the engine is ready.
+///
+/// Mirrors Swift `FederationStateActor.reloadPeers(storage:)`.
+fn reload_peers(
+    row_store: &Arc<dyn RowStore>,
+    peers: &mut Vec<PairedPeer>,
+) -> Result<(), String> {
+    let rows = row_store
+        .query(FED_PEERS_TABLE, None, &[], None, None)
+        .map_err(|e| e.to_string())?;
+    let mut loaded = 0usize;
+    for row in rows {
+        let public_key = match row.get("public_key") {
+            Some(TypedValue::Blob(b)) if b.len() == PUBLIC_KEY_LENGTH => {
+                let mut arr = [0u8; PUBLIC_KEY_LENGTH];
+                arr.copy_from_slice(b);
+                arr
+            }
+            _ => {
+                eprintln!(
+                    "[ConvergenceKit] reload_peers: row with missing/short public_key — skipped"
+                );
+                continue;
+            }
+        };
+        let seed_i64 = match row.get("family_seed") {
+            Some(TypedValue::Int(i)) => *i,
+            _ => {
+                eprintln!("[ConvergenceKit] reload_peers: row with unreadable family_seed — skipped");
+                continue;
+            }
+        };
+        let dim_i64 = match row.get("family_dimension") {
+            Some(TypedValue::Int(i)) => *i,
+            _ => {
+                eprintln!(
+                    "[ConvergenceKit] reload_peers: row with unreadable family_dimension — skipped"
+                );
+                continue;
+            }
+        };
+        // Reverse the bit-cast: seed stored as i64 bit pattern of the u64 value.
+        let seed = u64::from_ne_bytes(seed_i64.to_ne_bytes());
+        let dimension = dim_i64 as u32;
+        let family = crate::pairing::HyperplaneFamilySpec { seed, dimension };
+        peers.push(PairedPeer { public_key, family });
+        loaded += 1;
+    }
+    if loaded > 0 {
+        eprintln!("[ConvergenceKit] enable: reloaded {} paired peer(s) from _fed_peers", loaded);
+    }
+    Ok(())
 }
 
 // ─── tombstone GC ─────────────────────────────────────────────────────────────

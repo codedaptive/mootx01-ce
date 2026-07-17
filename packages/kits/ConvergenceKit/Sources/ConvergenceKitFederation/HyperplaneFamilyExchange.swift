@@ -63,3 +63,35 @@ public struct PairingAcceptance: Sendable, Codable {
         self.signatureOfProposal = signatureOfProposal
     }
 }
+
+/// Canonical byte encoding of a `PairingProposal` for signing and verification.
+///
+/// Layout (all integers little-endian):
+///   proposerPublicKey  (32 bytes, Ed25519 pubkey raw)
+///   proposedFamily.seed       (8 bytes: LE u64)
+///   proposedFamily.dimension  (4 bytes: LE u32)
+///   nonce              (variable)
+///
+/// This encoding is byte-identical to the Rust `proposal_signing_bytes` in
+/// `pairing.rs`. Both sides MUST produce the same bytes; byte widths and
+/// field ordering are fixed here for cross-port verification.
+///
+/// Note: `HyperplaneFamilySpec.dimension` is `Int` in Swift; it is truncated
+/// to `UInt32` (LE 4 bytes) to match the Rust `u32` encoding.
+public func proposalSigningBytes(_ proposal: PairingProposal) -> Data {
+    var bytes = Data()
+    bytes.reserveCapacity(
+        proposal.proposerPublicKey.count + 8 + 4 + proposal.nonce.count
+    )
+    // 32-byte Ed25519 proposer public key
+    bytes.append(contentsOf: proposal.proposerPublicKey)
+    // 8-byte LE u64 hyperplane family seed
+    var seed = proposal.proposedFamily.seed.littleEndian
+    withUnsafeBytes(of: &seed) { bytes.append(contentsOf: $0) }
+    // 4-byte LE u32 dimension (Int truncated to UInt32 for wire format)
+    var dim = UInt32(proposal.proposedFamily.dimension).littleEndian
+    withUnsafeBytes(of: &dim) { bytes.append(contentsOf: $0) }
+    // nonce bytes (16 bytes in the standard handshake)
+    bytes.append(contentsOf: proposal.nonce)
+    return bytes
+}

@@ -67,13 +67,12 @@ struct FederationObserverOutboxTests {
         storageA: any Storage,
         storageB: any Storage
     ) async throws -> (FederationSyncEngine, FederationSyncEngine) {
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let relay = FederationRelay()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
         try await engineB.enable(manifest: makeManifest(), storage: storageB)
-        let relay = FederationRelay()
-        try await engineA.pair(with: engineB, via: relay,
-                               family: HyperplaneFamilySpec(seed: 0xBEEF_CAFE))
+        try await engineA.pair(with: engineB, family: HyperplaneFamilySpec(seed: 0xBEEF_CAFE))
         return (engineA, engineB)
     }
 
@@ -195,10 +194,10 @@ struct FederationObserverOutboxTests {
 
         // Re-enable and push: the outbox must be empty — the pre-disable state
         // was cleared and the post-disable write was never captured.
+        // WC6: peers are reloaded from _fed_peers on re-enable, so explicit
+        // re-pair is not required. Calling pair() again is idempotent (upsert).
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
-        let relay = FederationRelay()
-        try await engineA.pair(with: engineB, via: relay,
-                               family: HyperplaneFamilySpec(seed: 0xBEEF_CAFE))
+        try await engineA.pair(with: engineB, family: HyperplaneFamilySpec(seed: 0xBEEF_CAFE))
         let pushed = try await engineA.push().pushed
         #expect(pushed == 0, "no write should remain captured across a disable boundary")
         let receipt = try await engineB.pull()

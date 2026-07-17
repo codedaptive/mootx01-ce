@@ -62,14 +62,13 @@ struct EchoSuppressionTests {
         storageA: any Storage,
         storageB: any Storage
     ) async throws -> (FederationSyncEngine, FederationSyncEngine) {
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let relay = FederationRelay()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         let manifest = makeManifest()
         try await engineA.enable(manifest: manifest, storage: storageA)
         try await engineB.enable(manifest: manifest, storage: storageB)
-        let relay = FederationRelay()
-        try await engineA.pair(with: engineB, via: relay,
-                               family: HyperplaneFamilySpec(seed: 0xDEAD_C0DE))
+        try await engineA.pair(with: engineB, family: HyperplaneFamilySpec(seed: 0xDEAD_C0DE))
         return (engineA, engineB)
     }
 

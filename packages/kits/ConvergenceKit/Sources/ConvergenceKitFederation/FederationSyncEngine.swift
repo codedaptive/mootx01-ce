@@ -39,13 +39,28 @@ private let logger = Logger(subsystem: "com.mootx01.synckit.federation", categor
 
 public final class FederationSyncEngine: SyncEngine, Sendable {
     let stateActor: FederationStateActor
+    /// Engine-level relay: shared across all peers. Passed to the state actor
+    /// at `enable()` time so `pair()`, `push()`, and `pull()` all use the same
+    /// transport. For in-process testing, give both engines the same
+    /// `FederationRelay` instance at init time.
+    let relay: any Relay
 
-    public init() {
+    /// Create a new sync engine with the given transport relay.
+    ///
+    /// For in-process testing, two engines must share the same relay so their
+    /// inboxes are connected. For production, supply a hosted relay conforming
+    /// to `Relay` (the v1.x extension point).
+    ///
+    /// - Parameter relay: The relay used by this engine for all send/drain
+    ///   operations. Defaults to a private `FederationRelay` instance (useful
+    ///   for single-engine setups or stub tests that do not pair).
+    public init(relay: any Relay = FederationRelay()) {
+        self.relay = relay
         self.stateActor = FederationStateActor()
     }
 
     public func enable(manifest: SyncManifest, storage: any Storage) async throws {
-        try await stateActor.enable(manifest: manifest, storage: storage)
+        try await stateActor.enable(manifest: manifest, storage: storage, relay: relay)
     }
 
     public func disable() async throws {
@@ -71,15 +86,46 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
         get async { await stateActor.currentState }
     }
 
-    /// Pair with a peer. Both sides exchange public keys plus a
-    /// shared hyperplane family spec. After pairing, push/pull
-    /// routes JSON-encoded SyncRecord batches inside SignedEnvelope
-    /// messages through the peer's relay inbox.
+    /// Pair with a peer engine using a signed Ed25519 handshake.
     ///
-    /// For v1.0 pairing is in-process: both peers share a
-    /// FederationRelay instance.
-    public func pair(with peer: FederationSyncEngine, via relay: any Relay, family: HyperplaneFamilySpec) async throws {
-        try await stateActor.pair(with: peer.stateActor, via: relay, family: family)
+    /// Both sides verify each other's signatures over the canonical proposal
+    /// bytes (proposerPublicKey || seed || dimension || nonce). If either
+    /// signature fails verification, or if the accepter echoes back a
+    /// different family spec, `SyncError.authenticationFailed` is thrown and
+    /// neither side is registered as a peer.
+    ///
+    /// On success, both sides persist the peer to `_fed_peers` so the pairing
+    /// survives an engine restart (`enable()` reloads peers on re-open).
+    ///
+    /// For v1.0 pairing is in-process: both engines must share the same relay
+    /// passed at `init(relay:)` time.
+    public func pair(with peer: FederationSyncEngine, family: HyperplaneFamilySpec) async throws {
+        try await stateActor.pair(with: peer.stateActor, family: family)
+    }
+
+    /// Accept a pairing proposal from a remote proposer.
+    ///
+    /// Verifies the proposer's Ed25519 signature over the canonical proposal
+    /// bytes. On success, signs the same bytes with the local key, persists the
+    /// proposer as a peer, and returns a `PairingAcceptance` the caller can
+    /// forward to the proposer for its own verification.
+    ///
+    /// This method is the server-side leg of the pairing handshake. In v1.0,
+    /// `pair(with:family:)` drives both legs in-process. In v1.x this method
+    /// will be called when a proposal arrives over a relay transport (WC7).
+    ///
+    /// - Parameters:
+    ///   - proposal: The proposal sent by the remote engine.
+    ///   - proposerSignature: Ed25519 signature the proposer computed over
+    ///     `proposalSigningBytes(proposal)`.
+    /// - Returns: A signed acceptance carrying the local public key and family.
+    /// - Throws: `SyncError.authenticationFailed` if signature verification
+    ///   fails.
+    public func acceptPairingProposal(
+        _ proposal: PairingProposal,
+        proposerSignature: Data
+    ) async throws -> PairingAcceptance {
+        try await stateActor.acceptProposal(proposal, proposerSignature: proposerSignature)
     }
 
     public var identity: LocalIdentity {
@@ -94,13 +140,24 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
 /// receiver knows how to decode the payload without ambiguity.
 ///
 /// Variants are assigned stable byte values; never reuse a value.
-/// `syncRecordBatch` (0x01) is the only v1.0 variant. `fieldWriteEventBatch`
-/// (0x02) is reserved for the next-gen write-path payload (C1 extension point).
+/// `syncRecordBatch` (0x01) is the only v1.0 sync payload.
+/// Pairing payloads (0x10, 0x11) are WC7 extension points for relay-based
+/// handshake transport — reserved here so the byte space is locked.
+/// `fieldWriteEventBatch` (0x02) is reserved for the next-gen write-path
+/// payload (C1 extension point).
 public enum PayloadKind: UInt8, Sendable, Codable, Hashable {
-    /// A JSON-encoded array of `SyncRecord` values. The only v1.0 payload.
+    /// A JSON-encoded array of `SyncRecord` values. The only v1.0 sync payload.
     case syncRecordBatch = 0x01
     // fieldWriteEventBatch = 0x02  — reserved; add when FieldWriteEvent
     // wire format lands. Do not assign 0x02 to anything else.
+
+    /// A JSON-encoded `PairingProposal`. Extension point for relay-based
+    /// pairing (WC7). In v1.0, pairing is direct actor-to-actor and these
+    /// kinds are never placed on the relay; `pull()` silently ignores them.
+    case pairingProposal   = 0x10
+    /// A JSON-encoded `PairingAcceptance`. Extension point for relay-based
+    /// pairing (WC7). Silently ignored by `pull()` in v1.0.
+    case pairingAcceptance = 0x11
 }
 
 // MARK: - Canonical signing bytes
@@ -256,26 +313,39 @@ actor FederationStateActor {
     var subscribers: [AsyncStream<SyncEvent>.Continuation] = []
     var peers: [PairedPeer] = []
     var hlcGenerator = HLCGenerator(nodeID: Int32.random(in: 1...0x0F))
+    /// Engine-level relay. Set by enable(relay:); nilled by disable().
+    /// Nil when the engine is not active — push/pull gate on this.
+    var relay: (any Relay)?
 
+    /// A peer registered via the signed handshake (pair() or acceptProposal()).
+    /// `publicKey` is the 32-byte Ed25519 verifying key of the remote estate.
+    /// `family` is the agreed HyperplaneFamilySpec for fingerprint comparability.
+    /// Both fields are persisted to `_fed_peers` so pairing survives restart.
     struct PairedPeer {
         let publicKey: Data
-        weak var actor: FederationStateActor?
-        let relay: any Relay
         let family: HyperplaneFamilySpec
     }
 
-    func enable(manifest: SyncManifest, storage: any Storage) async throws {
+    func enable(manifest: SyncManifest, storage: any Storage, relay: any Relay) async throws {
         if isEnabled { throw SyncError.alreadyEnabled }
         self.manifest = manifest
         self.storage = storage
-        // Ensure Federation side tables exist: _fed_sync_meta (v1), _fed_sync_meta_cols
-        // (v2), _fed_pending_skew (v3, R9), and _fed_identity (v4, WC1). Mirrors the
-        // CloudKit engine's CKSideSchema.ensure call in enable().
+        self.relay = relay
+        // Ensure Federation side tables exist through schema v6:
+        //   v1 _fed_sync_meta, v2 _fed_sync_meta_cols, v3 _fed_pending_skew,
+        //   v4 _fed_identity (WC1), v5 _fed_outbox (WC2 — root adds at merge),
+        //   v6 _fed_peers (WC6).
+        // Mirrors the CloudKit engine's CKSideSchema.ensure call in enable().
         try await Self.ensureFedSyncMetaTable(storage: storage)
 
         // Load or mint the persistent estate Ed25519 identity (I-8, WC1).
         // Must run after ensureFedSyncMetaTable so _fed_identity exists.
         try await loadOrMintIdentity(storage: storage)
+
+        // Reload paired peers from _fed_peers so pairing survives restart (WC6).
+        // Must run after loadOrMintIdentity (we need localIdentity to be set)
+        // and after ensureFedSyncMetaTable (_fed_peers must exist).
+        try await reloadPeers(storage: storage)
 
         // Schema-skew replay (R9, CVK-ICLOUD P3-M4).
         //
@@ -330,6 +400,11 @@ actor FederationStateActor {
 
     func disable() async {
         isEnabled = false
+        // Nil the relay so push/pull gate on it after disable. The paired peers
+        // are persisted in _fed_peers in storage; nilling the relay does NOT
+        // remove them. The in-memory peers list is cleared here (it is rebuilt
+        // from _fed_peers on the next enable() call via reloadPeers).
+        relay = nil
         // Cancel each observer task, then await its completion so write
         // capture is deterministically stopped before disable returns —
         // no late write can land in the outbox across the disable boundary.
@@ -416,25 +491,97 @@ actor FederationStateActor {
         return .disabled
     }
 
-    func pair(with peerActor: FederationStateActor, via relay: any Relay, family: HyperplaneFamilySpec) async throws {
-        // localIdentity is now a var (actor-isolated) so cross-actor access requires await.
-        // WHY: WC1 changed localIdentity from let to var so loadOrMintIdentity can replace
-        // the placeholder with the persisted estate identity at enable() time. The await
-        // hop here is the correct Swift 6 cross-actor access pattern.
-        let peerPubKey = (await peerActor.localIdentity).publicKey
-        peers.append(PairedPeer(publicKey: peerPubKey, actor: peerActor, relay: relay, family: family))
-        // Symmetric: register ourselves on the peer too.
-        await peerActor.acceptPeering(publicKey: localIdentity.publicKey, relay: relay, family: family)
+    /// Signed pairing handshake (WC6). Derives a 16-byte cryptographically
+    /// random nonce, builds a PairingProposal, signs the canonical bytes with
+    /// the local Ed25519 key, and calls `acceptProposal` on the peer actor
+    /// (direct cross-actor call for v1.0 in-process pairing). Verifies the
+    /// acceptance: both the returned family and the accepter's signature over
+    /// the canonical proposal bytes must be valid. On success, both sides are
+    /// persisted to `_fed_peers`.
+    func pair(with peerActor: FederationStateActor, family: HyperplaneFamilySpec) async throws {
+        // 16-byte cryptographically random nonce (CryptoKit SymmetricKey).
+        let nonce = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
+        let proposal = PairingProposal(
+            proposerPublicKey: localIdentity.publicKey,
+            proposedFamily: family,
+            nonce: nonce
+        )
+        let sigBytes = proposalSigningBytes(proposal)
+        let proposerSig = try localIdentity.sign(sigBytes)
+
+        // Direct cross-actor call (v1.0 in-process). Peer verifies our
+        // signature, signs the same bytes, persists us, and returns acceptance.
+        let acceptance = try await peerActor.acceptProposal(proposal, proposerSignature: proposerSig)
+
+        // Proposer-side verification: family must echo back unchanged,
+        // and accepter's signature must verify against the accepter's claimed key.
+        guard acceptance.acceptedFamily == family else {
+            throw SyncError.authenticationFailed(
+                detail: "accepter echoed a different family spec")
+        }
+        guard FederationSignature.verify(
+            acceptance.signatureOfProposal,
+            of: sigBytes,
+            by: acceptance.accepterPublicKey
+        ) else {
+            throw SyncError.authenticationFailed(
+                detail: "accepter signature verification failed")
+        }
+
+        // Persist and register the peer on the proposer side.
+        let peerPubKey = acceptance.accepterPublicKey
+        if let storage {
+            try await persistPeer(publicKey: peerPubKey, family: family, storage: storage)
+        }
+        peers.append(PairedPeer(publicKey: peerPubKey, family: family))
         emit(.peerConnected(identity: peerPubKey.base64EncodedString()))
     }
 
-    func acceptPeering(publicKey: Data, relay: any Relay, family: HyperplaneFamilySpec) {
-        peers.append(PairedPeer(publicKey: publicKey, actor: nil, relay: relay, family: family))
-        emit(.peerConnected(identity: publicKey.base64EncodedString()))
+    /// Accepter side of the signed pairing handshake (WC6).
+    ///
+    /// Verifies the proposer's Ed25519 signature over `proposalSigningBytes(proposal)`.
+    /// On success, signs the same bytes with the local key, persists the proposer
+    /// to `_fed_peers`, and returns a `PairingAcceptance`. Throws
+    /// `SyncError.authenticationFailed` if the proposer's signature does not
+    /// verify against `proposal.proposerPublicKey`.
+    func acceptProposal(
+        _ proposal: PairingProposal,
+        proposerSignature: Data
+    ) async throws -> PairingAcceptance {
+        let sigBytes = proposalSigningBytes(proposal)
+        // Verify proposer's signature. If verification fails, the proposer
+        // does not control the key they claim — reject immediately.
+        guard FederationSignature.verify(
+            proposerSignature,
+            of: sigBytes,
+            by: proposal.proposerPublicKey
+        ) else {
+            throw SyncError.authenticationFailed(
+                detail: "proposer signature verification failed")
+        }
+
+        // Sign the same proposal bytes with the accepter's private key.
+        // This proves the accepter has seen and agreed to this specific nonce.
+        let accepterSig = try localIdentity.sign(sigBytes)
+
+        // Persist and register the proposer as a peer on the accepter side.
+        let proposerPubKey = proposal.proposerPublicKey
+        let family = proposal.proposedFamily
+        if let storage {
+            try await persistPeer(publicKey: proposerPubKey, family: family, storage: storage)
+        }
+        peers.append(PairedPeer(publicKey: proposerPubKey, family: family))
+        emit(.peerConnected(identity: proposerPubKey.base64EncodedString()))
+
+        return PairingAcceptance(
+            accepterPublicKey: localIdentity.publicKey,
+            acceptedFamily: family,
+            signatureOfProposal: accepterSig
+        )
     }
 
     func push() async throws -> SyncReceipt {
-        guard isEnabled, let manifest else { throw SyncError.notEnabled }
+        guard isEnabled, let manifest, let relay else { throw SyncError.notEnabled }
         if peers.isEmpty {
             return SyncReceipt.empty
         }
@@ -546,7 +693,7 @@ actor FederationStateActor {
 
         var pushedCount = 0
         for peer in peers {
-            peer.relay.send(to: peer.publicKey, message: envelope)
+            relay.send(to: peer.publicKey, message: envelope)
             pushedCount += records.count
         }
 
@@ -557,7 +704,7 @@ actor FederationStateActor {
     }
 
     func pull() async throws -> SyncReceipt {
-        guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
+        guard isEnabled, let manifest, let storage, let relay else { throw SyncError.notEnabled }
         var appliedCount = 0
         var conflicts = 0
         // Count of records held in _fed_pending_skew this pull cycle (R9).
@@ -566,17 +713,37 @@ actor FederationStateActor {
         var appliedByTable: [String: [UUID]] = [:]
         var deletedByTable: [String: [UUID]] = [:]
 
-        for peer in peers {
-            let envelopes = peer.relay.drain(for: localIdentity.publicKey)
-            for envelope in envelopes {
-                // SECURITY (F-3 class): `envelope.senderPublicKey` is a field
-                // the sender controls and must never be trusted as the
-                // verification key. The authoritative trust anchor is the key
-                // registered at pairing time (`peer.publicKey`). Require the
-                // envelope's claimed sender key to equal the registered key;
-                // any mismatch is a federation-auth rejection. All trust in
-                // the verification chain derives from the pairing registry,
-                // not from the envelope's own fields. Mirrors Rust pull().
+        // Drain the engine-level relay inbox once. All peers deliver to the
+        // same local inbox (keyed by this engine's public key). Resolving the
+        // sender by looking up envelope.senderPublicKey in the pairing registry
+        // mirrors the Rust pull() design (single inbox, registry lookup).
+        let envelopes = relay.drain(for: localIdentity.publicKey)
+        for envelope in envelopes {
+                // Pairing payload kinds (0x10, 0x11) are WC7 extension points;
+                // v1.0 pairing is direct actor-to-actor and never traverses the
+                // relay. Silently skip rather than count as conflicts.
+                if envelope.payloadKind == .pairingProposal
+                    || envelope.payloadKind == .pairingAcceptance {
+                    continue
+                }
+
+                // SECURITY (F-3 class): Resolve the registered peer from the
+                // pairing registry using the claimed sender key. Trust derives
+                // from the registry, not from the envelope's own fields. An
+                // envelope from an unregistered sender is rejected as a conflict.
+                // Mirrors Rust pull() registry lookup.
+                guard let peer = peers.first(where: {
+                    $0.publicKey == envelope.senderPublicKey
+                }) else {
+                    conflicts += 1
+                    logger.error("federation-auth: senderPublicKey \(envelope.senderPublicKey.base64EncodedString()) not in pairing registry — rejected")
+                    continue
+                }
+
+                // Advisory-field check: the lookup above guarantees equality,
+                // but the explicit comparison makes the security intent visible.
+                // If the lookup mechanism ever changes, a mismatch here is a
+                // federation-auth rejection, not a silent pass.
                 guard envelope.senderPublicKey == peer.publicKey else {
                     conflicts += 1
                     logger.error("federation-auth: senderPublicKey \(envelope.senderPublicKey.base64EncodedString()) does not match registered peer key \(peer.publicKey.base64EncodedString()) — rejected")
@@ -673,7 +840,6 @@ actor FederationStateActor {
                     }
                 }
             }
-        }
 
         // Emit recordsHeldForMigration when at least one future-schema record
         // was enqueued this cycle (R9).
@@ -950,7 +1116,23 @@ actor FederationStateActor {
     /// follow-up for Swift only; Rust leg stores in-estate for parity.
     static let fedIdentityTable = "_fed_identity"
 
-    /// Create the Federation side tables through schema v4.
+    /// Side table name for the persistent paired-peer registry (WC6).
+    ///
+    /// One row per paired peer:
+    ///   peer_id        TEXT PRIMARY KEY — deterministic UUID derived from the first
+    ///                  16 bytes of the peer's Ed25519 public key. Used as the conflict
+    ///                  column on upsert, so re-pairing the same physical peer is idempotent.
+    ///   public_key     BLOB — raw 32-byte Ed25519 public key.
+    ///   family_seed    INT  — HyperplaneFamilySpec.seed (LE u64 stored as INT64).
+    ///   family_dimension INT — HyperplaneFamilySpec.dimension.
+    ///   paired_at      TEXT — ISO8601 wall-clock timestamp (date storage is TEXT per
+    ///                  schema invariants).
+    ///
+    /// Note: revoke and key-rotation are deferred to a future mission. See
+    /// docs/reference/CONVERGENCEKIT_SPEC.md §B-7 for the deferred scope.
+    static let fedPeersTable = "_fed_peers"
+
+    /// Create the Federation side tables through schema v6.
     ///
     /// Must be called from `enable()` before any `applyInbound`. Mirrors
     /// `CKSideSchema.ensure`. Marked `internal` (not private) so tests that
@@ -960,6 +1142,8 @@ actor FederationStateActor {
     /// - v2: `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (CVK-ICLOUD P2-M1)
     /// - v3: `_fed_pending_skew` schema-skew pending queue (R9, CVK-ICLOUD P3-M4)
     /// - v4: `_fed_identity` persistent estate Ed25519 identity (I-8, WC1)
+    /// - v5: `_fed_outbox` durable push outbox (WC2 — root adds migration at merge)
+    /// - v6: `_fed_peers` persistent paired-peer registry (WC6)
     static func ensureFedSyncMetaTable(storage: any Storage) async throws {
         let fedSyncMetaDecl = TableDeclaration(
             name: fedSyncMetaTable,
@@ -1033,10 +1217,26 @@ actor FederationStateActor {
             primaryKey: ["key_id"]
         )
 
+        // _fed_peers: one row per paired peer. peer_id is a deterministic UUID
+        // derived from the first 16 bytes of the peer's Ed25519 public key, used
+        // as the conflict column on upsert so re-pairing the same physical peer
+        // is idempotent. Date storage is TEXT (ISO8601) per schema invariants.
+        let fedPeersDecl = TableDeclaration(
+            name: fedPeersTable,
+            columns: [
+                ColumnDeclaration(name: "peer_id",          type: .text, nullable: false),
+                ColumnDeclaration(name: "public_key",        type: .blob, nullable: false),
+                ColumnDeclaration(name: "family_seed",       type: .int,  nullable: false),
+                ColumnDeclaration(name: "family_dimension",  type: .int,  nullable: false),
+                ColumnDeclaration(name: "paired_at",         type: .text, nullable: false),
+            ],
+            primaryKey: ["peer_id"]
+        )
+
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitFederation",
-            version: 4,
-            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl, fedIdentityDecl],
+            version: 6,
+            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl, fedIdentityDecl, fedPeersDecl],
             migrations: [
                 // v1 → v2: add per-column HLC side table for fieldLevelLWW.
                 Migration(fromVersion: 1, toVersion: 2, operations: [
@@ -1053,6 +1253,16 @@ actor FederationStateActor {
                 // ensure returns.
                 Migration(fromVersion: 3, toVersion: 4, operations: [
                     .createTable(fedIdentityDecl),
+                ]),
+                // v5 → v6: add _fed_peers persistent paired-peer registry (WC6).
+                //
+                // NOTE: v4 → v5 (_fed_outbox, WC2) lands in a sibling worktree.
+                // Root reconciles the full migration chain (v4→v5→v6) and the
+                // tables array at merge. Fresh installs use the tables array
+                // directly (schema version 6, all tables created); this migration
+                // block only runs for estates upgrading from an existing v5 estate.
+                Migration(fromVersion: 5, toVersion: 6, operations: [
+                    .createTable(fedPeersDecl),
                 ]),
             ]
         )
@@ -1170,6 +1380,89 @@ actor FederationStateActor {
         )
         localIdentity = newIdentity
         logger.info("federation: minted new LocalIdentity for estate, persisted to _fed_identity")
+    }
+
+    // MARK: - Paired peer persistence (_fed_peers, WC6)
+
+    /// Derive a deterministic UUID from the first 16 bytes of an Ed25519 public key.
+    ///
+    /// Used as the `peer_id` primary key in `_fed_peers` so that upsert on
+    /// `conflictColumns: ["peer_id"]` is idempotent — re-pairing the same physical
+    /// peer overwrites the existing row rather than inserting a duplicate.
+    ///
+    /// The derivation is intentionally simple (raw byte slice, no hashing) because
+    /// Ed25519 public keys already have sufficient entropy in their first 16 bytes.
+    private func peerUUID(from publicKey: Data) -> String {
+        let bytes = publicKey.prefix(16)
+        return UUID(uuid: (
+            bytes[bytes.startIndex],
+            bytes[bytes.startIndex + 1],
+            bytes[bytes.startIndex + 2],
+            bytes[bytes.startIndex + 3],
+            bytes[bytes.startIndex + 4],
+            bytes[bytes.startIndex + 5],
+            bytes[bytes.startIndex + 6],
+            bytes[bytes.startIndex + 7],
+            bytes[bytes.startIndex + 8],
+            bytes[bytes.startIndex + 9],
+            bytes[bytes.startIndex + 10],
+            bytes[bytes.startIndex + 11],
+            bytes[bytes.startIndex + 12],
+            bytes[bytes.startIndex + 13],
+            bytes[bytes.startIndex + 14],
+            bytes[bytes.startIndex + 15]
+        )).uuidString
+    }
+
+    /// Upsert a paired peer into `_fed_peers`.
+    ///
+    /// `peer_id` is the conflict column so re-pairing the same physical peer
+    /// (same Ed25519 public key) updates `paired_at` without inserting a duplicate.
+    /// `paired_at` is ISO8601 TEXT per schema invariants.
+    private func persistPeer(publicKey: Data, family: HyperplaneFamilySpec, storage: any Storage) async throws {
+        let peerID = peerUUID(from: publicKey)
+        let now = ISO8601DateFormatter().string(from: Date())
+        _ = try await storage.rowStore.upsert(
+            table: Self.fedPeersTable,
+            values: [
+                "peer_id":         .text(peerID),
+                "public_key":      .blob(publicKey),
+                "family_seed":     .int(Int64(bitPattern: family.seed)),
+                "family_dimension": .int(Int64(family.dimension)),
+                "paired_at":       .text(now),
+            ],
+            conflictColumns: ["peer_id"]
+        )
+        logger.debug("federation: persisted peer \(peerID) to _fed_peers")
+    }
+
+    /// Load all rows from `_fed_peers` and rebuild the in-memory `peers` array.
+    ///
+    /// Called from `enable()` after `ensureFedSyncMetaTable` and `loadOrMintIdentity`,
+    /// so the table exists and `localIdentity` is set. Rows with unreadable column
+    /// values are skipped with a warning rather than aborting enable().
+    private func reloadPeers(storage: any Storage) async throws {
+        let rows = try await storage.rowStore.query(table: Self.fedPeersTable)
+        var loaded = 0
+        for row in rows {
+            guard
+                case .blob(let pubKey) = row["public_key"],
+                case .int(let seedInt) = row["family_seed"],
+                case .int(let dimInt) = row["family_dimension"]
+            else {
+                logger.warning("federation: _fed_peers row with unreadable columns — skipped")
+                continue
+            }
+            let family = HyperplaneFamilySpec(
+                seed: UInt64(bitPattern: seedInt),
+                dimension: Int(dimInt)
+            )
+            peers.append(PairedPeer(publicKey: pubKey, family: family))
+            loaded += 1
+        }
+        if loaded > 0 {
+            logger.info("federation: reloaded \(loaded) paired peer(s) from _fed_peers")
+        }
     }
 
     // MARK: - Tombstone GC (CVK-WB7)

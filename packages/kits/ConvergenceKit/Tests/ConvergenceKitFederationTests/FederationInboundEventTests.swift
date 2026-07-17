@@ -56,13 +56,13 @@ struct FederationInboundEventTests {
     ) {
         let storageA = try await makeStorage()
         let storageB = try await makeStorage()
-        let engineA = FederationSyncEngine()
-        let engineB = FederationSyncEngine()
+        let relay = FederationRelay()
+        let engineA = FederationSyncEngine(relay: relay)
+        let engineB = FederationSyncEngine(relay: relay)
         try await engineA.enable(manifest: makeManifest(policy: policy), storage: storageA)
         try await engineB.enable(manifest: makeManifest(policy: policy), storage: storageB)
-        let relay = FederationRelay()
         let family = HyperplaneFamilySpec(seed: 0xDEADBEEF)
-        try await engineA.pair(with: engineB, via: relay, family: family)
+        try await engineA.pair(with: engineB, family: family)
         return (engineA, engineB, storageA, storageB)
     }
 
