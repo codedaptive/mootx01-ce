@@ -1,13 +1,14 @@
 ---
 title: ConvergenceKit Specification
-version: 1.0.0
+version: 1.0.1
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
   - docs/reference/CONVERGENCEKIT_INTERFACE.md
+  - docs/reference/CONVERGENCEKIT_PLAYGROUND_RULES.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
@@ -284,6 +285,10 @@ None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.0.1 -- 2026-07-16
+Added `docs/reference/CONVERGENCEKIT_PLAYGROUND_RULES.md` to `relates_to`.
+Consumer contract document (CVK-ICLOUD P2-M4). No behavioral content changed.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
