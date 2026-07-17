@@ -99,6 +99,15 @@ actor CloudKitStateActor {
     /// passed through multiple call sites.
     var identityStore: DeviceIdentityStore?
 
+    /// Coalescing debouncer that fires push() after outbox write activity quiets.
+    ///
+    /// Created by enable() and cancelled by disable(). Nil when the engine is
+    /// disabled. Prevents per-keystroke push storms (B-11): arm() is called after
+    /// each successful OutboxStore.append, and the trigger fires push() once the
+    /// coalescingWindow (2 s) elapses without a new write. The maxLatency ceiling
+    /// (10 s) guarantees a trigger even under a sustained write stream.
+    var drainDebouncer: OutboxDrainDebouncer?
+
     /// Monotonic HLC source for locally-originated changes that reach the push
     /// path without an HLC of their own.
     ///
@@ -218,6 +227,45 @@ actor CloudKitStateActor {
         // Set the HLC generator to the confirmed slot's nodeID.
         hlcGenerator = HLCGenerator(nodeID: newNodeID)
 
+        // Create the drain debouncer (B-11, CVK-ICLOUD P3-M1).
+        //
+        // The trigger calls push() to flush the outbox after write activity
+        // quiets. On transport failure, the debouncer re-arms with a backoff
+        // delay to prevent hot-looping on network errors.
+        //
+        // Interaction with RetryPolicy (P1-M6): delay(forAttempt: 0) returns
+        // ~1 s with ±20% jitter — the single-step "wait a moment, retry" path
+        // for transient blips. The poll scheduler (P3-M2, AdaptivePollScheduler)
+        // manages the multi-step retry arc for persistent failures.
+        let retryPolicy = RetryPolicy.default
+        self.drainDebouncer = OutboxDrainDebouncer(
+            coalescingWindow: OutboxDrainDebouncer.Constants.coalescingWindow,
+            maxLatency: OutboxDrainDebouncer.Constants.maxLatency,
+            sleep: { try await Task.sleep(for: $0) },
+            trigger: { [weak self] in
+                guard let self else { return }
+                do {
+                    _ = try await self.push()
+                } catch SyncError.transportFailure(let detail) {
+                    // Re-arm with backoff so the next attempt is delayed rather
+                    // than immediate. Without backoff, a broken network would cause
+                    // the debouncer to fire on each subsequent write and hammer
+                    // CloudKit with failing push attempts — a hot loop. The
+                    // coalescingWindow (2 s) already de-dupes writes; this backoff
+                    // adds a further wait before the retry attempt.
+                    logger.warning("debouncer: push transport failure, backing off: \(detail)")
+                    let backoff = retryPolicy.delay(forAttempt: 0)
+                    try? await Task.sleep(for: .seconds(backoff))
+                    await self.drainDebouncer?.arm()
+                } catch SyncError.notEnabled {
+                    // Engine disabled while trigger was in flight — expected; no-op.
+                    ()
+                } catch {
+                    logger.error("debouncer: push error: \(String(describing: error))")
+                }
+            }
+        )
+
         // Start observing each declared table that is not pull-only.
         for table in manifest.tables where table.direction != .pullOnly {
             let stream = storage.observer.observe(table: table.name, events: [.insert, .update, .delete])
@@ -230,6 +278,13 @@ actor CloudKitStateActor {
         }
 
         isEnabled = true
+
+        // If there were leftover outbox entries from a previous session, arm the
+        // debouncer so they are pushed shortly after enable() returns — without
+        // requiring the host app to call push() manually (B-11).
+        if !leftovers.isEmpty {
+            await drainDebouncer?.arm()
+        }
     }
 
     func disable() async {
@@ -243,6 +298,14 @@ actor CloudKitStateActor {
         // the next enable() (drainLeftovers above). This is the durability
         // guarantee R4 requires: the outbox survives process death and
         // disable/enable cycles.
+
+        // Cancel the drain debouncer and AWAIT its task (I-2 deterministic teardown).
+        // After cancel() returns, no push will fire — even if arm() was called
+        // moments before disable(). The await closes the race window where the
+        // debouncer's sleep just completed and the trigger is queued to run.
+        await drainDebouncer?.cancel()
+        drainDebouncer = nil
+
         manifest = nil
         storage = nil
         database = nil
@@ -370,6 +433,11 @@ actor CloudKitStateActor {
 
         do {
             try await OutboxStore.append(entry: entry, to: storage)
+            // Arm the debouncer after a successful durable append (B-11).
+            // The debouncer coalesces rapid writes into one push cycle, preventing
+            // per-keystroke push storms. arm() is a no-op if the engine is being
+            // torn down (drainDebouncer is nil after disable()).
+            await drainDebouncer?.arm()
         } catch {
             logger.error("outbox append failed for \(change.table): \(String(describing: error))")
         }
