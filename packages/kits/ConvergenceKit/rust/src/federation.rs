@@ -1185,6 +1185,20 @@ const FED_SYNC_META_TABLE: &str = "_fed_sync_meta";
 /// col_hlc encoding, and PK structure are byte-identical to the Swift side.
 const FED_SYNC_META_COLS_TABLE: &str = "_fed_sync_meta_cols";
 
+/// Side table name for the schema-skew pending queue (R9, v3 schema).
+/// Mirrors Swift's `_fed_pending_skew` (FederationStateActor v3).
+/// The behavioral skew-queue code lands in WC3; this constant and the table
+/// schema are defined here so WC1 can bring both legs to v4 via sequential
+/// migrations (v2→v3 creates the table, v3→v4 adds _fed_identity).
+const FED_PENDING_SKEW_TABLE: &str = "_fed_pending_skew";
+
+/// Side table name for the persistent estate Ed25519 identity (I-8, WC1).
+/// One row per estate: key_id TEXT PK (fixed "local"), secret_key BLOB
+/// (32 bytes, Ed25519 private key), public_key BLOB (32 bytes),
+/// created_at TEXT (ISO8601 per schema invariants — never REAL).
+/// At-rest posture: covered by SQLCipher per ADR-014 on the estate file.
+const FED_IDENTITY_TABLE: &str = "_fed_identity";
+
 /// Ensure both Federation side tables exist.
 ///
 /// Called from `enable()` before any `apply_record`. Uses `storage.migrate()`
@@ -1231,10 +1245,43 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             "column_name".to_string(),
         ],
     );
+    // v3 (WC3 placeholder): schema-skew pending queue (R9).
+    // Behavioral skew-queue logic lands in WC3; the table is declared here
+    // so the v2→v3 migration runs before WC1's v3→v4 identity migration.
+    let skew_table = TableDeclaration::new(
+        FED_PENDING_SKEW_TABLE,
+        vec![
+            ColumnDeclaration::uuid("id"),
+            ColumnDeclaration::text("table_name"),
+            ColumnDeclaration::text("row_key"),
+            // schema_version: the inbound record's declared schema version.
+            ColumnDeclaration::int("schema_version").with_default(TypedValue::Int(0)),
+            // received_at: ISO8601 TEXT per schema invariants.
+            ColumnDeclaration::text("received_at"),
+            ColumnDeclaration::blob("payload"),
+        ],
+        vec!["id".to_string()],
+    );
+    // v4 (WC1): persistent Ed25519 estate identity (I-8).
+    // One row per estate (key_id = "local"). At-rest posture: SQLCipher
+    // per ADR-014 covers the estate file. No custom crypto invented.
+    let identity_table = TableDeclaration::new(
+        FED_IDENTITY_TABLE,
+        vec![
+            ColumnDeclaration::text("key_id"),
+            // secret_key: 32-byte Ed25519 private key (SigningKey seed).
+            ColumnDeclaration::blob("secret_key"),
+            // public_key: 32-byte Ed25519 verifying key.
+            ColumnDeclaration::blob("public_key"),
+            // created_at: ISO8601 TEXT per schema invariants (never REAL).
+            ColumnDeclaration::text("created_at"),
+        ],
+        vec!["key_id".to_string()],
+    );
     let schema = SchemaDeclaration::new(
         "ConvergenceKitFederation",
-        2,
-        vec![meta_table, cols_table.clone()],
+        4,
+        vec![meta_table, cols_table.clone(), skew_table.clone(), identity_table.clone()],
     )
     .with_migrations(vec![
         // v1 → v2: add _fed_sync_meta_cols per-column HLC side table
@@ -1244,8 +1291,101 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             to_version: 2,
             operations: vec![SchemaOperation::CreateTable(cols_table)],
         },
+        // v2 → v3: add _fed_pending_skew schema-skew queue table (R9, WC3).
+        // WC3 adds the behavioral queue logic; this migration just declares the
+        // table so WC1 can land v4 via sequential migrations (v2→v3→v4).
+        Migration {
+            from_version: 2,
+            to_version: 3,
+            operations: vec![SchemaOperation::CreateTable(skew_table)],
+        },
+        // v3 → v4: add _fed_identity persistent estate identity (I-8, WC1).
+        // Mirrors Swift FederationStateActor v3→v4 in ensureFedSyncMetaTable.
+        Migration {
+            from_version: 3,
+            to_version: 4,
+            operations: vec![SchemaOperation::CreateTable(identity_table)],
+        },
     ]);
     storage.migrate(&schema).map_err(|e| e.to_string())
+}
+
+/// Return the current UTC wall time as an ISO8601 string (e.g. "2026-07-17T12:34:56Z").
+///
+/// WHY no chrono: ConvergenceKit's Cargo.toml does not carry the chrono crate.
+/// The algorithm uses Howard Hinnant's civil_from_days (public domain) to convert
+/// the Unix day count to (y, m, d), then formats hh:mm:ss from the seconds remainder.
+/// This is the same function used by Swift's ISO8601DateFormatter with no fractional
+/// seconds and UTC timezone — byte-compatible output for SQLite TEXT date columns.
+fn iso8601_utc_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Hinnant civil_from_days: converts days since epoch to (y, m, d).
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let rem = secs % 86_400;
+    let hh = rem / 3600;
+    let mm = (rem % 3600) / 60;
+    let ss = rem % 60;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hh, mm, ss)
+}
+
+/// Load the estate's persistent Ed25519 identity from `_fed_identity`, or mint
+/// a fresh one and persist it (I-8, WC1).
+///
+/// Called by the host at startup — mirrors Swift `FederationStateActor.loadOrMintIdentity`.
+/// Runs `ensure_fed_sync_meta_table` first so callers need not pre-warm the schema.
+///
+/// At-rest posture: the estate file is covered by SQLCipher (ADR-014); no custom
+/// crypto is applied to the key bytes at this layer.
+///
+/// Returns `Err(String)` on storage failure; callers should surface the error.
+pub fn load_or_mint_identity(storage: &dyn Storage) -> Result<LocalIdentity, String> {
+    ensure_fed_sync_meta_table(storage)?;
+    let predicate = StoragePredicate::Eq(
+        Column::new(FED_IDENTITY_TABLE.to_string(), "key_id".to_string()),
+        TypedValue::Text("local".to_string()),
+    );
+    let rows = storage
+        .row_store()
+        .query(FED_IDENTITY_TABLE, Some(&predicate), &[], None, None)
+        .map_err(|e| e.to_string())?;
+    if let Some(row) = rows.into_iter().next() {
+        if let Some(TypedValue::Blob(secret_bytes)) = row.get("secret_key") {
+            if secret_bytes.len() == SECRET_KEY_LENGTH {
+                let mut arr = [0u8; SECRET_KEY_LENGTH];
+                arr.copy_from_slice(secret_bytes);
+                return Ok(LocalIdentity::from_secret(arr));
+            }
+        }
+    }
+    // No existing row — mint a fresh identity and persist it.
+    let identity = LocalIdentity::generate();
+    let secret = identity.secret_bytes().to_vec();
+    let pubkey = identity.public_key_bytes().to_vec();
+    let now = iso8601_utc_now();
+    let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+    values.insert("key_id".to_string(), TypedValue::Text("local".to_string()));
+    values.insert("secret_key".to_string(), TypedValue::Blob(secret));
+    values.insert("public_key".to_string(), TypedValue::Blob(pubkey));
+    values.insert("created_at".to_string(), TypedValue::Text(now));
+    storage
+        .row_store()
+        .upsert(FED_IDENTITY_TABLE, values, &["key_id".to_string()])
+        .map_err(|e| e.to_string())?;
+    Ok(identity)
 }
 
 /// Read the persisted sync HLC from `_fed_sync_meta` for a given (table, row_key).

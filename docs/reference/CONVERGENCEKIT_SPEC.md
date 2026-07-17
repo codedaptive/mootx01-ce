@@ -168,7 +168,9 @@ conflict; its records do not apply.
 **I-8 (per-estate identity):** a Federation identity is per-estate, not
 per-device or per-user. Two estates on the same device hold distinct
 keypairs and do not implicitly trust each other across the federation
-channel.
+channel. The keypair is persisted in the `_fed_identity` side table (v4
+schema) and survives disable/enable and process restart; a fresh keypair
+is minted only on first enable of a new estate (WC1).
 
 **I-9 (federation is not substrate):** ConvergenceKit replicates rows;
 it does not itself decide cross-estate access. Multi-estate access
@@ -302,7 +304,9 @@ fingerprints are directly comparable. Pairing is symmetric — each side
 registers the other. Pairing rides a `Relay` transport abstraction
 (INTERFACE § 4): the in-process `FederationRelay` is the local-and-test
 implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
-`Relay` conformer requiring no change to the engine.
+`Relay` conformer requiring no change to the engine. All signing uses the
+persistent estate identity loaded via `loadOrMintIdentity`/`load_or_mint_identity`
+(I-8, WC1): envelopes signed before the first `enable()` are not possible.
 
 **B-8 (fieldLevelLWW):** `ConflictPolicy.fieldLevelLWW` applies
 last-writer-wins at the column grain using per-column HLCs. Shipped in
