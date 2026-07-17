@@ -39,6 +39,7 @@
 
 import Foundation
 import PersistenceKit
+import SubstrateTypes
 
 /// Durable queue operations for schema-skew pending records.
 ///
@@ -97,6 +98,73 @@ public enum PendingSkewQueue {
             conflictColumns: ["id"]
         )
         _ = try await evictIfNeeded(cap: cap, from: storage, sideTable: sideTable)
+    }
+
+    // MARK: - Tombstone purge (P5-M1b)
+
+    /// Purge skew-queue entries for a (table, rowKey) whose stored record HLC
+    /// is strictly OLDER than the winning tombstone HLC.
+    ///
+    /// WHY only older entries are removed:
+    /// A future-schema entry whose HLC is NEWER than the tombstone represents a
+    /// write that postdates the delete event. On replay (after a schema update),
+    /// that newer record would win the LWW gate and override the delete, which is
+    /// correct — it is a legitimate re-create. Removing it here would silence a
+    /// valid write. Only entries that the tombstone's own LWW gate would have
+    /// defeated are safe to discard.
+    ///
+    /// - Parameters:
+    ///   - tableName: Application table of the deleted row.
+    ///   - rowKey: UUID of the deleted row.
+    ///   - tombstoneHLC: The HLC of the winning tombstone. Entries with a stored
+    ///                   record HLC strictly less than this value are deleted.
+    ///   - storage: The local PersistenceKit storage.
+    ///   - sideTable: Pending-skew table name (`_ck_pending_skew` or `_fed_pending_skew`).
+    @discardableResult
+    public static func deleteMatchingOlderThan(
+        tableName: String,
+        rowKey: UUID,
+        tombstoneHLC: PackedHLC,
+        from storage: any Storage,
+        sideTable: String
+    ) async throws -> Int {
+        // Query all entries for this (table_name, row_key). The per-row count is
+        // typically 0–2 (a row rarely accumulates multiple held schema versions),
+        // so loading them all to decode the payload HLC is inexpensive.
+        let candidates = try await storage.rowStore.query(
+            table: sideTable,
+            where: .and([
+                .eq(Column(table: sideTable, name: "table_name"), .text(tableName)),
+                .eq(Column(table: sideTable, name: "row_key"),    .text(rowKey.uuidString)),
+            ])
+        )
+        guard !candidates.isEmpty else { return 0 }
+
+        // Decode each payload to read its HLC; delete entries older than the tombstone.
+        var purgedCount = 0
+        for row in candidates {
+            guard case .blob(let payloadData) = row["payload"],
+                  let record = try? JSONDecoder().decode(SyncRecord.self, from: payloadData)
+            else { continue }
+
+            // Compare using the substrate's HLC natural ordering (packed uint64 comparison
+            // is not used here; we compare the HLC triple directly via its Comparable
+            // conformance provided by SubstrateTypes).
+            if record.hlc.asHLC < tombstoneHLC.asHLC {
+                // This entry predates the tombstone. Deleting it prevents indefinite
+                // retention of a payload that the tombstone has already superseded.
+                if case .uuid(let entryID) = row["id"] {
+                    _ = try? await storage.rowStore.deleteSync(
+                        table: sideTable,
+                        where: .eq(Column(table: sideTable, name: "id"), .uuid(entryID))
+                    )
+                    purgedCount += 1
+                }
+            }
+            // Entries whose HLC >= tombstoneHLC survive: they represent writes that
+            // postdate the delete and may override it on schema-skew replay.
+        }
+        return purgedCount
     }
 
     // MARK: - Cap enforcement

@@ -119,6 +119,10 @@ let package = Package(
             dependencies: [
                 "ConvergenceKit",
                 "ConvergenceKitFederation",
+                // P5-M1b: needed to call CKSideSchema.ensure in retention tests that
+                // verify OutboxStore.deleteMatchingParked works when the CK outbox table
+                // exists on a storage instance also used by the Federation backend.
+                "ConvergenceKitCloudKit",
                 "ConvergenceKitConformance",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],
