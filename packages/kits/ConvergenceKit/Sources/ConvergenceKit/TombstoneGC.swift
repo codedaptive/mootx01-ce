@@ -51,8 +51,18 @@ public enum TombstoneGC {
     ) async throws -> Int {
         // Compaction threshold: physical time (ms) below which tombstone
         // entries are eligible for deletion.
+        //
+        // CRITICAL: the stored sync_hlc physical field is 40-bit-truncated
+        // (HLC.packed masks phys with 0xFF_FFFF_FFFF), while nowMillis is
+        // full-width Unix ms (~1.75e12 in 2026 > 2^40 ≈ 1.10e12). Comparing
+        // an unmasked cutoff against truncated stored values would make EVERY
+        // tombstone look ~35 years old and compact them all instantly,
+        // silently destroying the A6 stale-resurrect guard (Perkins P4-M4
+        // finding; same failure class as the SlotTable eviction bug fixed at
+        // the Adams P1 gate). Mask the cutoff into the same 40-bit space so
+        // both sides of the comparison wrap identically.
         let retentionMs = SyncTombstone.gcRetentionSeconds * 1_000
-        let cutoffMs = nowMillis - retentionMs
+        let cutoffMs = (nowMillis - retentionMs) & 0xFF_FFFF_FFFF
 
         // Query all tombstone entries for this side table.
         // WHY query-then-delete rather than a single DELETE WHERE: the packed
