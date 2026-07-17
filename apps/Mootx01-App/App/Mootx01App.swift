@@ -67,14 +67,25 @@ struct Mootx01App: App {
                 .task { Mootx01Shortcuts.updateAppShortcutParameters() }
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
-                .task { await MootSyncDriver.shared.syncNow() }
+                .task {
+                    // CVK-WB2: apply the user's persisted sync preference at launch.
+                    // configure() is a no-op when called with the same value as the
+                    // current config; safe to call on every launch including cold starts
+                    // where the driver is already in the .disabled default.
+                    await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: SyncPolicy.isEnabled()))
+                    await MootSyncDriver.shared.syncNow()
+                }
             #else
             ContentView(model: model)
                 .task { await model.start() }
                 .task { Mootx01Shortcuts.updateAppShortcutParameters() }
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
-                .task { await MootSyncDriver.shared.syncNow() }
+                .task {
+                    // CVK-WB2: apply the user's persisted sync preference at launch.
+                    await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: SyncPolicy.isEnabled()))
+                    await MootSyncDriver.shared.syncNow()
+                }
                 // A4b: content shared while the app was backgrounded drains
                 // on the next foregrounding, not only at launch; the widget
                 // projection and CloudKit sync run on the same beat.
