@@ -57,7 +57,13 @@ impl From<SyncEventKind> for StorageEvent {
 
 /// Codable wrapper for HLC. Stable across encoders.
 /// JSON contract: camelCase field names matching Swift's property names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Ordering is lexicographic by (physical_time, logical_count, node_id) —
+/// the same field order as the struct declaration, which matches the Swift
+/// `Comparable` extension on `PackedHLC` (ColumnHLCMap.swift). `derive`
+/// on a struct with all-Ord fields uses declaration order, so the ordering
+/// is byte-identical to Swift's implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackedHLC {
     pub physical_time: i64,
