@@ -164,6 +164,46 @@ struct LexiconGapsTests {
         #expect(text.contains("source="), "fact_search must include source= drawer ID; got: \(text)")
     }
 
+    @Test("moot_fact_search exact fields do not accept substring or provenance collisions")
+    func factSearchExactFields() async throws {
+        let dispatcher = try await makeDispatcher()
+        for (subject, source) in [("calendar.event.ev-1", "miner:calendar"),
+                                  ("calendar.event.ev-10", "miner:other")] {
+            _ = await dispatcher.handle(JSONRPCRequest(
+                id: .integer(0), method: "tools/call", params: .object([
+                    "name": .string("moot_file_fact"),
+                    "arguments": .object([
+                        "subject": .string(subject),
+                        "predicate": .string("scheduled"),
+                        "object": .string("fixture"),
+                        "source_id": .string(source),
+                    ]),
+                ])
+            ))
+        }
+        let raw = await dispatcher.handle(JSONRPCRequest(
+            id: .integer(1), method: "tools/call", params: .object([
+                "name": .string("moot_fact_search"),
+                "arguments": .object([
+                    "subject_exact": .string("calendar.event.ev-1"),
+                    "predicate_exact": .string("scheduled"),
+                    "source_id_exact": .string("miner:calendar"),
+                ]),
+            ])
+        ))
+        let response = try #require(raw)
+        guard case .result(let result) = response.payload else {
+            Issue.record("exact fact search failed: \(response.payload)")
+            return
+        }
+        let text = try #require(
+            result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
+        )
+        #expect(text.contains("calendar.event.ev-1"))
+        #expect(!text.contains("calendar.event.ev-10"))
+        #expect(text.hasPrefix("facts: 1"))
+    }
+
     // MARK: - Tier 3: moot_retire_fact
 
     @Test("moot_retire_fact for nonexistent id returns isError result")

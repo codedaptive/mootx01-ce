@@ -5,6 +5,7 @@
 //!   1. Federation tool (moot_federated_search)
 //!   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
 //!   3. Vault tools (backed by vault-kit; ADR-VAULTKIT-002)
+//!   3.5 Dataset tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats; MX-TAB-7b)
 //!   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 //!   5. Lens tools (moot_lens_keystones … moot_lens_concepts)
 //!   6. Unknown tool → methodNotFound error
@@ -283,6 +284,17 @@ fn route_tool(
             ));
         }
         return crate::vault_tools::dispatch_vault(name, args, registry, vault_ledger);
+    }
+
+    // 3.5. Dataset tools — interface-tier CRUD over user-owned datasets (MX-TAB-7b).
+    //
+    // Inserted between vault and recipe to mirror Swift ToolDispatcher.dispatch(_:_:)
+    // insertion order: after VaultTools and before InterfaceTools in the Swift dispatch
+    // chain. Dataset tools are always present (not vault-gated): they open user-supplied
+    // data into the estate, which is not a vault-filesystem-import concern.
+    if crate::dataset_tools::is_dataset_tool(name) {
+        let result = crate::dataset_tools::dispatch(name, args, registry)?;
+        return Ok(inject_hint(name, args, result));
     }
 
     // 4. Recipe tools

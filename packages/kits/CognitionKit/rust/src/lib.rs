@@ -72,6 +72,12 @@ pub mod grounded_synthesis;
 pub mod keystones_recipe;
 pub mod latent_themes_recipe;
 pub mod complexity_recipe;
+// Dataset-targeted lens entry points (MX-TAB-6): take plain column-value
+// arrays from the tool layer rather than estate handles. No PersistenceKit
+// dependency is added to the library; callers feed values from DatasetStore.
+pub mod dataset_complexity;
+pub mod dataset_associations;
+pub mod dataset_cohesion;
 pub mod migration_live;
 pub mod migration_orchestration;
 pub mod migration_ranking;
@@ -126,6 +132,11 @@ pub use migration_ranking::{
     RankedPlan, RankingResult,
 };
 pub use complexity_recipe::{run_complexity, ComplexityOutput, ComplexityResult};
+pub use dataset_complexity::{run_dataset_column_entropy, ColumnEntropyOutput};
+pub use dataset_associations::{run_dataset_associations, DatasetAssociationsOutput};
+pub use dataset_cohesion::{
+    run_dataset_cohesion, DatasetCohesionOutput, DatasetColumnValue, RowAnomalyScore, SCAN_CAP,
+};
 pub use mind_overlap_recipe::{run_mind_overlap, MindOverlap};
 pub use precise_recall::{run as run_precise_recall, PreciseMatch, DEFAULT_POOL as PRECISE_DEFAULT_POOL};
 pub use moment_recipe::{run_moment, MomentOutput};

@@ -1,10 +1,10 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.4.0
+version: 1.5.0
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-25
+date: 2026-07-16
 description: Public API surface for NeuronKit in both the Swift and Rust ports.
 package: NeuronKit
 languages: [swift, rust]
@@ -48,6 +48,7 @@ and Rust legs.
 - `Sources/NeuronKit/BranchOps.swift` — `deriveBranch` / `promoteBranch` /
   `mergeDrawers`
 - `Sources/NeuronKit/BenchmarkAlgorithm.swift` — `benchmark`, `BenchmarkReport`
+- `Sources/NeuronKit/BenchmarkScoring.swift` — `BenchmarkScoring` (enum, nested `Score`), `BenchmarkScoring.score(…)`
 - `Sources/NeuronKit/Tournament.swift` — `runTournament`, `TournamentReport`,
   `BranchScore`, `DisqualifiedBranch`, `DisqualificationReason`
 - `Sources/NeuronKit/Tournament/BradleyTerry.swift` — `bradleyTerry`,
@@ -76,12 +77,33 @@ and Rust legs.
   `DistillationLensResult`, `InjectionDepth`
 - `Sources/NeuronKit/Lenses/HMMFeatureExtractor.swift` — `hmmFeatureExtractor`
   (the production HMM-tagger-backed `DistillationPipeline.FeatureExtractor`)
+- `Sources/NeuronKit/Lenses/NodeMotion.swift` — `NodeMotion`, `NodeAnomaly`,
+  `NodeMotionLens` (diffusion node-layer lens: `fold`, `classify`, `run`, `anomaly`)
+- `Sources/NeuronKit/Lenses/QueryPrecision.swift` — `NeuronKit.queryPrecision`,
+  `NeuronKit.hasDistinctiveTokens`, `NeuronKit.containmentSatisfied`
+- `Sources/NeuronKit/Dreaming/CorpusGrowthProbe.swift` — `CorpusGrowthProbe`
+  protocol, `EstateCorpusGrowthProbe`, `autoReindexVocabGrowthFraction`,
+  `autoReindexVocabGrowthFloor`
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
   `RecallTraceRewardSource`), and the seam value types
 - `Sources/NeuronKit/Maintenance/` — `MaintenanceDaemon`,
   `MaintenancePolicy` (+ store), and the seam value types
+- `Sources/NeuronKit/Governor/AutonomicGovernor.swift` — `AutonomicGovernor`
+  (actor), `GovernorReport`, `TopologyInputsToken`,
+  `autonomicGovernorDefaultTopologyCadenceMs()`,
+  `autonomicGovernorDefaultPoolReduceCadenceMs()`
+- `Sources/NeuronKit/Governor/GraphCentralityProducer.swift` — `GraphCentralityCache`,
+  `GraphCentralityAdjacency`
+- `Sources/NeuronKit/Governor/PreferenceProducer.swift` — `PreferenceCache`,
+  `PreferenceOutcomes`
+- `Sources/NeuronKit/Reduction/ReductionSignals.swift` — `ReductionCandidate`,
+  `ReductionQuery`, `ReductionSignal`, `NeuronKit.reductionScore(_:query:candidate:)`
+- `Sources/NeuronKit/Reduction/ReductionComposition.swift` — `WeightedSignal`,
+  `ReductionComposition`, `NeuronKit.reduce(composition:query:candidates:limit:)`,
+  `NeuronKit.reduceLate(composition:query:candidates:limit:survivorMultiple:hydrate:)`
+- `Sources/NeuronKit/Reduction/CompositionGrid.swift` — `NeuronKit.CompositionGrid`
 - `Tests/NeuronKitTests/`, `Package.swift`
 
 **Rust:** `packages/kits/NeuronKit/rust/` (crate `neuron-kit`, lib
@@ -93,6 +115,26 @@ and Rust legs.
   `src/tournament.rs`
 - `src/hmm_feature_extractor.rs` — `hmm_feature_extractor()`, `hmm_extract`,
   `is_year` (the production HMM-tagger-backed `FeatureExtractor` fn pointer)
+- `src/benchmark_scoring.rs` — `BenchmarkScore`, `score`
+- `src/query_precision.rs` — `query_precision`, `has_distinctive_tokens`,
+  `containment_satisfied`, `DEFAULT_DISTINCTIVE_BONUS`
+- `src/reduction_signals.rs` — `ReductionCandidate`, `ReductionQuery`, `ReductionSignal`,
+  `reduction_score`, `hamming_similarity`, `lattice_proximity`, `squash`, `clamp01`,
+  `temporal_text_score`, `token_exact_rate`, `reference_codes`
+- `src/reduction_composition.rs` — `WeightedSignal`, `ReductionComposition`, `reduce`,
+  `reduce_late`, `mmr_diversity_rerank`, `assembly_expand`,
+  `DEFAULT_SURVIVOR_MULTIPLE`
+- `src/composition_grid.rs` — `composition_grid::all()`, `composition_grid::named()`,
+  `composition_grid::names()`, `DEFAULT_NAME`
+- `src/graph_centrality.rs` — `GraphCentralityCache`, `CentralityGraph`,
+  `build_centrality_graph`, `compute_centrality_scores`
+- `src/preference_producer.rs` — `PreferenceCache`, `PreferenceRecord`,
+  `preference_outcomes`, `compute_preference_scores`
+- `src/autonomic_governor.rs` — `AutonomicGovernor` (struct), `GovernorReport`,
+  `GRAPH_CENTRALITY_SCAN_NODE_CAP`, `POOL_REDUCE_FILE_CAP`
+- `src/governor_topology_sink.rs` — topology-sink type wired by the governor
+- `src/diffusion/node_motion.rs` — `NodeMotion`, `fold`, `DEFAULT_NODE_LAMBDA`
+- `src/diffusion/node_anomaly.rs` — `NodeAnomaly`, `classify`, `DEFAULT_CHURN_THRESHOLD`
 - the reasoning lenses: `src/keystones.rs`, `src/constellation.rs`,
   `src/spreading_activation.rs`, `src/theme_weather.rs`,
   `src/latent_themes.rs`, `src/bias.rs`, `src/anticipation.rs`,
@@ -634,6 +676,349 @@ public struct DreamingCycleReport: Sendable, Equatable {
 }
 ```
 
+### `BenchmarkScoring`
+
+The pure benchmark scoring core — separates the per-query score computation
+from the benchmark orchestration (`BenchmarkAlgorithm`). Swift-only live path;
+Rust has the flat `BenchmarkScore` struct and free `score` function.
+
+**Swift:**
+
+```swift
+public enum BenchmarkScoring {
+    public struct Score: Sendable, Equatable {
+        public let queryCount: Int
+        public let recallOverlap: Float
+        public let recallPrecision: Float
+        public let meanReciprocalRank: Float
+        public let notFoundInBranch: [String]
+        public let newInBranch: [String]
+    }
+    public static func score(expected: [String: Set<String>],
+                             found: [String: [String]]) -> Score
+}
+```
+
+**Rust:**
+
+```rust
+pub struct BenchmarkScore {
+    pub recall_overlap: f32, pub recall_precision: f32,
+    pub mean_reciprocal_rank: f32, pub not_found: Vec<String>, pub new_in_branch: Vec<String>,
+}
+pub fn score(expected_ids: &[String], found_per_query: &[Vec<String>]) -> BenchmarkScore;
+```
+
+### `CorpusGrowthProbe` / `EstateCorpusGrowthProbe`
+
+Seam protocol injected into `DreamingDaemon` for auto-reindex triggering.
+The daemon calls `vocabAnchor()` each cycle to measure vocabulary growth since
+the last retrain, then calls `reindex(now:)` when growth crosses the
+configured fraction/floor thresholds. Swift-only (GLK-bound); the Rust daemon
+has no corpus-auto-reindex seam.
+
+```swift
+public let autoReindexVocabGrowthFraction: Double   // 0.10 — 10 % vocab growth
+public let autoReindexVocabGrowthFloor: Int          // 25 — absolute term floor
+
+public protocol CorpusGrowthProbe: Sendable {
+    func vocabAnchor() async throws -> Int
+    func reindex(now: Date) async throws
+}
+public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
+    public init(handle: EstateHandle, kit: GeniusLocusKit)
+    public func vocabAnchor() async throws -> Int
+    public func reindex(now: Date) async throws
+}
+```
+
+### Node-motion / diffusion types (SPEC § 11 diffusion, ADR-DIFFUSION-001)
+
+The diffusion node-layer lens. `NodeMotion` and `NodeAnomaly` are pure data,
+identical across ports. `NodeMotionLens` owns the fold + classify algorithms
+(both ports) plus the estate-reading entry points `run` / `anomaly` (Swift
+only — GLK-bound).
+
+**Swift:**
+
+```swift
+public struct NodeMotion: Sendable, Equatable {
+    public let rowID: UUID
+    public let volatility: Double          // decay-weighted mutation mass; high → churning
+    public let eventCount: Int             // distinct HLC mutation moments
+    public let lastEventPhysicalMs: Int64? // most-recent event physical ms, or nil
+    public let anchorTrajectory: [UInt64]  // ordered UDC anchors the node has held
+    public var currentAnchor: UInt64?      // anchorTrajectory.last
+    public var reanchored: Bool            // Set(anchorTrajectory).count > 1
+    public init(rowID:volatility:eventCount:lastEventPhysicalMs:anchorTrajectory:)
+}
+
+public struct NodeAnomaly: Sendable, Equatable {
+    public let rowID: UUID
+    public let volatility: Double
+    public let isChurning: Bool    // volatility ≥ churnThreshold (default 3.0)
+    public let reanchored: Bool
+    public let currentAnchor: UInt64?
+    public var isAnomalous: Bool   // isChurning || reanchored
+    public init(rowID:volatility:isChurning:reanchored:currentAnchor:)
+}
+
+public enum NodeMotionLens {
+    public static let defaultNodeLambda: Double       // 0.5 — per-day decay constant
+    public static let defaultChurnThreshold: Double   // 3.0 — volatility churn gate
+    // Pure folds (both ports):
+    public static func fold(entries: [UnifiedAuditEntry], rowID: UUID,
+                            now: Date, lambdaPerDay: Double) -> NodeMotion
+    public static func classify(motion: NodeMotion,
+                                churnThreshold: Double = defaultChurnThreshold) -> NodeAnomaly
+    // Estate-reading entry points (Swift-only, GLK-bound):
+    public static func run(kit: GeniusLocusKit, handle: EstateHandle, rowID: String,
+                           now: Date, lambdaPerDay: Double) async throws -> NodeMotion
+    public static func anomaly(kit: GeniusLocusKit, handle: EstateHandle, rowID: String,
+                               now: Date, lambdaPerDay: Double,
+                               churnThreshold: Double) async throws -> NodeAnomaly
+}
+```
+
+**Rust:** (pure folds only; no GLK-bound entry points)
+
+```rust
+pub struct NodeMotion {
+    pub row_id: uuid::Uuid, pub volatility: f64, pub event_count: usize,
+    pub last_event_physical_ms: Option<i64>, pub anchor_trajectory: Vec<u64>,
+}
+// current_anchor() -> Option<u64> ; reanchored() -> bool
+pub const DEFAULT_NODE_LAMBDA: f64;     // 0.5
+pub fn fold(entries: &[UnifiedAuditEntry], row_id: Uuid, now_ms: i64,
+            lambda_per_day: f64) -> NodeMotion;
+
+pub struct NodeAnomaly {
+    pub row_id: uuid::Uuid, pub volatility: f64,
+    pub is_churning: bool, pub reanchored: bool, pub current_anchor: Option<u64>,
+}
+// is_anomalous() -> bool
+pub const DEFAULT_CHURN_THRESHOLD: f64; // 3.0
+pub fn classify(motion: &NodeMotion, churn_threshold: f64) -> NodeAnomaly;
+```
+
+### Reduction pipeline types
+
+The precise-reduction pipeline: pure, deterministic re-rank of a coarse
+hybrid-recall pool into an exact-answer-first bounded set. All types live
+in NeuronKit on both ports; CognitionKit's `PreciseRecall` recipe orchestrates.
+
+**Swift:**
+
+```swift
+// One candidate in the reduction pool.
+public struct ReductionCandidate: Sendable {
+    public let id: String
+    public let content: String
+    public let room: String
+    public let score: RecallScoreVector      // dense recall signal from GLK Step 2
+    public let udcCode: String
+    public let udcFacets: String?
+    public let coarseRank: Int               // 0-based position in coarse-grab pool
+    public let eventTime: Date?
+    public let isCurrentlyBelieved: Bool     // drawer state Cluster A
+    public let precisionScore: Double        // stamped by reduce fold; 0 before scoring
+    public init(id:content:room:score:udcCode:udcFacets:coarseRank:eventTime:isCurrentlyBelieved:precisionScore:)
+    public static func from(hit: RecallHit, coarseRank: Int) -> ReductionCandidate
+}
+
+// Query side: text + optional lattice anchor.
+public struct ReductionQuery: Sendable, Equatable {
+    public let text: String
+    public let udcCode: String    // "" when unanchored
+    public init(text: String, udcCode: String = "")
+}
+
+// Named per-candidate signal component.
+public enum ReductionSignal: String, Sendable, CaseIterable, Codable {
+    case text, hamming, matrix, lattice, bm25, vector, dense
+    case tokenExact, temporalState, temporalText, assembly, mmr
+    public var isSetLevel: Bool   // mmr, assembly — handled by compose fold, not score
+    public var needsContent: Bool // text, tokenExact, mmr, temporalText, assembly need body
+}
+
+// One weighted term in a composition.
+public struct WeightedSignal: Sendable, Equatable, Codable {
+    public let signal: ReductionSignal
+    public let weight: Double
+    public init(_ signal: ReductionSignal, weight: Double = 1.0)
+}
+
+// Named, declarative reduction composition.
+public struct ReductionComposition: Sendable, Equatable, Codable {
+    public let name: String
+    public let terms: [WeightedSignal]
+    public let mmrLambda: Double    // default 0.7; used only when mmr term present
+    public init(name: String, terms: [WeightedSignal], mmrLambda: Double = 0.7)
+}
+```
+
+**Rust:** (identical shapes; `WeightedSignal` is also a named struct on the Rust side)
+
+```rust
+pub struct ReductionCandidate { /* same fields */ }
+impl ReductionCandidate { pub fn from_hit(hit: &RecallHit, coarse_rank: usize) -> Self; }
+pub struct ReductionQuery { pub text: String, pub udc_code: String }
+impl ReductionQuery { pub fn new(text: impl Into<String>) -> Self; }
+pub enum ReductionSignal { Text, Hamming, Matrix, Lattice, Bm25, Vector, Dense,
+                           TokenExact, TemporalState, TemporalText, Assembly, Mmr }
+impl ReductionSignal { pub fn is_set_level(self) -> bool; pub fn needs_content(self) -> bool; }
+pub struct WeightedSignal { pub signal: ReductionSignal, pub weight: f64 }
+impl WeightedSignal { pub fn new(signal: ReductionSignal) -> Self;
+                      pub fn weighted(signal: ReductionSignal, weight: f64) -> Self; }
+pub struct ReductionComposition { pub name: String, pub terms: Vec<WeightedSignal>,
+                                  pub mmr_lambda: f64 }
+impl ReductionComposition { pub fn new(…) -> Self; pub fn with_lambda(…) -> Self;
+                             pub fn has_mmr(&self) -> bool; pub fn has_assembly(&self) -> bool;
+                             pub fn dense_per_candidate_terms(&self) -> Vec<WeightedSignal>;
+                             pub fn needs_content(&self) -> bool; }
+pub const DEFAULT_SURVIVOR_MULTIPLE: usize;  // 8
+```
+
+### `CompositionGrid`
+
+The named ablation grid of all shipped `ReductionComposition` values. Adding
+a composition is one entry here; the optimizer enumerates the grid against the
+recall gauntlet. Both ports expose the grid; Rust uses free functions in the
+`composition_grid` module rather than a namespace enum.
+
+**Swift:**
+
+```swift
+public enum CompositionGrid {
+    public static let defaultName: String       // "text"
+    public static let all: [ReductionComposition]
+    public static func named(_ name: String?) -> ReductionComposition
+    public static var names: [String]
+}
+```
+
+**Rust:**
+
+```rust
+pub const DEFAULT_NAME: &str;                         // "text"
+pub fn all() -> Vec<ReductionComposition>;
+pub fn named(name: Option<&str>) -> ReductionComposition;
+pub fn names() -> Vec<String>;
+pub fn is_known(name: &str) -> bool;                  // Rust-only convenience predicate
+```
+
+### Governor types
+
+The `AutonomicGovernor` is the production wiring that sequences all
+background autonomic duties — dreaming, maintenance, graph-centrality cache
+updates, preference score updates, topology snapshots, GC sweeps, and the
+bounded pool-reduce pass. Both ports have an `AutonomicGovernor`; the Rust
+governor is a struct (sync; no async actor isolation). `TopologyInputsToken`
+and the producer cache types (`GraphCentralityCache`, `PreferenceCache`) are
+part of the governor surface.
+
+**Swift:**
+
+```swift
+public func autonomicGovernorDefaultTopologyCadenceMs() -> Int   // 300_000
+public func autonomicGovernorDefaultPoolReduceCadenceMs() -> Int // 300_000
+
+public actor AutonomicGovernor {
+    public init(kit: GeniusLocusKit, handles: [EstateHandle], …)
+    public struct GovernorReport: Sendable {
+        public let dreamingFired: Bool
+        public let maintenanceFired: Bool
+        public let signalsTicked: Bool
+        public let graphAnalyticsFired: Bool
+        public let graphCentralityFired: Bool
+        public let preferenceFired: Bool
+        public let topologySnapshotFired: Bool
+        public let poolReduceFired: Bool
+        public let tableSwapped: Bool
+        public let tableVersion: UInt64
+        public let gcSweepFired: Bool
+    }
+    public func run() async
+    public func tick(now: Date) async -> GovernorReport
+    public static func graphCentralityScan(…) async throws -> GraphCentralityCache
+    public static func preferenceScan(…) async throws -> PreferenceCache
+    public static func topologySnapshotDuty(…) async throws
+}
+
+// Stable token representing topology inputs: digest changes only when
+// drawer/tunnel/fact counts or max timestamps change; avoids redundant snapshot recomputes.
+public struct TopologyInputsToken: Sendable, Equatable {
+    public let drawerCount: Int
+    public let tunnelCount: Int
+    public let factCount: Int
+    public let deadDrawerCount: Int
+    public let deadTunnelCount: Int
+    public let maxFiledAt: Date?
+    public let maxEventTime: Date?
+    public let inputsDigest: UInt64
+    public var fingerprint: String
+}
+
+// Read-only centrality-score cache produced by graphCentralityScan.
+public final class GraphCentralityCache: GraphCache, Sendable {
+    public init(scores: [String: Float])
+    public func graphScore(for drawerID: String) -> Float
+    public var count: Int
+}
+
+// Adjacency builder helper used by graphCentralityScan (Swift public for testing).
+public enum GraphCentralityAdjacency {
+    public static let kgFactGroupCap: Int   // 50
+    public struct Graph: Sendable {
+        public let nodeIDs: [String]
+        public let edges: [(String, String)]
+    }
+    public static func build(drawers: [Drawer], tunnels: [Tunnel], facts: [KGFact]) -> Graph
+}
+
+// Read-only preference-score cache produced by preferenceScan.
+public final class PreferenceCache: PreferenceStore, Sendable {
+    public init(scores: [String: Float])
+    public func preferenceScore(for drawerID: String) -> Float
+    public var count: Int
+}
+
+public enum PreferenceOutcomes {
+    public struct Record: Sendable, Equatable {
+        public let label: String
+        public let endorsements: Int
+        public let dismissals: Int
+        public init(label: String, endorsements: Int, dismissals: Int)
+    }
+    public static func build(traces: [RecallTraceItem]) -> [Record]
+}
+```
+
+**Rust:**
+
+```rust
+pub const GRAPH_CENTRALITY_SCAN_NODE_CAP: usize;   // 10_000
+pub const POOL_REDUCE_FILE_CAP: usize;             // 500
+pub struct AutonomicGovernor { /* … */ }
+pub struct GovernorReport { /* same fields as Swift, snake_case */ }
+impl AutonomicGovernor { pub fn new(…) -> Self; pub fn stop(&self);
+    pub fn tick(&mut self, …); pub fn register_standing_signal(…); /* … */ }
+
+pub struct GraphCentralityCache { /* … */ }
+impl GraphCentralityCache { pub fn new(scores: HashMap<String, f32>) -> Self;
+    pub fn count(&self) -> usize; }
+pub struct CentralityGraph { /* node_ids, edges */ }
+pub fn build_centrality_graph(…) -> CentralityGraph;
+pub fn compute_centrality_scores(graph: &CentralityGraph) -> GraphCentralityCache;
+
+pub struct PreferenceCache { /* … */ }
+impl PreferenceCache { pub fn new(scores: HashMap<String, f32>) -> Self;
+    pub fn count(&self) -> usize; }
+pub struct PreferenceRecord { pub label: String, pub endorsements: i64, pub dismissals: i64 }
+pub fn preference_outcomes(traces: &[RecallTraceItem]) -> Vec<PreferenceRecord>;
+pub fn compute_preference_scores(records: &[PreferenceRecord]) -> PreferenceCache;
+```
+
 ### Maintenance daemon surface
 
 ```swift
@@ -1007,6 +1392,91 @@ pub fn complexity(counts_a: &[f32], counts_b: Option<&[f32]>,
 pub fn calibrate(curve: &MatrixCalibrationCurve, claimed: &[f32]) -> Vec<CalibratedValue>;
 ```
 
+### Query-precision scoring (SPEC pure text math, no SubstrateML gate)
+
+Discriminative re-rank signal for the precise-recall recipe: content-word
+match plus a bounded distinctive-token bonus. Pure, total, deterministic.
+Both ports; identical ASCII-folded tokenisation rules.
+
+**Swift:**
+
+```swift
+extension NeuronKit {
+    // Precision of candidate as an answer to query, in [0, 1]. Returns 0 when
+    // either side is empty. distinctiveBonus (default 0.25) is the max additive
+    // contribution of numeric / proper-noun token matches.
+    public static func queryPrecision(query: String, candidate: String,
+                                      distinctiveBonus: Float = 0.25) -> Float
+
+    // True when query contains at least one distinctive token (number or
+    // capitalised word). When true, the exact-token gate in moot_recall_precise
+    // applies; used by RecipeTools without re-implementing tokenisation.
+    public static func hasDistinctiveTokens(_ query: String) -> Bool
+
+    // True when any candidateContents satisfies the distinctive-token
+    // containment gate for query, or when query has no distinctive tokens.
+    // Returns false → recall set should be suppressed as not_found.
+    public static func containmentSatisfied(query: String,
+                                            candidateContents: [String]) -> Bool
+}
+```
+
+**Rust:**
+
+```rust
+pub const DEFAULT_DISTINCTIVE_BONUS: f32;   // 0.25
+pub fn query_precision(query: &str, candidate: &str, distinctive_bonus: f32) -> f32;
+pub fn has_distinctive_tokens(query: &str) -> bool;
+pub fn containment_satisfied(query: &str, candidate_contents: &[&str]) -> bool;
+pub fn word_tokens(s: &str) -> Vec<String>;          // shared tokeniser
+pub fn distinctive_tokens(s: &str) -> BTreeSet<String>;
+```
+
+### Reduction pipeline functions (SPEC bounded re-rank discipline)
+
+**Swift:**
+
+```swift
+extension NeuronKit {
+    // Per-candidate score for signal in [0, 1]. Set-level signals (mmr, assembly)
+    // return 0.5 (neutral). Total and deterministic.
+    public static func reductionScore(_ signal: ReductionSignal, query: ReductionQuery,
+                                      candidate: ReductionCandidate) -> Double
+
+    // Re-rank candidates under composition against query; return top limit in
+    // precision order. Never prunes pool below limit (bounded-reduce discipline).
+    // Steps: weighted-sum, stable sort, optional MMR re-rank, optional assembly
+    // expansion, bounded truncate.
+    public static func reduce(composition: ReductionComposition, query: ReductionQuery,
+                              candidates: [ReductionCandidate], limit: Int) -> [ReductionCandidate]
+
+    // Narrow-then-hydrate reduce: body-free dense signals score the wide pool first,
+    // a bounded survivor set is hydrated via the hydrate closure, then the full
+    // composition scores the survivors. Equivalent to reduce when composition has
+    // no dense terms (falls back to full-pool hydration) or no content terms
+    // (selects body-free, hydrates top-k for output). survivorMultiple defaults to 8.
+    public static func reduceLate(
+        composition: ReductionComposition, query: ReductionQuery,
+        candidates: [ReductionCandidate], limit: Int, survivorMultiple: Int = 8,
+        hydrate: ([String]) async throws -> [String: String]
+    ) async throws -> [ReductionCandidate]
+}
+```
+
+**Rust:**
+
+```rust
+pub fn reduction_score(signal: ReductionSignal, query: &ReductionQuery,
+                        candidate: &ReductionCandidate) -> f64;
+pub fn reduce(composition: &ReductionComposition, query: &ReductionQuery,
+              candidates: &[ReductionCandidate], limit: usize) -> Vec<ReductionCandidate>;
+pub fn reduce_late<F>(composition: &ReductionComposition, query: &ReductionQuery,
+                      candidates: &[ReductionCandidate], limit: usize,
+                      survivor_multiple: usize,
+                      hydrate: F) -> Result<Vec<ReductionCandidate>, …>
+where F: Fn(&[String]) -> Result<HashMap<String, String>, …>;
+```
+
 ### Analytics capabilities (not NeuronKit surfaces)
 
 Two analytics capabilities appear in CognitionKit's `NeuronKitCapability`
@@ -1227,12 +1697,33 @@ shape deltas.
 | Complexity result | `ComplexityResult` (`Lenses/Complexity.swift:13`) | `ComplexityResult` (`complexity.rs:17`) | both public/pub | identical 3-field struct: `marginalEntropy: Float`/`marginal_entropy: f32`, `jointEntropy: Float?`/`joint_entropy: Option<f32>`, `mutualInfo: Float?`/`mutual_info: Option<f32>` | `ComplexityTests.swift` / `lens_conformance.rs` complexity cases | Confirmed |
 | Calibrated value | `CalibratedValue` (`Lenses/Calibration.swift:17`) | `CalibratedValue` (`calibration_lens.rs:19`) | both public/pub | identical 2-field struct: `raw: Float`/`f32`, `calibrated: Float`/`f32` — one calibrated score from the matrix calibration curve | `CalibrationTests.swift` / `lens_conformance.rs` calibration cases | Confirmed |
 | Antecedent rank | `AntecedentRank` (`Lenses/Precedence.swift:14`) | `AntecedentRank` (`precedence.rs:17`) | both public/pub | identical 2-field struct: `id: String`, `score: Float`/`f32` — one ranked antecedent drawer from the temporal-precedence lens | `PrecedenceTests.swift` / `lens_conformance.rs` precedence cases | Confirmed |
-| Reduction candidate | (Swift callers build `ReductionCandidate.from(hit:coarseRank:)` inside `CognitionKit`) | `ReductionCandidate` (`reduction_signals.rs:28`) | — / pub struct | In Rust, `ReductionCandidate` is a pub struct in NeuronKit carrying the dense signal, content, and coarse rank for the bounded-reduce pipeline. Swift callers (CognitionKit `PreciseRecall`) assemble candidates from `GLKRecallHit` using the extension `ReductionCandidate.from(hit:coarseRank:)`. The type is public in both ports; the Rust struct is the definitive shape. | `NeuronKitTests.swift` (reduction round-trip) / `reduction_signals.rs #[cfg(test)]` | Confirmed |
-| Reduction query | (inline `ReductionQuery(text:)` construction in Swift) | `ReductionQuery` (`reduction_signals.rs:93`) | — / pub struct | Named wrapper for the caller's query text passed into the reduction pipeline. Swift declares `ReductionQuery` as a public struct in NeuronKit mirroring the Rust `pub struct ReductionQuery`. | `NeuronKitTests.swift` / `reduction_signals.rs #[cfg(test)]` | Confirmed |
-| Reduction signal | (composite NeuronKit type in Swift) | `ReductionSignal` (`reduction_signals.rs:117`) | — / pub struct | The per-candidate signal vector (hamming distance, bm25/vector/coOccurrence scores, lattice anchor UDC code) fed to the composition reduce. Swift re-exposes this as a public struct; Rust owns the canonical shape. | `NeuronKitTests.swift` / `reduction_signals.rs #[cfg(test)]` | Confirmed |
-| Reduction composition | (Swift `CompositionGrid.named(_)` returns a composition) | `ReductionComposition` (`reduction_composition.rs:51`) | — / pub struct | Named composition strategy from `CompositionGrid`. Swift's `ReductionComposition` is the public type returned by `CompositionGrid.named(_:)`; Rust's `ReductionComposition` carries the same identifier and scoring closure. | `NeuronKitTests.swift` (composition grid round-trip) / `reduction_composition.rs #[cfg(test)]` | Confirmed |
-| Weighted reduction signal (Rust) | — | `WeightedSignal` (`reduction_composition.rs:27`) | — / pub struct | Rust-side named `(signal: ReductionSignal, weight: f32)` pair used internally by multi-signal compositions. Swift handles the weighting inline in the composition closure. Behaviour is test-bound via the same composition fixtures. | `reduction_composition.rs #[cfg(test)]` | **Confirmed (Rust-only named pair; Swift handles inline)** |
+| Reduction candidate | `ReductionCandidate` `Reduction/ReductionSignals.swift` | `ReductionCandidate` (`reduction_signals.rs`) | `public` / `pub struct` | Identical shape: dense recall signal + content + coarse rank + precision score. Swift factory: `ReductionCandidate.from(hit:coarseRank:)`; Rust: `from_hit`. Both public in NeuronKit; CognitionKit `PreciseRecall` is the caller, not the definer. | `NeuronKitTests.swift` / `reduction_signals.rs #[cfg(test)]` | Confirmed |
+| Reduction query | `ReductionQuery` `Reduction/ReductionSignals.swift` | `ReductionQuery` (`reduction_signals.rs`) | `public` / `pub struct` | Named wrapper for query text + optional lattice anchor passed to the reduction pipeline. Identical fields both ports. Rust adds a `new(text)` constructor; Swift uses memberwise init. | `NeuronKitTests.swift` / `reduction_signals.rs #[cfg(test)]` | Confirmed |
+| Reduction signal | `ReductionSignal` `Reduction/ReductionSignals.swift` | `ReductionSignal` (`reduction_signals.rs`) | `public` / `pub enum` | Named enum of signal components (`.text`, `.hamming`, `.matrix`, `.lattice`, `.bm25`, `.vector`, `.dense`, `.tokenExact`, `.temporalState`, `.temporalText`, `.assembly`, `.mmr`). Identical cases both ports. `isSetLevel`/`needsContent` predicates identical. | `NeuronKitTests.swift` / `reduction_signals.rs #[cfg(test)]` | Confirmed |
+| Reduction composition | `ReductionComposition` `Reduction/ReductionComposition.swift` | `ReductionComposition` (`reduction_composition.rs`) | `public` / `pub struct` | Named declarative composition: ordered weighted terms + mmrLambda. Identical fields both ports. Swift codable; Rust serde-able. | `NeuronKitTests.swift` / `reduction_composition.rs #[cfg(test)]` | Confirmed |
+| Weighted signal | `WeightedSignal` `Reduction/ReductionComposition.swift` | `WeightedSignal` (`reduction_composition.rs`) | `public` / `pub struct` | Both ports have a named `WeightedSignal { signal, weight }` struct. Swift `init(_ signal:weight:)` with weight defaulting to 1.0; Rust `new(signal)` and `weighted(signal, weight)`. Identical semantics. | `NeuronKitTests.swift` / `reduction_composition.rs #[cfg(test)]` | Confirmed |
 | QID pending row (Rust maintenance) | — | `QidPendingRow` (`maintenance_cycle.rs:172`) | — / pub struct | Internal Rust struct carrying a pending QueueKit job ID and its enqueue timestamp during maintenance-cycle processing. Swift has no equivalent named type — it threads the ID directly through the `MaintenanceProposalSink` protocol call. Rust names it for grouped `MaintenanceScan` accumulation. | `maintenance_cycle.rs #[cfg(test)]` | **Confirmed (Rust-only named accumulator; concept present both ports as protocol parameter)** |
+| Benchmark scoring core | `BenchmarkScoring` (enum, nested `Score`) `BenchmarkScoring.swift` | `BenchmarkScore` (struct) + free `score` fn `benchmark_scoring.rs` | `public` / `pub` | Swift nests the score result under `BenchmarkScoring.Score`; Rust has a flat `BenchmarkScore` and a free `score` function. Pure scoring logic shared; fixture-gated. | `BenchmarkScoringTests.swift` ; `benchmark_scoring.rs` tests | Confirmed |
+| Query precision | `NeuronKit.queryPrecision` `Lenses/QueryPrecision.swift` | `query_precision` `query_precision.rs` | `public` / `pub fn` | Identical algorithm: content-word match rate + distinctive-token bonus, clamped to [0, 1]. ASCII-folded tokenisation (`lowercased()`/`to_lowercase()`). Conformance vectors cover the key discriminator cases. | `NeuronKitTests.swift` / `query_precision.rs #[cfg(test)]` | Confirmed |
+| Has-distinctive-tokens gate | `NeuronKit.hasDistinctiveTokens` `Lenses/QueryPrecision.swift` | `has_distinctive_tokens` `query_precision.rs` | `public` / `pub fn` | Identical predicate: returns true when query contains a digit-bearing or capitalised (non-stopword) token. Public so `RecipeTools` can apply the gate without re-implementing tokenisation. | `NeuronKitTests.swift` / `query_precision.rs #[cfg(test)]` | Confirmed |
+| Containment-satisfied gate | `NeuronKit.containmentSatisfied` `Lenses/QueryPrecision.swift` | `containment_satisfied` `query_precision.rs` | `public` / `pub fn` | Identical: gate passes when query has no distinctive tokens OR at least one candidate contains one. False → suppress results with not_found discrimination. | `NeuronKitTests.swift` / `query_precision.rs #[cfg(test)]` | Confirmed |
+| Reduction score | `NeuronKit.reductionScore` `Reduction/ReductionSignals.swift` | `reduction_score` `reduction_signals.rs` | `public` / `pub fn` | Per-candidate score for one `ReductionSignal`, in [0, 1]. Set-level signals return 0.5 (neutral). Total and deterministic. Identical scoring functions both ports; conformance-gated. | `NeuronKitTests.swift` / `reduction_signals.rs #[cfg(test)]` | Confirmed |
+| Reduction reduce | `NeuronKit.reduce(composition:query:candidates:limit:)` `Reduction/ReductionComposition.swift` | `reduce` `reduction_composition.rs` | `public` / `pub fn` | Weighted-sum → stable sort → optional MMR → optional assembly → bounded truncate. Deterministic sort tie-breaks: precision desc, content asc, coarse-rank asc. Identical both ports; conformance-gated. | `NeuronKitTests.swift` / `reduction_composition.rs #[cfg(test)]` | Confirmed |
+| Reduction reduce-late | `NeuronKit.reduceLate(…hydrate:)` `Reduction/ReductionComposition.swift` | `reduce_late` `reduction_composition.rs` | `public` / `pub fn` | Narrow-then-hydrate path: dense signals score the wide pool body-free; survivors hydrated; full composition re-scores. `DEFAULT_SURVIVOR_MULTIPLE = 8`. Equivalent to `reduce` on pure-content or pure-dense compositions. | `NeuronKitTests.swift` / `reduction_composition.rs #[cfg(test)]` | Confirmed |
+| Composition grid | `NeuronKit.CompositionGrid` `Reduction/CompositionGrid.swift` | `composition_grid` module `composition_grid.rs` | `public` / `pub` | Swift namespace enum; Rust free functions (`all()`, `named()`, `names()`, `is_known()`). Same named entries and default ("text"). | `NeuronKitTests.swift` / `composition_grid.rs #[cfg(test)]` | Confirmed |
+| Node motion (diffusion) | `NodeMotion` `Lenses/NodeMotion.swift` | `NodeMotion` `diffusion/node_motion.rs` | `public` / `pub struct` | Identical data: `rowID`/`row_id`, `volatility: f64`, `eventCount`/`event_count`, `lastEventPhysicalMs`/`last_event_physical_ms`, `anchorTrajectory`/`anchor_trajectory: Vec<u64>`. Computed: `currentAnchor`, `reanchored`. | `NodeMotionTests.swift` / `diffusion/node_motion.rs #[cfg(test)]` | Confirmed |
+| Node anomaly (diffusion) | `NodeAnomaly` `Lenses/NodeMotion.swift` | `NodeAnomaly` `diffusion/node_anomaly.rs` | `public` / `pub struct` | Identical data: `rowID`, `volatility`, `isChurning`/`is_churning`, `reanchored`, `currentAnchor`/`current_anchor`. `isAnomalous`/`is_anomalous()`. | `NodeMotionTests.swift` / `diffusion/node_anomaly.rs #[cfg(test)]` | Confirmed |
+| Node-motion fold (pure, both ports) | `NodeMotionLens.fold` `Lenses/NodeMotion.swift` | `fold` `diffusion/node_motion.rs` | `public` / `pub fn` | Pure deterministic fold: HLC-ordered audit entries → `NodeMotion`. Decay weight `exp(-λ·Δt_days)`. HLC dedup keys on full `(physical, logical, node)` triple. 40-bit physical-ms mask for age math (wrap-safe). Identical algorithm both ports. | `NodeMotionTests.swift` / `diffusion/node_motion.rs` | Confirmed |
+| Node-anomaly classify (pure, both ports) | `NodeMotionLens.classify` `Lenses/NodeMotion.swift` | `classify` `diffusion/node_anomaly.rs` | `public` / `pub fn` | Pure: classify a `NodeMotion` as churning/reanchored/stable given `churnThreshold`. Identical both ports. | `NodeMotionTests.swift` / `diffusion/node_anomaly.rs` | Confirmed |
+| Node-motion estate reader (Swift-only) | `NodeMotionLens.run` / `NodeMotionLens.anomaly` `Lenses/NodeMotion.swift` | — | `public` / — | GLK-bound estate-reading entry points. `run(kit:handle:rowID:now:lambdaPerDay:)` calls `kit.nodeAuditEntries` then `fold`; `anomaly(…)` adds `classify`. Rust has no GLK estate dependency for this module — the pure `fold`/`classify` fns are the Rust surface. | `NodeMotionTests.swift` | Confirmed (Swift-only GLK entry points) |
+| Corpus growth probe | `CorpusGrowthProbe` / `EstateCorpusGrowthProbe` `Dreaming/CorpusGrowthProbe.swift` | — | `public` / — | Swift-only: protocol seam + production GLK adapter for dreaming auto-reindex. Rust dreaming daemon has no corpus-reindex seam. `autoReindexVocabGrowthFraction = 0.10`; `autoReindexVocabGrowthFloor = 25`. | `DreamingDaemonTests.swift` | Confirmed (Swift-only) |
+| Autonomic governor | `AutonomicGovernor` (actor) `Governor/AutonomicGovernor.swift` | `AutonomicGovernor` (struct) `autonomic_governor.rs` | `public` / `pub` | Swift actor / Rust struct (sync, no async runtime — sanctioned). Both sequence background duties: dreaming, maintenance, graph-centrality, preference, topology snapshots, GC sweeps, pool-reduce. | `AutonomicGovernorTests.swift` / `autonomic_governor.rs #[cfg(test)]` | Confirmed |
+| Governor report | `AutonomicGovernor.GovernorReport` `Governor/AutonomicGovernor.swift` | `GovernorReport` `autonomic_governor.rs` | `public` / `pub struct` | Boolean tick-result summary. Swift nests it under `AutonomicGovernor`; Rust declares it flat. Same fields both ports (snake/camel idiom). | `AutonomicGovernorTests.swift` / `autonomic_governor.rs #[cfg(test)]` | Confirmed |
+| Topology inputs token (Swift-only) | `TopologyInputsToken` `Governor/AutonomicGovernor.swift` | — | `public` / — | Stable change-detection token: digest over drawer/tunnel/fact counts and max timestamps. Avoids redundant topology recomputes. Swift-only governor surface; Rust governor does not use a token. | `AutonomicGovernorTests.swift` | Confirmed (Swift-only) |
+| Graph-centrality cache | `GraphCentralityCache` `Governor/GraphCentralityProducer.swift` | `GraphCentralityCache` `graph_centrality.rs` | `public` / `pub struct` | Read-only `[DrawerID → Float]` centrality score cache produced by `graphCentralityScan` / `compute_centrality_scores`. Identical semantics both ports. | `AutonomicGovernorTests.swift` / `graph_centrality.rs #[cfg(test)]` | Confirmed |
+| Graph-centrality adjacency builder | `GraphCentralityAdjacency` `Governor/GraphCentralityProducer.swift` | `CentralityGraph` + `build_centrality_graph` `graph_centrality.rs` | `public` / `pub` | Swift namespace enum with nested `Graph` struct; Rust flat `CentralityGraph` and free `build_centrality_graph` fn. Semantics identical: assembles undirected adjacency over tunnels+kgFacts for centrality computation. `kgFactGroupCap = 50` (Swift constant, Rust constant). | `AutonomicGovernorTests.swift` / `graph_centrality.rs #[cfg(test)]` | Confirmed |
+| Preference cache | `PreferenceCache` `Governor/PreferenceProducer.swift` | `PreferenceCache` `preference_producer.rs` | `public` / `pub struct` | Read-only `[DrawerID → Float]` preference score cache produced by `preferenceScan` / `compute_preference_scores`. Identical semantics both ports. | `AutonomicGovernorTests.swift` / `preference_producer.rs #[cfg(test)]` | Confirmed |
+| Preference outcomes builder | `PreferenceOutcomes` `Governor/PreferenceProducer.swift` | `PreferenceRecord` + `preference_outcomes` `preference_producer.rs` | `public` / `pub` | Swift namespace enum with `Record` struct and `build(traces:)` static method; Rust flat `PreferenceRecord` and free `preference_outcomes(traces:)`. Aggregates recall-trace endorsements/dismissals per room label. | `AutonomicGovernorTests.swift` / `preference_producer.rs #[cfg(test)]` | Confirmed |
 
 ### Policy-store seam
 
@@ -1347,20 +1838,26 @@ estate I/O. See NEURONKIT_SPEC.md § TOPOLOGY_ANALYSIS for the contract.
 // Swift — Sources/NeuronKit/Lenses/TopologyAnalysis.swift
 public static func graphTopology(drawers: [TopologyDrawerInput],
                                  tunnels: [TopologyTunnelInput],
-                                 facts: [TopologyFactInput]) -> GraphTopology
+                                 facts: [TopologyFactInput],
+                                 estate: String,
+                                 now: Date) -> GraphTopology
 public static let topologyMaxPasses = 20      // Louvain passes per level
 public static let topologyMaxLevels = 10      // phase-2 aggregation levels
 public static let topologyResolution = 0.05   // Reichardt–Bornholdt γ (see SPEC § TOPOLOGY_ANALYSIS)
+public static let kgFactCliqueCap = 50        // max drawers per KGFact shared-subject clique
 ```
 
 ```rust
 // Rust — rust/src/topology_analysis.rs
 pub fn graph_topology(drawers: &[TopologyDrawerInput],
                       tunnels: &[TopologyTunnelInput],
-                      facts: &[TopologyFactInput]) -> GraphTopology;
+                      facts: &[TopologyFactInput],
+                      estate: &str,
+                      ts: f64) -> GraphTopology;
 pub const TOPOLOGY_MAX_PASSES: usize = 20;    // Louvain passes per level
 pub const TOPOLOGY_MAX_LEVELS: usize = 10;    // phase-2 aggregation levels
 pub const TOPOLOGY_RESOLUTION: f64 = 0.05;    // Reichardt–Bornholdt gamma
+pub const KGFACT_CLIQUE_CAP: usize = 50;      // max drawers per KGFact shared-subject clique
 pub fn epoch_to_iso8601(secs: i64) -> String; // Rust-only formatting helper
 ```
 
@@ -1376,7 +1873,7 @@ pub fn epoch_to_iso8601(secs: i64) -> String; // Rust-only formatting helper
 
 | Swift | Rust | Wire field names (camelCase JSON at ARIA) |
 |---|---|---|
-| `GraphTopologyNode { id, communityId: Int, centrality: Double, lastActiveTs: String?, createdTs: String?, tombstonedTs: String? }` | `GraphTopologyNode { id, community_id: i64, centrality: f64, last_active_ts, created_ts, tombstoned_ts: Option<String> }` | `communityId` -1 = dead sentinel |
+| `GraphTopologyNode { id, communityId: Int, centrality: Double, lastActiveTs: String?, createdTs: String?, tombstonedTs: String?, udcCode: String? }` | `GraphTopologyNode { id, community_id: i64, centrality: f64, last_active_ts, created_ts, tombstoned_ts: Option<String>, udc_code: Option<String> }` | `communityId` -1 = dead sentinel; `udcCode` nil = unanchored (empty-string input normalised to nil; dead nodes retain their code) |
 | `GraphTopologyEdge { source, target, edgeType: String, weight: Double, createdTs, tombstonedTs }` | `GraphTopologyEdge { source, target, edge_type: &'static str, weight: f64, created_ts, tombstoned_ts }` | `edgeType` ∈ tunnel, kgFact, lattice |
 | `GraphTopologyCommunity { id: Int, size: Int, dominantUdcCode: String }` | `GraphTopologyCommunity { id: i64, size: usize, dominant_udc_code: String }` | live members only |
 | `GraphTopology { nodes, edges, communityCount: Int, communities }` | `GraphTopology { nodes, edges, community_count: usize, communities }` | communities sorted size desc, id asc |
@@ -1489,6 +1986,35 @@ Three cases keyed on `confidence`:
 *End of NeuronKit Interface.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-07-16
+Audit pass: added all surface items shipped since 1.4.0 that were absent
+from the doc. Additions:
+
+- **§ 1 layout** — added `BenchmarkScoring.swift`, `Lenses/NodeMotion.swift`,
+  `Lenses/QueryPrecision.swift`, `Dreaming/CorpusGrowthProbe.swift`,
+  `Governor/AutonomicGovernor.swift`, `Governor/GraphCentralityProducer.swift`,
+  `Governor/PreferenceProducer.swift`, `Reduction/ReductionSignals.swift`,
+  `Reduction/ReductionComposition.swift`, `Reduction/CompositionGrid.swift` (Swift);
+  `benchmark_scoring.rs`, `query_precision.rs`, `reduction_signals.rs`,
+  `reduction_composition.rs`, `composition_grid.rs`, `graph_centrality.rs`,
+  `preference_producer.rs`, `autonomic_governor.rs`, `governor_topology_sink.rs`,
+  `diffusion/node_motion.rs`, `diffusion/node_anomaly.rs` (Rust).
+- **§ 2 types** — `BenchmarkScoring` + nested `Score`; `CorpusGrowthProbe` /
+  `EstateCorpusGrowthProbe`; `NodeMotion`, `NodeAnomaly`, `NodeMotionLens`;
+  `ReductionCandidate`, `ReductionQuery`, `ReductionSignal`, `WeightedSignal`,
+  `ReductionComposition`; `CompositionGrid`; governor types: `AutonomicGovernor`,
+  `GovernorReport`, `TopologyInputsToken`, `GraphCentralityCache`,
+  `GraphCentralityAdjacency`, `PreferenceCache`, `PreferenceOutcomes`.
+- **§ 3 functions** — `NeuronKit.queryPrecision`, `hasDistinctiveTokens`,
+  `containmentSatisfied`; `NeuronKit.reductionScore`, `reduce`, `reduceLate`.
+- **§ 7 concordance** — corrected rows for Reduction candidate, Reduction query,
+  Reduction signal (was misdescribed as a signal vector struct; it is an enum of
+  signal-case names), Reduction composition, and Weighted signal (was marked
+  Rust-only; Swift also has `WeightedSignal` as a public struct). Added 21 new
+  concordance rows covering the diffusion lens, query-precision helpers, reduction
+  pipeline functions, composition grid, benchmark scoring, governor types, and
+  corpus-growth probe.
 
 ### 1.4.0 -- 2026-06-25
 Rust dreaming-daemon parity (closes the 1.3.0 port differences). The Rust

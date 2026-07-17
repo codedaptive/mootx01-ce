@@ -33,7 +33,11 @@ let package = Package(
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
-            ]
+            ],
+            // Privacy manifest (M-MXA-5): cleanStaleTmpFiles reads file
+            // modification dates (FileTimestamp C617.1); the manifest rides
+            // the resource bundle so Xcode's privacy report aggregates it.
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .testTarget(
             name: "QueueKitTests",

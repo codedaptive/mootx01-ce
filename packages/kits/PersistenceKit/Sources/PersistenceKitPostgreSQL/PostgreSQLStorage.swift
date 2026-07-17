@@ -103,6 +103,22 @@ public final class PostgreSQLStorage: Storage, Sendable {
     }
 }
 
+// MARK: - DatasetStore surface (MX-TAB-2)
+
+extension PostgreSQLStorage {
+    /// Returns a `PostgreSQLDatasetStore` backed by this storage's `backend`.
+    ///
+    /// Overrides the default `featureGated` throw from the `Storage` protocol
+    /// extension — PostgreSQL has a conformance. The store is lightweight (no
+    /// connection acquired here; connections are checked out per operation from
+    /// the shared pool). Creating the store is therefore synchronous and cheap.
+    public var datasetStore: any DatasetStore {
+        get throws {
+            PostgreSQLDatasetStore(backend: backend)
+        }
+    }
+}
+
 // MARK: - StorageIntrospection
 
 extension PostgreSQLStorage: StorageIntrospection {
@@ -129,6 +145,13 @@ actor PostgreSQLBackend {
     let pool: PostgreSQLPool
     let logger = Logger(label: "storagekit.postgres.backend")
     var schemaDeclaration: SchemaDeclaration?
+    /// Cached DatasetSchema per dataset table name (MX-TAB-2).
+    ///
+    /// Keyed by `datasetTableName(id)` (e.g. `ds_<hex>`). Populated by
+    /// `createDatasetTable` and consumed by `queryDatasetRows` and
+    /// `datasetColumnStats` to decode row values with the correct column types.
+    /// Actor isolation serializes reads and writes without additional locking.
+    var datasetSchemas: [String: DatasetSchema] = [:]
     /// At-rest encryption config for this estate. `nonisolated` so the row
     /// stores can read it synchronously when applying the per-row content seam
     /// (it is immutable and `Sendable`). Mode 2 (RowEncryption) is the only

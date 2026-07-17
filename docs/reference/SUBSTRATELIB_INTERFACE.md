@@ -1,8 +1,8 @@
 ---
 title: SubstrateLib Interface
-version: 1.2.0
+version: 1.4.0
 status: active
-date: 2026-06-28
+date: 2026-07-16
 description: Public API surface for SubstrateLib in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -251,7 +251,7 @@ public struct FieldWrite: Sendable {
 }
 
 public struct Vocabulary: Sendable {
-    public static let basis: [FieldSlot]        // substrate-owned slots
+    public static let basis: Set<FieldSlot>     // substrate-owned slots
     public let union: Set<FieldSlot>            // frozen consumer slots
     // No public init — construct only via VocabularyValidator.freeze.
     public func slot(for target: FieldSlot) -> FieldSlot?
@@ -313,7 +313,7 @@ pub mod audit_gate {
 
     pub enum VocabularyError { Overlap(String, String), BasisCollision(String),
                                MalformedWidth(String), ValueExceedsWidth(String, i64) }
-    pub fn freeze(proposed: HashSet<FieldSlot>) -> Result<Vocabulary, VocabularyError>;
+    pub fn freeze(proposed: Vec<FieldSlot>) -> Result<Vocabulary, VocabularyError>;
 
     pub enum GateViolation { UndeclaredField { label: String },
                              IllegalValue { label: String, value: i64 },
@@ -333,6 +333,22 @@ pub mod audit_gate {
         hlc: HLC,
         actor: &str,
     ) -> Result<AuditEvent, GateViolation>;
+
+    /// Deterministic event-identity hash: SHA-256 over a stable wire
+    /// encoding, first 16 bytes folded to `u128`. Byte order matches the
+    /// Swift `AuditGate.contentID` (internal). Used directly in cross-port
+    /// conformance testing (`content_id_shared_vector` test, `rust/src/audit_gate.rs:464`).
+    ///
+    /// The Swift counterpart `AuditGate.contentID` is `internal`; the Rust
+    /// port exposes it as `pub fn` for downstream conformance harness use.
+    pub fn content_id(
+        estate_uuid: u128,
+        row_id: RowId,
+        hlc: &HLC,
+        verb: &str,
+        after: (i64, i64, i64),
+        after_anchor: LatticeAnchor,
+    ) -> u128;
 }
 ```
 
@@ -403,6 +419,7 @@ public enum MerkleHash {
     public static func leaf(drawerId: UUID, content: [UInt8],
                             vectors: [MerkleVectorInput]) -> ContentHash
     public static func interior(childHashes: [(UUID, ContentHash)]) -> MerkleRoot
+    public static func interior(childRoots: [(UUID, MerkleRoot)]) -> MerkleRoot
     public static func tombstone(drawerId: UUID) -> ContentHash
 }
 ```
@@ -419,6 +436,7 @@ pub struct MerkleVectorInput {
 pub fn leaf(drawer_id: &[u8; 16], content: &[u8],
             vectors: &[MerkleVectorInput]) -> ContentHash;
 pub fn interior(child_hashes: &[([u8; 16], ContentHash)]) -> MerkleRoot;
+pub fn interior_roots(child_roots: &[([u8; 16], MerkleRoot)]) -> MerkleRoot;
 pub fn tombstone(drawer_id: &[u8; 16]) -> ContentHash;
 pub(crate) fn canonical_leaf_bytes(drawer_id: &[u8; 16], content: &[u8],
     vectors: &[MerkleVectorInput], domain: u8) -> Vec<u8>;
@@ -432,6 +450,12 @@ a different domain tag. The v2 canonical leaf encoding writes vector
 identity (model_id + vector_index) into the preimage before the float
 payload — see ADR-017 §16 v2 for the complete per-vector byte layout.
 
+The second `interior` overload (`childRoots:` / `interior_roots`) is
+used at wing and estate levels where children already carry
+`MerkleRoot`s rather than `ContentHash`es. It uses the same INTERIOR
+domain tag (0x01) and the same UUID sort order; the hash value is
+over the 32 raw bytes of the `MerkleRoot` regardless of type wrapper.
+
 ### `KeyedCommitment`, `KeyedCommitmentValue` — keyed-commitment API
 
 HMAC-SHA256 commitment over canonical leaf bytes per ADR-017 §17.
@@ -439,7 +463,7 @@ HMAC-SHA256 commitment over canonical leaf bytes per ADR-017 §17.
 **Swift:**
 
 ```swift
-public struct KeyedCommitmentValue: Hashable, Sendable {
+public struct KeyedCommitmentValue: Hashable, Sendable, Codable {
     public let hmacBytes: [UInt8]   // 32-byte HMAC-SHA256 output
     public let keyVersion: Int
     public var hexString: String { get }
@@ -521,7 +545,10 @@ All operations on this package are members of the four top-level
 namespaces (`Substrate`, `RowStateAutomaton`, `AuditGate`,
 `SubstrateLibMetric`) or their helper types. No free top-level
 functions (Swift); the Rust port exposes verb emit helpers as free
-functions in `substrate_lib_telemetry`.
+functions in `substrate_lib_telemetry`, and exposes
+`audit_gate::content_id` as a `pub fn` for downstream conformance
+harness use (see §2 `AuditGate` — Rust block; the Swift equivalent
+`AuditGate.contentID` is `internal`).
 
 ## § 4 — Errors
 
@@ -595,7 +622,7 @@ consumes them by import/`pub use`, so they are not re-rowed here.
 | Verb-driver error surface | `SubstrateError` (enum) — `Sources/SubstrateLib/Verbs.swift:56` | `SubstrateError` (enum) — `rust/src/verbs.rs:38` | public both | identical (case set differs only by Swift extras `proposalRequired`/`nonProposalCannotUseProposalVerb` carried by the Swift reference driver; shared cases align) | `VerbsTests.swift::testMutateRejectsInvalidTransition` ↔ `rust/src/verbs.rs::tests` (mutate transition rejection) | Confirmed |
 | In-memory verb driver | `Substrate` (struct) — `Sources/SubstrateLib/Verbs.swift:77` | `Substrate` (struct) — `rust/src/verbs.rs:171` | public both | identical: stateful reference struct; Swift `mutating func` ↔ Rust `&mut self` methods (capture/reanchor/mutate/withdraw/expunge/recall/propose/associate/learn) | `VerbsTests.swift::testCaptureCreatesActiveRow` ↔ `rust/src/verbs.rs::tests` (capture creates active row) | Confirmed |
 | Named mutation operations | `Substrate.MutationKind` (nested enum, raw `String`) — `Sources/SubstrateLib/Verbs.swift:198` | `MutationKind` (flat enum, `token()` wire string) — `rust/src/verbs.rs:79` | public both | Swift nested `Substrate.MutationKind` / Rust flat `MutationKind`; Swift `rawValue` ↔ Rust `token()` for the wire token | `VerbsTests.swift::testMutateConfirmPendingToAccepted` ↔ `rust/src/verbs.rs::tests` (mutate confirm) | Confirmed |
-| Row-state automaton namespace | `RowStateAutomaton` (caseless enum: `transitions`, `transition(from:on:)`, `validate`, `canTransition`) — `Sources/SubstrateLib/RowStateAutomaton.swift:50` | `row_state` module free fns: `transition`, `validate` — `rust/src/row_state.rs:114,132` | public both | Swift enum-namespace / Rust module free fns (sanctioned namespacing diff — no async runtime, pure stateless ops) | `RowStateAutomatonTests.swift::testPendingToActiveViaObserve` ↔ `rust/src/row_state.rs::tests` (transition table) | Confirmed |
+| Row-state automaton namespace | `RowStateAutomaton` (caseless enum: `transitions`, `transition(from:on:)`, `validate`, `canTransition`) — `Sources/SubstrateLib/RowStateAutomaton.swift:50` | `row_state` module free fns: `transition`, `validate` — `rust/src/row_state.rs:114,132`; Rust also exposes `verbs::can_transition(from, to, verb) -> bool` (`rust/src/verbs.rs:119`) — a convenience predicate with a different signature (takes `to` state) not directly equivalent to Swift `canTransition` | public both | Swift enum-namespace / Rust module free fns (sanctioned namespacing diff); Rust `can_transition` is in the `verbs` module, not `row_state`, and includes the target state as a parameter | `RowStateAutomatonTests.swift::testPendingToActiveViaObserve` ↔ `rust/src/row_state.rs::tests` (transition table) | Confirmed |
 | Transition-table key | `TransitionKey` (struct) — `Sources/SubstrateLib/RowStateAutomaton.swift:201` | `TransitionKey` (struct) — `rust/src/row_state.rs:36` | public both | identical `(from, on/verb)` composite key | `RowStateAutomatonTests.swift::testValidateRejectsIllegalTransitions` ↔ `rust/src/row_state.rs::tests` (illegal transition) | Confirmed |
 | Three-column bitmap snapshot | `BitmapFields` (struct: adjective/operational/provenance `UInt64`) — `Sources/SubstrateLib/RowStateAutomaton.swift:214` | `BitmapFields` (struct: adjective/operational/provenance `u64`) — `rust/src/row_state.rs:122` | public both | identical | `BitmapFieldConstantsConformanceTests.swift` ↔ `tests/bitmap_field_constants_conformance.rs` | Confirmed |
 | Forbidden-combination check (I-22) | `ForbiddenCombinations` (caseless enum: `check(state:fields:)`) — `Sources/SubstrateLib/RowStateAutomaton.swift:234` | `check_forbidden_combinations` (free fn) — `rust/src/row_state.rs:156` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff) | `RowStateAutomatonTests.swift::testI22SecretCannotBeExportable` ↔ `rust/src/row_state.rs::tests` (I-22 secret/public) | Confirmed |
@@ -607,11 +634,12 @@ consumes them by import/`pub use`, so they are not re-rowed here.
 | Single field write request | `FieldWrite` (struct: slot + value) — `Sources/SubstrateLib/AuditGate.swift:257` | `FieldWrite` (struct: slot + value) — `rust/src/audit_gate.rs:175` | public both | identical; Swift `Int64` value ↔ Rust `i64` | `AuditGateTests.swift::testUndeclaredFieldRejected` ↔ `rust/src/audit_gate.rs::tests` (undeclared field) | Confirmed |
 | Gate violation surface | `GateViolation` (enum) — `Sources/SubstrateLib/AuditGate.swift:268` | `GateViolation` (enum) — `rust/src/audit_gate.rs:178` | public both | identical case set (undeclaredField / illegalValue / basisViolation / stateInconsistentWithVerb); **this is the actual `admit` error return on both ports** | `AuditGateTests.swift::testIllegalValueRejected` ↔ `rust/src/audit_gate.rs::tests` (illegal value) | Confirmed |
 | The write gate | `AuditGate` (caseless enum: `admit(...) -> Result<AuditEvent, GateViolation>`) — `Sources/SubstrateLib/AuditGate.swift:284` | `audit_gate::admit(...) -> Result<AuditEvent, GateViolation>` (free fn) — `rust/src/audit_gate.rs:191` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff); deterministic content-ID + canonical snapshot event both sides | `AuditGateTests.swift::testContentIDDeterministicAndStable` ↔ `rust/src/audit_gate.rs::tests` (content-id determinism) + `WireFormatConformanceTests.swift` ↔ `tests/wire_format_conformance.rs` (canonical event wire) | Confirmed |
+| Event-identity hash fn | `AuditGate.contentID` (`static func`, **internal**) — `Sources/SubstrateLib/AuditGate.swift:422` | `audit_gate::content_id` (`pub fn`) — `rust/src/audit_gate.rs:314` | Swift: internal; Rust: public | SHA-256 over wire encoding, first 16 bytes folded to UUID/u128; byte-identical both ports. Swift side is `internal`; Rust exposes it `pub` for downstream conformance harness use (`content_id_shared_vector` test, `rust/src/audit_gate.rs:464`). | `AuditGateTests.swift::testContentIDDeterministicAndStable` (Swift internal call-site) ↔ `rust/src/audit_gate.rs::tests::content_id_shared_vector` | Confirmed |
 | Telemetry metric-name constants | `SubstrateLibMetric` (caseless enum, 10 `static let` strings) — `Sources/SubstrateLib/SubstrateLibTelemetry.swift` | `metric` submodule (10 `pub const &str` values) — `rust/src/substrate_lib_telemetry.rs` | public both | Swift enum-namespace / Rust `pub mod metric` (sanctioned namespacing diff); string values bit-identical across ports | `SubstrateLibTelemetryTests.swift::§7 metric name constants` ↔ `tests/substrate_lib_telemetry_tests.rs::metric_names_are_correct` | Confirmed |
 | Telemetry emit helpers | 10 `@inline(__always)` package-internal functions — `Sources/SubstrateLib/SubstrateLibTelemetry.swift` | 10 `#[inline(always)]` `pub fn` — `rust/src/substrate_lib_telemetry.rs` | internal both | identical tag keys and semantics; off-path cost one atomic load + branch when monitoring disabled | `SubstrateLibTelemetryTests.swift §1–§6` ↔ `tests/substrate_lib_telemetry_tests.rs §1–§6` | Confirmed |
 | Merkle hash pipeline | `MerkleHash` (caseless enum: `leaf`/`interior`/`tombstone`) — `Sources/SubstrateLib/MerkleHash.swift` | `merkle_hash` module free fns: `leaf`/`interior`/`tombstone` — `rust/src/merkle_hash.rs` | public both | Swift enum-namespace / Rust module free fns (sanctioned namespacing diff); domain-separated SHA-256 via MerkleDomain tags (0x00 leaf, 0x01 interior, 0x02 tombstone); canonical byte encoding bit-identical both ports | `MerkleHashTests.swift` (10 tests: determinism, domain separation, vector sort-order independence) ↔ `rust/src/merkle_hash.rs::tests` | Confirmed |
 | Merkle vector input | `MerkleVectorInput` (struct: modelID/vectorIndex/floats) — `Sources/SubstrateLib/MerkleHash.swift` | `MerkleVectorInput` (struct: model_id/vector_index/floats) — `rust/src/merkle_hash.rs` | public both | identical layout; Swift `UInt32` ↔ Rust `u32`, Swift `[Float]` ↔ Rust `Vec<f32>` | `MerkleHashTests.swift::leafWithVectors` ↔ `rust/src/merkle_hash.rs::tests::leaf_with_vectors` | Confirmed |
-| Keyed commitment value | `KeyedCommitmentValue` (struct: hmacBytes/keyVersion) — `Sources/SubstrateLib/KeyedCommitment.swift` | `KeyedCommitmentValue` (struct: hmac_bytes/key_version) — `rust/src/keyed_commitment.rs` | public both | identical; Swift `Int` keyVersion ↔ Rust `i64`; `hexString` property both sides | `KeyedCommitmentTests.swift::hexString` ↔ `rust/src/keyed_commitment.rs::tests` | Confirmed |
+| Keyed commitment value | `KeyedCommitmentValue` (struct: hmacBytes/keyVersion) — `Sources/SubstrateLib/KeyedCommitment.swift:26` | `KeyedCommitmentValue` (struct: hmac_bytes/key_version) — `rust/src/keyed_commitment.rs` | public both | identical; Swift `Int` keyVersion ↔ Rust `i64`; `hexString` property both sides; Swift adds `Codable` conformance (encode/decode with any `Encoder`/`Decoder`); Rust derives `Hash + Eq` but has no `Serialize`/`Deserialize` (no serde on this struct) | `KeyedCommitmentTests.swift::hexString` ↔ `rust/src/keyed_commitment.rs::tests` | Confirmed |
 | Keyed commitment API | `KeyedCommitment` (caseless enum: `commit`) — `Sources/SubstrateLib/KeyedCommitment.swift` | `keyed_commitment::commit` (free fn) — `rust/src/keyed_commitment.rs` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff); HMAC-SHA256 over canonical leaf bytes with COMMITMENT domain tag 0x03 | `KeyedCommitmentTests.swift` (6 tests: determinism, domain separation, key variation, vectors) ↔ `rust/src/keyed_commitment.rs::tests` (5 tests) | Confirmed |
 | Commitment audit entry | `KeyedCommitmentAuditEntry` (struct) — `Sources/SubstrateLib/KeyedCommitmentAudit.swift` | `KeyedCommitmentAuditEntry` (struct) — `rust/src/keyed_commitment.rs` | public both | identical fields; deterministic content-ID via SHA-256 over (drawerId + hmacBytes + keyVersion + tombstoneHLC.wireBytes + reason + NUL) | `KeyedCommitmentTests.swift::deterministicID` ↔ `rust/src/keyed_commitment.rs::tests::audit_entry_deterministic_id` | Confirmed |
 | Commitment audit log | `CommitmentAuditLog` (struct, G-Set CRDT) — `Sources/SubstrateLib/KeyedCommitmentAudit.swift` | `CommitmentAuditLog` (struct, HashMap-backed) — `rust/src/keyed_commitment.rs` | public both | identical semantics: add (idempotent), merge (set union), orderedEntries (tombstone-HLC sorted), entries(forDrawer:) | `KeyedCommitmentTests.swift` (round-trip, idempotent, merge, ordered) ↔ `rust/src/keyed_commitment.rs::tests` (same scenarios) | Confirmed |
@@ -697,12 +725,11 @@ let mutateEvent = try mutateResult.get()
 ```rust
 use substrate_types::*;
 use substrate_lib::audit_gate::{self, FieldSlot, FieldWrite, Column};
-use std::collections::HashSet;
 
 let flags_slot = FieldSlot::new(Column::Adjective, 24, 3, "flags");
 let state_slot = FieldSlot::with_values(Column::Adjective, 0, 6, "state",
     &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33]);
-let vocab = audit_gate::freeze(HashSet::from([flags_slot.clone()])).unwrap();
+let vocab = audit_gate::freeze(vec![flags_slot.clone()]).unwrap();
 
 let capture_event = audit_gate::admit(
     estate_uuid, row_id, NounType::Drawer, RowVerb::Capture,
@@ -716,6 +743,25 @@ let capture_event = audit_gate::admit(
 ```
 
 ## Changelog
+
+### 1.4.0 -- 2026-07-16
+Added `Codable` to `KeyedCommitmentValue` Swift signature (§2 and concordance table
+"Keyed commitment value" row); the conformance was present in source (`KeyedCommitment.swift:26`)
+but omitted from the doc. Rust `KeyedCommitmentValue` has no serde derivation — noted in the
+concordance row. Added `audit_gate::content_id` (`pub fn`) to §2 Rust `audit_gate` block, §3,
+and a new concordance table row ("Event-identity hash fn"): the Rust function is public for
+conformance harness use; the Swift equivalent `AuditGate.contentID` is `internal`.
+
+### 1.3.0 -- 2026-07-16
+Corrected `Vocabulary.basis` type from `[FieldSlot]` (array) to `Set<FieldSlot>` in
+the Swift signature block. Corrected Rust `freeze` parameter from `HashSet<FieldSlot>`
+to `Vec<FieldSlot>`. Added second `MerkleHash.interior` overload (Swift
+`interior(childRoots:[(UUID,MerkleRoot)])`) and its Rust counterpart
+`interior_roots` — used at wing/estate level where children carry MerkleRoots
+rather than ContentHashes. Added prose note explaining the second interior overload.
+Updated concordance table row for "Row-state automaton namespace" to document the
+Rust-only `verbs::can_transition(from, to, verb)` convenience predicate (module and
+signature differ from Swift `canTransition(from:on:)`).
 
 ### 1.2.0 -- 2026-06-28
 Security fix: corrected vectorIndex/vector_index type from Int32/i32 to

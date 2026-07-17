@@ -1,8 +1,8 @@
 ---
 title: IntellectusLib Interface
-version: 1.0.0
+version: 1.0.1
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: Public API surface for IntellectusLib in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -292,10 +292,15 @@ report!({
 });
 ```
 
-Also available as a function for use when a closure is already on hand:
+Also available as a function for use when a sample has already been constructed:
 
 ```rust
-// Direct function form — caller is responsible for the gate check:
+// report_sample performs its own enabled gate check and discards when
+// monitoring is disabled — a direct call when disabled is a no-op.
+// The manual is_enabled() guard shown here is an optional optimisation:
+// it avoids constructing the sample at all when monitoring is off.
+// Omitting the guard is safe; including it preserves the short-circuit
+// construction benefit when a sample would be expensive to build.
 if Intellectus::is_enabled() {
     Intellectus::report_sample(sample);
 }
@@ -360,6 +365,11 @@ IntellectusLib. All public types (`StatSample`, `EventKind`, `StatsSink`,
 macro is documented in § 4. The two ports are variant-for-variant equivalent.
 
 ## Changelog
+
+### 1.0.1 -- 2026-07-16
+§ 4 direct-call note corrected: `report_sample` performs its own enabled gate check
+and discards when disabled; the manual `is_enabled()` guard is an optional construction
+optimisation, not a correctness requirement.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -12,8 +12,8 @@
 //! follows the per-table ConflictPolicy on the local manifest.
 
 use crate::engine::SyncEngine;
-use crate::record::{PackedHLC, SyncEventKind, SyncRecord, SyncValueMap};
-use crate::types::{ConflictPolicy, SyncDirection, SyncedTable, SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
+use crate::record::{ColumnHLCMap, PackedHLC, SyncEventKind, SyncRecord, SyncValueMap};
+use crate::types::{AppliedBatch, ConflictPolicy, SyncDirection, SyncedTable, SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
 use substrate_types::hlc::{HLC, HLCGenerator};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
@@ -21,7 +21,8 @@ use ed25519_dalek::{
 };
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use uuid::Uuid;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -446,6 +447,13 @@ impl FederationSyncEngine {
             let pulling = Arc::clone(&self.state.pulling);
             let schema_version = manifest.schema_version;
             let kit_id = manifest.kit_id.clone();
+            // Column projection (R2, CVK-ICLOUD P2-M2): capture excluded columns and
+            // the PK column from the table declaration so the observer closure can
+            // strip them before enqueuing. Cloned at start_observers time; no lock needed.
+            let excluded_columns: HashSet<String> = table.excluded_columns.clone();
+            let pk_column = table.primary_key_column.clone();
+            // Capture conflict_policy for fieldLevelLWW column HLC stamping.
+            let conflict_policy = table.conflict_policy;
 
             let handle = std::thread::spawn(move || {
                 // 100ms tick bounds shutdown latency without busy-spinning.
@@ -464,8 +472,12 @@ impl FederationSyncEngine {
                             if pulling.load(Ordering::Acquire) {
                                 continue;
                             }
+                            // Column projection (R2): apply outbound strip and
+                            // storm-kill before converting to a SyncRecord.
+                            let change = outbound_strip_change(change, &excluded_columns, &pk_column);
+                            let Some(change) = change else { continue };
                             if let Some(record) =
-                                change_to_record(change, schema_version, &kit_id, &hlc_generator)
+                                change_to_record(change, schema_version, &kit_id, &hlc_generator, conflict_policy)
                             {
                                 outbox.lock().unwrap().push(record);
                             }
@@ -520,6 +532,10 @@ impl SyncEngine for FederationSyncEngine {
         }
         let inbox = self.relay.register(self.peer_identity.clone());
         self.state.inbox = Some(inbox);
+        // Ensure the _fed_sync_meta side table exists before any apply. Mirrors
+        // the Swift engine's ensureFedSyncMetaTable call in enable() (A6 unification).
+        ensure_fed_sync_meta_table(&*storage)
+            .map_err(|e| SyncError::TransportFailure { detail: format!("ensure _fed_sync_meta: {}", e) })?;
         // Subscribe the observer workers BEFORE marking enabled so the
         // write-capture path is live the moment the engine reports enabled.
         self.start_observers(&manifest, &storage)?;
@@ -638,21 +654,39 @@ impl SyncEngine for FederationSyncEngine {
 
         let mut pulled = 0;
         let mut conflicts = 0;
+        // Collect row keys per table for the post-apply integrity hook (R3).
+        let mut applied_by_table: HashMap<String, Vec<Uuid>> = HashMap::new();
+        let mut deleted_by_table: HashMap<String, Vec<Uuid>> = HashMap::new();
         for envelope in envelopes {
-            // Only accept envelopes from explicitly paired peers. Signature
-            // verification proves key ownership; this check enforces the
-            // pairing authorization boundary before applying any records.
-            // Without this gate an attacker can craft a valid self-signed
-            // envelope (ADR-013) and inject records even without a pairing
-            // handshake — the signature alone does not prove authorization.
-            if !self
+            // SECURITY (F-3 class): `envelope.sender_public_key` is a field
+            // the sender controls and must never be trusted as the verification
+            // key. Resolve the registered peer from the pairing registry using
+            // the envelope's claimed key, then carry the REGISTERED key forward
+            // for all subsequent checks. `sender_public_key` is advisory: if it
+            // matches a registry entry we proceed; if it diverges from the
+            // registered key we reject. Trust derives from the pairing registry,
+            // not from the envelope's own fields. Mirrors Swift pull().
+            let registered_key: [u8; ed25519_dalek::PUBLIC_KEY_LENGTH] = match self
                 .state
                 .paired_peers
                 .iter()
-                .any(|peer| peer.public_key == envelope.sender_public_key)
+                .find(|peer| peer.public_key == envelope.sender_public_key)
             {
+                Some(p) => p.public_key,
+                None => {
+                    conflicts += 1;
+                    continue; // sender not in pairing registry
+                }
+            };
+            // Advisory-field check: envelope's claimed sender key must equal the
+            // registered peer key. The `find` above guarantees this when the
+            // peer list is keyed by public key, but the explicit comparison makes
+            // the security intent visible: if the lookup mechanism ever changes
+            // (e.g. a UUID peer-id lookup returning a different registered key),
+            // a mismatch here is a federation-auth rejection, not a silent pass.
+            if envelope.sender_public_key != registered_key {
                 conflicts += 1;
-                continue;
+                continue; // federation-auth: claimed sender key does not match registry
             }
 
             // Reject unknown payload kinds to avoid misinterpreting future
@@ -665,14 +699,18 @@ impl SyncEngine for FederationSyncEngine {
 
             // Verify signature over canonical bytes (not raw payload).
             // The sender signed envelope_signing_bytes(...); we reproduce
-            // the same bytes here for verification.
+            // the same bytes here. SECURITY: use the REGISTERED peer key
+            // (`registered_key`) as the sender key in the canonical bytes
+            // and as the verification key — not `envelope.sender_public_key`.
+            // The advisory check above confirms they are equal, but trust
+            // derives from the pairing registry, not from the envelope.
             let signing_bytes = envelope_signing_bytes(
-                &envelope.sender_public_key,
+                &registered_key,               // registered peer key, not envelope claim
                 envelope.payload_kind,
                 &envelope.payload,
                 &envelope.hlc,
             );
-            if !verify_signature(&envelope.signature, &signing_bytes, &envelope.sender_public_key) {
+            if !verify_signature(&envelope.signature, &signing_bytes, &registered_key) {
                 conflicts += 1;
                 continue;
             }
@@ -710,14 +748,50 @@ impl SyncEngine for FederationSyncEngine {
                 }
                 // Apply the record per event kind and conflict policy.
                 match apply_record(record, synced_table, &storage) {
-                    Ok(()) => { pulled += 1; }
+                    Ok(()) => {
+                        pulled += 1;
+                        // Track for post-apply hook: deletes go to deleted_by_table,
+                        // inserts/updates go to applied_by_table.
+                        if record.event == SyncEventKind::Delete {
+                            deleted_by_table
+                                .entry(record.table.clone())
+                                .or_default()
+                                .push(record.row_key);
+                        } else {
+                            applied_by_table
+                                .entry(record.table.clone())
+                                .or_default()
+                                .push(record.row_key);
+                        }
+                    }
                     Err(_) => { conflicts += 1; }
                 }
             }
         }
         // Clear the pull guard: local writes from this point forward are user
         // mutations and must be captured by the observer workers as normal.
+        // The hook invocation below intentionally runs AFTER the guard is
+        // cleared so that hook-originated repair writes flow into the outbox
+        // (hook-writes-must-ship, Kong Q2 adjudication).
         self.state.pulling.store(false, Ordering::Release);
+
+        // Post-apply integrity hook (R3): invoked once per batch when at least
+        // one record was applied. A hook error counts as ONE additional conflict
+        // but does NOT abort — all records were already applied before the hook
+        // ran. The hook runs after the pull guard is cleared, so writes made
+        // through AppliedBatch.storage carry origin == local and reach the outbox.
+        if pulled > 0 {
+            if let Some(ref hook) = manifest.post_apply_integrity_hook {
+                let batch = AppliedBatch {
+                    storage: Arc::clone(&storage),
+                    applied_by_table,
+                    deleted_by_table,
+                };
+                if hook(&batch).is_err() {
+                    conflicts += 1;
+                }
+            }
+        }
 
         let receipt = SyncReceipt::now(0, pulled, conflicts);
         self.state.last_pull_secs = Some(receipt.timestamp_secs);
@@ -747,19 +821,14 @@ impl SyncEngine for FederationSyncEngine {
 
 /// Apply one inbound SyncRecord to local storage per event kind and conflict policy.
 ///
-/// The body is two nested matches: event kind (Insert/Update/Delete) × conflict
-/// policy (four arms each). Each arm is a short operation — upsert, conditional
-/// insert, hard-delete, or a silent return. Length comes from the cross-product
-/// of cases, not from complex logic.
+/// A6 UNIFICATION: the sync HLC is now stored in `_fed_sync_meta` (a per-engine
+/// side table) rather than in the application row's `_syncHLC` column. This
+/// matches the Swift Federation engine's A6 migration and the CloudKit engine's
+/// `_ck_sync_meta` pattern. The side-table entry survives hard-deletes, blocking
+/// stale resurrections for rows that were previously deleted.
 ///
-/// `LastWriterWinsByHLC` compares the incoming record's HLC against the stored
-/// row's `_syncHLC`. If the incoming HLC is older (strictly less), the write is
-/// silently dropped. On every apply that wins the comparison the row is written
-/// with `_syncHLC` so the next inbound can compare. Note: this path persists
-/// only `_syncHLC`; the Swift CloudKitStateActor.applyInbound also persists
-/// `_syncSchemaVersion` and `_syncKitID`.
-/// The same HLC gate applies to delete events: a stale delete (incoming HLC <
-/// local `_syncHLC`) is silently rejected; a newer delete proceeds.
+/// Dispatch order: tombstone first (sync_deleted == Some(true) || Delete event),
+/// then Insert/Update via conflict policy. Each arm is a short operation.
 fn apply_record(
     record: &SyncRecord,
     synced_table: &SyncedTable,
@@ -771,13 +840,109 @@ fn apply_record(
         TypedValue::Uuid(record.row_key),
     );
 
+    // Tombstone path: dispatches on conflict policy, gates via LWW, persists
+    // delete HLC in _fed_sync_meta after hard-delete (A6 adjudication).
+    let is_tombstone = record.sync_deleted == Some(true) || record.event == SyncEventKind::Delete;
+    if is_tombstone {
+        match synced_table.conflict_policy {
+            ConflictPolicy::AppendOnly => {
+                // Append-only tables are write-once; silently reject remote deletes.
+            }
+            ConflictPolicy::LocalWins => {
+                // Local state is authoritative; silently reject remote deletes.
+            }
+            ConflictPolicy::RemoteWins => {
+                // Remote delete wins unconditionally.
+                let _ = row_store.delete(&record.table, &predicate);
+            }
+            ConflictPolicy::LastWriterWinsByHLC => {
+                // HLC gate: stale delete (incoming HLC < side-table HLC) must not
+                // remove a newer local row. Side table persists the HLC after delete
+                // so stale resurrections are also blocked (A6).
+                if let Some(local_hlc) = read_fed_sync_hlc(&row_store, &record.table, &record.row_key) {
+                    let incoming: HLC = record.hlc.into();
+                    if incoming < local_hlc {
+                        return Ok(()); // stale delete — local row is newer
+                    }
+                }
+                let _ = row_store.delete(&record.table, &predicate);
+                // A6: persist tombstone HLC in side table after hard-delete.
+                // WHY: without this a stale insert arriving later would find
+                // local_hlc = None and be accepted, resurrecting the deleted row.
+                write_fed_tombstone_hlc(
+                    &row_store,
+                    &record.table,
+                    &record.row_key,
+                    record.hlc.into(),
+                )
+                .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+            }
+            ConflictPolicy::FieldLevelLWW => {
+                // Tombstone interplay (edit-beats-delete): the tombstone wins only
+                // when its HLC is >= ALL local per-column HLCs. If even one column
+                // was written more recently than the tombstone, the row was edited
+                // after the delete — the edit wins and the row is preserved.
+                // An empty local column HLC map means no column-grain edits exist;
+                // tombstone wins unconditionally (row never written under fieldLevelLWW).
+                let local_col_hlcs = read_fed_column_hlcs(&row_store, &record.table, &record.row_key);
+                if tombstone_wins(record.hlc, &local_col_hlcs) {
+                    let _ = row_store.delete(&record.table, &predicate);
+                    // Clear column HLC side-table entries: the row is gone, and stale
+                    // column entries would confuse a future re-insert under fieldLevelLWW.
+                    clear_fed_column_hlcs(&row_store, &record.table, &record.row_key);
+                    // A6: persist tombstone HLC in _fed_sync_meta to block stale
+                    // resurrections from older records arriving later.
+                    write_fed_tombstone_hlc(
+                        &row_store,
+                        &record.table,
+                        &record.row_key,
+                        record.hlc.into(),
+                    )
+                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                }
+                // If tombstone_wins returns false, a local column HLC is strictly
+                // greater than the tombstone — edit-beats-delete; keep the row.
+            }
+        }
+        return Ok(());
+    }
+
+    // Normal (non-tombstone) Insert/Update path.
     match record.event {
         SyncEventKind::Insert | SyncEventKind::Update => {
-            let mut values: BTreeMap<String, TypedValue> = record
+            let raw_values: BTreeMap<String, TypedValue> = record
                 .values
                 .as_ref()
                 .map(|v| v.clone().into_typed())
                 .unwrap_or_default();
+
+            // Inbound projection (R2, CVK-ICLOUD P2-M2): drop excluded columns before
+            // the conflict-policy switch. A peer on a different manifest version may
+            // send columns this manifest marks excluded. Writing them would overwrite
+            // locally-computed derived values with stale remote copies.
+            let mut values: BTreeMap<String, TypedValue> = if !synced_table.excluded_columns.is_empty() {
+                let dropped: Vec<_> = raw_values
+                    .keys()
+                    .filter(|k| synced_table.excluded_columns.contains(*k))
+                    .cloned()
+                    .collect();
+                if !dropped.is_empty() {
+                    // Log at warn-equivalent (eprintln for now; adopt tracing when wired).
+                    eprintln!(
+                        "[ConvergenceKit] inbound projection: dropping {} excluded column(s) for table '{}': {}",
+                        dropped.len(),
+                        synced_table.name,
+                        dropped.join(", ")
+                    );
+                }
+                raw_values
+                    .into_iter()
+                    .filter(|(k, _)| !synced_table.excluded_columns.contains(k))
+                    .collect()
+            } else {
+                raw_values
+            };
+
             // Guarantee the primary key column is present so the storage
             // backend can resolve the row key even when `values` is sparse.
             values
@@ -790,21 +955,28 @@ fn apply_record(
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
                 ConflictPolicy::LastWriterWinsByHLC => {
-                    // Compare HLC; only apply if remote >= local.
-                    // Mirrors Swift CloudKitStateActor.applyInbound exactly.
-                    if let Some(local_hlc) = read_sync_hlc(&row_store, &record.table, &predicate) {
+                    // A6: read HLC from _fed_sync_meta side table, not from the row.
+                    // The side-table entry exists even after a delete (tombstone HLC),
+                    // so a stale resurrect for a previously-deleted row is also gated.
+                    if let Some(local_hlc) = read_fed_sync_hlc(&row_store, &record.table, &record.row_key) {
                         let incoming: HLC = record.hlc.into();
                         if incoming < local_hlc {
-                            // Stale inbound: silently drop.
-                            return Ok(());
+                            return Ok(()); // stale inbound — local (or tombstone) is newer
                         }
                     }
-                    // Persist _syncHLC so the next inbound write can compare.
-                    // (Schema version and kit ID are not persisted here.)
-                    values.insert("_syncHLC".to_string(), TypedValue::Hlc(record.hlc.into()));
+                    // Apply WITHOUT embedding _syncHLC in the row. A6: HLC lives
+                    // in _fed_sync_meta, not in the application row column.
                     row_store
                         .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    // Persist HLC in side table (is_deleted = 0, live row).
+                    write_fed_sync_hlc(
+                        &row_store,
+                        &record.table,
+                        &record.row_key,
+                        record.hlc.into(),
+                    )
+                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
                 ConflictPolicy::RemoteWins => {
                     row_store
@@ -821,41 +993,96 @@ fn apply_record(
                             .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                     }
                 }
-            }
-        }
-        SyncEventKind::Delete => {
-            match synced_table.conflict_policy {
-                ConflictPolicy::AppendOnly => {
-                    // Append-only tables are write-once; silently reject remote deletes.
-                }
-                ConflictPolicy::LastWriterWinsByHLC => {
-                    // HLC gate on the delete path: a stale delete (incoming HLC <
-                    // local _syncHLC) must not remove a newer local row. A newer
-                    // delete (incoming HLC >= local _syncHLC) proceeds.
-                    if let Some(local_hlc) = read_sync_hlc(&row_store, &record.table, &predicate) {
-                        let incoming: HLC = record.hlc.into();
-                        if incoming < local_hlc {
-                            // Stale delete: silently drop.
-                            return Ok(());
-                        }
+                ConflictPolicy::FieldLevelLWW => {
+                    // True column-grain fieldLevelLWW apply using wire-carried column
+                    // HLCs and the persistent _fed_sync_meta_cols side table.
+                    //
+                    // For each column: apply iff incoming column HLC >= local column HLC.
+                    // Falls back to the row-grain HLC when the sender omits per-column
+                    // HLCs (backward-compat: treat all columns as incoming at row HLC).
+                    //
+                    // Port of Swift's FieldLWWMerge.merge(…) + ColumnHLCStore.writeAll(…)
+                    // in ApplyInbound.swift. Commutativity is guaranteed by field_lww_merge.
+                    let local_col_hlcs = read_fed_column_hlcs(&row_store, &record.table, &record.row_key);
+                    let incoming_col_hlcs = record.column_hlcs.as_ref().cloned().unwrap_or_default();
+                    let (columns_to_apply, updated_col_hlcs) = field_lww_merge(
+                        values,
+                        &incoming_col_hlcs,
+                        record.hlc,
+                        &local_col_hlcs,
+                    );
+                    if !columns_to_apply.is_empty() {
+                        row_store
+                            .upsert(
+                                &record.table,
+                                columns_to_apply,
+                                &[synced_table.primary_key_column.clone()],
+                            )
+                            .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                        // Persist updated column HLCs to side table so the next
+                        // inbound apply can read them for its own column-grain gate.
+                        write_fed_column_hlcs(&row_store, &record.table, &record.row_key, &updated_col_hlcs)
+                            .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                     }
-                    row_store
-                        .delete(&record.table, &predicate)
-                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                }
-                ConflictPolicy::RemoteWins => {
-                    // Remote delete wins unconditionally; hard-delete the row by primary key.
-                    row_store
-                        .delete(&record.table, &predicate)
-                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                }
-                ConflictPolicy::LocalWins => {
-                    // Local state is authoritative; silently reject remote deletes.
+                    // Update the row-grain sync HLC in _fed_sync_meta with the
+                    // incoming row HLC. The tombstone path uses the column-grain
+                    // side table (not this value) for its own gate; this update
+                    // keeps _fed_sync_meta current for any code that may query it
+                    // independently (e.g. observability, GC).
+                    write_fed_sync_hlc(
+                        &row_store,
+                        &record.table,
+                        &record.row_key,
+                        record.hlc.into(),
+                    )
+                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
             }
         }
+        // Delete is handled by the tombstone path above; this arm is unreachable
+        // when is_tombstone dispatches correctly.
+        SyncEventKind::Delete => {}
     }
     Ok(())
+}
+
+/// Outbound column projection (R2, CVK-ICLOUD P2-M2).
+///
+/// Strips `excluded_columns` from `change.values` before the change enters the
+/// outbox. Returns `None` (storm kill) when the change is an update and, after
+/// stripping, only the primary key remains — i.e. every changed column was
+/// excluded and there is nothing sync-meaningful to ship.
+///
+/// Parity with Swift `FederationStateActor.recordOutbound`: same two enforcement
+/// points (strip + storm-kill), same semantics for delete unaffected.
+fn outbound_strip_change(
+    mut change: TableChange,
+    excluded: &HashSet<String>,
+    pk_column: &str,
+) -> Option<TableChange> {
+    if excluded.is_empty() {
+        return Some(change);
+    }
+    let Some(raw_values) = change.values.take() else {
+        // Delete: no values to strip; tombstone must propagate.
+        return Some(change);
+    };
+    let stripped: BTreeMap<String, TypedValue> = raw_values
+        .into_iter()
+        .filter(|(k, _)| !excluded.contains(k))
+        .collect();
+
+    // Storm kill: after stripping, if only the PK remains (or nothing at all),
+    // every changed column was excluded. Nothing meaningful to sync for an update.
+    // Deletes are handled above (values is None → returned early).
+    if change.event == StorageEvent::Update {
+        let has_non_pk = stripped.keys().any(|k| k != pk_column);
+        if !has_non_pk {
+            return None; // storm kill
+        }
+    }
+    change.values = Some(stripped);
+    Some(change)
 }
 
 /// Map an observed `TableChange` to a `SyncRecord` for the outbox.
@@ -874,22 +1101,51 @@ fn change_to_record(
     schema_version: i32,
     kit_id: &str,
     hlc_generator: &Arc<Mutex<HLCGenerator>>,
+    conflict_policy: ConflictPolicy,
 ) -> Option<SyncRecord> {
     let row_key = change.row_key?;
     let hlc = match change.hlc {
         Some(h) => h,
         None => hlc_generator.lock().unwrap().send(now_millis()),
     };
+    let event = SyncEventKind::from(change.event);
+    // Tombstone flag: set sync_deleted = Some(true) for delete events so the
+    // receiver applies the tombstone path (LWW gate + _fed_sync_meta persistence).
+    // Matches Swift FederationStateActor.push() and the wire contract (C-8 parity).
+    let sync_deleted = if event == SyncEventKind::Delete { Some(true) } else { None };
+
+    // For fieldLevelLWW tables, stamp all present value columns with the capture HLC.
+    // Mirrors Swift FederationStateActor.push() stamping logic (coarse stamp — no
+    // changedColumns field on TableChange in PersistenceKit).
+    let column_hlcs: Option<ColumnHLCMap> =
+        if conflict_policy == ConflictPolicy::FieldLevelLWW && event != SyncEventKind::Delete {
+            let raw = change.values.as_ref();
+            if let Some(raw_values) = raw {
+                let mut entries = std::collections::BTreeMap::new();
+                for key in raw_values.keys() {
+                    entries.insert(key.clone(), PackedHLC::from(hlc));
+                }
+                Some(ColumnHLCMap { entries })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     let values = change.values.map(SyncValueMap::from_typed);
-    Some(SyncRecord::new(
+    let mut record = SyncRecord::new(
         change.table,
-        SyncEventKind::from(change.event),
+        event,
         row_key,
         values,
         hlc,
         schema_version,
         kit_id,
-    ))
+    );
+    record.sync_deleted = sync_deleted;
+    record.column_hlcs = column_hlcs;
+    Some(record)
 }
 
 /// Current wall-clock in milliseconds, passed explicitly into the HLC
@@ -911,24 +1167,671 @@ fn rand_node_id() -> i32 {
     i32::from_le_bytes(key).unsigned_abs() as i32
 }
 
-/// Read the stored `_syncHLC` for a row, if present.
+/// Side table name for Federation row-grain sync HLC storage (A6 unification).
+/// Mirrors `_ck_sync_meta` in the CloudKit engine.
+const FED_SYNC_META_TABLE: &str = "_fed_sync_meta";
+
+/// Side table name for Federation per-column HLC storage (fieldLevelLWW, B-8).
 ///
-/// Returns the HLC stored in the `_syncHLC` column of the first matching row,
-/// or `None` when the row does not exist yet or has no `_syncHLC`. The
-/// InMemory backend stores `TypedValue::Hlc` verbatim; SQLite/Postgres return
-/// `TypedValue::Int` (the packed i64). Both encodings are handled.
-fn read_sync_hlc(
+/// Schema: (table_name TEXT, primary_key TEXT, column_name TEXT, col_hlc INT);
+/// PRIMARY KEY (table_name, primary_key, column_name).
+///
+/// One row per (table, row, column) triple. Populated by `write_fed_column_hlcs`
+/// after every winning fieldLevelLWW column apply. Consulted by the inbound apply
+/// path to determine which columns from the incoming record win over local state.
+///
+/// Mirrors Swift's `_fed_sync_meta_cols` declared in `FederationStateActor v2`
+/// (referenced in ColumnHLCStore.swift). Naming parity: column layout, INT
+/// col_hlc encoding, and PK structure are byte-identical to the Swift side.
+const FED_SYNC_META_COLS_TABLE: &str = "_fed_sync_meta_cols";
+
+/// Ensure both Federation side tables exist.
+///
+/// Called from `enable()` before any `apply_record`. Uses `storage.migrate()`
+/// which is forward-only and idempotent.
+///
+/// Schema version 2 governs both tables:
+///   v1 — `_fed_sync_meta`      row-grain HLC for A6 LWW gate + tombstone block
+///   v2 — `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (B-8 parity)
+///
+/// Mirrors Swift `FederationStateActor.ensureFedSyncMetaTable` (which the Swift
+/// comment refers to as "v2" upon adding `_fed_sync_meta_cols`). Returns an error
+/// string on failure (caller converts to SyncError).
+fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
+    use persistence_kit::{ColumnDeclaration, Migration, SchemaDeclaration, SchemaOperation, TableDeclaration};
+    let meta_table = TableDeclaration::new(
+        FED_SYNC_META_TABLE,
+        vec![
+            ColumnDeclaration::text("table_name"),
+            ColumnDeclaration::text("primary_key"),
+            // sync_hlc: Int64-packed HLC for LWW gate; 0 means no entry yet.
+            ColumnDeclaration::int("sync_hlc").with_default(TypedValue::Int(0)),
+            ColumnDeclaration::int("schema_version").with_default(TypedValue::Int(0)),
+            ColumnDeclaration::text("kit_id").with_default(TypedValue::Text(String::new())),
+            // is_deleted: 1 for tombstone entries (delete HLC that outlives the row).
+            ColumnDeclaration::int("is_deleted").with_default(TypedValue::Int(0)),
+        ],
+        vec!["table_name".to_string(), "primary_key".to_string()],
+    );
+    let cols_table = TableDeclaration::new(
+        FED_SYNC_META_COLS_TABLE,
+        vec![
+            ColumnDeclaration::text("table_name"),
+            ColumnDeclaration::text("primary_key"),
+            ColumnDeclaration::text("column_name"),
+            // col_hlc: Int64-packed HLC, same encoding as _fed_sync_meta.sync_hlc.
+            // Stored as signed Int64 (TypedValue::Int); recovered via u64 bit-cast.
+            // WHY Int and not a dedicated HLC column: matches Swift's col_hlc INT
+            // convention in CKSideSchema v6 and ColumnHLCStore.writeAll.
+            ColumnDeclaration::int("col_hlc").with_default(TypedValue::Int(0)),
+        ],
+        vec![
+            "table_name".to_string(),
+            "primary_key".to_string(),
+            "column_name".to_string(),
+        ],
+    );
+    let schema = SchemaDeclaration::new(
+        "ConvergenceKitFederation",
+        2,
+        vec![meta_table, cols_table.clone()],
+    )
+    .with_migrations(vec![
+        // v1 → v2: add _fed_sync_meta_cols per-column HLC side table
+        // for fieldLevelLWW column-grain apply (B-8 parity with Swift).
+        Migration {
+            from_version: 1,
+            to_version: 2,
+            operations: vec![SchemaOperation::CreateTable(cols_table)],
+        },
+    ]);
+    storage.migrate(&schema).map_err(|e| e.to_string())
+}
+
+/// Read the persisted sync HLC from `_fed_sync_meta` for a given (table, row_key).
+///
+/// A6: HLC lives in the side table, not in the application row. Returns the HLC
+/// regardless of `is_deleted` status — tombstone HLCs gate the same as live HLCs.
+fn read_fed_sync_hlc(
     row_store: &Arc<dyn RowStore>,
     table: &str,
-    predicate: &StoragePredicate,
+    row_key: &uuid::Uuid,
 ) -> Option<HLC> {
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "table_name".to_string()),
+            TypedValue::Text(table.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "primary_key".to_string()),
+            TypedValue::Text(row_key.to_string()),
+        ),
+    ]);
     let rows = row_store
-        .query(table, Some(predicate), &[], None, None)
+        .query(FED_SYNC_META_TABLE, Some(&predicate), &[], None, None)
         .ok()?;
     let first = rows.into_iter().next()?;
-    match first.get("_syncHLC") {
+    match first.get("sync_hlc") {
         Some(TypedValue::Hlc(h)) => Some(*h),
         Some(TypedValue::Int(i)) => Some(HLC::from_packed((*i) as u64)),
         _ => None,
+    }
+}
+
+/// Persist the sync HLC in `_fed_sync_meta` after a successful upsert (is_deleted = 0).
+fn write_fed_sync_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+    hlc: HLC,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut values = BTreeMap::new();
+    values.insert("table_name".to_string(), TypedValue::Text(table.to_string()));
+    values.insert("primary_key".to_string(), TypedValue::Text(row_key.to_string()));
+    // hlc.packed() → u64 bit layout per cookbook §12.3; stored as Int64 for TypedValue parity.
+    values.insert("sync_hlc".to_string(), TypedValue::Int(hlc.packed() as i64));
+    values.insert("schema_version".to_string(), TypedValue::Int(0));
+    values.insert("kit_id".to_string(), TypedValue::Text(String::new()));
+    values.insert("is_deleted".to_string(), TypedValue::Int(0));
+    row_store.upsert(
+        FED_SYNC_META_TABLE,
+        values,
+        &["table_name".to_string(), "primary_key".to_string()],
+    )?;
+    Ok(())
+}
+
+/// Persist the delete HLC in `_fed_sync_meta` after a hard-delete (A6, is_deleted = 1).
+///
+/// WHY: without this a stale insert for the same (table, row_key) would find
+/// local_hlc = None and be accepted, resurrecting the deleted row.
+fn write_fed_tombstone_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+    hlc: HLC,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut values = BTreeMap::new();
+    values.insert("table_name".to_string(), TypedValue::Text(table.to_string()));
+    values.insert("primary_key".to_string(), TypedValue::Text(row_key.to_string()));
+    // hlc.packed() → u64 bit layout per cookbook §12.3; stored as Int64 for TypedValue parity.
+    values.insert("sync_hlc".to_string(), TypedValue::Int(hlc.packed() as i64));
+    values.insert("schema_version".to_string(), TypedValue::Int(0));
+    values.insert("kit_id".to_string(), TypedValue::Text(String::new()));
+    values.insert("is_deleted".to_string(), TypedValue::Int(1));
+    row_store.upsert(
+        FED_SYNC_META_TABLE,
+        values,
+        &["table_name".to_string(), "primary_key".to_string()],
+    )?;
+    Ok(())
+}
+
+// ─── per-column HLC side table (_fed_sync_meta_cols) ──────────────────────────
+
+/// Read the ColumnHLCMap for a given (table, row_key) from `_fed_sync_meta_cols`.
+///
+/// Returns all (column_name, col_hlc) rows for the pair, decoded into a
+/// ColumnHLCMap. Returns an empty map when no entries exist — first write for
+/// this row under fieldLevelLWW (any incoming HLC wins).
+///
+/// Mirrors Swift's `ColumnHLCStore.readAll(from:sideTable:tableName:primaryKey:)`.
+fn read_fed_column_hlcs(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+) -> ColumnHLCMap {
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_COLS_TABLE.to_string(), "table_name".to_string()),
+            TypedValue::Text(table.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_COLS_TABLE.to_string(), "primary_key".to_string()),
+            TypedValue::Text(row_key.to_string()),
+        ),
+    ]);
+    let Ok(rows) = row_store.query(FED_SYNC_META_COLS_TABLE, Some(&predicate), &[], None, None)
+    else {
+        return ColumnHLCMap::default();
+    };
+    let mut entries = BTreeMap::new();
+    for row in rows {
+        let Some(TypedValue::Text(col_name)) = row.get("column_name") else { continue };
+        let col_hlc_i64 = match row.get("col_hlc") {
+            Some(TypedValue::Int(i)) => *i,
+            _ => continue,
+        };
+        // col_hlc stored as Int64 bit-cast from u64 (same as sync_hlc in _fed_sync_meta).
+        let hlc = HLC::from_packed(col_hlc_i64 as u64);
+        entries.insert(col_name.clone(), PackedHLC::from(hlc));
+    }
+    ColumnHLCMap { entries }
+}
+
+/// Persist a ColumnHLCMap for a given (table, row_key) to `_fed_sync_meta_cols`.
+///
+/// Upserts one row per column using the three-column PK (table_name, primary_key,
+/// column_name) on conflict. Existing entries for columns not in `map` are left
+/// unchanged. Empty map is a no-op.
+///
+/// Mirrors Swift's `ColumnHLCStore.writeAll(map:to:sideTable:tableName:primaryKey:)`.
+fn write_fed_column_hlcs(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+    map: &ColumnHLCMap,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if map.is_empty() {
+        return Ok(());
+    }
+    for (col_name, &packed_hlc) in &map.entries {
+        let hlc: HLC = packed_hlc.into();
+        // Encode as Int64 bit-cast from u64 — same convention as write_fed_sync_hlc.
+        let col_hlc_val = hlc.packed() as i64;
+        let mut values = BTreeMap::new();
+        values.insert("table_name".to_string(),  TypedValue::Text(table.to_string()));
+        values.insert("primary_key".to_string(), TypedValue::Text(row_key.to_string()));
+        values.insert("column_name".to_string(), TypedValue::Text(col_name.clone()));
+        values.insert("col_hlc".to_string(),     TypedValue::Int(col_hlc_val));
+        row_store.upsert(
+            FED_SYNC_META_COLS_TABLE,
+            values,
+            &[
+                "table_name".to_string(),
+                "primary_key".to_string(),
+                "column_name".to_string(),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Delete all per-column HLC entries for a given (table, row_key).
+///
+/// Called after a row is hard-deleted: column HLC side-table entries are
+/// no longer needed once the tombstone HLC is persisted in `_fed_sync_meta`
+/// (the row-grain side table guards against stale resurrects). Leaving stale
+/// column entries wastes space and could confuse a future re-insert under
+/// fieldLevelLWW.
+///
+/// Mirrors Swift's `ColumnHLCStore.clearAll(from:sideTable:tableName:primaryKey:)`.
+fn clear_fed_column_hlcs(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+) {
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_COLS_TABLE.to_string(), "table_name".to_string()),
+            TypedValue::Text(table.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_COLS_TABLE.to_string(), "primary_key".to_string()),
+            TypedValue::Text(row_key.to_string()),
+        ),
+    ]);
+    // Best-effort: ignore errors (row may already be absent; stale entries
+    // would only affect future re-inserts, not correctness of current deletes).
+    let _ = row_store.delete(FED_SYNC_META_COLS_TABLE, &predicate);
+}
+
+// ─── pure fieldLevelLWW merge logic ───────────────────────────────────────────
+
+/// Compute which columns from an incoming record should be applied to local
+/// storage, given the local column HLC state.
+///
+/// Port of Swift's `FieldLWWMerge.merge(incomingValues:incomingColumnHLCs:
+/// incomingRowHLC:localColumnHLCs:)` — semantics are byte-identical.
+///
+/// For each column in `incoming_values`:
+///   - Use the per-column HLC from `incoming_column_hlcs` if present; fall back
+///     to `incoming_row_hlc` (backward-compat: sender omits column HLCs).
+///   - Apply the column iff incoming HLC >= local column HLC (first write if
+///     local has no entry for that column).
+///
+/// COMMUTATIVITY: identical to Swift — applying A then B, or B then A,
+/// produces the same per-column result because ties (`>=` on equal HLCs)
+/// resolve identically in both orderings.
+///
+/// Returns `(columns_to_apply, updated_column_hlcs)`. The caller must:
+///   1. Apply `columns_to_apply` to the application row (upsert).
+///   2. Persist `updated_column_hlcs` to `_fed_sync_meta_cols`.
+fn field_lww_merge(
+    incoming_values: BTreeMap<String, TypedValue>,
+    incoming_column_hlcs: &ColumnHLCMap,
+    incoming_row_hlc: PackedHLC,
+    local_column_hlcs: &ColumnHLCMap,
+) -> (BTreeMap<String, TypedValue>, ColumnHLCMap) {
+    let mut columns_to_apply: BTreeMap<String, TypedValue> = BTreeMap::new();
+    let mut updated_entries = local_column_hlcs.entries.clone();
+
+    for (column, value) in incoming_values {
+        // Prefer per-column HLC from sender; fall back to row-grain HLC when
+        // the sender does not support fieldLevelLWW (backward-compat).
+        let incoming_col_hlc: PackedHLC = incoming_column_hlcs
+            .entries
+            .get(&column)
+            .copied()
+            .unwrap_or(incoming_row_hlc);
+
+        let should_apply = match local_column_hlcs.entries.get(&column) {
+            // Apply iff incoming HLC >= local HLC.
+            // Ties (>=, not >) go to incoming so convergence is guaranteed
+            // when two replicas simultaneously write the same HLC.
+            Some(&local_hlc) => incoming_col_hlc >= local_hlc,
+            // No local HLC for this column — first write always wins.
+            None => true,
+        };
+
+        if should_apply {
+            columns_to_apply.insert(column.clone(), value);
+            // Advance stored HLC to the winner.
+            updated_entries.insert(column, incoming_col_hlc);
+        }
+    }
+
+    (columns_to_apply, ColumnHLCMap { entries: updated_entries })
+}
+
+/// Decide whether an incoming tombstone should delete the local row.
+///
+/// Port of Swift's `FieldLWWMerge.tombstoneWins(tombstoneHLC:localColumnHLCs:)`.
+///
+/// The tombstone wins (returns `true`, caller should delete) iff its HLC is
+/// >= ALL local per-column HLCs. If even one column has an HLC strictly greater
+/// than the tombstone, the row was edited after the delete — the edit wins
+/// and the row is preserved (edit-beats-delete).
+///
+/// WHY empty local map → tombstone wins:
+/// An empty `local_column_hlcs` means this row has never been written under
+/// fieldLevelLWW (e.g., created before the policy was enabled). There are no
+/// column-grain edits to protect, so the tombstone wins unconditionally.
+fn tombstone_wins(tombstone_hlc: PackedHLC, local_column_hlcs: &ColumnHLCMap) -> bool {
+    if local_column_hlcs.is_empty() {
+        return true;
+    }
+    // Tombstone wins iff its HLC is >= every local column HLC.
+    // A single column with a strictly higher HLC keeps the row alive.
+    for (_, &local_hlc) in &local_column_hlcs.entries {
+        if local_hlc > tombstone_hlc {
+            return false; // edit-beats-delete: this column was written more recently
+        }
+    }
+    true
+}
+
+// ─── unit tests (pure merge logic) ────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn hlc(physical_time: i64, logical: i32, node: i32) -> PackedHLC {
+        PackedHLC { physical_time, logical_count: logical, node_id: node }
+    }
+
+    fn col_map(pairs: &[(&str, PackedHLC)]) -> ColumnHLCMap {
+        let mut entries = BTreeMap::new();
+        for (col, h) in pairs {
+            entries.insert(col.to_string(), *h);
+        }
+        ColumnHLCMap { entries }
+    }
+
+    // ── field_lww_merge ──────────────────────────────────────────────────────
+
+    /// Disjoint columns: each replica contributes a column the other lacks.
+    /// After merge, both columns survive in the result (and both appear in
+    /// updated_column_hlcs). Mirrors Swift's disjoint-column test case.
+    #[test]
+    fn merge_disjoint_columns_both_survive() {
+        // Incoming record has column "title" at T=200.
+        let mut incoming_values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        incoming_values.insert("title".to_string(), TypedValue::Text("Hello".to_string()));
+        let incoming_col_hlcs = col_map(&[("title", hlc(200, 0, 1))]);
+
+        // Local has column "body" at T=100 (different column, no conflict).
+        let local_col_hlcs = col_map(&[("body", hlc(100, 0, 1))]);
+
+        let (apply, updated) = field_lww_merge(
+            incoming_values,
+            &incoming_col_hlcs,
+            hlc(200, 0, 1),
+            &local_col_hlcs,
+        );
+
+        // "title" must be applied (no local HLC → first write wins).
+        assert_eq!(
+            apply.get("title"),
+            Some(&TypedValue::Text("Hello".to_string())),
+            "incoming disjoint column must be applied"
+        );
+        // "body" is not in incoming_values, so it's untouched.
+        assert!(!apply.contains_key("body"), "local-only column must not appear in apply set");
+
+        // updated_column_hlcs must contain both: "title" at T=200, "body" retained at T=100.
+        assert_eq!(updated.entries.get("title"), Some(&hlc(200, 0, 1)));
+        assert_eq!(updated.entries.get("body"),  Some(&hlc(100, 0, 1)));
+    }
+
+    /// Same column, newest HLC wins — incoming T=200 beats local T=100.
+    /// Mirrors Swift's "same-column newest wins" test case.
+    #[test]
+    fn merge_same_column_newest_wins() {
+        let mut incoming: BTreeMap<String, TypedValue> = BTreeMap::new();
+        incoming.insert("title".to_string(), TypedValue::Text("Newer".to_string()));
+        let incoming_col_hlcs = col_map(&[("title", hlc(200, 0, 1))]);
+
+        let local_col_hlcs = col_map(&[("title", hlc(100, 0, 1))]);
+
+        let (apply, updated) = field_lww_merge(
+            incoming,
+            &incoming_col_hlcs,
+            hlc(200, 0, 1),
+            &local_col_hlcs,
+        );
+
+        // Incoming wins (T=200 > T=100).
+        assert_eq!(
+            apply.get("title"),
+            Some(&TypedValue::Text("Newer".to_string())),
+            "incoming column with higher HLC must win"
+        );
+        assert_eq!(updated.entries.get("title"), Some(&hlc(200, 0, 1)));
+    }
+
+    /// Same column, stale incoming (T=50 < local T=100) — local wins, column NOT applied.
+    #[test]
+    fn merge_same_column_stale_incoming_loses() {
+        let mut incoming: BTreeMap<String, TypedValue> = BTreeMap::new();
+        incoming.insert("title".to_string(), TypedValue::Text("Stale".to_string()));
+        let incoming_col_hlcs = col_map(&[("title", hlc(50, 0, 1))]);
+
+        let local_col_hlcs = col_map(&[("title", hlc(100, 0, 1))]);
+
+        let (apply, updated) = field_lww_merge(
+            incoming,
+            &incoming_col_hlcs,
+            hlc(50, 0, 1),
+            &local_col_hlcs,
+        );
+
+        // Stale incoming must not overwrite local.
+        assert!(apply.is_empty(), "stale incoming column must not be applied");
+        // Local HLC must be unchanged.
+        assert_eq!(updated.entries.get("title"), Some(&hlc(100, 0, 1)));
+    }
+
+    /// Tie (equal HLCs) — incoming wins (>= semantics, not >).
+    /// Equal-HLC ties resolve to incoming to guarantee eventual convergence.
+    #[test]
+    fn merge_tie_incoming_wins() {
+        let mut incoming: BTreeMap<String, TypedValue> = BTreeMap::new();
+        incoming.insert("title".to_string(), TypedValue::Text("Tie-wins".to_string()));
+        let tie_hlc = hlc(100, 0, 1);
+        let incoming_col_hlcs = col_map(&[("title", tie_hlc)]);
+        let local_col_hlcs   = col_map(&[("title", tie_hlc)]);
+
+        let (apply, _) = field_lww_merge(
+            incoming,
+            &incoming_col_hlcs,
+            tie_hlc,
+            &local_col_hlcs,
+        );
+
+        // Tie → incoming wins (>= semantics).
+        assert!(apply.contains_key("title"), "tie must resolve to incoming (>= semantics)");
+    }
+
+    /// Commutativity property: merge(A over B) and merge(B over A) must agree
+    /// on which value each column holds when the HLCs differ.
+    /// Mirrors Swift's commutativity property test with seeded orders.
+    #[test]
+    fn merge_commutativity_property() {
+        // A has "title" at T=200, "body" at T=50.
+        let mut a_values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        a_values.insert("title".to_string(), TypedValue::Text("A-title".to_string()));
+        a_values.insert("body".to_string(),  TypedValue::Text("A-body".to_string()));
+        let a_col_hlcs = col_map(&[("title", hlc(200, 0, 1)), ("body", hlc(50, 0, 1))]);
+
+        // B has "title" at T=100, "body" at T=300.
+        let mut b_values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        b_values.insert("title".to_string(), TypedValue::Text("B-title".to_string()));
+        b_values.insert("body".to_string(),  TypedValue::Text("B-body".to_string()));
+        let b_col_hlcs = col_map(&[("title", hlc(100, 0, 1)), ("body", hlc(300, 0, 1))]);
+
+        // Order 1: start with A's state, apply B on top.
+        let (apply_b_over_a, final_b_over_a) = field_lww_merge(
+            b_values.clone(),
+            &b_col_hlcs,
+            hlc(300, 0, 1),
+            &a_col_hlcs,
+        );
+        // Now take A as winner where A won, fold in B's apply set.
+        // Build state_after_b_over_a: start with A's values, overwrite with apply set.
+        let mut state_b_over_a: BTreeMap<String, String> = BTreeMap::new();
+        state_b_over_a.insert("title".to_string(), "A-title".to_string()); // A wins title
+        state_b_over_a.insert("body".to_string(),  "A-body".to_string());  // A initial
+        for (k, v) in &apply_b_over_a {
+            if let TypedValue::Text(s) = v {
+                state_b_over_a.insert(k.clone(), s.clone());
+            }
+        }
+
+        // Order 2: start with B's state, apply A on top.
+        let (apply_a_over_b, final_a_over_b) = field_lww_merge(
+            a_values.clone(),
+            &a_col_hlcs,
+            hlc(200, 0, 1),
+            &b_col_hlcs,
+        );
+        let mut state_a_over_b: BTreeMap<String, String> = BTreeMap::new();
+        state_a_over_b.insert("title".to_string(), "B-title".to_string()); // B initial
+        state_a_over_b.insert("body".to_string(),  "B-body".to_string());  // B wins body
+        for (k, v) in &apply_a_over_b {
+            if let TypedValue::Text(s) = v {
+                state_a_over_b.insert(k.clone(), s.clone());
+            }
+        }
+
+        // Both orderings must converge on the same per-column winner:
+        //   title: A wins (T=200 > T=100)
+        //   body:  B wins (T=300 > T=50)
+        assert_eq!(state_b_over_a["title"], "A-title", "title: A must win (T=200 > T=100)");
+        assert_eq!(state_b_over_a["body"],  "B-body",  "body: B must win (T=300 > T=50)");
+        assert_eq!(state_a_over_b["title"], "A-title", "commutativity: title must be same");
+        assert_eq!(state_a_over_b["body"],  "B-body",  "commutativity: body must be same");
+
+        // HLC maps must also converge.
+        assert_eq!(final_b_over_a.entries["title"], hlc(200, 0, 1));
+        assert_eq!(final_b_over_a.entries["body"],  hlc(300, 0, 1));
+        assert_eq!(final_b_over_a, final_a_over_b, "updated HLC maps must be identical");
+    }
+
+    /// Fallback to row-grain HLC when incoming_column_hlcs is empty
+    /// (backward-compat: sender does not carry per-column HLCs).
+    #[test]
+    fn merge_row_grain_fallback_when_no_column_hlcs() {
+        let mut incoming: BTreeMap<String, TypedValue> = BTreeMap::new();
+        incoming.insert("note".to_string(), TypedValue::Text("from old sender".to_string()));
+
+        // Incoming has no column HLCs — use row-grain HLC as fallback.
+        let incoming_col_hlcs = ColumnHLCMap::default();
+        let row_hlc = hlc(500, 0, 1);
+
+        // Local column HLC is older (T=100 < T=500) — incoming wins.
+        let local_col_hlcs = col_map(&[("note", hlc(100, 0, 1))]);
+
+        let (apply, _) = field_lww_merge(
+            incoming,
+            &incoming_col_hlcs,
+            row_hlc,
+            &local_col_hlcs,
+        );
+        assert!(apply.contains_key("note"), "row-grain fallback must allow win when row HLC is newer");
+
+        // Now test stale row-grain fallback: row HLC older than local column.
+        let mut incoming2: BTreeMap<String, TypedValue> = BTreeMap::new();
+        incoming2.insert("note".to_string(), TypedValue::Text("stale old sender".to_string()));
+        let (apply2, _) = field_lww_merge(
+            incoming2,
+            &ColumnHLCMap::default(),
+            hlc(50, 0, 1),  // row HLC older than local column T=100
+            &local_col_hlcs,
+        );
+        assert!(apply2.is_empty(), "stale row-grain fallback must not overwrite newer local column");
+    }
+
+    // ── tombstone_wins ───────────────────────────────────────────────────────
+
+    /// Empty local column HLCs → tombstone wins unconditionally.
+    /// Mirrors Swift: "An empty localColumnHLCs means this row has never been
+    /// written under fieldLevelLWW — tombstone wins unconditionally."
+    #[test]
+    fn tombstone_wins_empty_local_map() {
+        assert!(
+            tombstone_wins(hlc(100, 0, 1), &ColumnHLCMap::default()),
+            "tombstone must win when local column HLC map is empty"
+        );
+    }
+
+    /// Tombstone HLC >= all local column HLCs → tombstone wins.
+    #[test]
+    fn tombstone_wins_when_hlc_ge_all_columns() {
+        let local = col_map(&[
+            ("title", hlc(100, 0, 1)),
+            ("body",  hlc(80,  0, 1)),
+        ]);
+        // Tombstone at T=100 equals the highest column HLC (>= semantics).
+        assert!(
+            tombstone_wins(hlc(100, 0, 1), &local),
+            "tombstone at T=100 must beat all local columns (max local HLC = 100, >= semantics)"
+        );
+        // Tombstone at T=200 clearly beats all.
+        assert!(
+            tombstone_wins(hlc(200, 0, 1), &local),
+            "tombstone at T=200 must beat all local columns"
+        );
+    }
+
+    /// One local column HLC strictly greater than tombstone → tombstone loses.
+    /// This is the "edit-beats-delete" case: the row was edited after the delete.
+    #[test]
+    fn tombstone_loses_when_one_column_newer() {
+        let local = col_map(&[
+            ("title", hlc(50,  0, 1)),
+            ("body",  hlc(200, 0, 1)), // newer than tombstone
+        ]);
+        // Tombstone at T=100 loses because "body" is at T=200.
+        assert!(
+            !tombstone_wins(hlc(100, 0, 1), &local),
+            "tombstone must lose when one local column (body at T=200) is newer"
+        );
+    }
+
+    /// All local columns equal to tombstone HLC — tombstone wins (>= semantics).
+    #[test]
+    fn tombstone_wins_on_exact_tie() {
+        let tie = hlc(100, 0, 1);
+        let local = col_map(&[("title", tie), ("body", tie)]);
+        assert!(
+            tombstone_wins(tie, &local),
+            "tombstone must win on exact tie with all columns (>= semantics)"
+        );
+    }
+
+    // ── cross-leg golden (ColumnHLCMap wire format) ──────────────────────────
+
+    /// Verify that the Rust decoder accepts a JSON string produced by Swift's
+    /// JSONEncoder for a ColumnHLCMap. The Swift golden was generated with:
+    ///   JSONEncoder().encode(ColumnHLCMap(entries: [
+    ///       "colA": PackedHLC(physicalTime: 100, logicalCount: 0, nodeID: 1),
+    ///       "colB": PackedHLC(physicalTime: 200, logicalCount: 5, nodeID: 3),
+    ///   ]))
+    /// Swift's JSONEncoder sorts dictionary keys alphabetically, producing
+    /// "colA" before "colB" — matching Rust's BTreeMap serialisation.
+    #[test]
+    fn column_hlc_map_cross_leg_golden() {
+        let golden = r#"{"entries":{"colA":{"physicalTime":100,"logicalCount":0,"nodeID":1},"colB":{"physicalTime":200,"logicalCount":5,"nodeID":3}}}"#;
+        let map: ColumnHLCMap = serde_json::from_str(golden)
+            .expect("Rust must decode Swift-golden ColumnHLCMap JSON");
+
+        let col_a = map.entries.get("colA").expect("colA must be present");
+        let col_b = map.entries.get("colB").expect("colB must be present");
+        assert_eq!(col_a.physical_time, 100, "colA physical_time");
+        assert_eq!(col_a.logical_count, 0,   "colA logical_count");
+        assert_eq!(col_a.node_id, 1,          "colA node_id");
+        assert_eq!(col_b.physical_time, 200, "colB physical_time");
+        assert_eq!(col_b.logical_count, 5,   "colB logical_count");
+        assert_eq!(col_b.node_id, 3,          "colB node_id");
+
+        // Round-trip: Rust output must be byte-identical to the golden.
+        let encoded = serde_json::to_string(&map).expect("Rust must encode ColumnHLCMap");
+        assert_eq!(
+            encoded, golden,
+            "Rust-encoded ColumnHLCMap must be byte-identical to the Swift golden"
+        );
     }
 }

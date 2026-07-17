@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-07-17
+version: 1.6
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -14,7 +14,7 @@ purpose: |
   format and TypedValue boxing, the SyncReceipt / SyncEvent / SyncState
   value types, the SyncError enum, and the three backends (None,
   CloudKit, Federation). The companion SPEC carries the behavioral
-  contracts (invariants I-1…I-9, conformance C-1…C-8).
+  contracts (invariants I-1…I-12, conformance C-1…C-15).
 ---
 
 # ConvergenceKit Interface
@@ -29,6 +29,9 @@ purpose: |
     `ConflictPolicy`, `SyncReceipt`, `SyncEvent`, `SyncState`, `SyncError`
   - `SyncRecord.swift` — `SyncRecord`, `SyncEventKind`, `PackedHLC`,
     `SyncValueMap`, `SyncValueBox`, `FingerprintWire`
+  - `FieldLWW/ColumnHLCMap.swift` — `ColumnHLCMap`, `PackedHLC.Comparable`
+  - `FieldLWW/FieldLWWMerge.swift` — `FieldLWWMerge` (pure stateless merge)
+  - `FieldLWW/ColumnHLCStore.swift` — `ColumnHLCStore` (side-table CRUD)
 - `Sources/ConvergenceKitNone/` — `NoSyncEngine` (default, SPEC § 5 B-1)
 - `Sources/ConvergenceKitCloudKit/` — `CloudKitSyncEngine`,
   `CKRecordMapping`, `DecodedRecord`
@@ -49,13 +52,13 @@ Four library products: `ConvergenceKit`, `ConvergenceKitNone`,
   `SyncManifest`, `SyncReceipt`, `SyncEvent`, `SyncState`, `SyncError`,
   `SyncResult`
 - `src/record.rs` — `SyncRecord`, `SyncEventKind`, `PackedHLC`,
-  `FingerprintWire`, `SyncValueBox`, `SyncValueMap`
+  `FingerprintWire`, `SyncValueBox`, `SyncValueMap`, `ColumnHLCMap`
 - `src/engine.rs` — the `SyncEngine` trait
 - `src/none.rs` — `NoSyncEngine`
 - `src/federation.rs` — `FederationSyncEngine`, `Relay` (transport
   trait), `FederationRelay` (in-process `impl Relay`), `SignedEnvelope`,
   `PayloadKind`, `envelope_signing_bytes`, `LocalIdentity`,
-  `PeerIdentity`, `verify_signature`
+  `PeerIdentity`, `verify_signature`, `PairedPeer`
 - `src/pairing.rs` — `HyperplaneFamilySpec`, `PairingProposal`,
   `PairingAcceptance`, `proposal_signing_bytes`
 
@@ -118,6 +121,11 @@ public enum ConflictPolicy: String, Sendable, Codable {
     case appendOnly            // (eventID, hlc) idempotent; audit log; remote deletes rejected
     case localWins             // receiver discards remote on conflict; remote deletes rejected
     case remoteWins            // receiver overwrites local on conflict unconditionally
+    // Per-column HLC LWW. Wire carries ColumnHLCMap on SyncRecord (B-8).
+    // Array/blob columns are atomic whole values — concurrent writes to the
+    // same column lose the lower-HLC side. Rust twin: FieldLevelLWW (C-8).
+    // Side tables: _ck_sync_meta_cols (CloudKit), _fed_sync_meta_cols (Federation).
+    case fieldLevelLWW
 }
 
 public struct SyncedTable: Sendable, Codable {
@@ -125,16 +133,26 @@ public struct SyncedTable: Sendable, Codable {
     public let direction: SyncDirection
     public let primaryKeyColumn: String
     public let conflictPolicy: ConflictPolicy
+    /// Columns excluded from sync; locally recomputed on every device.
+    /// Matches Playground Rule 4: derived columns never sync.
+    public let excludedColumns: Set<String>
     public init(name: String, direction: SyncDirection = .bidirectional,
-                primaryKeyColumn: String, conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC)
+                primaryKeyColumn: String, conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC,
+                excludedColumns: Set<String> = [])
 }
 
-public struct SyncManifest: Sendable, Codable {
+public struct SyncManifest: Sendable {
     public let kitID: String
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
-    public init(kitID: String, schemaVersion: Int, zoneIdentifier: String, tables: [SyncedTable])
+    /// Optional hook run after each inbound pull batch applies;
+    /// use to restore cross-row or cross-table structural invariants that
+    /// sync cannot maintain (Playground Rule 3). Not `Codable` — closures
+    /// cannot be serialized; set at construction only.
+    public var postApplyIntegrityHook: ((any Storage) async -> Void)?
+    public init(kitID: String, schemaVersion: Int, zoneIdentifier: String, tables: [SyncedTable],
+                postApplyIntegrityHook: ((any Storage) async -> Void)? = nil)
     public func table(named name: String) -> SyncedTable?
 }
 ```
@@ -143,18 +161,23 @@ public struct SyncManifest: Sendable, Codable {
 
 ```rust
 pub enum SyncDirection { Bidirectional, PushOnly, PullOnly }
-pub enum ConflictPolicy { LastWriterWinsByHLC, AppendOnly, LocalWins, RemoteWins }
+pub enum ConflictPolicy {
+    LastWriterWinsByHLC, AppendOnly, LocalWins, RemoteWins,
+    FieldLevelLWW,  // per-column HLC LWW; see B-8
+}
 
 pub struct SyncedTable {
     pub name: String,
     pub direction: SyncDirection,           // serde default: Bidirectional
     pub primary_key_column: String,
     pub conflict_policy: ConflictPolicy,     // serde default: LastWriterWinsByHLC
+    pub excluded_columns: HashSet<String>,   // serde default: empty
 }
 impl SyncedTable {
     pub fn new(name: impl Into<String>, primary_key_column: impl Into<String>) -> Self;
     pub fn with_direction(self, direction: SyncDirection) -> Self;
     pub fn with_conflict_policy(self, policy: ConflictPolicy) -> Self;
+    pub fn with_excluded_columns(self, cols: impl IntoIterator<Item = impl Into<String>>) -> Self;
 }
 
 pub struct SyncManifest {
@@ -162,6 +185,9 @@ pub struct SyncManifest {
     pub schema_version: i32,
     pub zone_identifier: String,
     pub tables: Vec<SyncedTable>,
+    // post-apply hook: Rust equivalent would be a boxed fn; not serializable.
+    // Deferred — Swift ships postApplyIntegrityHook; Rust port does not carry it.
+    // pub post_apply_hook: Option<Box<dyn Fn(&dyn Storage) -> Result<(), SyncError> + Send>>,
 }
 impl SyncManifest {
     pub fn new(kit_id: impl Into<String>, schema_version: i32,
@@ -169,6 +195,13 @@ impl SyncManifest {
     pub fn table_named(&self, name: &str) -> Option<&SyncedTable>;
 }
 ```
+
+**Note — `TableChange.origin`:** ConvergenceKit's echo suppression (SPEC
+I-10) depends on an `origin: ChangeOrigin` field on PersistenceKit's
+`TableChange` type. `ChangeOrigin` is either `local` (all caller-initiated
+writes) or `syncApply` (writes issued by `applyInbound`). Shipped in
+P1-M1 (CVK-ICLOUD P1-M1, 2026-07-16); see `PERSISTENCEKIT_INTERFACE.md`
+for the full `ChangeOrigin` signature.
 
 ### `SyncReceipt`, `SyncEvent`, `SyncState`
 
@@ -193,6 +226,18 @@ public enum SyncEvent: Sendable {
     case peerConnected(identity: String)
     case peerDisconnected(identity: String, reason: String)
     case error(SyncError)
+    /// Emitted when ≥1 record was held in the schema-skew queue during a
+    /// pull cycle (future-schema records), or when the queue is non-empty
+    /// after enable-time replay (records waiting for a further schema bump).
+    /// count: total entries held/remaining across all schema versions.
+    /// SPEC: B-3, B-10. Rust twin: SyncEvent::RecordsHeldForMigration.
+    /// CVK-ICLOUD P3-M4.
+    case recordsHeldForMigration(count: Int)
+    /// A CloudKit silent-push notification arrived for this engine's zone
+    /// and the engine responded by nudging the poll scheduler. Emitted
+    /// before the pull that follows nudge(). CloudKit-only: never emitted
+    /// by NoSyncEngine or FederationSyncEngine.
+    case remoteWakeReceived
 }
 
 public enum SyncState: Sendable {
@@ -219,6 +264,12 @@ pub enum SyncEvent {
     PeerConnected { identity: String },
     PeerDisconnected { identity: String, reason: String },
     Error(SyncError),
+    /// Records held in the schema-skew queue (R9, CVK-ICLOUD P3-M4).
+    /// Swift twin: SyncEvent.recordsHeldForMigration(count:). SPEC B-3, B-10.
+    RecordsHeldForMigration { count: usize },
+    /// Vocabulary-parity arm for CloudKit remote-wake. Never constructed
+    /// on the Rust side (CloudKit is Swift-only per § 7 Exempt).
+    RemoteWakeReceived,
 }
 
 pub enum SyncState {
@@ -274,6 +325,23 @@ public struct SyncValueMap: Sendable, Codable {
     public var asTypedValues: [String: TypedValue] { get }
 }
 
+/// Per-column HLC map for fieldLevelLWW conflict policy (B-8).
+/// Wire shape: {"entries": {"colName": PackedHLC, ...}}
+/// Matches Rust ColumnHLCMap { entries: BTreeMap<String, PackedHLC> }.
+public struct ColumnHLCMap: Sendable, Codable, Equatable {
+    public var entries: [String: PackedHLC]
+    public init(entries: [String: PackedHLC] = [:])
+    /// Merge keeping highest HLC per column. Commutative.
+    public func merge(with other: ColumnHLCMap) -> ColumnHLCMap
+    /// Stamp all given keys with hlc. Used at outbox observe time.
+    public static func stampAll(keys: some Sequence<String>, hlc: PackedHLC) -> ColumnHLCMap
+    public var isEmpty: Bool { get }
+}
+
+/// Comparable conformance for PackedHLC: (physicalTime, logicalCount, nodeID) lexicographic.
+/// Parity: Rust PackedHLC derives PartialOrd on the same field order.
+extension PackedHLC: Comparable { /* < operator */ }
+
 public struct SyncRecord: Sendable, Codable {
     public let table: String
     public let event: SyncEventKind
@@ -282,8 +350,12 @@ public struct SyncRecord: Sendable, Codable {
     public let hlc: PackedHLC
     public let schemaVersion: Int
     public let kitID: String
+    /// Per-column HLC map for fieldLevelLWW tables (B-8). Nil for row-grain
+    /// LWW tables — omitted from JSON encoding (encodeIfPresent).
+    public let columnHLCs: ColumnHLCMap?
     public init(table: String, event: SyncEventKind, rowKey: UUID,
-                values: SyncValueMap?, hlc: PackedHLC, schemaVersion: Int, kitID: String)
+                values: SyncValueMap?, hlc: PackedHLC, schemaVersion: Int, kitID: String,
+                syncDeleted: Bool? = nil, columnHLCs: ColumnHLCMap? = nil)
 }
 ```
 
@@ -312,10 +384,26 @@ impl SyncValueMap {
     pub fn into_typed(self) -> BTreeMap<String, TypedValue>;
 }
 
+/// Per-column HLC map for fieldLevelLWW conflict policy (B-8).
+/// Wire shape: {"entries": {"colName": PackedHLC, ...}} (BTreeMap = alphabetical key order).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ColumnHLCMap {
+    pub entries: BTreeMap<String, PackedHLC>,
+}
+impl ColumnHLCMap {
+    pub fn new() -> Self;
+    pub fn is_empty(&self) -> bool;
+    /// Merge keeping highest HLC per column. Commutative.
+    pub fn merge(&self, other: &ColumnHLCMap) -> ColumnHLCMap;
+}
+
 pub struct SyncRecord {
     pub table: String, pub event: SyncEventKind, pub row_key: Uuid,
     pub values: Option<SyncValueMap>, pub hlc: PackedHLC,
     pub schema_version: i32, pub kit_id: String,
+    /// Per-column HLC map for fieldLevelLWW tables (B-8). None for row-grain
+    /// LWW tables. serde: skip_serializing_if = "Option::is_none", default.
+    pub column_hlcs: Option<ColumnHLCMap>,
 }
 impl SyncRecord {
     pub fn new(table: impl Into<String>, event: SyncEventKind, row_key: Uuid,
@@ -345,7 +433,64 @@ impl NoSyncEngine { pub fn new() -> Self; }   // also Default
 ```swift
 public final class CloudKitSyncEngine: SyncEngine, Sendable {
     /// Pass nil to resolve CKContainer.default() at enable() time.
-    public init(containerIdentifier: String? = nil)
+    /// enablePolling: false (default) — polling does not auto-start; the
+    /// host app or test drives push/pull manually. Pass true to start
+    /// AdaptivePollScheduler on enable() (intended for production use only).
+    public init(containerIdentifier: String? = nil, enablePolling: Bool = false)
+
+    // Host-app accelerator surface (shipped CVK-ICLOUD P3-M2/P3-M3).
+    // Correctness does NOT depend on nudge delivery; the engine is always
+    // sound under polling alone (SPEC B-11). These entry points are for
+    // host apps that hold APNs entitlements and want to reduce inbound
+    // latency.
+
+    /// Nudge the engine to run a pull cycle immediately, bypassing the
+    /// current idle-cadence timer. If a scheduler is running, delegates
+    /// to it (interrupt sleep + pull). If no scheduler is running
+    /// (enablePolling: false), fires a one-shot pull directly.
+    public func nudge() async
+
+    /// Register a `CKRecordZoneSubscription` for the engine's sync zone.
+    ///
+    /// Idempotent: the subscription ID is derived from the zone name
+    /// ("ck-zone-wake-<zoneIdentifier>") so CloudKit deduplicates on
+    /// repeated saves. Safe to call on every app launch without tracking
+    /// whether the subscription was already registered.
+    ///
+    /// Routes through the `CloudKitDatabaseProtocol` seam (no `CKDatabase`
+    /// argument needed; the seam resolves the correct database internally).
+    ///
+    /// Host-app responsibilities before calling:
+    /// 1. Declare the `com.apple.developer.icloud-services` → CloudKit entitlement.
+    /// 2. Call `UIApplication.registerForRemoteNotifications()` (or AppKit equivalent).
+    /// 3. Forward notification payloads via `handleRemoteNotification(userInfo:)`.
+    public func registerZoneSubscription() async throws
+
+    /// Remove the zone subscription for this engine's zone.
+    /// Safe to call even if no subscription is currently registered.
+    public func deregisterZoneSubscription() async throws
+
+    /// Process a remote-notification `userInfo` dict from the host app's
+    /// `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`.
+    ///
+    /// Returns `true` if the notification was a CloudKit zone-change event
+    /// for this engine's zone (emits `SyncEvent.remoteWakeReceived` and
+    /// calls `nudge()`); `false` if unrelated (wrong zone, unparseable,
+    /// or engine not enabled). A `false` return is not an error — it means
+    /// the notification was not for this engine.
+    ///
+    /// Call pattern:
+    /// ```swift
+    /// func application(_ app: UIApplication,
+    ///                  didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+    ///                  fetchCompletionHandler handler: @escaping (UIBackgroundFetchResult) -> Void) {
+    ///     Task {
+    ///         let consumed = await engine.handleRemoteNotification(userInfo: userInfo)
+    ///         handler(consumed ? .newData : .noData)
+    ///     }
+    /// }
+    /// ```
+    public func handleRemoteNotification(userInfo: [AnyHashable: Any]) async -> Bool
 }
 
 public enum CKRecordMapping {
@@ -357,13 +502,31 @@ public enum CKRecordMapping {
     public static func decode(_ record: CKRecord) throws -> DecodedRecord
 }
 
-public struct DecodedRecord: Sendable {
-    public let table: String
-    public let rowKey: UUID
-    public let values: [String: TypedValue]
+/// Sync metadata extracted from the `_sync*` reserved fields of a CKRecord.
+/// Carried separately from `values` so `values` remains clean (no `_sync*` keys)
+/// while the engine retains what it needs for conflict resolution and HLC
+/// persistence.
+public struct SyncMeta: Sendable {
     public let hlc: HLC
     public let schemaVersion: Int
     public let kitID: String
+}
+
+/// Decoded CKRecord: app-data values plus sync metadata. `hlc`, `schemaVersion`,
+/// and `kitID` are computed convenience accessors backed by `syncMeta`.
+public struct DecodedRecord: Sendable {
+    public let table: String
+    public let rowKey: UUID
+    /// App-data values. Contains no `_sync*` keys.
+    public let values: [String: TypedValue]
+    /// Sync metadata extracted during decode.
+    public let syncMeta: SyncMeta
+    /// Convenience: `syncMeta.hlc`
+    public var hlc: HLC { syncMeta.hlc }
+    /// Convenience: `syncMeta.schemaVersion`
+    public var schemaVersion: Int { syncMeta.schemaVersion }
+    /// Convenience: `syncMeta.kitID`
+    public var kitID: String { syncMeta.kitID }
 }
 ```
 
@@ -463,6 +626,12 @@ impl FederationSyncEngine {
     /// subscribes the storage observer and auto-populates the outbox on every
     /// observed write — parity with the Swift port (SPEC § 5, B-7).
     pub fn enqueue(&mut self, record: SyncRecord) -> SyncResult<()>;
+    /// Record a paired peer. The relay is shared at construction; this call
+    /// only registers the peer's public key and family so `push` knows who
+    /// to route to. Must be called symmetrically on both engines (Swift parity:
+    /// `pair(with:via:family:)` calls `acceptPeering` on the remote engine).
+    pub fn pair(&mut self, peer: &FederationSyncEngine,
+                family: HyperplaneFamilySpec) -> SyncResult<()>;
 }
 
 // Transport abstraction (hosted-sync hook): the engine holds `Arc<dyn
@@ -471,6 +640,10 @@ impl FederationSyncEngine {
 pub trait Relay: Send + Sync {
     fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
+    /// Deliver to one specific peer (by public key). Used by `push` to route
+    /// envelopes only to explicitly paired peers rather than broadcasting to
+    /// all relay participants.
+    fn send_to(&self, from: &PeerIdentity, to_public_key: &[u8; 32], envelope: SignedEnvelope);
 }
 
 pub struct FederationRelay { /* … */ }                         // also Default
@@ -480,6 +653,7 @@ impl FederationRelay {
 impl Relay for FederationRelay {
     fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
     fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
+    fn send_to(&self, from: &PeerIdentity, to_public_key: &[u8; 32], envelope: SignedEnvelope);
 }
 
 /// Discriminator for the opaque payload carried by `SignedEnvelope`.
@@ -517,6 +691,17 @@ impl LocalIdentity {
 }
 
 pub fn verify_signature(signature: &[u8], data: &[u8], peer_public_key: &[u8]) -> bool;
+
+/// A peer that has been explicitly paired via `pair()`. Re-exported from
+/// `federation.rs` via `pub use federation::*`. The engine only pushes when
+/// at least one `PairedPeer` exists; `push` returns an empty receipt when
+/// `paired_peers` is empty. No Swift public counterpart — the Swift analog
+/// (`FederationStateActor.PairedPeer`) is an internal actor-nested type.
+#[derive(Debug, Clone)]
+pub struct PairedPeer {
+    pub public_key: [u8; 32],
+    pub family: HyperplaneFamilySpec,
+}
 
 pub struct HyperplaneFamilySpec { pub seed: u64, pub dimension: u32 }
 impl HyperplaneFamilySpec {
@@ -563,6 +748,22 @@ public enum SyncError: Error, Sendable, Equatable {
     case peerUnreachable(identity: String)
     case authenticationFailed(detail: String)
     case unsupportedTable(name: String)
+    /// CloudKit-only. A CKRecord whose `recordName` could not be parsed as
+    /// a UUID. Fabricating a UUID from a corrupt recordName would create a
+    /// phantom local row that diverges on every subsequent sync round; the
+    /// pull loop quarantines the record, counts it as a conflict, and
+    /// continues to the next record rather than aborting the batch.
+    case corruptRemoteIdentity(recordName: String)
+    /// CloudKit-only. The device's `(slot, epoch)` pair has
+    /// been superseded: the slot was evicted and its epoch bumped while this
+    /// device was inactive. Raised before any inbound records are applied.
+    /// Recovery: the engine re-claims a fresh slot, re-mints pending outbox
+    /// entries under the new identity, then resumes the pull cycle.
+    case reenrollRequired(slot: Int, staleEpoch: Int, currentEpoch: Int)
+    /// CloudKit-only. All 15 assignable node-ID slots (1–15)
+    /// are occupied by recently-active devices. No records are applied.
+    /// Surfaced loud to the caller; the engine retries after a slot is freed.
+    case slotExhausted(activeCount: Int)
 }
 ```
 
@@ -610,7 +811,9 @@ cargo test -p convergence-kit
 ```
 
 Test files: `tests/none_engine_tests.rs`, `tests/federation_tests.rs`,
-`tests/wire_format_tests.rs`.
+`tests/federation_lww_tests.rs`, `tests/federation_inbound_event_tests.rs`,
+`tests/federation_observer_outbox_tests.rs`, `tests/wire_format_tests.rs`,
+`tests/json_conformance_tests.rs`.
 
 ## § 6 — Examples
 
@@ -669,23 +872,24 @@ sanctioned port difference.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
 | Sync direction | `SyncDirection` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncDirection` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw lowerCamel cases / Rust UpperCamel cases — identical variant set | Confirmed |
-| Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; same 4 variants, both default LWW-by-HLC | Confirmed |
-| Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`); serde defaults mirror Swift defaults | Confirmed |
-| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32` | Confirmed |
+| Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; 5 variants including `fieldLevelLWW` / `FieldLevelLWW`; both default LWW-by-HLC; wire encodes as camelCase "fieldLevelLWW" (both legs) | Confirmed |
+| Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`, `with_excluded_columns`); `excludedColumns: Set<String>` (Swift) / `excluded_columns: HashSet<String>` (Rust) — serde default empty | Confirmed |
+| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32`; `postApplyIntegrityHook` Swift-only closure (shipped; Rust `post_apply_hook` deferred — closures not serializable) | Confirmed |
 
 ### Cycle result + observation value types
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
 | Cycle receipt | `SyncReceipt` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncReceipt` (`rust/src/types.rs`) | public struct / pub struct | Swift `timestamp: Date` / Rust `timestamp_secs: i64` (Unix epoch); counts `Int` vs `usize`; both expose `empty` | Confirmed |
-| Event-stream payload | `SyncEvent` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncEvent` (`rust/src/types.rs`) | public enum / pub enum | Swift labelled-associated cases / Rust struct-variant cases; same 5 variants | Confirmed |
+| Event-stream payload | `SyncEvent` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncEvent` (`rust/src/types.rs`) | public enum / pub enum | Swift labelled-associated cases / Rust struct-variant cases; 6 variants: 5 shared + `remoteWakeReceived` (Swift) / `RemoteWakeReceived` (Rust parity arm, never constructed on Rust side — CloudKit is Swift-only) | Confirmed |
 | Coarse UI state | `SyncState` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncState` (`rust/src/types.rs`) | public enum / pub enum | Swift `case error` / Rust `Errored`; Swift `Date?` / Rust `Option<i64>` secs; same 4 states | Confirmed |
 
 ### Wire format (`SyncRecord` and TypedValue boxing)
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Wire record | `SyncRecord` (`Sources/ConvergenceKit/SyncRecord.swift`) | `SyncRecord` (`rust/src/record.rs`) | public struct / pub struct | identical fields; `rowKey: UUID` vs `row_key: Uuid`; Codable JSON ↔ serde_json wire-compatible | Confirmed |
+| Wire record | `SyncRecord` (`Sources/ConvergenceKit/SyncRecord.swift`) | `SyncRecord` (`rust/src/record.rs`) | public struct / pub struct | identical fields; `rowKey: UUID` vs `row_key: Uuid`; `columnHLCs: ColumnHLCMap?` vs `column_hlcs: Option<ColumnHLCMap>` (B-8); Codable JSON ↔ serde_json wire-compatible | Confirmed |
+| Column HLC map | `ColumnHLCMap` (`Sources/ConvergenceKit/FieldLWW/ColumnHLCMap.swift`) | `ColumnHLCMap` (`rust/src/record.rs`) | public struct / pub struct | Swift `[String: PackedHLC]` under `entries` key / Rust `BTreeMap<String, PackedHLC>` under `entries` key; both JSON-encode as `{"entries":{…}}`. Rust BTreeMap = alphabetical key order for deterministic encoding (C-8). | Confirmed |
 | Event kind | `SyncEventKind` (`Sources/ConvergenceKit/SyncRecord.swift`) | `SyncEventKind` (`rust/src/record.rs`) | public enum / pub enum | Swift `init(from:)`/`asStorageEvent` / Rust `From`/`Into<StorageEvent>`; same insert/update/delete | Confirmed |
 | Packed HLC | `PackedHLC` (`Sources/ConvergenceKit/SyncRecord.swift`) | `PackedHLC` (`rust/src/record.rs`) | public struct / pub struct | Swift `Int64`/`Int32` fields / Rust `i64`/`i32`; both bridge `HLC` | Confirmed |
 | Fingerprint wire | `FingerprintWire` (`Sources/ConvergenceKit/SyncRecord.swift`) | `FingerprintWire` (`rust/src/record.rs`) | public struct / pub struct | Swift 4×`UInt64` blocks / Rust 4×`u64`; both bridge `Fingerprint256` | Confirmed |
@@ -702,8 +906,8 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Federation engine | `FederationSyncEngine` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationSyncEngine` (`rust/src/federation.rs`) | public final class / pub struct | Both ports auto-populate the outbox by subscribing the storage observer at `enable` (SPEC § 5, B-7); Rust also exposes an explicit `enqueue` for direct-record callers; `init()` vs `new(identity, relay)`; Swift `pair(with:via:family:)` | Confirmed |
-| Transport abstraction | `Relay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `Relay` (`rust/src/federation.rs`) | public protocol / pub trait | Same hosted-relay seam, different verb shape: Swift inbox `send`/`drain` (poll) / Rust `register`(→`Receiver`)/`broadcast` (push). Both carry the signed envelope; bound `Sendable` vs `Send + Sync` | Confirmed |
+| Federation engine | `FederationSyncEngine` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationSyncEngine` (`rust/src/federation.rs`) | public final class / pub struct | Both ports auto-populate the outbox by subscribing the storage observer at `enable` (SPEC § 5, B-7); Rust also exposes an explicit `enqueue` for direct-record callers; `init()` vs `new(identity, relay)`. Both ports have a `pair` method: Swift `pair(with:via:family:)` takes a peer engine, relay, and family and calls `acceptPeering` on the remote to make it symmetric; Rust `pair(&mut self, peer:, family:)` takes a peer ref and records the public key — relay is shared at construction so no relay arg; each side must call `pair` on the other. | Confirmed |
+| Transport abstraction | `Relay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `Relay` (`rust/src/federation.rs`) | public protocol / pub trait | Same hosted-relay seam, different verb shape: Swift inbox `send`/`drain` (poll) / Rust `register`(→`Receiver`)/`broadcast` + `send_to` (push, targeted). Rust has an additional `send_to(from:to_public_key:envelope:)` that routes to one specific peer by public key — used by `push` to honor the pairing boundary. Both carry the signed envelope; bound `Sendable` vs `Send + Sync` | Confirmed |
 | In-process relay | `FederationRelay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`) | `FederationRelay` (`rust/src/federation.rs`) | public final class / pub struct | Swift `NSLock`-guarded inboxes / Rust `Mutex` + mpsc senders (+`Default`); same in-process semantics | Confirmed |
 | Signed wire envelope | `SignedEnvelope` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`), `PayloadKind` (same file), `envelopeSigningBytes(...)` (same file) | `SignedEnvelope` (`rust/src/federation.rs`), `PayloadKind` (same file), `envelope_signing_bytes` (same file) | public struct+enum+func / pub struct+enum+fn | Unified batch envelope: both ports carry `sender_public_key` (32B Ed25519), `payload_kind` (C1 tag: `syncRecordBatch`=0x01), opaque `payload` (JSON `[SyncRecord]` batch), `signature` (Ed25519 over canonical bytes — NOT raw JSON), `hlc` (batch-level). Canonical signing bytes are deterministic and byte-identical cross-port; golden vector in both test suites. `payload_kind` is the C1 extension point for `fieldWriteEventBatch`. Shape rule: Swift `Data`/`UInt8` vs Rust `Vec<u8>`/`u8` — same encoding | Confirmed |
 | Peer identity | `PeerIdentity` (`Sources/ConvergenceKitFederation/FederationIdentity.swift`) | `PeerIdentity` (`rust/src/federation.rs`) | public struct / pub struct | Swift `publicKey: Data` (32B Ed25519) / Rust `public_key: [u8;32]` | Confirmed |
@@ -723,7 +927,7 @@ sanctioned port difference.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; same 10 categories. Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed |
+| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncError` (`rust/src/types.rs`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; 10 shared categories + Swift-only CloudKit cases: `corruptRemoteIdentity(recordName:)` (shipped), `reenrollRequired(slot:staleEpoch:currentEpoch:)` (CloudKit-only, shipped), `slotExhausted(activeCount:)` (CloudKit-only, shipped). Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | Confirmed |
 | Result alias | (Swift: `throws` — no result type) | `SyncResult<T>` (`rust/src/types.rs`) | n/a / pub type alias | Swift uses `throws`; Rust port has no async runtime so it returns `Result<T, SyncError>` aliased as `SyncResult` — sanctioned async/throws ↔ Result seam | Confirmed |
 
 ### CloudKit backend — Apple-platform-bound (Exempt)
@@ -732,18 +936,181 @@ CloudKit is an Apple framework with no Rust counterpart by design
 (ConvergenceKit exposes CloudKit/Federation/None behind one protocol;
 only Federation/None have Rust ports).
 
+**`CloudKitSyncEngine` init signature (P3-M2):**
+
+```swift
+public init(containerIdentifier: String? = nil, enablePolling: Bool = false)
+```
+
+`enablePolling: Bool = false` — when `true`, `enable()` auto-starts an
+`AdaptivePollScheduler`. Default `false` preserves existing test behavior
+(manual push/pull drive).
+
+**`CloudKitSyncEngine.nudge()` — external accelerator seam (B-11):**
+
+```swift
+public func nudge() async
+```
+
+Fire an immediate inbound pull and reset the poll tier to `fast`. This is
+THE SEAM for external accelerators (SPEC B-11):
+
+- **P3-M3** — `OutboxDrainDebouncer` calls `nudge()` after each push cycle
+  so the remote peer's response arrives sooner than idle cadence.
+- **Future** — APNs silent-push wakeup handlers call `nudge()` rather than
+  `pull()` directly; the scheduler manages tier accounting.
+- **Future** — Local IPC from a companion process calls `nudge()` to wake
+  the poll loop.
+
+Behavior: if a scheduler is active (`enablePolling: true`), delegates to
+`AdaptivePollScheduler.nudge()` (interrupt sleep + reset tier). If no
+scheduler is running, fires a one-shot `pull()` directly — safe to call
+even without background polling.
+
+**`AdaptivePollScheduler` — the poll loop actor (P3-M2):**
+
+```swift
+public typealias SchedulerPullFn = @Sendable () async throws -> SyncReceipt
+public typealias SchedulerSleepFn = @Sendable (Duration) async throws -> Void
+
+public actor AdaptivePollScheduler {
+    public init(pull: @escaping SchedulerPullFn,
+                sleep: @escaping SchedulerSleepFn = { d in try await Task.sleep(for: d) })
+    public func start()              // idempotent
+    public func stop()               // deterministic; satisfies I-2
+    public func nudge()              // interrupt sleep + reset tier to fast
+    public var currentTier: PollTier { get }
+    public var nextIntervalMs: Int64 { get }
+}
+```
+
+Injection seam: pass `sleep: { _ in }` in tests for immediate-return loops.
+Sleep interruption: `nudge()` cancels an internal sleep sub-task WITHOUT
+cancelling the main loop task.
+
+**`PollTierPolicy` — pure tier decision table (P3-M2):**
+
+```swift
+public enum PollTier: Equatable, Sendable, CustomStringConvertible {
+    case fast   // 20 s — recent remote or local activity
+    case mid    // 90 s — activity receding
+    case idle   // 5 min — zone quiescent
+}
+
+public struct PollTierPolicy: Sendable {
+    public static let fastIntervalMs:     Int64 = 20_000   // 20 s
+    public static let midIntervalMs:      Int64 = 90_000   // 90 s
+    public static let idleIntervalMs:     Int64 = 300_000  // 5 min
+    public static let activityWindowMs:   Int64 = 120_000  // 2 min hold-fast window
+
+    public init()
+    public var tier: PollTier { get }
+    public var lastActivityMs: Int64? { get }
+    public var nextIntervalMs: Int64 { get }
+
+    public mutating func recordNonEmptyPull(nowMs: Int64)  // → fast, stamp activity
+    public mutating func recordEmptyPull(nowMs: Int64)     // → hold fast (in window) or decay
+    public mutating func recordNudge(nowMs: Int64)         // → fast, stamp activity
+}
+```
+
+All mutation methods take `nowMs: Int64` (milliseconds since Unix epoch)
+so the full transition table is deterministically testable without OS time
+calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
+
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Status |
 |---|---|---|---|---|---|
-| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
+| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit). `init(containerIdentifier:enablePolling:)` P3-M2. `nudge()` P3-M2 (B-11 seam). `registerZoneSubscription()`, `deregisterZoneSubscription()`, `handleRemoteNotification(userInfo:)` shipped P3-M3 (zone subscription + remote-wake accelerator). | Exempt |
+| Adaptive poll scheduler | `AdaptivePollScheduler` (`Sources/ConvergenceKitCloudKit/Engine/AdaptivePollScheduler.swift`) | — | public actor / — | Rust: none — Apple platform binding. `SchedulerPullFn`, `SchedulerSleepFn` typealias. Injected sleep for testability. Shipped P3-M2 | Exempt |
+| Poll tier policy | `PollTierPolicy`, `PollTier` (`Sources/ConvergenceKit/Loop/PollTierPolicy.swift`) | — | public struct, public enum / — | Rust: none — CloudKit-specific. Pure table, no OS calls, `nowMs: Int64` injection. Shipped P3-M2 | Exempt |
 | CKRecord ↔ row mapping | `CKRecordMapping` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public enum / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
-| Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
-| CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | Exempt |
+| Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — stored: `table`, `rowKey`, `values`, `syncMeta: SyncMeta`; computed: `hlc`, `schemaVersion`, `kitID` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). `hlc`/`schemaVersion`/`kitID` are computed accessors backed by `syncMeta`, not stored fields. | Exempt |
+| CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift`) — fields: `hlc: HLC`, `schemaVersion: Int`, `kitID: String` | — | public struct / — | Rust: none — Apple platform binding (CloudKit). Introduced to separate sync metadata from app-data values in `DecodedRecord`. | Exempt |
 
 ---
 
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.6 -- 2026-07-17 (CVK-ICLOUD P5-M4)
+- Promoted 1.6-draft to 1.6 (status: active). All `(v1.2-draft)` markers
+  removed: `excludedColumns` / `postApplyIntegrityHook` / `FieldLevelLWW`
+  (all shipped in CVK-ICLOUD P2-M1..P2-M2); `reenrollRequired` /
+  `slotExhausted` (shipped P3-M3/P4-M5); `TableChange.origin` note
+  updated from forward-reference to shipped status (P1-M1). Conformance
+  table Status cells updated to "Confirmed" throughout.
+
+### 1.6-draft -- 2026-07-17 (CVK-ICLOUD P4-M6)
+- Updated `purpose` frontmatter: corrected SPEC conformance range from
+  C-1…C-8 to C-1…C-15 to reflect the executable conformance table added
+  in SPEC P4-M6 (C-9..C-15 with named green tests).
+- `subscribeAttached()` NOT added: method was specified for this pass but
+  does not exist in `CloudKitSyncEngine.swift` at this revision. Per
+  SPEC-BEFORE-REALITY, the INTERFACE is not updated until the
+  implementation lands.
+
+### 1.5-draft -- 2026-07-16 (CVK-ICLOUD P3-M3)
+- Added `SyncEvent.remoteWakeReceived` (Swift) and `SyncEvent::RemoteWakeReceived`
+  (Rust parity arm, never constructed on Rust side) to § 2 `SyncEvent` listing.
+- Updated `SyncEvent` concordance row: 5 → 6 variants; parity-arm note added.
+- Updated `CloudKitSyncEngine` in § 2: corrected `init` signature to
+  `init(containerIdentifier:enablePolling:)`, replaced future-only
+  `registerZoneSubscription(database:)` and `handleRemoteNotification` with
+  shipped signatures (`registerZoneSubscription()` — no CKDatabase arg,
+  routes through the protocol seam; `deregisterZoneSubscription()` new;
+  `handleRemoteNotification(userInfo:)` now with full host-app call pattern).
+- Updated `CloudKitSyncEngine` concordance table row: P3-M3 APIs marked shipped.
+
+### 1.4-draft -- 2026-07-16 (CVK-ICLOUD P3-M2)
+- Added `CloudKitSyncEngine.init(containerIdentifier:enablePolling:)` —
+  `enablePolling: Bool = false` opt-in for auto-starting the poll scheduler.
+- Added formal `nudge()` API documentation to CloudKit section (shipped;
+  previously listed as planned in 1.3-draft changelog only).
+- Added `AdaptivePollScheduler` actor (`SchedulerPullFn`, `SchedulerSleepFn`
+  typealias; `start()`, `stop()`, `nudge()`, `currentTier`, `nextIntervalMs`)
+  to CloudKit section. Injected sleep for testability; interruptible sleep
+  sub-task for `nudge()`.
+- Added `PollTierPolicy` struct and `PollTier` enum (pure tier decision
+  table: fast/mid/idle + 2-min activity window; `nowMs: Int64` injection
+  for deterministic testing) to CloudKit section.
+- Updated `CloudKitSyncEngine` concordance table row: `nudge()` shipped,
+  `registerZoneSubscription`/`handleRemoteNotification` marked future-only.
+- Added `AdaptivePollScheduler` and `PollTier`/`PollTierPolicy` rows to
+  concordance table.
+
+### 1.3-draft -- 2026-07-16 (updated CVK-ICLOUD P3-M4)
+- Added `SyncEvent.recordsHeldForMigration(count: Int)` to `SyncEvent` enum
+  (Swift); added `SyncEvent::RecordsHeldForMigration { count: usize }` to Rust
+  `SyncEvent`. Emitted by CloudKit and Federation backends when future-schema
+  records are held in the pending-skew queue during pull, or when the queue
+  remains non-empty after enable-time replay. SPEC B-3, B-10.
+
+### 1.3-draft -- 2026-07-16
+- Added `ConflictPolicy.fieldLevelLWW` (Swift and Rust; v1.2-draft) to § 2.
+- Added `SyncedTable.excludedColumns` / `excluded_columns` (Swift and Rust;
+  v1.2-draft) and `with_excluded_columns` Rust builder to § 2.
+- Changed `SyncManifest` from `Codable` to non-Codable (closure property
+  `postApplyIntegrityHook` is not serializable); added `postApplyIntegrityHook`
+  (Swift-only, v1.2-draft) to § 2.
+- Added `TableChange.origin` cross-reference note to § 2 (PersistenceKit
+  P1-M1; do not edit PersistenceKit docs here).
+- Added `SyncError.reenrollRequired(slot:staleEpoch:currentEpoch:)` and
+  `SyncError.slotExhausted(activeCount:)` (Swift-only, CloudKit, v1.2-draft)
+  to § 4.
+- Added `CloudKitSyncEngine` host-app accelerator surface: `nudge()`,
+  `registerZoneSubscription(database:)`, `handleRemoteNotification(userInfo:)`
+  (v1.2-draft) to § 2.
+- Updated concordance table in § 7 for all of the above.
+
+### 1.1 -- 2026-07-16
+- Added Swift-only `SyncError.corruptRemoteIdentity(recordName:)` case to § 4 (CloudKit pull guard, thrown when `recordName` cannot parse as UUID).
+- Added `SyncMeta` public struct to CloudKit backend types in § 2.
+- Fixed `DecodedRecord` signature: `syncMeta: SyncMeta` is the stored property; `hlc`/`schemaVersion`/`kitID` are computed `var` accessors, not stored `let` fields.
+- Added `send_to(from:to_public_key:envelope:)` to Rust `Relay` trait and `FederationRelay` implementation in § 2.
+- Added Rust `FederationSyncEngine.pair` method to § 2.
+- Expanded Rust test-file list in § 5 (four additional test files).
+- Updated concordance table in § 7 for all of the above.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

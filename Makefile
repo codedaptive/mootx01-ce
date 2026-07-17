@@ -35,6 +35,7 @@ BASE    ?= origin/develop/1.0.x
         test-product test-product-swift test-product-rust test-product-python \
         test-validation test-validation-swift test-validation-rust test-validation-python \
         test-one test-changed test-full test-all test-checks test-glk-latency test-topology-zoom \
+        test-perf-bench test-apple-app-ios \
         conformance release pkg list clean clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
@@ -52,6 +53,7 @@ help:
 	@echo "  test-validation — validation and benchmark harness tests"
 	@echo "  test-full    — unit + product + validation + check gates"
 	@echo "  test-topology-zoom — run the pure semantic-zoom controller tests"
+	@echo "  test-apple-app-ios — regenerate and build the Apple app for the generic iOS simulator"
 	@echo "  check-static-assets — verify StaticAssets.swift matches DashboardAssets/ source"
 	@echo "  check-edition-boundary — verify no SHARED file references an EE-only path"
 	@echo "  conformance  — cross-language shared-vector conformance gate"
@@ -134,6 +136,9 @@ test-topology-zoom:
 	@node --check apps/moot-mgr/Sources/MootManager/DashboardAssets/semantic-zoom.mjs
 	@node --check apps/moot-mgr/Tests/BrowserFixtures/topology_v3_server.mjs
 
+test-apple-app-ios:
+	@$(TEST_RUNNER) apple-app-ios
+
 test-full:
 	@$(MAKE) test-checks
 	@$(TEST_RUNNER) full
@@ -149,6 +154,15 @@ test-all: test-full
 # and EncodeIntakeTests.swift.
 test-glk-latency:
 	@$(TEST_RUNNER) glk-latency
+
+# CVK perf benchmarks: gated behind MOOT_PERF_BENCH=1 (self-skip on a bare
+# `swift test` via .enabled(if:) on each @Suite). The four Q1/Q2/Q3/Q5
+# suites pushed the ConvergenceKit CloudKit bundle from 2s to ~77s. The
+# isolated pass below runs them alone, serially, where timing numbers mean
+# what they claim. See the file header in
+# Tests/ConvergenceKitCloudKitTests/CVK_ICLOUD_P4M5_PerfTests.swift.
+test-perf-bench:
+	@$(TEST_RUNNER) perf-bench
 
 # ── Static-asset lint gate ─────────────────────────────────────────────────────
 # Verifies that apps/moot-mgr/Sources/MootManager/StaticAssets.swift is in sync

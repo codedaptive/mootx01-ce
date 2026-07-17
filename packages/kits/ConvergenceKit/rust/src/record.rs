@@ -57,7 +57,13 @@ impl From<SyncEventKind> for StorageEvent {
 
 /// Codable wrapper for HLC. Stable across encoders.
 /// JSON contract: camelCase field names matching Swift's property names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Ordering is lexicographic by (physical_time, logical_count, node_id) —
+/// the same field order as the struct declaration, which matches the Swift
+/// `Comparable` extension on `PackedHLC` (ColumnHLCMap.swift). `derive`
+/// on a struct with all-Ord fields uses declaration order, so the ordering
+/// is byte-identical to Swift's implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackedHLC {
     pub physical_time: i64,
@@ -178,6 +184,56 @@ impl From<SyncValueBox> for TypedValue {
     }
 }
 
+/// Per-column HLC map for the `fieldLevelLWW` conflict policy (B-8, v1.2-draft).
+///
+/// Stores one `PackedHLC` per column name. Wire format:
+/// `{"entries": {"col": {"physicalTime":…,"logicalCount":…,"nodeID":…}}}`.
+///
+/// WHY `BTreeMap` (not `HashMap`):
+/// `BTreeMap` serialises keys in alphabetical order, producing deterministic
+/// JSON output regardless of insertion order. This guarantees byte-identical
+/// encoding between multiple serialisation passes and between Swift
+/// (which also sorts dictionary keys alphabetically via `JSONEncoder`'s
+/// default key encoding) and Rust. Byte-level parity is required by C-8.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ColumnHLCMap {
+    pub entries: BTreeMap<String, PackedHLC>,
+}
+
+impl ColumnHLCMap {
+    pub fn new() -> Self {
+        ColumnHLCMap {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Merge two ColumnHLCMaps, keeping the highest HLC per column.
+    /// Commutative: `a.merge(&b)` and `b.merge(&a)` produce the same result.
+    pub fn merge(&self, other: &ColumnHLCMap) -> ColumnHLCMap {
+        let mut result = self.entries.clone();
+        for (column, other_hlc) in &other.entries {
+            let entry = result.entry(column.clone()).or_insert(*other_hlc);
+            // Keep the higher HLC. PackedHLC fields are ordered: physicalTime,
+            // logicalCount, nodeID — same lexicographic order as Swift's Comparable.
+            let packed_other = other_hlc;
+            if packed_other.physical_time > entry.physical_time
+                || (packed_other.physical_time == entry.physical_time
+                    && packed_other.logical_count > entry.logical_count)
+                || (packed_other.physical_time == entry.physical_time
+                    && packed_other.logical_count == entry.logical_count
+                    && packed_other.node_id > entry.node_id)
+            {
+                *entry = *other_hlc;
+            }
+        }
+        ColumnHLCMap { entries: result }
+    }
+}
+
 /// Codable wrapper for a row's values map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncValueMap {
@@ -212,6 +268,27 @@ pub struct SyncRecord {
     /// Serializes as "kitID" to match Swift's property name (not "kitId").
     #[serde(rename = "kitID")]
     pub kit_id: String,
+    /// Set to `true` when this record represents a delete tombstone.
+    ///
+    /// WHY: explicit tombstone flag signals that the deletion HLC must
+    /// persist in the `_fed_sync_meta` side table after the row is
+    /// hard-deleted (A6 adjudication), preventing stale resurrections.
+    /// Matches Swift's `syncDeleted: Bool?` field (C-8 wire parity).
+    ///
+    /// Omitted from JSON when None (`skip_serializing_if`); decoded as
+    /// None when absent in older wire format (`default`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sync_deleted: Option<bool>,
+
+    /// Per-column HLC map for the `fieldLevelLWW` conflict policy (B-8, v1.2-draft).
+    ///
+    /// WHY wire-carried (A7): the sender knows which columns were written and at
+    /// which HLC. The receiver must not derive column HLCs from the row-grain HLC.
+    ///
+    /// Nil when `conflict_policy != fieldLevelLWW` or sender does not support
+    /// field-level LWW (backward-compat). Omitted from JSON when None (C-8 parity).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub column_hlcs: Option<ColumnHLCMap>,
 }
 
 impl SyncRecord {
@@ -232,6 +309,33 @@ impl SyncRecord {
             hlc: PackedHLC::from(hlc),
             schema_version,
             kit_id: kit_id.into(),
+            sync_deleted: None,
+            column_hlcs: None,
+        }
+    }
+
+    /// Construct a tombstone record for a delete event.
+    ///
+    /// A tombstone carries the delete HLC so the receiver can apply the
+    /// same LWW gate as for upserts and persist the HLC in the side table
+    /// after hard-deleting the row (A6 adjudication).
+    pub fn new_tombstone(
+        table: impl Into<String>,
+        row_key: Uuid,
+        hlc: HLC,
+        schema_version: i32,
+        kit_id: impl Into<String>,
+    ) -> Self {
+        SyncRecord {
+            table: table.into(),
+            event: SyncEventKind::Delete,
+            row_key,
+            values: None,
+            hlc: PackedHLC::from(hlc),
+            schema_version,
+            kit_id: kit_id.into(),
+            sync_deleted: Some(true),
+            column_hlcs: None,
         }
     }
 }

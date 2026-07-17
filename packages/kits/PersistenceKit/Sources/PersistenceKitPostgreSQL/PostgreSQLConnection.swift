@@ -114,7 +114,13 @@ func decodeRow(_ row: PostgresRow, columns: [ColumnDeclaration]) -> [String: Typ
     return out
 }
 
-private func decodeCell(_ cell: PostgresRandomAccessRow.Element, type: ColumnType) -> TypedValue {
+/// Decode a single PostgreSQL result cell into a `TypedValue` using the
+/// declared column type. Returns `.null` on any decode failure (including
+/// SQL NULL values, which are the correct representation for missing data).
+///
+/// Module-internal so `PostgreSQLDatasetStore` can call it for aggregate
+/// MIN/MAX decoding without duplicating the type-switch logic.
+func decodeCell(_ cell: PostgresRandomAccessRow.Element, type: ColumnType) -> TypedValue {
     do {
         switch type {
         case .uuid:

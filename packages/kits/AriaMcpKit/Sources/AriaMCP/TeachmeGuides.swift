@@ -484,6 +484,9 @@ enum TeachmeGuides {
 
         Pass a query string to filter by substring match across subject,
         predicate, and object. Omit query to return all active facts.
+        For deterministic identity checks, use subject_exact, predicate_exact,
+        object_exact, and/or source_id_exact. Exact fields are case-sensitive
+        and combine with each other and query. limit defaults to 100 (max 500).
 
         When to use vs siblings:
           - moot_fact_timeline — to see retired facts and full history
@@ -496,6 +499,11 @@ enum TeachmeGuides {
 
         Example (all facts):
           {}   (or omit entirely for default estate)
+
+        Example (exact source identity):
+          { "subject_exact": "calendar.event.ev-1",
+            "predicate_exact": "scheduled",
+            "source_id_exact": "miner:calendar" }
 
         Response:
           facts matching "Alice": N
@@ -616,12 +624,11 @@ enum TeachmeGuides {
     //   Tier 5:  ToolProjection.estateTools() minus palace_import  (7 always; +1 vault-gated)
     //   Tier 6:  LensTools.tools().count + 4 Tier-6 recipe tools  (27)
     //   Tier 7:  RecipeTools.tools().count minus 4 Tier-6 tools    (8)
-    //   Tier 8:  VaultTools.vaultToolNames.count (vault-on only)   (5)
-    //   Tier 9:  1 (moot_federated_search, always present)         (1)
-    //   Total vault-on:  ToolProjection.tools(environment:[:]).count (68)
-    //   Total vault-off: ToolProjection.tools(environment:["MOOTX01_VAULT":"0"]).count (62)
-    //   No Tier 8/Dataset here: DatasetTools does not exist on this branch's
-    //   registry (1.1.x-only surface). The tier list stops at Vault/Federation.
+    //   Tier 8:  DatasetTools.tools().count                        (3)
+    //   Tier 9:  VaultTools.vaultToolNames.count (vault-on only)   (5)
+    //   Tier 10: 1 (moot_federated_search, always present)         (1)
+    //   Total vault-on:  ToolProjection.tools(environment:[:]).count (71)
+    //   Total vault-off: ToolProjection.tools(environment:["MOOTX01_VAULT":"0"]).count (65)
     private static var estateStatusGuide: String {
         // Tier counts derived from the live registry.
         let tier1 = ToolProjection.coreMemoryTools().count
@@ -637,8 +644,9 @@ enum TeachmeGuides {
         // Tier 7: remaining recipe tools (dream, consolidate, distilled, recollect, hunt,
         //         list_recipes, run_migration, confirm_migration).
         let tier7 = RecipeTools.tools().count - tier6RecipeCount
-        let tier8 = VaultTools.vaultToolNames.count  // vault-on only
-        let tier9 = 1  // moot_federated_search
+        let tier8 = DatasetTools.tools().count
+        let tier9 = VaultTools.vaultToolNames.count  // vault-on only
+        let tier10 = 1  // moot_federated_search
         // Totals from the live registry (empty env = vault-on default).
         let totalVaultOn  = ToolProjection.tools(environment: [:]).count
         let totalVaultOff = ToolProjection.tools(environment: ["MOOTX01_VAULT": "0"]).count
@@ -683,11 +691,14 @@ enum TeachmeGuides {
               moot_recollect, moot_hunt_contradictions, moot_list_recipes,
               moot_run_migration, moot_confirm_migration
 
-            Tier 8 — Vault (\(tier8) tools, vault-on only):
+            Tier 8 — Dataset (\(tier8) tools):
+              moot_file_dataset, moot_dataset_query, moot_dataset_stats
+
+            Tier 9 — Vault (\(tier9) tools, vault-on only):
               moot_vault_export, moot_vault_import, moot_vault_status,
               moot_vault_reconcile, moot_vault_job
 
-            Tier 9 — Federation (\(tier9) tool):
+            Tier 10 — Federation (\(tier10) tool):
               moot_federated_search
 
             Teaching mechanism:

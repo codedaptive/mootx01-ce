@@ -143,6 +143,20 @@ private func makeAuditEvent(estateID: UUID, rowID: UUID, physicalTime: Int64) ->
 
 // MARK: - §10 Incremental Replication Tests
 
+/// Poll `condition` up to ~5 s (50 × 100 ms) rather than waiting one fixed
+/// interval for the observer AsyncStream to drain into the dirty-set.
+/// `observe()` registers synchronously, but delivery runs on a detached task,
+/// and under the parallel full-lane's load that task can land past any single
+/// fixed sleep — the flake class fixed in 9629d17a (ObserverSink) and 14d4dc4a
+/// (PK-TEST-01). Returns as soon as the condition holds; the trailing
+/// assertion then confirms it (and reports the real value if it never did).
+private func pollObserver(_ condition: () async -> Bool) async throws {
+    for _ in 0..<50 where !(await condition()) {
+        try await Task.sleep(nanoseconds: 100_000_000) // 100 ms
+    }
+}
+
+
 @Suite("IncrementalReplicationTests")
 struct IncrementalReplicationTests {
 
@@ -199,7 +213,7 @@ struct IncrementalReplicationTests {
         }
 
         // Allow the observer AsyncStream to deliver the 3 update events.
-        try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        try await pollObserver { await session.dirtySet.count() >= 3 }
 
         // Incremental sync — should write exactly 3 rows.
         let incCursor = try await session.sync(
@@ -268,7 +282,7 @@ struct IncrementalReplicationTests {
         )
 
         // Allow observer to deliver the delete event.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver { await session.dirtySet.count() >= 1 }
 
         // Sync — re-scan finds no row → delete issued to destination.
         let delCursor = try await session.sync(
@@ -334,7 +348,7 @@ struct IncrementalReplicationTests {
         let auditEvent2 = makeAuditEvent(estateID: estateID, rowID: id2, physicalTime: 2_000)
         try await source.auditLog.append(auditEvent2)
 
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver { await session2.dirtySet.count() >= 1 }
 
         let cursor2 = try await session2.sync(from: source, to: destination, fromCursor: fullCursor)
 
@@ -542,7 +556,7 @@ struct IncrementalReplicationTests {
         )
 
         // Allow observer to deliver both events.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver { await session.dirtySet.count() >= 2 }
 
         let dirtyCount = await session.dirtySet.count()
         // Both tables should have contributed a dirty key.
@@ -606,7 +620,7 @@ struct IncrementalReplicationTests {
             values: itemRow(id: id2, adjectiveBitmap: 0b1000),
             conflictColumns: ["id"]
         )
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver { await session.dirtySet.count() >= 1 }
 
         // Incremental sync: only event3 should be sent (events 1 and 2 are before the watermark).
         let cursor2 = try await session.sync(from: source, to: destination, fromCursor: fullCursor)
@@ -863,7 +877,11 @@ struct IncrementalReplicationTests {
         )
 
         // Allow observer to deliver events.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver {
+            let blobs = await session.blobDirtySet.count()
+            let rows = await session.dirtySet.count()
+            return blobs >= 1 && rows >= 1
+        }
 
         let zeroCursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
         let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor)
@@ -901,7 +919,11 @@ struct IncrementalReplicationTests {
             conflictColumns: ["id"]
         )
 
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver {
+            let blobs = await session.blobDirtySet.count()
+            let rows = await session.dirtySet.count()
+            return blobs >= 1 && rows >= 1
+        }
 
         let zeroCursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
         let cursor = try await session.sync(from: source, to: destination, fromCursor: zeroCursor)
@@ -947,7 +969,11 @@ struct IncrementalReplicationTests {
         )
 
         // Allow the observer tasks to deliver the events.
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await pollObserver {
+            let blobs = await session.blobDirtySet.count()
+            let rows = await session.dirtySet.count()
+            return blobs >= 1 && rows >= 1
+        }
 
         // Blob dirty-set must contain the put event — proving the SQLite backend
         // emitted a real event rather than an empty stream.
@@ -965,7 +991,7 @@ struct IncrementalReplicationTests {
 
         // Now delete the blob — must emit a delete event.
         try await source.blobStore.delete(key: blobKey)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await pollObserver { await session.blobDirtySet.count() >= 1 }
 
         // Also dirty a row so sync proceeds.
         _ = try await source.rowStore.upsert(
@@ -973,7 +999,7 @@ struct IncrementalReplicationTests {
             values: itemRow(id: rowID, adjectiveBitmap: 0b1111),
             conflictColumns: ["id"]
         )
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver { await session.dirtySet.count() >= 1 }
 
         let cursor2 = try await session.sync(from: source, to: destination, fromCursor: cursor)
         #expect(cursor2.blobsWritten >= 1, "Incremental sync on SQLite must propagate the blob delete")
@@ -1026,7 +1052,7 @@ struct IncrementalReplicationTests {
         try await source.blobStore.put(key: blobKey, bytes: blobBytes)
 
         // Allow the blob observer task to deliver the event.
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await pollObserver { await session.blobDirtySet.count() >= 1 }
 
         let blobCountBeforeAbort = await session.blobDirtySet.count()
         #expect(blobCountBeforeAbort >= 1,
@@ -1127,7 +1153,7 @@ struct IncrementalReplicationTests {
             conflictColumns: ["id"]
         )
 
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await pollObserver { await session.blobDirtySet.count() >= 1 }
 
         // Drain the blob dirty-set, simulating a failed sync drain.
         let drained = await session.blobDirtySet.drain()

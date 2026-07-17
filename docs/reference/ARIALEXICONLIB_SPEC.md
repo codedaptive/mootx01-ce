@@ -1,8 +1,8 @@
 ---
 title: AriaLexiconLib Specification
-version: 1.0.0
+version: 1.1.1
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for AriaLexiconLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -114,7 +114,7 @@ empty set for `Vector` (the substrate-managed rung is not directly
 verb-addressable).
 
 **B-2 (role partition):** `Noun.role` partitions the eight shapes —
-`Drawer` → `primary`; `KGFact`, `Vector` → `rung`; `Tunnel`,
+`Drawer` → `primary`; `kgFact`, `Vector` → `rung`; `Tunnel`,
 `DiaryEntry`, `Association` → `structure`; `Proposal`,
 `LearnedReference` → `product`.
 
@@ -148,9 +148,12 @@ same lengths.
 every noun: drawer accepts {capture, reanchor, mutate, withdraw,
 expunge, recall}; tunnel {capture, mutate, withdraw, expunge, recall};
 kgFact {mutate, withdraw, expunge, recall}; vector {}; diaryEntry
-{recall}; proposal {mutate, withdraw, expunge, recall}; association
-{mutate, expunge, recall}; learnedReference {learn, mutate, withdraw,
-expunge, recall}.
+{recall}; proposal {propose, mutate, withdraw, expunge, recall};
+association {associate, mutate, expunge, recall}; learnedReference
+{learn, mutate, withdraw, expunge, recall}. A shape accepts the
+substrate-driven verb that produces it: `propose` creates a Proposal
+and `associate` accumulates connective weight into an Association, so
+each row includes its creating verb.
 
 **C-4:** the flow partition (B-3) and role partition (B-2) hold for
 every verb and noun.
@@ -160,7 +163,21 @@ identical case names, ordering, flow/role assignments, and acceptance
 sets. The shared conformance harness asserts this; a divergence fails
 the gate before either port ships.
 
+**C-6 (wire-string identity):** both ports serialize every case to the
+same camelCase wire string — Swift via `Codable` on the `String` raw
+values (case names ARE the raw values), Rust via serde
+(`rename_all = "camelCase"`) and the `as_str()` accessors on `Noun`,
+`Verb`, and `Adjective`. Rust tests pin `as_str()` and the serde output
+against the Swift raw values for every variant, so a JSON lexicon
+payload is byte-identical across ports.
+
 ## Changelog
+
+### 1.1.1 -- 2026-07-16
+B-2 role-partition: corrected `KGFact` typo to `kgFact` (wire-string/Swift-case spelling; Rust variant is `KgFact`). Neither port spells the variant `KGFact`. Aligns B-2 with C-3 which already used `kgFact`.
+
+### 1.1.0 -- 2026-07-16
+C-3 acceptance matrix corrected to match both shipped legs: proposal accepts `propose` and association accepts `associate` (each shape accepts the substrate-driven verb that produces it). Added C-6 wire-string identity (Swift Codable raw values ≡ Rust serde camelCase / `as_str()`).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -1,6 +1,6 @@
 ---
 title: LoopbackHTTP Interface
-version: 1.0.0
+version: 1.0.1
 status: active
 description: Public API surface of the LoopbackHTTP kit — the loopback-pinned POSIX socket and HTTP/SSE transport primitives.
 spec_type: kit
@@ -30,15 +30,23 @@ public enum POSIXSocket {
     public static func listenLoopbackTCP(port: UInt16) throws -> (fd: Int32, port: UInt16)
 
     /// Bind a Unix-domain listening socket at `path` and chmod it to 0600.
+    /// Any stale file at `path` is unlinked first, so a leftover socket from
+    /// a crashed run cannot block the bind.
     public static func listenUnix(path: String) throws -> Int32
 
     /// Accept one connection on a listening fd, or nil on interrupt/failure.
+    /// On Darwin, each accepted fd is marked SO_NOSIGPIPE so that a peer close
+    /// during a write surfaces as sendAll returning false (EPIPE) rather than
+    /// raising SIGPIPE and killing the process. On Linux, MSG_NOSIGNAL is
+    /// passed in sendAll instead (SO_NOSIGPIPE does not exist on Linux).
     public static func acceptOne(_ listenFD: Int32) -> Int32?
 
     /// Read up to `max` bytes. Empty Data on EOF; nil on error.
     public static func recv(_ fd: Int32, max: Int) -> Data?
 
-    /// Write all of `data` to the fd. Returns true on success.
+    /// Write all of `data` to the fd. Returns true on success. A peer-closed
+    /// connection returns false (EPIPE) rather than raising SIGPIPE — Darwin
+    /// fds are marked SO_NOSIGPIPE at accept; Linux passes MSG_NOSIGNAL here.
     @discardableResult
     public static func sendAll(_ fd: Int32, _ data: Data) -> Bool
 }
@@ -163,3 +171,13 @@ ADR-LOOPBACKHTTP-001.
 | HTTP request wire type | `HTTPRequest` | — | public struct / — | Swift-only wire DTO for incoming HTTP requests; Rust side uses its own parse layer | — | Exempt (platform binding) |
 | HTTP response wire type | `HTTPResponse` | — | public struct / — | Swift-only wire DTO for HTTP responses; Rust side builds responses directly | — | Exempt (platform binding) |
 | Server-sent events stream | `SSEStream` | — | public struct / — | Swift-only SSE write helper; no Rust port (Apple-only MCP transport surface) | — | Exempt (platform binding) |
+
+---
+
+## Changelog
+
+### 1.0.1 -- 2026-07-16
+Added SIGPIPE-suppression note to `acceptOne` and `sendAll` (SO_NOSIGPIPE on Darwin / MSG_NOSIGNAL on Linux). Added stale-file-removal note to `listenUnix`. No API changes.
+
+### 1.0.0 -- 2026-06-14
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

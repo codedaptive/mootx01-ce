@@ -93,6 +93,11 @@ let package = Package(
             name: "SQLCipher",
             path: "Sources/SQLCipher",
             exclude: ["LICENSE.md"],
+            // Privacy manifest (M-MXA-5): declares the amalgamation's
+            // required-reason API usage (stat family → FileTimestamp C617.1,
+            // statfs/fstatvfs → DiskSpace E174.1) so Xcode's aggregated
+            // privacy report picks it up from the resource bundle.
+            resources: [.copy("PrivacyInfo.xcprivacy")],
             publicHeadersPath: "include",
             cSettings: [
                 .define("SQLITE_HAS_CODEC"),
@@ -192,6 +197,10 @@ let package = Package(
             dependencies: [
                 "PersistenceKit",
                 "PersistenceKitSQLite",
+                // PersistenceKitInMemory: TransactionBoundaryTests uses InMemoryStorage
+                // as a comparison backend. Pre-existing implicit dep — made explicit here
+                // to fix the linker failure on SPM 6 strict mode. (MX-TAB-1 surfaced this.)
+                "PersistenceKitInMemory",
                 "PersistenceKitConformance",
                 "SubstrateTypes",
                 // SQLCipher: CorruptReadBackTests opens the raw DB file via the
@@ -225,6 +234,22 @@ let package = Package(
                 "SQLCipher",
             ],
             path: "Tests/PersistenceKitReplicationTests"
+        ),
+        // MX-TAB-1 dataset store test suite.
+        // Runs round-trip tests against both SQLite and InMemory backends, covering
+        // the five DatasetStore verbs, identifier validation, column stats, PK
+        // pre-sort, the default-throw feature gate, and BINARY collation parity.
+        .testTarget(
+            name: "PersistenceKitDatasetTests",
+            dependencies: [
+                "PersistenceKit",
+                "PersistenceKitInMemory",
+                "PersistenceKitSQLite",
+                "SubstrateTypes",
+                // SQLCipher: SQLiteStorage requires it (SQLiteBackend uses the vendored engine).
+                "SQLCipher",
+            ],
+            path: "Tests/PersistenceKitDatasetTests"
         ),
     ]
 )

@@ -18,6 +18,7 @@
 //!                                         ├─► teachme pre-check (intercepts before any runner)
 //!                                         ├─► interface_tools (Tier 1–5 + maintenance/admin)
 //!                                         ├─► vault_tools (moot_vault_export, moot_vault_import, …)
+//!                                         ├─► dataset_tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats; MX-TAB-7b)
 //!                                         ├─► recipe_tools (moot_list_lenses, moot_synthesize, …)
 //!                                         ├─► lens_tools (moot_lens_keystones … moot_lens_concepts)
 //!                                         └─► hint injection (CoachingEngine, non-error results only)
@@ -41,6 +42,7 @@
 
 pub mod build_serial;
 pub mod coaching_engine;
+pub mod dataset_tools;
 pub mod dispatch;
 pub mod dispatcher;
 // monitoring_control: injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
