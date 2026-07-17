@@ -793,6 +793,11 @@ impl SyncEngine for FederationSyncEngine {
             }
         }
 
+        // Tombstone GC: run if the 24 h interval has elapsed since the last sweep.
+        // Called on every successful pull; best-effort — a GC failure does not abort
+        // the pull or increment conflicts. Mirrors Swift gcIfDue(nowMs:).
+        gc_if_due(&storage.row_store(), now_millis());
+
         let receipt = SyncReceipt::now(0, pulled, conflicts);
         self.state.last_pull_secs = Some(receipt.timestamp_secs);
         self.emit(SyncEvent::RemoteChangesApplied { count: pulled });
@@ -1185,6 +1190,50 @@ const FED_SYNC_META_TABLE: &str = "_fed_sync_meta";
 /// col_hlc encoding, and PK structure are byte-identical to the Swift side.
 const FED_SYNC_META_COLS_TABLE: &str = "_fed_sync_meta_cols";
 
+// ─── tombstone GC constants ────────────────────────────────────────────────────
+
+/// Minimum seconds a tombstone HLC entry persists in `_fed_sync_meta` before
+/// GC may compact it. 90 days = 7 776 000 s.
+///
+/// This value MUST STRICTLY EXCEED the slot-eviction long window (30 days,
+/// SlotLongInactivityWindow): a device idle just under the eviction window can
+/// return, re-enroll, and pull — and must still find every tombstone minted
+/// while it was away, or deleted rows would silently resurrect from its stale
+/// local copy. Equality is NOT sufficient (a device evicted at exactly the
+/// window boundary could race a GC sweep at the same boundary), so retention
+/// is 3× the eviction window (raised at the CVK-WB7 merge gate, 2026-07-17).
+/// If the eviction window ever changes, this constant must move with it,
+/// staying strictly greater.
+///
+/// Mirrors Swift `SyncTombstone.gcRetentionSeconds`.
+pub const TOMBSTONE_GC_RETENTION_SECS: i64 = 7_776_000; // 90 days
+
+/// How often (ms) the federation pull triggers a tombstone GC sweep. 24 h.
+///
+/// GC pressure is tiny — tombstones accumulate at the delete rate, not the
+/// overall write rate. A daily sweep is far more frequent than needed to keep
+/// tombstone count bounded; the retention window is 90 d (1 200× the interval).
+///
+/// Mirrors Swift `TombstoneGCSchedule.gcIntervalMs`.
+pub const TOMBSTONE_GC_INTERVAL_MS: i64 = 86_400_000; // 24 h
+
+/// Sentinel `table_name` value in `_fed_sync_meta` for the GC state row.
+///
+/// The leading underscore matches the convention for internal sentinel keys and
+/// cannot collide with a real application table name (application tables are
+/// caller-chosen bare identifiers; the protocol reserves underscore-prefixed
+/// names for system use). Mirrors Swift `TombstoneGCCoordinator`'s sentinel
+/// zone name pattern.
+const GC_SENTINEL_TABLE_NAME: &str = "_gc_state";
+
+/// Sentinel `primary_key` value in `_fed_sync_meta` for the GC state row.
+///
+/// Together with `GC_SENTINEL_TABLE_NAME`, this uniquely identifies the GC
+/// sentinel row. The `sync_hlc` field of this row stores the last-GC
+/// wall-clock ms directly (NOT a packed HLC — documented here so future
+/// readers do not misinterpret it as a sync event timestamp).
+const GC_SENTINEL_PRIMARY_KEY: &str = "_tombstone_sweep";
+
 /// Ensure both Federation side tables exist.
 ///
 /// Called from `enable()` before any `apply_record`. Uses `storage.migrate()`
@@ -1246,6 +1295,166 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
         },
     ]);
     storage.migrate(&schema).map_err(|e| e.to_string())
+}
+
+// ─── tombstone GC ─────────────────────────────────────────────────────────────
+
+/// Compact stale tombstone entries from `_fed_sync_meta`.
+///
+/// Queries all rows where `is_deleted = 1` (tombstone entries), unpacks the
+/// `sync_hlc` physical time, and deletes entries whose physical time is older
+/// than `TOMBSTONE_GC_RETENTION_SECS` ago. The retention window ensures
+/// in-flight stale resurrects from peers that have not recently synced are
+/// still gated by a live tombstone HLC entry (A6 stale-resurrect guard).
+///
+/// Returns the count of compacted entries.
+///
+/// Port of Swift `TombstoneGC.compact(from:sideTable:nowMillis:)`.
+fn tombstone_compact(row_store: &Arc<dyn RowStore>, now_ms: i64) -> usize {
+    let retention_ms = TOMBSTONE_GC_RETENTION_SECS * 1_000;
+
+    // CRITICAL: the stored sync_hlc physical field is 40-bit-truncated
+    // (HLC.packed() masks phys with 0xFF_FFFF_FFFF), while now_ms is full-width
+    // Unix ms (~1.75e12 in 2026 > 2^40 ≈ 1.10e12). Comparing an unmasked
+    // cutoff against truncated stored values would make EVERY tombstone look
+    // ~35 years old and compact them all instantly, silently destroying the
+    // A6 stale-resurrect guard (same failure class as the SlotTable eviction
+    // bug — Perkins P4-M4 finding). Mask the cutoff into the same 40-bit
+    // space so both sides of the comparison wrap identically.
+    let cutoff_ms: i64 = ((now_ms - retention_ms) as u64 & 0xFF_FFFF_FFFF) as i64;
+
+    // Query all tombstone entries for this side table.
+    // WHY query-then-delete rather than a single DELETE WHERE: the packed HLC
+    // stores physical time in the lowest 40 bits with node/logical in the upper
+    // bits. A direct SQL comparison on the packed int64 would not correctly
+    // isolate physical time; we unpack in Rust instead. Mirrors Swift TombstoneGC.compact.
+    let predicate = StoragePredicate::Eq(
+        Column::new(FED_SYNC_META_TABLE.to_string(), "is_deleted".to_string()),
+        TypedValue::Int(1),
+    );
+    let Ok(tombstones) = row_store.query(FED_SYNC_META_TABLE, Some(&predicate), &[], None, None)
+    else {
+        return 0;
+    };
+
+    let mut compacted = 0;
+    for row in tombstones {
+        let packed_i64 = match row.get("sync_hlc") {
+            Some(TypedValue::Int(i)) => *i,
+            _ => continue,
+        };
+
+        // Extract the low 40 bits as the physical time in milliseconds.
+        // Packed layout (cookbook §12.3): (node 8 bits << 56) |
+        //   (logicalCount 16 bits << 40) | (physicalTime 40 bits).
+        let physical_ms: i64 = (packed_i64 as u64 & 0xFF_FFFF_FFFF) as i64;
+
+        if physical_ms > cutoff_ms {
+            // Tombstone is within the retention window — keep it.
+            continue;
+        }
+
+        // Tombstone is beyond the retention window. Delete by (table_name, primary_key).
+        let tname = match row.get("table_name") {
+            Some(TypedValue::Text(t)) => t.clone(),
+            _ => continue,
+        };
+        let pk = match row.get("primary_key") {
+            Some(TypedValue::Text(p)) => p.clone(),
+            _ => continue,
+        };
+        let delete_pred = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new(FED_SYNC_META_TABLE.to_string(), "table_name".to_string()),
+                TypedValue::Text(tname),
+            ),
+            StoragePredicate::Eq(
+                Column::new(FED_SYNC_META_TABLE.to_string(), "primary_key".to_string()),
+                TypedValue::Text(pk),
+            ),
+        ]);
+        if row_store.delete(FED_SYNC_META_TABLE, &delete_pred).is_ok() {
+            compacted += 1;
+        }
+    }
+    compacted
+}
+
+/// Read the last-GC wall-clock ms from the GC sentinel row.
+///
+/// Returns 0 when no prior GC run has been recorded, so `(now_ms - 0)` is
+/// always `>= TOMBSTONE_GC_INTERVAL_MS` for any reasonable `now_ms` (well
+/// past the Unix epoch). Mirrors Swift `readLastGCMs(from:)`.
+fn read_gc_sentinel_ms(row_store: &Arc<dyn RowStore>) -> i64 {
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "table_name".to_string()),
+            TypedValue::Text(GC_SENTINEL_TABLE_NAME.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "primary_key".to_string()),
+            TypedValue::Text(GC_SENTINEL_PRIMARY_KEY.to_string()),
+        ),
+    ]);
+    let Ok(rows) = row_store.query(FED_SYNC_META_TABLE, Some(&predicate), &[], None, None) else {
+        return 0;
+    };
+    let Some(row) = rows.into_iter().next() else {
+        return 0;
+    };
+    match row.get("sync_hlc") {
+        Some(TypedValue::Int(ms)) => *ms,
+        _ => 0,
+    }
+}
+
+/// Write the last-GC wall-clock ms to the GC sentinel row.
+///
+/// The sentinel occupies `(table_name='_gc_state', primary_key='_tombstone_sweep')`
+/// in `_fed_sync_meta`. The `sync_hlc` field stores wall-clock ms directly —
+/// NOT a packed HLC. This sentinel row is never read as a tombstone gate;
+/// only `read_gc_sentinel_ms` reads it.
+///
+/// `is_deleted = 0` ensures the sentinel row is never swept by
+/// `tombstone_compact`, which only queries `is_deleted = 1` rows.
+///
+/// Mirrors Swift `writeLastGCMs(_:to:)`.
+fn write_gc_sentinel_ms(row_store: &Arc<dyn RowStore>, ms: i64) {
+    let mut values = BTreeMap::new();
+    values.insert("table_name".to_string(), TypedValue::Text(GC_SENTINEL_TABLE_NAME.to_string()));
+    values.insert("primary_key".to_string(), TypedValue::Text(GC_SENTINEL_PRIMARY_KEY.to_string()));
+    // sync_hlc: wall-clock ms of last GC run. NOT a packed HLC — this field
+    // is read only by read_gc_sentinel_ms; it never participates in the LWW gate.
+    values.insert("sync_hlc".to_string(), TypedValue::Int(ms));
+    values.insert("schema_version".to_string(), TypedValue::Int(0));
+    values.insert("kit_id".to_string(), TypedValue::Text(String::new()));
+    // is_deleted = 0: sentinel row MUST NOT be swept by tombstone_compact.
+    values.insert("is_deleted".to_string(), TypedValue::Int(0));
+    let _ = row_store.upsert(
+        FED_SYNC_META_TABLE,
+        values,
+        &["table_name".to_string(), "primary_key".to_string()],
+    );
+}
+
+/// Run tombstone GC if the 24 h interval has elapsed since the last sweep.
+///
+/// Reads the last-GC timestamp from the GC sentinel row in `_fed_sync_meta`,
+/// checks the `TOMBSTONE_GC_INTERVAL_MS` interval, runs `tombstone_compact`
+/// if due, and updates the sentinel. Best-effort — a storage failure leaves
+/// the sentinel unchanged so the next pull retries.
+///
+/// `now_ms` is injectable for testing; production callers pass `now_millis()`.
+///
+/// Mirrors Swift `FederationStateActor.gcIfDue(nowMs:)`, which calls
+/// `TombstoneGC.compact(from:sideTable:nowMillis:)` then `writeLastGCMs(_:to:)`.
+fn gc_if_due(row_store: &Arc<dyn RowStore>, now_ms: i64) {
+    let last_gc_ms = read_gc_sentinel_ms(row_store);
+    if (now_ms - last_gc_ms) < TOMBSTONE_GC_INTERVAL_MS {
+        return;
+    }
+    tombstone_compact(row_store, now_ms);
+    write_gc_sentinel_ms(row_store, now_ms);
 }
 
 /// Read the persisted sync HLC from `_fed_sync_meta` for a given (table, row_key).
@@ -1526,7 +1735,202 @@ fn tombstone_wins(tombstone_hlc: PackedHLC, local_column_hlcs: &ColumnHLCMap) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use persistence_kit::inmemory::InMemoryStorage;
     use std::collections::BTreeMap;
+
+    // ── tombstone GC test helpers ────────────────────────────────────────────
+
+    /// Fresh storage with `_fed_sync_meta` (and `_fed_sync_meta_cols`) initialised.
+    fn make_gc_storage() -> Arc<dyn Storage> {
+        let s = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        ensure_fed_sync_meta_table(&*s).expect("ensure_fed_sync_meta_table");
+        s
+    }
+
+    /// Count rows in `_fed_sync_meta` matching a predicate.
+    fn count_meta_rows(row_store: &Arc<dyn RowStore>, predicate: Option<&StoragePredicate>) -> usize {
+        row_store
+            .query(FED_SYNC_META_TABLE, predicate, &[], None, None)
+            .map(|r| r.len())
+            .unwrap_or(0)
+    }
+
+    /// Count tombstone rows (`is_deleted = 1`) in `_fed_sync_meta`.
+    fn count_tombstones(row_store: &Arc<dyn RowStore>) -> usize {
+        let pred = StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "is_deleted".to_string()),
+            TypedValue::Int(1),
+        );
+        count_meta_rows(row_store, Some(&pred))
+    }
+
+    // ── tombstone GC tests ───────────────────────────────────────────────────
+
+    /// GC compacts a tombstone that is past the 90 d retention window.
+    ///
+    /// Mirrors Swift `TombstoneGCRetentionInvariantTests`.
+    #[test]
+    fn gc_compact_when_due() {
+        let storage = make_gc_storage();
+        let row_store = storage.row_store();
+
+        // now_ms small enough that arithmetic stays below 2^40.
+        let now_ms: i64 = 10_000_000_000;
+        // Tombstone physical time: just past the 90 d retention boundary.
+        let past_retention_ms = now_ms - TOMBSTONE_GC_RETENTION_SECS * 1_000 - 1;
+        let old_hlc = HLC { physical_time: past_retention_ms, logical_count: 0, node_id: 1 };
+
+        // Write a tombstone entry for a fake row.
+        let row_key = Uuid::new_v4();
+        write_fed_tombstone_hlc(&row_store, "test_items", &row_key, old_hlc)
+            .expect("write tombstone");
+        assert_eq!(count_tombstones(&row_store), 1, "tombstone must exist before GC");
+
+        // Sentinel = 0 (no prior GC run) → interval check passes immediately.
+        gc_if_due(&row_store, now_ms);
+
+        assert_eq!(
+            count_tombstones(&row_store),
+            0,
+            "tombstone older than 90 d must be compacted"
+        );
+        // Sentinel must be updated to now_ms.
+        assert_eq!(
+            read_gc_sentinel_ms(&row_store),
+            now_ms,
+            "sentinel must record the GC run timestamp"
+        );
+    }
+
+    /// GC skips compaction when the 24 h interval has not elapsed.
+    #[test]
+    fn gc_skip_when_not_due() {
+        let storage = make_gc_storage();
+        let row_store = storage.row_store();
+
+        let now_ms: i64 = 10_000_000_000;
+        // Old tombstone — past retention, would be compacted if GC ran.
+        let past_retention_ms = now_ms - TOMBSTONE_GC_RETENTION_SECS * 1_000 - 1;
+        let old_hlc = HLC { physical_time: past_retention_ms, logical_count: 0, node_id: 1 };
+        let row_key = Uuid::new_v4();
+        write_fed_tombstone_hlc(&row_store, "test_items", &row_key, old_hlc)
+            .expect("write tombstone");
+
+        // Sentinel = 1 second ago — interval has NOT elapsed (need 24 h = 86_400_000 ms).
+        write_gc_sentinel_ms(&row_store, now_ms - 1_000);
+
+        gc_if_due(&row_store, now_ms);
+
+        assert_eq!(
+            count_tombstones(&row_store),
+            1,
+            "tombstone must survive when GC interval has not elapsed"
+        );
+    }
+
+    /// A tombstone inside the 90 d retention window is kept by compact.
+    #[test]
+    fn gc_inside_retention_survives() {
+        let storage = make_gc_storage();
+        let row_store = storage.row_store();
+
+        let now_ms: i64 = 10_000_000_000;
+        // Recent tombstone: 1 day ago — well within the 90 d window.
+        let recent_ms = now_ms - 86_400_000;
+        let recent_hlc = HLC { physical_time: recent_ms, logical_count: 0, node_id: 1 };
+        let row_key = Uuid::new_v4();
+        write_fed_tombstone_hlc(&row_store, "test_items", &row_key, recent_hlc)
+            .expect("write recent tombstone");
+
+        // Sentinel = 0 → GC interval passes; compact will run.
+        gc_if_due(&row_store, now_ms);
+
+        assert_eq!(
+            count_tombstones(&row_store),
+            1,
+            "tombstone inside the 90 d retention window must not be compacted"
+        );
+    }
+
+    /// The GC sentinel row survives tombstone_compact (it has is_deleted = 0).
+    ///
+    /// `tombstone_compact` queries `WHERE is_deleted = 1`. The sentinel row has
+    /// `is_deleted = 0`, so the query never sees it — it cannot be accidentally
+    /// swept even when compact is called directly.
+    #[test]
+    fn gc_sentinel_survives_compaction() {
+        let storage = make_gc_storage();
+        let row_store = storage.row_store();
+
+        let now_ms: i64 = 10_000_000_000;
+        write_gc_sentinel_ms(&row_store, now_ms);
+
+        // Run compact with no tombstones — sentinel must be untouched.
+        tombstone_compact(&row_store, now_ms);
+
+        let sentinel_ms = read_gc_sentinel_ms(&row_store);
+        assert_eq!(
+            sentinel_ms, now_ms,
+            "sentinel row must survive tombstone_compact (is_deleted = 0 is invisible to the sweep)"
+        );
+    }
+
+    /// 2026-scale packed-HLC regression: a tombstone from 1 day ago must NOT be
+    /// compacted when now_ms exceeds 2^40 and both sides of the cutoff comparison
+    /// are correctly masked to 40 bits.
+    ///
+    /// Without the 40-bit mask on the cutoff, any packed physical time (which IS
+    /// already masked to 40 bits) would appear older than the unmasked cutoff
+    /// (~1.76e12), causing every tombstone to be silently compacted — destroying
+    /// the A6 stale-resurrect guard. This is the same failure class as the
+    /// SlotTable eviction bug (Perkins P4-M4 finding). The mask on both sides
+    /// wraps the comparison into the same 40-bit space so tombstones within the
+    /// retention window are correctly identified.
+    ///
+    /// Approximate 2026-07-17 wall-clock: 1_766_779_200_000 ms > 2^40 (1_099_511_627_776).
+    /// Physical time in the stored packed HLC is masked to 40 bits:
+    ///   stored_physical = tombstone_physical_time & 0xFF_FFFF_FFFF
+    ///   Without mask: cutoff ≈ 1.76e12 > any 40-bit stored value → all compacted (BUG).
+    ///   With mask:    cutoff & 0xFF_FFFF_FFFF < stored_physical → tombstone kept (CORRECT).
+    #[test]
+    fn gc_2026_scale_packed_hlc_regression() {
+        let storage = make_gc_storage();
+        let row_store = storage.row_store();
+
+        // Approximate 2026-07-17 wall-clock ms. Exceeds 2^40 = 1_099_511_627_776.
+        let now_ms: i64 = 1_766_779_200_000;
+
+        // Tombstone minted 1 day ago — physical_time > 2^40, so the HLC packer
+        // truncates it to 40 bits when storing sync_hlc.
+        let tombstone_physical = now_ms - 86_400_000; // 1 day ago, still within 90 d
+        let recent_hlc = HLC { physical_time: tombstone_physical, logical_count: 0, node_id: 1 };
+        let row_key = Uuid::new_v4();
+        write_fed_tombstone_hlc(&row_store, "test_items", &row_key, recent_hlc)
+            .expect("write 2026-scale tombstone");
+
+        // Sentinel = 0 → GC runs. If the mask is absent on the cutoff,
+        // the tombstone would be incorrectly compacted here.
+        gc_if_due(&row_store, now_ms);
+
+        assert_eq!(
+            count_tombstones(&row_store),
+            1,
+            "2026-scale tombstone 1 day old must survive (within 90 d retention) — \
+             failure means the 40-bit mask is missing from the cutoff comparison"
+        );
+
+        // Also verify the invariant directly: retention must strictly exceed the
+        // slot-eviction long window (30 d = 2_592_000 s).
+        // If this assertion fails, the constants drifted and the GC window is broken.
+        let slot_eviction_long_window_secs: i64 = 30 * 24 * 3_600; // 2_592_000 s
+        assert!(
+            TOMBSTONE_GC_RETENTION_SECS > slot_eviction_long_window_secs,
+            "TOMBSTONE_GC_RETENTION_SECS ({}) must strictly exceed the slot-eviction \
+             long window ({}) — equality is insufficient (race at window boundary)",
+            TOMBSTONE_GC_RETENTION_SECS,
+            slot_eviction_long_window_secs
+        );
+    }
 
     fn hlc(physical_time: i64, logical: i32, node: i32) -> PackedHLC {
         PackedHLC { physical_time, logical_count: logical, node_id: node }
