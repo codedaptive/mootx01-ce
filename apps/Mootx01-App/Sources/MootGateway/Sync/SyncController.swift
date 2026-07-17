@@ -1,6 +1,7 @@
 import Foundation
 import ConvergenceKit
 import PersistenceKit
+import LocusKit
 import OSLog
 
 // MARK: - SyncController  (app-side orchestration of ConvergenceKit sync)
@@ -40,10 +41,40 @@ public actor SyncController {
     /// the same one the ARIA verbs write through, so the engine observes the
     /// exact rows the estate mutates. For real device sync inject
     /// `CloudKitSyncEngine(containerIdentifier:)`; tests inject `NoSyncEngine()`.
-    public func enable(engine: any SyncEngine, manifest: SyncManifest) async throws {
-        try await engine.enable(manifest: manifest, storage: bridge.estateStorage())
+    ///
+    /// The sensitivity ceiling wraps storage BEFORE it is passed to `engine.enable()`.
+    ///
+    /// WHY this ordering is mandatory (Perkins Amendment 1, CVK-ICLOUD P5-M1):
+    /// `AppliedBatch.storage` (IntegrityHook.swift:56) IS the handle engine.enable()
+    /// received. Hook writes carry origin == .local and flow into the outbox
+    /// (hook-writes-must-ship, Kong Q2 adjudication). Passing the unwrapped rawStorage
+    /// to enable() would let hook-repair writes on restricted/secret rows carry
+    /// origin == .local, enter the outbox, and cross the CloudKit wire — leaking
+    /// above-ceiling content even though the initial change event was filtered.
+    /// The SensitivityFilteredStorage wrapper must be the single handle the engine holds.
+    ///
+    /// - Parameters:
+    ///   - engine: Concrete sync engine (`CloudKitSyncEngine` or `NoSyncEngine`).
+    ///   - manifest: The per-estate sync manifest (tables, policies, kitID).
+    ///   - ceiling: Sensitivity ceiling for outbound suppression and inbound gating.
+    ///     Defaults to `.elevated` (normal + elevated sync; restricted + secret gated).
+    ///   - backendName: Human-readable label registered with GeniusLocusKit for
+    ///     `moot_estate_status sync:` reporting ("cloudkit", "none", etc.).
+    public func enable(
+        engine: any SyncEngine,
+        manifest: SyncManifest,
+        ceiling: AdjectiveSensitivity = .elevated,
+        backendName: String = "cloudkit"
+    ) async throws {
+        let rawStorage = await bridge.estateStorage()
+        // Wrap storage before enable() — Perkins Amendment 1 invariant (see above).
+        let filteredStorage = SensitivityFilteredStorage(wrapping: rawStorage, ceiling: ceiling)
+        try await engine.enable(manifest: manifest, storage: filteredStorage)
         self.engine = engine
-        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public)")
+        // Register with GeniusLocusKit so moot_estate_status sync: reports real state.
+        // This is status-reporting only — it does NOT drive the engine lifecycle.
+        try await bridge.registerSyncEngine(engine, backendName: backendName)
+        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public), ceiling \(ceiling.rawValue, privacy: .public)")
     }
 
     /// Pull remote changes (engine applies + reconciles), then push local.
