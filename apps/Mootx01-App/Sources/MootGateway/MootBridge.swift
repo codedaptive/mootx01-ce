@@ -1,5 +1,6 @@
 import Foundation
 import AriaMCP
+import ConvergenceKit
 import GeniusLocusKit
 import LocusKit
 import PersistenceKit
@@ -72,10 +73,33 @@ public actor MootBridge {
     /// same file would give a distinct observer that never sees those writes).
     private let storage: any Storage
 
-    private init(dispatcher: ARIA_MCPDispatcher, storage: any Storage,
-                 serverName: String, databasePath: String?) {
+    /// The open GeniusLocusKit coordinator for this estate.
+    ///
+    /// Retained here (alongside the ToolDispatcher that also holds it) so that
+    /// `registerSyncEngine(_:backendName:)` can forward to
+    /// `GeniusLocusKit.registerSyncEngine(_:backendName:for:)` for
+    /// `moot_estate_status sync:` reporting. Without this handle, MootBridge
+    /// callers would need direct GeniusLocusKit access, breaking the abstraction.
+    private let kit: GeniusLocusKit
+
+    /// The estate handle for this bridge's open estate.
+    ///
+    /// Stored so `registerSyncEngine` can forward to the correct per-handle slot
+    /// in GeniusLocusKit's registry without the caller knowing the estate UUID.
+    private let handle: EstateHandle
+
+    private init(
+        dispatcher: ARIA_MCPDispatcher,
+        storage: any Storage,
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        serverName: String,
+        databasePath: String?
+    ) {
         self.dispatcher = dispatcher
         self.storage = storage
+        self.kit = kit
+        self.handle = handle
         self.serverName = serverName
         self.databasePath = databasePath
     }
@@ -84,15 +108,45 @@ public actor MootBridge {
     /// (`engine.enable(manifest:storage:)`). Same instance the verbs use.
     public func estateStorage() -> any Storage { storage }
 
+    /// Register a sync engine with GeniusLocusKit for `moot_estate_status sync:` reporting.
+    ///
+    /// Forwards to `GeniusLocusKit.registerSyncEngine(_:backendName:for:)` using this
+    /// bridge's open estate handle. Must be called AFTER `engine.enable()` so the engine
+    /// carries a valid state. SyncController.enable() calls this automatically — callers
+    /// do not call it directly.
+    ///
+    /// - Parameters:
+    ///   - engine: The same engine passed to `engine.enable()`.
+    ///   - backendName: Human-readable label: "cloudkit", "none", or "federation".
+    public func registerSyncEngine(_ engine: some SyncEngine, backendName: String) async throws {
+        try await kit.registerSyncEngine(engine, backendName: backendName, for: handle)
+    }
+
     // MARK: Attachment
+
+    // MARK: - Bridge components container
+
+    /// Components produced by the three-step wiring (schema → coordinator → dispatcher).
+    ///
+    /// Returned as a named struct so both `attachInMemory` and `attachSQLite` can
+    /// extract `kit` and `handle` without duplicating the wiring logic. Both are
+    /// stored in the resulting MootBridge for `registerSyncEngine` support.
+    private struct BridgeComponents {
+        let dispatcher: ARIA_MCPDispatcher
+        let kit: GeniusLocusKit
+        let handle: EstateHandle
+    }
 
     /// The three-step wiring (schema → coordinator → dispatcher) over an
     /// already-constructed storage backend. Mirrors `MootSidecar.attach`.
-    private static func makeDispatcher(
+    ///
+    /// Returns `BridgeComponents` so the caller can store `kit` and `handle`
+    /// for status-reporting operations (e.g. `registerSyncEngine`).
+    private static func makeComponents(
         storage: any Storage,
         owner: OwnerCredentials,
         serverName: String
-    ) async throws -> ARIA_MCPDispatcher {
+    ) async throws -> BridgeComponents {
         let kit = GeniusLocusKit()
         // Schema first (Estate.create installs it), then the coordinator
         // handle that drives every verb. `open` without `create` fails — the
@@ -104,7 +158,8 @@ public actor MootBridge {
         // Forward serverName as the host identity so facts/memories filed
         // through this bridge are stamped with the correct source.
         let tooling = ToolDispatcher(kit: kit, handle: handle, serverIdentity: serverName)
-        return ARIA_MCPDispatcher(info: info, tooling: tooling)
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+        return BridgeComponents(dispatcher: dispatcher, kit: kit, handle: handle)
     }
 
     /// Attach an ephemeral in-memory MOOT. Test-only callers select this
@@ -113,8 +168,15 @@ public actor MootBridge {
         let owner = OwnerCredentials(ownerIdentifier: "gateway-owner")
         let configuration = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let storage = InMemoryStorage(configuration: configuration)
-        let dispatcher = try await makeDispatcher(storage: storage, owner: owner, serverName: serverName)
-        return MootBridge(dispatcher: dispatcher, storage: storage, serverName: serverName, databasePath: nil)
+        let components = try await makeComponents(storage: storage, owner: owner, serverName: serverName)
+        return MootBridge(
+            dispatcher: components.dispatcher,
+            storage: storage,
+            kit: components.kit,
+            handle: components.handle,
+            serverName: serverName,
+            databasePath: nil
+        )
     }
 
     /// Attach a durable SQLite-backed MOOT at `url`. The cross-process edge
@@ -155,8 +217,15 @@ public actor MootBridge {
             encryptionConfig: .fullDatabase(key: key)
         )
         let storage = try SQLiteStorage(configuration: configuration)
-        let dispatcher = try await makeDispatcher(storage: storage, owner: owner, serverName: serverName)
-        return MootBridge(dispatcher: dispatcher, storage: storage, serverName: serverName, databasePath: url.path)
+        let components = try await makeComponents(storage: storage, owner: owner, serverName: serverName)
+        return MootBridge(
+            dispatcher: components.dispatcher,
+            storage: storage,
+            kit: components.kit,
+            handle: components.handle,
+            serverName: serverName,
+            databasePath: url.path
+        )
     }
 
     // MARK: JSON-RPC drive
