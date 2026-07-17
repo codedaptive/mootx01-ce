@@ -1347,7 +1347,14 @@ const FED_PENDING_SKEW_TABLE: &str = "_fed_pending_skew";
 /// updates its schema. Mirrors Swift `PendingSkewQueue.cap = 512`.
 const FED_SKEW_QUEUE_CAP: usize = 512;
 
-/// Ensure all three Federation side tables exist (v3, CVK-WC3).
+/// Side table name for the persistent estate Ed25519 identity (I-8, WC1).
+/// One row per estate: key_id TEXT PK (fixed "local"), secret_key BLOB
+/// (32 bytes, Ed25519 private key), public_key BLOB (32 bytes),
+/// created_at TEXT (ISO8601 per schema invariants — never REAL).
+/// At-rest posture: covered by SQLCipher per ADR-014 on the estate file.
+const FED_IDENTITY_TABLE: &str = "_fed_identity";
+
+/// Ensure all four Federation side tables exist (v4: WC3 skew + WC1 identity).
 ///
 /// Called from `enable()` before any `apply_record`. Uses `storage.migrate()`
 /// which is forward-only and idempotent.
@@ -1416,10 +1423,26 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
         ],
         vec!["id".to_string()],
     );
+    // v4 (WC1): persistent Ed25519 estate identity (I-8).
+    // One row per estate (key_id = "local"). At-rest posture: SQLCipher
+    // per ADR-014 covers the estate file. No custom crypto invented.
+    let identity_table = TableDeclaration::new(
+        FED_IDENTITY_TABLE,
+        vec![
+            ColumnDeclaration::text("key_id"),
+            // secret_key: 32-byte Ed25519 private key (SigningKey seed).
+            ColumnDeclaration::blob("secret_key"),
+            // public_key: 32-byte Ed25519 verifying key.
+            ColumnDeclaration::blob("public_key"),
+            // created_at: ISO8601 TEXT per schema invariants (never REAL).
+            ColumnDeclaration::text("created_at"),
+        ],
+        vec!["key_id".to_string()],
+    );
     let schema = SchemaDeclaration::new(
         "ConvergenceKitFederation",
-        3,
-        vec![meta_table, cols_table.clone(), skew_table.clone()],
+        4,
+        vec![meta_table, cols_table.clone(), skew_table.clone(), identity_table.clone()],
     )
     .with_migrations(vec![
         // v1 → v2: add _fed_sync_meta_cols per-column HLC side table
@@ -1437,8 +1460,61 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             to_version: 3,
             operations: vec![SchemaOperation::CreateTable(skew_table)],
         },
+        // v3 → v4: add _fed_identity persistent estate identity (I-8, WC1).
+        // Mirrors Swift FederationStateActor v3→v4.
+        Migration {
+            from_version: 3,
+            to_version: 4,
+            operations: vec![SchemaOperation::CreateTable(identity_table)],
+        },
     ]);
     storage.migrate(&schema).map_err(|e| e.to_string())
+}
+
+/// Load the estate's persistent Ed25519 identity from `_fed_identity`, or mint
+/// a fresh one and persist it (I-8, WC1).
+///
+/// Called by the host at startup — mirrors Swift `FederationStateActor.loadOrMintIdentity`.
+/// Runs `ensure_fed_sync_meta_table` first so callers need not pre-warm the schema.
+///
+/// At-rest posture: the estate file is covered by SQLCipher (ADR-014); no custom
+/// crypto is applied to the key bytes at this layer.
+///
+/// Returns `Err(String)` on storage failure; callers should surface the error.
+pub fn load_or_mint_identity(storage: &dyn Storage) -> Result<LocalIdentity, String> {
+    ensure_fed_sync_meta_table(storage)?;
+    let predicate = StoragePredicate::Eq(
+        Column::new(FED_IDENTITY_TABLE.to_string(), "key_id".to_string()),
+        TypedValue::Text("local".to_string()),
+    );
+    let rows = storage
+        .row_store()
+        .query(FED_IDENTITY_TABLE, Some(&predicate), &[], None, None)
+        .map_err(|e| e.to_string())?;
+    if let Some(row) = rows.into_iter().next() {
+        if let Some(TypedValue::Blob(secret_bytes)) = row.get("secret_key") {
+            if secret_bytes.len() == SECRET_KEY_LENGTH {
+                let mut arr = [0u8; SECRET_KEY_LENGTH];
+                arr.copy_from_slice(secret_bytes);
+                return Ok(LocalIdentity::from_secret(arr));
+            }
+        }
+    }
+    // No existing row — mint a fresh identity and persist it.
+    let identity = LocalIdentity::generate();
+    let secret = identity.secret_bytes().to_vec();
+    let pubkey = identity.public_key_bytes().to_vec();
+    let now = iso8601_utc_now();
+    let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+    values.insert("key_id".to_string(), TypedValue::Text("local".to_string()));
+    values.insert("secret_key".to_string(), TypedValue::Blob(secret));
+    values.insert("public_key".to_string(), TypedValue::Blob(pubkey));
+    values.insert("created_at".to_string(), TypedValue::Text(now));
+    storage
+        .row_store()
+        .upsert(FED_IDENTITY_TABLE, values, &["key_id".to_string()])
+        .map_err(|e| e.to_string())?;
+    Ok(identity)
 }
 
 // ─── tombstone GC ─────────────────────────────────────────────────────────────

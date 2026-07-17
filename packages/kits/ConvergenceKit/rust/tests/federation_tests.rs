@@ -613,3 +613,76 @@ fn disable_clears_paired_peers() {
     let receipt2 = engine_a.push().unwrap();
     assert_eq!(receipt2.pushed, 0, "re-enabled engine with no pairing must return empty");
 }
+
+// ── WC1: Ed25519 identity persistence tests ──────────────────────────────────
+
+/// Helper: open a fresh InMemoryStorage with the minimal app schema.
+/// load_or_mint_identity calls ensure_fed_sync_meta_table internally;
+/// it does NOT require the caller to pre-warm the federation schema.
+fn make_identity_storage() -> Arc<dyn Storage> {
+    use persistence_kit::{ColumnDeclaration, ColumnType, SchemaDeclaration, TableDeclaration};
+    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let schema = SchemaDeclaration::new(
+        "identity-test-kit",
+        1,
+        vec![TableDeclaration::new(
+            "items",
+            vec![ColumnDeclaration::new("id", ColumnType::Uuid)],
+            vec!["id".to_string()],
+        )],
+    );
+    storage.open(&schema).expect("open identity test schema");
+    storage
+}
+
+#[test]
+fn identity_persists_across_restart() {
+    use convergence_kit::load_or_mint_identity;
+
+    // Simulated estate storage (same Arc — represents same on-disk file after restart).
+    let storage = make_identity_storage();
+
+    // First call mints and persists a fresh identity.
+    let id1 = load_or_mint_identity(storage.as_ref())
+        .expect("load_or_mint_identity first call");
+    let pub1 = id1.public_key_bytes();
+
+    // Second call on the same storage must restore the identical keypair (I-8).
+    let id2 = load_or_mint_identity(storage.as_ref())
+        .expect("load_or_mint_identity second call");
+    let pub2 = id2.public_key_bytes();
+
+    assert_eq!(
+        pub1, pub2,
+        "public key must be identical across restarts for the same estate (I-8)"
+    );
+
+    // The restored identity must produce signatures verifiable under the original key.
+    let data = b"federation payload";
+    let sig = id2.sign(data);
+    assert!(
+        verify_signature(&sig, data, &pub1),
+        "signature from restored identity must verify under original public key"
+    );
+}
+
+#[test]
+fn distinct_estates_get_distinct_identities() {
+    use convergence_kit::load_or_mint_identity;
+
+    // Two distinct storages represent two distinct estates.
+    let storage_a = make_identity_storage();
+    let storage_b = make_identity_storage();
+
+    let id_a = load_or_mint_identity(storage_a.as_ref())
+        .expect("load_or_mint for estate A");
+    let id_b = load_or_mint_identity(storage_b.as_ref())
+        .expect("load_or_mint for estate B");
+
+    // Ed25519 keygen is random — two distinct estates must not share a keypair.
+    assert_ne!(
+        id_a.public_key_bytes(),
+        id_b.public_key_bytes(),
+        "distinct estates must produce distinct Ed25519 identities"
+    );
+}

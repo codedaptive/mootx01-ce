@@ -98,9 +98,9 @@ Wave A/B behaviors and their current Federation parity. "FED" means "Federation 
 | Parked outbox purge on tombstone | B-9 note | YES (P5-M1b) | N/A (no outbox yet) | N/A |
 | Schema-skew pending queue | B-10, C-15 | YES (_fed_pending_skew v3) | NO (rejects as conflict) | **DRIFT** |
 | TombstoneGC | B-9 note | YES (gcIfDue after pull) | NO | **DRIFT** |
-| Side-schema version | B-12 | v3 | v2 | **DRIFT** |
+| Side-schema version | B-12 | v4 | v4 | **PARITY (WC1)** |
 | Durable outbox | I-12, B-11 | NO (in-memory) | NO (in-memory) | PARITY (both missing) |
-| Identity persistence | I-8 | NO (ephemeral) | NO (ephemeral) | PARITY (both missing) |
+| Identity persistence | I-8 | YES (_fed_identity v4) | YES (_fed_identity v4) | **PARITY (WC1)** |
 | Peer persistence | I-8 | NO | NO | PARITY (both missing) |
 | Signed pairing handshake | B-7 | TYPED NOT WIRED | TYPED NOT WIRED | PARITY (both missing) |
 | SyncValueBox depth cap | row 11 | NO | NO | PARITY (both missing) |
@@ -149,7 +149,13 @@ Seven missions, two can run in parallel after WC1.
 
 ---
 
-### WC1 — Federation identity persistence (FOUNDATION GATE)
+### ~~WC1 — Federation identity persistence (FOUNDATION GATE)~~ DONE (CVK-WC1, 2026-07-17)
+
+**Completed:** `_fed_identity` side table added (Swift v3→v4, Rust v2→v4 via sequential
+migrations). `loadOrMintIdentity` / `load_or_mint_identity` persist the Ed25519 keypair at
+`enable()`. Identity survives disable/enable and process restart. Rust v2→v3 carries
+`_fed_pending_skew` table schema (behavioral logic in WC3). 231 Swift / 103 Rust tests, both
+exit 0. SPEC I-8 and B-7 updated.
 
 **Scope:** LocalIdentity must survive process restarts. Both legs.
 

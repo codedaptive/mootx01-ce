@@ -83,7 +83,7 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
     }
 
     public var identity: LocalIdentity {
-        get async { stateActor.localIdentity }
+        get async { await stateActor.localIdentity }
     }
 }
 
@@ -242,7 +242,10 @@ public final class FederationRelay: Relay, @unchecked Sendable {
 // MARK: - FederationStateActor
 
 actor FederationStateActor {
-    let localIdentity = LocalIdentity()
+    // Placeholder replaced by loadOrMintIdentity(storage:) at the start of enable().
+    // Do not read localIdentity before enable() completes — the placeholder key
+    // is ephemeral and will not match the persisted estate identity (I-8, WC1).
+    var localIdentity: LocalIdentity = LocalIdentity()
     var manifest: SyncManifest?
     var storage: (any Storage)?
     var isEnabled: Bool = false
@@ -266,9 +269,13 @@ actor FederationStateActor {
         self.manifest = manifest
         self.storage = storage
         // Ensure Federation side tables exist: _fed_sync_meta (v1), _fed_sync_meta_cols
-        // (v2), and _fed_pending_skew (v3, R9). Mirrors the CloudKit engine's
-        // CKSideSchema.ensure call in enable().
+        // (v2), _fed_pending_skew (v3, R9), and _fed_identity (v4, WC1). Mirrors the
+        // CloudKit engine's CKSideSchema.ensure call in enable().
         try await Self.ensureFedSyncMetaTable(storage: storage)
+
+        // Load or mint the persistent estate Ed25519 identity (I-8, WC1).
+        // Must run after ensureFedSyncMetaTable so _fed_identity exists.
+        try await loadOrMintIdentity(storage: storage)
 
         // Schema-skew replay (R9, CVK-ICLOUD P3-M4).
         //
@@ -410,7 +417,11 @@ actor FederationStateActor {
     }
 
     func pair(with peerActor: FederationStateActor, via relay: any Relay, family: HyperplaneFamilySpec) async throws {
-        let peerPubKey = peerActor.localIdentity.publicKey
+        // localIdentity is now a var (actor-isolated) so cross-actor access requires await.
+        // WHY: WC1 changed localIdentity from let to var so loadOrMintIdentity can replace
+        // the placeholder with the persisted estate identity at enable() time. The await
+        // hop here is the correct Swift 6 cross-actor access pattern.
+        let peerPubKey = (await peerActor.localIdentity).publicKey
         peers.append(PairedPeer(publicKey: peerPubKey, actor: peerActor, relay: relay, family: family))
         // Symmetric: register ourselves on the peer too.
         await peerActor.acceptPeering(publicKey: localIdentity.publicKey, relay: relay, family: family)
@@ -932,8 +943,14 @@ actor FederationStateActor {
     /// Mirrors `_ck_pending_skew` added to CKSideSchema at v7.
     static let fedPendingSkewTable = "_fed_pending_skew"
 
-    /// Create the Federation side tables: _fed_sync_meta, _fed_sync_meta_cols,
-    /// and _fed_pending_skew.
+    /// Side table name for the persistent estate Ed25519 identity (I-8, WC1).
+    /// One row per estate: key_id TEXT PK (fixed "local"), secret_key BLOB (32 bytes,
+    /// Ed25519 private key), public_key BLOB (32 bytes), created_at TEXT (ISO8601).
+    /// At-rest posture: covered by SQLCipher per ADR-014. Keychain storage is a
+    /// follow-up for Swift only; Rust leg stores in-estate for parity.
+    static let fedIdentityTable = "_fed_identity"
+
+    /// Create the Federation side tables through schema v4.
     ///
     /// Must be called from `enable()` before any `applyInbound`. Mirrors
     /// `CKSideSchema.ensure`. Marked `internal` (not private) so tests that
@@ -942,6 +959,7 @@ actor FederationStateActor {
     /// - v1: `_fed_sync_meta` row-grain HLC (original)
     /// - v2: `_fed_sync_meta_cols` per-column HLC for fieldLevelLWW (CVK-ICLOUD P2-M1)
     /// - v3: `_fed_pending_skew` schema-skew pending queue (R9, CVK-ICLOUD P3-M4)
+    /// - v4: `_fed_identity` persistent estate Ed25519 identity (I-8, WC1)
     static func ensureFedSyncMetaTable(storage: any Storage) async throws {
         let fedSyncMetaDecl = TableDeclaration(
             name: fedSyncMetaTable,
@@ -1000,10 +1018,25 @@ actor FederationStateActor {
             primaryKey: ["id"]
         )
 
+        // _fed_identity: one-row side table for the persistent estate Ed25519 identity
+        // (I-8, WC1). key_id is fixed "local"; secret_key and public_key are the 32-byte
+        // raw Ed25519 key material. created_at is ISO8601 TEXT per schema invariants.
+        // At-rest: covered by SQLCipher (ADR-014). Keychain is a follow-up (Swift only).
+        let fedIdentityDecl = TableDeclaration(
+            name: fedIdentityTable,
+            columns: [
+                ColumnDeclaration(name: "key_id",     type: .text, nullable: false),
+                ColumnDeclaration(name: "secret_key", type: .blob, nullable: false),
+                ColumnDeclaration(name: "public_key", type: .blob, nullable: false),
+                ColumnDeclaration(name: "created_at", type: .text, nullable: false),
+            ],
+            primaryKey: ["key_id"]
+        )
+
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitFederation",
-            version: 3,
-            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl],
+            version: 4,
+            tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl, fedIdentityDecl],
             migrations: [
                 // v1 → v2: add per-column HLC side table for fieldLevelLWW.
                 Migration(fromVersion: 1, toVersion: 2, operations: [
@@ -1014,6 +1047,12 @@ actor FederationStateActor {
                 // applicable. Drained by SkewReplay.drainReady at enable() time.
                 Migration(fromVersion: 2, toVersion: 3, operations: [
                     .createTable(fedPendingSkewDecl),
+                ]),
+                // v3 → v4: add _fed_identity for persistent estate Ed25519 identity
+                // (I-8, WC1). loadOrMintIdentity reads or writes this table after
+                // ensure returns.
+                Migration(fromVersion: 3, toVersion: 4, operations: [
+                    .createTable(fedIdentityDecl),
                 ]),
             ]
         )
@@ -1085,6 +1124,52 @@ actor FederationStateActor {
     /// assigning lastPushAt and lastPullAt on receipts.
     private func nowMillis() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    // MARK: - Persistent estate identity (I-8, WC1)
+
+    /// Load the estate Ed25519 identity from `_fed_identity`, or mint a fresh one and
+    /// persist it if this is the first `enable()` on this estate.
+    ///
+    /// Must be called after `ensureFedSyncMetaTable` (which creates the table) and
+    /// before any push/pull/pair operation that reads `localIdentity`.
+    ///
+    /// At-rest posture: the 32-byte private key lives in the estate SQLite file.
+    /// SQLCipher covers the file at rest (ADR-014). Per-key Keychain storage is a
+    /// follow-up for the Swift leg only; both legs store in-estate for parity now.
+    ///
+    /// I-8: identity is per-estate. Keypair derivation is unchanged — only
+    /// persistence is added. A second `enable()` against the same storage reloads
+    /// the same keypair minted on the first `enable()`.
+    private func loadOrMintIdentity(storage: any Storage) async throws {
+        let rows = try await storage.rowStore.query(
+            table: Self.fedIdentityTable,
+            where: .eq(
+                Column(table: Self.fedIdentityTable, name: "key_id"),
+                .text("local")
+            )
+        )
+        if let row = rows.first, case .blob(let secretBlob) = row["secret_key"] {
+            // Restore from the persisted private key bytes.
+            localIdentity = try LocalIdentity(privateKeyBytes: secretBlob)
+            logger.debug("federation: restored LocalIdentity from _fed_identity")
+            return
+        }
+        // First enable on this estate: mint a new keypair and persist it.
+        let newIdentity = LocalIdentity()
+        let now = ISO8601DateFormatter().string(from: Date())
+        _ = try await storage.rowStore.upsertSync(
+            table: Self.fedIdentityTable,
+            values: [
+                "key_id":     .text("local"),
+                "secret_key": .blob(newIdentity.privateKey.rawRepresentation),
+                "public_key": .blob(newIdentity.publicKey),
+                "created_at": .text(now),
+            ],
+            conflictColumns: ["key_id"]
+        )
+        localIdentity = newIdentity
+        logger.info("federation: minted new LocalIdentity for estate, persisted to _fed_identity")
     }
 
     // MARK: - Tombstone GC (CVK-WB7)
