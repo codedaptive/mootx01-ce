@@ -15,6 +15,7 @@
 //   - explicit save then load returns the saved identity
 //   - save overwrites the existing row (upsert behaviour)
 //   - claimedAt round-trips without precision loss
+//   - _ck_device_identity exists after CKSideSchema.ensure alone (CVK-WB12 A11)
 
 import Testing
 import Foundation
@@ -230,5 +231,30 @@ struct DeviceIdentityStorePreferStoredTests {
         #expect(result.deviceUUID == saved.deviceUUID, "loadOrMint must prefer stored identity")
         #expect(result.slot       == saved.slot)
         #expect(result.epoch      == saved.epoch)
+    }
+}
+
+// MARK: - CKSideSchema v9 consolidation (CVK-WB12 A11)
+
+@Suite("CKSideSchema v9: _ck_device_identity consolidated")
+struct CKSideSchemaDeviceIdentityConsolidationTests {
+
+    /// Verifies that _ck_device_identity is queryable after CKSideSchema.ensure
+    /// alone — i.e. DeviceIdentityStore.ensureSchema is no longer required as a
+    /// separate call for the table to exist (CVK-WB12, A11 final consolidation).
+    @Test("_ck_device_identity table exists after CKSideSchema.ensure alone")
+    func deviceIdentityTableExistsAfterSideSchemaEnsure() async throws {
+        let storage = makeStorage()
+        // Call CKSideSchema.ensure directly — NOT DeviceIdentityStore.ensureSchema.
+        // After CVK-WB12 the table declaration lives in CKSideSchema v9, so
+        // ensure(storage:) alone must make the table queryable.
+        try await CKSideSchema.ensure(storage: storage)
+
+        // Confirm the table is accessible: a query on the empty table must
+        // succeed (not throw) and return zero rows.
+        let store = DeviceIdentityStore(storage: storage)
+        let result = try await store.load()
+        #expect(result == nil,
+                "_ck_device_identity must exist and be empty after CKSideSchema.ensure alone")
     }
 }

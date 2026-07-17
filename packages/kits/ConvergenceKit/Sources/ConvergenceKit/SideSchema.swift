@@ -35,8 +35,18 @@
 //                                  predicate does a sequential scan on unindexed estates.
 //                                  With this composite index, the coalescing query becomes
 //                                  an O(log N) index seek instead of O(N) scan.
+//   v9 — _ck_device_identity  Device-slot registry (N2, CVK-WB12 A11 final consolidation).
+//                              Consolidated from DeviceIdentityStore.swift's separate
+//                              SchemaDeclaration (formerly kitID "ConvergenceKit" v1).
+//                              DeviceIdentityStore.ensureSchema(storage:) now delegates to
+//                              CKSideSchema.ensure(storage:). Migration is additive: the
+//                              v8→v9 .createTable uses IF NOT EXISTS semantics — devices
+//                              that already have _ck_device_identity from the legacy
+//                              DeviceIdentityStore.ensureSchema path advance the version
+//                              counter without recreating the table.
 // Earmarks now superseded:
-//   v4 — _ck_device_identity  Device-slot registry (N2)      ← earmark superseded by v6→v7 jump
+//   v4 — _ck_device_identity  Device-slot registry (N2) ← earmark superseded by v6→v7 jump;
+//                              table consolidated at v9 (CVK-WB12, A11 final — DONE)
 //   v5 — _ck_pending_skew     Schema-skew pending queue (R9) ← landed at v7 instead (see below)
 //
 // WHY v7 for _ck_pending_skew (not v5):
@@ -107,6 +117,17 @@ public enum CKSideSchema {
     /// Drained by SkewReplay.drainReady at enable() time when schema_version
     /// equals the newly-enabled manifest version. Added in v7.
     public static let pendingSkewTable = "_ck_pending_skew"
+
+    /// Device-slot registry side table (N2). Persists this device's
+    /// (deviceUUID, slot, epoch, claimedAt) sync identity per estate.
+    ///
+    /// Schema: (id TEXT PK, device_uuid TEXT, slot INT, epoch INT,
+    ///          claimed_at TEXT); single row keyed by the sentinel "self".
+    ///
+    /// Read/write helpers live in DeviceIdentityStore.swift; only the
+    /// schema declaration lives here (per A11 consolidation, CVK-WB12).
+    /// Added in v9.
+    public static let deviceIdentityTable = "_ck_device_identity"
 
     // MARK: - Schema declaration (internal — callers use ensure)
 
@@ -235,6 +256,43 @@ public enum CKSideSchema {
             primaryKey: ["id"]
         )
 
+        // _ck_device_identity schema (v9 — A11 final consolidation, CVK-WB12):
+        //   id          — fixed sentinel TEXT key; always "self" for this device/estate.
+        //   device_uuid — stable device UUID as TEXT (UUID.uuidString). Generated once
+        //                 on first enable() for this device/estate pair.
+        //   slot        — the HLC node-ID slot (1–15) claimed via CloudKit CAS by
+        //                 SlotClaimOperation. INT, not Bool, per schema invariants.
+        //   epoch       — epoch counter matching the registry record; bumped when the
+        //                 slot is evicted and reclaimed. Starts at 1 on first mint.
+        //                 INT64 range; default 1.
+        //   claimed_at  — ISO8601 wall-clock TEXT when this slot/epoch was first
+        //                 claimed. DATE STORAGE INVARIANT: TEXT ISO8601, never REAL.
+        //
+        // Columns are IDENTICAL to those previously declared in
+        // DeviceIdentityStore.ensureSchema — no renames, no type changes.
+        // The v8→v9 migration uses .createTable with IF NOT EXISTS semantics:
+        // devices that already have the table from the legacy path advance
+        // the counter without recreating the table.
+        let deviceIdentityDecl = TableDeclaration(
+            name: deviceIdentityTable,
+            columns: [
+                // Fixed sentinel key — always "self" for this device.
+                ColumnDeclaration(name: "id",          type: .text, nullable: false),
+                // Device UUID as a TEXT string (UUID.uuidString).
+                ColumnDeclaration(name: "device_uuid", type: .text, nullable: false),
+                // Slot number 1–15 stored as Int64.
+                ColumnDeclaration(name: "slot",        type: .int,  nullable: false),
+                // Epoch counter; starts at 1 on first mint.
+                ColumnDeclaration(name: "epoch",       type: .int,  nullable: false,
+                                  defaultValue: .int(1)),
+                // DATE STORAGE INVARIANT: TEXT ISO8601, never REAL.
+                // Storing as unix float would lose sub-second precision
+                // and prevent human readability in DB browsers.
+                ColumnDeclaration(name: "claimed_at",  type: .text, nullable: false),
+            ],
+            primaryKey: ["id"]
+        )
+
         // Secondary index on _ck_outbox(table_name, row_key).
         //
         // WHY this index (CVK-WB5 perf Q3):
@@ -256,12 +314,13 @@ public enum CKSideSchema {
 
         return SchemaDeclaration(
             kitID: "ConvergenceKit",
-            version: 8,
-            tables: [syncMetaDecl, outboxDecl, changeTokenDecl, syncMetaColsDecl, pendingSkewDecl],
+            version: 9,
+            tables: [syncMetaDecl, outboxDecl, changeTokenDecl, syncMetaColsDecl,
+                     pendingSkewDecl, deviceIdentityDecl],
             indices: [outboxTableRowIndex],
             migrations: [
                 // v1 → v2: add durable outbox table.
-                // The tables array handles v0 → v8 fresh installs via IF NOT EXISTS.
+                // The tables array handles v0 → v9 fresh installs via IF NOT EXISTS.
                 Migration(fromVersion: 1, toVersion: 2, operations: [
                     .createTable(outboxDecl),
                 ]),
@@ -302,6 +361,17 @@ public enum CKSideSchema {
                 Migration(fromVersion: 7, toVersion: 8, operations: [
                     .addIndex(outboxTableRowIndex),
                 ]),
+                // v8 → v9: A11 final consolidation — fold _ck_device_identity
+                //   into CKSideSchema (CVK-WB12). Previously declared under
+                //   kitID "ConvergenceKit" v1 in DeviceIdentityStore.swift.
+                //   createTable is IF NOT EXISTS: devices that already have the
+                //   table from the legacy DeviceIdentityStore.ensureSchema path
+                //   advance the version counter without recreating the table.
+                //   Column set is identical to the legacy declaration — no
+                //   renames, no type changes, no Bool columns added.
+                Migration(fromVersion: 8, toVersion: 9, operations: [
+                    .createTable(deviceIdentityDecl),
+                ]),
             ]
         )
     }()
@@ -316,6 +386,9 @@ public enum CKSideSchema {
     /// TokenStore.ensure(storage:) call in enable() is no longer needed.
     /// From v6 onward, this call also ensures _ck_sync_meta_cols for
     /// fieldLevelLWW column HLC tracking.
+    /// From v9 onward, this call also ensures _ck_device_identity; a separate
+    /// DeviceIdentityStore.ensureSchema(storage:) call in enable() is no longer
+    /// needed (the method now delegates here for call-site stability).
     public static func ensure(storage: any Storage) async throws {
         try await storage.migrate(to: declaration)
     }
