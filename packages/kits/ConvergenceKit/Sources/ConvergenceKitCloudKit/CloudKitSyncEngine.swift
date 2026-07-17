@@ -288,6 +288,9 @@ actor CloudKitStateActor {
 
         var appliedCount = 0
         var conflicts = 0
+        // Collect row keys per table for the post-apply integrity hook (R3).
+        var appliedByTable: [String: [UUID]] = [:]
+        var deletedByTable: [String: [UUID]] = [:]
 
         for record in pulledRecords {
             do {
@@ -305,6 +308,9 @@ actor CloudKitStateActor {
 
                 try await applyInbound(decoded, syncedTable: syncedTable, storage: storage)
                 appliedCount += 1
+                // Track for post-apply hook: CKRecord modifications are always
+                // upserts (deletes arrive via deletedIDs below).
+                appliedByTable[decoded.table, default: []].append(decoded.rowKey)
             } catch let err as SyncError {
                 logger.error("pull apply failed: \(String(describing: err))")
                 conflicts += 1
@@ -326,13 +332,29 @@ actor CloudKitStateActor {
                     .uuid(rowKey)
                 )
                 _ = try? await storage.rowStore.delete(table: syncedTable.name, where: predicate)
+                // Track for post-apply hook: legacy deletions attributed per-table.
+                deletedByTable[syncedTable.name, default: []].append(rowKey)
             }
             appliedCount += 1
         }
 
         serverChangeToken = newToken
-        let receipt = SyncReceipt(pushed: 0, pulled: appliedCount, conflicts: conflicts)
         lastPullAt = Date()
+
+        // Post-apply integrity hook (R3): invoked once per batch when at least
+        // one record was applied. Hook throws count as one additional conflict
+        // but never abort the cycle. Hook writes carry origin == .local and
+        // flow into the outbox (hook-writes-must-ship, Kong Q2).
+        if appliedCount > 0 {
+            let batch = AppliedBatch(
+                storage: storage,
+                appliedByTable: appliedByTable,
+                deletedByTable: deletedByTable
+            )
+            conflicts += await invokeIntegrityHook(manifest.postApplyIntegrityHook, batch: batch)
+        }
+
+        let receipt = SyncReceipt(pushed: 0, pulled: appliedCount, conflicts: conflicts)
         if appliedCount > 0 {
             emit(.remoteChangesApplied(count: appliedCount))
         }

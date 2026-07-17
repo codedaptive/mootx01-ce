@@ -1,8 +1,8 @@
 ---
 title: ConvergenceKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -165,6 +165,16 @@ it does not itself decide cross-estate access. Multi-estate access
 policy is mediated by the access surface (aria-mcp), per architecture
 invariant I-13.
 
+**I-10 (integrity hook is post-apply, not transactional):** when a
+`SyncManifest` carries a `postApplyIntegrityHook`, the hook is invoked
+exactly once per pull cycle, AFTER all records in the batch have been
+applied through PersistenceKit's `rowStore`. The hook is NOT invoked
+when the batch applied zero records (empty-batch rule). The hook runs
+outside any enclosing transaction — PersistenceKit currently exposes no
+batch-transaction API. Consumers must design hooks so that re-invoking
+them on a subsequent pull is safe (idempotent repairs). A hook failure
+does not roll back the applied records.
+
 ## § 5 — Behavioral contracts
 
 **B-1 (None passthrough):** with the None backend, `enable` and
@@ -225,6 +235,34 @@ registers the other. Pairing rides a `Relay` transport abstraction
 implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
 `Relay` conformer requiring no change to the engine.
 
+**B-8 (post-apply integrity hook):** a `SyncManifest` may carry an
+optional `postApplyIntegrityHook` closure (Swift) / function pointer
+(Rust). When present and when the pull batch applied ≥1 records, the
+hook receives an `AppliedBatch` summary: the `Storage` handle the pull
+used, a `[tableName: [rowKey]]` map of upserted rows, and a matching
+map of hard-deleted rows. Contract:
+
+- **Invocation**: once per pull cycle, after ALL records in the batch
+  are applied, before the `SyncReceipt` is constructed.
+- **Empty-batch rule**: the hook is NOT invoked when `pulled == 0` (no
+  records in the batch or all records rejected). Both the invocation
+  helper and each pull path enforce this independently.
+- **Failure semantics**: a throw (Swift) or `Err` return (Rust) is
+  counted as ONE additional conflict in the `SyncReceipt`'s `conflicts`
+  field. It does NOT abort the pull cycle — all records were already
+  applied before the hook ran. The engine does not re-invoke the hook
+  on the next cycle.
+- **Hook-write contract (Kong Q2)**: writes made through
+  `AppliedBatch.storage` use the non-sync-tagged (caller-visible)
+  storage paths, so they carry `origin == .local`. The storage observer
+  fires normally; ConvergenceKit's outbound observer enqueues the change
+  for the next push cycle. Hook-originated repair writes MUST ship to
+  peers.
+- **Not serialised**: the hook closure is not Codable (Swift) / not
+  serde-serialisable (Rust). `SyncManifest` cannot be used as a wire
+  type once a hook is attached. `SyncManifest` is a local configuration
+  object; `SyncRecord` is the wire format.
+
 ## § 6 — Error model (conceptual)
 
 Errors are the `SyncError` enum (shape in INTERFACE § 4). Categories:
@@ -279,11 +317,30 @@ is rejected at pull and its records do not apply (I-7).
 `SyncValueMap` / `SyncValueBox` and the Rust version agrees with the Swift version on the discriminated encoding (B-5). The CloudKit HLC pack/unpack
 is lossless within the 48/12/4-bit layout (B-6).
 
+**C-9 (integrity hook contract):** for a manifest carrying a hook, on a
+pull batch that applies ≥1 records (on both CloudKit and Federation
+backends, both ports):
+- The hook is invoked exactly once.
+- `AppliedBatch.appliedByTable` contains every upserted row key grouped
+  by table.
+- `AppliedBatch.deletedByTable` contains every hard-deleted row key
+  grouped by table.
+- A hook error increments `conflicts` by exactly one; `pulled` is
+  unchanged; storage retains the applied records.
+- The hook is NOT invoked when zero records applied.
+- Writes through `AppliedBatch.storage` flow into the outbox and ship
+  on the next push (hook-writes-must-ship).
+
 The conformance fixtures run with InMemory PersistenceKit underneath.
 None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-16
+Added I-10 (hook post-apply, non-transactional), B-8 (post-apply integrity
+hook behavioral contract), C-9 (hook conformance requirement). Landed by
+CVK-ICLOUD P2-M3.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

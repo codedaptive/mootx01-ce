@@ -13,7 +13,7 @@
 
 use crate::engine::SyncEngine;
 use crate::record::{PackedHLC, SyncEventKind, SyncRecord, SyncValueMap};
-use crate::types::{ConflictPolicy, SyncDirection, SyncedTable, SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
+use crate::types::{AppliedBatch, ConflictPolicy, SyncDirection, SyncedTable, SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
 use substrate_types::hlc::{HLC, HLCGenerator};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
@@ -21,7 +21,8 @@ use ed25519_dalek::{
 };
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use uuid::Uuid;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -638,6 +639,9 @@ impl SyncEngine for FederationSyncEngine {
 
         let mut pulled = 0;
         let mut conflicts = 0;
+        // Collect row keys per table for the post-apply integrity hook (R3).
+        let mut applied_by_table: HashMap<String, Vec<Uuid>> = HashMap::new();
+        let mut deleted_by_table: HashMap<String, Vec<Uuid>> = HashMap::new();
         for envelope in envelopes {
             // Only accept envelopes from explicitly paired peers. Signature
             // verification proves key ownership; this check enforces the
@@ -710,14 +714,50 @@ impl SyncEngine for FederationSyncEngine {
                 }
                 // Apply the record per event kind and conflict policy.
                 match apply_record(record, synced_table, &storage) {
-                    Ok(()) => { pulled += 1; }
+                    Ok(()) => {
+                        pulled += 1;
+                        // Track for post-apply hook: deletes go to deleted_by_table,
+                        // inserts/updates go to applied_by_table.
+                        if record.event == SyncEventKind::Delete {
+                            deleted_by_table
+                                .entry(record.table.clone())
+                                .or_default()
+                                .push(record.row_key);
+                        } else {
+                            applied_by_table
+                                .entry(record.table.clone())
+                                .or_default()
+                                .push(record.row_key);
+                        }
+                    }
                     Err(_) => { conflicts += 1; }
                 }
             }
         }
         // Clear the pull guard: local writes from this point forward are user
         // mutations and must be captured by the observer workers as normal.
+        // The hook invocation below intentionally runs AFTER the guard is
+        // cleared so that hook-originated repair writes flow into the outbox
+        // (hook-writes-must-ship, Kong Q2 adjudication).
         self.state.pulling.store(false, Ordering::Release);
+
+        // Post-apply integrity hook (R3): invoked once per batch when at least
+        // one record was applied. A hook error counts as ONE additional conflict
+        // but does NOT abort — all records were already applied before the hook
+        // ran. The hook runs after the pull guard is cleared, so writes made
+        // through AppliedBatch.storage carry origin == local and reach the outbox.
+        if pulled > 0 {
+            if let Some(ref hook) = manifest.post_apply_integrity_hook {
+                let batch = AppliedBatch {
+                    storage: Arc::clone(&storage),
+                    applied_by_table,
+                    deleted_by_table,
+                };
+                if hook(&batch).is_err() {
+                    conflicts += 1;
+                }
+            }
+        }
 
         let receipt = SyncReceipt::now(0, pulled, conflicts);
         self.state.last_pull_secs = Some(receipt.timestamp_secs);

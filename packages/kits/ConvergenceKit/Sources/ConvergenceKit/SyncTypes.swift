@@ -68,28 +68,58 @@ public struct SyncedTable: Sendable, Codable {
 /// Declarative configuration for a sync session. The consumer
 /// declares which PersistenceKit tables sync to which zone with
 /// which conflict policies.
-public struct SyncManifest: Sendable, Codable {
+///
+/// ## Not Codable
+///
+/// `SyncManifest` is NOT `Codable`. The `postApplyIntegrityHook` closure
+/// cannot be serialised, so the whole struct cannot synthesise `Codable`
+/// conformance. `SyncManifest` is a local configuration object — it is
+/// passed to `SyncEngine.enable(manifest:storage:)` and is never transmitted
+/// over the wire. Only `SyncRecord` is the wire format.
+///
+/// Code that previously JSON-encoded a `SyncManifest` for cross-port
+/// conformance testing should instead encode the `SyncedTable` array directly,
+/// or test the `SyncRecord` wire format (which remains `Codable`).
+public struct SyncManifest: Sendable {
     public let kitID: String
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
 
-    /// Explicit CodingKeys documenting the cross-port JSON contract.
-    /// Rust serde renames match these exact strings.
-    private enum CodingKeys: String, CodingKey {
-        case kitID, schemaVersion, zoneIdentifier, tables
-    }
+    /// (v1.2-draft) Optional callback invoked once per pull batch AFTER all
+    /// inbound records have been applied. Use it to restore cross-row or
+    /// cross-table structural invariants that row-grain conflict policies
+    /// cannot maintain (Playground Rule 3, R3).
+    ///
+    /// **Invocation contract (CVK-ICLOUD P2-M3):**
+    /// - Called once per pull cycle, after ALL records in the batch apply.
+    /// - NOT called when the batch applied zero records (empty-batch rule).
+    /// - A throw is logged and counted as ONE additional conflict in the
+    ///   `SyncReceipt`; it does NOT abort the pull cycle.
+    /// - Writes made through `AppliedBatch.storage` use the non-sync-tagged
+    ///   paths (`upsert`, `insert`, `delete`), so they carry `origin == .local`
+    ///   and flow into the outbox — hook-originated repairs ship to peers on
+    ///   the next push cycle (Kong Q2 adjudication: hook-writes-must-ship).
+    ///
+    /// **Atomicity caveat:** PersistenceKit exposes no batch-transaction API.
+    /// The hook runs after the batch applies but NOT inside a containing
+    /// transaction. Design hooks to be idempotent (safe to re-run).
+    ///
+    /// Not `Codable` — closures cannot be serialised; set at construction only.
+    public var postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)?
 
     public init(
         kitID: String,
         schemaVersion: Int,
         zoneIdentifier: String,
-        tables: [SyncedTable]
+        tables: [SyncedTable],
+        postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil
     ) {
         self.kitID = kitID
         self.schemaVersion = schemaVersion
         self.zoneIdentifier = zoneIdentifier
         self.tables = tables
+        self.postApplyIntegrityHook = postApplyIntegrityHook
     }
 
     public func table(named name: String) -> SyncedTable? {

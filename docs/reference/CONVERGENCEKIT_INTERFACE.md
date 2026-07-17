@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-06-14
-version: 1.0.0
+version: 1.1.0
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -129,13 +129,35 @@ public struct SyncedTable: Sendable, Codable {
                 primaryKeyColumn: String, conflictPolicy: ConflictPolicy = .lastWriterWinsByHLC)
 }
 
-public struct SyncManifest: Sendable, Codable {
+// SyncManifest is NOT Codable: it carries postApplyIntegrityHook, a closure
+// that cannot be serialised. It is a local configuration object passed to
+// enable(manifest:storage:) and is never transmitted over the wire.
+// SyncRecord is the wire format; SyncedTable remains Codable.
+public struct SyncManifest: Sendable {
     public let kitID: String
     public let schemaVersion: Int
     public let zoneIdentifier: String
     public let tables: [SyncedTable]
-    public init(kitID: String, schemaVersion: Int, zoneIdentifier: String, tables: [SyncedTable])
+    /// (v1.1) Optional callback invoked once per pull batch after all records
+    /// are applied. Not invoked when zero records applied (empty-batch rule).
+    /// A throw counts as one additional conflict in SyncReceipt; never aborts.
+    /// Hook writes use non-sync-tagged paths → origin == .local → ships on push.
+    public var postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)?
+    public init(kitID: String, schemaVersion: Int, zoneIdentifier: String,
+                tables: [SyncedTable],
+                postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil)
     public func table(named name: String) -> SyncedTable?
+}
+
+/// Summary of one inbound pull batch passed to postApplyIntegrityHook.
+/// storage: the PersistenceKit handle the pull used; writes flow to outbox.
+/// appliedByTable: upserted row keys keyed by table name.
+/// deletedByTable: hard-deleted row keys keyed by table name.
+public struct AppliedBatch: @unchecked Sendable {
+    public let storage: any Storage
+    public let appliedByTable: [String: [UUID]]
+    public let deletedByTable: [String: [UUID]]
+    public init(storage: any Storage, appliedByTable: [String: [UUID]], deletedByTable: [String: [UUID]])
 }
 ```
 
@@ -157,15 +179,35 @@ impl SyncedTable {
     pub fn with_conflict_policy(self, policy: ConflictPolicy) -> Self;
 }
 
+// SyncManifest does not derive Debug automatically: Arc<dyn Fn(...)> is not
+// Debug. A manual Debug impl is provided that prints the hook presence only.
+// post_apply_integrity_hook uses #[serde(skip)] — omitted from JSON, defaults
+// to None on deserialisation. Wire shape (kitID, schemaVersion, zoneIdentifier,
+// tables) is unchanged; the hook is a local runtime callback only.
 pub struct SyncManifest {
     pub kit_id: String,
     pub schema_version: i32,
     pub zone_identifier: String,
     pub tables: Vec<SyncedTable>,
+    /// (v1.1) Not serialised. None by default.
+    #[serde(skip)]
+    pub post_apply_integrity_hook: Option<IntegrityHookFn>,
 }
+/// Shareable hook type: Arc<dyn Fn(&AppliedBatch) -> Result<(), SyncError>
+/// + Send + Sync>. Arc makes it Clone so SyncManifest remains Clone.
+pub type IntegrityHookFn = Arc<dyn Fn(&AppliedBatch) -> Result<(), SyncError> + Send + Sync>;
+
+/// Summary of one inbound pull batch passed to post_apply_integrity_hook.
+pub struct AppliedBatch {
+    pub storage: Arc<dyn Storage>,
+    pub applied_by_table: HashMap<String, Vec<Uuid>>,
+    pub deleted_by_table: HashMap<String, Vec<Uuid>>,
+}
+
 impl SyncManifest {
     pub fn new(kit_id: impl Into<String>, schema_version: i32,
                zone_identifier: impl Into<String>, tables: Vec<SyncedTable>) -> Self;
+    pub fn with_integrity_hook(self, hook: IntegrityHookFn) -> Self;
     pub fn table_named(&self, name: &str) -> Option<&SyncedTable>;
 }
 ```
@@ -671,7 +713,8 @@ sanctioned port difference.
 | Sync direction | `SyncDirection` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncDirection` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw lowerCamel cases / Rust UpperCamel cases — identical variant set | Confirmed |
 | Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift`) | `ConflictPolicy` (`rust/src/types.rs`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; same 4 variants, both default LWW-by-HLC | Confirmed |
 | Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncedTable` (`rust/src/types.rs`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`); serde defaults mirror Swift defaults | Confirmed |
-| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32` | Confirmed |
+| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift`) | `SyncManifest` (`rust/src/types.rs`) | public struct / pub struct | identical serialisable fields; NOT Codable (Swift) / derives Clone+Serialize+Deserialize (Rust, hook skipped); hook field: Swift `(@Sendable (AppliedBatch) async throws → Void)?` / Rust `Option<IntegrityHookFn>` both `#[serde(skip)]`; `table(named:)` / `table_named` | Confirmed |
+| Applied batch | `AppliedBatch` (`Sources/ConvergenceKit/IntegrityHook.swift`) | `AppliedBatch` (`rust/src/types.rs`) | public struct / pub struct | Swift `any Storage` / Rust `Arc<dyn Storage>`; Swift `[String:[UUID]]` / Rust `HashMap<String,Vec<Uuid>>` for applied/deleted maps | Confirmed |
 
 ### Cycle result + observation value types
 
@@ -744,6 +787,13 @@ only Federation/None have Rust ports).
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-16
+Added `AppliedBatch` type (Swift + Rust). Added `postApplyIntegrityHook`
+to `SyncManifest` (Swift) and `post_apply_integrity_hook` + `IntegrityHookFn`
+to `SyncManifest` (Rust). Removed `Codable` conformance from Swift `SyncManifest`
+(closures cannot be serialised; the wire format is `SyncRecord`, not the manifest).
+Updated concordance table. Landed by CVK-ICLOUD P2-M3.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

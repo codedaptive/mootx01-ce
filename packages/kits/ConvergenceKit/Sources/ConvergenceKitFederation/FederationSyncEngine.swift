@@ -424,6 +424,9 @@ actor FederationStateActor {
         guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
         var appliedCount = 0
         var conflicts = 0
+        // Collect row keys per table for the post-apply integrity hook (R3).
+        var appliedByTable: [String: [UUID]] = [:]
+        var deletedByTable: [String: [UUID]] = [:]
 
         for peer in peers {
             let envelopes = peer.relay.drain(for: localIdentity.publicKey)
@@ -492,6 +495,13 @@ actor FederationStateActor {
 
                         try await applyInbound(record, syncedTable: syncedTable, storage: storage)
                         appliedCount += 1
+                        // Track for post-apply hook: deletes go to deletedByTable,
+                        // inserts/updates go to appliedByTable.
+                        if record.event == .delete {
+                            deletedByTable[record.table, default: []].append(record.rowKey)
+                        } else {
+                            appliedByTable[record.table, default: []].append(record.rowKey)
+                        }
                     } catch {
                         conflicts += 1
                     }
@@ -500,6 +510,20 @@ actor FederationStateActor {
         }
 
         lastPullAt = Date()
+
+        // Post-apply integrity hook (R3): invoked once per batch when at least
+        // one record was applied. Hook throws count as one additional conflict
+        // but never abort the cycle. Hook writes carry origin == .local and
+        // flow into the outbox (hook-writes-must-ship, Kong Q2).
+        if appliedCount > 0 {
+            let batch = AppliedBatch(
+                storage: storage,
+                appliedByTable: appliedByTable,
+                deletedByTable: deletedByTable
+            )
+            conflicts += await invokeIntegrityHook(manifest.postApplyIntegrityHook, batch: batch)
+        }
+
         let receipt = SyncReceipt(pushed: 0, pulled: appliedCount, conflicts: conflicts)
         if appliedCount > 0 {
             emit(.remoteChangesApplied(count: appliedCount))
