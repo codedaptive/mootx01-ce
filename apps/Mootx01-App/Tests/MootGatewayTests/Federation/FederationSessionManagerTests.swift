@@ -1,6 +1,7 @@
 // FederationSessionManagerTests.swift
 //
 // FED-OD-4: Federation Session Lifecycle tests.
+// Extended by FED-OD-7 (FSM-7, FSM-8): ceiling proof at LANRelay inbox level.
 //
 // Test matrix:
 //   FSM-1: Session-end determinism — channel closed before engine disabled; no
@@ -13,6 +14,11 @@
 //          push/pull after end throw noActiveSession
 //   FSM-5: F1 invariant line — non-Balanced postures throw postureUnavailable
 //   FSM-6: Session state machine — idle → active → ended → reset → idle
+//   FSM-7: [FED-OD-7 Row 3] Ceiling holds at LANRelay inbox — restricted-sensitivity
+//          row (adjective_bitmap encoding raw=32) is suppressed by
+//          SensitivityFilteredObserver and never reaches the transport inbox
+//   FSM-8: [FED-OD-7 Row 3 positive control] Normal-sensitivity row (raw=0) is NOT
+//          suppressed and DOES reach the transport inbox after push
 //
 // All tests use ClosableInMemoryTransport (defined at the bottom of this file) — an
 // in-process loopback that throws after close(), satisfying the channel-close-first
@@ -24,6 +30,8 @@ import Foundation
 import ConvergenceKit
 import ConvergenceKitFederation
 @testable import MootGateway
+import PersistenceKit
+import PersistenceKitInMemory
 
 // MARK: - Test helpers
 
@@ -289,6 +297,222 @@ struct FederationSessionManagerTests {
 
         // Clean up.
         try await manager.endSession()
+    }
+}
+
+// MARK: - FSM-7 / FSM-8: Ceiling proof at LANRelay inbox (FED-OD-7 Row 3)
+
+/// FED-OD-7 Row 3 ceiling proof: extends P5-M1 SensitivityFilteredStorage tests to the
+/// LANRelay transport path.
+///
+/// Decision doc §6: "Ceiling holds across sessions: above-ceiling rows never reach a
+/// LANRelay inbox (extends the P5-M1 gate tests to the new transport)."
+///
+/// FSM-2 (FED-OD-4) verified that SensitivityFilteredStorage is wired at .elevated
+/// ceiling using an empty manifest. These tests extend that proof:
+///   FSM-7 proves the filter works with an ACTUAL above-ceiling row (restricted
+///          sensitivity, adjective_bitmap = Int64(32) << 6 = 2048, bits 6-11 = raw 32)
+///          in a manifest-declared table with a real paired peer, verifying the row
+///          never reaches the transport inbox.
+///   FSM-8 is the positive control: a normal row (adjective_bitmap = 0, raw = 0)
+///          is NOT suppressed and DOES reach the peer's transport inbox after push.
+///
+/// adjective_bitmap encoding for sensitivity tiers (LocusKit/Adjectives.swift):
+///   Bits 6–11 hold the 6-bit sensitivity axis raw value (extracted by >> 6 & 0x3F).
+///   normal    = 0   → bitmap = 0
+///   elevated  = 16  → bitmap = Int64(16) << 6 = 1024  (at ceiling for Balanced session)
+///   restricted= 32  → bitmap = Int64(32) << 6 = 2048  (above ceiling — suppressed)
+///   secret    = 48  → bitmap = Int64(48) << 6 = 3072  (above ceiling — suppressed)
+@Suite("FED-OD-7 Row 3 — Ceiling holds at LANRelay inbox (P5-M1 extended to LAN transport)")
+struct LANCeilingConformanceTests {
+
+    // MARK: - Schema helpers
+
+    /// Open an in-memory storage with a table containing adjective_bitmap.
+    ///
+    /// The "items" table mirrors the minimal schema needed to test the ceiling filter:
+    /// any table with an "adjective_bitmap" column is gated by SensitivityFilteredStorage.
+    /// (Only the drawers table carries adjective_bitmap in production; the generic name
+    /// "items" is used here to keep the test self-contained without importing LocusKit.)
+    private func makeStorageWithAdjectiveBitmapTable() async throws -> any Storage {
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .inMemory
+        ))
+        try await storage.open(schema: SchemaDeclaration(
+            kitID: "CeilingTestKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "items",
+                    columns: [
+                        .uuid("id"),
+                        .text("content"),
+                        // adjective_bitmap: the sensitivity axis column.
+                        // SensitivityFilteredObserver reads bits 6-11 of this field
+                        // to determine the sensitivity tier (see SensitivityFilteredStorage.swift).
+                        .bitmap("adjective_bitmap")
+                    ],
+                    primaryKey: ["id"]
+                )
+            ],
+            indices: [],
+            migrations: []
+        ))
+        return storage
+    }
+
+    private func makeCeilingManifest() -> SyncManifest {
+        SyncManifest(
+            kitID: "CeilingTestKit",
+            schemaVersion: 1,
+            zoneIdentifier: "ceiling-conformance-test",
+            tables: [SyncedTable(name: "items", primaryKeyColumn: "id")]
+        )
+    }
+
+    // MARK: - FSM-7: Restricted row never reaches LANRelay inbox (negative test)
+
+    /// NEGATIVE TEST (FED-OD-7 Row 3):
+    ///
+    /// A row with restricted sensitivity (adjective_bitmap encoding raw=32 in bits 6-11)
+    /// is suppressed by SensitivityFilteredObserver before entering the outbox.
+    /// After pairing engine A (filtered, .elevated ceiling) with engine B and pushing,
+    /// the transport inbox for B's key must contain zero envelopes.
+    ///
+    /// Proof chain:
+    ///   1. adjective_bitmap = Int64(32) << 6 = 2048
+    ///   2. sensitivityRaw(from: .bitmap(2048)) = (2048 >> 6) & 0x3F = 32
+    ///   3. 32 > ceiling.rawValue (.elevated = 16) → exceedsCeiling = true
+    ///   4. INSERT event: skip (no tombstone — row was never below ceiling on peers)
+    ///   5. outbox stays empty → receipt.pushed == 0
+    ///   6. transport.inboxCount(for: bKey) == 0 (no delivery to peer)
+    @Test("FSM-7: CEIL-1 restricted row suppressed: above-ceiling row never reaches LANRelay transport inbox")
+    func restrictedRowNeverReachesLANRelayInbox() async throws {
+        let rawStorageA = try await makeStorageWithAdjectiveBitmapTable()
+        let rawStorageB = try await makeStorageWithAdjectiveBitmapTable()
+
+        // Shared ClosableInMemoryTransport — both relay instances route through it.
+        // send(to: bKey, message: env) puts env in transport inboxes[bKey].
+        // inboxCount(for: bKey) reads without draining, so we can assert post-push.
+        let transport = ClosableInMemoryTransport()
+
+        // Engine A: SensitivityFilteredStorage(ceiling: .elevated) is the EXACT handle
+        // passed to enable(), per Perkins Amendment 1.
+        // ceiling=.elevated means raw > 16 is suppressed (restricted=32, secret=48).
+        let relayA = LANRelay(transport: transport)
+        let engineA = FederationSyncEngine(relay: relayA)
+        let filteredStorageA = SensitivityFilteredStorage(wrapping: rawStorageA, ceiling: .elevated)
+        try await engineA.enable(manifest: makeCeilingManifest(), storage: filteredStorageA)
+
+        // Engine B: plain storage (receives envelopes — is the delivery target).
+        // Uses the SAME shared transport so inboxes[bKey] is readable from A's sends.
+        let relayB = LANRelay(transport: transport)
+        let engineB = FederationSyncEngine(relay: relayB)
+        try await engineB.enable(manifest: makeCeilingManifest(), storage: rawStorageB)
+
+        // Pair A ↔ B in-process (writes _fed_peers on both sides so push() has a target).
+        // pair(with:family:) calls stateActor methods directly — no relay traffic involved.
+        // After pairing, engineA.push() will attempt to deliver to engineB's public key.
+        let familySpec = HyperplaneFamilySpec(seed: 0xCE11_0D07)
+        try await engineA.pair(with: engineB, family: familySpec)
+
+        // Capture B's public key — this is the inbox key on the shared transport.
+        let bKey = await engineB.identity.publicKey
+
+        // Insert above-ceiling row directly into rawStorageA (caller-initiated write,
+        // forwarded unchanged by SensitivityFilteredRowStore.insert → fires the raw
+        // storage's observer). The SensitivityFilteredObserver then processes the event:
+        //   adjective_bitmap = Int64(32) << 6 = 2048 → raw = (2048>>6)&0x3F = 32
+        //   32 > ceiling.rawValue (16) → INSERT suppressed (no outbox entry created).
+        _ = try await rawStorageA.rowStore.insert(
+            table: "items",
+            values: [
+                "id": .uuid(UUID()),
+                "content": .text("restricted content — must not cross LAN relay"),
+                // Encoding: bits 6–11 = sensitivity raw value.
+                // restricted sensitivity raw = 32 → adjective_bitmap = 32 << 6 = 2048.
+                "adjective_bitmap": .bitmap(Int64(32) << 6)
+            ]
+        )
+
+        // Allow the async observer task to process the change event.
+        // 100ms is consistent with FederationPairingTests and FSM-2 in this file.
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Push from A. The restricted INSERT was suppressed → outbox is empty →
+        // push() finds no entries to deliver → receipt.pushed == 0.
+        let receipt = try await engineA.push()
+        #expect(receipt.pushed == 0,
+                "FSM-7: CEIL-1 — restricted INSERT suppressed by SensitivityFilteredObserver; outbox must be empty (receipt.pushed == 0)")
+
+        // The transport inbox for B must have zero envelopes.
+        // If any above-ceiling row leaked through the filter, push() would have
+        // delivered it here. Zero confirms the ceiling is enforced at the relay level.
+        #expect(transport.inboxCount(for: bKey) == 0,
+                "FSM-7: CEIL-1 — no envelopes must reach LANRelay inbox from a restricted-sensitivity row")
+
+        try await engineA.disable()
+        try await engineB.disable()
+    }
+
+    // MARK: - FSM-8: Normal row reaches LANRelay inbox (positive control)
+
+    /// POSITIVE CONTROL (FED-OD-7 Row 3):
+    ///
+    /// A row with normal sensitivity (adjective_bitmap = 0, raw = 0, which is
+    /// ≤ ceiling.rawValue 16) is NOT suppressed by SensitivityFilteredObserver.
+    /// After pairing and push, the transport inbox for B's key must contain at
+    /// least one envelope — confirming the ceiling filter lets through below-ceiling
+    /// rows and that FSM-7's zero-count is due to suppression, not test infrastructure.
+    @Test("FSM-8: CEIL-2 positive control: normal-sensitivity row reaches LANRelay transport inbox after push")
+    func normalRowReachesLANRelayInbox() async throws {
+        let rawStorageA = try await makeStorageWithAdjectiveBitmapTable()
+        let rawStorageB = try await makeStorageWithAdjectiveBitmapTable()
+        let transport = ClosableInMemoryTransport()
+
+        let relayA = LANRelay(transport: transport)
+        let engineA = FederationSyncEngine(relay: relayA)
+        let filteredStorageA = SensitivityFilteredStorage(wrapping: rawStorageA, ceiling: .elevated)
+        try await engineA.enable(manifest: makeCeilingManifest(), storage: filteredStorageA)
+
+        let relayB = LANRelay(transport: transport)
+        let engineB = FederationSyncEngine(relay: relayB)
+        try await engineB.enable(manifest: makeCeilingManifest(), storage: rawStorageB)
+
+        let familySpec = HyperplaneFamilySpec(seed: 0xCE11_0D08)
+        try await engineA.pair(with: engineB, family: familySpec)
+        let bKey = await engineB.identity.publicKey
+
+        // Insert normal-sensitivity row (adjective_bitmap = 0).
+        // raw = (0 >> 6) & 0x3F = 0 ≤ ceiling.rawValue (16) → NOT suppressed.
+        // The observer event passes through SensitivityFilteredObserver and
+        // recordOutbound creates an outbox entry.
+        _ = try await rawStorageA.rowStore.insert(
+            table: "items",
+            values: [
+                "id": .uuid(UUID()),
+                "content": .text("normal content — at or below ceiling, must sync"),
+                "adjective_bitmap": .bitmap(0)  // normal: raw 0, 0 <= ceiling 16 → passes filter
+            ]
+        )
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Push from A. The normal INSERT was NOT suppressed → outbox has one entry →
+        // push() delivers it to B → receipt.pushed > 0.
+        let receipt = try await engineA.push()
+        #expect(receipt.pushed > 0,
+                "FSM-8: CEIL-2 — normal row must enter the outbox and be pushed to the peer (receipt.pushed > 0)")
+
+        // The transport inbox for B must have at least one envelope.
+        // This confirms the ceiling filter correctly passes below-ceiling rows,
+        // and FSM-7's zero-count is due to suppression, not infrastructure failure.
+        #expect(transport.inboxCount(for: bKey) > 0,
+                "FSM-8: CEIL-2 — at least one envelope must reach LANRelay inbox from a normal-sensitivity row")
+
+        try await engineA.disable()
+        try await engineB.disable()
     }
 }
 
