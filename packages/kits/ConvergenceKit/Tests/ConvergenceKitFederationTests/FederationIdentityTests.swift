@@ -1,13 +1,16 @@
 // FederationIdentityTests.swift
 //
 // Peer coverage for Sources/ConvergenceKitFederation/FederationIdentity.swift
-// (LocalIdentity, PeerIdentity, FederationSignature). Deterministic
-// Ed25519 sign/verify — no platform or network dependency.
+// (LocalIdentity, PeerIdentity, FederationSignature) and the persistence
+// behaviour added by WC1 (loadOrMintIdentity in FederationStateActor).
 
 import Testing
 import Foundation
 import Crypto
+import ConvergenceKit
 import ConvergenceKitFederation
+import PersistenceKit
+import PersistenceKitInMemory
 
 @Suite("Federation identity")
 struct FederationIdentityTests {
@@ -67,5 +70,109 @@ struct FederationIdentityTests {
         #expect(a == b)
         #expect(a != c)
         #expect(Set([a, b, c]).count == 2)
+    }
+}
+
+// MARK: - Identity persistence tests (WC1)
+
+/// Tests for loadOrMintIdentity — the _fed_identity side-table persistence added
+/// in WC1. These tests drive enable() with real InMemoryStorage so the full
+/// ensureFedSyncMetaTable + loadOrMintIdentity path is exercised.
+private func makeFedStorage() async throws -> InMemoryStorage {
+    let storage = InMemoryStorage(configuration: EstateConfiguration(
+        estateID: UUID(), backend: .inMemory
+    ))
+    let schema = SchemaDeclaration(
+        kitID: "IdTestKit",
+        version: 1,
+        tables: [
+            TableDeclaration(name: "items", columns: [.uuid("id")], primaryKey: ["id"])
+        ]
+    )
+    try await storage.open(schema: schema)
+    return storage
+}
+
+private func makeFedManifest() -> SyncManifest {
+    SyncManifest(
+        kitID: "IdTestKit",
+        schemaVersion: 1,
+        zoneIdentifier: "zone-id-test",
+        tables: [SyncedTable(name: "items", primaryKeyColumn: "id")]
+    )
+}
+
+@Suite("Federation identity persistence (WC1)")
+struct FederationIdentityPersistenceTests {
+
+    @Test("identity survives disable/re-enable against the same estate storage")
+    func identityPersistsAcrossReEnable() async throws {
+        let storage = try await makeFedStorage()
+        let manifest = makeFedManifest()
+
+        // First engine: enable mints and persists the identity.
+        let engine1 = FederationSyncEngine()
+        try await engine1.enable(manifest: manifest, storage: storage)
+        let pubKey1 = await engine1.identity.publicKey
+        try await engine1.disable()
+
+        // Second engine: enable against the same storage must reload the same identity.
+        let engine2 = FederationSyncEngine()
+        try await engine2.enable(manifest: manifest, storage: storage)
+        let pubKey2 = await engine2.identity.publicKey
+        try await engine2.disable()
+
+        #expect(
+            pubKey1 == pubKey2,
+            "public key must be identical after re-enable against the same estate storage (I-8)"
+        )
+    }
+
+    @Test("restored identity signs data verifiable under the original public key")
+    func restoredIdentitySignsCorrectly() async throws {
+        let storage = try await makeFedStorage()
+        let manifest = makeFedManifest()
+
+        let engine1 = FederationSyncEngine()
+        try await engine1.enable(manifest: manifest, storage: storage)
+        let pubKey1 = await engine1.identity.publicKey
+        try await engine1.disable()
+
+        // Restore from same storage and sign fresh data.
+        let engine2 = FederationSyncEngine()
+        try await engine2.enable(manifest: manifest, storage: storage)
+        let identity2 = await engine2.identity
+        let payload = Data("federation payload".utf8)
+        let signature = try identity2.sign(payload)
+        try await engine2.disable()
+
+        // Signature from the restored identity must verify under the original public key.
+        #expect(
+            FederationSignature.verify(signature, of: payload, by: pubKey1),
+            "signature from reloaded identity must verify under the original public key"
+        )
+    }
+
+    @Test("distinct estate storages receive distinct identities")
+    func distinctEstatesGetDistinctIdentities() async throws {
+        let storage1 = try await makeFedStorage()
+        let storage2 = try await makeFedStorage()
+        let manifest = makeFedManifest()
+
+        let engine1 = FederationSyncEngine()
+        try await engine1.enable(manifest: manifest, storage: storage1)
+        let pubKey1 = await engine1.identity.publicKey
+        try await engine1.disable()
+
+        let engine2 = FederationSyncEngine()
+        try await engine2.enable(manifest: manifest, storage: storage2)
+        let pubKey2 = await engine2.identity.publicKey
+        try await engine2.disable()
+
+        // Two distinct estates must not share the same keypair.
+        #expect(
+            pubKey1 != pubKey2,
+            "distinct estate storages must produce distinct Ed25519 identities"
+        )
     }
 }

@@ -1,8 +1,8 @@
 ---
 title: NeuronKit Specification
-version: 1.6.0
+version: 1.7.0
 status: active
-date: 2026-07-09
+date: 2026-07-16
 description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -511,6 +511,36 @@ returns the claimed value unchanged for empty bins, making calibrated results co
 equal to the claim undetectable from the return value alone. Empty claimed returns empty (B-8).
 Result: `[CalibratedValue { claimed, calibrated, isCalibrated }]`.
 
+### § 7.6 — Diffusion lenses (node-layer motion, ADR-DIFFUSION-001)
+
+The diffusion family is the time-axis peer of distillation: where distillation
+extracts structure FROM content at ingest, diffusion tracks how a node's content
+and classification EVOLVE over time. The node-layer lens is the first shipped tier.
+
+**NodeMotion — node-layer motion model.** Folds a node's HLC-ordered audit
+entries (via `UnifiedAuditLog`) into a decay-weighted motion model. The decay
+weight is `exp(-λ·Δt_days)` where `λ` is the per-layer noise schedule constant
+(`defaultNodeLambda = 0.5` per day — the node layer is high-frequency, so λ is
+large). Dedup key is the FULL HLC identity `(physical, logical, node)` so two
+mutations in the same millisecond (bursty writes, bulk import) are counted as
+distinct volatility events. Physical-time age math uses a 40-bit mask to align
+with the packed-HLC layout, avoiding a millennia-aged read when wall clock
+exceeds the truncated physical field (secfix/ce-node-motion-hlc-dedup). Result:
+`NodeMotion { rowID, volatility, eventCount, lastEventPhysicalMs, anchorTrajectory }`.
+
+**NodeAnomaly — write-time verdict.** Classifies a `NodeMotion` as churning
+(`volatility ≥ churnThreshold`, default 3.0) and/or reanchored
+(`Set(anchorTrajectory).count > 1` — the node's topic has crossed at least two
+distinct UDC codes). Reads hot at write time; the pure `fold`+`classify` pipeline
+is deterministic over `(entries, now, λ, threshold)` and conforms to I-17, I-18.
+GLK-bound estate-reading entry points (`run`, `anomaly`) are Swift-only per I-2.
+Result: `NodeAnomaly { rowID, volatility, isChurning, reanchored, currentAnchor }`.
+
+The pure `fold` and `classify` functions are both-port (C-18); `NodeMotionLens.run`
+and `.anomaly` are Swift-only (GLK estate access — I-2 exception applies). Both
+conformance obligations hold: the pure math is port-symmetric, and the estate
+accessor is appropriately asymmetric.
+
 ---
 
 ## § 8 — The surface-then-sequence archetype
@@ -634,11 +664,15 @@ is non-conformant.
 realise the complete lens taxonomy (§ 7) — keystones, constellation,
 spreading activation, theme weather, latent themes, representation bias,
 learned preference, anticipation, momentSignature, rhythm, precedence,
-complexity, calibration — with matching type and member names
+complexity, calibration, and the diffusion node-layer lenses nodeMotion
+(`fold`) / nodeAnomaly (`classify`) — with matching type and member names
 (the § 6 fitter-error name being the lone sanctioned exception) and
 bit-for-bit-equal numeric results on shared vectors. A surface present on
 one leg and absent on the other is non-conformant; this is the
 design law applied to NeuronKit (I-2 / "everything has both legs").
+The GLK-bound entry points `NodeMotionLens.run` / `.anomaly` are
+Swift-only and are NOT part of the C-18 parity obligation — only the pure
+`fold` and `classify` algorithms that the estate-reading entry points wrap.
 
 **C-Det (cross-port determinism):** for every shared test vector, the
 Swift and Rust ports agree bit-for-bit on the reasoning engines AND the
@@ -650,10 +684,15 @@ frequencies, momentum, NMF loadings + reconstruction error, bias
 differences, preference strengths + intervals, Wilson-ranked
 predictions, OR-reduced window signatures + Hamming rankings,
 dominant spectral periods, T-matrix antecedent rankings, Shannon
-entropy + mutual information, empirical confidence calibration). Tie-breaks resolve on stable keys so the agreement is
-exact. Randomised primitives (spreading activation, latent themes) agree
-because both ports take the same explicit seed into the same gated
-generator (SplitMix64).
+entropy + mutual information, empirical confidence calibration, and the
+diffusion-lens pure folds: NodeMotion volatility + anchorTrajectory,
+NodeAnomaly isChurning + reanchored). Tie-breaks resolve on stable keys
+so the agreement is exact. Randomised primitives (spreading activation,
+latent themes) agree because both ports take the same explicit seed into
+the same gated generator (SplitMix64). The query-precision helpers
+(`queryPrecision`, `hasDistinctiveTokens`, `containmentSatisfied`) and
+the reduction-pipeline functions (`reductionScore`, `reduce`) also agree
+bit-for-bit — they are pure ASCII-folded text math with no RNG or clock.
 
 ---
 
@@ -1073,6 +1112,16 @@ last-run timestamps; driven by resident governor (`.timer`) or forked `mootx01
 dream` (`.event`). § 12 (ratified target, Phase 0) is the normative v2 contract
 and is unchanged; § 9 C-1 previously contradicted it. The v2 build (T1–T14) is
 shipped; ADR-021 status updated to decided.
+
+### 1.7.0 -- 2026-07-16
+Audit pass: added behavioral contracts for surfaces shipped since 1.6.0 that
+were absent from the SPEC. Added § 7.6 (diffusion node-layer lenses — NodeMotion
+fold and NodeAnomaly classify, ADR-DIFFUSION-001); updated C-18 to include
+`nodeMotion`/`nodeAnomaly` in the both-legs lens taxonomy (with explicit note
+that the GLK-bound `run`/`anomaly` entry points are Swift-only and outside C-18);
+updated C-Det to cover the diffusion-lens pure folds and the new reduction-pipeline
+functions (`queryPrecision`, `hasDistinctiveTokens`, `containmentSatisfied`,
+`reductionScore`, `reduce`). Doc-only; no algorithm or conformance change.
 
 ### 1.6.0 -- 2026-07-09
 AUDIT-ALERT-RESTORE (Bob's option-1 ruling). Added § 9 C-4 and C-12 — both

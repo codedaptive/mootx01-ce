@@ -1,8 +1,8 @@
 ---
 title: SubstrateLib Specification
-version: 1.2.0
+version: 1.3.0
 status: active
-date: 2026-06-28
+date: 2026-07-16
 description: "Behavioral specification for SubstrateLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -157,21 +157,24 @@ Orchestration-specific:
 
 ### § 5.1 The nine substrate verbs
 
-`Verbs.Substrate` is a namespace; each verb is a static function
-that:
+`Substrate` is a stateful in-memory estate struct. Each verb method
+is `mutating` (Swift) / `&mut self` (Rust) and:
 
 1. Validates preconditions (row exists for non-capture verbs;
    capture has no row).
 2. Computes the new row state via the row-state automaton.
 3. Builds the FieldWrites that encode the mutation.
 4. Calls `AuditGate.admit` to produce the canonical audit event.
-5. Returns the audit event for the consumer to append to the log.
+5. Appends the produced audit event to `self.auditEvents` and
+   returns `Result<UUID, SubstrateError>` (for capture/propose) or
+   `Result<(), SubstrateError>` (for all other mutating verbs).
+   `recall` is non-mutating and returns `[Row]` (Swift) /
+   `Vec<&Row>` (Rust).
 
-The verbs are *pure*: they do not perform I/O, do not update any
-persistent state, do not log. The consumer (LocusKit) appends the
-returned audit event to its own audit log inside a transaction
-that also updates the materialized projection (the live `drawers`
-table, etc.).
+The verbs do not perform I/O, do not talk to any database, and do
+not log. The consumer (LocusKit) wraps the returned audit event in
+a transaction that also updates the materialized projection (the
+live `drawers` table, etc.).
 
 Per-verb semantics live in cookbook §10. The verbs in
 SubstrateLib are the canonical implementations; kit-side variants
@@ -221,10 +224,10 @@ bitmap to evaluate forbidden combinations.
 - A list of `FieldWrite`s — each `(slot, value)` describing what
   to write where.
 
-It produces a `Result<AuditEvent, AuditGateError>`. The success
+It produces a `Result<AuditEvent, GateViolation>`. The success
 case carries the canonical event; the failure case enumerates the
-rejection reason (vocabulary violation, basis violation,
-state-inconsistent-with-verb, content-ID collision).
+rejection reason (undeclared field, illegal value, basis violation,
+or state-inconsistent-with-verb).
 
 The "corruption is unrepresentable" guarantee:
 
@@ -315,22 +318,26 @@ regardless of message order.
 
 The package raises:
 
-- `AuditGateError.vocabularyViolation(slot:reason:)` — a FieldWrite's
-  slot is not declared, value is out-of-range, or value exceeds
-  width.
-- `AuditGateError.basisViolation(RowStateError)` — the
-  RowStateAutomaton refused the transition.
-- `AuditGateError.stateInconsistentWithVerb(verb:)` — the verb
+- `GateViolation.undeclaredField(label:)` — the FieldWrite's slot
+  is not present in the frozen vocabulary (basis ∪ union).
+- `GateViolation.illegalValue(label:value:)` — the value is outside
+  the slot's declared legal set or exceeds the slot's bit width.
+- `GateViolation.basisViolation(Error)` — the RowStateAutomaton
+  refused the transition or the I-22 forbidden-combination check
+  failed (wraps the underlying `RowStateError`).
+- `GateViolation.stateInconsistentWithVerb(verb:)` — the verb
   argument and the written state do not match (e.g. capture with
   a non-initial written state, or mutate without a state
   transition).
 - `RowStateError.illegalTransition(RowState, RowVerb)` — the
   (state, verb) pair is absent from the transition table.
-- `RowStateError.forbiddenCombination(state:, fields:)` — the
-  merged bitmap violates I-22.
+- `RowStateError.violatesInvariant(String)` — the merged bitmap
+  violates I-22 (checked by `ForbiddenCombinations.check`).
 
-`Substrate.Error` is the surface error type for verb-driver callers
-(LocusKit); it wraps the gate-level errors with verb-context.
+`SubstrateError` is the surface error type for verb-driver callers
+(LocusKit); it carries verb-context such as `rowNotFound`,
+`alreadyTombstoned`, `invalidStateTransition`, and
+`missingLatticeAnchor`.
 
 ## § 7 — Conformance requirements
 
@@ -404,6 +411,18 @@ sentinel. Non-telemetry calls use `ts: 0.0`, which every
 timestamp-filtered sink discards.
 
 ## Changelog
+
+### 1.3.0 -- 2026-07-16
+Corrected §5.1: `Substrate` is a stateful struct with mutating verb methods,
+not a static-function namespace; verb return types clarified (capture/propose
+return Result<UUID,SubstrateError>, others Result<(),SubstrateError>, recall
+is non-mutating). Corrected §5.3: `AuditGate.admit` returns
+`Result<AuditEvent, GateViolation>`, not `Result<AuditEvent, AuditGateError>`.
+Corrected §6 error model: `AuditGateError.*` cases replaced with the actual
+`GateViolation.*` case names (`undeclaredField`, `illegalValue`,
+`basisViolation`, `stateInconsistentWithVerb`); `RowStateError.forbiddenCombination`
+corrected to `RowStateError.violatesInvariant`; `Substrate.Error` corrected to
+`SubstrateError`.
 
 ### 1.2.0 -- 2026-06-28
 Security fix: §5.4 leaf encoding upgraded to v2. vector_index type corrected

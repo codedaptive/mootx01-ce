@@ -16,6 +16,13 @@
 // The two federated lenses take a second estate via `estateIDB`,
 // resolved through the dispatcher's own estate registry exactly like
 // `estateID`.
+//
+// MX-TAB-7 addition (§4): three analytics lenses gain an optional `dataset_id`
+// parameter. When absent → existing estate-drawer behavior is EXACTLY unchanged.
+// When present → routes to the CognitionKit dataset-targeted twins:
+//   DatasetComplexity.runColumn   (Shannon entropy over dataset column values)
+//   DatasetAssociations.run       (association rules over column-value co-occurrence)
+//   DatasetCohesion.run           (column-value anomaly scoring)
 
 import Foundation
 import GeniusLocusKit
@@ -23,6 +30,7 @@ import NeuronKit
 import LocusKit
 import CognitionKit
 import SubstrateML
+import PersistenceKit
 
 /// Namespace for the reasoning-lens tool surface. No instances.
 enum LensTools {
@@ -157,11 +165,13 @@ enum LensTools {
                 provenance: .recipe),
             ProjectedTool(
                 name: "moot_lens_cohesion",
-                description: "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the lexical odd-ones-out.",
+                description: "Reasoning lens: flag recalled memories whose content cohesion with peers is anomalously low (lexical odd-ones-out), or detect column-value anomalies in a dataset when dataset_id is supplied.",
                 inputSchema: objectSchema(
                     properties: [
-                        "threshold": numberSchema("Z-score magnitude threshold (default 1.5)."),
+                        "threshold": numberSchema("Z-score magnitude threshold (default 1.5). Estate mode only; ignored when dataset_id is present."),
                         "filter": filterSchema,
+                        "dataset_id": stringSchema("Optional UUID of a dataset (from moot_file_dataset). When supplied, scores column-value anomalies instead of lexical outliers."),
+                        "top_n": integerSchema("Max anomaly rows to return in dataset mode (default 10). Ignored in estate mode."),
                         "estateID": estateIDSchema,
                     ],
                     required: []),
@@ -203,7 +213,7 @@ enum LensTools {
                 description: "Reasoning lens: learn which capture actions tend to reach a target outcome, ranked by conservative success rate. Confirmation-level filters in the recall frame (userConfirmed/unconfirmed) are ignored — the lens performs its own dual recall (confirmed = success, unconfirmed = non-success) to compute a differentiated rate; sensitivity and other scoping filters are honored.",
                 inputSchema: objectSchema(
                     properties: [
-                        "targetKind": stringSchema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly."),
+                        "targetKind": stringSchema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly, dataset (dataset targeting arrives in MX-TAB-6 — passing it returns an error for now)."),
                         "k": integerSchema("How many actions to return (default 5)."),
                         "minObservations": integerSchema("Minimum observations per action (default 1)."),
                         "filter": filterSchema,
@@ -298,12 +308,13 @@ enum LensTools {
             // Information-theoretic lens (Lens 4, Topics).
             ProjectedTool(
                 name: "moot_lens_complexity",
-                description: "Reasoning lens: Shannon entropy (and optional mutual information) over the distribution of a label field across the recalled set.",
+                description: "Reasoning lens: Shannon entropy (and optional mutual information) over a label field across the recalled set, or over a dataset column when dataset_id is supplied.",
                 inputSchema: objectSchema(
                     properties: [
-                        "fieldA": stringSchema("Label field for entropy: room, wing, addedBy, embeddingModelID."),
-                        "fieldB": stringSchema("Optional second label field for mutual information."),
+                        "fieldA": stringSchema("Label field for entropy. Estate mode: room, wing, addedBy, embeddingModelID. Dataset mode (dataset_id present): column name in the dataset."),
+                        "fieldB": stringSchema("Optional second label field (or column) for mutual information."),
                         "filter": filterSchema,
+                        "dataset_id": stringSchema("Optional UUID of a dataset (from moot_file_dataset). When supplied, fieldA/fieldB are column names; filter is ignored."),
                         "estateID": estateIDSchema,
                     ],
                     required: ["fieldA"]),
@@ -311,13 +322,14 @@ enum LensTools {
             // Analytics lenses.
             ProjectedTool(
                 name: "moot_lens_associations",
-                description: "Recall a frame, project each drawer's categorical facets into a co-occurrence matrix, and mine pairwise association rules.",
+                description: "Recall a frame and mine pairwise association rules over drawer categorical facets, or mine rules over dataset column values when dataset_id is supplied.",
                 inputSchema: objectSchema(
                     properties: [
                         "filter": filterSchema,
-                        "limit": integerSchema("Max drawers to recall."),
+                        "limit": integerSchema("Max drawers to recall (estate mode) or max rows to scan (dataset mode, default 1000, capped at 10000)."),
                         "minSupport": .object(["type": .string("number"), "description": .string("Minimum rule support (0..1). Default 0.")]),
                         "minConfidence": .object(["type": .string("number"), "description": .string("Minimum rule confidence (0..1). Default 0.")]),
+                        "dataset_id": stringSchema("Optional UUID of a dataset (from moot_file_dataset). When supplied, mines rules over dataset column values instead of drawer facets."),
                         "estateID": estateIDSchema,
                     ],
                     required: []),
@@ -466,7 +478,65 @@ enum LensTools {
             """)
 
         case "moot_lens_cohesion":
-            // Lexical-cohesion outlier detector (formerly moot_lens_contradiction).
+            // Dataset mode: dataset_id present → column-value anomaly scoring (MX-TAB-7).
+            // Calls DatasetCohesion.run over rows fetched from the DatasetStore.
+            // When absent → estate-mode lexical outlier path below is EXACTLY unchanged.
+            if let dsID = try optionalString(args["dataset_id"], argument: "dataset_id") {
+                let resolved: (uuid: UUID, drawer: Drawer, content: DatasetHandleContent?, store: any DatasetStore)
+                do {
+                    resolved = try await resolveDataset(
+                        idStr: dsID, kit: kit, handle: handle, toolName: "moot_lens_cohesion")
+                } catch let e as DatasetResolutionError {
+                    switch e {
+                    case .refusal(let r): return r
+                    case .fault(let f): throw f
+                    }
+                }
+                let (uuid, _, content, datasetStore) = resolved
+                // Column order from handle content is required: DatasetCohesion.run takes
+                // [[DatasetColumnValue]] where each row is indexed by column position,
+                // not by name. Without the schema, columns cannot be reliably ordered.
+                guard let c = content else {
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.internalError,
+                        message: "moot_lens_cohesion: cannot read dataset column schema (handle content missing or malformed)")
+                }
+                let colOrder = c.columns.map { $0.name }
+                let topN = max(1, try integer(args, "top_n", default: 10))
+                let rows: [StorageRow]
+                do {
+                    rows = try await datasetStore.queryRows(
+                        id: uuid, predicate: nil, orderBy: [],
+                        limit: datasetLensRowCap, offset: nil, columns: nil)
+                } catch {
+                    return ToolDispatcher.errorResult(
+                        "moot_lens_cohesion: query failed: " + error.localizedDescription)
+                }
+                // Project each StorageRow as [DatasetColumnValue] in column-declaration order.
+                // Numeric TypedValues (.int, .bitmap, .float) → .numeric(Double).
+                // Bool/text/uuid/timestamp → .categorical(string). null → .null.
+                let projectedRows: [[DatasetColumnValue]] = rows.map { row in
+                    colOrder.map { colName -> DatasetColumnValue in
+                        guard let tv = row.values[colName] else { return .null }
+                        return typedValueToDatasetColumnValue(tv)
+                    }
+                }
+                let dsOut = DatasetCohesion.run(rows: projectedRows, topN: topN)
+                var dsLines = [
+                    "dataset_cohesion: scored \(dsOut.rowsScored) row(s) of dataset \(uuid.uuidString) — top \(dsOut.topAnomalies.count) anomaly row(s):",
+                ]
+                if dsOut.topAnomalies.isEmpty {
+                    dsLines.append("  (no rows scored)")
+                } else {
+                    for a in dsOut.topAnomalies {
+                        // f64 shortest roundtrip: String(a.score) matches the Rust twin.
+                        dsLines.append("  row[\(a.rowIndex)] score=\(String(a.score))")
+                    }
+                }
+                return ToolDispatcher.textResult(dsLines.joined(separator: "\n"))
+            }
+
+            // Estate mode: lexical-cohesion outlier detector (formerly moot_lens_contradiction).
             // Surfaces memories whose content similarity with their peers is
             // anomalously low — the lexical odd-ones-out.
             let out = try await Contradiction.run(
@@ -627,6 +697,14 @@ enum LensTools {
                     code: JSONRPCErrorCode.invalidParams,
                     message: "targetKind is not a content kind name")
             }
+            // dataset targeting is not yet supported — dataset-handle creation
+            // and lens integration arrive in MX-TAB-6. Reject early with a
+            // clear message so the caller understands the future-arrival intent.
+            if kind == .dataset {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "dataset targeting is not yet supported (arrives in MX-TAB-6)")
+            }
             let predictions = try await Anticipate.run(
                 kit: kit, handle: handle, frame: try frame(args),
                 targetOutcome: UInt8(kind.rawValue),
@@ -731,14 +809,79 @@ enum LensTools {
             """)
 
         case "moot_lens_associations":
+            // minSupport/minConfidence are parsed before the dataset-mode branch so that
+            // type-validation errors are surfaced regardless of which path executes.
+            let minSupport = try doubleArg(args["minSupport"], argument: "minSupport") ?? 0.0
+            let minConfidence = try doubleArg(args["minConfidence"], argument: "minConfidence") ?? 0.0
+
+            // Dataset mode: dataset_id present → mine rules over dataset column values (MX-TAB-7).
+            // Projects each row as a {columnName: value} dictionary with nulls excluded.
+            // When absent → estate-mode path below is EXACTLY unchanged.
+            if let dsID = try optionalString(args["dataset_id"], argument: "dataset_id") {
+                let resolved: (uuid: UUID, drawer: Drawer, content: DatasetHandleContent?, store: any DatasetStore)
+                do {
+                    resolved = try await resolveDataset(
+                        idStr: dsID, kit: kit, handle: handle, toolName: "moot_lens_associations")
+                } catch let e as DatasetResolutionError {
+                    switch e {
+                    case .refusal(let r): return r
+                    case .fault(let f): throw f
+                    }
+                }
+                let (uuid, _, _, datasetStore) = resolved
+                // `limit` applies to dataset rows. When absent, default = cap = datasetLensRowCap
+                // (10 000). clampLimit rejects negatives and enforces the ceiling.
+                let rowLimit = try ToolDispatcher.clampLimit(
+                    try optionalInt(args["limit"], argument: "limit"),
+                    argument: "limit",
+                    default: datasetLensRowCap,
+                    ceiling: datasetLensRowCap)
+                let rows: [StorageRow]
+                do {
+                    rows = try await datasetStore.queryRows(
+                        id: uuid, predicate: nil, orderBy: [],
+                        limit: rowLimit, offset: nil, columns: nil)
+                } catch {
+                    return ToolDispatcher.errorResult(
+                        "moot_lens_associations: query failed: " + error.localizedDescription)
+                }
+                // Project rows as [[String: String]] — null values excluded (no natural label).
+                // typedValueToLabelString produces bare values ("Chicago" not "\"Chicago\"")
+                // so labels read as "columnName:value" without JSON escaping artifacts.
+                let projectedRows: [[String: String]] = rows.map { row in
+                    var dict: [String: String] = [:]
+                    for (col, tv) in row.values {
+                        if case .null = tv { continue }
+                        dict[col] = typedValueToLabelString(tv)
+                    }
+                    return dict
+                }
+                let dsOut = DatasetAssociations.run(
+                    rows: projectedRows,
+                    thresholds: MiningThresholds(minSupport: minSupport, minConfidence: minConfidence))
+                var dsLines = [
+                    "dataset_associations: \(dsOut.rules.count) rule(s) from \(dsOut.rowCount) row(s) (dataset \(uuid.uuidString))",
+                ]
+                if dsOut.labelOverflow {
+                    dsLines.append("note: label vocabulary was capped at 64; some column:value pairs were dropped")
+                }
+                for rule in dsOut.rules {
+                    dsLines.append(
+                        "  \(rule.antecedent) → \(rule.consequent): "
+                        + "sup=\(String(format: "%.3f", rule.support)) "
+                        + "conf=\(String(format: "%.3f", rule.confidence)) "
+                        + "lift=\(String(format: "%.3f", rule.lift))")
+                }
+                return ToolDispatcher.textResult(dsLines.joined(separator: "\n"))
+            }
+
+            // Estate mode: recall drawers, mine rules over categorical drawer facets.
             let filterChain = try decodeFilterChain(args["filter"])
             // Route through clampLimit so negative and over-ceiling values are
             // rejected/clamped at the MCP boundary. Parity: Rust lens_tools.rs
             // moot_lens_associations uses clamp_limit with the same ceiling.
             let limit = try ToolDispatcher.clampLimit(
                 try optionalInt(args["limit"], argument: "limit"), argument: "limit")
-            let minSupport = try doubleArg(args["minSupport"], argument: "minSupport") ?? 0.0
-            let minConfidence = try doubleArg(args["minConfidence"], argument: "minConfidence") ?? 0.0
             let arFrame = LocusKit.RecallFrame(
                 filterChain: filterChain,
                 hydrationLevel: .structured,
@@ -836,6 +979,76 @@ enum LensTools {
             let fieldA = try requireString(args, "fieldA")
             let fieldB = try optionalString(args["fieldB"], argument: "fieldB")
 
+            // Dataset mode: dataset_id present → column entropy over dataset rows (MX-TAB-7).
+            // fieldA/fieldB are column names; drawer-field validation is skipped entirely.
+            // When absent → estate-mode path below is EXACTLY unchanged.
+            if let dsID = try optionalString(args["dataset_id"], argument: "dataset_id") {
+                let resolved: (uuid: UUID, drawer: Drawer, content: DatasetHandleContent?, store: any DatasetStore)
+                do {
+                    resolved = try await resolveDataset(
+                        idStr: dsID, kit: kit, handle: handle, toolName: "moot_lens_complexity")
+                } catch let e as DatasetResolutionError {
+                    switch e {
+                    case .refusal(let r): return r
+                    case .fault(let f): throw f
+                    }
+                }
+                let (uuid, _, content, datasetStore) = resolved
+                // Column validation requires decoded content. If the handle content
+                // is malformed (corrupted), fail fast with a clear internal-error.
+                guard let c = content else {
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.internalError,
+                        message: "moot_lens_complexity: cannot read dataset column schema (handle content missing or malformed)")
+                }
+                let colNames = Set(c.columns.map { $0.name })
+                if !colNames.isEmpty && !colNames.contains(fieldA) {
+                    let list = colNames.sorted().joined(separator: ", ")
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.invalidParams,
+                        message: "moot_lens_complexity: fieldA '\(fieldA)' is not a column of dataset \(uuid.uuidString). Available: \(list)")
+                }
+                if let fb = fieldB, !colNames.isEmpty, !colNames.contains(fb) {
+                    let list = colNames.sorted().joined(separator: ", ")
+                    throw JSONRPCError(
+                        code: JSONRPCErrorCode.invalidParams,
+                        message: "moot_lens_complexity: fieldB '\(fb)' is not a column of dataset \(uuid.uuidString). Available: \(list)")
+                }
+                let rows: [StorageRow]
+                do {
+                    rows = try await datasetStore.queryRows(
+                        id: uuid, predicate: nil, orderBy: [],
+                        limit: datasetLensRowCap, offset: nil, columns: nil)
+                } catch {
+                    return ToolDispatcher.errorResult(
+                        "moot_lens_complexity: query failed: " + error.localizedDescription)
+                }
+                // Project column A values: TypedValue → String? (nil for .null).
+                // DatasetTools.typedValueToString is used for f64 wire discipline
+                // (String(d) shortest roundtrip) and consistent null representation.
+                let colA: [String?] = rows.map { row -> String? in
+                    guard let tv = row.values[fieldA] else { return nil }
+                    if case .null = tv { return nil }
+                    return DatasetTools.typedValueToString(tv)
+                }
+                let colB: [String?]? = fieldB.map { fb in
+                    rows.map { row -> String? in
+                        guard let tv = row.values[fb] else { return nil }
+                        if case .null = tv { return nil }
+                        return DatasetTools.typedValueToString(tv)
+                    }
+                }
+                let dsOut = DatasetComplexity.runColumn(columnA: colA, columnB: colB)
+                var dsLines = [
+                    "dataset_complexity: dataset=\(uuid.uuidString) rows=\(rows.count) nonNull=\(dsOut.nonNullCount) null=\(dsOut.nullCount)",
+                    "entropyA=\(dsOut.result.entropyA)",
+                ]
+                if let eb = dsOut.result.entropyB { dsLines.append("entropyB=\(eb)") }
+                if let mi = dsOut.result.mutualInformation { dsLines.append("mutualInformation=\(mi)") }
+                return ToolDispatcher.textResult(dsLines.joined(separator: "\n"))
+            }
+
+            // Estate mode: validate drawer field names, then run the Complexity recipe.
             // Validate field names before calling into the recipe. The complexity
             // recipe silently returns entropy=-0 for fields it does not recognise,
             // which would surface as a successful but meaningless result. Reject
@@ -1109,6 +1322,7 @@ enum LensTools {
         case "structuredJSON": return .structuredJSON
         case "imageCaption": return .imageCaption
         case "fingerprintOnly": return .fingerprintOnly
+        case "dataset": return .dataset
         default: return nil
         }
     }
@@ -1162,6 +1376,162 @@ enum LensTools {
         var lines = ["\(heading): \(items.count) result(s)"]
         lines += items.map { "  - \($0)" }
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
+    // MARK: - Dataset resolution (MX-TAB-7 dataset-mode lens paths)
+
+    /// Distinguishes soft refusals (withdrawn handle, not found) from hard faults
+    /// (invalid UUID, estate inaccessible, storage unavailable) in resolveDataset.
+    ///
+    /// Callers catch this error and either return the refusal JSONValue or rethrow the fault:
+    ///
+    ///     do { resolved = try await resolveDataset(...) }
+    ///     catch let e as DatasetResolutionError {
+    ///         switch e {
+    ///         case .refusal(let r): return r      // keeps the MCP call id
+    ///         case .fault(let f): throw f         // surfaces as JSONRPC error
+    ///         }
+    ///     }
+    private enum DatasetResolutionError: Error {
+        /// Soft refusal: return this JSONValue as the tool result (isError:true).
+        case refusal(JSONValue)
+        /// Hard fault: rethrow as a JSONRPCError (transport-level error).
+        case fault(JSONRPCError)
+    }
+
+    /// Row cap for all dataset-mode lens queries. Matches DatasetCohesion.scanCap
+    /// (10 000 rows). Bounds scan cost; callers may supply a smaller `limit`.
+    private static let datasetLensRowCap: Int = DatasetCohesion.scanCap
+
+    /// Resolve a dataset_id string to its active handle drawer, decoded content
+    /// (optional), and DatasetStore.
+    ///
+    /// - Soft refusals (withdrawn handle, not found) throw `.refusal(errorResult)`.
+    /// - Hard faults (invalid UUID, estate inaccessible, storage absent) throw `.fault(JSONRPCError)`.
+    /// - Content is returned as optional: callers that need column metadata check for nil
+    ///   themselves; callers that only need rows (e.g. associations) can ignore it.
+    private static func resolveDataset(
+        idStr: String,
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        toolName: String
+    ) async throws -> (uuid: UUID, drawer: Drawer, content: DatasetHandleContent?, store: any DatasetStore) {
+        guard let uuid = UUID(uuidString: idStr) else {
+            throw DatasetResolutionError.fault(JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(toolName): dataset_id is not a valid UUID: \(idStr)"))
+        }
+
+        let estate: LocusKit.Estate
+        do {
+            // estate(for:) is actor-isolated on GeniusLocusKit; await is required
+            // (matches the try await pattern used elsewhere in LensTools dispatch).
+            estate = try await kit.estate(for: handle)
+        } catch {
+            throw DatasetResolutionError.fault(JSONRPCError(
+                code: JSONRPCErrorCode.internalError,
+                message: "\(toolName): estate not accessible: " + error.localizedDescription))
+        }
+
+        let drawer: Drawer
+        do {
+            drawer = try await estate.resolveActiveDatasetHandle(datasetId: uuid)
+        } catch let lke as LocusKitError {
+            // Withdrawn handle is a soft refusal: surface as errorResult so the client
+            // keeps the JSONRPC call id. Mirrors DatasetTools.describeLocusKitError.
+            throw DatasetResolutionError.refusal(
+                ToolDispatcher.errorResult("\(toolName): " + lensDescribeLocusKitError(lke)))
+        } catch {
+            throw DatasetResolutionError.refusal(
+                ToolDispatcher.errorResult(
+                    "\(toolName): dataset handle not found: " + error.localizedDescription))
+        }
+
+        // Content is try? because callers decide if they need it:
+        // - complexity and cohesion: guard-check for nil (need column schema)
+        // - associations: ignores content (column names come from row keys)
+        let content = try? DatasetHandleContent.decode(from: drawer.content)
+
+        let store: any DatasetStore
+        do {
+            store = try await kit.datasetStore(for: handle)
+        } catch {
+            throw DatasetResolutionError.fault(JSONRPCError(
+                code: JSONRPCErrorCode.internalError,
+                message: "\(toolName): estate storage does not support datasets: " + error.localizedDescription))
+        }
+
+        return (uuid: uuid, drawer: drawer, content: content, store: store)
+    }
+
+    /// Describe a LocusKitError at the ARIA lens boundary.
+    /// Mirrors DatasetTools.describeLocusKitError with lens-appropriate guidance.
+    private static func lensDescribeLocusKitError(_ error: LocusKitError) -> String {
+        switch error {
+        case .withdrawnDatasetHandle(let datasetId):
+            return "dataset is withdrawn (id: \(datasetId.uuidString)). " +
+                "Restore it with moot_update_memory mutation=revive before using this lens."
+        default:
+            return error.localizedDescription
+        }
+    }
+
+    /// Convert a TypedValue to a bare string for use as a categorical label in
+    /// DatasetAssociations (no JSON-style quoting — labels must be human-readable).
+    ///
+    /// Contrast with DatasetTools.typedValueToString which wraps .text in quotes.
+    /// Here, "Chicago" is the label, not "\"Chicago\"".
+    ///
+    /// Float discipline: Double uses String(d) (f64 shortest roundtrip) matching the Rust twin.
+    /// Callers must exclude .null values before calling (null has no natural label).
+    private static func typedValueToLabelString(_ v: TypedValue) -> String {
+        switch v {
+        case .null:          return ""         // caller should exclude; empty → no contribution
+        case .bool(let b):   return b ? "true" : "false"
+        case .int(let i):    return "\(i)"
+        case .bitmap(let i): return "\(i)"
+        case .float(let d):  return String(d)  // f64 shortest roundtrip
+        case .text(let s):   return s          // bare — no JSON quoting
+        case .uuid(let u):   return u.uuidString
+        case .timestamp(let date):
+            return ISO8601DateFormatter().string(from: date)
+        default:
+            // blob, json, hlc, fingerprint — use type description as fallback label.
+            return "<\(v.typeDescription)>"
+        }
+    }
+
+    /// Project a TypedValue to a DatasetColumnValue for DatasetCohesion.run.
+    ///
+    /// Column kind is inferred by DatasetCohesion from the first non-null value.
+    /// Numeric types (.int, .bitmap, .float) → .numeric(Double).
+    /// Bool/text/uuid/timestamp → .categorical(string).
+    /// Null and unscoreable types (.blob, .json, etc.) → .null (zero anomaly signal).
+    private static func typedValueToDatasetColumnValue(_ v: TypedValue) -> DatasetColumnValue {
+        switch v {
+        case .null:
+            return .null
+        case .int(let i):
+            // Exact Int64 → Double conversion; no precision loss for typical dataset integers.
+            return .numeric(Double(i))
+        case .bitmap(let i):
+            // Bitmaps are integer-valued; treat as numeric for MAD-based anomaly scoring.
+            return .numeric(Double(i))
+        case .float(let d):
+            return .numeric(d)
+        case .bool(let b):
+            // Bool → categorical: "true"/"false" strings enable rarity-based scoring.
+            return .categorical(b ? "true" : "false")
+        case .text(let s):
+            return .categorical(s)
+        case .uuid(let u):
+            return .categorical(u.uuidString)
+        case .timestamp(let date):
+            return .categorical(ISO8601DateFormatter().string(from: date))
+        default:
+            // blob, json, hlc, fingerprint — no scorable representation; contribute 0.
+            return .null
+        }
     }
 
     // MARK: - JSON schema helpers (same small copies as RecipeTools)

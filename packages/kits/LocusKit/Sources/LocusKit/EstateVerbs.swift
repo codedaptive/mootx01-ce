@@ -91,7 +91,7 @@ public extension Estate {
 
         // Operational bitmap assembly:
         //   bits 0–5   capture_channel (contiguous raw 0…5)
-        //   bits 6–11  content_kind    (contiguous raw 0…6)
+        //   bits 6–11  content_kind    (contiguous raw 0…7)
         //   bits 12–23 feature_flags   (OptionSet bitset, cookbook §2.4)
         // Per DrawerOperational.swift / spec § 5.6.
         // F18 atomic centralization: compose via BitField.writeField rather
@@ -433,7 +433,10 @@ public extension Estate {
     /// everywhere — stale set bits are a harmless over-approximation
     /// (spec § 11.5 / ContainerFingerprintStore header). Tightening is
     /// done by `containerFP.rebuildAll` at estate open.
-    private func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {
+    // Internal rather than private so extensions in other LocusKit source files
+    // (e.g. DatasetHandle.swift) can call this without duplicating the container-
+    // fingerprint OR-in logic. Access stays module-internal; no public API change.
+    func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {
         try await store.addDrawer(drawer, now: now)
         // Resolve wing/room display names from the node tree for the
         // container fingerprint aggregate.

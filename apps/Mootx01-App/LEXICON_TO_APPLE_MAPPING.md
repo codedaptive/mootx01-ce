@@ -86,8 +86,9 @@ those lines at the gateway layer — no new ARIA tool needed.
 - `DrawerEntityQuery.entities(for:)` resolves by running a recall with the UUID as the query
   and exact-id filtering; best-effort but no fabrication.
 - `DrawerEntityQuery.suggestedEntities()` returns the 20 most-recent drawers.
-- `RecallDrawerIntent` still returns text today; a typed `[DrawerEntity]` result from the intent
-  itself is a future upgrade (requires App Intents returning a value, currently returning dialog).
+- `RecallDrawerIntent` returns a typed `[DrawerEntity]` value plus the full response text as
+  dialog — Shortcuts chains the entities into a next step; Siri reads the dialog. One
+  `moot_memory_search` call feeds both (composition: `RecallDrawerIntent.entities(from:)`).
 
 Content in `DrawerEntity` is a 120-char preview from the search response; full-body content is
 not returned in the search path.
@@ -131,7 +132,7 @@ write paths.
 | Code | Adapter | State | File |
 |---|---|---|---|
 | A1 | Embedded (in-process) | **live** | `Sources/MootGateway/MootBridge.swift` |
-| A2 | ARIA_MCP server on device | **seam** | `Sources/MootGateway/Transport/GatewayTransport.swift` — `HTTPTransport` (URLSession POST to loopback daemon) is implemented; `InProcessTransport` is live. Seam because LAN/Bonjour discovery and Local Network entitlement are not yet built; loopback CE is the working path. |
+| A2 | ARIA_MCP server on device | **live (app-hosted) / seam (daemon)** | `Sources/MootGateway/Transport/GatewayTransport.swift` (`HTTPTransport` loopback client + `InProcessTransport`) and `Sources/MootGateway/LANServer/` — `MootLANServer` (NWListener) serves the app's OWN estate to LAN MCP clients over credentialed HTTP/JSON-RPC, bridging to the in-process dispatcher; it advertises `_mootx01._tcp` and `LANDaemonBrowser` discovers peers. Remote callers are bearer-authed, read-only, and public-only (`LANRequestGate`). The STANDALONE-daemon leg stays seam: the daemon advertising itself is an engine-lane parity mission. |
 | A3 | Consume other estates (client) | **v1.1** | `Sources/MootGateway/MCPClient/MootEstateClient.swift` — fold-in via capture is real (`foldIn`); outbound federation deferred to v1.1 by Bob's ruling; `fetch` throws `outboundFederationNotInThisVersion` as an explicit guard. |
 | A4 | App Intents | **pending registration** | `packages/apple/MootIntentKit/Sources/MootIntentKit/CaptureDrawerIntent.swift` + `RecallDrawerIntent.swift` + other verb intents — implementation is live and tested; `Mootx01Shortcuts.updateAppShortcutParameters()` called at every app launch (App/Mootx01App.swift). System Siri/Spotlight activation requires the Xcode app bundle build (xcodegen → xcodebuild). |
 | A5 | Callback URL | **pending registration** | `packages/apple/MootIntentKit/Sources/MootIntentKit/MootURLRouter.swift` — routing logic and security hardening are complete and tested; `CFBundleURLTypes` for `mootx01://` is declared in `project.yml` (the xcodegen spec). URL-scheme registration activates when xcodegen regenerates the project and the app bundle is built. |
@@ -157,7 +158,7 @@ turns "Apple dropped a change" into "complete the slot."
 | **Apple Intelligence dials out as an MCP client** | `Sources/MootGateway/Transport/GatewayTransport.swift` — adapt `HTTPTransport` to Apple's transport/auth; the resident daemon supplies the listener. No verb/tool change. | Small |
 | **App Intents exported outward as MCP** | Nothing new to author — the A4 intents in `packages/apple/MootIntentKit/` are the on-ramp; register them in an Xcode bundle (`AppIntentsPackage`). | Medium (bundle) |
 | **FM v2 / on-device "Core AI" tool-calling** | New `FMToolAdapter` beside MootIntentKit exposing `recall`/`capture` as a model `Tool`; reuse `MootBridge`. | Small |
-| **App Intents 2.0 (richer entities / streaming)** | `packages/apple/MootIntentKit/Sources/MootIntentKit/DrawerEntity.swift` — adopt the new entity/result types; wire the typed `[DrawerEntity]` result that the text-result edge blocks today. | Enhance |
+| **App Intents 2.0 (richer entities / streaming)** | `packages/apple/MootIntentKit/Sources/MootIntentKit/DrawerEntity.swift` — adopt the new entity/result types. The typed `[DrawerEntity]` recall result is wired (RecallDrawerIntent returns entities + dialog); remaining upgrades are streaming results and richer entity properties. | Enhance |
 | **A memory/knowledge assistant schema** | `packages/apple/MootIntentKit/Sources/MootIntentKit/CaptureDrawerIntent.swift` + `RecallDrawerIntent.swift` — conform to the schema for the deep treatment; update §1 candidacy. | Opportunistic |
 | **Personal Context APIs open** | New scope doc + an `A3` reader in `MCPClient/` consuming Personal Context; fold in via `capture`/`learn`. | Investigate |
 
@@ -170,10 +171,14 @@ verb set never changes — the lexicon is fixed; only its Apple projection moves
 
 **Closed since last audit (2026-06-13):** CaptureView exportability Picker (A), DrawerEntity
 structured recall via gateway-layer text parse (B), `updateAppShortcutParameters()` at launch
-and `CFBundleURLTypes` declared in `project.yml` (C).
+and `CFBundleURLTypes` declared in `project.yml` (C), typed `[DrawerEntity]` recall results (D),
+and the `NSExtension` Share-Sheet capture targets (E — `Mootx01-Share-iOS`/`-macOS`, UI-less:
+the extension spools to the app-group `ShareInbox`, the host app drains via `ShareInboxDrain`
+at launch/foreground/tick; the extension process never opens the estate).
 
-**Remaining:** `NSExtension` Share-Sheet target; Bonjour/LAN discovery and Local Network
-entitlement (the remaining A2 gap; loopback `HTTPTransport` is implemented); iCloud sync;
-graduating `MootGateway` into `ARIA_MacOS`/`ARIA_iOS`. System activation of A4/A5/A6 requires
-running `xcodegen generate` then building the Xcode project — that Xcode build step is outside
-SPM and is the final activation gate.
+**Remaining:** daemon-side Bonjour advertisement (the last A2 gap — an engine-lane Swift/Rust
+parity mission; the app-side browse client `LANDaemonDiscovery` and the `NSBonjourServices` /
+`NSLocalNetworkUsageDescription` plumbing are done, and loopback `HTTPTransport` is implemented);
+iCloud sync; graduating `MootGateway` into `ARIA_MacOS`/`ARIA_iOS`. System activation of
+A4/A5/A6 requires running `xcodegen generate` then building the Xcode project — that Xcode
+build step is outside SPM and is the final activation gate.

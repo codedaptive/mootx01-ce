@@ -1,6 +1,6 @@
 ---
 title: GeniusLocus Engineering Specification Cookbook
-version: 1.1.0
+version: 1.2.0
 status: implementation-grade specification
 description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (23 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code."
 author: MOOTx01 maintainers
@@ -384,7 +384,8 @@ Drawer operational (empirical-dominant, 6-bit floor):
                                  0=prose 1=code 2=transcript 3=list
                                  4=structured_json 5=image_caption
                                  6=fingerprint_only (NEW, AmbientSample)
-                                 7–63 reserved
+                                 7=dataset (NEW, MX-TAB-3)
+                                 8–63 reserved
   Bits 12–23  feature_flags     [empirical, bitset]
                                  bit 12 has_attachments
                                  bit 13 has_voice

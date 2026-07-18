@@ -74,9 +74,24 @@ extension MootToolCalling {
     }
 
     /// Parse `moot_memory_search` text response lines into DrawerEntity values.
+    /// Forwards to DrawerLineParser — kept on the protocol so conformances
+    /// (and their tests) keep the `Bridge.parseDrawerLines` call shape.
+    public static func parseDrawerLines(_ text: String) -> [DrawerEntity] {
+        DrawerLineParser.parse(text)
+    }
+}
+
+// MARK: - DrawerLineParser
+//
+// The moot_memory_search response-line parser as a standalone namespace, so
+// non-conforming callers (RecallDrawerIntent's typed-result composition) can
+// parse without routing through a MootToolCalling conformance.
+
+public enum DrawerLineParser {
+    /// Parse `moot_memory_search` text response lines into DrawerEntity values.
     /// Each result line is `<uuid>  [<room>]  <content>`. The first line
     /// ("found N memory(s)") and the recall_provenance line are skipped.
-    public static func parseDrawerLines(_ text: String) -> [DrawerEntity] {
+    public static func parse(_ text: String) -> [DrawerEntity] {
         // UUID pattern: 8-4-4-4-12 hex groups.
         let uuidPattern = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
         // Full line pattern: <uuid>  [<room>]  <content>

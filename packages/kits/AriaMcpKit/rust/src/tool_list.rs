@@ -17,20 +17,22 @@
 //!                 consolidate, recall_distilled, recollect
 //!   Lens (23)   — moot_lens_keystones … moot_lens_complexity (+ moot_lens_node_motion, moot_lens_cohesion, moot_lens_contradiction)
 //!   Vault (5)   — export, import, status, reconcile, job
+//!   Dataset (3) — moot_file_dataset, moot_dataset_query, moot_dataset_stats (MX-TAB-7b)
 //!
 //! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 68 tools (ADR-025 wave 8.2 added moot_monitoring_status;
+//! Vault-on (default): 71 tools (ADR-025 wave 8.2 added moot_monitoring_status;
 //! FDC reset added moot_reclassify_fdc; the contradiction hunter added
-//! moot_hunt_contradictions + moot_review_tunnel).
-//! Vault-off (MOOTX01_VAULT=0): 62 tools —
+//! moot_hunt_contradictions + moot_review_tunnel; MX-TAB-7 added 3 dataset
+//! tools moot_file_dataset/query/stats).
+//! Vault-off (MOOTX01_VAULT=0): 65 tools —
 //! the five moot_vault_* tools and moot_palace_import are hidden together
 //! because all open local SQLite files (filesystem import/export vector).
+//! Dataset tools are always present (not vault-gated).
 //! Memory adapter (opt-in, MOOTX01_MEMORY_TOOL=1): adds 1 tool (`memory`) above the
-//! base count — 69 vault-on or 63 vault-off when enabled. Default (absent / ≠ "1")
-//! is OFF, preserving the 68/62 counts unchanged. There are no dataset tools on
-//! this branch's registry (a 1.1.x-only surface); the tier list stops at Vault.
+//! base count — 72 vault-on or 66 vault-off when enabled. Default (absent / ≠ "1")
+//! is OFF, preserving the 71/65 counts unchanged.
 //!
 //! Wire identity: every tool name and inputSchema required/optional field set
 //! is byte-identical to Swift `ToolProjection.swift`. Every schema wraps with
@@ -69,13 +71,16 @@ pub fn memory_enabled() -> bool {
 
 /// Build the tool surface for `tools/list`.
 ///
-/// Produces 68 tools when vault is enabled (the default) or 62 tools when
+/// Produces 71 tools when vault is enabled (the default) or 65 tools when
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). Adding 1 each when
 /// `MOOTX01_MEMORY_TOOL=1` (the opt-in memory adapter). The filesystem-importing
 /// `moot_palace_import` tool is hidden with the vault surface (same security
-/// posture). All other non-vault tiers are always present. See ADR-015.
-/// ADR-025 wave 8.2 added `moot_monitoring_status`; the FDC reset tool added
-/// `moot_reclassify_fdc`.
+/// posture). Dataset tools (moot_file_dataset, moot_dataset_query,
+/// moot_dataset_stats) are always present and are NOT vault-gated.
+/// See ADR-015. ADR-025 wave 8.2 added `moot_monitoring_status`; the FDC
+/// reset tool added `moot_reclassify_fdc`; the contradiction hunter added
+/// `moot_hunt_contradictions` + `moot_review_tunnel`; MX-TAB-7 added 3
+/// dataset tools.
 pub fn build_tool_list() -> serde_json::Value {
     build_tool_list_with_flags(vault_enabled(), memory_enabled())
 }
@@ -96,11 +101,12 @@ pub fn build_tool_list_with_vault_flag(vault_on: bool) -> serde_json::Value {
 /// The single implementation all entry points delegate to. Tests that need
 /// fully deterministic behaviour (no env-var reads) call this directly —
 /// e.g. `build_tool_list_with_flags(vault_enabled(), false)` to get the
-/// baseline 68/62 count without racing against memory-tool env mutations.
+/// baseline 71/65 count without racing against memory-tool env mutations.
 pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json::Value {
-    // Vault-on: 68 tools. Vault-off: 62 tools (palace_import + 5 vault_* hidden).
-    // Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1: 69/63.
-    let capacity = if vault_on { 68 } else { 62 } + if memory_on { 1 } else { 0 };
+    // Vault-on: 71 tools. Vault-off: 65 tools (palace_import + 5 vault_* hidden).
+    // Memory adapter adds 1 when MOOTX01_MEMORY_TOOL=1: 72/66.
+    // Dataset tools (3) are always present regardless of vault flag.
+    let capacity = if vault_on { 71 } else { 65 } + if memory_on { 1 } else { 0 };
     let mut tools: Vec<serde_json::Value> = Vec::with_capacity(capacity);
 
     // Anthropic memory_20250818 adapter (M-MEMTOOL-1) — opt-in, prepended when
@@ -193,6 +199,14 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     for lens_name in crate::lens_tools::LENS_TOOLS {
         tools.push(lens_tool(lens_name));
     }
+
+    // Dataset (3) — moot_file_dataset, moot_dataset_query, moot_dataset_stats (MX-TAB-7b).
+    // Always present: not vault-gated. User-owned tabular datasets are an
+    // estate-tier surface (interface provenance), not a filesystem-export surface.
+    // Schemas are byte-identical to Swift DatasetTools.swift `tools()` projections.
+    tools.push(file_dataset_tool());
+    tools.push(dataset_query_tool());
+    tools.push(dataset_stats_tool());
 
     // Vault (5) — gated by MOOTX01_VAULT env var (ADR-015).
     // Default (env absent or ≠ "0") is vault-on: tools appear in tools/list.
@@ -482,7 +496,11 @@ fn fact_search_tool() -> serde_json::Value {
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("Optional substring filter across subject, predicate, and object."),
-                "limit": integer_schema("Max results (default 50).")
+                "subject_exact": string_schema("Optional exact, case-sensitive subject filter."),
+                "predicate_exact": string_schema("Optional exact, case-sensitive predicate filter."),
+                "object_exact": string_schema("Optional exact, case-sensitive object filter."),
+                "source_id_exact": string_schema("Optional exact provenance source filter."),
+                "limit": integer_schema("Max results (default 100, maximum 500).")
             }),
             json!([])
         )))
@@ -948,7 +966,7 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_bias" => "Reasoning lens: detect over/under-representation relative to a reference distribution.",
         "moot_lens_drift" => "Reasoning lens: measure distribution drift across a temporal split point.",
         "moot_lens_node_motion" => "Reasoning lens (diffusion, node layer): how a single memory has MOVED over time — its mutation volatility (decay-weighted recent-churn mass), its topic trajectory (the UDC anchors it has occupied), whether it reanchored, and a write-time anomaly verdict (churning / reanchored / stable). Reads the memory's fresh audit history.",
-        "moot_lens_cohesion" => "Reasoning lens: surface drawers that are statistical outliers in content cohesion with their peers (the odd-ones-out).",
+        "moot_lens_cohesion" => "Reasoning lens: flag recalled memories whose content cohesion with peers is anomalously low (lexical odd-ones-out), or detect column-value anomalies in a dataset when dataset_id is supplied.",
         "moot_lens_contradiction" => "Reasoning lens: surface recorded contradictions — drawer pairs connected by a contradicts tunnel (confirmed edges plus PROPOSED agent-derived findings from the contradiction hunter, flagged unreviewed), and KG facts with conflicting objects for the same subject+predicate. Reports recorded links only; to scan memory CONTENT for new conflicts run moot_hunt_contradictions (or moot_dream, which includes a hunt sweep). Settle proposed edges with moot_review_tunnel.",
         "moot_lens_trust_synthesis" => "Reasoning lens: hybrid-recall and rank by trust score.",
         "moot_lens_partial_cue" => "Reasoning lens: retrieve memories by partial-cue similarity to an anchor. Results include a discrimination signal. Fingerprint-based scores tend to be near-flat on small corpora (a current envelope, not a bug — the embedding encoder in v1.1 will widen score separation); low discrimination is expected on small estates. For keyword/exact retrieval use moot_recall_precise instead.",
@@ -956,13 +974,13 @@ fn lens_description(name: &str) -> &'static str {
         "moot_lens_successors" => "Reasoning lens: suggest probable successor drawers via tunnel traversal.",
         "moot_lens_overlap" => "Reasoning lens: compute thematic overlap between two estates.",
         "moot_lens_divergence" => "Reasoning lens: measure topic divergence between two estates.",
-        "moot_lens_associations" => "Analytics lens: mine pairwise association rules from categorical facets.",
+        "moot_lens_associations" => "Recall a frame and mine pairwise association rules over drawer categorical facets, or mine rules over dataset column values when dataset_id is supplied.",
         "moot_lens_concepts" => "Analytics lens: mine formal concepts from the categorical feature matrix.",
         "moot_lens_apriori" => "Read the estate's audit log and mine multi-antecedent association rules via the Apriori algorithm.",
         "moot_lens_moment" => "Temporal lens: measure fingerprint-set similarity across a primary window and optional comparison windows.",
         "moot_lens_rhythm" => "Temporal lens: detect capture-rhythm patterns from fingerprint bit-series data.",
         "moot_lens_precedence" => "Temporal lens: discover temporal precedence (causal ordering) between drawers via audit event lag analysis.",
-        "moot_lens_complexity" => "Information-theoretic lens: compute per-drawer content complexity scores.",
+        "moot_lens_complexity" => "Reasoning lens: Shannon entropy (and optional mutual information) over a label field across the recalled set, or over a dataset column when dataset_id is supplied.",
         _ => "Reasoning lens.",
     }
 }
@@ -1059,8 +1077,10 @@ fn lens_schema(name: &str) -> serde_json::Value {
         ),
         "moot_lens_cohesion" => object_schema(
             json!({
-                "threshold": number_schema("Z-score magnitude threshold (default 1.5)."),
+                "threshold": number_schema("Z-score magnitude threshold (default 1.5). Estate mode only; ignored when dataset_id is present."),
                 "filter": filter,
+                "dataset_id": string_schema("Optional UUID of a dataset (from moot_file_dataset). When supplied, scores column-value anomalies instead of lexical outliers."),
+                "top_n": integer_schema("Max anomaly rows to return in dataset mode (default 10). Ignored in estate mode."),
                 "estateID": estate_id,
                 "teachme": teachme
             }),
@@ -1094,7 +1114,7 @@ fn lens_schema(name: &str) -> serde_json::Value {
         ),
         "moot_lens_anticipate" => object_schema(
             json!({
-                "targetKind": string_schema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly."),
+                "targetKind": string_schema("Target outcome as a content kind: prose, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly, dataset (dataset targeting arrives in MX-TAB-6 — passing it returns an error for now)."),
                 "k": integer_schema("How many actions to return (default 5)."),
                 "minObservations": integer_schema("Minimum observations per action (default 1)."),
                 "filter": filter,
@@ -1134,9 +1154,10 @@ fn lens_schema(name: &str) -> serde_json::Value {
         "moot_lens_associations" => object_schema(
             json!({
                 "filter": filter,
-                "limit": integer_schema("Max drawers to recall."),
+                "limit": integer_schema("Max drawers to recall (estate mode) or max rows to scan (dataset mode, default 1000, capped at 10000)."),
                 "minSupport": number_schema("Minimum rule support (0..1). Default 0."),
                 "minConfidence": number_schema("Minimum rule confidence (0..1). Default 0."),
+                "dataset_id": string_schema("Optional UUID of a dataset (from moot_file_dataset). When supplied, mines rules over dataset column values instead of drawer facets."),
                 "estateID": estate_id,
                 "teachme": teachme
             }),
@@ -1211,9 +1232,10 @@ fn lens_schema(name: &str) -> serde_json::Value {
         ),
         "moot_lens_complexity" => object_schema(
             json!({
-                "fieldA": string_schema("Label field for entropy: room, wing, addedBy, embeddingModelID."),
-                "fieldB": string_schema("Optional second label field for mutual information."),
+                "fieldA": string_schema("Label field for entropy. Estate mode: room, wing, addedBy, embeddingModelID. Dataset mode (dataset_id present): column name in the dataset."),
+                "fieldB": string_schema("Optional second label field (or column) for mutual information."),
                 "filter": filter,
+                "dataset_id": string_schema("Optional UUID of a dataset (from moot_file_dataset). When supplied, fieldA/fieldB are column names; filter is ignored."),
                 "estateID": estate_id,
                 "teachme": teachme
             }),
@@ -1221,6 +1243,113 @@ fn lens_schema(name: &str) -> serde_json::Value {
         ),
         _ => with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dataset tools — moot_file_dataset, moot_dataset_query, moot_dataset_stats
+// (MX-TAB-7b). Always present; not vault-gated. Schemas byte-identical to
+// Swift DatasetTools.swift `tools()` projections. provenance: .interface.
+// ---------------------------------------------------------------------------
+
+/// `moot_file_dataset` — import a tabular dataset into the estate.
+///
+/// Schema mirrors Swift DatasetTools.tools()[0].inputSchema.
+/// Uses with_teachme(with_estate_id(...)) matching the Rust interface-tool convention
+/// (all non-vault Rust interface tools include teachme via this wrapper).
+fn file_dataset_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_file_dataset",
+        "description": "Import a tabular dataset into the estate as a first-class handle. \
+Provide columns (array of name+type pairs), either inline rows \
+(array of objects) or a local csv_path, and a location for the \
+handle. Column names must match [A-Za-z_][A-Za-z0-9_]*. \
+Returns the dataset id and handle info. \
+Use moot_dataset_query to read back rows.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "name": string_schema("Dataset name — stored as the handle's room label."),
+                "columns": {
+                    "type": "array",
+                    "description": "Column schema pairs. Each element: {\"name\": \"[A-Za-z_][A-Za-z0-9_]*\", \"type\": \"text|int|float|bool\"}. Required when using inline rows; optional for csv_path (type inferred from values).",
+                    "items": object_schema(
+                        json!({
+                            "name": string_schema("Column identifier: [A-Za-z_][A-Za-z0-9_]*"),
+                            "type": string_schema("Column type: text, int, float, bool. Optional when csv_path is used (type inferred).")
+                        }),
+                        json!(["name"])
+                    )
+                },
+                "rows": {
+                    "type": "array",
+                    "description": "Inline rows as JSON objects. Keys must be column names. Mutually exclusive with csv_path.",
+                    "items": { "type": "object" }
+                },
+                "csv_path": string_schema("Absolute filesystem path to a CSV file to import. Path is canonicalized and must resolve to a regular file. Size cap: 100 MiB. Mutually exclusive with rows."),
+                "location": string_schema("Room location for the dataset handle in the estate."),
+                "wing": string_schema("Optional wing name. Omit for the default wing."),
+                "sensitivity": string_schema("Optional sensitivity: normal (default), elevated, restricted, secret.")
+            }),
+            json!(["name", "location"])
+        )))
+    })
+}
+
+/// `moot_dataset_query` — predicate query over a dataset's rows.
+///
+/// Schema mirrors Swift DatasetTools.tools()[1].inputSchema.
+fn dataset_query_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_dataset_query",
+        "description": "Query rows from a dataset. Refuses withdrawn handles. \
+Supply the dataset id from moot_file_dataset. \
+Predicates use JSON: {\"col\":\"name\",\"op\":\"eq|neq|lt|lte|gt|gte\",\"val\":value} \
+or {\"and\":[...]} / {\"or\":[...]} for compound conditions. \
+order_by: array of {\"col\":\"name\",\"dir\":\"asc|desc\"} objects. \
+Returns rows plus handle metadata (belief state, sensitivity).",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "id": string_schema("Dataset UUID from moot_file_dataset."),
+                "where": string_schema("Optional predicate JSON: {\"col\":\"name\",\"op\":\"eq\",\"val\":value} or {\"and\":[...]} / {\"or\":[...]}. Omit for full scan."),
+                "order_by": {
+                    "type": "array",
+                    "description": "Optional sort order. Each element: {\"col\":\"name\",\"dir\":\"asc|desc\"}.",
+                    "items": object_schema(
+                        json!({
+                            "col": string_schema("Column name."),
+                            "dir": string_schema("Sort direction: asc or desc (default asc).")
+                        }),
+                        json!(["col"])
+                    )
+                },
+                "limit": integer_schema("Maximum rows to return (default 100, max 1000)."),
+                "columns": {
+                    "type": "array",
+                    "description": "Optional column projection. Array of column name strings to return. Omit for all columns.",
+                    "items": { "type": "string" }
+                }
+            }),
+            json!(["id"])
+        )))
+    })
+}
+
+/// `moot_dataset_stats` — per-column aggregate statistics.
+///
+/// Schema mirrors Swift DatasetTools.tools()[2].inputSchema.
+fn dataset_stats_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_dataset_stats",
+        "description": "Return per-column aggregate statistics for a dataset. Refuses withdrawn handles. \
+Supply the dataset id from moot_file_dataset. Omit column to get stats for all \
+columns. Float values use f64 shortest-roundtrip format.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "id": string_schema("Dataset UUID from moot_file_dataset."),
+                "column": string_schema("Optional column name. Omit for stats on all columns.")
+            }),
+            json!(["id"])
+        )))
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 ---
 title: ObserverSink Specification
-version: 1.0.0
+version: v1.1
 status: active
 date: 2026-06-14
 description: The PersistenceKit-backed telemetry sink that persists IntellectusLib stat samples into an SQLite stats store, with schema, retention, and a monitoring on/off signal.
@@ -36,7 +36,7 @@ integration tests.
 packages/libs/ObserverSink/
 ├── Package.swift                      ← Swift package (swift-tools-version:6.2)
 ├── Sources/ObserverSink/
-│   ├── StatsStore.swift               ← schema + lifecycle + CRUD
+│   ├── StatsStore.swift               ← schema (v5, four tables) + lifecycle + CRUD
 │   └── PersistenceStatsSink.swift     ← StatsSink conformance
 ├── Tests/ObserverSinkTests/
 │   └── ObserverSinkConformanceTests.swift
@@ -66,7 +66,7 @@ it (IntellectusLib, PersistenceKit) and nothing depends back on it.
 
 ## 4. Schema
 
-Three SQLite tables. All timestamps are stored as **TEXT (ISO-8601 UTC)**; no
+Four SQLite tables. All timestamps are stored as **TEXT (ISO-8601 UTC)**; no
 REAL timestamp columns exist. This is a hard schema invariant across the
 substrate: date storage is always TEXT, never a Unix-epoch REAL.
 
@@ -122,20 +122,55 @@ Well-known rows:
 
 | Key | Value | Semantics |
 |---|---|---|
-| `"monitoring"` | `"1"` / `"0"` | Global monitoring on/off flag (manager writes, sink reads) |
-| `"retention_cutoff"` | ISO-8601 TEXT | Cutoff timestamp of the last retention pass |
+| `"monitoring"` | `"1"` / `"0"` | Global monitoring on/off flag (manager writes, sink reads). Defaults to `"1"` (ON) for new estates (wave 8.1). |
+| `"monitoring_source"` | `"default"` / `"user"` / `"unknown"` | Records the origin of the current monitoring value. `"default"` = system-seeded; `"user"` = explicitly set via `setMonitoringEnabled`; `"unknown"` = ambiguous pre-wave-8.1 opt-out preserved without change. The wave 8.1 migration uses this to distinguish seed values from explicit user choices. |
+| `"retention_cutoff"` | ISO-8601 TEXT | Cutoff timestamp of the last retention pass. Defaults to epoch zero (`"1970-01-01T00:00:00.000Z"`) to indicate no pass has run. |
 
-Both rows are seeded on `StatsStore.open()` (upsert, idempotent).
+All three rows are seeded on `StatsStore.open()` using seed-if-absent semantics: the row
+is inserted only when absent. An existing value (e.g. an operator-set monitoring flag)
+is preserved across re-opens. Subsequent opens are no-ops for those rows.
+
+### 4.4 `topology_snapshots` (v2)
+
+Added by the v1→v2 migration. Stores the latest governor-computed topology payload
+for each estate. One row per estate; the autonomic governor upserts after each
+topology-recompute duty cycle.
+
+| Column | Type | Notes |
+|---|---|---|
+| `estate` | TEXT NOT NULL PK | Estate identifier (PRIMARY KEY; one row per estate, latest-wins upsert) |
+| `generated_at` | TEXT NOT NULL | ISO-8601 UTC timestamp of when the governor produced the snapshot |
+| `payload` | TEXT NOT NULL | JSON-encoded ARIAGraphPayload bytes; served verbatim by `/api/graph` and moot-mgr |
+| `topology_fingerprint` | TEXT NULL | Stable topology-inputs fingerprint (FNV-1a, process-independent). Added by v2→v3 migration. Nullable: pre-v3 rows and snapshots written without a fingerprint store NULL. |
+
+The fingerprint lets a restarting governor compare the persisted inputs fingerprint against
+freshly-computed inputs and skip the full drawer/tunnel/fact read when they match.
 
 ---
 
 ## 5. Schema version
 
-`StatsStore.schemaVersion = 1` (Swift) / `StatsStore::SCHEMA_VERSION = 1` (Rust).
+`StatsStore.schemaVersion = 5` (Swift) / `StatsStore::SCHEMA_VERSION = 5` (Rust).
 
 Schema version is stored in PersistenceKit's internal `_schema_versions` table,
 keyed by `kitID = "ObserverSink"`. Future schema changes require a `Migration`
 entry in the `SchemaDeclaration`.
+
+Version history:
+
+- **v1**: Initial schema — `metric_samples`, `event_samples`, `control`.
+- **v2**: Added `topology_snapshots` table (one row per estate, latest-wins upsert;
+  `estate`, `generated_at`, `payload`).
+- **v3**: Added `topology_snapshots.topology_fingerprint` nullable column so the
+  autonomic governor can skip the full topology read on restart when inputs are unchanged.
+- **v4**: Added `idx_metric_samples_dropbox_id` index on `metric_samples.dropbox_id`
+  for O(log n) per-dropbox COUNT(*) queries (deployed when 6M-row hot-dropbox tables
+  caused 504 timeouts on full scans).
+- **v5**: Replaced `idx_metric_samples_dropbox_id` with composite index
+  `idx_metric_samples_dropbox_name_ts` (dropbox_id, name, ts DESC) so that
+  per-(dropbox, name) ORDER BY ts DESC LIMIT 1 probes used by
+  `queryLatestMetricsByNamesAndDropboxes` become pure index seeks. Reduced dashboard
+  `/api/estates` latency from 3.8–4.3 s to sub-second on a 2.76M-row table.
 
 ---
 
@@ -143,8 +178,13 @@ entry in the `SchemaDeclaration`.
 
 The global monitoring flag is a row in the `control` table (`key = "monitoring"`).
 
-- **Manager writes** the flag to `"1"` when it starts accepting subscribers and
-  to `"0"` when it shuts down or the last subscriber drops.
+- **Default**: `"1"` (ON) for new estates, seeded by `StatsStore.open()` (wave 8.1
+  behavior). Existing estates with a pre-wave-8.1 default-off seed are migrated to
+  `"1"` on the next open, unless the operator explicitly set the flag via
+  `setMonitoringEnabled` (indicated by `monitoring_source = "user"`).
+- **Manager writes** the flag to `"1"` when enabling monitoring and to `"0"` when
+  disabling it. Writing also records `monitoring_source = "user"` so subsequent
+  re-opens do not revert the operator's choice.
 - **`PersistenceStatsSink`** reads this row on every `receive(_:)` call. If the
   value is `"0"`, the sample is discarded without I/O.
 
@@ -192,14 +232,24 @@ Rust equivalents:
 unstructured `Task` for async store I/O (required because `SQLiteStorage` is
 actor-isolated). Errors from the `Task` are logged at `.error` level; never thrown.
 
+**In-flight cap (backpressure, issue #48)**: before dispatching a Task, the
+Swift port checks an `InFlightCounter` capped at 64. If the cap is already
+reached, `receive(_:)` returns immediately and the sample is silently dropped —
+no log is emitted and no error is reported. This bounds Task backlog and memory
+growth under sustained high-rate emission. 64 concurrent inserts is generous for
+any realistic workload. Telemetry loss under extreme backpressure is acceptable
+for the stats-recording use case.
+
 ### Rust port
 
 `receive` is fully synchronous (the `StatsSink` trait is synchronous; `SqliteStorage`
 is mutex-backed synchronous I/O). No thread spawning. Errors are printed to `stderr`.
+The Rust leg has no in-flight cap because there are no Tasks to bound.
 
-This is intentional — Rust and Swift have different concurrency models. The
-observable behavior (check flag → insert if on → discard if off → never panic)
-is identical.
+This is intentional — Rust and Swift have different concurrency models. The core
+behavior is the same on both legs: gate on the monitoring flag → insert if on →
+discard if off → never panic. Swift additionally gates on the in-flight cap before
+dispatching a Task; the Rust leg goes directly to the flag check.
 
 ---
 
@@ -207,12 +257,12 @@ is identical.
 
 Both ports ship matching integration tests:
 
-- Swift: `ObserverSinkConformanceTests.swift` (10 tests, Swift Testing)
-- Rust: `tests/conformance.rs` (10 tests, `#[test]`)
+- Swift: `ObserverSinkConformanceTests.swift` (34 tests, Swift Testing)
+- Rust: `tests/conformance.rs` (29 tests, `#[test]`)
 
 Tests cover:
 1. Schema version constant correct
-2. Control rows seeded on open (monitoring defaults off)
+2. Control rows seeded on open (monitoring defaults ON per wave 8.1)
 3. Monitoring flag write-read round-trip
 4. Metric emit → stored → readback (name, value, tags, ts, dropboxID match)
 5. Event emit → stored → readback (kind, nounType, rowID, estate, ts match)

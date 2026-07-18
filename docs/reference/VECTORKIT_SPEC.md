@@ -1,6 +1,6 @@
 ---
 title: VectorKit Specification
-version: 1.3.0
+version: 1.4.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
@@ -239,6 +239,27 @@ N items it performs exactly:
   builds both indexes once — no per-row array clone.
   Search output is identical to N sequential `addPayload` calls (the
   total ordering (distance ASC, itemID ASC) is applied at query time).
+
+**B-3d (replaceModelVectors — bulk re-embed path):**
+`replaceModelVectors(modelID:_:)` / `replace_model_vectors(model_id, batch)` is
+the bulk re-embed path for a single model. It performs:
+1. A bulk-delete of all rows whose `model_id` equals `modelID`, followed by a
+   plain-INSERT of the replacement batch, in ONE transaction (one fsync;
+   INSERT is used — not upsert — because after the bulk delete nothing conflicts,
+   eliminating the per-row existence SELECT).
+2. ONE resident binary index rebuild from the table after the transaction commits
+   (O(N) — avoids the O(N²) cost of N individual `addPayload` removes and adds
+   each of which rebuilds the full index partition).
+
+Invariants: Int8 payloads are rejected fail-closed (I-4a), same as `addPayloads`.
+Any in-flight deferred-index window is published before the table write, so the
+resident index is consistent at the point the transaction begins. Float (Lane D)
+index state for the model is invalidated and rebuilt lazily on the next
+`findNearestFloat` call, consistent with the batch-write behavior in B-3b.
+The method is deliberate NOT a superset of `addPayloads`: live-capture writes
+continue to use `addPayload` / `addPayloads` (which mutate the resident index
+incrementally per key); `replaceModelVectors` is reserved for the full re-embed
+case where the prior set is rendered obsolete by a model weights change.
 
 **B-3c (flush — sidecar quiesce):** `flush()` (both ports) is a no-op
 when there is no sidecar, when the in-memory array already matches the
@@ -579,6 +600,15 @@ provisioned estate.
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 1.4.0 -- 2026-07-16
+Added B-3d — behavioral contract for `replaceModelVectors(modelID:_:)` /
+`replace_model_vectors`: the bulk re-embed path that deletes all rows for a
+model and plain-INSERTs the replacement batch in ONE transaction, rebuilding
+the resident binary index ONCE (O(N) vs O(N²) for N individual removes+adds).
+Documents int8 fail-closed precondition (I-4a), deferred-index flush guarantee,
+and the deliberate design boundary vs `addPayloads` (live-capture path).
+Additive (MINOR).
 
 ### 1.2.0 -- 2026-06-17
 Added invariant I-8 (the `ext` forward-compat slot, ADR-012): the `vectors` table carries one nullable `.json` `ext` column at schema v3, inert in 1.0. Pre-ship pre-provisioning during the 1.0.0 free-migration window.

@@ -29,6 +29,9 @@ public struct ContentView: View {
                 Tab(String(localized: "Recall"), systemImage: "tray.and.arrow.up") {
                     RecallView(model: model)
                 }
+                Tab(String(localized: "Intelligence"), systemImage: "brain.head.profile") {
+                    IntelligenceView()
+                }
                 Tab(String(localized: "The Top"), systemImage: "list.bullet.rectangle") {
                     SurfaceMapView(model: model)
                 }
@@ -40,6 +43,12 @@ public struct ContentView: View {
                 }
                 Tab(String(localized: "Engine"), systemImage: "cpu") {
                     EngineView(model: model)
+                }
+                // M-ING-2: per-source mining consent/config. Sources ship
+                // disabled; enabling arms them — the consent prompt fires on
+                // the first actual read, never from this view.
+                Tab(String(localized: "Miners"), systemImage: "square.and.arrow.down.on.square") {
+                    MinerSettingsView()
                 }
             }
             Divider()

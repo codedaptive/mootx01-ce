@@ -1,8 +1,8 @@
 ---
 title: VectorKit Interface
 status: active
-version: 1.4.0
-date: 2026-06-17
+version: 1.6.0
+date: 2026-07-16
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -325,7 +325,7 @@ impl VectorStore {
 }
 ```
 
-**`vectors` table schema — schema version 3 (Lane F multi-vector + ADR-012 ext slot):**
+**`vectors` table schema — schema version 4 (Lane F multi-vector + ADR-012 ext slot + `filed_at` index):**
 declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()`.
 
 | Column | Type | Nullable | Notes |
@@ -335,7 +335,7 @@ declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()
 | `vector_index` | INTEGER | NOT NULL DEFAULT 0 | 0 for single-vector; 0..N-1 for ColBERT token vectors. |
 | `model_id` | TEXT | NOT NULL | Embedding model identifier. |
 | `model_version` | TEXT | NOT NULL | Model weights version. |
-| `kind` | INTEGER | NOT NULL DEFAULT 0 | `VectorKind` raw value: 0=binary, 1=float32, 2=int8. |
+| `kind` | INTEGER | NOT NULL DEFAULT 0 | `VectorKind` raw value: 0=Binary, 1=Float32, 2=Int8. |
 | `dim` | INTEGER | NOT NULL DEFAULT 256 | Number of logical dimensions. |
 | `payload` | BLOB | NOT NULL | Vector bytes: 32 bytes (binary); dim×4 (float32); dim (int8). (Renamed from `engram`.) |
 | `scale` | REAL | NULL | Int8 dequantization scale. NULL for binary and float32. |
@@ -343,7 +343,8 @@ declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()
 | `ext` | JSON | NULL | ADR-012 forward-compat slot (schema v3). Inert in 1.0 — written NULL / omitted on insert, never read. |
 
 UNIQUE constraint: `(item_id, vector_index, model_id)`.
-Indices: `idx_vectors_item` on `(item_id)`; `idx_vectors_model_item` on `(model_id, item_id)`.
+Indices: `idx_vectors_item` on `(item_id)`; `idx_vectors_model_item` on `(model_id, item_id)`;
+`idx_vectors_filed_at_item` on `(filed_at, item_id)` (schema v4 — covers `recentItemIDs` ORDER BY, enabling an ordered index scan rather than full-table filesort).
 
 (SPEC § 4, I-3/I-4; declared by `schemaDeclaration` / `schema_declaration()`.)
 
@@ -354,6 +355,27 @@ Indices: `idx_vectors_item` on `(item_id)`; `idx_vectors_model_item` on `(model_
 Generate a model-tagged engram for text (SPEC § 5, B-1/B-2; I-5). See
 `EmbeddingProvider` / `FloatSimHashEmbeddingProvider` in § 2 for the
 signatures.
+
+### `VectorStore.defaultSidecarURL(for:)` / `default_sidecar_path` (static sidecar helper)
+
+Returns the conventional `.vectors.vec` sidecar URL / path for a SQLite-backed
+storage, or `nil` / `None` for non-file backends (in-memory, PostgreSQL) where a
+local sidecar does not apply. The filename convention (same base name as the
+SQLite file, `.vectors.vec` extension) lives in VectorKit so every caller derives
+the same stable path. Pass the result as the `sidecarURL` / `sidecar_path`
+argument to `VectorStore.init` / `VectorStore::new` to enable sidecar persistence.
+
+**Swift:**
+
+```swift
+public static func defaultSidecarURL(for storage: any Storage) -> URL?
+```
+
+**Rust:**
+
+```rust
+pub fn default_sidecar_path(storage: &Arc<dyn Storage>) -> Option<PathBuf>;
+```
 
 ### `VectorStore.addVector` / `add_vector` (binary convenience)
 
@@ -474,6 +496,38 @@ public func addPayloads(_ batch: [VectorPayloadInput]) async throws
 pub fn add_payloads(&self, batch: &[VectorPayloadInput]) -> Result<(), VectorKitError>;
 ```
 
+### `VectorStore.replaceModelVectors(modelID:_:)` / `replace_model_vectors` (bulk re-embed path)
+
+Replace the ENTIRE vector set for a model in one atomic operation — the bulk
+re-embed path (distinct from `addPayloads` / `add_payloads`). Performs:
+- A bulk-delete of all rows for `modelID` followed by plain-INSERT of the
+  replacement batch in ONE transaction (one fsync; INSERT skips the per-row
+  existence SELECT because after the bulk delete nothing conflicts).
+- ONE resident binary index rebuild from the table after the transaction commits
+  (O(N) — avoids the O(N²) cost of N individual `addPayload` removes and adds).
+
+Int8 payloads are rejected fail-closed (same precondition as `addPayloads`):
+any element with `kind == .int8` / `Int8` rejects the entire batch with
+`VectorKitError.int8QuantizationPolicyUndefined` (SPEC § I-4a).
+Any in-flight deferred-index window is flushed before the table write.
+Behavioral contract: SPEC B-3d.
+
+**Swift:**
+
+```swift
+public func replaceModelVectors(modelID: String, _ batch: [VectorPayloadInput]) async throws
+```
+
+**Rust:**
+
+```rust
+pub fn replace_model_vectors(
+    &self,
+    model_id: &str,
+    batch: &[VectorPayloadInput],
+) -> Result<(), VectorKitError>;
+```
+
 ### `VectorStore.flush()` / `flush` (sidecar quiesce)
 
 Flush any pending write-behind sidecar mutation to disk (SPEC § 5,
@@ -498,6 +552,51 @@ public func flush() async throws
 
 ```rust
 pub fn flush(&self) -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.beginDeferredIndex()` / `begin_deferred_index` (deferred-index window open)
+
+Opens a deferred-index window. While active, `addPayload` / `add_payload` and
+`addPayloads` / `add_payloads` calls append to the durable table and the
+resident array store as normal, but defer the MIH + brute-force index rebuild.
+A bulk import wrapped in `beginDeferredIndex` + `publishResidentIndex` pays ONE
+index rebuild regardless of batch count — O(N) instead of O(N²). Idempotent:
+re-entering an already-active window is a no-op (existing live-key seed preserved).
+
+Works with or without a sidecar: with a sidecar, deferred writes stage into the
+resident array store; without one (memory-only path), records accumulate in a
+deferred-pending buffer and are merged in one pass at `publishResidentIndex`.
+
+**Swift:**
+
+```swift
+public func beginDeferredIndex() async throws
+```
+
+**Rust:**
+
+```rust
+pub fn begin_deferred_index(&self) -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.publishResidentIndex()` / `publish_resident_index` (deferred-index window close)
+
+Ends the deferred-index window opened by `beginDeferredIndex` /
+`begin_deferred_index` by rebuilding the resident MIH + brute-force index ONCE
+from the final accumulated snapshot. A no-op rebuild (mode is still cleared)
+when nothing was deferred since the window opened. Called by the corpus ingest
+drain when a burst completes.
+
+**Swift:**
+
+```swift
+public func publishResidentIndex() async throws
+```
+
+**Rust:**
+
+```rust
+pub fn publish_resident_index(&self) -> Result<(), VectorKitError>;
 ```
 
 ### `VectorStore.getVector` / `get_vector` (binary convenience)
@@ -735,6 +834,30 @@ pub fn delete_all_vectors(&self, item_id: &str, model_id: &str)
     -> Result<(), VectorKitError>;
 ```
 
+### `VectorStore::delete_payload` (Rust-only — parity delta)
+
+Deletes the single row at `(item_id, vector_index, model_id)`. A finer-grained
+delete than `delete_all_vectors` / `delete_vector` (which operate at the item
+level); this targets one specific `(item, index, model)` triple. Any in-flight
+deferred-index window is flushed before the delete so no deferred slot survives
+in memory after the row is removed from the table.
+
+**Parity:** No Swift equivalent — `deletePayload` does not exist in the Swift
+port. The Swift delete surface is `deleteVector` (single-index convenience) and
+`deleteAllVectors` (all indexes for a model). Callers needing per-index deletes
+on the Swift side combine those two.
+
+**Rust only:**
+
+```rust
+pub fn delete_payload(
+    &self,
+    item_id: &str,
+    vector_index: u32,
+    model_id: &str,
+) -> Result<(), VectorKitError>;
+```
+
 ### `VectorStore.destroyAllVectors` / `destroy_all_vectors`
 
 Deletes all rows from the `vectors` table. Called by
@@ -860,9 +983,10 @@ let hits = try await store.findNearest(probe: probe, modelID: "minilm-v6", limit
 ## § 7 — Swift/Rust Concordance
 
 Every top-level public concept in VectorKit, mapped Swift↔Rust with the
-shape rule that governs how the two ports may differ. The surface is a
-clean 1:1 — six public types, identical names, no Apple-platform-bound
-types, no Swift-only or Rust-only contract types.
+shape rule that governs how the two ports may differ. The six public types
+are 1:1 by name. One method-level parity delta exists: `delete_payload`
+(Rust-only — see § 3 and the `VectorStore` row below); all other methods
+are present in both ports.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule |
 |---|---|---|---|---|
@@ -871,7 +995,7 @@ types, no Swift-only or Rust-only contract types.
 | Storage record | `StoredVector` | `StoredVector` | public struct / pub struct | Lane F rename: `drawerID`→`itemID` / `drawer_id`→`item_id`; `vectorIndex`/`vector_index` UInt32/u32 added for multi-vector (ColBERT); timestamp seam: Swift `Date` (TEXT ISO8601) / Rust `i64` (Unix epoch) — sanctioned; `engram` field is binary-only convenience; typed payloads accessed via `getPayload` / `get_payload` |
 | Nearest-neighbour result | `VectorMatch` | `VectorMatch` | public struct / pub struct | Lane F rename: `drawerID`→`itemID` / `drawer_id`→`item_id`; ordering by distance asc then item id asc (Swift `Comparable` `<` / Rust `Ord`+`PartialOrd`); `distance` Swift `Int` / Rust `i32` (Hamming 0…256 for binary lane; cosine×10_000 for float lane) |
 | Batch input record | `VectorPayloadInput` | `VectorPayloadInput` | public struct / pub struct | identical fields: `itemID`/`item_id`, `vectorIndex`/`vector_index`, `payload`, `modelID`/`model_id`, `modelVersion`/`model_version`, `filedAt`/`filed_at_unix_secs`; timestamp seam: Swift `Date` / Rust `i64` — same as `StoredVector` (sanctioned). Value type, fully `Sendable`. No methods; data carrier only. |
-| PersistenceKit-backed store | `VectorStore` | `VectorStore` | public actor / pub struct | Swift `actor` (async CRUD mirrors PersistenceKit `RowStore`) / Rust `struct` over `Arc<Mutex<HotState>>` + `Arc<dyn Storage>`, sync CRUD — sanctioned (no async runtime). Construction: Swift `init(storage:sidecarURL:mihThreshold:mihBandCount:)` / Rust `new` + `open`. Schema v2 (multi-vector, `item_id`, `kind`, `payload`): `schemaDeclaration` / `schema_declaration()`. Hot-path: BruteForceIndex → MIHIndex at `mihThreshold` (default 50_000); float lane via `FloatBruteForceIndex`. Write paths: `addPayload` (write-behind) + `addPayloads` (O(1) sidecar/index per batch) + `flush` (quiesce). |
+| PersistenceKit-backed store | `VectorStore` | `VectorStore` | public actor / pub struct | Swift `actor` (async CRUD mirrors PersistenceKit `RowStore`) / Rust `struct` over `Arc<Mutex<HotState>>` + `Arc<dyn Storage>`, sync CRUD — sanctioned (no async runtime). Construction: Swift `init(storage:sidecarURL:mihThreshold:mihBandCount:deferredPendingLimit:)` / Rust `new(storage, sidecar_path)` + `open`; `defaultSidecarURL(for:)` / `default_sidecar_path` static helper returns the conventional `.vectors.vec` path. Schema v4 (multi-vector, `item_id`, `kind`, `payload`, `filed_at` index): `schemaDeclaration` / `schema_declaration()`. Hot-path: BruteForceIndex → MIHIndex at `mihThreshold` (default 50_000); float lane via `FloatBruteForceIndex`. Write paths: `addPayload` (write-behind) + `addPayloads` (O(1) sidecar/index per batch) + `replaceModelVectors` (bulk re-embed: delete all + plain-INSERT + one index rebuild) + `flush` (quiesce). Deferred-index control: `beginDeferredIndex` / `begin_deferred_index` + `publishResidentIndex` / `publish_resident_index` — wraps bulk imports in one index rebuild. **Parity delta:** `delete_payload` (Rust-only — deletes one `(item_id, vector_index, model_id)` row; no Swift equivalent). |
 | Error enum | `VectorKitError` | `VectorKitError` | public enum / pub enum | identical case-for-case: `embeddingFailed`/`EmbeddingFailed`, `modelUnavailable`/`ModelUnavailable`, `storeUnavailable`/`StoreUnavailable`, `notFound`/`NotFound` (Swift lowerCamel / Rust UpperCamel — idiom) |
 
 ## Swift/Rust Concordance — engine types
@@ -882,23 +1006,24 @@ covered in the per-surface tables above.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule |
 |---|---|---|---|---|
 | Binary distance metric | `BinaryMetric` | `BinaryMetric` | public enum / pub enum | identical 2-case enum (hamming/Hamming, jaccard/Jaccard) |
-| Float distance metric | `FloatMetric` | `FloatMetric` | public enum / pub enum | identical 2-case enum (cosine/Cosine, dotProduct/DotProduct) |
+| Float distance metric | `FloatMetric` | `FloatMetric` | public enum / pub enum | identical 3-case enum (cosine/Cosine, l2/L2, dot/Dot) |
 | Dense metric wrapper | `DenseMetric` | `DenseMetric` | public enum / pub enum | identical 2-case enum (binary(BinaryMetric)/Binary(BinaryMetric), float(FloatMetric)/Float(FloatMetric)) |
 | Brute-force index | `BruteForceIndex` | `BruteForceIndex` | public struct / pub struct | identical: conforms to / implements DenseIndex protocol/trait |
-| Dense NN result | `DenseHit` | `DenseHit` | public struct / pub struct | identical 3-field struct (itemID/item_id UUID/String, distance Int/i32, laneTag/lane_tag LaneTag) |
+| Float brute-force index | `FloatBruteForceIndex` | `FloatBruteForceIndex` | public actor / pub struct | Swift `actor` / Rust `struct` (sanctioned async seam). Implements `DenseIndex`; backs the Lane D float nearest / farthest search. One instance per modelID inside `VectorStore`. Methods: `search` / `find_nearest` (nearest), `searchFarthest` / `search_farthest` (farthest), guided by `SearchDirection`. |
+| Dense NN result | `DenseHit` | `DenseHit` | public struct / pub struct | 3-field struct: key/key VectorRecordKey, rawDistance/raw_distance Int32/i32, metric/metric DenseMetric. Float-lane consumers use typed accessors (hammingDistance/hamming_distance, floatDistance/float_distance). Ordering: rawDistance asc, key asc tiebreak. |
 | Dense index protocol | `DenseIndex` | `DenseIndex` | public protocol / pub trait | Swift `protocol : Sendable` / Rust `trait : Send + Sync`; both require `findNearest`/`find_nearest` + `insert`/`insert` + `remove`/`remove` |
 | Index backend selector | `IndexKind` | `IndexKind` | public enum / pub enum | identical 2-case enum (bruteForce/BruteForce, mih/Mih) |
-| Lane classification tag | `LaneTag` | `LaneTag` | public enum / pub enum | identical 3-case enum (binary/Binary, float/Float, unknown/Unknown) |
+| Lane classification tag | `LaneTag` | `LaneTag` | public enum / pub enum | identical 4-case enum (binaryDense/BinaryDense, floatDense/FloatDense, sparse/Sparse, lateInteraction/LateInteraction); used in fusion and late-interaction paths |
 | MIH band count | `MIHBandCount` | `MIHBandCount` | public enum UInt32 / pub enum u32 | identical 3-case enum (eight=8/Eight, sixteen=16/Sixteen, thirtyTwo=32/ThirtyTwo) |
 | Multi-index hash index | `MIHIndex` | `MIHIndex` | public struct / pub struct | identical: conforms to / implements DenseIndex; BandCount parameter |
-| MaxSim result | `MaxSimHit` | `MaxSimHit` | public struct / pub struct | identical 3-field struct (itemID/item_id, score Float/f32, matchCount/match_count UInt32/u32) |
+| MaxSim result | `MaxSimHit` | `MaxSimHit` | public struct / pub struct | 2-field struct (itemID/item_id String, score). Parity delta: Swift score is Int (integer MaxSim score, larger = more relevant); Rust score is u32. No matchCount field. |
 | MaxSim scorer | `MaxSimScorer` | `MaxSimScorer` | public struct / pub struct | identical: scores a query against a `ResidentVectorArray` using max-similarity (ColBERT-style) |
-| Metadata predicate | `MetadataFilter` | `MetadataFilter` | public struct / pub struct | identical: required `itemID`/`item_id` set membership check |
-| Model-partition index entry | `ModelPartitionEntry` | `ModelPartitionEntry` | public struct / pub struct | identical 3-field struct (modelID/model_id, modelVersion/model_version, startOffset/start_offset UInt32/u32) |
+| Metadata predicate | `MetadataFilter` | `MetadataFilter` | public struct / pub struct | identical 2-field struct (modelID/model_id: String?/Option<String>, modelVersion/model_version: String?/Option<String>); nil = wildcard; accepts(_:)/accepts(&key) returns true when all non-nil constraints match the key's modelID/model_version. Convenience factory: `.exact(modelID:modelVersion:)` / construct by field. |
+| Model-partition index entry | `ModelPartitionEntry` | `ModelPartitionEntry` | public struct / pub struct | Parity delta: Swift has (modelID: String, modelVersion: String, range: Range<Int>); Rust has (model_id: String, start: usize, end: usize) with a range() accessor — no model_version field. Both expose the same half-open index range; the Swift version carries modelVersion for convenience, the Rust version does not. |
 | Resident vector array | `ResidentVectorArray` | `ResidentVectorArray` | public struct / pub struct | in-memory contiguous float32 array for MaxSim scoring; identical layout |
 | Resident store | `ResidentArrayStore` | `ResidentArrayStore` | public actor / pub struct | Swift async actor / Rust struct with Arc<Mutex<...>> (no async runtime — sanctioned) |
-| Vector kind discriminant | `VectorKind` | `VectorKind` | public enum UInt8 / pub enum u8 | identical 2-case enum (binary=0/Binary, float=1/Float) |
-| Vector storage key | `VectorRecordKey` | `VectorRecordKey` | public struct / pub struct | identical 3-field struct (itemID/item_id UUID/String, vectorIndex/vector_index UInt32/u32, kind/kind VectorKind) |
+| Vector kind discriminant | `VectorKind` | `VectorKind` | public enum UInt8 / pub enum u8 | identical 3-case enum (binary=0/Binary, float32=1/Float32, int8=2/Int8). The `float32` case is named `float32` (not `float`) in both ports. `int8` writes are rejected fail-closed by VectorStore (SPEC §I-4a). |
+| Vector storage key | `VectorRecordKey` | `VectorRecordKey` | public struct / pub struct | identical 4-field struct (itemID/item_id String, vectorIndex/vector_index UInt32/u32, modelID/model_id String, modelVersion/model_version String). No kind field — kind is carried by VectorPayload. Comparable/Ord: lexicographic on (item_id, vector_index, model_id, model_version). |
 | Typed vector envelope | `VectorPayload` | `VectorPayload` | public struct / pub struct | 4-field struct: kind/kind VectorKind, dim/dim UInt32/u32, bytes/bytes [UInt8]/Vec<u8>, scale/scale Float?/Option<f32>. Carries raw bytes + decode metadata. Int8 writes are rejected fail-closed in VectorStore; `scale` is preserved as a placeholder pending int8 policy ratification (SPEC § I-4a). |
 
 ## § 8 — Telemetry
@@ -922,6 +1047,38 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-07-16
+Seven public-surface gaps closed (verifier pass 2):
+- Added `defaultSidecarURL(for:)` / `default_sidecar_path` static factory helper
+  to § 3 (returns the `.vectors.vec` sidecar path for a SQLite-backed storage).
+- Added `replaceModelVectors(modelID:_:)` / `replace_model_vectors` to § 3 (bulk
+  re-embed path: delete-all + plain-INSERT + one index rebuild in one transaction).
+- Added `beginDeferredIndex()` / `begin_deferred_index` to § 3 (opens a
+  deferred-index window; subsequent writes accumulate without rebuilding indexes).
+- Added `publishResidentIndex()` / `publish_resident_index` to § 3 (closes the
+  deferred-index window with a single index rebuild from the accumulated snapshot).
+- Added `delete_payload` (Rust-only parity delta) to § 3 — deletes one
+  `(item_id, vector_index, model_id)` row; no Swift equivalent.
+- Added `FloatBruteForceIndex` row to the Swift/Rust Concordance — engine types
+  table (it was the only public `DenseIndex` conformer absent from the table).
+- Updated § 7 intro (was "clean 1:1") to accurately state the six top-level types
+  are 1:1 with one method-level parity delta (`delete_payload`). Updated the
+  VectorStore concordance row to enumerate the full write-path surface.
+
+### 1.5.0 -- 2026-07-16
+Engine-types concordance audit — corrected eight wrong rows in the
+Swift/Rust Concordance — engine types table:
+- `FloatMetric`: was "2-case (cosine, dotProduct)" → 3-case (cosine, l2, dot).
+- `DenseHit`: was "(itemID, distance, laneTag)" → (key: VectorRecordKey, rawDistance: Int32/i32, metric: DenseMetric).
+- `LaneTag`: was "3-case (binary, float, unknown)" → 4-case (binaryDense/BinaryDense, floatDense/FloatDense, sparse/Sparse, lateInteraction/LateInteraction).
+- `MetadataFilter`: was "itemID set membership" → 2-field struct (modelID, modelVersion) with nil-wildcard accepts() filter.
+- `ModelPartitionEntry`: was "(modelID, modelVersion, startOffset UInt32)" → documented actual parity delta: Swift (modelID, modelVersion, range: Range<Int>) vs Rust (model_id, start, end usize; no model_version).
+- `MaxSimHit`: was "3-field (itemID, score Float, matchCount)" → 2-field (itemID, score Int/u32; no matchCount).
+- `VectorKind`: was "2-case (binary, float)" → 3-case (binary=0, float32=1, int8=2); case name is `float32` not `float`.
+- `VectorRecordKey`: was "3-field (itemID, vectorIndex, kind: VectorKind)" → 4-field (itemID, vectorIndex, modelID, modelVersion); no kind field.
+Schema table updated from v3 to v4 and the v4 index `idx_vectors_filed_at_item` added.
+VectorStore concordance: Swift init updated to include `deferredPendingLimit` parameter; Rust `new` updated to show `sidecar_path` parameter; schema reference updated to v4.
 
 ### 1.4.0 -- 2026-07-13
 findByKeyword / find_by_keyword: `limit` now counts DISTINCT item ids

@@ -396,7 +396,7 @@ Updates required:
 
 ## 7. CloudKit Compatibility
 
-`ConvergenceKitCloudKit`'s `CKRecordMapping` was audited against the proposed refactor. CloudKit is well-insulated: `CKRecordMapping` has its own HLC packing (48/12/4 layout) and its own `Fingerprint256` byte layout (4 × UInt64 little-endian), both distinct from SubstrateLib's internal Codable forms.
+`ConvergenceKitCloudKit`'s `CKRecordMapping` was audited against the proposed refactor. CloudKit is well-insulated: `CKRecordMapping` has its own HLC packing (physical 48b | logical 12b | node 4b, per CONVERGENCEKIT_SPEC.md B-6) and its own `Fingerprint256` byte layout (4 × UInt64 little-endian), both distinct from SubstrateLib's internal Codable forms.
 
 CloudKit depends on three things from SubstrateLib:
 

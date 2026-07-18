@@ -38,16 +38,21 @@ let package = Package(
         .package(name: "GeniusLocusKit", path: "../../kits/GeniusLocusKit"),
         .package(name: "LocusKit", path: "../../kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../kits/PersistenceKit"),
+        // QueueKit backs ShareInboxSpool (durable maildir). Pulls only base
+        // PersistenceKit protocols + SubstrateTypes + IntellectusLib — no
+        // SQLCipher — so it is light enough for the Share Extension bundle.
+        .package(name: "QueueKit", path: "../../kits/QueueKit"),
     ],
     targets: [
         .target(
             name: "MootIntentKit",
-            // No dependency on substrate kits. The seam is MootToolCalling —
-            // a protocol defined in this package that MootBridge conforms to.
-            // AriaMCP is the only inter-package import because JSONValue is the
-            // tool-argument type the intents build.
+            // No estate/substrate-STORAGE dependency (the seam is
+            // MootToolCalling). AriaMCP supplies JSONValue; QueueKit supplies
+            // the durable maildir behind ShareInboxSpool (protocols-only weight,
+            // no SQLCipher — safe for the Share Extension).
             dependencies: [
                 .product(name: "AriaMCP", package: "AriaMcpKit"),
+                .product(name: "QueueKit", package: "QueueKit"),
             ],
             path: "Sources/MootIntentKit"
         ),

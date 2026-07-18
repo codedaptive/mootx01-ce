@@ -34,7 +34,7 @@ pub fn union_slots() -> Vec<FieldSlot> {
             6,
             6,
             "content_kind",
-            &[0, 1, 2, 3, 4, 5, 6],
+            &[0, 1, 2, 3, 4, 5, 6, 7],
         ),
         FieldSlot::new(Column::Operational, 12, 12, "feature_flags"),
         FieldSlot::new(Column::Operational, 24, 1, "state_extension"),

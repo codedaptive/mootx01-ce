@@ -54,7 +54,7 @@ use substrate_types::{RowState, RowStateCluster};
 use vault_kit::palace_bridge::PalaceBridge;
 
 use crate::dispatch::{
-    decode_filter_chain, error_result, optional_bool, optional_integer, optional_string,
+    clamp_limit, decode_filter_chain, error_result, optional_bool, optional_integer, optional_string,
     require_string, text_result, wall_now,
 };
 use crate::estate_registry::EstateRegistry;
@@ -1632,6 +1632,11 @@ fn run_fact_search(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let query = optional_string(args, "query")?;
+    let subject_exact = optional_string(args, "subject_exact")?;
+    let predicate_exact = optional_string(args, "predicate_exact")?;
+    let object_exact = optional_string(args, "object_exact")?;
+    let source_exact = optional_string(args, "source_id_exact")?;
+    let limit = clamp_limit(optional_integer(args, "limit")?, "limit", 100, crate::dispatch::LIMIT_HARD_CEILING)?;
 
     let coord = estate.coord.lock().unwrap();
     // Capture dense-lane availability before consuming the lock via recall_kg_facts.
@@ -1654,11 +1659,17 @@ fn run_fact_search(
     let matches: Vec<_> = facts
         .iter()
         .filter(|f| {
-            if let Some(q) = query {
-                f.subject.contains(q) || f.predicate.contains(q) || f.object.contains(q)
-            } else {
-                true
-            }
+            let query_matches = query.map(|q| {
+                let q = q.to_lowercase();
+                f.subject.to_lowercase().contains(&q)
+                    || f.predicate.to_lowercase().contains(&q)
+                    || f.object.to_lowercase().contains(&q)
+            }).unwrap_or(true);
+            query_matches
+                && subject_exact.map(|v| f.subject == v).unwrap_or(true)
+                && predicate_exact.map(|v| f.predicate == v).unwrap_or(true)
+                && object_exact.map(|v| f.object == v).unwrap_or(true)
+                && source_exact.map(|v| f.source_drawer_id == v).unwrap_or(true)
         })
         .collect();
 
@@ -1698,7 +1709,7 @@ fn run_fact_search(
     // callers can reason about provenance without a separate timeline call.
     // Mirrors Swift runFactSearch field additions.
     let mut lines = vec![header];
-    for f in &matches {
+    for f in matches.iter().take(limit) {
         let filed_iso = epoch_to_iso8601(f.filed_at);
         // Gate source= on source-drawer sensitivity: hide only when the source drawer
         // EXISTS in the estate AND is Restricted/Secret. Non-drawer provenance strings
@@ -2817,7 +2828,15 @@ fn run_reclassify_fdc(
     };
     let mut active: Vec<_> = drawers
         .into_iter()
-        .filter(|d| d.tombstoned_at.is_none() && d.is_currently_believed())
+        // Dataset handles (ContentKind::Dataset) carry structured JSON, not
+        // classifiable free text. The FDC classifier must never reclassify them
+        // — doing so would corrupt the DatasetHandleContent payload.
+        // MX-TAB-4 locked decision: FDC classifier boundary.
+        .filter(|d| {
+            d.tombstoned_at.is_none()
+                && d.is_currently_believed()
+                && d.content_kind() != ContentKind::Dataset
+        })
         .collect();
     if let Some(limit) = limit {
         active.truncate(limit);

@@ -1,8 +1,8 @@
 ---
 title: SubstrateKernel Interface
-version: 1.1.0
+version: 1.3.0
 status: active
-date: 2026-06-20
+date: 2026-07-16
 description: Public API surface for SubstrateKernel in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -27,6 +27,7 @@ relates_to:
   - `SHA256.swift` — SHA-256 primitive
   - `HKDF.swift` — RFC 5869 HKDF-SHA256 (`GrantHKDF`)
   - `HammingNN.swift` — Hamming nearest-neighbor primitive
+  - `FloatVecOps.swift` — scalar float-vector operations (`FloatVecOps`)
 - `Tests/SubstrateKernelTests/` — unit + conformance.
 - `Package.swift` — depends on `SubstrateTypes`.
 
@@ -37,7 +38,12 @@ relates_to:
   `KernelKind` + `PortableKernel` dispatch.
 - `src/kernel_simd.rs` — portable SIMD backend (`SimdKernel`, feature
   `simd-nightly`).
+- `src/kernel_avx512.rs` — AVX-512 VPOPCNTQ Hamming backend
+  (`Avx512HammingKernel`, x86_64 only; dark path pending MatrixSprint
+  validation, see P11-VAL-015).
 - `src/bit_field.rs`, `src/sha256.rs`, `src/hkdf.rs`, `src/hamming_nn.rs`.
+- `src/float_vec_ops.rs` — scalar float-vector operations (`l2_norm`,
+  `l2_normalize`, `dot`, `cosine`).
 - `tests/` — conformance.
 - `Cargo.toml` — depends on `substrate-types`.
 
@@ -72,6 +78,9 @@ public protocol SubstrateKernel: Sendable {
     func orReduceBatch(batches: [[Fingerprint256]]) -> [Fingerprint256]
     func countFold256(_ fingerprints: [Fingerprint256]) -> CountVector256
     func countFoldBatch(batches: [[Fingerprint256]]) -> [CountVector256]
+    // Float-input SimHash projection (SPEC § 5.4):
+    func floatSimHashProject(vector: [Float],
+                             planes: FloatSimHashPlanes) -> Fingerprint256
 }
 
 public enum KernelKind: String, Sendable {
@@ -90,12 +99,19 @@ pub trait SubstrateKernel: Send + Sync {
     fn hamming_top_k(&self, probe: &Fingerprint256, candidates: &[Fingerprint256],
                      k: usize) -> Vec<(usize, u32)>;
     fn simhash_block(&self, input: &[u64], family: &HyperplaneFamily) -> u64;
-    // batched variants with default impls:
-    fn hamming_distance_batch(&self, probe: &Fingerprint256, candidates: &[Fingerprint256]) -> Vec<u32>;
-    fn simhash_block_batch(&self, inputs: &[Vec<u64>], family: &HyperplaneFamily) -> Vec<u64>;
-    fn or_reduce_batch(&self, batches: &[Vec<Fingerprint256>]) -> Vec<Fingerprint256>;
+    // batched variants with default impls — write into caller-supplied
+    // output slices (no allocation on the hot path):
+    fn hamming_distance_batch(&self, probe: &Fingerprint256,
+                              candidates: &[Fingerprint256], out: &mut [u32]);
+    fn simhash_block_batch(&self, inputs: &[&[u64]],
+                           family: &HyperplaneFamily, out: &mut [u64]);
+    fn or_reduce_batch(&self, batches: &[&[Fingerprint256]],
+                       out: &mut [Fingerprint256]);
     fn count_fold_256(&self, fingerprints: &[Fingerprint256]) -> CountVector256;
-    fn count_fold_batch(&self, batches: &[Vec<Fingerprint256>]) -> Vec<CountVector256>;
+    fn count_fold_batch(&self, batches: &[&[Fingerprint256]],
+                        out: &mut [CountVector256]);
+    fn float_simhash_project(&self, vector: &[f32],
+                             planes: &FloatSimHashPlanes) -> Fingerprint256;
 }
 
 pub enum KernelKind { Scalar, Simd, Neon, Avx512, Avx2 }   // no Bnns/Metal (Apple-only)
@@ -138,7 +154,16 @@ Hardware-optimized backends. SPEC § 5.3.
 ```swift
 public struct SimdKernel: SubstrateKernel { public init(); /* impl */ }
 public struct NeonKernel: SubstrateKernel { public init(); /* impl */ }
-public struct MetalKernel: SubstrateKernel { public init?(); /* impl, init? since GPU may be unavailable */ }
+public struct MetalKernel: SubstrateKernel {
+    /// Dreaming-daemon batch scale (~100K rows). Pool RAM cost at this
+    /// size: 100K × 32 B (candidates) + 100K × 4 B (distances) + ~80 B
+    /// overhead ≈ 3.6 MB — trivial for the kernel instance lifetime.
+    public static let defaultMaxN: Int = 100_000
+    /// Returns nil when Metal is unavailable (headless CI, virtualised
+    /// environment); the kernel registry skips registration on nil.
+    public init?(maxN: Int = MetalKernel.defaultMaxN)
+    /* remaining protocol methods */
+}
 ```
 
 **Rust:** `SimdKernel` only (feature `simd-nightly`); NEON / Metal
@@ -315,14 +340,63 @@ pub fn top_k<I>(
 where I: IntoIterator<Item = (u128, Fingerprint256)>;
 ```
 
+### `FloatVecOps`
+
+Scalar IEEE-754 float-vector operations. The canonical reference every
+backend must match bit for bit. SPEC § 5.8.
+
+**Swift:**
+
+```swift
+public enum FloatVecOps {
+    /// Euclidean (L2) norm. Returns 0.0 for empty input.
+    public static func l2Norm(_ v: [Float]) -> Float
+    /// L2-normalise; returns the zero vector unchanged (zero-norm passthrough).
+    public static func l2Normalize(_ v: [Float]) -> [Float]
+    /// Dot product. Precondition: a.count == b.count (precondition failure otherwise).
+    public static func dot(_ a: [Float], _ b: [Float]) -> Float
+    /// Cosine similarity for L2-normalised inputs. Precondition: equal lengths;
+    /// Debug asserts |norm − 1.0| < 1e-5. For unit vectors equals dot(a, b).
+    public static func cosine(_ a: [Float], _ b: [Float]) -> Float
+}
+```
+
+**Rust** (`src/float_vec_ops.rs`, module free functions):
+
+```rust
+pub fn l2_norm(v: &[f32]) -> f32;
+/// Takes ownership; returns the normalised vector (zero-vector passthrough).
+pub fn l2_normalize(v: Vec<f32>) -> Vec<f32>;
+/// Panics (release + debug) on dimension mismatch via assert_eq!.
+pub fn dot(a: &[f32], b: &[f32]) -> f32;
+/// Panics on dimension mismatch; debug_assert! on non-unit input norms.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32;
+```
+
+Bit-identity contract: Swift and Rust use identical IEEE-754 scalar
+accumulation order (no fused ops, no BLAS). The Rust `l2_normalize`
+uses `1.0 / norm_sq.sqrt()` explicitly (not `.recip()`) to guarantee
+the same bit pattern as Swift's `1.0 / normSq.squareRoot()`.
+
+**Swift/Rust idiom difference:** Rust `l2_normalize` takes `Vec<f32>`
+by value and returns the normalised `Vec<f32>` (in-place mutation of
+the owned buffer); Swift takes and returns `[Float]` by value
+(copy-on-write).
+
+**Panic behavior difference:** Rust `dot` and `cosine` use `assert_eq!`
+(panics in both debug and release builds on dimension mismatch); Swift
+`dot` and `cosine` use `precondition` (same behavior: panics in both
+builds). Both are intentional — silent truncation via `zip` is worse
+than a panic.
+
 ## § 3 — Public functions
 
 All operations on this package are methods on the `SubstrateKernel`
 protocol implementations or static functions on the primitive
-namespaces (`BitField`, `SHA256`, `GrantHKDF`, `HammingNN`). No free
-top-level functions outside those surfaces. (In the Rust port these
-namespaces are modules of free functions: `bit_field::`, `sha256::`,
-`hkdf::`, `hamming_nn::`.)
+namespaces (`BitField`, `SHA256`, `GrantHKDF`, `HammingNN`,
+`FloatVecOps`). No free top-level functions outside those surfaces.
+(In the Rust port these namespaces are modules of free functions:
+`bit_field::`, `sha256::`, `hkdf::`, `hamming_nn::`, `float_vec_ops::`.)
 
 ## § 4 — Errors
 
@@ -339,8 +413,9 @@ reaching a kernel call.
   - `SHA256Tests.swift` — NIST FIPS 180-4 vectors
   - `HKDFTests.swift` — RFC 5869 vectors + grant scope-key vector
   - `HammingNNTests.swift` — top-K vectors, tie-breaking order
-- **Rust:** `tests/kernel_conformance.rs`, plus per-module
-  `#[cfg(test)] mod tests` blocks.
+- **Rust:** `tests/avx512_hamming_conformance.rs` (AVX-512 Hamming path
+  conformance), `tests/kernel_telemetry_tests.rs` (telemetry event
+  assertions), plus per-module `#[cfg(test)] mod tests` blocks.
 
 ## § 6 — Examples
 
@@ -418,7 +493,9 @@ differences; the two ports remain behaviorally equivalent.
 | Hamming-NN top-K search | `HammingNN` enum (namespace) — `HammingNN.swift:51` | `hamming_nn` module — `rust/src/hamming_nn.rs` (free fn `top_k:67`) | public / `pub` | Swift `HammingNN.topK(anchor:candidates:k:blocks:) -> [HammingNNHit]` / Rust `hamming_nn::top_k(anchor,candidates,k,blocks) -> Vec<HammingNNHit>`. Swift `blocks: BlockMask` / Rust `blocks: u8` bitmask — same block semantics, type idiom. Concept anchored on Swift `HammingNN` enum | `HammingNNTests` "top-1 finds the exact self-match" / "top-K sorted ascending" — `HammingNNTests.swift:20`; `HammingNNTopKTieBreakTests:14` / Rust `top_one_finds_self`, `top_k_returns_sorted_ascending` in `hamming_nn.rs:132` | Both ports |
 | Hamming-NN hit record | `HammingNNHit` struct — `HammingNN.swift:32` | `HammingNNHit` struct — `rust/src/hamming_nn.rs:37` | public / `pub` | Swift `rowID: UUID` + `distance: Int` (`Hashable, Sendable`) / Rust `row_id: u128` + `distance: u32` (`Ord`/`PartialOrd` for heap+sort). UUID ↔ u128 and Int ↔ u32 are sanctioned port idioms; tie-break is rowID/row_id ascending in both (UUID string order and u128 order agree on conformance IDs) | `HammingNNTopKTieBreakTests` "equal-distance hits return in rowID-ascending order" — `HammingNNTopKTieBreakTests.swift:22` / Rust `top_k_returns_sorted_ascending` — `hamming_nn.rs:153` | Both ports |
 | NEON kernel backend | `NeonKernel` struct — `PortableKernel-NEON.swift:39` | none — `import simd` Apple-Silicon NEON lane (no `pub` Rust kernel; Rust covers aarch64 via `SimdKernel` under `simd-nightly`) | public / — | Rust: none — Apple-Silicon `import simd` platform binding; the Rust port's aarch64 NEON path is `SimdKernel`, not a distinct `NeonKernel`. No separate cross-port contract type | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Apple-only |
-| Metal GPU kernel backend | `MetalKernel` struct — `PortableKernel-Metal.swift:109` | none — Apple `Metal` framework (`#if canImport(Metal)`, `init?` since GPU may be unavailable) | public / — | Rust: none — Apple platform binding (Metal is an Apple-only GPU system framework; the Rust port uses scalar + portable SIMD) | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Apple-only |
+| Metal GPU kernel backend | `MetalKernel` struct — `PortableKernel-Metal.swift:109`; `defaultMaxN: Int = 100_000` — `:128`; `init?(maxN: Int = MetalKernel.defaultMaxN)` — `:134` | none — Apple `Metal` framework (`#if canImport(Metal)`, `init?` since GPU may be unavailable) | public / — | Rust: none — Apple platform binding (Metal is an Apple-only GPU system framework; the Rust port uses scalar + portable SIMD). `defaultMaxN` sets the persistent buffer-pool ceiling (dreaming-daemon batch scale, ~3.6 MB overhead); callers may pass a smaller `maxN` to cap pool RAM | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Apple-only |
+| Float-input SimHash projection (protocol op) | `SubstrateKernel.floatSimHashProject(vector:planes:)` — `PortableKernel.swift:127` (default impl in extension) | `SubstrateKernel::float_simhash_project(&self, vector, planes)` — `rust/src/kernel.rs:124` (default impl in trait) | public / `pub` (protocol/trait method with default impl) | Swift `floatSimHashProject(vector:[Float], planes:FloatSimHashPlanes) -> Fingerprint256` / Rust `float_simhash_project(&self, vector:&[f32], planes:&FloatSimHashPlanes) -> Fingerprint256`. Both: bit k set ⟺ ⟨vector, plane_k⟩ > 0 over 256 hyperplanes. Planes passed as data (no RNG in kernel). dim mismatch panics/preconditions in both | Rust: `float_simhash_project_valid_dim_is_deterministic` + `float_simhash_project_dim_mismatch_panics` — `kernel.rs:614,634` | Both ports |
+| Scalar float-vector operations | `FloatVecOps` enum (namespace) — `FloatVecOps.swift:62` | `float_vec_ops` module — `rust/src/float_vec_ops.rs` (free fns: `l2_norm:60`, `l2_normalize:89`, `dot:120`, `cosine:149`) | public / `pub` | Swift `FloatVecOps.l2Norm`, `.l2Normalize`, `.dot`, `.cosine` (static funcs) / Rust `float_vec_ops::l2_norm`, `l2_normalize`, `dot`, `cosine` (free fns). IEEE-754 scalar loop, bit-identical cross-port. Rust `l2_normalize` takes `Vec<f32>` owned / Swift takes `[Float]` by value — sanctioned port idiom. Rust uses `1.0 / sqrt` (not `.recip()`) to match Swift's bit pattern. Panic on dim mismatch in release builds in both (`precondition`/`assert_eq!`) | Rust `#[cfg(test)] mod tests` in `float_vec_ops.rs:170` (8 tests: l2_norm/l2_normalize/dot/cosine + bit-identity canonicals) | Both ports |
 
 ### Concordance notes
 
@@ -431,6 +508,25 @@ differences; the two ports remain behaviorally equivalent.
   op, and its BNNSGraph matmul path crashes on macOS 26.5.
 
 ## Changelog
+
+### 1.3.0 -- 2026-07-16
+Corrected `MetalKernel` surface: added `public static let defaultMaxN: Int = 100_000`
+(omitted from § 2 and the concordance table); corrected `init?()` to
+`init?(maxN: Int = MetalKernel.defaultMaxN)` in § 2, the hardware-backends
+code block, and the concordance table row. Corrected § 5 Rust integration-test
+entry points: `tests/kernel_conformance.rs` does not exist — actual files are
+`tests/avx512_hamming_conformance.rs` and `tests/kernel_telemetry_tests.rs`.
+
+### 1.2.0 -- 2026-07-16
+Added `FloatVecOps` section (Swift `public enum FloatVecOps` / Rust
+`float_vec_ops` module): `l2Norm`/`l2_norm`, `l2Normalize`/`l2_normalize`,
+`dot`, `cosine`. Added `floatSimHashProject(vector:planes:)` to the
+`SubstrateKernel` protocol listing. Corrected Rust batched-variant
+signatures: they use write-through `out: &mut [...]` buffers, not
+allocating return values. Added `FloatVecOps` and `floatSimHashProject`
+rows to the concordance table. Added `src/float_vec_ops.rs` and
+`src/kernel_avx512.rs` to the Rust package layout. Added
+`FloatVecOps.swift` to the Swift file listing.
 
 ### 1.1.0 -- 2026-06-20
 Added `GrantHKDF.hmac` (RFC 2104 HMAC-SHA256) to the public API surface.
