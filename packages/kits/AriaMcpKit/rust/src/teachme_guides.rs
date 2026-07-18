@@ -364,6 +364,9 @@ moot_fact_search — search KG facts by subject, predicate, or object
 
 Optional args:
   query (string) substring match across all three fields
+  subject_exact, predicate_exact, object_exact, source_id_exact (string)
+    case-sensitive exact filters; filters combine
+  limit (integer) default 100, maximum 500
 
 Example:
   { \"query\": \"Alice\" }

@@ -23,9 +23,10 @@ use uuid::Uuid;
 use crate::{
     AeadProvider, AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore,
     CachingRowStore, ColumnType, EstateConfiguration, EstateEncryptionConfig,
-    IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore,
-    SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate,
-    StorageResult, StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
+    ChangeOrigin, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle,
+    RowKey, RowStore, SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver,
+    StoragePredicate, StorageResult, StorageRow, StorageTransaction, TableChange,
+    TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
 
@@ -1019,6 +1020,16 @@ impl Storage for SqliteStorage {
             }
         }
     }
+
+    /// Dataset store override: returns a `SqliteDatasetStoreShim` that shares
+    /// the same `Arc<Mutex<Inner>>` connection as all other SQLite stores.
+    /// This ensures dataset DDL and row operations are serialized on the same
+    /// connection and participate in the WAL write-lock protocol.
+    fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
+        Ok(Arc::new(SqliteDatasetStoreShim {
+            inner: self.inner.clone(),
+        }))
+    }
 }
 
 impl StorageTransaction for SqliteStorage {
@@ -1358,6 +1369,109 @@ fn fetch_matching_keys(
     .unwrap_or_default()
 }
 
+/// Fetch the full column values for the first row matching `conflict_columns`
+/// from `values`. Returns `None` if no matching row exists or on error.
+///
+/// Used by `upsert` to compute `changed_columns` before the INSERT ON CONFLICT.
+/// Cost: one O(1) SELECT on the conflict-column index. The Mutex serializes
+/// writes so there is no interleaving between this read and the upsert.
+fn fetch_row_by_conflict_columns(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    values: &BTreeMap<String, TypedValue>,
+    conflict_columns: &[String],
+) -> Option<BTreeMap<String, TypedValue>> {
+    if conflict_columns.is_empty() {
+        return None;
+    }
+    let pairs: Vec<(&String, &TypedValue)> = conflict_columns
+        .iter()
+        .filter_map(|col| values.get(col).map(|v| (col, v)))
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let where_sql = pairs
+        .iter()
+        .map(|(col, _)| format!("\"{col}\" = ?"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql} LIMIT 1");
+    let binds: Vec<SqlValue> = pairs.iter().map(|(_, v)| to_sql(v)).collect();
+    let mut stmt = conn.prepare_cached(&sql).ok()?;
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(params_from_iter(binds)).ok()?;
+    let row = rows.next().ok()??;
+    let mut result: BTreeMap<String, TypedValue> = BTreeMap::new();
+    for (i, name) in col_names.iter().enumerate() {
+        let vref = row.get_ref(i).ok()?;
+        let kit = table_column_type(schema, table, name);
+        if let Ok(v) = read_value(vref, kit, table, name) {
+            result.insert(name.clone(), v);
+        }
+    }
+    Some(result)
+}
+
+/// Fetch full column values for every row matching `predicate`.
+/// Returns a map of `RowKey → BTreeMap<String, TypedValue>`.
+///
+/// Used by `update` to compute `changed_columns` (diff between pre-update
+/// row and SET values — CVK-WB4). Cost: one `SELECT *` before the `UPDATE`.
+/// The Mutex serializes writes so there is no interleaving. On any error
+/// the function returns an empty map; `update` then falls back to `changed_columns: None`.
+fn fetch_matching_rows_with_values(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    predicate: &StoragePredicate,
+) -> std::collections::HashMap<RowKey, BTreeMap<String, TypedValue>> {
+    let pk_col = schema
+        .and_then(|s| s.tables.iter().find(|t| t.name == table))
+        .and_then(|t| t.primary_key.first().cloned())
+        .unwrap_or_else(|| "row_id".to_string());
+    let mut binds: Vec<SqlValue> = Vec::new();
+    let where_sql = match compile_predicate(predicate, &mut binds) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql}");
+    let mut stmt = match conn.prepare_cached(&sql) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows_q = match stmt.query(params_from_iter(binds)) {
+        Ok(r) => r,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let mut result = std::collections::HashMap::new();
+    while let Ok(Some(row)) = rows_q.next() {
+        let mut row_map: BTreeMap<String, TypedValue> = BTreeMap::new();
+        let mut row_key: Option<RowKey> = None;
+        for (i, name) in col_names.iter().enumerate() {
+            let vref = match row.get_ref(i) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let kit = table_column_type(schema, table, name);
+            if let Ok(v) = read_value(vref, kit, table, name) {
+                if name == &pk_col {
+                    if let TypedValue::Uuid(u) = &v {
+                        row_key = Some(*u);
+                    }
+                }
+                row_map.insert(name.clone(), v);
+            }
+        }
+        if let Some(k) = row_key {
+            result.insert(k, row_map);
+        }
+    }
+    result
+}
+
 /// Resolve the row's primary key: a single-column UUID primary key reads
 /// the UUID from the row; anything else gets a fresh v4.
 fn extract_row_key(
@@ -1440,12 +1554,16 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        // changedColumns for insert = all written column names (CVK-WB4).
+        let changed_cols: std::collections::HashSet<String> = values.keys().cloned().collect();
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Insert,
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1502,6 +1620,11 @@ impl RowStore for SqliteRowStore {
                 sql.push_str(&format!(" DO UPDATE SET {}", updates.join(", ")));
             }
         }
+        // Pre-read existing row for changedColumns diff BEFORE the upsert (CVK-WB4).
+        // One O(1) SELECT on the conflict-column index. The Mutex serializes writes
+        // so there is no interleaving between this read and the INSERT ON CONFLICT.
+        let existing_row = fetch_row_by_conflict_columns(
+            &guard.conn, guard.schema.as_ref(), table, &values, conflict_columns);
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
         // prepare_cached: the SQL text for a given (table, column-set) shape is
         // identical across a bulk loop, so the statement parses ONCE and replays
@@ -1515,12 +1638,21 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        let changed_cols: std::collections::HashSet<String> = if let Some(old) = &existing_row {
+            // Upsert-as-update: stamp only columns that differ from the stored row.
+            values.keys().filter(|col| old.get(*col) != values.get(*col)).cloned().collect()
+        } else {
+            // Upsert-as-insert: all written columns are new.
+            values.keys().cloned().collect()
+        };
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Update,
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1547,11 +1679,11 @@ impl RowStore for SqliteRowStore {
             validate_sql_identifier(k)?;
         }
         let guard = self.inner.lock().unwrap();
-        // Pre-query row keys before mutating. The `values` map carries only
-        // the SET columns (not the primary key). The Mutex serializes all
-        // operations so no interleaving is possible between this SELECT and
-        // the UPDATE.
-        let matched_keys = fetch_matching_keys(&guard.conn, guard.schema.as_ref(), table, predicate);
+        // Pre-read full row values BEFORE mutating for changedColumns diff (CVK-WB4).
+        // One SELECT * per update; the Mutex serializes all operations so no
+        // interleaving is possible between this read and the UPDATE.
+        // On error (empty map) each notification falls back to changed_columns: None.
+        let pre_rows = fetch_matching_rows_with_values(&guard.conn, guard.schema.as_ref(), table, predicate);
         let keys: Vec<&String> = values.keys().collect();
         let set_clause = keys
             .iter()
@@ -1569,13 +1701,21 @@ impl RowStore for SqliteRowStore {
             .map_err(|e| map_sql_err(e, table))?
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
-        for key in matched_keys {
+        for (key, old_row) in &pre_rows {
+            // Compute changed columns: those whose stored value differed from the SET values.
+            let changed_cols: std::collections::HashSet<String> = values
+                .keys()
+                .filter(|col| old_row.get(*col) != values.get(*col))
+                .cloned()
+                .collect();
             self.observers.emit(&TableChange {
                 table: table.to_string(),
                 event: StorageEvent::Update,
-                row_key: Some(key),
+                row_key: Some(*key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                changed_columns: Some(changed_cols),
             });
         }
         Ok(changed)
@@ -1609,6 +1749,9 @@ impl RowStore for SqliteRowStore {
                 row_key: Some(key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all.
+                changed_columns: None,
             });
         }
         Ok(changed)
@@ -2419,6 +2562,395 @@ impl StorageObserver for SqliteObserver {
     ) -> StorageResult<Receiver<TableChange>> {
         Ok(self.observers.observe(table, events))
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// DatasetStore SQLite conformance — SqliteDatasetStoreShim (MX-TAB-1)
+//
+// Holds the same Arc<Mutex<Inner>> as every other SQLite sub-store so
+// dataset DDL and row ops run on the same serialized connection.
+// Implements crate::dataset_store::DatasetStore by reusing `to_sql`,
+// `read_value`, `compile_predicate`, `native_type` etc. from this module.
+//
+// No explicit COLLATE clause is added to TEXT columns in CREATE TABLE DDL:
+// SQLite's BINARY collation (the default) is preserved for byte-order parity
+// with the Rust InMemory backend and with the Swift leg.
+// ─────────────────────────────────────────────────────────────────────
+
+use crate::dataset_store::{
+    ColumnStats, DatasetIndexDeclaration, DatasetSchema, DatasetStore,
+    compare_typed_values_for_sort, dataset_index_name, dataset_native_type, dataset_table_name,
+    validate_dataset_column_identifier,
+};
+
+/// SQLite conformance for `DatasetStore` (MX-TAB-1).
+///
+/// Shares `Arc<Mutex<Inner>>` with `SqliteStorage` so all dataset operations
+/// are serialized on the same SQLite connection as RowStore and BlobStore.
+/// Created by `Storage::dataset_store()` on `SqliteStorage`.
+pub struct SqliteDatasetStoreShim {
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl DatasetStore for SqliteDatasetStoreShim {
+    fn create_dataset(
+        &self,
+        id: uuid::Uuid,
+        schema: &DatasetSchema,
+        indexes: &[DatasetIndexDeclaration],
+    ) -> StorageResult<()> {
+        // Validate all user-supplied column names before touching the connection.
+        for col in &schema.columns {
+            validate_dataset_column_identifier(&col.name)?;
+        }
+        for idx in indexes {
+            validate_dataset_column_identifier(&idx.column)?;
+        }
+
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Build CREATE TABLE DDL. No COLLATE clause on TEXT columns — SQLite's
+        // BINARY collation (the default) is intentionally preserved.
+        let mut parts: Vec<String> = Vec::new();
+        for col in &schema.columns {
+            let mut line = format!("\"{}\" {}", col.name, dataset_native_type(col.column_type));
+            if !col.nullable {
+                line.push_str(" NOT NULL");
+            }
+            parts.push(line);
+        }
+        if let Some(pk) = &schema.primary_key_column {
+            parts.push(format!("PRIMARY KEY (\"{pk}\")"));
+        }
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)",
+            table_name,
+            parts.join(",\n  ")
+        );
+        guard
+            .conn
+            .execute_batch(&create_sql)
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("create_dataset DDL: {e}"),
+            })?;
+
+        // Declare secondary indexes.
+        for idx in indexes {
+            let unique = if idx.unique { "UNIQUE " } else { "" };
+            let idx_name = dataset_index_name(id, &idx.column);
+            let idx_sql = format!(
+                "CREATE {unique}INDEX IF NOT EXISTS \"{idx_name}\" ON \"{table_name}\" (\"{}\")",
+                idx.column
+            );
+            guard
+                .conn
+                .execute_batch(&idx_sql)
+                .map_err(|e| StorageError::BackendError {
+                    underlying: format!("create_dataset index DDL: {e}"),
+                })?;
+        }
+        Ok(())
+    }
+
+    fn append_rows(
+        &self,
+        id: uuid::Uuid,
+        rows: &[std::collections::BTreeMap<String, TypedValue>],
+    ) -> StorageResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Validate column names from the first row.
+        if let Some(first) = rows.first() {
+            for key in first.keys() {
+                validate_dataset_column_identifier(key)?;
+            }
+        }
+
+        // Recover the declared PK column from PRAGMA table_info for pre-sort.
+        let pk_column = dataset_pk_column_for_table(&guard.conn, &table_name)?;
+
+        // Pre-sort ascending by PK when declared.
+        let mut sorted_rows: Vec<std::collections::BTreeMap<String, TypedValue>> =
+            rows.to_vec();
+        if let Some(ref pk) = pk_column {
+            sorted_rows.sort_by(|a, b| {
+                let av = a.get(pk).unwrap_or(&TypedValue::Null);
+                let bv = b.get(pk).unwrap_or(&TypedValue::Null);
+                if compare_typed_values_for_sort(av, bv) {
+                    std::cmp::Ordering::Less
+                } else if compare_typed_values_for_sort(bv, av) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+        }
+
+        // BEGIN IMMEDIATE / INSERT all rows / COMMIT — GLK_BATCH1 pattern.
+        guard
+            .conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("append_rows BEGIN: {e}"),
+            })?;
+
+        let result = (|| -> StorageResult<()> {
+            for row in &sorted_rows {
+                dataset_insert_row(&guard.conn, &table_name, row)?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                guard
+                    .conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| StorageError::BackendError {
+                        underlying: format!("append_rows COMMIT: {e}"),
+                    })?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = guard.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    fn query_rows(
+        &self,
+        id: uuid::Uuid,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+        columns: Option<&[String]>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Validate and build projection.
+        let projection = match columns {
+            Some(cols) if !cols.is_empty() => {
+                for name in cols {
+                    validate_sql_identifier(name)?;
+                }
+                cols.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ")
+            }
+            _ => "*".to_string(),
+        };
+
+        let mut sql = format!("SELECT {projection} FROM \"{table_name}\"");
+        let mut binds: Vec<SqlValue> = Vec::new();
+
+        if let Some(pred) = predicate {
+            let where_sql = compile_predicate(pred, &mut binds)?;
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql);
+        }
+
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|clause| -> StorageResult<String> {
+                    validate_sql_identifier(&clause.column.name)?;
+                    let dir = if clause.direction == OrderDirection::Ascending {
+                        "ASC"
+                    } else {
+                        "DESC"
+                    };
+                    Ok(format!("\"{}\" {}", clause.column.name, dir))
+                })
+                .collect::<StorageResult<_>>()?;
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&parts.join(", "));
+        }
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {lim}"));
+        }
+        if let Some(off) = offset {
+            if off > 0 {
+                sql.push_str(&format!(" OFFSET {off}"));
+            }
+        }
+
+        let mut stmt = guard
+            .conn
+            .prepare_cached(&sql)
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("query_rows prepare: {e}"),
+            })?;
+
+        // Read rows without a schema type hint (dataset columns are not in
+        // the accumulated schema declaration). SQLite affinity drives the
+        // TypedValue case: REAL → TypedValue::Float(f64) — f64, never f32.
+        let rows = stmt
+            .query_map(params_from_iter(binds.iter()), |row| {
+                let col_count = row.as_ref().column_count();
+                let mut map: std::collections::BTreeMap<String, TypedValue> =
+                    std::collections::BTreeMap::new();
+                for i in 0..col_count {
+                    let col_name = row
+                        .as_ref()
+                        .column_name(i)
+                        .unwrap_or("")
+                        .to_string();
+                    // kit: None → no declared-type hint; read by SQLite affinity.
+                    let val = read_value(
+                        row.get_ref(i)?,
+                        None,
+                        &table_name,
+                        &col_name,
+                    ).map_err(|_e| {
+                        // read_value is StorageError but we're inside a rusqlite closure
+                        // that only accepts rusqlite::Error. Convert: the only error case
+                        // is CorruptStoredValue, which shouldn't happen without a type hint.
+                        rusqlite::Error::InvalidColumnName(col_name.clone())
+                    })?;
+                    map.insert(col_name, val);
+                }
+                Ok(StorageRow::new(map))
+            })
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("query_rows step: {e}"),
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
+    fn column_stats(&self, id: uuid::Uuid, column: &str) -> StorageResult<ColumnStats> {
+        validate_dataset_column_identifier(column)?;
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+
+        // Single aggregate query — five values in one round trip.
+        // REAL MIN/MAX → ValueRef::Real(f64) → TypedValue::Float(f64).
+        // NULL MIN/MAX (empty or all-null column) → ValueRef::Null → TypedValue::Null.
+        let sql = format!(
+            r#"SELECT COUNT("{col}"), COUNT(DISTINCT "{col}"), COUNT(*) - COUNT("{col}"), MIN("{col}"), MAX("{col}") FROM "{table}""#,
+            col = column,
+            table = table_name
+        );
+
+        guard
+            .conn
+            .query_row(&sql, [], |row| {
+                let count: i64 = row.get(0)?;
+                let distinct_count: i64 = row.get(1)?;
+                let null_count: i64 = row.get(2)?;
+                // MIN/MAX: no type hint → SQLite affinity-driven TypedValue.
+                let min = dataset_read_aggregate(row, 3)?;
+                let max = dataset_read_aggregate(row, 4)?;
+                Ok(ColumnStats {
+                    count,
+                    distinct_count,
+                    null_count,
+                    min,
+                    max,
+                })
+            })
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("column_stats: {e}"),
+            })
+    }
+
+    fn drop_dataset(&self, id: uuid::Uuid) -> StorageResult<()> {
+        let table_name = dataset_table_name(id);
+        let guard = self.inner.lock().unwrap();
+        guard
+            .conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("drop_dataset: {e}"),
+            })
+    }
+}
+
+// ── Dataset SQLite helpers (module-private) ───────────────────────────────
+
+/// Recover the primary-key column name for a dataset table via PRAGMA table_info.
+/// Returns `None` when the table uses SQLite's synthetic rowid key.
+fn dataset_pk_column_for_table(
+    conn: &Connection,
+    table_name: &str,
+) -> StorageResult<Option<String>> {
+    let mut stmt = conn
+        .prepare_cached(&format!("PRAGMA table_info(\"{table_name}\")"))
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("PRAGMA table_info: {e}"),
+        })?;
+    let result = stmt
+        .query_map([], |row| {
+            let pk: i32 = row.get(5)?;
+            let name: String = row.get(1)?;
+            Ok((pk, name))
+        })
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("PRAGMA table_info query: {e}"),
+        })?
+        .find_map(|r| {
+            r.ok().and_then(|(pk, name)| {
+                if pk > 0 { Some(name) } else { None }
+            })
+        });
+    Ok(result)
+}
+
+/// Insert one row into a dataset table using the existing `to_sql` codec.
+fn dataset_insert_row(
+    conn: &Connection,
+    table_name: &str,
+    row: &std::collections::BTreeMap<String, TypedValue>,
+) -> StorageResult<()> {
+    if row.is_empty() {
+        return Ok(());
+    }
+    // BTreeMap keys are sorted — consistent column order for statement cache reuse.
+    let keys: Vec<&str> = row.keys().map(|s| s.as_str()).collect();
+    for k in &keys {
+        validate_sql_identifier(k)?;
+    }
+    let cols = keys.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+    let ph = vec!["?"; keys.len()].join(", ");
+    let sql = format!("INSERT INTO \"{table_name}\" ({cols}) VALUES ({ph})");
+
+    let binds: Vec<SqlValue> = keys
+        .iter()
+        .map(|k| to_sql(row.get(*k).unwrap_or(&TypedValue::Null)))
+        .collect();
+
+    conn.execute(&sql, params_from_iter(binds.iter()))
+        .map_err(|e| map_sql_err(e, table_name))?;
+    Ok(())
+}
+
+/// Read a MIN/MAX aggregate value from a rusqlite Row at `index`.
+/// No type hint → SQLite affinity drives TypedValue case.
+/// REAL → TypedValue::Float(f64) — f64 only, satisfying the cross-leg wire rule.
+fn dataset_read_aggregate(
+    row: &rusqlite::Row,
+    index: usize,
+) -> rusqlite::Result<TypedValue> {
+    use rusqlite::types::ValueRef;
+    Ok(match row.get_ref(index)? {
+        ValueRef::Null => TypedValue::Null,
+        ValueRef::Integer(i) => TypedValue::Int(i),
+        ValueRef::Real(f) => TypedValue::Float(f),  // f64 — never f32
+        ValueRef::Text(b) => TypedValue::Text(
+            std::str::from_utf8(b).unwrap_or("").to_string(),
+        ),
+        ValueRef::Blob(b) => TypedValue::Blob(b.to_vec()),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────

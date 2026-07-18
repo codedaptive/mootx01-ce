@@ -36,6 +36,25 @@ final class SQLiteRowStore: RowStore, Sendable {
     func delete(table: String, where predicate: StoragePredicate) async throws -> Int {
         try await backend.deleteRows(table: table, where: predicate)
     }
+
+    // MARK: - Sync-tagged write paths (CVK-ICLOUD P1-M1, I-10)
+    // Thread origin: .syncApply through to the backend so the emitted
+    // TableChange carries that origin. ConvergenceKit's recordOutbound
+    // drops .syncApply changes, preventing the echo loop.
+
+    func insertSync(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        try await backend.insertRow(table: table, values: values, origin: .syncApply)
+    }
+    func upsertSync(
+        table: String,
+        values: [String: TypedValue],
+        conflictColumns: [String]
+    ) async throws -> RowHandle {
+        try await backend.upsertRow(table: table, values: values, conflictColumns: conflictColumns, origin: .syncApply)
+    }
+    func deleteSync(table: String, where predicate: StoragePredicate) async throws -> Int {
+        try await backend.deleteRows(table: table, where: predicate, origin: .syncApply)
+    }
     func query(table: String, where predicate: StoragePredicate?, orderBy: [OrderClause], limit: Int?, offset: Int?) async throws -> [StorageRow] {
         try await backend.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset, tableSchema: nil, columns: nil)
     }

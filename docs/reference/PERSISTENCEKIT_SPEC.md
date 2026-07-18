@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.6.0
+version: 1.8.0
 status: active
-date: 2026-06-28
+date: 2026-07-16
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -33,12 +33,16 @@ purpose: |
 
 PersistenceKit is the substrate's storage seam. Every kit that needs to
 persist rows, blobs, or audit events talks to one protocol —
-`Storage` — and never to a database driver. `Storage` surfaces four
+`Storage` — and never to a database driver. `Storage` surfaces five
 sub-stores: a `RowStore` (typed row I/O), a `BlobStore` (opaque byte
-I/O), an `AuditLog` (append-only HLC-ordered event persistence), and a
-`StorageObserver` (change notification). Three backends conform: SQLite
-(file-backed, WAL), PostgreSQL (pooled), and InMemory (the test and
-conformance reference).
+I/O), an `AuditLog` (append-only HLC-ordered event persistence), a
+`StorageObserver` (change notification), and a `DatasetStore` (typed
+tabular I/O for user-defined dataset tables, MX-TAB-1). Three backends
+conform: SQLite (file-backed, WAL), PostgreSQL (pooled), and InMemory
+(the test and conformance reference). `StorageIntrospection` is a
+separate optional-capability protocol, not a `Storage` requirement.
+The DatasetStore is available on SQLite and InMemory backends;
+PostgreSQL is deferred to MX-TAB-2.
 
 PersistenceKit owns no vector-search engine. An earlier wording, "Storage
 surfaces a VectorIndex", was a wording defect; the intent was a
@@ -73,7 +77,7 @@ durable contract those decisions produced.
 
 This specification defines:
 
-- The `Storage` protocol and its four sub-store contracts.
+- The `Storage` protocol and its five sub-store contracts.
 - The typed value model (`TypedValue`, `ColumnType`, `Column`).
 - Schema declaration and forward-only migration semantics.
 - The closed predicate algebra (`StoragePredicate`) and ordering
@@ -92,6 +96,12 @@ This specification defines:
   and StorageObserver-driven invalidation.
 - The cross-backend conformance obligation (all three backends, one
   fixture suite, identical observable results).
+- The dataset store contract (MX-TAB-1): table naming convention
+  (`ds_<uuid-no-hyphens>`), column identifier validation, BINARY
+  collation discipline, PK pre-sort, f64-only float statistics, and
+  per-operation behaviors (`createDataset`, `appendRows`, `queryRows`,
+  `columnStats`, `dropDataset`). Available on SQLite and InMemory;
+  PostgreSQL deferred (MX-TAB-2).
 
 This specification does NOT define:
 
@@ -137,10 +147,12 @@ the ARIA surfaces transitively.
 ## § 4 — Invariants
 
 **I-1 (one protocol, swappable backends):** every consumer reaches
-storage through `Storage` and its four sub-store protocols. A consumer
+storage through `Storage` and its five sub-store protocols. A consumer
 that compiles against `Storage` runs unchanged on SQLite, PostgreSQL, or
 InMemory. Backends differ in file format and performance, never in
-observable result (§ 7, C-1).
+observable result (§ 7, C-1). The `DatasetStore` sub-store defaults to
+`featureGated("datasetStore")` on PostgreSQL and third-party conformers
+(B-18, I-23).
 
 **I-1a (vector-storage accommodation):** PersistenceKit owns no vector
 search. Every backend MUST accommodate vector workloads' storage needs —
@@ -292,6 +304,44 @@ Unix) so that other OS users cannot read the estate. Apple Data Protection
 an orthogonal at-rest encryption layer (SECFIX-WS2-PK CAND-052, landed
 2026-06-28).
 
+**I-23 (dataset table naming):** each dataset's backing table is named
+`ds_<uuid-no-hyphens>` (all lowercase hex). The `ds_` prefix provides
+a letter first character; the 32 hex digits are all alphanumeric. The
+result is a valid SQL identifier on every backend without quoting.
+Table names are generated internally by `datasetTableName(_:)` /
+`dataset_table_name`; they are never user-supplied and never need
+identifier validation (MX-TAB-1).
+
+**I-24 (dataset column identifier validation, fail-closed):** every
+user-supplied column name (from `moot_file_dataset` and CSV headers)
+MUST pass `validateDatasetColumnIdentifier` / `validate_dataset_column_identifier`
+against `[A-Za-z_][A-Za-z0-9_]*` before any DDL or DML is constructed.
+An invalid name rejects the entire `createDataset` or `appendRows`
+operation with `StorageError.invalidIdentifier`; there is no
+sanitize-and-continue path. This is the same validation rule as I-21
+applied at the dataset surface.
+
+**I-25 (dataset BINARY collation discipline):** TEXT column ordering
+(`ORDER BY`) and distinct-count in dataset queries use byte order —
+SQLite BINARY collation (the default; dataset DDL never overrides
+collation). This locks parity between backends and across Swift/Rust legs
+so the conformance harness can verify identical results with non-ASCII
+fixture strings. Locale-aware ordering for dataset columns is out of scope
+for v1.
+
+**I-26 (dataset PK pre-sort):** when `DatasetSchema.primaryKeyColumn`
+is non-nil, `appendRows` pre-sorts the supplied rows ascending by that
+column's value before insertion, so SQLite rowid assignment tracks key
+order. When the PK column is nil, the backend uses its synthetic key
+(SQLite rowid; PostgreSQL `bigint generated always as identity`) and no
+pre-sort applies.
+
+**I-27 (dataset f64-only float statistics):** `columnStats` returns
+`TypedValue.float(Double)` / `TypedValue::Float(f64)` for the `min`
+and `max` fields of REAL columns — never f32. This enforces the
+cross-leg wire rule so Swift and Rust produce identical JSON text on the
+MCP tool surface regardless of which leg handled the query.
+
 ## § 5 — Behavioral contracts
 
 **B-1 (auto-commit outside a transaction):** the sub-stores reached
@@ -301,8 +351,9 @@ sub-store protocols bound to one connection.
 
 **B-2 (transaction atomicity):** if the `transaction` block throws, the
 transaction rolls back and no write within it is visible. If it returns,
-all writes commit together. The four sub-stores inside one transaction
-share one connection (Q6).
+all writes commit together. The three sub-stores inside one transaction
+(`rowStore`, `blobStore`, `auditLog`) share one connection (Q6).
+`observer` and `datasetStore` are not part of `StorageTransaction`.
 
 **B-3 (isolation levels):** `readCommitted` is the default. SQLite maps
 `readCommitted` and `repeatableRead` to `BEGIN IMMEDIATE` and is
@@ -492,6 +543,92 @@ ports use SQLCipher whole-file encryption but on different crypto backends
 (OpenSSL FIPS on Rust, CommonCrypto on Apple) and never share a physical
 file. Parity for Mode 3 is behavioral — the rows retrieved are identical
 across ports — not on-disk byte identity. See B-12.
+
+**B-18 (dataset store operations):** `DatasetStore` is the sixth sub-store on
+`Storage`, accessed through `storage.datasetStore` / `storage.dataset_store()`.
+It reuses `StoragePredicate`, `OrderClause`, and `TypedValue` — no new
+query language. All identifier validation, collation, PK pre-sort, and
+float-statistics rules are governed by I-23 through I-27.
+
+- `createDataset(id:schema:indexes:)` / `create_dataset`: creates the backing
+  table with `CREATE TABLE IF NOT EXISTS` semantics. Idempotent: a second call
+  with the same `id` is a no-op. Column names in `schema.columns` and index
+  column names are validated (I-24) before any DDL; an invalid name throws
+  `StorageError.invalidIdentifier` and aborts the operation.
+- `appendRows(id:rows:)` / `append_rows`: bulk-inserts rows via
+  `beginTransaction / commitTransaction` (GLK_BATCH1) so all rows land in one
+  atomic write. Pre-sorts by `primaryKeyColumn` when declared (I-26). Column
+  names in each row dict are validated (I-24).
+- `queryRows(id:predicate:orderBy:limit:offset:columns:)` / `query_rows`:
+  column-projecting predicate query. `columns nil` returns all columns.
+  TEXT ordering uses BINARY collation (I-25).
+- `columnStats(id:column:)` / `column_stats`: per-column aggregate statistics
+  computed in SQL: `COUNT`, `COUNT(DISTINCT …)`, `MIN`, `MAX`, NULL count.
+  Float `min`/`max` values for REAL columns use `TypedValue.float(Double)` /
+  `TypedValue::Float(f64)` — never f32 (I-27).
+- `dropDataset(id:)` / `drop_dataset`: drops the backing table with
+  `DROP TABLE IF EXISTS` semantics. A no-op if the table does not exist.
+  The caller is responsible for the estate handle tombstone (LocusKit, MX-TAB-4).
+
+The default `Storage.datasetStore` / `Storage::dataset_store()` throws
+`StorageError.featureGated("datasetStore")`. `SQLiteStorage` and
+`InMemoryStorage` override this with a concrete implementation.
+`PostgreSQLStorage` and third-party conformers inherit the default (MX-TAB-2).
+
+**B-19 (change origin tag):** Every `TableChange` emitted by a backend carries
+an `origin: ChangeOrigin` field (`ChangeOrigin` / `change_origin::ChangeOrigin`
+in Rust) that identifies whether the triggering write was a local user-initiated
+write (`.local` / `Local`) or a write performed during inbound sync application
+(`.syncApply` / `SyncApply`).
+
+- All ordinary write paths (`insert`, `upsert`, `update`, `delete` on every
+  backend) emit `origin: .local` / `ChangeOrigin::Local`.
+- Three sync-tagged write methods — `insertSync`, `upsertSync`, `deleteSync`
+  (Swift) / `insert_sync`, `upsert_sync`, `delete_sync` (Rust) — emit
+  `origin: .syncApply` / `ChangeOrigin::SyncApply`. All three are protocol
+  requirements with default implementations that delegate to the ordinary write
+  paths (safe for non-sync conformers; the origin override is in the backend
+  implementations that ConvergenceKit's `applyInbound` calls).
+- `CachingRowStore` delegates `insertSync` / `upsertSync` / `deleteSync` to its
+  backing store and applies identical cache-invalidation logic, preserving the
+  origin tag through the caching layer.
+- The `origin` field enables ConvergenceKit's outbound observer to discard
+  `applyInbound` writes and prevent the multi-device echo loop (I-10,
+  CVK-ICLOUD P1-M1). Observers uninterested in origin may ignore the field.
+
+**B-20 (changedColumns stamping — CVK-WB4):** Every `TableChange` emitted by
+the InMemory and SQLite backends carries a `changedColumns: Set<String>?`
+(`changed_columns: Option<HashSet<String>>` in Rust) field that identifies
+which columns actually changed in the write. The contract per operation:
+
+- **insert:** `changedColumns` = `Some(Set(values.keys))` — all written columns.
+  No pre-existing row exists; every column in the insert dict is "changed" from
+  the nothing that was there before.
+- **update:** `changedColumns` = `Some(columns where newValue != oldValue)` —
+  only the columns whose value actually changed relative to the stored row before
+  the UPDATE. A value present in the SET clause but equal to the stored value is
+  NOT included. The backend performs a pre-read (O(1) in InMemory — old row
+  already in memory; O(1) in SQLite — `SELECT` by primary key before `UPDATE`)
+  to compute the diff.
+- **upsert (insert path):** `changedColumns` = `Some(Set(values.keys))` — same
+  as insert; no pre-existing row. The pre-read (`SELECT` by conflict columns)
+  confirms the row is absent.
+- **upsert (update path):** `changedColumns` = `Some(columns where newValue !=
+  oldValue)` — diff against the pre-existing row, same as update.
+- **delete:** `changedColumns` = `nil` / `None` — delete tombstones carry no
+  column-level granularity; the row is gone.
+
+The PostgreSQL backend always emits `changed_columns: None` (conservative /
+backward-compatible); pre-read diff is not implemented there.
+
+Consumers that do not use `changedColumns` may ignore the field: the field is
+additive and does not change existing `TableChange` semantics. ConvergenceKit
+uses `changedColumns` for two behaviors (CVK-WB4): (1) mixed-column storm-kill
+precision — when `changedColumns` is present and every changed column is in the
+excluded-columns set, the outbound change is dropped even if non-changed sync
+columns survive the projection strip; (2) fieldLevelLWW stamp precision — only
+the columns in `changedColumns` receive a new column-level HLC stamp in the
+outbound `SyncRecord`, preventing false HLC advancement on unchanged columns.
 
 ## § 6 — Error model (conceptual)
 
@@ -708,6 +845,24 @@ Authority for the Package.swift / Cargo.toml addition:
 `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ## Changelog
+
+### 1.8.0 -- 2026-07-16
+CVK-ICLOUD P1-M1: Added behavioral contract B-19 (change origin tag). Every
+`TableChange` now carries `origin: ChangeOrigin` (.local / .syncApply). Three
+sync-tagged write methods (`insertSync` / `upsertSync` / `deleteSync`, with Rust
+equivalents) emit `.syncApply`, enabling ConvergenceKit's outbound observer to
+discard `applyInbound` writes and prevent the multi-device echo loop (I-10).
+
+### 1.7.0 -- 2026-07-16
+MX-TAB-1: Updated § 1 to name five sub-stores (was four, omitting DatasetStore;
+StorageIntrospection is correctly a separate optional-capability protocol, not
+a Storage sub-store). Added DatasetStore to § 2 scope bullet. Added
+invariants I-23 (dataset table naming), I-24 (column identifier validation,
+fail-closed), I-25 (BINARY collation discipline), I-26 (PK pre-sort), I-27
+(f64-only float statistics). Added behavioral contract B-18 (DatasetStore
+operations: createDataset idempotence, appendRows GLK_BATCH1 + pre-sort,
+queryRows BINARY collation, columnStats f64 rule, dropDataset IF EXISTS, and
+the featureGated default for PostgreSQL and third-party conformers).
 
 ### 1.6.0 -- 2026-06-28
 SECFIX-WS2-PK: Added I-21 (SQL-identifier validation on all write paths,

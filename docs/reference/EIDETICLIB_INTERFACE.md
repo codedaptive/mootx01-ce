@@ -1,8 +1,8 @@
 ---
 title: EideticLib Interface
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: Public API surface for EideticLib in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -155,6 +155,28 @@ hosts `sentences` and `sentencesByDelimiter` are the same deterministic path.
 pub fn sentences(text: &str) -> Vec<String>;   // in module eidetic_lib::segmenter
 ```
 
+#### `EideticContentKind`
+
+Discriminates the semantic kind of content passed to the content-aware
+`lookup` overload. `.code` is authoritative shape metadata and causes the
+FDC encoder to anchor any non-empty content at `005` (the Computer
+science / programming general class) with a language Q-ID when detection
+is decisive. `.text` is the default natural-language path.
+
+**Swift:**
+
+```swift
+public enum EideticContentKind: Equatable, Sendable {
+    case text
+    case code
+}
+```
+
+**Rust:** The equivalent discriminant is `FdcContentKind` from the
+`lattice_lib` crate; `lookup_no_record_with_kind` accepts it directly.
+`EideticContentKind` has no separate Rust type in EideticLib — callers
+pass `lattice_lib::FdcContentKind` to `lookup_no_record_with_kind`.
+
 #### Code-state types
 
 | Type | One-line | Source (Swift) |
@@ -186,6 +208,55 @@ extension EideticLib {
 
 ```rust
 pub fn lookup(term: &str) -> Anchor;
+```
+
+### `lookup` (non-recording variant)
+
+Identical result to `lookup(_:)` — the `Anchor` is byte-for-byte the
+same. Novel tokens encountered during concept-bag construction are NOT
+accumulated into LatticeLib's `sharedNovelCache` when `recordNovel: false`
+is passed. Use this overload when the term is user-supplied memory content
+that must not leak plaintext tokens into the pool pipeline (SPEC § 5,
+B-6).
+
+**Swift:**
+
+```swift
+extension EideticLib {
+    public static func lookup(_ term: String, recordNovel: Bool) -> Anchor
+}
+```
+
+**Rust:**
+
+```rust
+pub fn lookup_no_record(term: &str) -> Anchor;
+```
+
+### `lookup` (content-kind, non-recording)
+
+Content-aware non-recording lookup used by capture and recalculation.
+`.code` content is treated as authoritative shape metadata and anchors
+any non-empty term at FDC `005`, with a language Q-ID when detection is
+decisive. Never records novel tokens (SPEC § 5, B-7).
+
+**Swift:**
+
+```swift
+extension EideticLib {
+    public static func lookup(
+        _ term: String,
+        contentKind: EideticContentKind,
+        recordNovel: Bool
+    ) -> Anchor
+}
+```
+
+**Rust:**
+
+```rust
+// FdcContentKind is imported from lattice_lib
+pub fn lookup_no_record_with_kind(term: &str, content_kind: FdcContentKind) -> Anchor;
 ```
 
 ### `classifyLatticeCode`
@@ -238,7 +309,12 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 Target `EideticLibTests`. Suites: `LatticeLookupTests` and `EideticLibTests`
 (lookup determinism, empty anchor — C-1/C-2), `LatticeCodeStateTests`
 (grammar parity, pending round-trip — C-4/C-5), `SegmenterTests`
-(canonical reference + routed-entry round-trip — C-11), `StemmerTests`.
+(canonical reference + routed-entry round-trip — C-11),
+`LookupConformanceTests` (exact-code/Q-ID cross-language gate against
+`Tests/SharedVectors/lookup_vectors.json` — concordance § 7),
+`StemmerTests`, `NormalizerTests`, `TokenizerTests`, `WordClassTests`,
+`WordClassTableTests`, `WordClassTaggerTests` (LatticeLib linguistic-
+primitive tests exercised through the EideticLib test target).
 
 **Rust:**
 
@@ -316,13 +392,24 @@ Swift is the reference of record.
 
 | Aspect | Swift | Rust | Status |
 |---|---|---|---|
-| Signature | `EideticLib.lookup(_ term: String) -> Anchor` | `pub fn lookup(term: &str) -> Anchor` | Parity |
+| Signature (base) | `EideticLib.lookup(_ term: String) -> Anchor` | `pub fn lookup(term: &str) -> Anchor` | Parity |
 | Delegation | `FDC.encodeAnchor(term)` in LatticeLib | `Fdc::encode_anchor(term)` in lattice-lib | Parity |
 | Confidence for resolved code | 32 (medium) | 32 (medium) | Parity |
 | Confidence for unresolved | 0 | 0 | Parity |
 | Missing FDC artifacts | `fatalError` if `FDC.isAvailable == false` | `panic!` if `Fdc::is_available() == false` | Parity — crash loud, no sentinel |
 | Behavioral tests | Pass | Pass | Parity |
 | Exact-code conformance (SharedVectors/lookup_vectors.json) | Pass | Pass | Parity |
+| Source | `Sources/EideticLib/EideticLib.swift` | `rust/src/lib.rs` | |
+
+### Non-recording `lookup` variants
+
+| Aspect | Swift | Rust | Status |
+|---|---|---|---|
+| Signature (non-recording) | `EideticLib.lookup(_ term: String, recordNovel: Bool) -> Anchor` | `pub fn lookup_no_record(term: &str) -> Anchor` | Parity in result; naming differs by convention |
+| Result vs base `lookup` | Byte-identical `Anchor` for same artifacts | Byte-identical `Anchor` for same artifacts | Parity — confirmed by test `lookup_no_record_matches_lookup_result` |
+| Novel-token accumulation | Suppressed when `recordNovel: false` | Always suppressed | Parity in suppression behavior |
+| Signature (content-kind, non-recording) | `EideticLib.lookup(_ term: String, contentKind: EideticContentKind, recordNovel: Bool) -> Anchor` | `pub fn lookup_no_record_with_kind(term: &str, content_kind: FdcContentKind) -> Anchor` | Equivalent; Rust uses `FdcContentKind` directly |
+| Code content behavior | `.code` kind anchors non-empty term at `005`; `.text` is normal path | Same via `FdcContentKind` | Parity |
 | Source | `Sources/EideticLib/EideticLib.swift` | `rust/src/lib.rs` | |
 
 ### `Anchor` struct
@@ -348,6 +435,14 @@ Conformance is exercised by `LookupConformanceTests` (Swift) and
 *End of EideticLib Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-16
+Added `EideticContentKind` type (§2); added `lookup(_ term:, recordNovel:)`
+and `lookup(_ term:, contentKind:, recordNovel:)` Swift overloads and their
+Rust equivalents `lookup_no_record` / `lookup_no_record_with_kind` (§3);
+expanded §5 test suite list to include `LookupConformanceTests` and the
+LatticeLib linguistic-primitive suites; added non-recording variants
+concordance table (§7).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

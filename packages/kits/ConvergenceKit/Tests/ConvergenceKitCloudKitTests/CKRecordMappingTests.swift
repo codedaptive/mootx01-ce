@@ -7,10 +7,11 @@
 // CKRecord objects are constructed and read entirely in process, the
 // same way the existing CloudKit stub test instantiates CloudKit types.
 //
-// Note: CKRecordMapping.decode() reads CKRecord values back as
-// NS-bridged objects, so integers decode as `.int`. This test covers
-// `.text` and `.int` only; there is no `.bitmap` value or assertion
-// in this file (the discriminator is not carried on the wire).
+// Type-tag fidelity tests (P4-M2): CKRecordMapping writes a _syncTypeTags
+// compact JSON map for lossy discriminators (.uuid, .bitmap, .hlc, .json,
+// .fingerprint) and restores them at decode time. Each lossy case gets its
+// own round-trip test: encode → CKRecord (discriminator collapsed) →
+// decode (discriminator restored by tag map) → byte/type equality.
 //
 // LWW tests use @testable import to reach CloudKitStateActor.applyInbound
 // directly, exercising the HLC durability fix without a live CloudKit stack.
@@ -301,5 +302,168 @@ struct LWWDurableHLCTests {
         #expect(finalRows.count == 1)
         #expect(finalRows[0]["note"] == .text("local-at-T2000"),
                 "persisted HLC must guard against stale inbound after restart")
+    }
+}
+
+// MARK: - Type-tag fidelity round-trip tests (P4-M2)
+
+/// Verifies that the _syncTypeTags map written by record(from:) is consumed
+/// by decode(_:) to restore the exact TypedValue discriminator for every lossy
+/// CKRecord case. Each test: encode a single-column record, decode it, assert
+/// type equality (discriminator) and byte equality (value content).
+@Suite("CKRecord type-tag fidelity (P4-M2)")
+struct CKRecordTypeFidelityTests {
+
+    private let zoneID = CKRecordZone.ID(
+        zoneName: "test-zone",
+        ownerName: CKCurrentUserDefaultName
+    )
+    private let hlc = HLC(physicalTime: 500, logicalCount: 0, nodeID: 1)
+
+    private func roundTrip(
+        column: String,
+        value: TypedValue
+    ) throws -> TypedValue? {
+        let rowKey = UUID()
+        let record = try CKRecordMapping.record(
+            from: [column: value],
+            table: "test",
+            rowKey: rowKey,
+            hlc: hlc,
+            schemaVersion: 1,
+            kitID: "TK",
+            zone: zoneID
+        )
+        let decoded = try CKRecordMapping.decode(record)
+        return decoded.values[column]
+    }
+
+    @Test(".uuid round-trips through CKRecord with discriminator restored by tag map")
+    func uuidRoundTrip() throws {
+        let u = UUID()
+        let result = try roundTrip(column: "col", value: .uuid(u))
+        // Without tag map: would decode as .text(u.uuidString). With tag map: .uuid(u).
+        #expect(result == .uuid(u),
+                "uuid discriminator must be restored by _syncTypeTags; got \(String(describing: result))")
+    }
+
+    @Test(".bitmap round-trips through CKRecord with discriminator restored by tag map")
+    func bitmapRoundTrip() throws {
+        let bm = Int64(0b1010_0101)
+        let result = try roundTrip(column: "col", value: .bitmap(bm))
+        // Without tag map: would decode as .int(bm). With tag map: .bitmap(bm).
+        #expect(result == .bitmap(bm),
+                "bitmap discriminator must be restored by _syncTypeTags; got \(String(describing: result))")
+    }
+
+    @Test(".hlc round-trips through CKRecord with discriminator and value restored by tag map")
+    func hlcRoundTrip() throws {
+        let h = HLC(physicalTime: 1_234_567, logicalCount: 3, nodeID: 7)
+        let result = try roundTrip(column: "col", value: .hlc(h))
+        // Without tag map: would decode as .int(packed). With tag map: .hlc(h).
+        if case .hlc(let decoded) = result {
+            #expect(decoded.physicalTime == h.physicalTime,
+                    "hlc physicalTime must survive CKRecord round-trip via tag map")
+            #expect(decoded.logicalCount == h.logicalCount)
+            #expect(decoded.nodeID == h.nodeID)
+        } else {
+            Issue.record("expected .hlc, got \(String(describing: result))")
+        }
+    }
+
+    @Test(".json round-trips through CKRecord with discriminator restored by tag map")
+    func jsonRoundTrip() throws {
+        let jsonBytes = Data(#"{"k":"v"}"#.utf8)
+        let result = try roundTrip(column: "col", value: .json(jsonBytes))
+        // Without tag map: would decode as .text or .blob. With tag map: .json.
+        if case .json(let decodedData) = result {
+            #expect(decodedData == jsonBytes,
+                    "json bytes must be byte-identical after CKRecord round-trip via tag map")
+        } else {
+            Issue.record("expected .json, got \(String(describing: result))")
+        }
+    }
+
+    @Test(".fingerprint round-trips through CKRecord with discriminator restored by tag map")
+    func fingerprintRoundTrip() throws {
+        let fp = Fingerprint256(block0: 0xAABB, block1: 0xCCDD, block2: 0xEEFF, block3: 0x1122)
+        let result = try roundTrip(column: "col", value: .fingerprint(fp))
+        // Without tag map: would decode as .blob(32 bytes). With tag map: .fingerprint(fp).
+        if case .fingerprint(let decoded) = result {
+            #expect(decoded.block0 == fp.block0, "block0 must survive round-trip")
+            #expect(decoded.block1 == fp.block1, "block1 must survive round-trip")
+            #expect(decoded.block2 == fp.block2, "block2 must survive round-trip")
+            #expect(decoded.block3 == fp.block3, "block3 must survive round-trip")
+        } else {
+            Issue.record("expected .fingerprint, got \(String(describing: result))")
+        }
+    }
+
+    @Test("non-lossy discriminators round-trip without a tag map entry")
+    func nonLossyDiscriminatorsRoundTrip() throws {
+        // These cases must round-trip correctly without any _syncTypeTags assistance.
+        let rowKey = UUID()
+        let record = try CKRecordMapping.record(
+            from: [
+                "t": .text("hello"),
+                "i": .int(42),
+                "f": .float(3.14),
+                "b": .bool(true),
+                "d": .blob(Data([0x01, 0x02])),
+                "ts": .timestamp(Date(timeIntervalSince1970: 1_000_000)),
+            ],
+            table: "test",
+            rowKey: rowKey,
+            hlc: hlc,
+            schemaVersion: 1,
+            kitID: "TK",
+            zone: zoneID
+        )
+        let decoded = try CKRecordMapping.decode(record)
+        #expect(decoded.values["t"] == .text("hello"))
+        #expect(decoded.values["i"] == .int(42))
+        #expect(decoded.values["f"] == .float(3.14))
+        #expect(decoded.values["b"] == .bool(true))
+        #expect(decoded.values["d"] == .blob(Data([0x01, 0x02])))
+        // timestamp: Date equality is exact since it round-trips through NSDate.
+        if case .timestamp(let t) = decoded.values["ts"] {
+            #expect(abs(t.timeIntervalSince1970 - 1_000_000) < 0.001,
+                    "timestamp must survive CKRecord round-trip")
+        } else {
+            Issue.record("expected .timestamp, got \(String(describing: decoded.values["ts"]))")
+        }
+    }
+
+    @Test("mixed lossy and non-lossy columns in one record all round-trip correctly")
+    func mixedColumnsRoundTrip() throws {
+        let u = UUID()
+        let bm = Int64(0xFF_00)
+        let jsonBytes = Data(#"{"x":1}"#.utf8)
+        let rowKey = UUID()
+        let record = try CKRecordMapping.record(
+            from: [
+                "uid":   .uuid(u),
+                "flags": .bitmap(bm),
+                "note":  .text("mixed"),
+                "count": .int(7),
+                "data":  .json(jsonBytes),
+            ],
+            table: "test",
+            rowKey: rowKey,
+            hlc: hlc,
+            schemaVersion: 1,
+            kitID: "TK",
+            zone: zoneID
+        )
+        let decoded = try CKRecordMapping.decode(record)
+        #expect(decoded.values["uid"]   == .uuid(u),       "uuid must be restored in mixed record")
+        #expect(decoded.values["flags"] == .bitmap(bm),    "bitmap must be restored in mixed record")
+        #expect(decoded.values["note"]  == .text("mixed"), "text must round-trip in mixed record")
+        #expect(decoded.values["count"] == .int(7),        "int must round-trip in mixed record")
+        if case .json(let d) = decoded.values["data"] {
+            #expect(d == jsonBytes, "json bytes must be byte-identical in mixed record")
+        } else {
+            Issue.record("expected .json, got \(String(describing: decoded.values["data"]))")
+        }
     }
 }

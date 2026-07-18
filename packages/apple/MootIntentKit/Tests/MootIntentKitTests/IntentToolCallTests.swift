@@ -396,6 +396,35 @@ struct DrawerEntityRecallTests {
         #expect(drawers[1].content == "another sample drawer content")
     }
 
+    @Test("RecallDrawerIntent.entities(from:) — the typed-result composition perform() returns")
+    func recallIntentTypedResultComposition() async throws {
+        let bridge = try await TestBridge.makeInMemory()
+
+        _ = await bridge.callTool("moot_file_memory", arguments: [
+            "content": .string("typed-result-test: chained shortcut fodder"),
+            "location": .string("entity-tests"),
+        ])
+
+        // Exactly the tool call RecallDrawerIntent.perform() makes, then the
+        // same composition step it returns as the intent value.
+        let result = await bridge.callTool("moot_memory_search", arguments: [
+            "query": .string("typed-result-test"),
+        ])
+        #expect(result.isError == false)
+        let entities = RecallDrawerIntent.entities(from: result)
+        #expect(entities.isEmpty == false, "typed composition should surface the seeded drawer")
+        #expect(entities.contains { $0.content.contains("chained shortcut fodder") })
+        #expect(entities.allSatisfy { UUID(uuidString: $0.id) != nil },
+            "every returned entity carries a well-formed drawer UUID")
+    }
+
+    @Test("RecallDrawerIntent.entities(from:) returns [] on a substrate refusal")
+    func recallIntentTypedResultRefusal() {
+        let refused = IntentCallResult(text: "the MOOT refused", isError: true)
+        #expect(RecallDrawerIntent.entities(from: refused).isEmpty,
+            "an error result must never fabricate entities")
+    }
+
     @Test("recallDrawers and entities(for:) resolve a drawer by id end-to-end")
     func entityByIDRoundTrip() async throws {
         let bridge = try await TestBridge.makeInMemory()

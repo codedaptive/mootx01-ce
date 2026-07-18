@@ -18,6 +18,7 @@ Usage:
   scripts/moot-test path <file-or-directory>
   scripts/moot-test changed [base-ref]
   scripts/moot-test glk-latency
+  scripts/moot-test apple-app-ios
   scripts/moot-test list-swift|list-rust|list-python [unit|product|validation|all]
 
 Environment:
@@ -25,6 +26,7 @@ Environment:
   CARGO_TEST_ARGS="test_name"      extra args for cargo test
   PYTEST_ARGS="-k name"            extra args for python3 -m pytest
   BASE=origin/develop/1.0.x        default base for changed
+  MOOT_APP_DERIVED_DATA=path      derived-data cache for the Apple app iOS build
 USAGE
 }
 
@@ -157,6 +159,53 @@ run_glk_latency() {
     --filter EncodeDrainNearRealtimeTests --filter EncodeIntakeTests)
 }
 
+# ConvergenceKit P4-M5 performance benchmarks: gated behind MOOT_PERF_BENCH=1
+# (suites self-skip via .enabled(if:) on a bare `swift test`). Running them
+# serially and in isolation matches the GLK_LATENCY_TESTS pattern and ensures
+# timing numbers are meaningful rather than contended.
+# See: packages/kits/ConvergenceKit/Tests/ConvergenceKitCloudKitTests/CVK_ICLOUD_P4M5_PerfTests.swift
+run_perf_bench() {
+  local dir="packages/kits/ConvergenceKit"
+  if [[ ! -d "$dir" ]]; then
+    echo "-- skip CVK perf benchmarks (missing $dir)"
+    return 0
+  fi
+  echo "-- swift test (CVK perf benchmarks, MOOT_PERF_BENCH=1, isolated): $dir"
+  (cd "$dir" && MOOT_PERF_BENCH=1 swift test --no-parallel \
+    --filter Q1StormResistanceTests \
+    --filter Q2CoalescingTests \
+    --filter Q3PerWriteOverheadTests \
+    --filter Q5SideTableTests)
+}
+
+run_apple_app_ios() {
+  local app_dir="apps/Mootx01-App"
+  local project="$app_dir/Mootx01-App.xcodeproj"
+  local derived_data="${MOOT_APP_DERIVED_DATA:-$HOME/Library/Developer/Xcode/DerivedData/Mootx01-App-iOS}"
+
+  command -v xcodegen >/dev/null || {
+    echo "xcodegen is required to build $app_dir (brew install xcodegen)" >&2
+    return 2
+  }
+  command -v xcodebuild >/dev/null || {
+    echo "xcodebuild is required to build $app_dir" >&2
+    return 2
+  }
+
+  echo "-- xcodegen: $app_dir"
+  (cd "$app_dir" && xcodegen generate)
+
+  echo "-- xcodebuild: Mootx01-iOS (generic simulator, all architectures)"
+  xcodebuild -quiet \
+    -project "$project" \
+    -scheme Mootx01-iOS \
+    -destination "generic/platform=iOS Simulator" \
+    -derivedDataPath "$derived_data" \
+    CODE_SIGNING_ALLOWED=NO \
+    ONLY_ACTIVE_ARCH=NO \
+    build
+}
+
 find_owner() {
   local path="$1"
   local dir="$path"
@@ -254,6 +303,7 @@ case "$cmd" in
   validation-swift) run_scope validation swift ;;
   validation-rust) run_scope validation rust ;;
   validation-python) run_scope validation python ;;
+  apple-app-ios) run_apple_app_ios ;;
   full)
     run_scope unit all
     run_scope product all
@@ -263,5 +313,6 @@ case "$cmd" in
   path) run_path "${1:-}" ;;
   changed) run_changed "${1:-}" ;;
   glk-latency) run_glk_latency ;;
+  perf-bench) run_perf_bench ;;
   *) usage >&2; exit 2 ;;
 esac

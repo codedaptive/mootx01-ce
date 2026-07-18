@@ -374,7 +374,7 @@ public struct ToolDispatcher: Sendable {
     /// JSON-RPC error: the call did reach the substrate, the substrate
     /// said no, the client should see why.
     ///
-    /// Dispatch order: teachme pre-check → federation → recipe → lens → vault → interface → methodNotFound → hint injection.
+    /// Dispatch order: teachme pre-check → federation → recipe → lens → vault → dataset → interface → methodNotFound → hint injection.
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
         let args = arguments.objectValue ?? [:]
         do {
@@ -408,6 +408,14 @@ public struct ToolDispatcher: Sendable {
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle, jobRegistry: jobRegistry,
                     environment: environment)
+            } else if DatasetTools.isDatasetTool(name) {
+                // User-defined tabular dataset tools (MX-TAB-7): file, query, stats.
+                // Dispatched between vault and the five-tier interface; each tool
+                // targets an estate and resolves the handle via the standard gate.
+                runnerResult = try await DatasetTools.dispatch(
+                    name: name, args: args, kit: kit,
+                    resolveHandle: resolveHandle,
+                    serverIdentity: serverIdentity)
             } else if InterfaceTools.isInterfaceTool(name) {
                 // Five-tier AI-client interface tools dispatched by name.
                 runnerResult = try await InterfaceTools.dispatch(
@@ -2080,13 +2088,27 @@ extension ToolDispatcher {
         // Omitting query returns all active facts (the unfiltered case).
         let queryRaw = try optionalString(args["query"], argument: "query")
         let query = queryRaw?.lowercased()
-        let facts = query.map { q in
-            allFacts.filter {
-                $0.subject.lowercased().contains(q) ||
-                $0.predicate.lowercased().contains(q) ||
-                $0.object.lowercased().contains(q)
-            }
-        } ?? allFacts
+        let subjectExact = try optionalString(args["subject_exact"], argument: "subject_exact")
+        let predicateExact = try optionalString(args["predicate_exact"], argument: "predicate_exact")
+        let objectExact = try optionalString(args["object_exact"], argument: "object_exact")
+        let sourceExact = try optionalString(args["source_id_exact"], argument: "source_id_exact")
+        let limit = try Self.clampLimit(
+            optionalInt(args["limit"], argument: "limit"),
+            argument: "limit",
+            default: 100
+        )
+        let facts = allFacts.filter { fact in
+            let queryMatches = query.map { q in
+                fact.subject.lowercased().contains(q) ||
+                fact.predicate.lowercased().contains(q) ||
+                fact.object.lowercased().contains(q)
+            } ?? true
+            return queryMatches
+                && (subjectExact.map { fact.subject == $0 } ?? true)
+                && (predicateExact.map { fact.predicate == $0 } ?? true)
+                && (objectExact.map { fact.object == $0 } ?? true)
+                && (sourceExact.map { fact.sourceDrawerID == $0 } ?? true)
+        }
         // Gate source-drawer IDs: for each distinct sourceDrawerID in the facts we are
         // about to emit, check whether it references an actual drawer row in the estate.
         // If it does AND is Restricted/Secret (outside the default sensitivity ceiling),
@@ -2095,7 +2117,7 @@ extension ToolDispatcher {
         // We use getDrawers(ids:matchingFrame:hydrationLevel:) which returns both the
         // admissible set and the full loadedIDs set — the difference is the blocked set.
         // Parity with Rust run_fact_search.
-        let emittedFacts = Array(facts.prefix(100))
+        let emittedFacts = Array(facts.prefix(limit))
         let distinctSourceIDs = Array(Set(emittedFacts.map { $0.sourceDrawerID }))
         let estate = try await kit.estate(for: handle)
         let hiddenSourceIDs: Set<String>
@@ -2758,7 +2780,12 @@ extension ToolDispatcher {
         let priorFloor = try await estate.meta(key: Self.fdcRecalcedDataVersionMetaKey)
         let drawers = try await estate.allDrawers()
         let active = drawers.filter {
+            // Dataset handles (contentKind == .dataset) carry structured JSON,
+            // not classifiable free text. The FDC classifier must never reclassify
+            // them — doing so would corrupt the DatasetHandleContent payload.
+            // MX-TAB-4 locked decision: FDC classifier boundary.
             $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal
+                && $0.contentKind != .dataset
         }
         let scannedDrawers = limit.map { Array(active.prefix($0)) } ?? active
 

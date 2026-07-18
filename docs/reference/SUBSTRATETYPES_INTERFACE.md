@@ -1,8 +1,8 @@
 ---
 title: SubstrateTypes Interface
-version: 1.2.0
+version: 1.4.0
 status: active
-date: 2026-06-20
+date: 2026-07-16
 description: Public API surface for SubstrateTypes in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -27,7 +27,7 @@ purpose: |
 
 **Swift:** `packages/libs/SubstrateTypes/`
 
-- `Sources/SubstrateTypes/` — 29 files, one per type family.
+- `Sources/SubstrateTypes/` — 30 files, one per type family.
 - `Tests/SubstrateTypesTests/` — unit + conformance tests.
 - `Package.swift` — manifest. No dependencies on other substrate
   packages.
@@ -42,7 +42,8 @@ purpose: |
   `or_reduce.rs`, `bitwise.rs`, `fnv.rs`, `count_vector.rs`,
   `bit_tensor.rs`, `time_range.rs`, `recall_types.rs`,
   `content_hash.rs`, `merkle_root.rs`, `snapshot_id.rs`,
-  `as_of_coordinate.rs`, `merkle_domain.rs`).
+  `as_of_coordinate.rs`, `merkle_domain.rs`,
+  `float_simhash_planes.rs`).
 - `tests/` — conformance tests, shared vectors.
 - `Cargo.toml` — declares only `serde`, `serde_json`, `uuid`,
   standard library.
@@ -125,10 +126,15 @@ public struct HLC: Hashable, Sendable, Codable, Comparable {
     public init(physicalTime: Int64, logicalCount: Int32, nodeID: Int32)
     public static func < (lhs: HLC, rhs: HLC) -> Bool
     public static let zero: HLC
-    public var packed: UInt64 { get }             // 64-bit packed form
+    public var packed: UInt64 { get }             // 64-bit packed form (lossy: 40+16+8 bits)
     public init(packed: UInt64)
-    public var wireBytes: [UInt8] { get }         // 16-byte LE wire format
+    public var wireBytes: [UInt8] { get }         // 16-byte LE wire format (lossless)
     public init(wireBytes bytes: [UInt8]) throws  // throws on bad length
+    public func advanced() -> HLC                 // logical counter +1, physical/node unchanged
+    public func physicalSecondsSinceEpoch() -> Int64  // physicalTime / 1000
+    /// Compatibility alias: accepts `nodeId` (lowercase 'd') as a label;
+    /// forwards to the canonical `nodeID` initializer.
+    public init(physicalTime: Int64, logicalCount: Int32, nodeId: Int32)
 }
 
 public struct HLCGenerator: Sendable {
@@ -155,6 +161,9 @@ impl HLC {
     pub fn from_packed(packed: u64) -> Self;
     pub fn wire_bytes(&self) -> [u8; 16];
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, HLCError>;
+    pub fn advanced(self) -> Self;                        // logical counter +1
+    pub fn physical_seconds_since_epoch(self) -> i64;    // physical_time / 1000
+    // Note: no `nodeId` alias in Rust (only Swift has it for back-compat).
 }
 
 pub struct HLCGenerator { pub node_id: i32, /* + internal last_physical/last_logical */ }
@@ -406,12 +415,22 @@ Row lifecycle enumerations. SPEC § 5.4.
 
 ```swift
 public enum RowState: UInt8, Sendable, Codable, CaseIterable {
-    // Cluster A (active / becoming)
+    // Cluster A (active / becoming): raw 0–3
     case active = 0, pending = 1, contested = 2, accepted = 3
-    // Cluster B (superseded / historical)
+    // Cluster B (superseded / historical): raw 16–19
     case superseded = 16, decayed = 17, withdrawn = 18, expired = 19
-    // Cluster C (terminal)
+    // Cluster C (terminal): raw 32–33
     case rejected = 32, tombstoned = 33
+
+    // Lifecycle cluster helpers (canonical partition; consumers must not
+    // re-derive cluster membership from raw-value magic numbers).
+    public static let activeClusterUpperBoundRaw: UInt8   // == superseded.rawValue (16)
+    public var cluster: RowStateCluster { get }           // shift-and-mask (raw >> 4) & 0x3
+    public var isActiveCluster: Bool { get }              // cluster == .a
+    public static func cluster(ofRawState raw: UInt8) -> RowStateCluster?  // nil if undefined raw
+
+    // CustomStringConvertible (lowercase English, matching RowVerb.rawValue casing)
+    public var description: String { get }
 }
 
 /// Groups RowState cases into lifecycle bands: A (active), B (historical), C (terminal).
@@ -430,13 +449,31 @@ public enum RowVerb: String, Sendable, Codable, CaseIterable {
 public enum RowStateError: Error, Sendable, Equatable {
     case illegalTransition(RowState, RowVerb)
     case violatesInvariant(String)
+    // CustomStringConvertible — produces "active --reject-->" style tokens
+    // that the AriaMcpKit describe_gate_rejection parser expects.
+    public var description: String { get }
 }
 ```
 
-**Rust:** `RowState` (`repr(u8)`, same ordinals), `RowStateCluster`
-(`A`/`B`/`C` PascalCase variants, same ordinals), `RowVerb`
-(`PascalCase` variants, same set), `RowStateError`
-(`IllegalTransition` / `ViolatesInvariant`) — same shapes.
+**Rust:** `RowState` (`repr(u8)`, same ordinals) with these additional
+`impl` members (parity with Swift helpers, plus one Rust-only):
+
+```rust
+impl RowState {
+    pub const ACTIVE_CLUSTER_UPPER_BOUND_RAW: u8; // == Superseded as u8 (16)
+    pub fn from_raw(raw: u8) -> Option<Self>;     // Rust only; Swift uses CaseIterable init
+    pub fn cluster(self) -> RowStateCluster;
+    pub fn is_active_cluster(self) -> bool;
+    pub fn cluster_of_raw_state(raw: u8) -> Option<RowStateCluster>;
+}
+```
+
+`RowStateCluster` (`A`/`B`/`C` PascalCase variants, same ordinals) with
+`is_active(self) -> bool` (Rust spelling of Swift `.isActive`).
+`RowVerb` (`PascalCase` variants, same 12-case set) with `token(&self) ->
+&'static str` (Rust-only — returns the lowercase English verb string
+matching Swift's `rawValue`; used for content-ID hashing parity with M8).
+`RowStateError` (`IllegalTransition` / `ViolatesInvariant`) — same shapes.
 
 ### `NounType`
 
@@ -474,6 +511,7 @@ public struct LatticeAnchor: Hashable, Sendable {
     public init(udcCode: UInt64, qidPointer: UInt64 = 0)
     public var isNull: Bool { get }
     public static func udc(_ udcString: String) -> LatticeAnchor
+    public static func udcQid(_ udcString: String, qid qidString: String) -> LatticeAnchor
 }
 ```
 
@@ -484,7 +522,9 @@ pub struct LatticeAnchor { pub udc_code: u64, pub qid_pointer: u64 }   // qid_po
 impl LatticeAnchor {
     pub fn new(udc_code: u64, qid_pointer: u64) -> Self;
     pub fn udc(udc_string: &str) -> Self;
+    pub fn udc_qid(udc_string: &str, qid_string: &str) -> Self;
     pub fn is_null(&self) -> bool;
+    pub fn fnv1a64(s: &str) -> u64;  // Rust-only helper; Swift callers use FNV.hash64(_:)
 }
 ```
 
@@ -781,6 +821,43 @@ public struct HyperplaneFamily: Sendable, Codable, Equatable {
 negative_mask: Vec<u64>, bit_length: usize }` with `sign`;
 `HyperplaneFamily { block_index, input_bit_length, planes }` with
 `generate`/`canonical_hash`.
+
+### `FloatSimHashPlanes`
+
+Materialized ±1 hyperplane set for the float-input SimHash projection.
+Lives in SubstrateTypes (the lowest layer) so both consumers reach it
+without a layering inversion: `SubstrateKernel.floatSimHashProject`
+applies it (no RNG), and `SubstrateML.FloatSimHash` generates it from a
+seed. SUBSTRATEKERNEL_SPEC § 5.4.
+
+**Swift** (`Sources/SubstrateTypes/FloatSimHashPlanes.swift`):
+
+```swift
+/// A materialized ±1 hyperplane set for `SubstrateKernel.floatSimHashProject`.
+/// `signBits` packs `256 * dim` bits (row-major: hyperplane outer,
+/// coordinate inner). A set bit means plane sign +1; a clear bit means -1.
+public struct FloatSimHashPlanes: Sendable, Equatable {
+    public let dim: Int          // dimensionality; must equal the projected vector's length
+    public let signBits: [UInt64] // ceil(256 * dim / 64) words; bit k*dim+i ↔ plane k, coord i
+    public init(dim: Int, signBits: [UInt64])
+}
+```
+
+**Rust** (`rust/src/float_simhash_planes.rs`, re-exported from crate root):
+
+```rust
+pub struct FloatSimHashPlanes {
+    pub dim: usize,
+    pub sign_bits: Vec<u64>,  // ceil(256 * dim / 64) words
+}
+impl FloatSimHashPlanes {
+    pub fn new(dim: usize, sign_bits: Vec<u64>) -> Self;
+}
+```
+
+Shape is identical across ports. The planes are seed-immutable; callers
+materialize them once per `(seed, dim)` and reuse them across every
+projection under that seed. Generation lives in `SubstrateML.FloatSimHash`.
 
 ### `ContentHash`
 
@@ -1198,9 +1275,9 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
-| 256-bit fingerprint | `Fingerprint256` (`Fingerprint256.swift:43`) | `Fingerprint256` (`fingerprint256.rs:41`) | both `public`/`pub` | identical — 256-bit value; Swift 4×`UInt64` words / Rust `[u8;32]` newtype, byte-identical XOR/hex/bytes | `Fingerprint256CombinatorsTests.swift`; `fingerprint256.rs` tests (16) | Confirmed |
+| 256-bit fingerprint | `Fingerprint256` (`Fingerprint256.swift:43`) | `Fingerprint256` (`fingerprint256.rs:41`) | both `public`/`pub` | identical — 256-bit value; Swift 4×`UInt64` named fields (`block0`–`block3`) / Rust 4×`u64` named fields (`block0`–`block3`), byte-identical XOR/hex/bytes | `Fingerprint256CombinatorsTests.swift`; `fingerprint256.rs` tests (16) | Confirmed |
 | Fingerprint error | `Fingerprint256Error` (`Fingerprint256.swift:197`) | `Fingerprint256Error` (`fingerprint256.rs:127`) | both public | identical — `invalidByteCount(expected,got)` | `Fingerprint256CombinatorsTests.swift`; `fingerprint256.rs` tests | Confirmed |
-| Hybrid logical clock | `HLC` (`HLC.swift:37`) | `HLC` (`hlc.rs:41`) | both public | identical — `physicalTime`/`logicalCount`/`nodeID` ↔ snake_case; 16-byte LE wire format | `HLCTests.swift`; `hlc.rs` tests (6) | Confirmed |
+| Hybrid logical clock | `HLC` (`HLC.swift:37`) | `HLC` (`hlc.rs:41`) | both public | identical — `physicalTime`/`logicalCount`/`nodeID` ↔ snake_case; 16-byte LE wire format; `advanced()`/`physical_seconds_since_epoch()` identical both ports; `init(nodeId:)` alias is Swift-only (back-compat) | `HLCTests.swift`; `hlc.rs` tests (6) | Confirmed |
 | HLC generator | `HLCGenerator` (`HLC.swift:125`) | `HLCGenerator` (`hlc.rs:178`) | both public | identical — `send`/`receive` mutating clock advance | `HLCTests.swift`; `hlc.rs` tests | Confirmed |
 | HLC error | `HLCError` (`HLC.swift:249`) | `HLCError` (`hlc.rs:151`) | both public | identical — `invalidWireLength(Int)` | `HLCTests.swift`; `hlc.rs` tests | Confirmed |
 | Audit event (wire row) | `AuditEvent` (`AuditEvent.swift:15`) | `AuditEvent` (`audit_event.rs:18`) | both public | identical concept — canonical wire/audit row; `eventID`/`estateUuid`/`rowId` ↔ `event_id`/`estate_uuid`/`row_id`; before/after bitmaps as three-`Int64`/`i64` tuples; `reason: String?` / `reason: Option<String>` nullable annotation field; `withReason(_:)` copy helper (Swift only) | `AuditEventTests.swift` | Confirmed |
@@ -1209,15 +1286,15 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | Audit value | `AuditValue` (`GSetAuditLog.swift:95`) | `AuditValue` (`gset.rs:67`) | both public | identical — `bitmap(UInt64)`/`string`/`fingerprint`/`integer(Int64)` ↔ `Bitmap(u64)`/`String`/`Fingerprint`/`Integer(i64)`; externally-tagged camelCase wire format | `GSetAuditLogTests.swift`; `gset.rs` tests | Confirmed |
 | G-Set audit log CRDT | `GSetAuditLog` (`GSetAuditLog.swift:134`) | `GSetAuditLog` (`gset.rs:114`) | both public | identical — content-hash-keyed store; `add`/`merge`/`count`/`orderedEntries`/`entries(forRow:)`/`entries(since:)` ↔ `add`/`merge`/`len`/`ordered_entries`/`entries_for_row`/`entries_since` | `GSetAuditLogTests.swift`; `gset.rs` tests (5) | Confirmed |
 | Row id | `RowId` (typealias `UUID`, `Row.swift:19`) | `RowId` (`row.rs:14`) | both public | idiom — Swift `RowId = UUID`; Rust `RowId(u128)` newtype; UUID and u128 are byte-equivalent 16-byte representations. The Rust `gset` module uses the canonical `RowId` newtype throughout. | `RowTests.swift`; `gset.rs` tests | Confirmed |
-| Row entity | `Row` (`Row.swift:23`) | `Row` (`row.rs:17`) | both public | identical concept — pure data row; Rust inlines bitmap `i64`s + `lineage_id`/`content`, Swift carries `RowBitmaps`/`createdAt` (same logical fields, port-local grouping) | `RowTests.swift` | Confirmed |
+| Row entity | `Row` (`Row.swift:23`) | `Row` (`row.rs:17`) | both public | identical concept — pure data row; both ports inline the three bitmap fields directly (`adjectiveBitmap`/`adjective_bitmap`, `operationalBitmap`/`operational_bitmap`, `provenanceBitmap`/`provenance_bitmap` as `Int64`/`i64`) plus `fingerprint`, `latticeAnchor`/`lattice_anchor`, `lineageId`/`lineage_id`, and `content`; neither port wraps bitmaps in a `RowBitmaps` carrier; no `createdAt` field in either port | `RowTests.swift` | Confirmed |
 | Row bitmaps carrier | `RowBitmaps` (`RowBitmaps.swift:37`) | `RowBitmaps` (`row_bitmaps.rs:31`) | both public | identical — three `i64` fields; same 216-bit layout constants, `field()`/`bit()`/`field_values()`/`bit_vector()`; reserved-field shift-guard | `RowBitmapsTests.swift`; `row_bitmaps.rs` tests (15) | Confirmed |
 | 216-bit vector | `BitVector216` (`RowBitmaps.swift:134`) | `BitVector216` (`row_bitmaps.rs:128`) | both public | identical — `[u8;27]` storage; `from_row_bitmaps`/`from_presence_bytes`/`bit_at`/`bit` mirror Swift inits + accessors | `RowBitmapsTests.swift`; `row_bitmaps.rs` tests | Confirmed |
-| Row lifecycle state | `RowState` (`RowState.swift:35`) | `RowState` (`row_state.rs:28`) | both public | identical — `repr(u8)`/`UInt8` raw values, same case ordinals | `RowStateTests.swift` | Confirmed |
+| Row lifecycle state | `RowState` (`RowState.swift:35`) | `RowState` (`row_state.rs:28`) | both public | identical — `repr(u8)`/`UInt8` raw values, same case ordinals; `cluster`/`isActiveCluster`/`activeClusterUpperBoundRaw`/`cluster(ofRawState:)` ↔ Rust `cluster()`/`is_active_cluster()`/`ACTIVE_CLUSTER_UPPER_BOUND_RAW`/`cluster_of_raw_state()`; `from_raw()` is Rust-only; `description` / `token()` surface verb strings (Swift via rawValue, Rust via explicit `token()`) | `RowStateTests.swift`; `row_state.rs` tests | Confirmed |
 | Row verb | `RowVerb` (`RowState.swift:50`) | `RowVerb` (`row_state.rs:66`) | both public | identical — same case set, camelCase ↔ PascalCase | `RowStateTests.swift` | Confirmed |
 | Row state error | `RowStateError` (`RowState.swift:137`) | `RowStateError` (`row_state.rs:185`) | both public | identical — `illegalTransition`/`violatesInvariant` (Rust `IllegalTransition`/`ViolatesInvariant`) | `RowStateTests.swift` | Confirmed |
 | Row state cluster | `RowStateCluster` (`RowState.swift:63`) | `RowStateCluster` (`row_state.rs:58`) | both public | identical — `a`/`b`/`c` ↔ `A`/`B`/`C` (`repr(u8)` 0/1/2); `isActive` / `is_active()` property; groups `RowState` cases into lifecycle bands | `RowStateTests.swift`; `row_state.rs` cluster tests | Confirmed |
 | Noun type | `NounType` (`NounType.swift:12`) | `NounType` (`noun_type.rs:8`) | both public | identical — eight `repr(u8)` cases, same ordinals | `NounTypeTests.swift` | Confirmed |
-| Lattice anchor | `LatticeAnchor` (`LatticeAnchor.swift:12`) | `LatticeAnchor` (`lattice_anchor.rs:9`) | both public | identical — `udcCode: UInt64`/`qidPointer: UInt64` ↔ `udc_code`/`qid_pointer: u64`; `udc(_)` constructor + `isNull`/`is_null` | `LatticeAnchorTests.swift` | Confirmed |
+| Lattice anchor | `LatticeAnchor` (`LatticeAnchor.swift:12`) | `LatticeAnchor` (`lattice_anchor.rs:9`) | both public | identical — `udcCode: UInt64`/`qidPointer: UInt64` ↔ `udc_code`/`qid_pointer: u64`; `udc(_)` constructor + `isNull`/`is_null`; `udcQid(_:qid:)` / `udc_qid()` both present; `fnv1a64` is Rust-only helper (Swift callers use `FNV.hash64`) | `LatticeAnchorTests.swift` | Confirmed |
 | Field-presence matrix F | `MatrixF` (`MatrixF.swift:24`) | `MatrixF` (`matrix_f.rs:7`) | both public | identical — flat 216-cell `[Int64]`/`Vec<i64>`, indexed `field*6+bit` | `MatrixFTests.swift`; `matrix_f.rs` tests (5) | Confirmed |
 | Confidence matrix C | `MatrixC` (`MatrixC.swift:27`) | `MatrixC` (`matrix_c.rs:9`) | both public | identical — flat 216-cell `[Float]`/`Vec<f32>` derived from F | `MatrixCTests.swift`; `matrix_c.rs` tests (4) | Confirmed |
 | Cooccurrence matrix O | `MatrixO` (`MatrixO.swift:70`) | `MatrixO` (`matrix_o.rs:41`) | both public | identical — sorted sparse `[(CooccurrenceKey, Int64)]` ↔ `Vec<(CooccurrenceKey, i64)>` | `MatrixOTests.swift`; `matrix_o.rs` tests (6) | Confirmed |
@@ -1234,6 +1311,7 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | Block selection mask | `BlockMask` (`BlockMask.swift:27`) | `BlockMask` (`block_mask.rs:32`) | both public | identical — `u8` mask; Swift `OptionSet` ↔ Rust transparent newtype with same `BLOCK0/1/2/3`/`ALL`/`NONE`, `contains`/`union`/`intersection`/`block_count` | `BlockMaskTests.swift`; `block_mask.rs` tests (8) | Confirmed |
 | Hyperplane | `Hyperplane` (`HyperplaneFamily.swift:30`) | `Hyperplane` (`hyperplane.rs:25`) | both public | identical — 256-bit plane | `HyperplaneFamilyTests.swift`; `hyperplane.rs` tests (3) | Confirmed |
 | Hyperplane family | `HyperplaneFamily` (`HyperplaneFamily.swift:68`) | `HyperplaneFamily` (`hyperplane.rs:68`) | both public | identical — seeded family of planes | `HyperplaneFamilyTests.swift`; `hyperplane.rs` tests | Confirmed |
+| Float-input SimHash planes | `FloatSimHashPlanes` (`FloatSimHashPlanes.swift:30`) | `FloatSimHashPlanes` (`float_simhash_planes.rs:24`) | both public | identical — `dim: Int`/`signBits: [UInt64]` ↔ `dim: usize`/`sign_bits: Vec<u64>`; seed-immutable; generated by `SubstrateML.FloatSimHash`, applied by `SubstrateKernel.floatSimHashProject` | (applied in SubstrateKernel tests) | Confirmed |
 | Fingerprint builder ADT | `FingerprintBuilder` (`public indirect enum`, `BitwiseArithmetic.swift:77`) | `FingerprintBuilder` (`bitwise.rs:75`) | both public | identical — `literal`/`intersect`/`difference`/`prototypeOf` ↔ `Literal`/`Intersect`/`Difference`/`PrototypeOf`; same `evaluate()` interpreter. | `BitwiseArithmeticTests.swift`; `bitwise.rs` tests (6) | Confirmed |
 | Hamming distance/similarity | `Hamming` namespace + `HammingDistance` alias (`Hamming.swift:23`,`:21`) | `hamming::distance` / `hamming::similarity` free fns (`hamming.rs:38`,`:53`) | both public | idiom — Swift caseless-`enum` namespace with static methods ↔ Rust module free functions; identical results, per-block `BlockMask`/`u8` | `HammingTests.swift`; `hamming.rs` tests (5) | Confirmed |
 | SimHash signing | `SimHash` namespace (`SimHash.swift:25`) | `simhash::*` free fns (`simhash.rs:38`+) | both public | idiom — Swift caseless-`enum` namespace ↔ Rust module free functions (`block`/`fingerprint`/`fingerprint_batch`); identical signing | `SimHashTests.swift`; `simhash.rs` tests (2) | Confirmed |
@@ -1251,6 +1329,9 @@ their module path (`hamming::distance`, `fnv::hash64`, …).
 | Domain tags | `MerkleDomain` (`MerkleDomain.swift`) | `MerkleDomain` (`merkle_domain.rs`) | both public | identical — `leaf`/`interior`/`tombstone`/`commitment` = 0x00/0x01/0x02/0x03; conformance-frozen | `MerkleDomainTests.swift`; `merkle_domain.rs` tests (2) | Confirmed |
 
 ## Changelog
+
+### 1.3.0 -- 2026-07-16
+Added missing public surface found during full audit. (1) `FloatSimHashPlanes` — a public type in both ports absent from the doc (Swift 30th file, Rust `float_simhash_planes.rs`; §1 file count corrected, §2 new section, §7 concordance row added). (2) `HLC.advanced()` / `HLC.physicalSecondsSinceEpoch()` — present in both ports since initial commit, not documented; added to §2 HLC block and concordance. (3) `HLC.init(physicalTime:logicalCount:nodeId:)` — Swift-only back-compat alias; documented with note. (4) `RowState` cluster helpers — `cluster`, `isActiveCluster`, `activeClusterUpperBoundRaw`, `cluster(ofRawState:)` and `description` conformance (Swift); Rust `ACTIVE_CLUSTER_UPPER_BOUND_RAW`, `from_raw`, `cluster`, `is_active_cluster`, `cluster_of_raw_state` equivalents added with parity notes. (5) `RowVerb::token()` — Rust-only method returning the lowercase verb string; documented with parity note. (6) `LatticeAnchor.udcQid(_:qid:)` / `udc_qid()` — both ports, omitted since initial doc; added to §2 and concordance. (7) `LatticeAnchor::fnv1a64()` — Rust-only helper; documented with parity note. (8) `RowStateError.description` — `CustomStringConvertible` conformance; added to §2.
 
 ### 1.2.0 -- 2026-06-20
 Added five new types for ADR-017 content-integrity and snapshots: ContentHash, MerkleRoot, SnapshotId, AsOfCoordinate, MerkleDomain (§2). Updated §1 file count from 24 to 29. Added ContentHashError, MerkleRootError, SnapshotIdError to §4. Added nine concordance rows to §7. Updated Rust module list.

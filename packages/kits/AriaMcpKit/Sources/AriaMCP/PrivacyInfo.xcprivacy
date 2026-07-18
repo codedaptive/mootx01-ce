@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest for the AriaMCP library target (M-MXA-5).
+
+  Required-reason API usage:
+  - ToolDispatch.deriveBuildSerial() reads .modificationDate (and .size)
+    via FileManager.attributesOfItem(atPath:) of the running executable
+    itself — a file inside the app bundle / app container — to derive a
+    build serial when MOOTX01_BUILD_SERIAL is unset.
+    Category FileTimestamp, reason C617.1.
+
+  The library's transports are loopback-only; nothing is collected and
+  nothing leaves the device.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

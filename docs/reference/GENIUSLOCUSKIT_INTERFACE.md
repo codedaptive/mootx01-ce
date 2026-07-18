@@ -3,7 +3,7 @@ title: GeniusLocusKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-07-12
-version: 1.18.0
+version: 1.20.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -222,6 +222,42 @@ public actor GeniusLocusKit {
     public func issueGrant(_ handle: EstateHandle, _ options: GrantOptions, now: Date = Date()) async throws -> IssueGrantResult
     public func revokeGrant(_ handle: EstateHandle, grantID: UUID, now: Date = Date()) async throws
 
+    // Sensitivity-unlock audit seam (SensitivityAuditVerbs.swift) — ADR-025 §4:
+    // AriaMcpKit's SensitivityGrantLedger/ToolDispatcher calls these to record
+    // sensitivity-unlock lifecycle events into the UnifiedAuditLog (SPEC B-8a).
+    // All four are async throws and awaited (not fire-and-forget) — the write is
+    // security-relevant; a failed durable append surfaces to the caller.
+    // Callers that treat audit recording as best-effort suppress the throw
+    // themselves via `try?` at the call site.
+    // Throws: GeniusLocusKitError.estateNotOpen for a stale handle.
+    public func recordSensitivityGrantIssued(
+        _ handle: EstateHandle,
+        tier: AdjectiveSensitivity,
+        grantID: UUID,
+        expiresAt: Date,
+        now: Date
+    ) async throws
+    public func recordSensitivityGrantDenied(
+        _ handle: EstateHandle,
+        tier: AdjectiveSensitivity,
+        now: Date
+    ) async throws
+    public func recordSensitivityGrantRevoked(
+        _ handle: EstateHandle,
+        tier: AdjectiveSensitivity,
+        grantID: UUID,
+        now: Date
+    ) async throws
+    // drawerID: the drawer's UUID string (not a grant id). Malformed drawerID
+    // is silently skipped (returns without appending) rather than throwing,
+    // because audit recording is best-effort observability on the read path.
+    public func recordSensitivityReadUnderGrant(
+        _ handle: EstateHandle,
+        tier: AdjectiveSensitivity,
+        drawerID: String,
+        now: Date
+    ) async throws
+
     // Unified audit log (GeniusLocusKit.swift, VerbSurface.swift) — SPEC B-9/B-10:
     public func auditLog(for handle: EstateHandle) throws -> UnifiedAuditLog
     public func feedAuditLog(for handle: EstateHandle) async throws
@@ -245,6 +281,38 @@ public actor GeniusLocusKit {
     public func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle)
     public func registerGraphCache(_ cache: some GraphCache, for handle: EstateHandle)   // recall cold-path seam
     public func registerPreferenceStore(_ store: some PreferenceStore, for handle: EstateHandle) // recall cold-path seam
+
+    // Sync engine registration (SyncEngineAPI.swift) — supplies the canonical
+    // sync-state token read by moot_estate_status. Call after open(_:owner:).
+    // Replaces any previously registered engine for the handle.
+    // GLK imports only the base ConvergenceKit protocol module and does not drive
+    // the engine's enable/disable/push/pull lifecycle; it reads engine.state lazily
+    // on each syncStateToken call.
+    // Callers that want local-only behaviour need NOT call registerSyncEngine;
+    // syncStateToken returns "local-only" when no engine is registered.
+    // Throws: GeniusLocusKitError.estateNotOpen for a stale handle.
+    public func registerSyncEngine(
+        _ engine: some SyncEngine,
+        backendName: String,      // "none" | "cloudkit" | "federation"
+        for handle: EstateHandle
+    ) throws
+    // Return the canonical sync-status token for moot_estate_status.
+    // Reads the registered engine's state asynchronously and formats it.
+    // Vocabulary (parity with Rust format_sync_state_token; the token "connected"
+    // is NEVER returned):
+    //   "local-only"                              — no engine registered
+    //   "none (idle)"                             — NoSyncEngine, disabled
+    //   "none (enabled, zone: <zone>)"            — NoSyncEngine, enabled
+    //   "cloudkit (idle)"                         — CloudKit, disabled
+    //   "cloudkit (enabled, zone: <zone>)"        — CloudKit, enabled
+    //   "cloudkit (syncing, direction: <d>)"      — CloudKit, mid-sync
+    //   "cloudkit (error: <e>)"                   — CloudKit, error
+    //   "federation (idle)"                       — Federation, disabled
+    //   "federation (in-process, zone: <zone>)"   — Federation enabled (v1.0 in-process)
+    //   "federation (syncing, direction: <d>)"    — Federation, mid-sync
+    //   "federation (error: <e>)"                 — Federation, error
+    // Throws: GeniusLocusKitError.estateNotOpen for a stale handle.
+    public func syncStateToken(for handle: EstateHandle) async throws -> String
 
     // Standing-signals API (SignalAPI.swift / DefaultStandingSignals.swift) — SPEC B-5/B-6:
     public func registerStandingSignal(_ spec: SignalSpec, in handle: EstateHandle, now: Date) async throws -> SignalID
@@ -288,6 +356,38 @@ public actor GeniusLocusKit {
     public func formalConceptCoverDeltas(estate: EstateHandle, miner: BoundedConceptMiner) async throws -> ConceptCoverDeltas
     public func conceptImplications(estate: EstateHandle, miner: BoundedConceptMiner,
                                     maxImplications: Int, maxPremiseSize: Int) async throws -> ConceptImplications
+
+    // Association rule mining (EstateAssociationRuleMining.swift) — SPEC § EstateAssociationRuleMining:
+    // Hard ceiling on audit entries materialized for Apriori. The public surface
+    // always passes this value; the internal variant mineAprioriRules(estate:thresholds:entryLimit:)
+    // exists for tests that exercise the cap at small scale.
+    // Rationale: 50,000 × ~175 bytes ≈ 10 MB allocation budget; real human-driven
+    // estates are well under this (1,000 drawers × 10 mutations ≈ 10,000 entries).
+    // Rust mirrors this as EstateCoordinator::MAX_APRIORI_AUDIT_ENTRIES (private const).
+    public static let maxAuditEntriesForMining: Int = 50_000
+
+    // Pairwise ARM: reads the estate's registered MatrixTier and delegates to
+    // SubstrateML.mineAssociationRules(matrix:activeRowCount:thresholds:).
+    // Returns [] (no error) when no MatrixTier is registered for the estate.
+    // See SPEC § EstateAssociationRuleMining for documented approximations
+    // (single-item support upper-bound; multi-bit/string/bytes skipped).
+    // Swift-only: no Rust parity (the Rust port exposes mineAprioriRules only).
+    public func mineAssociationRules(
+        estate: EstateHandle,
+        thresholds: MiningThresholds
+    ) -> [AssociationRule]
+
+    // Apriori: calls currentAuditLog(in:), bounds to the most-recent
+    // maxAuditEntriesForMining entries (HLC-ascending tail), converts each
+    // UnifiedAuditEntry.afterValue to a RowAuditEntry, builds RowAttributeView
+    // rows, and delegates to AprioriMining.mine(rows:thresholds:).
+    // Throws: GeniusLocusKitError.estateNotOpen when estate is unregistered;
+    // any error from currentAuditLog. Returns rules sorted by lift DESC,
+    // confidence DESC, evidenceCount DESC.
+    public func mineAprioriRules(
+        estate: EstateHandle,
+        thresholds: AprioriThresholds
+    ) async throws -> [AprioriRule]
 }
 ```
 **Rust:** the surface is split across synchronous types — `EstateCoordinator`
@@ -343,6 +443,74 @@ are `VerbSurface.captureKGFact` / `.retireKGFact` and `DreamingWrites.addDiaryEn
 returning `Result<…, VerbError>`), `LatticeRegion` + `EstateRecallContribution`
 fan-out, `SerialLaneScheduler`, and the grant, federation, branch, and
 migration surfaces are documented in SPEC § 8.
+
+**Rust — sync engine registration:** `EstateCoordinator::register_sync_engine(&mut self, handle, engine: Box<dyn SyncEngine>, backend_name: &str) -> Result<(), GeniusLocusKitError>` and `sync_state_token(&self, handle) -> Result<String, GeniusLocusKitError>` are the direct Rust parallels. The Rust token vocabulary is identical; the single formatting function is `format_sync_state_token(state, backend_name)` in `coordinator.rs`. The Rust method is synchronous (no `async`) because the Rust `SyncEngine` trait's `state()` method is also synchronous.
+
+**Rust — sensitivity audit verbs:** `EstateCoordinator` exposes four parallel methods — `record_sensitivity_grant_issued(&mut self, handle, tier, grant_id: Uuid, expires_at_ms: i64, now_ms: i64)`, `record_sensitivity_grant_denied(&mut self, handle, tier, now_ms: i64)`, `record_sensitivity_grant_revoked(&mut self, handle, tier, grant_id: Uuid, now_ms: i64)`, `record_sensitivity_read_under_grant(&mut self, handle, tier, drawer_id: &str, now_ms: i64)` — all returning `Result<(), GeniusLocusKitError>`. Date is passed as epoch-milliseconds (`i64`) per the Rust synchronous convention rather than `Date`.
+
+**Rust — association rule mining:** `EstateCoordinator::mine_apriori_rules(&self, handle, thresholds: AprioriThresholds) -> Result<Vec<AprioriRule>, VerbDispatchError>` is the Rust parity for `mineAprioriRules`; the cap constant is `EstateCoordinator::MAX_APRIORI_AUDIT_ENTRIES = 50_000` (private). Pairwise ARM (`mineAssociationRules`) has no Rust parity — the Rust port exposes `mine_apriori_rules` only.
+
+#### Dataset store access: `datasetStore(for:)` and `computeDatasetSignatures(...)`
+
+Two public extension methods expose the below-belief raw-table layer (MX-TAB
+feature series). The `DatasetStore` operates directly on backend tables — not on
+drawers, tunnels, or KG facts — so this surface is outside the nine-verb model
+(SPEC B-2 scope does not apply).
+
+```swift
+// DatasetStoreAccess.swift — MX-TAB-7 coordinator seam.
+// The coordinator holds the storage registry; this is the correct seam to vend
+// a DatasetStore rather than surfacing it through Estate (which owns the belief
+// layer, not raw backend tables).
+public extension GeniusLocusKit {
+    /// Return the DatasetStore backing the given estate.
+    /// - Throws:
+    ///   `.estateNotOpen` when `handle` is not in the coordinator registry.
+    ///   `StorageError.featureGated("datasetStore")` when the estate's Storage
+    ///   backend does not implement the DatasetStore surface.
+    func datasetStore(for handle: EstateHandle) throws -> any DatasetStore
+}
+
+// DatasetSignatures.swift — MX-TAB-5 layered content fingerprints.
+// Public constant — callers use it to size the DatasetStore.queryRows limit call:
+public let datasetSignatureSampleSize: Int = 128      // max sampled rows for tier-1
+
+public extension GeniusLocusKit {
+    /// Compute and persist layered SHA-256 signatures for a dataset handle drawer.
+    ///
+    /// Tier 1 (table): SHA-256 over the column schema (sorted asc by name) +
+    /// up to `datasetSignatureSampleSize` (128) sampled rows. Domain tag 0x10.
+    /// Tier 2 (per-column): SHA-256 over (name, declared type, value-distribution
+    /// sketch — distinctCount, nullCount, min, max, top-20 most-frequent values).
+    /// Domain tag 0x11.
+    /// Both tiers are written into the handle's DatasetHandleContent JSON payload
+    /// via `Estate.patchDatasetHandleSignatures`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` for a stale handle;
+    ///   `LocusKitError.drawerNotFound` when the drawer does not exist;
+    ///   `LocusKitError.invalidContent` on malformed content JSON.
+    func computeDatasetSignatures(
+        handle: EstateHandle,
+        drawerId: String,
+        columns: [DatasetColumnSummary],
+        columnStats: [String: ColumnStats],
+        sampledRows: [StorageRow],
+        now: Date
+    ) async throws -> Drawer
+}
+```
+
+**Rust:** `compute_dataset_signatures` is a free function in
+`rust/src/dataset_signatures.rs` (not a method on `EstateCoordinator`). It takes
+a `&Estate` reference directly — consistent with the Rust sync model, where the
+tool layer can reach the estate without going through the coordinator. The preimage
+format and SHA-256 output are byte-identical between ports: the tier-1 table
+preimage and tier-2 per-column preimage layouts (domain tags 0x10/0x11,
+big-endian length prefixes, canonical-value-bytes type encoding) are locked by
+cross-leg anchor test vectors in both test suites. Constants mirror Swift:
+`DATASET_SIGNATURE_SAMPLE_SIZE = 128` and `DATASET_SIGNATURE_TOP_K = 20`.
+There is no `datasetStore(for:)` equivalent on `EstateCoordinator` — the Rust
+tool layer reaches `DatasetStore` through the estate directly.
 
 #### `EstateHandle`
 
@@ -538,10 +706,10 @@ public struct IssueGrantResult: Sendable {
     public let grant: Grant; public let scopeKey: Data?   // non-nil for handed-over / decay-derived / time-aging custody
 }
 ```
-**Rust:** `FederatedRecallResult` and `FederatedReadRefusalReason` ARE present
-in the Rust port (`coordinator.rs`); the `GeniusLocusKitError::CrossEstateReadRefused`
-case carries the refusal reason. `IssueGrantResult` is NOT yet present. Callers
-on the Rust side use `VerbDispatchError` to surface grant failures until it ships.
+**Rust:** `FederatedRecallResult`, `FederatedReadRefusalReason`, and `IssueGrantResult`
+are all present in the Rust port (`coordinator.rs` / `grants::grant`). See the
+Swift/Rust Concordance — grant access-control surface section for the full
+cross-port concordance.
 
 #### Grant model: `Grant`, `GrantOptions`, `GrantScope`, `GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`, `GrantError`
 
@@ -1268,13 +1436,12 @@ pub fn register_preference_store(
 // columns share the weights.graph budget slice (Swift parity). Absent ⇒ 0.0.
 ```
 
-**Rust parity status:** the recall-CONSUMPTION surface is wired in both ports
-(mission glk-recall-graphpref-rust, 2026-06-17, closing ADR-011 D-4). Trait,
-registration, per-candidate lookup, and live `RecallScoreVector` columns mirror
-Swift exactly. A constant cache (0.8 / 0.9) normalizes to `0.5` cross-port
-(`recall_shape_matrix_steer_parity.rs` / `RecallShapeMatrixSteerTests.swift`).
-The cache PRODUCERS (dreaming-cycle graph-centrality; Bradley-Terry preference
-training) are absent in BOTH ports — a separate future mission.
+**Rust parity status:** Swift-only — `GraphCache`, `PreferenceStore`,
+`register_graph_cache`, and `register_preference_store` are not present in the
+Rust port. The `col_graph` and `col_preference` scoring columns read 0.0 in the
+Rust `recall_scored` path (no cache registered). The cache PRODUCERS
+(dreaming-cycle graph-centrality; Bradley-Terry preference training) are absent
+in both ports. See the concordance table below (`Recall cold-path seams` rows).
 
 ### `GLKRecallMode.nodeTreeNative` — 5th case
 
@@ -1538,16 +1705,13 @@ aliases. Foundation `UUID` on the Swift side is a `[u8;16]` newtype alias
 | Graph cache | `GraphCache` (protocol) | none — Swift-only cold-path seam | public protocol / — | Cold-path candidate-frontier graph lookup; held in `GeniusLocusKit` actor state. Rust recall does not yet wire a graph cache (follow-up, parallels the node-topology register seam) | `RecallDirectorTests.swift`, `RecallAbsentSignalTests.swift` (Swift) | Swift-only |
 | Preference store | `PreferenceStore` (protocol) | none — Swift-only cold-path seam | public protocol / — | Cold-path preference-buffer lookup; held in `GeniusLocusKit` actor state. Rust recall does not yet wire a preference store (same follow-up as `GraphCache`) | `RecallDirectorTests.swift` (Swift) | Swift-only |
 
-**Swift-only surfaces.** Three public types are present in Swift but have no
+**Swift-only surfaces.** Two public protocols are present in Swift but have no
 Rust counterpart yet, by deliberate deferral:
 
-- `FederatedRecallResult`, `FederatedReadRefusalReason` — the grant-gated
-  federated-read result surface, declared deferred in § 2 Tier 1 ("NOT yet
-  present in the Rust port"). Rust callers surface grant failures via
-  `VerbDispatchError` until it ships.
 - `GraphCache`, `PreferenceStore` — the recall cold-path seams. Swift-only
   protocols held in actor state; the Rust recall path (`recall_scored`)
-  does not yet wire them.
+  does not yet wire them. The `col_graph` and `col_preference` scoring columns
+  read 0.0 in Rust (no cache registered).
 
 The node-topology coordinator register seam (`register_node_topology` /
 `recall_tunnels` merge) is now fully wired in both ports — see the
@@ -1859,7 +2023,7 @@ section above.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
 | Write execution mode | `WriteMode` (`Intake/EncodeIntake.swift`) | `WriteMode` (`rust/src/intake.rs`) | public enum / pub enum | identical 2-case enum (regular/Regular, impatient/Impatient) | `EncodeIntakeTests.swift` / `encode_intake_parity` | Confirmed |
-| Expunge sweep result | `ExpungeIntegritySweepResult` (`Verbs/VerbSurface.swift`) | `ExpungeIntegritySweepResult` (`rust/src/coordinator.rs`) | public struct / pub struct | identical 3-field struct (expungedCount/expunged_count, orphanCorpusEntriesRemoved/orphan_corpus_entries_removed, durationMs/duration_ms) | `VerbSurfaceTests.swift` / `coordinator_tests` | Confirmed |
+| Expunge sweep result | `ExpungeIntegritySweepResult` (`Verbs/VerbSurface.swift`) | `ExpungeIntegritySweepResult` (`rust/src/coordinator.rs`) | public struct / pub struct | identical 3-field struct (remediatedCount/remediated_count, orphanedCount/orphaned_count, perRowErrors/per_row_errors) | `VerbSurfaceTests.swift` / `coordinator_tests` | Confirmed |
 | Recall origin tag | `RecallOrigin` (`RecallDirector/GLKRecallRequest.swift`) | `RecallOrigin` (`rust/src/recall.rs`) | public enum / pub enum | identical 2-case enum (local/Local, crossEstate/CrossEstate) | `RecallDirectorTests.swift` / `recall_tests` | Confirmed |
 | Recall fusion steering | `RecallShape` (`RecallDirector/RecallShape.swift`) | `RecallShape` (`rust/src/recall.rs`) | public struct / pub struct | signed `laneWeights`/`lane_weights` (retrieval keys `locus`/`bm25`/`hamming`/`dense`/`dense:<modelID>` + matrix/graph/preference keys `fieldFit`/`coOccurrence`/`temporal`/`graph`/`preference`, missing ⇒ 1.0) + `antiSimilarLanes`/`anti_similar_lanes` (FARTHEST dense lanes) + optional clamped `frontierK`/`frontier_k`; `weight(for:)`/`weight()`, `isAntiSimilar(_:)`/`is_anti_similar()`, and `effectiveFrontierK`/`effective_frontier_k` accessors; `[64,256]` frontier envelope | `RecallShapeSignedWeightTests.swift` + `RecallShapeAntiSimilarTests.swift` + `RecallShapeMatrixSteerTests.swift` / `recall_shape_signed_weight_parity` + `recall_shape_anti_similar_parity` + `recall_shape_matrix_steer_parity` | Confirmed |
 | Serial-lane dispatcher | — | `CoordinatorDispatcher` (`rust/src/brain/scheduler/serial_lane.rs`) | — / pub struct | Rust-only internal dispatcher for the serial scheduling lane; no Swift parity (Brain scheduling is async actor lanes in Swift) | `scheduler_tests` | Confirmed (Rust-only) |
@@ -1871,12 +2035,44 @@ section above.
 | Contradiction hunt pass | `GeniusLocusKit.huntContradictions(in:modelID:probeLimit:filedAfter:proximityThreshold:now:)` (`Brain/ContradictionHunt.swift`) | `EstateCoordinator::hunt_contradictions(handle, model_id, probe_limit, filed_after, proximity_threshold, now)` (`rust/src/coordinator.rs`) | public / pub | identical pass: candidates from `recentItemIDs` newest-first probes mined on TWO lanes — Lane 1 drawer-keyed binary Hamming kNN under the caller's modelID (`getVector` → `findNearest` limit 5, proximity ≤ 64) for bespoke/test-planted vectors; Lane 2 (when a Corpus is registered — the ONLY lane production estates populate) LEXICAL via the corpus's persistent BM25 inverted index (`Corpus.bm25TopKBySource(query:limit:)`, `huntBM25CandidateK` = 20 per probe, query capped to `huntBM25QueryCharLimit` = 240 chars), which returns SOURCE drawer IDs directly. BM25 not vectors on the corpus lane: contradictions are lexically similar (the shared-term notion ConflictCue screens on), and the binary SimHash space is degenerate at estate scale (109k estate buried a true twin at rank #399) while a whole-partition float scan is ~3 s/probe. Both lanes dedupe on drawer-pair keys, then SubstrateML conflict-cue screen; strong cue (≥ 0.70) → `capture(TunnelCaptureFrame(kind: .contradicts, lifecycle: .proposed, originClass: .derived))`, borderline (≥ 0.45) → returned with ≤ 160-char snippets, never persisted; durable dedup vs ALL contradicts tunnels incl. withdrawn; `filedAfter` watermark; `vectorStoreAvailable` honesty flag | `ContradictionHuntTests.swift` (incl. corpus-lane test) ↔ `coordinator.rs` hunt tests | Confirmed |
 | Contradiction hunt report | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`Brain/ContradictionHunt.swift`) | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`rust/src/coordinator.rs`) | public / pub | identical field sets (vectorStoreAvailable/probesScanned/pairsScreened/proposed/borderline/deduplicated; borderline adds sourceSnippet/targetSnippet) | `ContradictionHuntTests.swift` ↔ `coordinator.rs` hunt tests | Confirmed |
 | Contradiction-scout brain signal | `ContradictionScoutSignal` (`Brain/Signals/ContradictionScoutSignal.swift`, `public enum`) | `ContradictionScoutSignal` (`rust/src/brain/signals/contradiction_scout.rs:19`, `pub struct`) | public / pub | Same namespace idiom as `DistillationSignal`. Both expose `spec(huntCycle:)`/`spec(hunt_cycle)` (production wiring; the hunt persists its own writes, the signal emits one summary diagnostic) and `defaultSpec()`/`default_spec()`. Signal name `"contradiction-scout"`, hourly cadence (3 600 s). Registered 4th in `registerDefaultStandingSignals`. | `StandingSignalsTests.swift` ↔ `standing_signals_parity.rs` | Confirmed |
+| Dataset store accessor | `GeniusLocusKit.datasetStore(for:)` (`DatasetStoreAccess.swift`) | — | public func / (none) | Swift-only coordinator seam added by MX-TAB-7. Returns `any DatasetStore` for an open estate handle; throws `.estateNotOpen` or `StorageError.featureGated("datasetStore")`. No counterpart on `EstateCoordinator` — raw-table access in Rust goes directly to the estate's storage backend. | `DatasetStoreAccessTests.swift` | Swift-only |
+| Dataset signature compute | `computeDatasetSignatures(handle:drawerId:columns:columnStats:sampledRows:now:)` (`Intake/DatasetSignatures.swift`) | `compute_dataset_signatures(estate, drawer_id, columns, column_stats, sampled_rows)` (`rust/src/dataset_signatures.rs`) | public func (GLK extension) / pub fn (free function) | Both ports: SHA-256 table signature (domain tag 0x10, sample size 128) + per-column signatures (domain tag 0x11). Rust is a free function taking `&Estate` directly (not on `EstateCoordinator`), matching the Rust sync model. Byte-identical preimage format; cross-leg anchor hashes locked in both test suites. Constants: `datasetSignatureSampleSize`/`DATASET_SIGNATURE_SAMPLE_SIZE` = 128; Rust additionally exports `DATASET_SIGNATURE_TOP_K` = 20. | `DatasetSignaturesTests.swift` ↔ `dataset_signatures_tests.rs` | Confirmed |
 
 ---
 
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.19.0 -- 2026-07-16
+Audit corrections and MX-TAB dataset surface (shipped 2026-07-11/12, not
+previously documented):
+
+**Dataset surface (MX-TAB-5 and MX-TAB-7):**
+`datasetStore(for:)` public coordinator seam added (`DatasetStoreAccess.swift`)
+— Swift-only; returns `any DatasetStore` for an open estate, throws
+`.estateNotOpen` or `StorageError.featureGated("datasetStore")`.
+`computeDatasetSignatures(handle:drawerId:columns:columnStats:sampledRows:now:)`
+(`Intake/DatasetSignatures.swift`) and its Rust free-function counterpart
+`compute_dataset_signatures` (`rust/src/dataset_signatures.rs`) added —
+Tier 1 (table SHA-256, domain tag 0x10, 128-row sample) and Tier 2
+(per-column SHA-256, domain tag 0x11) layered content fingerprints;
+byte-identical cross-leg preimage format; anchor hashes locked in both test
+suites. Dataset store access subsection and two concordance rows added.
+
+**Parity corrections:**
+`IssueGrantResult` Rust status corrected — was incorrectly documented as
+missing; `pub struct IssueGrantResult` confirmed at `grants/grant.rs:354`.
+`FederatedRecallResult` and `FederatedReadRefusalReason` removed from the
+"Swift-only surfaces" paragraph — both ARE confirmed in the Rust port per
+the concordance table.
+`registerGraphCache`/`registerPreferenceStore` Rust note corrected — these
+symbols are NOT in the Rust port; the prior claim "wired in both ports
+(mission glk-recall-graphpref-rust)" was wrong.
+`ExpungeIntegritySweepResult` concordance row field names corrected —
+actual fields are `remediatedCount`/`remediated_count`,
+`orphanedCount`/`orphaned_count`, `perRowErrors`/`per_row_errors` (not the
+expungedCount/orphanCorpusEntriesRemoved/durationMs names the row showed).
 
 ### 1.18.0 -- 2026-07-12
 VectorSimilaritySignal corpus lane (both ports): `spec` gains an optional

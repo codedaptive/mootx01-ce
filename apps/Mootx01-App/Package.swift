@@ -49,6 +49,10 @@ let package = Package(
         // MootIntentKit owns the intent surface; MootBridge conforms to its
         // MootToolCalling protocol so the kit never reaches substrate internals.
         .package(name: "MootIntentKit", path: "../../packages/apple/MootIntentKit"),
+        .package(name: "MootFoundationModelsKit", path: "../../packages/apple/MootFoundationModelsKit"),
+        // Sync lives in ConvergenceKit (CloudKitSyncEngine / NoSyncEngine behind
+        // the SyncEngine protocol) — the app wires it, it does not reimplement it.
+        .package(name: "ConvergenceKit", path: "../../packages/kits/ConvergenceKit"),
     ],
     targets: [
         .target(
@@ -61,6 +65,11 @@ let package = Package(
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "MootIntentKit", package: "MootIntentKit"),
+                .product(name: "ConvergenceKit", package: "ConvergenceKit"),
+                .product(name: "ConvergenceKitCloudKit", package: "ConvergenceKit"),
+                // FED-OD-3: QR pairing ceremony uses ConvergenceKitFederation types
+                // (PairingProposal, PairingAcceptance, HyperplaneFamilySpec, etc.)
+                .product(name: "ConvergenceKitFederation", package: "ConvergenceKit"),
             ],
             path: "Sources/MootGateway"
         ),
@@ -69,6 +78,10 @@ let package = Package(
             dependencies: [
                 "MootGateway",
                 .product(name: "MootIntentKit", package: "MootIntentKit"),
+                .product(name: "MootFoundationModelsKit", package: "MootFoundationModelsKit"),
+                // FED-OD-3: QR pairing views reference ConvergenceKitFederation types
+                // (LocalIdentity, HyperplaneFamilySpec) passed in from the app layer.
+                .product(name: "ConvergenceKitFederation", package: "ConvergenceKit"),
             ],
             path: "Sources/GatewayUI"
         ),
@@ -85,6 +98,13 @@ let package = Package(
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "ConvergenceKit", package: "ConvergenceKit"),
+                .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
+                // P5-M2 push nudge tests: need @testable access to
+                // CloudKitSyncEngine.cloudKitZoneName (internal method).
+                .product(name: "ConvergenceKitCloudKit", package: "ConvergenceKit"),
+                // FED-OD-3: QR pairing ceremony tests use ConvergenceKitFederation types.
+                .product(name: "ConvergenceKitFederation", package: "ConvergenceKit"),
             ],
             path: "Tests/MootGatewayTests"
         ),

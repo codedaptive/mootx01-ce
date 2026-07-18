@@ -3,15 +3,16 @@ import AriaMCP   // JSONValue
 
 // MARK: - CaptureSink  (A4b — Share Sheet submit-in)
 //
-// The submit-in logic a Share Extension calls: take shared content (text, a
-// URL, a selection from almost any app) and file it as a verbatim drawer.
-// This is the capture path's reusable core, separated from the App Intent so
-// the (future) NSExtension Share Extension target and CaptureDrawerIntent
-// share one implementation.
+// The submit-in logic for shared content: take a shared item (text, a URL,
+// a selection from almost any app) and file it as a verbatim drawer. This is
+// the capture path's reusable core, shared by CaptureDrawerIntent and the
+// host-side drain of the Share-Sheet handoff.
 //
-// The Share Extension target itself (an NSExtension principal class in an app
-// bundle) cannot be declared in SwiftPM. When that bundle exists, its share
-// handler is three lines: build a SharedItem, call `capture`, show the result.
+// The Share Extension targets (Mootx01-Share-iOS / -macOS, declared in
+// project.yml with sources in ShareExtension/) do NOT call this directly —
+// they run in their own process and must not open the estate. They enqueue
+// into ShareInboxSpool; the HOST app drains the spool through this sink
+// (see ShareInboxDrain in MootGateway).
 
 public struct CaptureSink: Sendable {
 
@@ -19,8 +20,10 @@ public struct CaptureSink: Sendable {
 
     /// A normalized piece of shared content. A Share Extension maps the
     /// system's NSItemProvider payloads onto this; the gateway stays free of
-    /// UIKit/AppKit share types.
-    public struct SharedItem: Sendable {
+    /// UIKit/AppKit share types. Codable because the Share Extension hands
+    /// items to the host app through the ShareInboxSpool (a file per item in
+    /// the app-group container) — the extension process never opens the estate.
+    public struct SharedItem: Sendable, Codable {
         public let text: String
         /// Subject-matter location; defaults to an inbox-style room so shared
         /// captures land somewhere predictable.

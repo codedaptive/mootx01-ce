@@ -102,6 +102,39 @@ public protocol RowStore: Sendable {
         columns: [String]?
     ) async throws -> [StorageRow]
 
+    // MARK: - Sync-tagged write paths (CVK-ICLOUD P1-M1, I-10)
+
+    /// Insert a row and stamp the resulting `TableChange` with `origin: .syncApply`.
+    ///
+    /// Used exclusively by ConvergenceKit's `applyInbound` paths. The `.syncApply`
+    /// origin causes ConvergenceKit's outbound observer (`recordOutbound`) to discard
+    /// the resulting change notification, preventing the inbound→outbox→push echo loop
+    /// that would otherwise cause two live devices to ping-pong forever.
+    ///
+    /// Default implementation: calls `insert(table:values:)`. Concrete implementations
+    /// (`InMemoryRowStore`, `SQLiteRowStore`) override to thread `origin: .syncApply`
+    /// through to the backend's `TableChange` construction. `CachingRowStore` overrides
+    /// to delegate to `backing.insertSync(...)` so the origin propagates through the chain.
+    func insertSync(table: String, values: [String: TypedValue]) async throws -> RowHandle
+
+    /// Upsert a row and stamp the resulting `TableChange` with `origin: .syncApply`.
+    ///
+    /// See `insertSync` for the rationale. Used by `applyInbound` for all conflict
+    /// policies that write via upsert (`.appendOnly`, `.lastWriterWinsByHLC`, `.remoteWins`).
+    func upsertSync(
+        table: String,
+        values: [String: TypedValue],
+        conflictColumns: [String]
+    ) async throws -> RowHandle
+
+    /// Delete rows and stamp the resulting `TableChange` notifications with `origin: .syncApply`.
+    ///
+    /// See `insertSync` for the rationale. Used by `applyInbound` for delete events
+    /// under `.lastWriterWinsByHLC` and `.remoteWins` conflict policies, and by
+    /// `PullCycle` for CloudKit deletion records.
+    @discardableResult
+    func deleteSync(table: String, where predicate: StoragePredicate) async throws -> Int
+
     // MARK: - Transaction boundary (GLK_BATCH1)
 
     /// Open a write transaction on the backing store.
@@ -129,6 +162,31 @@ public protocol RowStore: Sendable {
 }
 
 public extension RowStore {
+    // MARK: - Sync-tagged write defaults (CVK-ICLOUD P1-M1)
+
+    /// Default: delegates to `insert`. Conformers not in the sync path (e.g.
+    /// PostgreSQLRowStore) inherit this safe passthrough; the origin is dropped
+    /// because those conformers do not participate in ConvergenceKit's echo
+    /// suppression chain.
+    func insertSync(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        try await insert(table: table, values: values)
+    }
+
+    /// Default: delegates to `upsert`. See `insertSync` for rationale.
+    func upsertSync(
+        table: String,
+        values: [String: TypedValue],
+        conflictColumns: [String]
+    ) async throws -> RowHandle {
+        try await upsert(table: table, values: values, conflictColumns: conflictColumns)
+    }
+
+    /// Default: delegates to `delete`. See `insertSync` for rationale.
+    @discardableResult
+    func deleteSync(table: String, where predicate: StoragePredicate) async throws -> Int {
+        try await delete(table: table, where: predicate)
+    }
+
     func query(table: String, where predicate: StoragePredicate? = nil) async throws -> [StorageRow] {
         try await query(table: table, where: predicate, orderBy: [], limit: nil, offset: nil)
     }

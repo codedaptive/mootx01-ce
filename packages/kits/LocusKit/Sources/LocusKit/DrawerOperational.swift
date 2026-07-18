@@ -32,7 +32,7 @@ import SubstrateLib
 ///
 /// ```
 /// bits 0–5    capture_channel        (contiguous, 6 cases at raw 0…5)
-/// bits 6–11   content_kind           (contiguous, 7 cases at raw 0…6)
+/// bits 6–11   content_kind           (contiguous, 8 cases at raw 0…7)
 /// bits 12–23  feature_flags          (bitset, 7 named bits 12…18)
 /// bit  24     state_extension flag
 /// bit  25     lineage_clustering flag (NEW in v0.6)
@@ -70,12 +70,13 @@ public enum CaptureChannel: Int, Sendable, Codable {
 
 /// Content kind — the shape of the drawer's content.
 /// Lives in bits 6–11 of `Drawer.operationalBitmap` (6 bits, 64 values;
-/// 7 used, 57 reserved). Per cookbook §2.4.
+/// 8 used, 56 reserved). Per cookbook §2.4.
 ///
-/// Contiguous encoding: cases sit at raw values 0…6 in the order the
+/// Contiguous encoding: cases sit at raw values 0…7 in the order the
 /// cookbook §2.4 declares them. F12 cascade (2026-05-27): added
 /// `fingerprintOnly = 6` per cookbook v0.6 (the AmbientSample noun
-/// type uses fingerprint-only rows; see §2.5).
+/// type uses fingerprint-only rows; see §2.5). MX-TAB-3 (2026-07-11):
+/// added `dataset = 7` per cookbook §2.4 (dataset handle rows).
 public enum ContentKind: Int, Sendable, Codable {
     case prose = 0
     case code = 1
@@ -84,6 +85,7 @@ public enum ContentKind: Int, Sendable, Codable {
     case structuredJSON = 4
     case imageCaption = 5
     case fingerprintOnly = 6   // NEW in v0.6 per cookbook §2.4 / §2.5
+    case dataset = 7           // NEW per MX-TAB-3 / cookbook §2.4 (contiguous, raw 7)
 }
 
 /// Feature flags — non-exclusive set of properties a drawer may carry.

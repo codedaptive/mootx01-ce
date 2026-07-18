@@ -44,9 +44,11 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 68.
+    /// Hard contract gate: the total tool count must be exactly 71.
     /// Snapshot includes the interface, federation, recipe, lens, vault, and
-    /// maintenance surfaces exposed by ToolProjection.
+    /// maintenance surfaces exposed by ToolProjection, plus the three dataset
+    /// tools added in MX-TAB-7 (moot_file_dataset, moot_dataset_query,
+    /// moot_dataset_stats).
     /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory
     /// drawer by id, in full; closes the fetch-drawer-by-ID gap,
     /// build-now per Bob's ruling).
@@ -63,8 +65,11 @@ struct ToolProjectionTests {
     /// (interface Tier 2 — accept/reject a PROPOSED tunnel).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        #expect(ToolProjection.tools(environment: [:]).count == 68,
-                "tools() must return exactly 68 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        // 66 baseline + 2 contradiction-hunter tools (moot_hunt_contradictions,
+        // moot_review_tunnel) + 3 dataset tools (MX-TAB-7: moot_file_dataset,
+        // moot_dataset_query, moot_dataset_stats) = 71.
+        #expect(ToolProjection.tools(environment: [:]).count == 71,
+                "tools() must return exactly 71 tools; got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.

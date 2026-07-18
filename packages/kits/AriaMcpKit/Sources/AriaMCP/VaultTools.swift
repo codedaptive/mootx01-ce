@@ -35,6 +35,7 @@ import Foundation
 import CryptoKit
 import GeniusLocusKit
 import LocusKit
+import PersistenceKit
 import VaultKit
 
 /// Namespace for the vault tool surface. No instances.
@@ -292,6 +293,13 @@ enum VaultTools {
                     })
                 let manifest = try VaultTools.buildManifest(vaultURL: vaultURL, now: Date())
                 try VaultTools.writeManifest(manifest, to: vaultURL)
+                // Export companion CSVs for dataset handles (MX-TAB-7b §6).
+                // Non-fatal — CSV export failures are silently collected so a broken
+                // DatasetStore never prevents the vault export from completing.
+                // Warnings are not surfaced in the async response (a future
+                // job-result extension can add datasetsExported).
+                _ = await VaultTools.exportDatasetCSVs(
+                    vaultURL: vaultURL, kit: kit, handle: handle)
                 await jobRegistry.complete(
                     jobID: jobID,
                     result: .exported(ExportResult(
@@ -351,15 +359,34 @@ enum VaultTools {
         // and return 0 without throwing. If this throws on a genuinely
         // unreadable regular .md file, release the slot via fail() so the
         // throwing preflight never permanently consumes a cap slot.
+        // Pre-flight: retain the full note map (not just count) so non-dataset paths
+        // can be derived below without a second filesystem walk.
+        let allNotes: [String: ManifestEntry]
         let noteCount: Int
         do {
-            noteCount = try hashAllNotes(vaultURL: vaultURL).count
+            allNotes = try hashAllNotes(vaultURL: vaultURL)
+            noteCount = allNotes.count
         } catch {
             // Preflight failed after the slot was acquired — release it so a
             // throwing preflight never permanently consumes a cap slot.
             await jobRegistry.fail(jobID: jobID, errorMsg: error.localizedDescription)
             throw error
         }
+
+        // Scan for dataset handle notes (contentKind: 7) before the Task.
+        // Scan is synchronous and filesystem-only — no estate access required.
+        // The results are Sendable (array of VaultDatasetNoteRecord) and safe to
+        // capture in the background Task below.
+        //
+        // Dataset notes are excluded from the bridge import because DrawerMapping
+        // does not re-honour `contentKind` on import — importing them through the
+        // standard path creates drawers with contentKind=0 (wrong). They are instead
+        // imported via the direct estate path after the bridge finishes (MX-TAB-7b §6).
+        let datasetNotes = VaultTools.scanDatasetNotes(vaultURL: vaultURL)
+        let datasetNotePaths = Set(datasetNotes.map { $0.path })
+        let nonDatasetPaths: Set<String> = datasetNotes.isEmpty
+            ? []
+            : Set(allNotes.keys.filter { !datasetNotePaths.contains($0) })
 
         let bridge = VaultBridge(kit: kit)
 
@@ -369,13 +396,37 @@ enum VaultTools {
                 // surface; the bridge stamps it on the audit receipt.
                 let capturedJobID = jobID
                 let capturedRegistry = jobRegistry
-                let report = try await bridge.importVault(
-                    at: vaultURL, into: handle, now: Date(),
-                    progress: { processed, total in
-                        Task { await capturedRegistry.updateProgress(
-                            jobID: capturedJobID, processed: processed, total: total) }
-                    },
-                    mode: mode)
+
+                // Step A: bridge import for non-dataset notes.
+                // When dataset notes are present, use the filtered overload so only
+                // non-dataset paths enter the standard capture loop. Otherwise the
+                // full (unfiltered) import is used — preserving the progress callback.
+                let report: ImportReport
+                if datasetNotes.isEmpty {
+                    report = try await bridge.importVault(
+                        at: vaultURL, into: handle, now: Date(),
+                        progress: { processed, total in
+                            Task { await capturedRegistry.updateProgress(
+                                jobID: capturedJobID, processed: processed, total: total) }
+                        },
+                        mode: mode)
+                } else {
+                    // Filtered import: dataset note paths excluded. The filtered
+                    // overload has no progress callback (candidate sets are small).
+                    report = try await bridge.importVault(
+                        at: vaultURL, includingPaths: nonDatasetPaths, into: handle,
+                        now: Date(), mode: mode)
+                }
+
+                // Step B: import dataset notes via the direct estate path (MX-TAB-7b §6).
+                // Non-fatal — dataset import failures do not discard the bridge result.
+                _ = await VaultTools.importDatasetNotes(
+                    vaultURL: vaultURL,
+                    datasetNotes: datasetNotes,
+                    kit: kit,
+                    handle: handle,
+                    now: Date())
+
                 await jobRegistry.complete(
                     jobID: jobID,
                     result: .imported(ImportResult(
@@ -820,5 +871,546 @@ enum VaultTools {
 
     private static func booleanSchema(_ description: String) -> JSONValue {
         .object(["type": .string("boolean"), "description": .string(description)])
+    }
+
+    // MARK: - Dataset round-trip helpers (MX-TAB-7b §6)
+    //
+    // These helpers power the export companion CSV write and the import direct
+    // estate path that bypasses DrawerMapping (which does not re-honour contentKind).
+    // Mirrors the corresponding block in the Rust twin's vault_tools.rs.
+
+    /// Vault CSV companion size cap (mirrors Rust VAULT_CSV_SIZE_CAP_BYTES: 100 MiB).
+    private static let vaultCSVSizeCapBytes: Int64 = 100 * 1_048_576
+
+    /// Maximum rows exported per dataset companion CSV.
+    private static let datasetExportRowCap = 1_000_000
+
+    /// A dataset handle note record from a vault scan.
+    ///
+    /// Declared as a `Sendable` struct (rather than a named tuple) so it can be
+    /// captured safely in the unstructured `Task` inside `runImport`.
+    private struct VaultDatasetNoteRecord: Sendable {
+        let path: String
+        let frontmatter: [String: String]
+        let body: String
+    }
+
+    /// Parse a Markdown note's YAML frontmatter block into a string dictionary.
+    ///
+    /// Handles BOM prefix. Strips surrounding double-quotes from string values.
+    /// Returns an empty dict when no frontmatter block is found.
+    private static func parseFrontmatter(_ content: String) -> [String: String] {
+        let s = content.hasPrefix("\u{FEFF}") ? String(content.dropFirst()) : content
+        guard s.hasPrefix("---") else { return [:] }
+        var result: [String: String] = [:]
+        let lines = s.components(separatedBy: "\n")
+        var i = 1
+        while i < lines.count {
+            let line = lines[i]
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("---") { break }
+            if let colonIdx = line.firstIndex(of: ":") {
+                let key = String(line[line.startIndex..<colonIdx])
+                    .trimmingCharacters(in: .whitespaces)
+                var val = String(line[line.index(after: colonIdx)...])
+                    .trimmingCharacters(in: .whitespaces)
+                // Strip surrounding double-quotes (YAML bare-string quoting convention).
+                if val.count >= 2 && val.hasPrefix("\"") && val.hasSuffix("\"") {
+                    val = String(val.dropFirst().dropLast())
+                }
+                if !key.isEmpty { result[key] = val }
+            }
+            i += 1
+        }
+        return result
+    }
+
+    /// Extract the body of a Markdown note — the text after the closing `---` block.
+    private static func extractMdBody(_ content: String) -> String {
+        let s = content.hasPrefix("\u{FEFF}") ? String(content.dropFirst()) : content
+        guard s.hasPrefix("---") else { return s }
+        let lines = s.components(separatedBy: "\n")
+        var i = 1
+        while i < lines.count {
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("---") {
+                let tail = lines[(i + 1)...]
+                return tail.joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            i += 1
+        }
+        return ""
+    }
+
+    /// Scan the vault for dataset handle notes (contentKind: 7 in frontmatter).
+    ///
+    /// Mirrors `ObsidianAdapter.toIR`: skips hidden directories and OKF nav files.
+    /// Returns an empty array on any filesystem error (non-fatal caller contract).
+    private static func scanDatasetNotes(vaultURL: URL) -> [VaultDatasetNoteRecord] {
+        var results: [VaultDatasetNoteRecord] = []
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: vaultURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        for case let fileURL as URL in enumerator where fileURL.pathExtension == "md" {
+            guard let rv = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                  rv.isRegularFile == true else { continue }
+            // Skip OKF navigation files (mirrors hashAllNotes / ObsidianAdapter.toIR).
+            let stem = fileURL.deletingPathExtension().lastPathComponent
+            if stem == "index" || stem == "log" { continue }
+            guard let data = try? Data(contentsOf: fileURL),
+                  let content = String(data: data, encoding: .utf8) else { continue }
+            let fm_ = parseFrontmatter(content)
+            // contentKind 7 → ContentKind.dataset (LocusKit/Sources/Drawers/ContentKind.swift).
+            guard fm_["contentKind"] == "7" else { continue }
+            results.append(VaultDatasetNoteRecord(
+                path: relativePath(of: fileURL, under: vaultURL),
+                frontmatter: fm_,
+                body: extractMdBody(content)))
+        }
+        return results
+    }
+
+    /// Map a ColumnType to the label used in vault CSV headers (all-caps).
+    /// Mirrors Rust `vault_column_type_label`.
+    private static func vaultColumnTypeLabel(_ ct: ColumnType) -> String {
+        switch ct {
+        case .int:   return "INT"
+        case .float: return "FLOAT"
+        case .bool:  return "BOOL"
+        default:     return "TEXT"
+        }
+    }
+
+    /// Parse a vault CSV header label back to ColumnType (case-insensitive).
+    /// Unknown labels default to .text. Mirrors Rust `column_type_from_label`.
+    private static func columnTypeFromLabel(_ label: String) -> ColumnType {
+        switch label.uppercased() {
+        case "INT", "INTEGER": return .int
+        case "FLOAT", "REAL", "DOUBLE": return .float
+        case "BOOL", "BOOLEAN": return .bool
+        default: return .text
+        }
+    }
+
+    /// RFC-4180 CSV field escaping: wraps the field in double-quotes when it
+    /// contains a comma, double-quote, newline, or carriage return.
+    private static func escapeCSVField(_ s: String) -> String {
+        guard s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r") else {
+            return s
+        }
+        return "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    /// Render a TypedValue as a CSV cell string for companion CSV export.
+    ///
+    /// Null → empty string (the import side reads empty → null, matching
+    /// the moot_file_dataset CSV path). Float → Swift's `String(d)` which is
+    /// the shortest-roundtrip f64 representation, matching the Rust `format!("{}", d)`
+    /// via the `ryu` crate. Never Float32.
+    private static func typedValueToCSVText(_ v: TypedValue) -> String {
+        switch v {
+        case .null:          return ""
+        case .bool(let b):   return b ? "true" : "false"
+        case .int(let i):    return "\(i)"
+        case .bitmap(let i): return "\(i)"
+        // f64 shortest roundtrip — matches Rust twin's ryu format!("{}", d).
+        case .float(let d):  return String(d)
+        case .text(let s):   return s
+        case .uuid(let u):   return u.uuidString
+        case .timestamp(let date): return ISO8601DateFormatter().string(from: date)
+        default:             return ""
+        }
+    }
+
+    /// Map a frontmatter sensitivity label to AdjectiveSensitivity.
+    private static func vaultSensitivityToAdjectiveSensitivity(
+        from label: String?
+    ) -> AdjectiveSensitivity {
+        switch label?.lowercased() {
+        case "elevated":   return .elevated
+        case "restricted": return .restricted
+        case "secret":     return .secret
+        default:           return .normal
+        }
+    }
+
+    /// Export companion CSV files alongside dataset handle notes in the vault.
+    ///
+    /// Called as a post-step in `runExport` after `bridge.export` and
+    /// `writeManifest` complete. For each note with `contentKind: 7`, queries
+    /// the DatasetStore and writes a companion `<slug>.csv` next to the `.md`.
+    ///
+    /// ## Sensitivity gate (MX-TAB-SEC-1 A4)
+    ///
+    /// Handles with `sensitivity: restricted` or `sensitivity: secret` in their
+    /// frontmatter have their note exported (by `bridge.export`) but NO companion
+    /// CSV written. This prevents bulk CSV data from leaving the estate unprotected
+    /// alongside a sensitive handle note. A logged notice and a warning entry are
+    /// emitted for each skipped handle.
+    ///
+    /// Non-fatal: individual failures are collected as warnings and returned.
+    /// Returns `(csvCount, warnings)`.
+    static func exportDatasetCSVs(
+        vaultURL: URL, kit: GeniusLocusKit, handle: EstateHandle
+    ) async -> (count: Int, warnings: [String]) {
+        let datasetNotes = scanDatasetNotes(vaultURL: vaultURL)
+        guard !datasetNotes.isEmpty else { return (0, []) }
+
+        let datasetStore: any DatasetStore
+        do {
+            datasetStore = try await kit.datasetStore(for: handle)
+        } catch {
+            return (0, ["vault_export: no DatasetStore; dataset CSVs skipped: \(error.localizedDescription)"])
+        }
+
+        var count = 0
+        var warnings: [String] = []
+
+        for note in datasetNotes {
+            // A4: Sensitivity gate — skip CSV for restricted/secret dataset handles
+            // (MX-TAB-SEC-1 A4).
+            //
+            // The .md handle note is already in the vault (written by bridge.export,
+            // which applies the bulk-channel tier rules). This gate prevents companion
+            // CSV data from riding alongside a sensitive handle note.
+            //
+            // Behaviour:
+            //   - normal / elevated:   note exported AND csv exported (no change)
+            //   - restricted / secret: note exported, CSV is SKIPPED with a logged notice
+            //
+            // "restricted" and "secret" map to ADR-007 tiers that are excluded from
+            // bulk data export. Their CSV content must not leave the estate unprotected.
+            let noteSensitivity = vaultSensitivityToAdjectiveSensitivity(
+                from: note.frontmatter["sensitivity"])
+            if noteSensitivity == .restricted || noteSensitivity == .secret {
+                let sensLabel = note.frontmatter["sensitivity"] ?? "restricted"
+                Logging.osLog.notice(
+                    "vault_export: sensitive dataset handle at \(note.path, privacy: .public) (sensitivity: \(sensLabel, privacy: .public)) — note exported, CSV skipped per MX-TAB-SEC-1 A4")
+                warnings.append(
+                    "vault_export: \(note.path): sensitivity=\(sensLabel) — " +
+                    "CSV skipped (handle note exported; dataset CSV withheld)")
+                continue
+            }
+
+            // Decode DatasetHandleContent from the note body to get the dataset UUID.
+            let handleContent: DatasetHandleContent
+            do {
+                handleContent = try DatasetHandleContent.decode(from: note.body)
+            } catch {
+                warnings.append("vault_export: \(note.path): cannot decode DatasetHandleContent; skipped")
+                continue
+            }
+
+            let datasetId = handleContent.datasetId
+
+            // Query rows (capped at datasetExportRowCap to bound file size).
+            let rows: [StorageRow]
+            do {
+                rows = try await datasetStore.queryRows(
+                    id: datasetId, predicate: nil, orderBy: [],
+                    limit: datasetExportRowCap, offset: nil, columns: nil)
+            } catch {
+                warnings.append("vault_export: \(note.path): queryRows failed (\(error.localizedDescription)); skipped")
+                continue
+            }
+
+            // Build CSV: header row (column names only), then one data row per StorageRow.
+            let colNames = handleContent.columns.map(\.name)
+            var csvLines: [String] = []
+            // Header: just column names, RFC-4180 escaped.
+            csvLines.append(colNames.map { escapeCSVField($0) }.joined(separator: ","))
+            // Data rows: column order matches header.
+            for row in rows {
+                let cells = colNames.map { col in
+                    escapeCSVField(typedValueToCSVText(row.values[col] ?? .null))
+                }
+                csvLines.append(cells.joined(separator: ","))
+            }
+            let csvContent = csvLines.joined(separator: "\n")
+
+            // Companion CSV path: replace `.md` with `.csv` (e.g. Wing/Room/Slug.csv).
+            // Matches Rust: format!("{}.csv", &rel_path[..rel_path.len() - 3])
+            let noteURL = vaultURL.appendingPathComponent(note.path)
+            let csvURL = noteURL.deletingPathExtension().appendingPathExtension("csv")
+
+            do {
+                try csvContent.write(to: csvURL, atomically: true, encoding: .utf8)
+                count += 1
+            } catch {
+                let csvPath = VaultTools.relativePath(of: csvURL, under: vaultURL)
+                warnings.append("vault_export: failed to write \(csvPath) (\(error.localizedDescription))")
+            }
+        }
+
+        return (count, warnings)
+    }
+
+    /// Import dataset handle notes via the direct estate path (bypasses DrawerMapping).
+    ///
+    /// For each `VaultDatasetNoteRecord` with `contentKind: 7`:
+    ///   1. Decode `DatasetHandleContent` from note body.
+    ///   2. Validate column identifiers before DDL.
+    ///   3. Read companion `.csv` at same path with `.csv` extension.
+    ///   4. Parse CSV; check size cap.
+    ///   5. `createDataset` → `appendRows` → `captureDatasetHandle`.
+    ///   6. Compute signatures non-fatally.
+    ///
+    /// Returns `(importedCount, warnings)`.
+    private static func importDatasetNotes(
+        vaultURL: URL,
+        datasetNotes: [VaultDatasetNoteRecord],
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async -> (imported: Int, warnings: [String]) {
+        guard !datasetNotes.isEmpty else { return (0, []) }
+
+        let datasetStore: any DatasetStore
+        do {
+            datasetStore = try await kit.datasetStore(for: handle)
+        } catch {
+            return (0, ["vault_import: no DatasetStore; dataset notes skipped: \(error.localizedDescription)"])
+        }
+
+        let estate: LocusKit.Estate
+        do {
+            estate = try await kit.estate(for: handle)
+        } catch {
+            return (0, ["vault_import: estate not accessible for dataset import; dataset notes skipped: \(error.localizedDescription)"])
+        }
+
+        var imported = 0
+        var warnings: [String] = []
+
+        for note in datasetNotes {
+            // 1. Decode DatasetHandleContent from the note body.
+            let handleContent: DatasetHandleContent
+            do {
+                handleContent = try DatasetHandleContent.decode(from: note.body)
+            } catch {
+                warnings.append("vault_import: \(note.path): cannot decode DatasetHandleContent; skipped")
+                continue
+            }
+
+            let datasetId = handleContent.datasetId
+
+            // 2. Validate column identifiers BEFORE any DDL.
+            var validationFailed = false
+            for col in handleContent.columns {
+                do {
+                    try validateDatasetColumnIdentifier(col.name)
+                } catch {
+                    warnings.append("vault_import: \(note.path): invalid column identifier \"\(col.name)\"; skipped")
+                    validationFailed = true
+                    break
+                }
+            }
+            if validationFailed { continue }
+
+            // 3. Build column declarations from handle content (types preserved from original).
+            let columnDecls = handleContent.columns.map { col in
+                ColumnDeclaration(name: col.name, type: columnTypeFromLabel(col.dataType))
+            }
+            let schema = DatasetSchema(columns: columnDecls, primaryKeyColumn: nil)
+
+            // 4. Locate and read companion CSV.
+            // Companion path: replace `.md` with `.csv` (mirrors Rust path logic).
+            let noteURL = vaultURL.appendingPathComponent(note.path)
+            let csvURL = noteURL.deletingPathExtension().appendingPathExtension("csv")
+            let csvRelPath = VaultTools.relativePath(of: csvURL, under: vaultURL)
+
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: csvURL.path) else {
+                // No companion CSV — log warning but skip this note.
+                // (Handle was exported without a backing table, or CSV was deleted.)
+                warnings.append("vault_import: \(note.path): no companion CSV at \(csvRelPath); skipped")
+                continue
+            }
+
+            let attrs = try? fm.attributesOfItem(atPath: csvURL.path)
+            let csvSize = (attrs?[.size] as? Int64) ?? Int64((attrs?[.size] as? Int) ?? 0)
+            if csvSize > vaultCSVSizeCapBytes {
+                let capMiB = vaultCSVSizeCapBytes / 1_048_576
+                let fileMiB = Double(csvSize) / 1_048_576.0
+                warnings.append(
+                    "vault_import: \(csvRelPath) exceeds \(capMiB) MiB size cap " +
+                    "(\(String(format: "%.1f", fileMiB)) MiB); skipped")
+                continue
+            }
+
+            guard let csvData = try? Data(contentsOf: csvURL),
+                  let csvContent = String(data: csvData, encoding: .utf8) else {
+                warnings.append("vault_import: \(note.path): cannot read companion CSV; skipped")
+                continue
+            }
+
+            // 5. Parse CSV.
+            let csvLines = vaultSplitCSVLines(csvContent)
+            guard !csvLines.isEmpty else {
+                warnings.append("vault_import: \(csvRelPath) is empty; skipped")
+                continue
+            }
+
+            // Header line provides column-name → field-index mapping.
+            let headerFields = vaultParseCSVRecord(csvLines[0])
+            var colIndex: [String: Int] = [:]
+            for (i, h) in headerFields.enumerated() { colIndex[h] = i }
+
+            let colTypes: [(name: String, type: ColumnType)] = handleContent.columns.map { col in
+                (col.name, columnTypeFromLabel(col.dataType))
+            }
+
+            var typedRows: [[String: TypedValue]] = []
+            typedRows.reserveCapacity(max(0, csvLines.count - 1))
+            for line in csvLines.dropFirst() {
+                let fields = vaultParseCSVRecord(line)
+                var row: [String: TypedValue] = [:]
+                for (colName, colType) in colTypes {
+                    let cell: String? = colIndex[colName].flatMap { i in
+                        i < fields.count && !fields[i].isEmpty ? fields[i] : nil
+                    }
+                    row[colName] = vaultParseTypedValue(cell, as: colType)
+                }
+                typedRows.append(row)
+            }
+
+            // 6a. Create dataset table (idempotent via CREATE TABLE IF NOT EXISTS).
+            do {
+                try await datasetStore.createDataset(id: datasetId, schema: schema, indexes: [])
+            } catch {
+                warnings.append("vault_import: \(note.path): createDataset failed (\(error.localizedDescription)); skipped")
+                continue
+            }
+
+            // 6b. Append rows. On failure, drop the table (atomic intent).
+            if !typedRows.isEmpty {
+                do {
+                    try await datasetStore.appendRows(id: datasetId, rows: typedRows)
+                } catch {
+                    try? await datasetStore.dropDataset(id: datasetId)
+                    warnings.append("vault_import: \(note.path): appendRows failed (\(error.localizedDescription)); table dropped")
+                    continue
+                }
+            }
+
+            // 6c. captureDatasetHandle — the ONLY authorised creation path for .dataset drawers.
+            // Source description preserved from the original handle content (audit-trail fidelity).
+            let sensitivity = vaultSensitivityToAdjectiveSensitivity(
+                from: note.frontmatter["sensitivity"])
+            let udc = note.frontmatter["udc"].flatMap { $0.isEmpty ? nil : $0 } ?? "000"
+            let room = note.frontmatter["room"].flatMap { $0.isEmpty ? nil : $0 } ?? "Datasets"
+            let columnSummaries = handleContent.columns.map { col in
+                DatasetColumnSummary(name: col.name, dataType: col.dataType)
+            }
+
+            let drawer: Drawer
+            do {
+                drawer = try await estate.captureDatasetHandle(
+                    datasetId: datasetId,
+                    columns: columnSummaries,
+                    rowCount: typedRows.count,
+                    sourceDescription: handleContent.sourceDescription,
+                    wing: note.frontmatter["wing"].flatMap { $0.isEmpty ? nil : $0 },
+                    room: room,
+                    addedBy: "aria-mcp-vault-import",
+                    sensitivity: sensitivity,
+                    latticeAnchor: LatticeAnchor.udc(udc))
+            } catch {
+                try? await datasetStore.dropDataset(id: datasetId)
+                warnings.append("vault_import: \(note.path): captureDatasetHandle failed (\(error.localizedDescription)); table dropped")
+                continue
+            }
+
+            // 6d. Signatures (MX-TAB-5) — non-fatal.
+            // The dataset and handle are already committed; signature failure is recoverable.
+            do {
+                let sampledRows = try await datasetStore.queryRows(
+                    id: datasetId, predicate: nil, orderBy: [],
+                    limit: datasetSignatureSampleSize, offset: nil, columns: nil)
+                var stats: [String: ColumnStats] = [:]
+                for col in schema.columns {
+                    stats[col.name] = try await datasetStore.columnStats(
+                        id: datasetId, column: col.name)
+                }
+                _ = try await kit.computeDatasetSignatures(
+                    handle: handle,
+                    drawerId: drawer.id,
+                    columns: columnSummaries,
+                    columnStats: stats,
+                    sampledRows: sampledRows,
+                    now: now)
+            } catch {
+                warnings.append("vault_import: \(note.path): signatures pending (\(error.localizedDescription))")
+            }
+
+            imported += 1
+        }
+
+        return (imported, warnings)
+    }
+
+    // MARK: - Private vault CSV parsing (private copies of DatasetTools helpers)
+    //
+    // DatasetTools helpers are private to that enum and cannot be called from here.
+    // The implementations are identical; any change to one must mirror the other.
+
+    /// Split vault CSV content into non-empty logical lines (normalising line endings).
+    private static func vaultSplitCSVLines(_ content: String) -> [String] {
+        content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    /// Parse one RFC-4180 CSV record into field strings.
+    private static func vaultParseCSVRecord(_ line: String) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var inQuotes = false
+        let chars = Array(line)
+        var i = 0
+        while i < chars.count {
+            let ch = chars[i]
+            if inQuotes {
+                if ch == "\"" {
+                    if i + 1 < chars.count && chars[i + 1] == "\"" {
+                        current.append("\""); i += 2; continue
+                    } else { inQuotes = false; i += 1; continue }
+                } else { current.append(ch); i += 1 }
+            } else {
+                if ch == "\"" { inQuotes = true; i += 1 }
+                else if ch == "," {
+                    fields.append(current.trimmingCharacters(in: .whitespaces))
+                    current = ""; i += 1
+                } else { current.append(ch); i += 1 }
+            }
+        }
+        fields.append(current.trimmingCharacters(in: .whitespaces))
+        return fields
+    }
+
+    /// Convert a raw string cell (nil = empty cell) to TypedValue.
+    /// Mirrors DatasetTools.parseTypedValue and Rust parse_vault_csv_cell.
+    private static func vaultParseTypedValue(_ raw: String?, as type_: ColumnType) -> TypedValue {
+        guard let s = raw, !s.isEmpty else { return .null }
+        switch type_ {
+        case .int:
+            return Int64(s).map { .int($0) } ?? .text(s)
+        case .float:
+            return Double(s).map { .float($0) } ?? .text(s)
+        case .bool:
+            switch s.lowercased() {
+            case "true", "1", "yes": return .bool(true)
+            case "false", "0", "no": return .bool(false)
+            default: return .text(s)
+            }
+        case .text:
+            return .text(s)
+        default:
+            return .text(s)
+        }
     }
 }

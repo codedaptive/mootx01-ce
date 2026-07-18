@@ -62,26 +62,40 @@ struct V1ConformanceTests {
 
     /// Run the server and collect all JSON-RPC responses from its output pipe.
     ///
-    /// Drains the output pipe in a concurrent Task BEFORE `server.run()` begins
-    /// writing. `StdioServer.write` is a blocking `write(2)`; once a response
-    /// exceeds the kernel pipe buffer (the 68-tool `tools/list` frame does),
-    /// a sequential run-then-read pattern deadlocks: the server blocks in
-    /// `write(2)` waiting for a reader, and the reader is only reached after
-    /// `server.run()` returns. The drain Task's `readToEnd()` consumes bytes
-    /// as they are written and returns on EOF, which the explicit close of
-    /// the write side delivers right after the server exits.
+    /// Drains the output pipe in a concurrent Task before `server.run()` begins
+    /// writing, preventing a pipe-buffer deadlock that manifests when the
+    /// response payload exceeds macOS's 16 KiB default pipe buffer.
+    ///
+    /// The deadlock pattern that caused the hang (MX-TAB-7 regression, 2026-07-12):
+    ///   1. `server.run()` writes the `tools/list` response (71 tools ≈ 30+ KiB)
+    ///      to `outPipe.fileHandleForWriting` via a blocking `write(2)` syscall.
+    ///   2. `write(2)` fills the 16 KiB pipe buffer and stalls — the kernel blocks
+    ///      the write until the read side drains some bytes.
+    ///   3. `readToEnd()` (the only consumer) was called AFTER `server.run()` in
+    ///      the old sequential pattern, so it was never reached.
+    ///   4. Neither side could make progress: permanent deadlock.
+    ///
+    /// Fix: launch a drain Task that calls `readToEnd()` before the server starts,
+    /// so the write never accumulates more than ~16 KiB of unread bytes. The drain
+    /// Task returns when the write side is closed (EOF), which happens immediately
+    /// after `server.run()` exits normally.
     private func collectResponses(
         server: StdioServer,
         input inPipe: Pipe,
         output outPipe: Pipe
     ) async throws -> [[String: JSONValue]] {
+        // Start draining BEFORE the server starts writing so the pipe buffer
+        // never fills. readToEnd() blocks until outPipe.fileHandleForWriting
+        // is closed (see below), so this Task lives for exactly the right duration.
         let drain = Task {
             (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
         }
         await server.run(input: inPipe.fileHandleForReading, output: outPipe.fileHandleForWriting)
+        // Closing the write side signals EOF to drain's readToEnd(), causing it to
+        // return with whatever bytes the server wrote.
         try outPipe.fileHandleForWriting.close()
-        let data = await drain.value
-        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        let raw = await drain.value
+        let lines = raw.split(separator: 0x0A, omittingEmptySubsequences: true)
         return try lines.map { line in
             let parsed = try JSONValue.parse(Data(line))
             guard let obj = parsed.objectValue else {
@@ -144,12 +158,15 @@ struct V1ConformanceTests {
 
     // ── Test 2 — tools/list surface count ───────────────────────────────────
 
-    /// VC-2: `tools/list` returns exactly 68 tools.
+    /// VC-2: `tools/list` returns exactly 71 tools.
     ///
-    /// The count is a snapshot of the v1.0 ARIA lexicon surface. If the count
+    /// The count is a snapshot of the v1.1 ARIA lexicon surface. If the count
     /// changes legitimately (a tool added or renamed), update this assertion
     /// and commit the reason with the change.
-    @Test func v1ToolsListReturns68Tools() async throws {
+    /// 66 → 71: +2 contradiction-hunter tools (moot_hunt_contradictions,
+    /// moot_review_tunnel) and +3 dataset tools (moot_file_dataset,
+    /// moot_dataset_query, moot_dataset_stats).
+    @Test func v1ToolsListReturns71Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -165,20 +182,16 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 68 = current ToolProjection snapshot: interface + federation + recipe
-        // + lens + vault + maintenance (including moot_reclassify_fdc). 3 new
-        // distillation recipe tools added (DA1): moot_consolidate, moot_recall_distilled,
-        // moot_recollect.
-        // 20th core ARIA = moot_memory_get (Tier 1, fetch-drawer-by-ID, build-now
-        // per Bob's ruling).
-        // 23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
-        // moot_palace_import (PAR-PB-1): direct palace → substrate import.
-        // moot_drain_status: AI-queryable background drain progress.
-        // moot_reclassify_fdc: AI-queryable FDC anchor audit/repair/reset.
-        // Contradiction hunter adds two: moot_hunt_contradictions (recipe,
-        // on-demand content sweep) + moot_review_tunnel (Tier 2, settle a
-        // PROPOSED tunnel).
-        #expect(tools.count == 68, "tools/list must return exactly 68 tools; got \(tools.count)")
+        // 71 = prior 66 + 2 contradiction-hunter tools + 3 dataset tools.
+        //   Contradiction hunter: moot_hunt_contradictions (recipe, on-demand
+        //     content sweep) + moot_review_tunnel (Tier 2, settle a PROPOSED tunnel).
+        //   Dataset (MX-TAB-7): moot_file_dataset, moot_dataset_query, moot_dataset_stats.
+        // Prior 66 = interface + federation + recipe + lens + vault + maintenance:
+        //   20th interface = moot_memory_get (Tier 1, fetch-drawer-by-ID).
+        //   23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
+        //   11th recipe = moot_recollect (DA1 distillation).
+        //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
+        #expect(tools.count == 71, "tools/list must return exactly 71 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

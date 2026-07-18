@@ -1,8 +1,8 @@
 ---
 title: SubstrateKernel Specification
-version: 1.1.0
+version: 1.2.0
 status: active
-date: 2026-06-23
+date: 2026-07-16
 description: "Behavioral specification for SubstrateKernel: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -31,8 +31,9 @@ This package is a **Lib**: pure functions and value types with no
 managed state. The `SubstrateKernel` protocol declares the dispatch
 surface; concrete kernels (`ScalarKernel`, `SimdKernel`, `NeonKernel`,
 `MetalKernel`) implement it. Selection is at runtime
-via `PortableKernel.dispatch(_:)` which picks the fastest available
-backend for the current device. Every backend produces bit-identical
+via `PortableKernel.kernelForCurrentPlatform()` (Swift) /
+`PortableKernel::for_current_platform()` (Rust), which picks the
+fastest available backend for the current device. Every backend produces bit-identical
 output to `ScalarKernel` on every input (I-7).
 
 The dispatch surface is *separable from* the algebra primitives that
@@ -54,14 +55,17 @@ This specification defines:
   implementation, the oracle.
 - The platform-optimized kernels — `SimdKernel`, `NeonKernel`,
   `MetalKernel`. Each is conformance-gated against `ScalarKernel`.
-- The dispatch entry point — `PortableKernel.dispatch(_:)` (Swift)
-  / kernel selection (Rust).
+- The dispatch entry point — `PortableKernel.kernelForCurrentPlatform()`
+  (Swift) / `PortableKernel::for_current_platform()` (Rust).
 - The `BitField` primitive — the substrate's parametric bit-field
   write/read used by every kit-level bit operation.
 - The `SHA256` primitive — used by `AuditGate` for the content-ID
   hash on every audit event.
 - The `HammingNN` primitive — Hamming nearest-neighbor over a
   candidate set, used by recall.
+- The `FloatVecOps` primitive — IEEE-754 scalar float-vector operations
+  (`l2Norm`, `l2Normalize`, `dot`, `cosine`); the canonical reference
+  for embedding normalization and similarity, consumed by `SubstrateML`.
 
 This specification does NOT define:
 
@@ -110,9 +114,12 @@ Kernel-specific:
 
 - **K-1.** Dispatch is non-allocating on the hot path. A kernel call
   on an N-fingerprint batch performs O(1) allocations regardless of N.
-- **K-2.** Selection is deterministic per device: `PortableKernel.
-  dispatch(_:)` picks the same backend on every call for a given
-  device. Backend selection may be overridden for testing.
+- **K-2.** Selection is deterministic per device:
+  `PortableKernel.kernelForCurrentPlatform()` /
+  `PortableKernel::for_current_platform()` picks the same backend on
+  every call for a given device. Backend selection may be overridden
+  for testing via `PortableKernel.kernel(of:)` /
+  `PortableKernel::of_kind()`.
 - **K-3.** A kernel that cannot run on the current device (e.g. Metal
   on a non-GPU host) does not throw — it is filtered out of the
   selection list before dispatch.
@@ -126,14 +133,19 @@ Kernel-specific:
 
 Every kernel implements the protocol's surface:
 
+- `popcount64(_ x: UInt64) -> Int`
 - `hammingDistance256(_ a: Fingerprint256, _ b: Fingerprint256) -> Int`
-- `simhashSign(_ input: SimHashInput, _ family: HyperplaneFamily) -> Fingerprint256`
 - `orReduce256(_ fingerprints: [Fingerprint256]) -> Fingerprint256`
-- `xor256(_ a: Fingerprint256, _ b: Fingerprint256) -> Fingerprint256`
-- *(planned, see § 5.4)* the **float-input SimHash projection** — the
-  dispatch home for `SubstrateML.FloatSimHash.project` (the float variant
-  the embedding providers use), promoted from a scalar-only standalone
-  function into this backend-selected surface.
+- `hammingTopK(probe:candidates:k:) -> [(index:Int, distance:Int)]`
+- `simhashCompute(subhashes:[UInt64], families:[HyperplaneFamily]) -> Fingerprint256`
+  (Swift; Rust uses `simhash_block(input:&[u64], family:&HyperplaneFamily) -> u64`
+  per block — see INTERFACE § 2 for the sanctioned idiom split)
+- Batched variants (`hammingDistanceBatch`, `simhashBlockBatch`,
+  `orReduceBatch`, `countFold256`, `countFoldBatch`) with default impls.
+- `floatSimHashProject(vector:[Float], planes:FloatSimHashPlanes) -> Fingerprint256`
+  (Swift) / `float_simhash_project(vector:&[f32], planes:&FloatSimHashPlanes) -> Fingerprint256`
+  (Rust) — the dispatch home for `SubstrateML.FloatSimHash.project`
+  (the float variant the embedding providers use). See § 5.4.
 
 Implementations vary in their dispatch strategy (loop unrolling,
 SIMD width, GPU offload) but every implementation produces the same
@@ -151,7 +163,7 @@ clearest. When debugging a kernel discrepancy, scalar is the
 reference for what the answer *is*; the dispatched backend is the
 suspect.
 
-### § 5.3 SIMD / NEON / BNNS / Metal kernels
+### § 5.3 SIMD / NEON / Metal kernels
 
 Hardware-optimized backends. Selection priority (Swift, on Apple
 silicon):
@@ -181,7 +193,7 @@ turn a dense float vector into a `Fingerprint256` — is a backend-selected
 dispatch op of this surface, with `ScalarKernel` as the canonical oracle
 (I-25). It previously ran only as a hand-written scalar loop in SubstrateML,
 bypassing the dispatch; promoting it gives the float variant the same
-multi-backend treatment `simhashSign` (the bitmap variant) already has.
+multi-backend treatment `simhashCompute` (the bitmap-subhash variant) already has.
 
 Backend selection follows `DECISION_SIMHASH_BACKENDS_2026-05-18`:
 
@@ -204,34 +216,71 @@ Backend selection follows `DECISION_SIMHASH_BACKENDS_2026-05-18`:
 the same way — across vectors, each vector's sum-of-squares serial — and is
 secondary (cheap relative to the 256-hyperplane projection).
 
-### § 5.4 BitField
+### § 5.5 BitField
 
-`BitField.writeField(into:value:shift:width:)` writes `value`
-into a packed `Int64` bitmap at the given shift and width, masking
-out the prior bits in that range and ORing the new value in. The
-operation is one read-modify-write; the read of the prior value is
-required for K-4.
+`BitField.writeField(_ value:Int64, into bitmap:Int64, shift:Int, width:Int)`
+writes `value` into a packed `Int64` bitmap at the given shift and
+width, masking out the prior bits in that range and ORing the new
+value in. The operation is one read-modify-write; the read of the
+prior value is required for K-4.
 
-`BitField.extractField(from:shift:width:)` reads `width` bits from
-the packed bitmap starting at `shift`, right-shifted to the low bits
-of the returned `Int64`.
+`BitField.extractField(_ bitmap:Int64, shift:Int, width:Int)` reads
+`width` bits from the packed bitmap starting at `shift`, right-shifted
+to the low bits of the returned `Int64`.
 
-`BitField.maskedEquals(a:b:shift:width:)` is the comparison
-counterpart: returns true iff the `[shift, shift+width)` bits of `a`
-and `b` are equal.
+`BitField.maskedEquals(_ bitmap:Int64, mask:Int64, expected:Int64)` is
+the comparison counterpart: returns true iff `(bitmap & mask) == expected`.
+The `mask` and `expected` share the same bit range (caller must
+pre-shift `expected` into the field's position).
 
-### § 5.5 SHA256
+### § 5.6 SHA256
 
-`SHA256.hash256(_:)` computes a 32-byte SHA-256 over the input.
+`SHA256.hash(_ bytes:[UInt8])` computes a 32-byte SHA-256 over the input.
 Used primarily by `AuditGate` for the content-ID hash on every
 audit event.
 
-### § 5.6 HammingNN
+### § 5.7 HammingNN
 
-`HammingNN.search(query:candidates:topK:)` finds the top-K
-fingerprints in the candidate set by Hamming distance to the query.
-The result is sorted ascending by distance. Ties broken by
-candidate index.
+`HammingNN.topK(anchor:candidates:k:blocks:)` finds the top-K
+nearest fingerprints in the candidate set by Hamming distance to the
+anchor. `candidates` iterates `(rowID: UUID, fingerprint: Fingerprint256)`
+pairs. The result is sorted ascending by distance. Ties are broken by
+`rowID.uuidString` ascending (not candidate index) — this gives
+deterministic, reproducible results across runs and Swift/Rust ports.
+
+### § 5.8 FloatVecOps
+
+Scalar IEEE-754 float-vector operations. The canonical reference that
+`SubstrateML.FloatSimHash` and any embedding-normalization consumer
+must match bit for bit. No hardware intrinsics, no BLAS; the scalar
+path is the conformance oracle.
+
+`FloatVecOps.l2Norm(_ v:[Float]) -> Float` — Euclidean norm.
+Accumulates `sum(x*x)` in coordinate order then takes `sqrt`. Returns
+`0.0` for an empty vector.
+
+`FloatVecOps.l2Normalize(_ v:[Float]) -> [Float]` — L2-normalise.
+Returns the zero vector unchanged when the norm is zero (the honest
+"no information" signal that projects to `Engram.zero` through
+`FloatSimHash`). Operation sequence is fixed: sum-of-squares →
+guard on zero → `invNorm = 1.0 / sqrt(normSq)` → element-wise
+multiply. This exact sequence is the bit-identity contract both
+ports must reproduce.
+
+`FloatVecOps.dot(_ a:[Float], _ b:[Float]) -> Float` — dot product.
+Precondition: equal lengths (panics in both debug and release builds).
+
+`FloatVecOps.cosine(_ a:[Float], _ b:[Float]) -> Float` — cosine
+similarity for L2-normalised unit vectors. For unit vectors equals
+the dot product. Callers must normalise both inputs first; a debug
+precondition fires when either norm deviates from 1.0 by more than
+1e-5.
+
+The Rust `float_vec_ops` module (`l2_norm`, `l2_normalize`, `dot`,
+`cosine`) is byte-identical to the Swift implementation. The Rust
+`l2_normalize` uses `1.0 / norm_sq.sqrt()` explicitly (not `.recip()`)
+to guarantee the same bit pattern as Swift's
+`1.0 / normSq.squareRoot()`.
 
 ## § 6 — Error model (conceptual)
 
@@ -305,6 +354,22 @@ on another in-repo kit when a recorded decision requires it. The telemetry it en
 the single `substrate.kernel.backend_selected` metric described in § 8.1.
 
 ## Changelog
+
+### 1.2.0 -- 2026-07-16
+Added § 5.8 FloatVecOps behavioral spec (`l2Norm`, `l2Normalize`, `dot`,
+`cosine`) and its bit-identity contract. Added `FloatVecOps` to the § 2
+scope list. Corrected § 5.1 protocol method list: removed non-existent
+`simhashSign` and `xor256`; added the full shipped surface including
+`floatSimHashProject` (no longer "planned" — already shipped). Fixed
+wrong dispatch function name `PortableKernel.dispatch(_:)` → correct
+names in § 1, § 2, and K-2. Fixed duplicate § 5.4 section number: old
+BitField § 5.4 → § 5.5, SHA256 § 5.5 → § 5.6, HammingNN § 5.6 → § 5.7.
+Fixed § 5.5 BitField signature descriptions (wrong arg labels for
+`extractField`, `maskedEquals`). Fixed § 5.6 SHA256 function name:
+`SHA256.hash256(_:)` → `SHA256.hash(_:)`. Fixed § 5.7 HammingNN function
+name: `HammingNN.search(query:candidates:topK:)` → `HammingNN.topK(anchor:candidates:k:blocks:)`;
+corrected tie-break: rowID.uuidString ascending (not candidate index).
+Fixed § 5.3 heading: removed "BNNS" (removed backend).
 
 ### 1.1.0 -- 2026-06-23
 Added § 5.4: the float-input SimHash projection (`SubstrateML.FloatSimHash.project`) is promoted from a scalar-only standalone function into this backend-selected dispatch surface — `ScalarKernel` oracle, `SimdKernel` production backend via the over-hyperplanes pattern (bit-identical cross-port and cross-backend), crossover ~bs 4, Metal declined per DECISION_SIMHASH_BACKENDS_2026-05-18. Listed as a planned dispatch op in § 5.1. `l2Normalize` parallelized across vectors as the secondary feeder op.
