@@ -112,12 +112,39 @@ resident as the sync toggle precedent does:
 
 ## 6. Conformance
 
-- LANRelay passes `RelayConformanceTests` unmodified.
-- Discovery TXT record contains no content-derived bytes (negative
-  test: fingerprint only).
-- Pairing over LANRelay refuses on SAS mismatch and on tampered
-  proposal (extends the WC6 negative tests to the new channel).
-- Session end is deterministic: no outbound entry created after End
-  Session lands in any relay (extends I-2/I-10 style tests).
-- Ceiling holds across sessions: above-ceiling rows never reach a
-  LANRelay inbox (extends the P5-M1 gate tests to the new transport).
+Six negative conformance rows. Each is satisfied by the named test.
+See `docs/status/FED_OD_CONFORMANCE.md` for the full mapping.
+
+- **Row 1 — TXT no-content-bytes.** Discovery TXT record contains no
+  content-derived bytes (fingerprint only).
+  Tests: `LANDiscoveryTXTNegativeTests.txtRecordHasExactlyFourKeys`,
+  `LANDiscoveryTXTNegativeTests.fingerprintDerivedFromKeyNotContent`
+  (`ConvergenceKitFederationTests/LAN/LANDiscoveryTests.swift`).
+
+- **Row 2 — Session-end determinism.** No outbound entry created after
+  End Session lands in any relay.
+  Test: `FederationSessionManagerTests.sessionEndDeterminism` (FSM-1)
+  (`MootGatewayTests/Federation/FederationSessionManagerTests.swift`).
+
+- **Row 3 — Ceiling holds on LANRelay.** Above-ceiling rows never reach
+  a LANRelay inbox.
+  Tests: `LANCeilingConformanceTests.restrictedRowNeverReachesLANRelayInbox`
+  (FSM-7, negative) and `LANCeilingConformanceTests.normalRowReachesLANRelayInbox`
+  (FSM-8, positive control)
+  (`MootGatewayTests/Federation/FederationSessionManagerTests.swift`).
+  Added by FED-OD-7.
+
+- **Row 4 — SAS mismatch refusal.** Pairing over LANRelay refuses on SAS mismatch.
+  Test: `QRPairingCoordinatorTests.sasMismatchNoPersistedPeer` (QR-2)
+  (`MootGatewayTests/Federation/QRPairingCoordinatorTests.swift`).
+
+- **Row 5 — Tampered proposal refusal.** Pairing refuses on tampered proposal.
+  Tests: `QRPairingCoordinatorTests.tamperedProposalSignatureRejected` (QR-3)
+  (`MootGatewayTests/Federation/QRPairingCoordinatorTests.swift`);
+  `FederationPairingTests.tamperedProposalRejected`
+  (`ConvergenceKitFederationTests/FederationPairingTests.swift`).
+
+- **Row 6 — TLS refused on unknown key.** LANRelay passes RelayConformanceTests
+  unmodified.
+  Test: `LANRelayConformanceTests.tlsRefusedOnUnknownKey` (Suite 3)
+  (`ConvergenceKitFederationTests/Relay/RelayConformanceTests.swift`).
