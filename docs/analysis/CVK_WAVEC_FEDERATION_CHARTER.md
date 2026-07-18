@@ -355,7 +355,7 @@ and future HostedRelay (contract-test framing). I-9 boundary cited. WC7 is unblo
 
 ---
 
-### WC7 — Hosted relay client conformer (TRANSPORT)
+### ~~WC7 — Hosted relay client conformer (TRANSPORT)~~ DONE (CVK-WC7, 2026-07-17)
 
 **Scope:** Deliver a production `Relay` conformer that speaks HTTPS (or gRPC). Requires a
 SyncServer wire protocol spec (authored first as a design doc, not a code mission — route
