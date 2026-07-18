@@ -128,23 +128,31 @@ public enum FederationPosture: String, CaseIterable, Identifiable, Sendable {
 
 // MARK: - KnownPeer
 
-/// A paired peer estate stored in _fed_peers.
+/// A paired peer estate stored in `_fed_peers`.
 ///
-/// F1 stub: persisted in UserDefaults by FederationController.
-/// FED-OD-4 will replace this with the real _fed_peers store backed by
-/// ConvergenceKitFederation's PairingRecord.
+/// The `id` (fingerprint) and `displayName` are the UI-layer identifiers.
+/// `publicKeyData` is the 32-byte Ed25519 key needed for `startSession` to
+/// call the real `FederationSessionManager`. Nil only for peers that were added
+/// via the F1 test-peer path (no QR ceremony); always non-nil for ceremony-paired peers.
 public struct KnownPeer: Identifiable, Hashable, Sendable, Codable {
-    /// Short fingerprint from the pairing ceremony (16 hex chars).
+    /// Short fingerprint derived from the estate identity key (SHA256 prefix, 16 hex chars).
+    /// Used as the list identifier and the mDNS fingerprint in LANDiscovery.
     public let id: String
     /// Display name agreed during pairing.
     public let displayName: String
     /// When the last session ended. Nil if never sessioned.
     public let lastSession: Date?
+    /// The 32-byte Ed25519 public key of this peer estate.
+    ///
+    /// Populated after a real QR ceremony. Nil for peers added via the F1 test-peer
+    /// path (no ceremony). Required for `startSession` to call the real session manager.
+    public let publicKeyData: Data?
 
-    public init(id: String, displayName: String, lastSession: Date? = nil) {
+    public init(id: String, displayName: String, lastSession: Date? = nil, publicKeyData: Data? = nil) {
         self.id = id
         self.displayName = displayName
         self.lastSession = lastSession
+        self.publicKeyData = publicKeyData
     }
 }
 

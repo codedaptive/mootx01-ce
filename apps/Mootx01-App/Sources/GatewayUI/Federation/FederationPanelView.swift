@@ -370,65 +370,52 @@ public struct FederationPanelView: View {
 
     // MARK: - QR Pairing Sheet
 
-    /// The pairing sheet content. In F1, wraps QRPairingView with a dismissal path.
+    /// The pairing sheet content. Presents the real QRPairingView using the estate
+    /// identity loaded by FederationController.bootstrapFromEstate().
     ///
-    /// QRPairingView requires a LocalIdentity and HyperplaneFamilySpec. In F1 the
-    /// identity comes from the engine layer (not yet wired to GatewayUI). This sheet
-    /// presents an "unavailable in F1 via this path" placeholder until FED-OD-4
-    /// delivers the identity wiring. See RECONCILIATION NOTE in FederationController.
+    /// Role: .proposer (this device shows its QR code for the peer to scan).
+    /// The back-channel from acceptor → proposer (relay or second QR scan) is the
+    /// genuinely-hardware-gated seam: ProposerQRDisplayView.onAcceptorPayloadReceived
+    /// fires when the acceptor's response arrives, but the relay transport
+    /// (LANRelayNWTransport) ships in a later mission. Until then, the proposer side
+    /// displays the QR and awaits relay delivery.
+    ///
+    /// Camera seam (P6): AcceptorQRScanView.onPayloadScanned requires AVCaptureSession
+    /// integration in the app target (platform-specific). The coordinator logic and
+    /// handleScannedPayload path are fully implemented; the hardware wiring is the
+    /// remaining gap.
     @ViewBuilder
     private var pairingSheet: some View {
         if let targetPeer = controller.pairingTargetPeer {
-            NavigationStack {
-                VStack(spacing: 20) {
-                    Image(systemName: "qrcode.viewfinder")
-                        .font(.system(size: 64))
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
+            // Use the real estate identity if already loaded; fall back to a fresh
+            // ephemeral identity if bootstrap hasn't completed. The fallback identity
+            // is valid for the ceremony but is NOT the persistent estate key — callers
+            // should await bootstrapFromEstate() before presenting the pairing sheet
+            // in production flows.
+            let identity = controller.localIdentity ?? LocalIdentity()
+            // Fresh random family seed per ceremony. Both sides end up with the same
+            // family via the QR proposal (proposer encodes it; acceptor echoes it back).
+            let familySeed = UInt64.random(in: .min ... .max)
+            let family = HyperplaneFamilySpec(seed: familySeed)
 
-                    Text(String(localized: "federation.pairing.placeholder.title",
-                                defaultValue: "Pair with \(targetPeer.displayName)"))
-                        .font(.headline)
-
-                    Text(String(localized: "federation.pairing.placeholder.description",
-                                defaultValue: "The full QR ceremony (FED-OD-3) requires the estate identity key to be injected from the engine layer. This wiring completes in FED-OD-4. In F1, use the Add as Test Peer button below to add this peer without the full ceremony."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-
-                    // F1 test peer path — lets testers verify the panel without
-                    // the full ceremony. FED-OD-4 replaces this with real QRPairingView.
-                    Button(String(localized: "federation.pairing.addtestpeer",
-                                  defaultValue: "Add as Test Peer")) {
-                        controller.completePairing(
-                            fingerprint: targetPeer.fingerprint,
-                            displayName: targetPeer.displayName
-                        )
-                    }
-                    .frame(minHeight: 44)
-                    .accessibilityLabel(String(localized: "federation.pairing.addtestpeer.a11y.label",
-                                               defaultValue: "Add test peer"))
-                    .accessibilityHint(String(localized: "federation.pairing.addtestpeer.a11y.hint",
-                                              defaultValue: "Adds this estate as a paired peer without the full QR ceremony. For testing only."))
+            QRPairingView(
+                localIdentity: identity,
+                family: family,
+                role: .proposer,
+                onComplete: { confirmation, peerPublicKey in
+                    let fingerprint = lanFingerprintFromPublicKey(peerPublicKey)
+                    await controller.completePairing(
+                        fingerprint: fingerprint,
+                        displayName: targetPeer.displayName,
+                        publicKeyData: peerPublicKey,
+                        family: confirmation.family
+                    )
+                },
+                onCancel: {
+                    controller.showingPairingSheet = false
+                    controller.pairingTargetPeer = nil
                 }
-                .padding(24)
-                .navigationTitle(String(localized: "federation.pairing.sheet.title",
-                                        defaultValue: "Pair Devices"))
-                #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-                #endif
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button(String(localized: "federation.pairing.cancel",
-                                      defaultValue: "Cancel")) {
-                            controller.showingPairingSheet = false
-                            controller.pairingTargetPeer = nil
-                        }
-                        .accessibilityLabel(String(localized: "federation.pairing.cancel.a11y",
-                                                   defaultValue: "Cancel pairing"))
-                    }
-                }
-            }
+            )
         } else {
             // Should not reach — sheet is only shown when pairingTargetPeer is set.
             EmptyView()

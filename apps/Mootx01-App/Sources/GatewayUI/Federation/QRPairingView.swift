@@ -50,7 +50,12 @@ public struct QRPairingView: View {
     let localIdentity: LocalIdentity
     let family: HyperplaneFamilySpec
     let role: Role
-    let onComplete: (SASConfirmation) async throws -> Void
+    /// Called when SAS is confirmed. Carries the `SASConfirmation` token and the
+    /// 32-byte Ed25519 public key of the remote peer — the peer key is captured during
+    /// the ceremony:
+    ///   - Proposer side: from `QRAcceptorPayload.identityPublicKey` (acceptor's key).
+    ///   - Acceptor side: from `QRPairingPayload.identityPublicKey` (proposer's key).
+    let onComplete: (SASConfirmation, Data) async throws -> Void
     let onCancel: () -> Void
 
     @State private var coordinator = QRPairingCoordinator()
@@ -60,6 +65,10 @@ public struct QRPairingView: View {
     @State private var sasPattern: [SASEntry] = []
     @State private var pendingConfirmation: SASConfirmation? = nil
     @State private var errorMessage: String? = nil
+    /// The 32-byte Ed25519 public key of the remote peer, captured during ceremony.
+    /// Set in handleAcceptorResponse (proposer) or handleScannedPayload (acceptor).
+    /// Non-nil when the SAS confirmation fires; used as the second argument to onComplete.
+    @State private var remotePeerPublicKey: Data? = nil
 
     enum Phase {
         case initializing
@@ -74,7 +83,7 @@ public struct QRPairingView: View {
         localIdentity: LocalIdentity,
         family: HyperplaneFamilySpec,
         role: Role,
-        onComplete: @escaping (SASConfirmation) async throws -> Void,
+        onComplete: @escaping (SASConfirmation, Data) async throws -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.localIdentity = localIdentity
@@ -186,6 +195,9 @@ public struct QRPairingView: View {
         do {
             let sas = try await coordinator.processAcceptorPayload(acceptorPayload)
             let confirmation = try await coordinator.confirmSAS()
+            // Capture the acceptor's identity key — this is the peer public key
+            // the caller needs to register in _fed_peers after SAS confirmation.
+            remotePeerPublicKey = acceptorPayload.identityPublicKey
             sasPattern = sas
             pendingConfirmation = confirmation
             phase = .showingSAS
@@ -200,6 +212,9 @@ public struct QRPairingView: View {
             let (_, sas) = try await coordinator.startAsAcceptor(
                 payload: payload, identity: localIdentity)
             let confirmation = try await coordinator.confirmSAS()
+            // Capture the proposer's identity key — this is the peer public key
+            // the caller needs to register in _fed_peers after SAS confirmation.
+            remotePeerPublicKey = payload.identityPublicKey
             sasPattern = sas
             pendingConfirmation = confirmation
             phase = .showingSAS
@@ -211,7 +226,11 @@ public struct QRPairingView: View {
     private func handleSASConfirmed(_ confirmation: SASConfirmation) async {
         do {
             await coordinator.markComplete()
-            try await onComplete(confirmation)
+            // Pass the captured peer public key alongside the SAS token.
+            // remotePeerPublicKey is always set before showingSAS phase; the
+            // fallback Data(count:32) is a defensive guard that should never fire.
+            let peerKey = remotePeerPublicKey ?? Data(count: 32)
+            try await onComplete(confirmation, peerKey)
             phase = .complete
         } catch {
             phase = .failed(error.localizedDescription)
