@@ -99,12 +99,16 @@ targets:
         # so ITSAppUsesNonExemptEncryption is false. This lets App Store
         # Connect accept uploads without the per-build compliance prompt.
         ITSAppUsesNonExemptEncryption: false
-        # A2 discovery: browse for LAN resident daemons. Both keys are
-        # required for NWBrowser — the OS denies undeclared service types.
-        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        # A2 discovery + FED-OD-1 federation discovery: browse for LAN daemons
+        # and discover paired Mootx01 estates for on-demand federation.
+        # Both NSLocalNetworkUsageDescription and NSBonjourServices are required —
+        # the OS denies NWBrowser/NWListener for undeclared service types, and
+        # App Store review rejects builds with missing local-network usage strings.
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons, to serve this estate to MCP clients on your LAN, and to discover other Mootx01 estates for on-demand federation."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
         NSBonjourServices:
           - _mootx01._tcp
+          - _mootx01-fed._tcp
 
   Mootx01-iOS:
     type: application
@@ -178,12 +182,16 @@ targets:
         # Export compliance: only exempt encryption ships (SQLCipher,
         # CryptoKit, OS TLS) — see the macOS target for the rationale.
         ITSAppUsesNonExemptEncryption: false
-        # A2 discovery: browse for LAN resident daemons. Both keys are
-        # required for NWBrowser — iOS denies undeclared service types.
-        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        # A2 discovery + FED-OD-1 federation discovery: browse for LAN daemons
+        # and discover paired Mootx01 estates for on-demand federation.
+        # Both NSLocalNetworkUsageDescription and NSBonjourServices are required —
+        # iOS denies NWBrowser/NWListener for undeclared service types, and
+        # App Store review rejects builds with missing local-network usage strings.
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons, to serve this estate to MCP clients on your LAN, and to discover other Mootx01 estates for on-demand federation."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
         NSBonjourServices:
           - _mootx01._tcp
+          - _mootx01-fed._tcp
 
   # Recall widget targets (Tier 3) — WidgetKit extensions rendering the
   # derived projection (WidgetSnapshotStore) from the app group. One estate,
