@@ -1,6 +1,6 @@
 // FederationPanelTests.swift
 //
-// FED-OD-6: Tests for the Federation panel's state machine and F1 invariants.
+// FED-OD-6b: Tests for the Federation panel's state machine and F1 invariants.
 //
 // Tests exercise FederationController and FederationPosture directly — no
 // UI rendering required. Covers:
@@ -8,20 +8,26 @@
 //   - Balanced is the only functional posture in F1
 //   - Sealed absent by construction (no-secret invariant)
 //   - startSession throws for locked postures (never silent stubs)
-//   - startSession succeeds with Balanced
+//   - startSession succeeds with Balanced (real wiring via in-memory bridge)
 //   - Localized-string fields are non-empty
 //
 // FederationController is @MainActor @Observable. Tests run on MainActor via
 // @Suite attribute to avoid async actor-hop noise on property access.
+//
+// Session lifecycle tests (startSession, endSession) use:
+//   - FederationController.init(sessionManager:) — test-only init
+//   - MootBridge.attachInMemory() — in-memory estate (no disk I/O)
+//   - FakeLANRelayLoopbackTransport — internal to MootGateway, accessible via @testable
 
 import Testing
 import Foundation
 @testable import GatewayUI
+@testable import MootGateway
 import ConvergenceKitFederation
 
 // .serialized: FederationController reads/writes UserDefaults; parallel runs
 // would interleave suite isolation and defaults state.
-@Suite("FederationPanel — state transitions and F1 invariants (FED-OD-6)", .serialized)
+@Suite("FederationPanel — state transitions and F1 invariants (FED-OD-6b)", .serialized)
 @MainActor
 struct FederationPanelTests {
 
@@ -106,8 +112,14 @@ struct FederationPanelTests {
             do {
                 try await controller.startSession(peer: peer, posture: posture)
                 Issue.record("startSession with \(posture.rawValue) should have thrown")
-            } catch FederationSessionError.postureNotFunctionalInF1(let p) {
-                #expect(p == posture)
+            } catch let error as GatewayUI.FederationSessionError {
+                // Swift 6: both GatewayUI and MootGateway export FederationSessionError —
+                // qualify explicitly. Catch-pattern with associated values needs if-case.
+                if case let .postureNotFunctionalInF1(p) = error {
+                    #expect(p == posture)
+                } else {
+                    Issue.record("Unexpected FederationSessionError for \(posture.rawValue): \(error)")
+                }
             } catch {
                 Issue.record("Unexpected error for \(posture.rawValue): \(error)")
             }
@@ -116,10 +128,17 @@ struct FederationPanelTests {
         #expect(controller.activeSession == nil)
     }
 
-    @Test("startSession succeeds with Balanced posture")
+    @Test("startSession succeeds with Balanced posture (real session manager)")
     func startSessionSucceedsWithBalanced() async throws {
-        let controller = FederationController()
-        let peer = KnownPeer(id: "11223344aabbccdd", displayName: "Alice")
+        // Wire a real in-memory bridge + session manager — asserts real wiring.
+        let bridge = try await MootBridge.attachInMemory()
+        let transport = FakeLANRelayLoopbackTransport()
+        let manager = FederationSessionManager(bridge: bridge, transport: transport)
+        let controller = FederationController(sessionManager: manager)
+
+        // KnownPeer with a real (test) 32-byte public key for the peer estate.
+        let peerKey = Data(repeating: 0x42, count: 32)
+        let peer = KnownPeer(id: "11223344aabbccdd", displayName: "Alice", publicKeyData: peerKey)
 
         try await controller.startSession(peer: peer, posture: .balanced)
 
@@ -131,18 +150,31 @@ struct FederationPanelTests {
         #expect(controller.activeSession == nil)
     }
 
-    @Test("startSession throws sessionAlreadyActive when a session is in progress")
+    @Test("startSession throws sessionAlreadyActive when a session is in progress (real manager)")
     func startSessionThrowsWhenAlreadyActive() async throws {
-        let controller = FederationController()
-        let peer = KnownPeer(id: "deadbeefdeadbeef", displayName: "Bob")
+        let bridge = try await MootBridge.attachInMemory()
+        let transport = FakeLANRelayLoopbackTransport()
+        let manager = FederationSessionManager(bridge: bridge, transport: transport)
+        let controller = FederationController(sessionManager: manager)
+
+        let peerKey = Data(repeating: 0xAB, count: 32)
+        let peer = KnownPeer(id: "deadbeefdeadbeef", displayName: "Bob", publicKeyData: peerKey)
 
         try await controller.startSession(peer: peer, posture: .balanced)
 
         do {
             try await controller.startSession(peer: peer, posture: .balanced)
             Issue.record("Second startSession should have thrown sessionAlreadyActive")
-        } catch FederationSessionError.sessionAlreadyActive {
-            // Expected — the session is still active.
+        } catch let error as GatewayUI.FederationSessionError {
+            // Swift 6: both GatewayUI and MootGateway export FederationSessionError —
+            // qualify explicitly.
+            if case .sessionAlreadyActive = error {
+                // Expected — the session is still active.
+            } else {
+                Issue.record("Unexpected FederationSessionError: \(error)")
+            }
+        } catch {
+            Issue.record("Unexpected error: \(error)")
         }
 
         await controller.endSession()
@@ -175,10 +207,15 @@ struct FederationPanelTests {
 
     // MARK: - Session lifecycle
 
-    @Test("endSession updates lastSession timestamp on the known peer")
+    @Test("endSession updates lastSession timestamp on the known peer (real manager)")
     func endSessionUpdatesLastSessionTimestamp() async throws {
-        let controller = FederationController()
-        let peer = KnownPeer(id: "cafebabe12345678", displayName: "Eve")
+        let bridge = try await MootBridge.attachInMemory()
+        let transport = FakeLANRelayLoopbackTransport()
+        let manager = FederationSessionManager(bridge: bridge, transport: transport)
+        let controller = FederationController(sessionManager: manager)
+
+        let peerKey = Data(repeating: 0xCA, count: 32)
+        let peer = KnownPeer(id: "cafebabe12345678", displayName: "Eve", publicKeyData: peerKey)
         controller.addKnownPeerForTesting(peer)
 
         try await controller.startSession(peer: peer, posture: .balanced)

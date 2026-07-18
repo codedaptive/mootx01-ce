@@ -339,6 +339,157 @@ public actor FederationSessionManager {
         }
     }
 
+    // MARK: - Estate identity
+
+    /// Load (or mint) the estate Ed25519 identity from `_fed_identity`.
+    ///
+    /// Runs a lightweight "identity probe" engine — a `FederationSyncEngine` with an
+    /// empty-tables manifest — to ensure `_fed_identity` exists, then reads the
+    /// local public key. The probe is disabled immediately after; no application sync
+    /// tables are created and no observers are started.
+    ///
+    /// This is the correct path to obtain the local key for LAN advertising or the
+    /// QR ceremony WITHOUT starting a full federation session.
+    public func estateIdentity() async throws -> LocalIdentity {
+        let rawStorage = await bridge.estateStorage()
+        let probeManifest = SyncManifest(
+            kitID: "identity-probe",
+            schemaVersion: 0,
+            zoneIdentifier: "identity-probe",
+            tables: []
+        )
+        let probeEngine = FederationSyncEngine()
+        try await probeEngine.enable(manifest: probeManifest, storage: rawStorage)
+        let identity = await probeEngine.identity
+        try await probeEngine.disable()
+        return identity
+    }
+
+    // MARK: - Peer management
+
+    /// The `_fed_peers` table name — matches `FederationStateActor.fedPeersTable`.
+    private static let fedPeersTableName = "_fed_peers"
+
+    /// Derive the deterministic `peer_id` UUID from a 32-byte Ed25519 public key.
+    ///
+    /// Mirrors `FederationStateActor.peerUUID(from:)` exactly: UUID is constructed
+    /// from the first 16 bytes of the public key. Idempotent — same key always yields
+    /// the same UUID, enabling upsert-on-conflict in `registerPairedPeer`.
+    private static func peerUUID(from publicKey: Data) -> String {
+        let bytes = publicKey.prefix(16)
+        return UUID(uuid: (
+            bytes[bytes.startIndex],
+            bytes[bytes.startIndex + 1],
+            bytes[bytes.startIndex + 2],
+            bytes[bytes.startIndex + 3],
+            bytes[bytes.startIndex + 4],
+            bytes[bytes.startIndex + 5],
+            bytes[bytes.startIndex + 6],
+            bytes[bytes.startIndex + 7],
+            bytes[bytes.startIndex + 8],
+            bytes[bytes.startIndex + 9],
+            bytes[bytes.startIndex + 10],
+            bytes[bytes.startIndex + 11],
+            bytes[bytes.startIndex + 12],
+            bytes[bytes.startIndex + 13],
+            bytes[bytes.startIndex + 14],
+            bytes[bytes.startIndex + 15]
+        )).uuidString
+    }
+
+    /// Register a newly-paired peer in the `_fed_peers` table.
+    ///
+    /// Called after the QR ceremony completes and the user confirms the SAS pattern.
+    /// Ensures the federation tables exist via an identity probe, then upserts the peer
+    /// row. Re-pairing the same physical estate (same public key) updates `paired_at`
+    /// without inserting a duplicate.
+    ///
+    /// Schema mirrors `FederationStateActor.persistPeer`:
+    ///   `peer_id` TEXT PK, `public_key` BLOB, `family_seed` INT,
+    ///   `family_dimension` INT, `paired_at` TEXT (ISO8601).
+    public func registerPairedPeer(publicKey: Data, family: HyperplaneFamilySpec) async throws {
+        let rawStorage = await bridge.estateStorage()
+        // Ensure federation tables exist. The probe enable is fast (no app tables,
+        // no observers started) and idempotent — safe to call before the first session.
+        let probeManifest = SyncManifest(
+            kitID: "identity-probe",
+            schemaVersion: 0,
+            zoneIdentifier: "identity-probe",
+            tables: []
+        )
+        let probeEngine = FederationSyncEngine()
+        try await probeEngine.enable(manifest: probeManifest, storage: rawStorage)
+        try await probeEngine.disable()
+
+        // Upsert. Schema matches FederationStateActor.persistPeer exactly so the
+        // engine can reload this row on next enable().
+        let peerID = Self.peerUUID(from: publicKey)
+        let now = ISO8601DateFormatter().string(from: Date())
+        try await rawStorage.rowStore.upsert(
+            table: Self.fedPeersTableName,
+            values: [
+                "peer_id":          .text(peerID),
+                "public_key":       .blob(publicKey),
+                "family_seed":      .int(Int64(bitPattern: family.seed)),
+                "family_dimension": .int(Int64(family.dimension)),
+                "paired_at":        .text(now)
+            ],
+            conflictColumns: ["peer_id"]
+        )
+        logger.info("federation: registered peer \(peerID, privacy: .public) in _fed_peers")
+    }
+
+    /// Load all paired peers from `_fed_peers`.
+    ///
+    /// Returns the 32-byte public key and `paired_at` timestamp for each row.
+    /// If the federation tables do not yet exist (before the first pairing or session),
+    /// returns an empty array without throwing.
+    public func loadPairedPeers() async throws -> [(publicKey: Data, pairedAt: Date)] {
+        let rawStorage = await bridge.estateStorage()
+        do {
+            let rows = try await rawStorage.rowStore.query(table: Self.fedPeersTableName)
+            let formatter = ISO8601DateFormatter()
+            return rows.compactMap { row -> (publicKey: Data, pairedAt: Date)? in
+                guard case .blob(let pubKey) = row["public_key"],
+                      pubKey.count == 32 else { return nil }
+                let pairedAt: Date
+                if case .text(let dateStr) = row["paired_at"],
+                   let date = formatter.date(from: dateStr) {
+                    pairedAt = date
+                } else {
+                    pairedAt = Date.distantPast
+                }
+                return (publicKey: pubKey, pairedAt: pairedAt)
+            }
+        } catch {
+            // Table likely does not exist yet (pre-first-pairing/pre-first-session).
+            logger.debug("federation: loadPairedPeers — _fed_peers absent, returning empty")
+            return []
+        }
+    }
+
+    /// Remove a paired peer from `_fed_peers`.
+    ///
+    /// If the table does not exist or the peer row is absent, this is a no-op.
+    /// Called from `FederationController.unpair(_:)` after the user confirms.
+    public func removePairedPeer(publicKey: Data) async throws {
+        let rawStorage = await bridge.estateStorage()
+        let peerID = Self.peerUUID(from: publicKey)
+        do {
+            try await rawStorage.rowStore.delete(
+                table: Self.fedPeersTableName,
+                where: .eq(
+                    Column(table: Self.fedPeersTableName, name: "peer_id"),
+                    .text(peerID)
+                )
+            )
+            logger.info("federation: removed peer \(peerID, privacy: .public) from _fed_peers")
+        } catch {
+            // Table absent or peer not found — no-op.
+            logger.debug("federation: removePairedPeer no-op for \(peerID, privacy: .public): \(error)")
+        }
+    }
+
     // MARK: - Push / Pull (pass-through)
 
     /// Push local outbox entries to the peer.
