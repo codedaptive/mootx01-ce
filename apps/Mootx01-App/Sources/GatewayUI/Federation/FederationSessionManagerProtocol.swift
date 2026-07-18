@@ -1,19 +1,20 @@
 // FederationSessionManagerProtocol.swift
 //
-// FED-OD-6: Thin protocol seam for FED-OD-4's FederationSessionManager.
+// FED-OD-6 (protocol seam) + FED-OD-6b (reconciliation complete).
 //
-// FED-OD-4 is a sibling mission and is NOT present in this worktree. At
-// reconciliation, FederationSessionManager (FED-OD-4) will conform to this
-// protocol, and FederationController will be updated to consume it via
-// dependency injection rather than its current F1 stub.
-//
-// RECONCILIATION NOTE:
-//   - Replace F1FederationSessionManager with the real FED-OD-4 implementation.
-//   - Wire LocalIdentity from the engine layer to FederationController.
-//   - Replace the UserDefaults-backed KnownPeer store with _fed_peers (FED-OD-4).
-//   - LANDiscovery advertising currently uses a placeholder publicKey (zero bytes);
-//     replace with the estate's real Ed25519 public key once the engine surface
-//     that exposes it lands (expected in FED-OD-4 or a companion mission).
+// FED-OD-6b wired the real FED-OD-4 FederationSessionManager into this surface.
+// Shipped reality:
+//   - FederationController is the FederationSessionManaging conformer. It holds
+//     a real FederationSessionManager (MootGateway) via composition in its
+//     `_sessionManager` stored property, loaded lazily from GatewayRuntime.
+//   - LocalIdentity is loaded from the engine layer via manager.estateIdentity()
+//     inside FederationController.bootstrapFromEstate(), and cached as
+//     `localIdentity` for LANDiscovery advertising and the QR ceremony. Discovery
+//     uses the real Ed25519 public key once bootstrapFromEstate() completes; it
+//     falls back to a 32-byte zero placeholder only while the estate is unavailable.
+//   - KnownPeers are backed by `_fed_peers` (via FederationSessionManager) with a
+//     UserDefaults cache for synchronous initial display. mergePeersFromEstate()
+//     enriches entries with real publicKeyData on startup.
 
 import Foundation
 
@@ -132,8 +133,9 @@ public enum FederationPosture: String, CaseIterable, Identifiable, Sendable {
 ///
 /// The `id` (fingerprint) and `displayName` are the UI-layer identifiers.
 /// `publicKeyData` is the 32-byte Ed25519 key needed for `startSession` to
-/// call the real `FederationSessionManager`. Nil only for peers that were added
-/// via the F1 test-peer path (no QR ceremony); always non-nil for ceremony-paired peers.
+/// call the real `FederationSessionManager`. Nil until `mergePeersFromEstate()`
+/// enriches the entry from `_fed_peers`; always non-nil for ceremony-paired peers
+/// once the estate bootstrap completes.
 public struct KnownPeer: Identifiable, Hashable, Sendable, Codable {
     /// Short fingerprint derived from the estate identity key (SHA256 prefix, 16 hex chars).
     /// Used as the list identifier and the mDNS fingerprint in LANDiscovery.
@@ -144,8 +146,8 @@ public struct KnownPeer: Identifiable, Hashable, Sendable, Codable {
     public let lastSession: Date?
     /// The 32-byte Ed25519 public key of this peer estate.
     ///
-    /// Populated after a real QR ceremony. Nil for peers added via the F1 test-peer
-    /// path (no ceremony). Required for `startSession` to call the real session manager.
+    /// Populated from `_fed_peers` by `mergePeersFromEstate()` during estate bootstrap.
+    /// Required for `startSession` to delegate to the real `FederationSessionManager`.
     public let publicKeyData: Data?
 
     public init(id: String, displayName: String, lastSession: Date? = nil, publicKeyData: Data? = nil) {
@@ -160,8 +162,9 @@ public struct KnownPeer: Identifiable, Hashable, Sendable, Codable {
 
 /// An active federation session (F1: Balanced posture, time-boxed).
 ///
-/// FED-OD-4 will replace this with a richer session object backed by the
-/// grant lifecycle in FederationSessionManager.
+/// UI-layer tracking struct. FederationController creates this when startSession
+/// succeeds and clears it in endSession. It does not map 1:1 to MootGateway
+/// FederationSessionManager state — it is the view-layer representation only.
 public struct FederationSession: Sendable {
     /// The paired peer this session is open with.
     public let peer: KnownPeer
@@ -178,8 +181,8 @@ public struct FederationSession: Sendable {
         self.peer = peer
         self.posture = posture
         self.startedAt = startedAt
-        // F1 default session window: 30 minutes.
-        // FED-OD-4 will derive this from the grant lifetime (decay half-life).
+        // F1 production session window: 30 minutes (Balanced posture, charter §V4).
+        // The UI timer fires at expiresAt and calls FederationController.endSession().
         self.expiresAt = startedAt.addingTimeInterval(30 * 60)
         self.whatsCrossing = posture.cardWhatCrosses
     }
@@ -187,15 +190,17 @@ public struct FederationSession: Sendable {
 
 // MARK: - FederationSessionManaging Protocol Seam
 
-/// Protocol seam for FED-OD-4's FederationSessionManager.
+/// Protocol seam between FederationPanelView and the session manager.
 ///
-/// Defines the minimal interface the FederationPanel consumes. When FED-OD-4
-/// lands, FederationSessionManager will conform here. For F1, FederationController
-/// acts as the conformer using a stub implementation.
+/// Defines the minimal interface FederationPanel consumes. FederationController
+/// is the conformer: it delegates startSession/endSession to the real
+/// FederationSessionManager (MootGateway) via composition when the peer has a
+/// verified public key. The protocol exists so GatewayUITests can inject a
+/// test double without importing MootGateway.
 ///
-/// @MainActor: this protocol is a UI-layer surface (consumed by FederationPanelView).
-/// FED-OD-4's FederationSessionManager should also conform on @MainActor, or use
-/// nonisolated async bridges to hand off to an internal actor.
+/// @MainActor: UI-layer surface consumed by FederationPanelView. FederationController
+/// conforms on @MainActor; MootGateway.FederationSessionManager is an actor that
+/// is called via async delegation inside FederationController's conformance methods.
 @MainActor
 public protocol FederationSessionManaging: AnyObject {
     /// The currently active federation session, or nil.

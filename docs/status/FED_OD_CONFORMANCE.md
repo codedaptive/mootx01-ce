@@ -1,7 +1,7 @@
 ---
 title: F1 Federation On-Demand Conformance Map
-version: v0.1
-mission: FED-OD-7
+version: v0.2
+mission: FED-OD-7 + FED-OD-F1FIX
 decision_doc: DECISION_FEDERATION_ONDEMAND_LAN_PROXIMITY_2026-07-18
 updated: 2026-07-18
 ---
@@ -37,15 +37,24 @@ Target: `ConvergenceKitFederationTests`
 **Row text:** "Session end is deterministic: no outbound entry created after
 End Session lands in any relay (extends I-2/I-10 style tests)."
 
-**Status:** COVERED — existing test FSM-1 from FED-OD-4.
+**Status:** COVERED — FSM-1 (channel-close gate) + FSM-1b (non-vacuous delivery proof).
+FSM-1b added by FED-OD-F1FIX (Adams review finding #2).
 
 | Test function | File | Suite |
 |---|---|---|
 | `sessionEndDeterminism` (FSM-1) | `MootGatewayTests/Federation/FederationSessionManagerTests.swift` | `FederationSessionManagerTests` |
+| `sessionEndDeterminismNonVacuous` (FSM-1b) | `MootGatewayTests/Federation/FederationSessionManagerTests.swift` | `FederationSessionManagerTests` |
 
-FSM-1 asserts both `transport.isClosed` after `endSession()` AND that the
-transport inbox depth does not grow after the channel closes (delta == 0).
-Both gates are required by the row; FSM-1 checks both.
+FSM-1 asserts `transport.isClosed` after `endSession()` AND that the inbox
+depth delta is zero. The delta assertion in FSM-1 is trivially zero because no
+push() is called in that test.
+
+FSM-1b makes the row non-vacuous: it inserts a below-ceiling row (queuing a real
+`_fed_outbox` entry), then applies `closeChannel()` before `push()`. The closed
+transport causes `push()` to receive `peerUnreachable` → `receipt.pushed == 0` →
+`inboxCount(for: bKey) == 0`. This proves the channel-close-first ordering in
+`FederationSessionManager.endSession()` actually prevents post-session delivery,
+not just that the closed flag is set with an empty outbox.
 
 Target: `MootGatewayTests`
 

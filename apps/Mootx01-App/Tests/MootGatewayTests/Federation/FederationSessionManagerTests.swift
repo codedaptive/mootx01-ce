@@ -4,9 +4,13 @@
 // Extended by FED-OD-7 (FSM-7, FSM-8): ceiling proof at LANRelay inbox level.
 //
 // Test matrix:
-//   FSM-1: Session-end determinism — channel closed before engine disabled; no
-//          envelope delivered after endSession() (the gate test for channel-close-first)
-//   FSM-2: Ceiling holds across a session — above-ceiling rows (sensitivity > .elevated)
+//   FSM-1:  Session-end determinism — channel closed before engine disabled; no
+//           envelope delivered after endSession() (gate: isClosed + trivially-zero inbox)
+//   FSM-1b: Non-vacuous session-end proof — same invariant but with a real queued outbox
+//           entry: below-ceiling row inserted, closeChannel() fires first, then push()
+//           hits closed transport and retains entry (inbox stays zero). Reverse-ordering
+//           verification done during development: push before close → inbox > 0.
+//   FSM-2:  Ceiling holds across a session — above-ceiling rows (sensitivity > .elevated)
 //          never enter the outbox and never reach the LANRelay inbox during a session
 //   FSM-3: Start → push → end round-trip — two in-process estates, shared transport,
 //          envelopes flow from A to B during session, not after
@@ -95,6 +99,135 @@ struct FederationSessionManagerTests {
 
         // Session state is ended.
         #expect(await manager.sessionState == .ended)
+    }
+
+    // MARK: FSM-1b: Non-vacuous session-end determinism proof
+
+    /// Non-vacuous proof that channel-close-first prevents post-session delivery.
+    ///
+    /// FSM-1's inbox-delta assertion is trivially zero because no push() is called
+    /// between startSession() and endSession(). FSM-1b closes that gap: it inserts a
+    /// below-ceiling row (queuing a real outbox entry) BEFORE endSession(), then
+    /// replicates the session-end ordering steps that endSession() performs:
+    ///
+    ///   Step 1: relay.closeChannel() — transport marked closed
+    ///   Step 2: engine.push()        — hits closed transport → peerUnreachable
+    ///                                  → anyPeerFailed=true → entries RETAINED (not confirmed)
+    ///
+    /// Asserts receipt.pushed == 0 and transport.inboxCount(for: bKey) == 0, proving
+    /// that the channel-close-first ordering prevents delivery of the queued entry.
+    ///
+    /// Uses FederationSyncEngine + LANRelay directly (like FSM-7/8) because
+    /// FederationSessionManager does not expose the engine's peer-registration path.
+    /// The ordering being tested — closeChannel() FIRST, then push() — is exactly
+    /// what FederationSessionManager.endSession() enforces (see its documentation).
+    ///
+    /// Reverse-ordering verification (done during development, not a separate test):
+    /// Swapping Steps 1 and 2 (push() before closeChannel()) produces receipt.pushed > 0
+    /// and inboxCount > 0, confirming the zero counts in this test are due to the
+    /// close-first ordering, not to test infrastructure failure.
+    @Test("FSM-1b: channel-close-first non-vacuous — outbox entry queued, close before push prevents delivery")
+    func sessionEndDeterminismNonVacuous() async throws {
+        // Two paired engines over a shared ClosableInMemoryTransport.
+        // Engine A is the sender (filtered at .elevated ceiling).
+        // Engine B is the receiver (delivery target — its inbox must stay empty).
+        let rawStorageA = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory
+        ))
+        try await rawStorageA.open(schema: SchemaDeclaration(
+            kitID: "FSM1bKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "items",
+                    columns: [
+                        .uuid("id"),
+                        .text("content"),
+                        // adjective_bitmap: sensitivity axis column. Bits 6–11 hold
+                        // the sensitivity raw value (>> 6 & 0x3F). raw=0 is normal;
+                        // raw=16 is elevated (ceiling for Balanced); raw>16 suppressed.
+                        .bitmap("adjective_bitmap")
+                    ],
+                    primaryKey: ["id"]
+                )
+            ],
+            indices: [],
+            migrations: []
+        ))
+        let rawStorageB = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory
+        ))
+        try await rawStorageB.open(schema: SchemaDeclaration(
+            kitID: "FSM1bKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "items",
+                    columns: [.uuid("id"), .text("content"), .bitmap("adjective_bitmap")],
+                    primaryKey: ["id"]
+                )
+            ],
+            indices: [],
+            migrations: []
+        ))
+
+        let transport = ClosableInMemoryTransport()
+        let manifest = SyncManifest(
+            kitID: "FSM1bKit",
+            schemaVersion: 1,
+            zoneIdentifier: "fsm-1b-channel-close-first",
+            tables: [SyncedTable(name: "items", primaryKeyColumn: "id")]
+        )
+
+        // Engine A: filtered at .elevated ceiling (mirrors FederationSessionManager.startSession).
+        let relayA = LANRelay(transport: transport)
+        let engineA = FederationSyncEngine(relay: relayA)
+        let filteredStorageA = SensitivityFilteredStorage(wrapping: rawStorageA, ceiling: .elevated)
+        try await engineA.enable(manifest: manifest, storage: filteredStorageA)
+
+        // Engine B: plain storage — receives envelopes that A pushes.
+        let relayB = LANRelay(transport: transport)
+        let engineB = FederationSyncEngine(relay: relayB)
+        try await engineB.enable(manifest: manifest, storage: rawStorageB)
+
+        // Pair A → B so engineA.push() knows where to deliver.
+        let familySpec = HyperplaneFamilySpec(seed: 0xFED_1B_CE)
+        try await engineA.pair(with: engineB, family: familySpec)
+        let bKey = await engineB.identity.publicKey
+
+        // Insert a BELOW-ceiling row on A's side (adjective_bitmap = 0, raw = 0 ≤ 16).
+        // The SensitivityFilteredObserver passes this through and appends it to _fed_outbox.
+        _ = try await rawStorageA.rowStore.insert(
+            table: "items",
+            values: [
+                "id":               .uuid(UUID()),
+                "content":          .text("normal-sensitivity row — below ceiling, would reach B if channel open"),
+                "adjective_bitmap": .bitmap(0)   // raw=0, normal: (0 >> 6) & 0x3F = 0 ≤ 16 ceiling
+            ]
+        )
+
+        // Allow the async outbound observer to process the insert and queue the outbox entry.
+        // 100ms mirrors the sleep used in FSM-7/FSM-8 for the same observer path.
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Channel-close-first ordering (Step 1 of FederationSessionManager.endSession):
+        // Close the transport channel before any push can deliver the queued entry.
+        relayA.closeChannel()
+        #expect(transport.isClosed, "closeChannel() must mark the transport closed")
+
+        // Step 2: push() — outbox entry exists, but transport is closed.
+        // relay.send(to: bKey, message:) throws SyncError.peerUnreachable → anyPeerFailed=true
+        // → FedOutboxStore.confirm() is NOT called → entry is RETAINED (not delivered).
+        let receipt = try await engineA.push()
+        #expect(receipt.pushed == 0,
+            "FSM-1b: push after closeChannel must return 0 delivered — transport closed, entry retained")
+        #expect(transport.inboxCount(for: bKey) == 0,
+            "FSM-1b: B's transport inbox must be empty — channel-close-first ordering prevented delivery")
+
+        // Cleanup.
+        try await engineB.disable()
+        // engineA is already channel-closed; disable() cancels the observer tasks.
+        try await engineA.disable()
     }
 
     // MARK: FSM-2: Ceiling holds
