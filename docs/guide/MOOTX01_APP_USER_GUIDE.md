@@ -1,6 +1,6 @@
 ---
 title: MOOTx01 — User Guide
-version: v0.2
+version: v0.3
 status: draft
 ---
 
@@ -43,6 +43,8 @@ The app has these tabs:
 - **Edges** — an honest status board of what's connected and what isn't.
 - **Engine** — how the app hosts your estate, plus the portable LAN server.
 - **Miners** — optional automatic capture from Calendar and Contacts.
+- **Federation** — share selected memories with another Mootx01 estate on your
+  local network, on demand, for a limited time.
 
 ---
 
@@ -355,3 +357,90 @@ need to delete it on the peer explicitly.
   another device to connect.
 
 Everything else works out of the box, on one device, with no account required.
+
+---
+
+## Federation — sharing on demand with a nearby estate
+
+Federation lets you share a slice of your memories with another Mootx01 estate
+for a fixed window of time. When the session ends, the other person's key
+expires. This is the first release of Federation; only one sharing mode
+("Balanced") is available now. More modes — and tighter controls — arrive in
+future releases.
+
+### The short version
+
+Discover a nearby estate, pair with it once, then start a Balanced session to
+share facts and fields for up to 30 minutes. End the session when you're done;
+the key expires and nothing more crosses.
+
+### Step 1 — Enable discoverability
+
+Open the **Federation** tab. Under **Discoverability**, choose:
+
+- **Off** — your device is invisible on the local network (default).
+- **While Open** — your device is discoverable while this app is in the
+  foreground. Best for phones and tablets.
+- **Always** — your device is discoverable even when the app is in the
+  background. Best for a resident Mac.
+
+When you enable a non-Off setting, MOOTx01 starts looking for other estates on
+your Wi-Fi network. No data crosses at this stage — discovery is reachability
+only.
+
+### Step 2 — Pair with a nearby estate
+
+When another Mootx01 device appears in **Nearby**, tap **Pair**. You will
+complete a short pairing ceremony to confirm you are connecting to the estate
+you think you are. Once paired, the device appears in **Paired Peers** and shows
+a verification badge in Nearby.
+
+You only need to pair once per estate. The pairing survives app restarts.
+
+To remove a pairing, tap **Unpair** next to the peer. They will need to pair
+again before starting a future session.
+
+### Step 3 — Start a session
+
+Under **Start Session**, choose the paired peer and the sharing mode. In this
+release, only **Balanced** is available:
+
+- **Balanced** — private memories are shared as facts and fields (not full text),
+  the key lasts only for this session, and at the end the peer's access expires.
+  What crosses: private memories at fact-and-field granularity; the scope is your
+  room or row.
+
+Other modes (Open, Convenient, Locked, In-person) are shown with a lock icon.
+They require the grant system, which arrives in a future release. Tapping a
+locked mode shows what it will do when it ships; it does not start anything.
+
+Tap **Start Session**. The banner appears showing:
+
+- Who you are sharing with.
+- What is crossing (one plain-language sentence).
+- A countdown to when the session expires.
+
+### Step 4 — End the session
+
+Tap **End Session** and confirm. The peer's key expires immediately. After the
+session ends, nothing more crosses — even if the peer's app is still open.
+
+If you do nothing, the session expires on its own after 30 minutes.
+
+### What this release does not include
+
+- Private-share prompt (coming in F2): deliberately sharing a single memory
+  with a specific person, with a required expiry date.
+- Tell-record viewer (coming in F2): a log of what you have disclosed and when.
+- The Open, Convenient, Locked, and In-person postures: these require the
+  grant system, coming in F2.
+- Your own estate is never listed as a peer; you cannot share with yourself.
+
+### A word on privacy
+
+MOOTx01 is built around the principle that a secret told is not a secret.
+Federation does not change that. It decides *who counts as told* and *for how
+long*, and it keeps a faithful record. It cannot prevent a person from
+remembering what they saw. Balanced is the right first mode because it limits
+both what crosses (facts and fields, not full text) and for how long (one
+session). Choose the tightest posture that meets your need.
