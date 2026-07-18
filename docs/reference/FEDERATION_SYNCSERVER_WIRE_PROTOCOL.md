@@ -564,3 +564,28 @@ variants may be introduced in a future protocol version with a new
 | Version | Date | Author | Notes |
 |---|---|---|---|
 | v0.1 | 2026-07-17 | CVK-WC7a | Initial draft — proposed, awaiting Bob's review |
+
+## Implementation notes (CVK-WC7)
+
+Ambiguities surfaced during implementation of the Swift `HostedRelay` conformer and
+`RelayConformanceFixture`. Noted here for spec clarification on next revision.
+
+**§4 "send returns normally on transport failure":** The spec states the conformer's
+`send` method returns normally on transport failure, citing compatibility with the
+in-process `FederationRelay` contract. However, the Swift `Relay` protocol signature
+is `func send(...) throws`, and `FederationSyncEngine.push()` explicitly catches throws
+from `relay.send` to implement the "retain on failure" contract via the durable outbox
+(WC2). The WC7 implementation throws `SyncError.transportFailure` on network error and
+`SyncError.authenticationFailed` on 401/403, consistent with what `push()` expects.
+The spec phrase "returns normally" appears to describe the push() behavior (outbox
+retains), not the relay.send behavior. Recommend clarifying in next spec revision.
+
+**§1.2 `Relay.drain` / `poll` cadence:** The spec's cadence guidance (30s active /
+5min idle) is noted as guidance. The WC7 `HostedRelay.drain` method drives one GET
+per call; the caller (FederationSyncEngine.pull()) controls poll frequency. No
+scheduler is built into HostedRelay.
+
+**`Data.hex` encoding:** The spec uses lowercase hex for recipient public key in URL
+paths (`/v1/send/{64-char-hex}`). The WC7 implementation uses a local `Data.hex`
+extension that produces lowercase hex via `String(format: "%02x", byte)`, matching
+the spec's 64-char lowercase constraint.
