@@ -8,7 +8,7 @@ import Testing
 import Foundation
 import SubstrateTypes
 import ConvergenceKit
-import ConvergenceKitFederation
+@testable import ConvergenceKitFederation
 import PersistenceKit
 import PersistenceKitInMemory
 // ─────────────────────────────────────────────────────────────────
@@ -346,12 +346,17 @@ struct FederationPairingTests {
         try await engineB.disable()
     }
 
-    /// The proposer-side check: if an acceptance echoes back a different family spec,
-    /// `pair()` must throw `authenticationFailed` before registering the peer.
+    /// Proposer-side family-mismatch guard: if a misbehaving accepter echoes back a
+    /// different family spec, `pair()` must throw `authenticationFailed` before
+    /// registering the peer. The guard is in `FederationStateActor.verifyAndRegisterAcceptance`.
     ///
-    /// This tests the defensive guard in FederationStateActor.pair() against a
-    /// misbehaving accepter. A well-behaved accepter always echoes the proposed family;
-    /// this test directly verifies the check condition and error type.
+    /// Injection shape: build a `PairingProposal` for family F1, have B sign the
+    /// canonical proposal bytes with its real key (valid sig), then swap the
+    /// `acceptedFamily` to F2. The sig check passes (sig is over proposal bytes,
+    /// not the family field); only the family guard fires. This isolates guard 1
+    /// from guard 2, confirming the check order and error type.
+    ///
+    /// Post-condition: no peer is registered on engine A (`stateActor.peers` empty).
     @Test("family mismatch in PairingAcceptance is caught by proposer-side check")
     func familyMismatchRejected() async throws {
         let storageA = try await makeStorage()
@@ -363,36 +368,55 @@ struct FederationPairingTests {
         try await engineA.enable(manifest: makeManifest(), storage: storageA)
         try await engineB.enable(manifest: makeManifest(), storage: storageB)
 
-        // Build a legitimate proposal for family F1.
         let intendedFamily = HyperplaneFamilySpec(seed: 0xF1F1_F1F1)
         let wrongFamily    = HyperplaneFamilySpec(seed: 0xF2F2_F2F2)
+
+        // Retrieve both identities. A builds the proposal; B provides its real key.
         let aIdentity = await engineA.identity
+        let bIdentity = await engineB.identity
+
+        // Build the canonical proposal bytes the same way pair() would internally.
+        // Deterministic nonce — reproducible across test runs.
         let nonce = Data([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22,
                           0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00])
-        let proposal = PairingProposal(proposerPublicKey: aIdentity.publicKey, proposedFamily: intendedFamily, nonce: nonce)
-        let sigBytes = proposalSigningBytes(proposal)
-        let proposerSig = try aIdentity.sign(sigBytes)
-
-        // A well-behaved B echoes the proposal family. Get a valid acceptance for reference.
-        let validAcceptance = try await engineB.acceptPairingProposal(proposal, proposerSignature: proposerSig)
-        #expect(validAcceptance.acceptedFamily == intendedFamily, "well-behaved accepter must echo proposal family")
-
-        // Construct a tampered acceptance: same accepter key and valid signature,
-        // but wrong family. This simulates a misbehaving or malicious accepter.
-        // The proposer-side guard in pair() is: guard acceptance.acceptedFamily == family.
-        let tamperedAcceptance = PairingAcceptance(
-            accepterPublicKey: validAcceptance.accepterPublicKey,
-            acceptedFamily: wrongFamily,             // ← mismatch
-            signatureOfProposal: validAcceptance.signatureOfProposal
+        let proposal = PairingProposal(
+            proposerPublicKey: aIdentity.publicKey,
+            proposedFamily: intendedFamily,
+            nonce: nonce
         )
-        #expect(tamperedAcceptance.acceptedFamily != intendedFamily,
-                "tampered acceptance must have a different family to trigger the guard")
+        let sigBytes = proposalSigningBytes(proposal)
 
-        // Verify the proposer-side check: `acceptance.acceptedFamily == family`
-        // mirrors what pair() checks before calling FederationSignature.verify.
-        // A mismatch throws authenticationFailed before any peer registration.
-        let mismatchDetected = tamperedAcceptance.acceptedFamily != intendedFamily
-        #expect(mismatchDetected, "proposer guard must detect family mismatch — acceptedFamily ≠ proposed family")
+        // B signs the canonical proposal bytes with its real key.
+        // This is the same sig a well-behaved accepter would return — valid over
+        // the proposal bytes, independent of what acceptedFamily we put in the struct.
+        let bRealSig = try bIdentity.sign(sigBytes)
+
+        // Tampered acceptance: B's real key + real sig, but wrong family.
+        // Simulates a misbehaving accepter that lies about the family it accepted.
+        // Guard 1 in verifyAndRegisterAcceptance (acceptedFamily == family) fires first;
+        // the sig check (guard 2) would pass but is never reached.
+        let tamperedAcceptance = PairingAcceptance(
+            accepterPublicKey: bIdentity.publicKey,
+            acceptedFamily: wrongFamily,   // ← mismatch against intendedFamily
+            signatureOfProposal: bRealSig  // valid sig so guard 2 does not interfere
+        )
+
+        // Exercise the real proposer-side guard path via verifyAndRegisterAcceptance.
+        // This is the body that pair(with:family:) calls after receiving the acceptance.
+        do {
+            try await engineA.stateActor.verifyAndRegisterAcceptance(
+                tamperedAcceptance,
+                for: intendedFamily,
+                proposalBytes: sigBytes
+            )
+            Issue.record("verifyAndRegisterAcceptance must throw authenticationFailed for family-mismatch acceptance")
+        } catch SyncError.authenticationFailed {
+            // Expected — misbehaving accepter correctly rejected by guard 1.
+        }
+
+        // No peer must be registered: guard fires before peers.append.
+        let peersA = await engineA.stateActor.peers
+        #expect(peersA.isEmpty, "proposer must not register a peer when family mismatch is caught")
 
         try await engineA.disable()
         try await engineB.disable()
