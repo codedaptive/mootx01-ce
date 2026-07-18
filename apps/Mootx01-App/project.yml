@@ -192,6 +192,10 @@ targets:
         NSBonjourServices:
           - _mootx01._tcp
           - _mootx01-fed._tcp
+        # FED-OD-5 UWB proximity pairing: NearbyInteraction requires this key
+        # or App Store submission is rejected. iOS-only — NI framework is not
+        # available on macOS. Shown to the user on first proximity-pairing attempt.
+        NSNearbyInteractionUsageDescription: "MOOTx01 uses Ultra Wideband to detect when another Mootx01 device is nearby, so you can pair estates by holding iPhones together instead of scanning a QR code."
 
   # Recall widget targets (Tier 3) — WidgetKit extensions rendering the
   # derived projection (WidgetSnapshotStore) from the app group. One estate,
