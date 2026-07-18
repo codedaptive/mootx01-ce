@@ -108,6 +108,25 @@ public protocol LANRelayTransport: Sendable {
     /// background NWListener task. In `FakeLANRelayTransport` the buffer is
     /// populated by `send(to:message:)` routing to the same dict.
     func drain(for recipientPublicKey: Data) -> [SignedEnvelope]
+
+    /// Close the transport's outbound channel.
+    ///
+    /// After `close()` returns, any call to `send(to:message:)` MUST throw
+    /// (`SyncError.peerUnreachable` or `SyncError.transportFailure`) so the
+    /// engine's push cycle retains outbox entries rather than delivering.
+    ///
+    /// Default implementation is a no-op. Production conformers (NWTransport)
+    /// override to cancel the NWConnection; test conformers that need to verify
+    /// session-end determinism override to set a closed flag. `LANRelay.closeChannel()`
+    /// is the session-end call site — see FED-OD-4 session-end ordering.
+    func close()
+}
+
+/// Default no-op `close()` so existing `LANRelayTransport` conformers (including
+/// `FakeLANRelayTransport` used in conformance tests) do not need to implement it
+/// unless they want to verify session-end channel-close semantics.
+public extension LANRelayTransport {
+    func close() { }
 }
 
 // MARK: - LANRelay
@@ -138,6 +157,9 @@ public protocol LANRelayTransport: Sendable {
 ///   - `send(to:message:)` — forwards to the injected transport. Throws on
 ///     transport failure or TLS rejection (unknown key).
 ///   - `drain(for:)` — reads and clears the local buffer. Non-throwing.
+///   - `closeChannel()` — closes the transport channel; subsequent `send()` calls
+///     throw so the engine retains outbox entries. Called by `FederationSessionManager`
+///     as the session-end invariant: channel close FIRST, then engine.disable() (FED-OD-4).
 public final class LANRelay: Relay, @unchecked Sendable {
 
     // MARK: Injected transport
@@ -186,5 +208,30 @@ public final class LANRelay: Relay, @unchecked Sendable {
             logger.debug("lan-relay: drained \(received.count) envelope(s) for \(recipient.prefix(4).hex, privacy: .public)…")
         }
         return received
+    }
+
+    // MARK: Session-end channel close
+
+    /// Close the underlying transport channel.
+    ///
+    /// SESSION-END INVARIANT (FED-OD-4): `FederationSessionManager.endSession()`
+    /// calls this BEFORE calling `engine.disable()`. The ordering is load-bearing:
+    ///
+    ///   After `closeChannel()` returns, any subsequent `transport.send()` throws
+    ///   (peerUnreachable or transportFailure). The engine's push() cycle sees the
+    ///   throw and retains the outbox entry — it is NOT delivered post-session.
+    ///   `engine.disable()` then cancels observer tasks and stops new outbox writes.
+    ///
+    ///   If the order were reversed (disable first, close second), a push() racing
+    ///   on the actor queue could drain the outbox into the still-open channel
+    ///   between disable and close, delivering envelopes after the session closed.
+    ///   Channel-close-first eliminates the race: any such push() gets a transport
+    ///   error and retains entries.
+    ///
+    /// The durable _fed_outbox entries are NOT discarded on session end; they
+    /// persist for delivery in the next session to the same peer (WC2 contract).
+    public func closeChannel() {
+        transport.close()
+        logger.debug("lan-relay: channel closed — subsequent sends will fail")
     }
 }

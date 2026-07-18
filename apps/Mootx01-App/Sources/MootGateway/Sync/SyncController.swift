@@ -33,8 +33,25 @@ public actor SyncController {
     private var engine: (any SyncEngine)?
     private let log = Logger(subsystem: "com.codedaptive.mootx01", category: "sync")
 
+    /// Optional federation session manager. When set, `disable()` cascades to
+    /// `federationSessionManager?.endSession()` (try?) after disabling the
+    /// CloudKit engine, ensuring both sync paths tear down together.
+    ///
+    /// Wire via `setFederationSessionManager(_:)` after construction.
+    /// Not set at init to avoid circular dependencies.
+    private var federationSessionManager: FederationSessionManager?
+
     public init(bridge: MootBridge) {
         self.bridge = bridge
+    }
+
+    /// Wire a `FederationSessionManager` so it is torn down when this controller
+    /// is disabled. The manager's `endSession()` is called (best-effort via `try?`)
+    /// only when a session is active — it is a no-op if no session is active.
+    ///
+    /// Call this after constructing the session manager and before any sync beats.
+    public func setFederationSessionManager(_ manager: FederationSessionManager) {
+        self.federationSessionManager = manager
     }
 
     /// Enable the injected engine against the estate's OWN Storage instance —
@@ -101,6 +118,10 @@ public actor SyncController {
     public func disable() async throws {
         try await engine?.disable()
         engine = nil
+        // Cascade to federation session if one is active.
+        // Uses try? — a failing endSession during controller teardown is logged
+        // by the session manager itself; we do not re-throw here.
+        try? await federationSessionManager?.endSession()
     }
 
     public func state() async -> SyncState? {
