@@ -2,7 +2,7 @@
 status: active
 authors: MOOTx01 maintainers
 date: 2026-07-17
-version: 1.6
+version: 1.7
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -534,31 +534,56 @@ public struct DecodedRecord: Sendable {
 
 ```swift
 public final class FederationSyncEngine: SyncEngine, Sendable {
-    public init()
-    public func pair(with peer: FederationSyncEngine, via relay: any Relay,
-                     family: HyperplaneFamilySpec) async throws
+    /// - Parameter relay: shared transport for all send/drain operations.
+    ///   For in-process tests, two engines must share the same relay instance.
+    ///   Defaults to a private `FederationRelay` (single-engine or stub tests).
+    public init(relay: any Relay = FederationRelay())
+
+    /// Signed pairing handshake (WC6). Both sides verify each other's Ed25519
+    /// signatures over canonical proposal bytes. Throws `authenticationFailed`
+    /// if either signature fails or the accepter echoes a different family.
+    /// On success both sides persist the peer to `_fed_peers`.
+    public func pair(with peer: FederationSyncEngine, family: HyperplaneFamilySpec) async throws
+
+    /// Accepter leg of the pairing handshake. Verifies the proposer's signature,
+    /// persists the proposer, and returns a signed `PairingAcceptance`.
+    /// Called by `pair(with:family:)` internally; also the entry point for
+    /// relay-based pairing (WC7 extension).
+    public func acceptPairingProposal(
+        _ proposal: PairingProposal,
+        proposerSignature: Data
+    ) async throws -> PairingAcceptance
+
     public var identity: LocalIdentity { get async }
 }
 
 // Transport abstraction (hosted-sync hook): the engine pairs over `any
 // Relay`, so a hosted HTTPS/gRPC SyncServer relay drops in with no engine
-// change. `FederationRelay` is the in-process implementation (local + tests).
+// change. `FederationRelay` is the in-process implementation (local + tests);
+// `HostedRelay` is the HTTPS conformer (CVK-WC7, injected via `init(relay:)`).
 public protocol Relay: Sendable {
-    func send(to recipient: Data, message: SignedEnvelope)
+    /// Deliver `message` to `recipient`'s inbox. Throws on transport failure
+    /// (e.g. `SyncError.transportFailure`); the durable outbox retains the
+    /// record for retry. In-process `FederationRelay` never throws.
+    func send(to recipient: Data, message: SignedEnvelope) throws
     func drain(for recipient: Data) -> [SignedEnvelope]
 }
 
 public final class FederationRelay: Relay, @unchecked Sendable {
     public init()
-    public func send(to recipient: Data, message: SignedEnvelope)
+    public func send(to recipient: Data, message: SignedEnvelope) throws
     public func drain(for recipient: Data) -> [SignedEnvelope]
 }
 
 /// Discriminator for the opaque payload carried by `SignedEnvelope`.
-/// `syncRecordBatch` (0x01) is the only v1.0 variant. `fieldWriteEventBatch`
-/// (0x02) is reserved for the next-gen write-path payload (C1 extension point).
+/// `syncRecordBatch` (0x01) is the only v1.0 sync payload.
+/// `fieldWriteEventBatch` (0x02) reserved for next-gen write-path (C1).
+/// Pairing payload kinds (0x10, 0x11) are WC7 extension points for
+/// relay-based handshake transport; silently ignored by `pull()` in v1.0.
 public enum PayloadKind: UInt8, Sendable, Codable, Hashable {
-    case syncRecordBatch = 0x01
+    case syncRecordBatch   = 0x01
+    case pairingProposal   = 0x10
+    case pairingAcceptance = 0x11
 }
 
 /// Build the canonical deterministic byte sequence that `SignedEnvelope.signature`
@@ -1034,6 +1059,23 @@ calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.7 -- 2026-07-17 (CVK-WC-FIX)
+- **`FederationSyncEngine.init`**: corrected signature from `init()` to
+  `init(relay: any Relay = FederationRelay())`. The relay parameter was
+  added in WC7 (CVK-WC7) so two engines share a transport; the no-arg
+  form never existed in shipped code.
+- **`FederationSyncEngine.pair`**: removed stale `via relay: any Relay`
+  parameter. Shipped WC6 API is `pair(with:family:)` — relay is set at
+  `init(relay:)` time, not per-call.
+- **`FederationSyncEngine.acceptPairingProposal`**: added public method
+  (shipped WC6). Accepter-side leg of the Ed25519 handshake; called by
+  `pair(with:family:)` internally and by relay-based pairing (WC7).
+- **`Relay.send`**: changed to `throws`. Durable outbox (WC2) retains
+  records on transport failure; `FederationRelay` never throws in-process.
+- **`PayloadKind`**: added `pairingProposal = 0x10` and
+  `pairingAcceptance = 0x11` (shipped WC6 — reserved byte values for
+  relay-based pairing transport, silently ignored by `pull()` in v1.0).
 
 ### 1.6 -- 2026-07-17 (CVK-ICLOUD P5-M4)
 - Promoted 1.6-draft to 1.6 (status: active). All `(v1.2-draft)` markers

@@ -602,10 +602,9 @@ actor FederationStateActor {
     /// Signed pairing handshake (WC6). Derives a 16-byte cryptographically
     /// random nonce, builds a PairingProposal, signs the canonical bytes with
     /// the local Ed25519 key, and calls `acceptProposal` on the peer actor
-    /// (direct cross-actor call for v1.0 in-process pairing). Verifies the
-    /// acceptance: both the returned family and the accepter's signature over
-    /// the canonical proposal bytes must be valid. On success, both sides are
-    /// persisted to `_fed_peers`.
+    /// (direct cross-actor call for v1.0 in-process pairing). Delegates
+    /// acceptance verification and peer registration to
+    /// `verifyAndRegisterAcceptance(_:for:proposalBytes:)`.
     func pair(with peerActor: FederationStateActor, family: HyperplaneFamilySpec) async throws {
         // 16-byte cryptographically random nonce (CryptoKit SymmetricKey).
         let nonce = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
@@ -620,13 +619,35 @@ actor FederationStateActor {
         // Direct cross-actor call (v1.0 in-process). Peer verifies our
         // signature, signs the same bytes, persists us, and returns acceptance.
         let acceptance = try await peerActor.acceptProposal(proposal, proposerSignature: proposerSig)
+        try await verifyAndRegisterAcceptance(acceptance, for: family, proposalBytes: sigBytes)
+    }
 
-        // Proposer-side verification: family must echo back unchanged,
-        // and accepter's signature must verify against the accepter's claimed key.
+    /// Proposer-side acceptance verification and peer registration.
+    ///
+    /// Separated from `pair(with:family:)` so the two proposer-side guard
+    /// branches (family mismatch, signature mismatch) can be exercised by tests
+    /// with an injected misbehaving acceptance — without needing a second real
+    /// peer engine that returns the wrong response.
+    ///
+    /// Guards (in order):
+    ///  1. `acceptance.acceptedFamily == family` — misbehaving accepter guard.
+    ///  2. `FederationSignature.verify(...)` — accepter public key ownership guard.
+    ///
+    /// On success: persists the peer to `_fed_peers` and appends to in-memory
+    /// `peers`. On guard failure: throws `SyncError.authenticationFailed`;
+    /// no peer is registered.
+    func verifyAndRegisterAcceptance(
+        _ acceptance: PairingAcceptance,
+        for family: HyperplaneFamilySpec,
+        proposalBytes sigBytes: Data
+    ) async throws {
+        // Guard 1: family must echo back unchanged. A misbehaving accepter
+        // could lie about the family it accepted — reject before sig check.
         guard acceptance.acceptedFamily == family else {
             throw SyncError.authenticationFailed(
                 detail: "accepter echoed a different family spec")
         }
+        // Guard 2: accepter must prove ownership of the key it claims.
         guard FederationSignature.verify(
             acceptance.signatureOfProposal,
             of: sigBytes,
@@ -636,7 +657,7 @@ actor FederationStateActor {
                 detail: "accepter signature verification failed")
         }
 
-        // Persist and register the peer on the proposer side.
+        // Both guards passed: persist and register the peer on the proposer side.
         let peerPubKey = acceptance.accepterPublicKey
         if let storage {
             try await persistPeer(publicKey: peerPubKey, family: family, storage: storage)

@@ -96,13 +96,13 @@ Wave A/B behaviors and their current Federation parity. "FED" means "Federation 
 | Tombstone LWW + A6 footprint | B-9, C-12 | YES | YES | PARITY |
 | postApplyIntegrityHook (R3) | B-7 note | YES | YES (code present) | PARITY |
 | Parked outbox purge on tombstone | B-9 note | YES (P5-M1b) | N/A (no outbox yet) | N/A |
-| Schema-skew pending queue | B-10, C-15 | YES (_fed_pending_skew v3) | NO (rejects as conflict) | **DRIFT** |
-| TombstoneGC | B-9 note | YES (gcIfDue after pull) | NO | **DRIFT** |
-| Side-schema version | B-12 | v4 | v4 | **PARITY (WC1)** |
+| Schema-skew pending queue | B-10, C-15 | YES (_fed_pending_skew v3) | YES (_fed_pending_skew v3) | **PARITY (WC3)** |
+| TombstoneGC | B-9 note | YES (gcIfDue after pull) | YES (gc_if_due after pull) | **PARITY (WC4)** |
+| Side-schema version | B-12 | v6 | v6 | **PARITY (WC1, WC2, WC6)** |
 | Durable outbox | I-12, B-11 | YES (_fed_outbox v5) | YES (_fed_outbox v5) | **PARITY (WC2)** |
 | Identity persistence | I-8 | YES (_fed_identity v4) | YES (_fed_identity v4) | **PARITY (WC1)** |
-| Peer persistence | I-8 | NO | NO | PARITY (both missing) |
-| Signed pairing handshake | B-7 | TYPED NOT WIRED | TYPED NOT WIRED | PARITY (both missing) |
+| Peer persistence | I-8 | YES (_fed_peers v6) | YES (_fed_peers v6) | **PARITY (WC6)** |
+| Signed pairing handshake | B-7 | YES (WC6 wired) | YES (WC6 wired) | **PARITY (WC6)** |
 | SyncValueBox depth cap | row 11 | NO | NO | PARITY (both missing) |
 | Adaptive poll scheduler | B-11 | NO (deferred) | NO (deferred) | PARITY (both deferred) |
 
@@ -226,7 +226,7 @@ entries survive. Push delivers all 3 to relay inbox.
 
 ---
 
-### WC3 — Rust skew-queue parity (PARITY)
+### ~~WC3 — Rust skew-queue parity (PARITY)~~ DONE (CVK-WC3, 2026-07-17)
 
 **Scope:** Bring the Rust FederationSyncEngine to schema v3 parity with Swift: add
 `_fed_pending_skew` table (schema v3), port the skew-queue hold-and-replay logic from Swift's
@@ -255,7 +255,7 @@ in _fed_pending_skew during pull; replayed on re-enable with matching schema ver
 
 ---
 
-### WC4 — Rust TombstoneGC parity (PARITY)
+### ~~WC4 — Rust TombstoneGC parity (PARITY)~~ DONE (CVK-WC4, 2026-07-17)
 
 **Scope:** Port `gcIfDue` (CVK-WB7 pattern) to the Rust FederationSyncEngine.pull() path.
 Closes the TombstoneGC DRIFT row.
@@ -278,7 +278,7 @@ no primitive changes). **Can run in parallel with WC2 and WC3.**
 
 ---
 
-### WC5 — SyncValueBox depth cap (WIRE HARDENING)
+### ~~WC5 — SyncValueBox depth cap (WIRE HARDENING)~~ DONE (CVK-WC5, 2026-07-17)
 
 **Scope:** Closes TRACKED_FOLLOWUPS row 11. Add `maxDepth: Int = 3` parameter to
 `SyncValueBox.fromJSON` (or the recursive Codable init) in Swift; add a recursive depth
@@ -304,7 +304,7 @@ Deserialize implementation).
 
 ---
 
-### WC6 — Pairing lifecycle persistence (PAIRING)
+### ~~WC6 — Pairing lifecycle persistence (PAIRING)~~ DONE (CVK-WC6, 2026-07-17)
 
 **Scope:** Two sub-tasks in one atomic mission:
 
