@@ -65,4 +65,24 @@ public actor GatewayRuntime {
         IntentRuntimeBridge.shared.register(created)
         return created
     }
+
+    // MARK: - Federation Session Manager (FED-OD-4)
+
+    /// The process-wide `FederationSessionManager`. Created lazily on first access.
+    ///
+    /// F1 supports one concurrent federation session. The manager is backed by
+    /// this runtime's estate bridge (lazily resolved). The UI layer (FederationPanelView,
+    /// FED-OD-6) calls `startSession` / `endSession` on the manager returned here.
+    ///
+    /// - Throws: Rethrows from `bridge()` if the estate cannot be attached.
+    public func federationSession() async throws -> FederationSessionManager {
+        if let m = _federationSession { return m }
+        let b = try await bridge()
+        let manager = FederationSessionManager(bridge: b)
+        _federationSession = manager
+        return manager
+    }
+
+    // Stored separately from bridgeValue to keep the bridge accessor clean.
+    private var _federationSession: FederationSessionManager?
 }
