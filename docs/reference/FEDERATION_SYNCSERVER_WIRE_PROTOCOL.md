@@ -1,7 +1,7 @@
 ---
 title: Federation SyncServer Wire Protocol
 version: v0.1
-status: proposed
+status: accepted
 date: 2026-07-17
 mission: CVK-WC7a
 reviewer: Bob
@@ -589,3 +589,7 @@ scheduler is built into HostedRelay.
 paths (`/v1/send/{64-char-hex}`). The WC7 implementation uses a local `Data.hex`
 extension that produces lowercase hex via `String(format: "%02x", byte)`, matching
 the spec's 64-char lowercase constraint.
+
+## Status update
+
+Accepted 2026-07-18 (Bob): authoritative Federation relay contract; future SyncServer implementations build to this spec and must pass RelayConformanceTests.

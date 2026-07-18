@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 question: Should ConvergenceKit's CKRecordMapping use CKRecord.encryptedValues for content columns, and if so, which columns, under what migration path, and at what cost?
 authors: MOOTx01 maintainers
 date: 2026-07-17
@@ -196,3 +196,7 @@ A round-trip test through `CloudZoneFake` (the injectable `CloudKitDatabaseProto
 Row 3 in `docs/status/CVK_ICLOUD/TRACKED_FOLLOWUPS.md` should read:
 
 > **CKRecord.encryptedValues eval** — evaluated CVK-WB3. Recommendation: DEFER until a named content sensitivity requirement triggers adoption. Decision record: `docs/decisions/DECISION_CONVERGENCEKIT_ENCRYPTEDVALUES_2026-07-17.md`. Implementation sketch and migration path documented. Type compatibility is complete; zone-feed pull path makes the query restriction moot. Bob decides.
+
+## Status update
+
+Accepted 2026-07-18 (Bob): DEFER stands — SQLCipher at rest + TLS in transit suffice absent a named requirement; implementation sketch retained for future adoption.
