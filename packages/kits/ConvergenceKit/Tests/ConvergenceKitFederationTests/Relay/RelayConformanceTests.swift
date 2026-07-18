@@ -408,6 +408,182 @@ struct HostedRelayConformanceTests {
     }
 }
 
+// MARK: - Suite 3: Core conformance — LANRelay (via FakeLANRelayTransport, loopback)
+
+// Note on loopback semantics (Kong V1, FED-OD charter):
+//   `runCoreConformance` uses the SAME key for send-destination and drain-source.
+//   In production two separate LANRelay instances communicate; here a single relay
+//   with FakeLANRelayTransport (loopback) satisfies the contract because the seam
+//   routes sends directly into the drain buffer for the same key. This is identical
+//   to how FederationRelay works in-process — the fixture tests WHAT arrives, not HOW.
+
+@Suite("Relay conformance — LANRelay (via FakeLANRelayTransport, loopback, spec §6.3)")
+struct LANRelayConformanceTests {
+
+    // Convenience: make a (relay, transport) pair with a plain open-loopback transport.
+    private func makeRelay() -> (LANRelay, FakeLANRelayTransport) {
+        let transport = FakeLANRelayTransport()
+        let relay = LANRelay(transport: transport)
+        return (relay, transport)
+    }
+
+    // ── Core conformance ──────────────────────────────────────────────────────
+
+    @Test("core conformance checklist (spec §6.3 — LANRelay loopback)")
+    func coreConformance() throws {
+        let (relay, _) = makeRelay()
+        let recipient = LocalIdentity()
+        let sender = LocalIdentity()
+        // LANRelay has no registration step (unlike HostedRelay) — drain for any
+        // key starts empty. FakeLANRelayTransport loopback routes sends to drain.
+        try runCoreConformance(relay: relay, inboxKey: recipient.publicKey, senderIdentity: sender)
+    }
+
+    @Test("multiple recipients: envelopes route to correct inbox")
+    func multipleRecipients() throws {
+        let (relay, _) = makeRelay()
+        let aliceSender = LocalIdentity()
+        let bob = LocalIdentity()
+
+        let envForAlice = try makeTestEnvelope(sender: aliceSender, hlcSeed: 300)
+        let envForBob = try makeTestEnvelope(sender: aliceSender, hlcSeed: 400)
+
+        try relay.send(to: aliceSender.publicKey, message: envForAlice)
+        try relay.send(to: bob.publicKey, message: envForBob)
+
+        let aliceReceived = relay.drain(for: aliceSender.publicKey)
+        let bobReceived = relay.drain(for: bob.publicKey)
+
+        #expect(aliceReceived.count == 1, "Alice should receive exactly one envelope")
+        #expect(bobReceived.count == 1, "Bob should receive exactly one envelope")
+        #expect(aliceReceived[0].hlc.physicalTime == 300, "Alice received wrong envelope")
+        #expect(bobReceived[0].hlc.physicalTime == 400, "Bob received wrong envelope")
+    }
+
+    @Test("unknown recipient returns empty array")
+    func unknownRecipientEmpty() {
+        let (relay, _) = makeRelay()
+        let ghostKey = LocalIdentity().publicKey
+        #expect(relay.drain(for: ghostKey).isEmpty, "drain for unregistered key must be empty")
+    }
+
+    @Test("at-least-once: re-send same envelope does not lose delivery")
+    func atLeastOnceResend() throws {
+        let (relay, _) = makeRelay()
+        let recipient = LocalIdentity()
+        let sender = LocalIdentity()
+        let envelope = try makeTestEnvelope(sender: sender, hlcSeed: 54321)
+
+        // Send twice — simulates durable-outbox retry.
+        // LANRelay/FakeLANRelayTransport stores both (no dedup at relay level;
+        // engine LWW gate handles duplicates downstream).
+        try relay.send(to: recipient.publicKey, message: envelope)
+        try relay.send(to: recipient.publicKey, message: envelope)
+
+        let received = relay.drain(for: recipient.publicKey)
+        #expect(received.count >= 1, "at least one delivery must succeed on re-send")
+    }
+
+    // ── LANRelay-specific rows ─────────────────────────────────────────────────
+
+    /// TLS-refused-on-unknown-key: send to a key not in _fed_peers → peerUnreachable.
+    ///
+    /// This row verifies the identity-pinning invariant (charter V2, FED-OD charter):
+    ///   - The production TLS verifier refuses connections from unrecognized keys.
+    ///   - FakeLANRelayTransport with `knownPeers` simulates this at the seam level.
+    ///   - An unknown peer attempting to connect MUST result in SyncError.peerUnreachable.
+    @Test("TLS refused: send to unknown peer key throws peerUnreachable (charter V2)")
+    func tlsRefusedOnUnknownKey() throws {
+        let knownKey = LocalIdentity()
+        let unknownKey = LocalIdentity()
+
+        // Build a transport that only accepts the known peer.
+        let restrictedTransport = FakeLANRelayTransport(knownPeers: [knownKey.publicKey])
+        let relay = LANRelay(transport: restrictedTransport)
+
+        // Send to the KNOWN peer should succeed.
+        let envelope = try makeTestEnvelope(sender: knownKey)
+        try relay.send(to: knownKey.publicKey, message: envelope)
+        // (no assertion needed — no throw = pass)
+
+        // Send to the UNKNOWN peer must throw peerUnreachable (charter V2 invariant).
+        let unknownEnvelope = try makeTestEnvelope(sender: unknownKey, hlcSeed: 9_000)
+        var caughtExpectedError = false
+        do {
+            try relay.send(to: unknownKey.publicKey, message: unknownEnvelope)
+            Issue.record("expected peerUnreachable for unknown peer, got no error")
+        } catch SyncError.peerUnreachable {
+            caughtExpectedError = true
+        } catch {
+            Issue.record("expected peerUnreachable for unknown peer, got: \(error)")
+        }
+        #expect(caughtExpectedError, "send to unrecognized peer key must throw peerUnreachable")
+    }
+
+    /// Envelope byte-fidelity over LAN framing: all fields survive the transport round-trip.
+    ///
+    /// Mirrors the core conformance Row 4 but tests explicitly that the fake transport
+    /// preserves byte identity, confirming that a production LAN transport must do the same.
+    @Test("envelope byte-fidelity: all fields byte-identical after LAN transport round-trip")
+    func envelopeByteFidelity() throws {
+        let (relay, _) = makeRelay()
+        let recipient = LocalIdentity()
+        let sender = LocalIdentity()
+        let envelope = try makeTestEnvelope(sender: sender, hlcSeed: 7_777_777)
+
+        try relay.send(to: recipient.publicKey, message: envelope)
+        let received = relay.drain(for: recipient.publicKey)
+
+        guard let got = received.first else {
+            Issue.record("no envelope received — byte-fidelity test failed")
+            return
+        }
+
+        // Verify every field of SignedEnvelope is byte-identical after transport.
+        #expect(got.senderPublicKey == envelope.senderPublicKey,
+                "senderPublicKey must be byte-identical after LAN transport")
+        #expect(got.payloadKind == envelope.payloadKind,
+                "payloadKind must be byte-identical after LAN transport")
+        #expect(got.payload == envelope.payload,
+                "payload must be byte-identical after LAN transport")
+        #expect(got.signature == envelope.signature,
+                "signature must be byte-identical after LAN transport")
+        #expect(got.hlc.physicalTime == envelope.hlc.physicalTime,
+                "HLC.physicalTime must be byte-identical after LAN transport")
+        #expect(got.hlc.logicalCount == envelope.hlc.logicalCount,
+                "HLC.logicalCount must be byte-identical after LAN transport")
+        #expect(got.hlc.nodeID == envelope.hlc.nodeID,
+                "HLC.nodeID must be byte-identical after LAN transport")
+    }
+
+    /// Connection teardown: after a transport is invalidated, subsequent drain calls
+    /// return empty (clean teardown — no leaked buffer state from a prior session).
+    ///
+    /// In production the NWConnection/NWListener is closed at session end (FED-OD-4).
+    /// Here we verify that a reset transport yields empty drain results, confirming
+    /// the LANRelay does not hold buffer state beyond what the transport provides.
+    @Test("connection teardown: drain returns empty after transport reset (clean teardown)")
+    func connectionTeardownIsClean() throws {
+        let (relay, transport) = makeRelay()
+        let recipient = LocalIdentity()
+        let sender = LocalIdentity()
+        let envelope = try makeTestEnvelope(sender: sender, hlcSeed: 42_000)
+
+        // Pre-teardown: send and verify delivery.
+        try relay.send(to: recipient.publicKey, message: envelope)
+        #expect(transport.inboxCount(for: recipient.publicKey) == 1,
+                "should have one pending envelope before teardown")
+
+        // Simulate connection teardown: reset the transport state.
+        transport.reset()
+
+        // Post-teardown: drain must return empty (no leaked state).
+        let afterTeardown = relay.drain(for: recipient.publicKey)
+        #expect(afterTeardown.isEmpty,
+                "drain must return empty after transport reset (clean teardown)")
+    }
+}
+
 // MARK: - Test-local transport helpers
 
 /// Transport that records all requests it receives.
