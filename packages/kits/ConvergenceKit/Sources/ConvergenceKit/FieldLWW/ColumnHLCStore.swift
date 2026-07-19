@@ -99,10 +99,43 @@ public enum ColumnHLCStore {
         tableName: String,
         primaryKey: UUID
     ) async throws {
+        try await writeAll(map: map, to: storage.rowStore, sideTable: sideTable,
+                            tableName: tableName, primaryKey: primaryKey)
+    }
+
+    /// Transactional variant of `writeAll(map:to:sideTable:tableName:primaryKey:)`.
+    ///
+    /// N1 fix: callers that must commit this write atomically with the
+    /// application-row value write (e.g. `ApplyInbound`'s `.fieldLevelLWW` arm)
+    /// call this overload from inside an open `storage.transaction { txn in ... }`
+    /// block instead of the `any Storage` overload above. Both writes then land
+    /// (or roll back) as one unit, closing the crash window where a value upsert
+    /// commits without its column-HLC bookkeeping (or vice versa).
+    public static func writeAll(
+        map: ColumnHLCMap,
+        to transaction: any StorageTransaction,
+        sideTable: String,
+        tableName: String,
+        primaryKey: UUID
+    ) async throws {
+        try await writeAll(map: map, to: transaction.rowStore, sideTable: sideTable,
+                            tableName: tableName, primaryKey: primaryKey)
+    }
+
+    /// Shared implementation — both the `any Storage` and `any StorageTransaction`
+    /// overloads above only ever touch `.rowStore`, so the actual write logic
+    /// lives here once, keyed on the common `any RowStore` surface.
+    private static func writeAll(
+        map: ColumnHLCMap,
+        to rowStore: any RowStore,
+        sideTable: String,
+        tableName: String,
+        primaryKey: UUID
+    ) async throws {
         guard !map.isEmpty else { return }
         for (columnName, packedHLC) in map.entries {
             let hlc = packedHLC.asHLC
-            _ = try await storage.rowStore.upsertSync(
+            _ = try await rowStore.upsertSync(
                 table: sideTable,
                 values: [
                     "table_name":  .text(tableName),
@@ -136,7 +169,37 @@ public enum ColumnHLCStore {
         tableName: String,
         primaryKey: UUID
     ) async throws {
-        _ = try await storage.rowStore.delete(
+        try await clearAll(from: storage.rowStore, sideTable: sideTable,
+                            tableName: tableName, primaryKey: primaryKey)
+    }
+
+    /// Transactional variant of `clearAll(from:sideTable:tableName:primaryKey:)`.
+    ///
+    /// N1 fix: the `.fieldLevelLWW` tombstone arm in `ApplyInbound` clears the
+    /// column-HLC side table in the SAME transaction as the row hard-delete and
+    /// the tombstone-HLC write, so a crash between the three writes cannot leave
+    /// stale column-HLC entries pointing at a row that no longer exists (or vice
+    /// versa — a deleted-but-still-column-HLC-tagged row confusing a future
+    /// re-insert under fieldLevelLWW).
+    public static func clearAll(
+        from transaction: any StorageTransaction,
+        sideTable: String,
+        tableName: String,
+        primaryKey: UUID
+    ) async throws {
+        try await clearAll(from: transaction.rowStore, sideTable: sideTable,
+                            tableName: tableName, primaryKey: primaryKey)
+    }
+
+    /// Shared implementation — see the `writeAll` private overload above for
+    /// the same rationale.
+    private static func clearAll(
+        from rowStore: any RowStore,
+        sideTable: String,
+        tableName: String,
+        primaryKey: UUID
+    ) async throws {
+        _ = try await rowStore.delete(
             table: sideTable,
             where: .and([
                 .eq(Column(table: sideTable, name: "table_name"), .text(tableName)),

@@ -99,7 +99,33 @@ extension CloudKitStateActor {
         storage: any Storage, table: String, primaryKey: UUID, pkColumn: String,
         hlc: HLC, schemaVersion: Int, kitID: String
     ) async throws {
-        _ = try await storage.rowStore.upsertSync(
+        try await writeSyncHLC(rowStore: storage.rowStore, table: table, primaryKey: primaryKey,
+                                pkColumn: pkColumn, hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Transactional variant of `writeSyncHLC(storage:table:primaryKey:pkColumn:hlc:schemaVersion:kitID:)`.
+    ///
+    /// N1 fix: `ApplyInbound`'s `.lastWriterWinsByHLC` and `.fieldLevelLWW` arms
+    /// call this overload from inside an open `storage.transaction { txn in ... }`
+    /// block so the row-grain HLC bookkeeping write commits atomically with the
+    /// application-row value write. Previously these were two separate top-level
+    /// `await` calls; a crash/kill between them could leave a committed value
+    /// row with a stale (or missing) `_ck_sync_meta` HLC, letting a later stale
+    /// edit silently overwrite the newer value.
+    func writeSyncHLC(
+        storage transaction: any StorageTransaction, table: String, primaryKey: UUID, pkColumn: String,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        try await writeSyncHLC(rowStore: transaction.rowStore, table: table, primaryKey: primaryKey,
+                                pkColumn: pkColumn, hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private func writeSyncHLC(
+        rowStore: any RowStore, table: String, primaryKey: UUID, pkColumn: String,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await rowStore.upsertSync(
             table: Self.syncMetaTable,
             values: [
                 "table_name": .text(table),
@@ -128,7 +154,32 @@ extension CloudKitStateActor {
         storage: any Storage, table: String, primaryKey: UUID,
         hlc: HLC, schemaVersion: Int, kitID: String
     ) async throws {
-        _ = try await storage.rowStore.upsertSync(
+        try await writeTombstoneHLC(rowStore: storage.rowStore, table: table, primaryKey: primaryKey,
+                                     hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Transactional variant of `writeTombstoneHLC(storage:table:primaryKey:hlc:schemaVersion:kitID:)`.
+    ///
+    /// N1 fix: `ApplyInbound`'s `.lastWriterWinsByHLC` and `.fieldLevelLWW` tombstone
+    /// arms call this overload from inside an open `storage.transaction { txn in ... }`
+    /// block so the hard-delete of the application row and the persisted tombstone
+    /// HLC commit atomically. Without this, a crash between the delete and this
+    /// write could leave a deleted row with no tombstone HLC recorded, letting a
+    /// later stale insert resurrect it (defeating the A6 stale-resurrect guard).
+    func writeTombstoneHLC(
+        storage transaction: any StorageTransaction, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        try await writeTombstoneHLC(rowStore: transaction.rowStore, table: table, primaryKey: primaryKey,
+                                     hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private func writeTombstoneHLC(
+        rowStore: any RowStore, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await rowStore.upsertSync(
             table: Self.syncMetaTable,
             values: [
                 "table_name": .text(table),
