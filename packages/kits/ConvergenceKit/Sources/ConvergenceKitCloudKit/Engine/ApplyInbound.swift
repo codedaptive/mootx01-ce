@@ -274,6 +274,29 @@ extension CloudKitStateActor {
             }
 
         case .fieldLevelLWW:
+            // Gap 2 fix: reject a stale edit that predates a recorded row-grain
+            // tombstone. Without this, a column's absence from ColumnHLCStore
+            // (either genuinely never-written, OR wiped by the tombstone arm's
+            // ColumnHLCStore.clearAll) is indistinguishable to FieldLWWMerge.merge
+            // — its "no local HLC recorded" fallback treats the stale edit as a
+            // first-ever write and applies it unconditionally, resurrecting a
+            // row that was correctly deleted. Trigger-agnostic: reproducible via
+            // ordinary clock skew or a 3-device race, no crash required (P4.5).
+            //
+            // Strict `<` — matching the existing `.lastWriterWinsByHLC` gates
+            // above (both the tombstone-apply gate and the normal-apply gate):
+            // an edit STRICTLY older than the tombstone is rejected; an edit at
+            // or after the tombstone HLC proceeds to a normal apply below,
+            // correctly resurrecting the row when the edit is a genuine
+            // post-delete revival. Getting this boundary wrong in either
+            // direction is a data-loss bug (over-reject) or a zombie-row bug
+            // (under-reject) — both directions are covered by dedicated tests.
+            if let tombstoneHLC = try await readTombstoneHLC(
+                storage: storage, table: decoded.table, primaryKey: decoded.rowKey),
+               decoded.hlc < tombstoneHLC {
+                return // stale-before-tombstone edit — row stays deleted, no resurrection
+            }
+
             // Per-column LWW apply. Read local column HLCs from the side table,
             // compute which incoming columns win, apply them, and persist the
             // updated column HLC map. See FieldLWWMerge for the commutativity proof.

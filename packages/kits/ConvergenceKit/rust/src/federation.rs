@@ -1438,6 +1438,19 @@ fn apply_record(
                     }
                 }
                 ConflictPolicy::FieldLevelLWW => {
+                    // Gap 2 fix: reject a stale edit that predates a recorded
+                    // row-grain tombstone — see read_fed_tombstone_hlc's doc
+                    // comment for the full rationale. Mirrors the Swift
+                    // CloudKit ApplyInbound.swift / Federation applyInbound
+                    // gap-2 fix. Strict `<` matches the existing
+                    // LastWriterWinsByHLC gates elsewhere in this function.
+                    let incoming_hlc: HLC = record.hlc.into();
+                    if let Some(tombstone_hlc) = read_fed_tombstone_hlc(&row_store, &record.table, &record.row_key) {
+                        if incoming_hlc < tombstone_hlc {
+                            return Ok(()); // stale-before-tombstone edit — row stays deleted, no resurrection
+                        }
+                    }
+
                     // True column-grain fieldLevelLWW apply using wire-carried column
                     // HLCs and the persistent _fed_sync_meta_cols side table.
                     //
@@ -2368,6 +2381,60 @@ fn gc_if_due(row_store: &Arc<dyn RowStore>, now_ms: i64) {
     }
     tombstone_compact(row_store, now_ms);
     write_gc_sentinel_ms(row_store, now_ms);
+}
+
+/// Read the row-grain tombstone HLC for a (table, row_key) — ONLY if that row
+/// is currently tombstoned (`is_deleted == 1`). Returns `None` when there is no
+/// `_fed_sync_meta` entry at all, OR when an entry exists but the row is live
+/// (`is_deleted == 0`) — in both cases there is no active tombstone to gate
+/// against.
+///
+/// Gap 2 fix: `apply_record`'s `ConflictPolicy::FieldLevelLWW` normal-apply arm
+/// has no visibility, from `read_fed_column_hlcs` alone, into whether a
+/// column's absence means "never written" or "history cleared by a tombstone"
+/// (`clear_fed_column_hlcs` wipes ALL column entries when a tombstone wins —
+/// see the tombstone dispatch above). Without this row-grain check, a stale
+/// edit that predates a delete is indistinguishable from a first-ever write
+/// and gets applied, resurrecting a correctly-deleted row. The row-grain
+/// tombstone HLC survives the delete specifically for this purpose (A6) and
+/// is untouched by the gap-3 fix — it remains the reliable signal. Mirrors the
+/// Swift CloudKit `readTombstoneHLC` / Federation `readFedTombstoneHLC` gap-2 fix.
+///
+/// Distinct from `read_fed_sync_hlc` below, which returns the row-grain HLC
+/// unconditionally (correct for `ConflictPolicy::LastWriterWinsByHLC`'s single
+/// whole-row comparison). Gating `FieldLevelLWW`'s column merge on the
+/// UNCONDITIONAL row-grain HLC instead of ONLY the tombstone case would reject
+/// a legitimate concurrent edit to a DIFFERENT column merely because some
+/// other column in the same row was touched more recently — defeating
+/// fieldLevelLWW's whole purpose (independent per-column resolution).
+fn read_fed_tombstone_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+) -> Option<HLC> {
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "table_name".to_string()),
+            TypedValue::Text(table.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "primary_key".to_string()),
+            TypedValue::Text(row_key.to_string()),
+        ),
+    ]);
+    let rows = row_store
+        .query(FED_SYNC_META_TABLE, Some(&predicate), &[], None, None)
+        .ok()?;
+    let first = rows.into_iter().next()?;
+    match first.get("is_deleted") {
+        Some(TypedValue::Int(1)) => {}
+        _ => return None,
+    }
+    match first.get("sync_hlc") {
+        Some(TypedValue::Hlc(h)) => Some(*h),
+        Some(TypedValue::Int(i)) => Some(HLC::from_packed((*i) as u64)),
+        _ => None,
+    }
 }
 
 /// Read the persisted sync HLC from `_fed_sync_meta` for a given (table, row_key).
@@ -3780,5 +3847,174 @@ mod tests {
         );
 
         engine.disable().unwrap();
+    }
+
+    // ── Gap 2: fieldLevelLWW tombstone-resurrection guard ───────────────────
+    //
+    // Rust twin of TombstoneResurrectionGuardTests.swift (both CloudKit and
+    // Federation Swift test targets). See that file's header for the full
+    // gap-2 writeup. Summary: `ConflictPolicy::FieldLevelLWW`'s normal-apply
+    // arm read only `read_fed_column_hlcs` (column-grain), which cannot
+    // distinguish "column never written" from "history cleared by a
+    // tombstone" (`clear_fed_column_hlcs` wipes it on tombstone-wins). A
+    // stale edit predating a delete looked like a first-ever write and got
+    // applied, resurrecting a correctly-deleted row — reproducible via clock
+    // skew or a 3-device race, no crash required. Fixed by gating on the
+    // ROW-GRAIN tombstone HLC (`_fed_sync_meta.is_deleted == 1`, A6,
+    // untouched by gap 3): an edit strictly older than the tombstone is
+    // rejected; an edit at or after the tombstone HLC proceeds to a normal
+    // apply, correctly resurrecting the row.
+    //
+    // These tests call `apply_record` directly (synchronous, no observer
+    // thread) — same technique as the N1 tests above — for fully
+    // deterministic HLC control with no timing dependency.
+
+    fn gap2_make_storage() -> Arc<dyn Storage> {
+        let s = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let schema = SchemaDeclaration::new(
+            "gap2-test-kit",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::new("id", ColumnType::Uuid),
+                    ColumnDeclaration::new("note", ColumnType::Text),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        s.open(&schema).expect("open items schema");
+        ensure_fed_sync_meta_table(&*s).expect("ensure_fed_sync_meta_table");
+        s
+    }
+
+    fn gap2_synced_table() -> SyncedTable {
+        SyncedTable::new("items", "id")
+            .with_direction(SyncDirection::Bidirectional)
+            .with_conflict_policy(ConflictPolicy::FieldLevelLWW)
+    }
+
+    fn gap2_make_upsert(row_id: Uuid, note: &str, hlc_time: i64) -> SyncRecord {
+        let hlc = HLC { physical_time: hlc_time, logical_count: 0, node_id: 1 };
+        let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        values.insert("note".to_string(), TypedValue::Text(note.to_string()));
+        let mut record = SyncRecord::new(
+            "items",
+            SyncEventKind::Update,
+            row_id,
+            Some(SyncValueMap::from_typed(values)),
+            hlc,
+            1,
+            "gap2-test-kit",
+        );
+        let mut col_entries = BTreeMap::new();
+        col_entries.insert("note".to_string(), PackedHLC::from(hlc));
+        record.column_hlcs = Some(ColumnHLCMap { entries: col_entries });
+        record
+    }
+
+    fn gap2_make_tombstone(row_id: Uuid, hlc_time: i64) -> SyncRecord {
+        let hlc = HLC { physical_time: hlc_time, logical_count: 0, node_id: 1 };
+        SyncRecord::new_tombstone("items", row_id, hlc, 1, "gap2-test-kit")
+    }
+
+    fn gap2_row_exists(storage: &Arc<dyn Storage>, row_id: Uuid) -> bool {
+        let pred = StoragePredicate::Eq(
+            Column::new("items".to_string(), "id".to_string()),
+            TypedValue::Uuid(row_id),
+        );
+        storage.row_store().count("items", Some(&pred)).unwrap_or(0) > 0
+    }
+
+    fn gap2_row_note(storage: &Arc<dyn Storage>, row_id: Uuid) -> Option<String> {
+        let pred = StoragePredicate::Eq(
+            Column::new("items".to_string(), "id".to_string()),
+            TypedValue::Uuid(row_id),
+        );
+        let rows = storage
+            .row_store()
+            .query("items", Some(&pred), &[], None, None)
+            .ok()?;
+        match rows.into_iter().next()?.get("note")? {
+            TypedValue::Text(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// (a) STALE edit after delete — must NOT resurrect (the money test).
+    #[test]
+    fn gap2_stale_edit_after_tombstone_does_not_resurrect() {
+        let storage = gap2_make_storage();
+        let synced_table = gap2_synced_table();
+        let row_id = Uuid::new_v4();
+
+        apply_record(&gap2_make_upsert(row_id, "original", 100), &synced_table, &storage)
+            .expect("seed upsert must succeed");
+        apply_record(&gap2_make_tombstone(row_id, 200), &synced_table, &storage)
+            .expect("tombstone must succeed");
+        assert!(!gap2_row_exists(&storage, row_id), "row must be deleted after the tombstone");
+
+        // A stale edit at T=150 (< tombstone T=200) arrives late.
+        apply_record(&gap2_make_upsert(row_id, "STALE-MUST-NOT-RESURRECT", 150), &synced_table, &storage)
+            .expect("apply_record must not error even when rejecting");
+
+        assert!(
+            !gap2_row_exists(&storage, row_id),
+            "stale edit predating the tombstone must NOT resurrect the row (gap 2 money test)"
+        );
+    }
+
+    /// (b) LEGITIMATE fresh edit after delete — MUST resurrect (guard against
+    /// over-rejecting).
+    #[test]
+    fn gap2_fresh_edit_after_tombstone_resurrects_correctly() {
+        let storage = gap2_make_storage();
+        let synced_table = gap2_synced_table();
+        let row_id = Uuid::new_v4();
+
+        apply_record(&gap2_make_upsert(row_id, "original", 100), &synced_table, &storage)
+            .expect("seed upsert must succeed");
+        apply_record(&gap2_make_tombstone(row_id, 200), &synced_table, &storage)
+            .expect("tombstone must succeed");
+        assert!(!gap2_row_exists(&storage, row_id), "row must be deleted after the tombstone");
+
+        // A genuinely NEW edit at T=300 (> tombstone T=200) — a legitimate
+        // post-delete revival.
+        apply_record(&gap2_make_upsert(row_id, "LEGITIMATE-REVIVAL", 300), &synced_table, &storage)
+            .expect("resurrection upsert must succeed");
+
+        assert!(gap2_row_exists(&storage, row_id), "edit newer than the tombstone must resurrect the row");
+        assert_eq!(
+            gap2_row_note(&storage, row_id).as_deref(),
+            Some("LEGITIMATE-REVIVAL"),
+            "resurrected row must carry the new edit's value"
+        );
+    }
+
+    /// (c) Trigger-agnostic: order-independence (3-device / clock-skew race
+    /// variant). The same two records, applied in opposite order on two
+    /// independent estates, must converge to the same (deleted) state.
+    #[test]
+    fn gap2_order_independence_converges_to_deleted_state() {
+        let synced_table = gap2_synced_table();
+        let row_id = Uuid::new_v4();
+
+        // Estate A: edit@50 then tombstone@100 (expected order).
+        let storage_a = gap2_make_storage();
+        apply_record(&gap2_make_upsert(row_id, "v1", 50), &synced_table, &storage_a)
+            .expect("estate A upsert must succeed");
+        apply_record(&gap2_make_tombstone(row_id, 100), &synced_table, &storage_a)
+            .expect("estate A tombstone must succeed");
+
+        // Estate B: the SAME two records in the OPPOSITE order.
+        let storage_b = gap2_make_storage();
+        apply_record(&gap2_make_tombstone(row_id, 100), &synced_table, &storage_b)
+            .expect("estate B tombstone must succeed");
+        apply_record(&gap2_make_upsert(row_id, "v1", 50), &synced_table, &storage_b)
+            .expect("estate B stale upsert must not error even when rejected");
+
+        assert!(!gap2_row_exists(&storage_a, row_id), "estate A (edit-then-tombstone order) must converge to deleted");
+        assert!(!gap2_row_exists(&storage_b, row_id), "estate B (tombstone-then-edit order) must converge to deleted");
     }
 }

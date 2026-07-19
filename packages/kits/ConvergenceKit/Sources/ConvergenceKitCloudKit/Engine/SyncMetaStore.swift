@@ -48,6 +48,49 @@ extension CloudKitStateActor {
         return HLC(packed: UInt64(bitPattern: packed))
     }
 
+    /// Read the row-grain tombstone HLC for a specific row — ONLY if that row
+    /// is currently tombstoned (`is_deleted == 1`). Returns `nil` when there is
+    /// no `_ck_sync_meta` entry at all, OR when an entry exists but the row is
+    /// live (`is_deleted == 0`) — in both cases there is no active tombstone to
+    /// gate against.
+    ///
+    /// Gap 2 fix: `ApplyInbound`'s `.fieldLevelLWW` normal-apply arm has no
+    /// visibility, from `ColumnHLCStore` alone, into whether a column's absence
+    /// means "never written" or "history cleared by a tombstone"
+    /// (`ColumnHLCStore.clearAll` wipes ALL column entries when a tombstone
+    /// wins — see the `.fieldLevelLWW` tombstone arm above). Without this
+    /// row-grain check, a stale edit that predates a delete is indistinguishable
+    /// from a first-ever write and gets applied, resurrecting a correctly-deleted
+    /// row. The row-grain tombstone HLC survives the delete specifically for
+    /// this purpose (A6) and is untouched by the gap-3 fix (which only ever
+    /// writes ColumnHLCStore on local writes, never `_ck_sync_meta`'s
+    /// `is_deleted` flag) — it remains the reliable signal.
+    ///
+    /// Distinct from `readSyncHLC`, which returns the row-grain HLC
+    /// unconditionally (used by `.lastWriterWinsByHLC`, where a single
+    /// whole-row HLC comparison is always the correct gate — no per-column
+    /// ambiguity exists there). Gating `.fieldLevelLWW`'s column merge on the
+    /// UNCONDITIONAL row-grain HLC instead of ONLY the tombstone case would be
+    /// wrong in the other direction: it would reject a legitimate concurrent
+    /// edit to a DIFFERENT column merely because some other column in the same
+    /// row was touched more recently, defeating fieldLevelLWW's whole purpose
+    /// (independent per-column conflict resolution).
+    func readTombstoneHLC(
+        storage: any Storage, table: String, primaryKey: UUID
+    ) async throws -> HLC? {
+        let rows = try await storage.rowStore.query(
+            table: Self.syncMetaTable,
+            where: .and([
+                .eq(Column(table: Self.syncMetaTable, name: "table_name"), .text(table)),
+                .eq(Column(table: Self.syncMetaTable, name: "primary_key"), .text(primaryKey.uuidString))
+            ])
+        )
+        guard let row = rows.first,
+              case .int(let isDeleted) = row["is_deleted"], isDeleted == 1,
+              case .int(let packed) = row["sync_hlc"] else { return nil }
+        return HLC(packed: UInt64(bitPattern: packed))
+    }
+
     /// Batch-read sync HLCs for a set of (table, rowKey) pairs in one query.
     ///
     /// Used by `PullCycle.pull()` to pre-load `_ck_sync_meta` for the entire
