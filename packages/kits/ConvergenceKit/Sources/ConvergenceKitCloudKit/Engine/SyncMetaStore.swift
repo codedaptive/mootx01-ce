@@ -3,6 +3,17 @@
 // _ck_sync_meta side table management for CloudKitStateActor.
 // Provides ensure/read/write operations for the HLC-keyed row
 // metadata used by the lastWriterWinsByHLC conflict policy (#12).
+//
+// GAP 6 (2026-07, D38.1): reads/writes the full-width `sync_hlc_wire` BLOB
+// (HLC.wireBytes) instead of the legacy 40-bit-truncated `sync_hlc` packed
+// column. `_ck_sync_meta` is the ONE gap-6 carrier with real shipped
+// v1.0.33 data; `CKSideSchema.ensure(storage:)` runs a one-time BACKFILL
+// (`backfillSyncHLCWireIfNeeded`) that reconstructs `sync_hlc_wire` from the
+// legacy `sync_hlc` value — see `LegacyPackedHLCMigration.swift` for the
+// recoverability proof and `SideSchema.swift`'s v9→v10 migration for the
+// backfill call site. By the time any function below runs, every row
+// already has `sync_hlc_wire` populated (backfilled or freshly written);
+// callers do not need to fall back to `sync_hlc`.
 
 import Foundation
 import ConvergenceKit
@@ -44,8 +55,9 @@ extension CloudKitStateActor {
             ])
         )
         guard let row = rows.first,
-              case .int(let packed) = row["sync_hlc"] else { return nil }
-        return HLC(packed: UInt64(bitPattern: packed))
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else { return nil }
+        return hlc
     }
 
     /// Read the row-grain tombstone HLC for a specific row — ONLY if that row
@@ -87,8 +99,9 @@ extension CloudKitStateActor {
         )
         guard let row = rows.first,
               case .int(let isDeleted) = row["is_deleted"], isDeleted == 1,
-              case .int(let packed) = row["sync_hlc"] else { return nil }
-        return HLC(packed: UInt64(bitPattern: packed))
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else { return nil }
+        return hlc
     }
 
     /// Batch-read sync HLCs for a set of (table, rowKey) pairs in one query.
@@ -128,10 +141,11 @@ extension CloudKitStateActor {
             guard
                 case .text(let tableName)  = row["table_name"],
                 case .text(let primaryKey) = row["primary_key"],
-                case .int(let packed)      = row["sync_hlc"]
+                case .blob(let wire)       = row["sync_hlc_wire"],
+                let hlc = try? HLC(wireBytes: [UInt8](wire))
             else { continue }
             let key = "\(tableName)|\(primaryKey)"
-            result[key] = HLC(packed: UInt64(bitPattern: packed))
+            result[key] = hlc
         }
         return result
     }
@@ -173,7 +187,7 @@ extension CloudKitStateActor {
             values: [
                 "table_name": .text(table),
                 "primary_key": .text(primaryKey.uuidString),
-                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "sync_hlc_wire": .blob(Data(hlc.wireBytes)),
                 "schema_version": .int(Int64(schemaVersion)),
                 "kit_id": .text(kitID),
                 "is_deleted": .int(0)
@@ -227,7 +241,7 @@ extension CloudKitStateActor {
             values: [
                 "table_name": .text(table),
                 "primary_key": .text(primaryKey.uuidString),
-                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "sync_hlc_wire": .blob(Data(hlc.wireBytes)),
                 "schema_version": .int(Int64(schemaVersion)),
                 "kit_id": .text(kitID),
                 "is_deleted": .int(1)

@@ -10,6 +10,12 @@
 // Transport-agnostic: OutboxEntry holds a serialised SyncValueMap blob so the
 // push path can re-encode to any transport format (CKRecord today, other
 // formats in the future) without coupling the outbox schema to CloudKit.
+//
+// GAP 6 (2026-07, D38.1): `hlcWireBytes: Data` (16-byte `HLC.wireBytes`)
+// replaces the legacy `packedHLC: Int64` (`HLC.packed`, 40-bit-truncated).
+// `_ck_outbox` is develop/1.1.x-only (confirmed absent from the shipped
+// v1.0.33 tag) — clean regenerate, no backfill needed. See
+// ColumnHLCStore.swift's file header for the full defect writeup this fixes.
 
 import Foundation
 
@@ -57,11 +63,12 @@ public struct OutboxEntry: Sendable {
     /// Decoding only happens in PushCycle when building the CKRecord.
     public let columnHLCsData: Data?
 
-    /// Packed HLC for this change (48-bit physical | 12-bit logical |
-    /// 4-bit node, packed into Int64). Used by the coalescing logic:
-    /// when two entries for the same (tableName, rowKey) exist, the one
-    /// with the lower packedHLC is discarded.
-    public let packedHLC: Int64
+    /// Full-width wire-format HLC for this change (`HLC.wireBytes` — 16
+    /// bytes: 8 bytes physicalTime LE + 4 bytes logicalCount LE + 4 bytes
+    /// nodeID LE; gap 6, D38.1). Used by the coalescing logic: when two
+    /// entries for the same (tableName, rowKey) exist, the one decoding to
+    /// the lower HLC is discarded.
+    public let hlcWireBytes: Data
 
     /// ISO8601 wall-clock timestamp recorded at append time. Used for
     /// observability (staleness monitoring, queue age signals). Not used
@@ -86,7 +93,7 @@ public struct OutboxEntry: Sendable {
         rowKey: String,
         event: SyncEventKind,
         valuesData: Data?,
-        packedHLC: Int64,
+        hlcWireBytes: Data,
         enqueuedAt: String,
         retryCount: Int = 0,
         isParked: Bool = false,
@@ -97,7 +104,7 @@ public struct OutboxEntry: Sendable {
         self.rowKey = rowKey
         self.event = event
         self.valuesData = valuesData
-        self.packedHLC = packedHLC
+        self.hlcWireBytes = hlcWireBytes
         self.enqueuedAt = enqueuedAt
         self.retryCount = retryCount
         self.isParked = isParked

@@ -65,21 +65,26 @@
 // never cross the 40-bit boundary — the exact "vectors starting below the
 // real seam" pattern already called out for gap 5's own rowKey vectors.
 //
-// This is OUT OF SCOPE for gap 5 (which is rowKey minting only) and is
-// NOT fixed here — see the gap-5 completion report for the full writeup
-// and a proposed follow-up gap. `.lastWriterWinsByHLC`'s row-grain gate is
-// NOT affected: `decoded.hlc` (the incoming comparator, from
-// `OutboxEntry.packedHLC`) and the persisted `_ck_sync_meta.sync_hlc`
-// (`SyncMetaStore.swift:176,48`) are BOTH already the truncated `.packed`
-// form on both sides of the comparison, so the row-grain gate is
-// self-consistently truncated and correctly ordered (verified: within any
-// single 40-bit wrap band, which covers the entire practical lifetime of
-// a running deployment, truncation preserves relative order). Using
-// `.lastWriterWinsByHLC` here cleanly isolates and proves gap 5's actual
-// claim — that both spokes now resolve the SAME rowKey, so the HLC gate
-// compares against the RIGHT side-table entry instead of hitting the
-// "no local entry" first-write-wins fallback — without being confounded
-// by the separate, already-broken column-grain comparison.
+// This was OUT OF SCOPE for gap 5 (which is rowKey minting only) and was
+// NOT fixed there — see the gap-5 completion report for the full writeup.
+// `.lastWriterWinsByHLC`'s row-grain gate was NOT affected by the original
+// defect: `decoded.hlc` (the incoming comparator, from
+// `OutboxEntry.hlcWireBytes`) and the persisted `_ck_sync_meta.sync_hlc`
+// were BOTH already the truncated `.packed` form on both sides of the
+// comparison at the time gap 5 landed, so the row-grain gate was
+// self-consistently truncated and correctly ordered — which is exactly why
+// this test uses `.lastWriterWinsByHLC` to isolate gap 5's rowKey claim
+// from the (then still-open) column-grain defect below.
+//
+// GAP 6 UPDATE (2026-07, D38.1): the column-grain defect described above
+// is now FIXED — full-width HLC persistence across every carrier, both
+// legs (see `ColumnHLCStore.swift`'s file header for the current writeup).
+// `OutboxEntry.packedHLC: Int64` was renamed to `hlcWireBytes: Data`
+// (`HLC.wireBytes`, lossless) as part of that fix — this file's helper
+// below was updated to match, but the test itself still deliberately uses
+// `.lastWriterWinsByHLC` (unchanged) since that was always gap 5's actual
+// claim; the money test for gap 6's `.fieldLevelLWW` column-grain fix
+// lives in `FieldLevelLWWFullWidthOrderingMoneyTests.swift`.
 
 import Testing
 import Foundation
@@ -161,7 +166,7 @@ struct RowKeyDeterminismOrderingMoneyTests {
         let batch = try await OutboxStore.readBatch(from: storage)
         let entry = try #require(batch.last, "expected at least one outbox entry")
         let rowKey = try #require(UUID(uuidString: entry.rowKey), "outbox entry rowKey must be a valid UUID string")
-        let hlc = HLC(packed: UInt64(bitPattern: entry.packedHLC))
+        let hlc = try HLC(wireBytes: [UInt8](entry.hlcWireBytes))
         let valuesData = try #require(entry.valuesData, "expected values for an insert/update entry")
         let valueMap = try JSONDecoder().decode(SyncValueMap.self, from: valuesData)
         let columnHLCs: ColumnHLCMap? = try entry.columnHLCsData.map { try JSONDecoder().decode(ColumnHLCMap.self, from: $0) }

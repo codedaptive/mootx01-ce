@@ -129,7 +129,7 @@ struct CrashRecoveryTests {
             rowKey: originalEntry.rowKey,
             event: originalEntry.event,
             valuesData: originalEntry.valuesData,
-            packedHLC: originalEntry.packedHLC,
+            hlcWireBytes: originalEntry.hlcWireBytes,
             enqueuedAt: originalEntry.enqueuedAt,
             retryCount: 0,
             isParked: false,

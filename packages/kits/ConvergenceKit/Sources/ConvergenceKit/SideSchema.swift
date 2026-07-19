@@ -44,6 +44,28 @@
 //                              that already have _ck_device_identity from the legacy
 //                              DeviceIdentityStore.ensureSchema path advance the version
 //                              counter without recreating the table.
+//   v10 — FULL-WIDTH HLC PERSISTENCE, EVERY CARRIER (gap 6, 2026-07, D38.1).
+//         Originally scoped to _ck_sync_meta_cols alone; widened after Kong
+//         found the narrow fix regresses CloudKit deletes (edit-beats-delete)
+//         — a still-truncated row-grain tombstone HLC compared against
+//         now-full-width column HLCs reproduces the same defect one level
+//         up. D38.1: full-width, atomic, every carrier, one encoding
+//         (HLC.wireBytes — the already Swift/Rust lockstep-audited 16-byte
+//         lossless format, HLC.swift:205-245 — reused verbatim, not
+//         reinvented per carrier). This version bump covers:
+//           - _ck_sync_meta_cols gains `col_hlc_wire` BLOB (ColumnHLCStore.swift)
+//           - _ck_sync_meta gains `sync_hlc_wire` BLOB (SyncMetaStore.swift) —
+//             BACKFILL-migrated from the legacy `sync_hlc` packed column (this
+//             table is the one carrier with real shipped v1.0.33 data; see
+//             LegacyPackedHLCMigration.swift for the recoverability proof and
+//             SideSchema.swift's v9→v10 migration below for the backfill step)
+//           - _ck_outbox gains `hlc_wire` BLOB (OutboxEntry.hlcWireBytes) —
+//             develop/1.1.x-only (confirmed absent from v1.0.33), clean
+//             regenerate, no backfill needed
+//         Every carrier's legacy Int64-packed column is RETAINED (additive-
+//         only migration policy) but is dead — nothing reads it after this
+//         version. See ColumnHLCStore.swift / SyncMetaStore.swift /
+//         OutboxEntry.swift file headers for the full per-carrier writeup.
 // Earmarks now superseded:
 //   v4 — _ck_device_identity  Device-slot registry (N2) ← earmark superseded by v6→v7 jump;
 //                              table consolidated at v9 (CVK-WB12, A11 final — DONE)
@@ -99,12 +121,15 @@ public enum CKSideSchema {
     /// Per-column HLC side table for the `fieldLevelLWW` conflict policy.
     ///
     /// Schema: (table_name TEXT, primary_key TEXT, column_name TEXT,
-    ///          col_hlc INT); PRIMARY KEY (table_name, primary_key, column_name).
+    ///          col_hlc_wire BLOB, col_hlc INT [legacy, dead]);
+    ///          PRIMARY KEY (table_name, primary_key, column_name).
     ///
     /// One row per (table, row, column) triple. Populated by ColumnHLCStore
     /// after every winning fieldLevelLWW apply. Consulted by the inbound apply
     /// path to determine which columns from the incoming record should overwrite
-    /// local state. Added in v6 (CVK-ICLOUD P2-M1).
+    /// local state. Added in v6 (CVK-ICLOUD P2-M1). Gained the full-width
+    /// `col_hlc_wire` BLOB (`HLC.wireBytes`) in v10 (gap 6, D38.1) — see
+    /// ColumnHLCStore.swift's file header for the truncation defect this fixes.
     public static let syncMetaColsTable = "_ck_sync_meta_cols"
 
     /// Pending-skew queue for future-schema records (R9, CVK-ICLOUD P3-M4).
@@ -132,11 +157,20 @@ public enum CKSideSchema {
     // MARK: - Schema declaration (internal — callers use ensure)
 
     static let declaration: SchemaDeclaration = {
+        // sync_hlc_wire: full-width HLC.wireBytes (gap 6, D38.1). Replaces
+        // reliance on the legacy `sync_hlc` packed column for comparisons.
+        // `_ck_sync_meta` is the ONE gap-6 carrier with real shipped v1.0.33
+        // data — this table's v9→v10 migration BACKFILLs `sync_hlc_wire` from
+        // the legacy `sync_hlc` value via `LegacyPackedHLCMigration` (see that
+        // file for the recoverability proof) rather than clean-regenerating.
+        let syncHLCWireDecl = ColumnDeclaration(name: "sync_hlc_wire", type: .blob, nullable: true)
         let syncMetaDecl = TableDeclaration(
             name: syncMetaTable,
             columns: [
                 ColumnDeclaration(name: "table_name",     type: .text, nullable: false),
                 ColumnDeclaration(name: "primary_key",    type: .text, nullable: false),
+                // LEGACY, dead since gap 6 (40-bit-truncated packed HLC). Retained
+                // for additive-migration safety; sync_hlc_wire is authoritative.
                 ColumnDeclaration(name: "sync_hlc",       type: .int,  nullable: false,
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "schema_version", type: .int,  nullable: false,
@@ -149,6 +183,7 @@ public enum CKSideSchema {
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "kit_id",         type: .text, nullable: false,
                                   defaultValue: .text("")),
+                syncHLCWireDecl,
             ],
             primaryKey: ["table_name", "primary_key"]
         )
@@ -174,11 +209,16 @@ public enum CKSideSchema {
         //                  Null for entries written before v6 or for non-fieldLevelLWW
         //                  tables. The push path decodes this and passes it to
         //                  CKRecordMapping to populate _syncColumnHLCs in the CKRecord.
+        //   hlc_wire     — HLC.wireBytes(hlc), 16-byte BLOB (gap 6, D38.1). Replaces
+        //                  `hlc` (legacy, dead) as the coalescing/ordering key.
+        //                  `_ck_outbox` is develop/1.1.x-only (confirmed absent from
+        //                  the shipped v1.0.33 tag) — clean regenerate, no backfill.
         let retryCountDecl  = ColumnDeclaration(name: "retry_count",  type: .int,  nullable: false,
                                                 defaultValue: .int(0))
         let isParkDecl      = ColumnDeclaration(name: "is_parked",    type: .int,  nullable: false,
                                                 defaultValue: .int(0))
         let columnHLCsDecl  = ColumnDeclaration(name: "column_hlcs",  type: .blob, nullable: true)
+        let hlcWireDecl     = ColumnDeclaration(name: "hlc_wire",     type: .blob, nullable: true)
 
         let outboxDecl = TableDeclaration(
             name: outboxTable,
@@ -188,12 +228,15 @@ public enum CKSideSchema {
                 ColumnDeclaration(name: "row_key",     type: .text, nullable: false),
                 ColumnDeclaration(name: "event",       type: .text, nullable: false),
                 ColumnDeclaration(name: "values",      type: .blob, nullable: true),
+                // LEGACY, dead since gap 6 (40-bit-truncated packed HLC). Retained
+                // for additive-migration safety; hlc_wire is authoritative.
                 ColumnDeclaration(name: "hlc",         type: .int,  nullable: false,
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "enqueued_at", type: .text, nullable: false),
                 retryCountDecl,
                 isParkDecl,
                 columnHLCsDecl,
+                hlcWireDecl,
             ],
             primaryKey: ["id"]
         )
@@ -213,13 +256,23 @@ public enum CKSideSchema {
             primaryKey: ["zone_name"]
         )
 
-        // _ck_sync_meta_cols schema (v6 — per-column HLC for fieldLevelLWW):
-        //   table_name  — application table name.
-        //   primary_key — row UUID as TEXT.
-        //   column_name — application column name.
-        //   col_hlc     — packed HLC (Int64, same layout as sync_hlc in _ck_sync_meta).
+        // _ck_sync_meta_cols schema (v6 — per-column HLC for fieldLevelLWW;
+        // v10 — gap 6 full-width column, D38.1 uniform wireBytes encoding):
+        //   table_name    — application table name.
+        //   primary_key   — row UUID as TEXT.
+        //   column_name   — application column name.
+        //   col_hlc_wire  — HLC.wireBytes(hlc), 16-byte BLOB (gap 6). No bit-packing —
+        //                   the already Swift/Rust lockstep-audited lossless wire
+        //                   format (HLC.swift:205-245), so no truncation is possible.
+        //   col_hlc       — LEGACY, dead since gap 6. Was: packed HLC (Int64,
+        //                   same 40-bit-truncated layout as sync_hlc in
+        //                   _ck_sync_meta). Retained only because migrations
+        //                   are additive-only (never drop a column) — see
+        //                   ColumnHLCStore.swift's file header for the full
+        //                   defect writeup this replacement fixes.
         //                 Read/written by ColumnHLCStore; consulted by ApplyInbound
         //                 for the .fieldLevelLWW policy arm.
+        let colHLCWireDecl = ColumnDeclaration(name: "col_hlc_wire", type: .blob, nullable: true)
         let syncMetaColsDecl = TableDeclaration(
             name: syncMetaColsTable,
             columns: [
@@ -228,6 +281,7 @@ public enum CKSideSchema {
                 ColumnDeclaration(name: "column_name", type: .text, nullable: false),
                 ColumnDeclaration(name: "col_hlc",     type: .int,  nullable: false,
                                   defaultValue: .int(0)),
+                colHLCWireDecl,
             ],
             primaryKey: ["table_name", "primary_key", "column_name"]
         )
@@ -314,7 +368,7 @@ public enum CKSideSchema {
 
         return SchemaDeclaration(
             kitID: "ConvergenceKit",
-            version: 9,
+            version: 10,
             tables: [syncMetaDecl, outboxDecl, changeTokenDecl, syncMetaColsDecl,
                      pendingSkewDecl, deviceIdentityDecl],
             indices: [outboxTableRowIndex],
@@ -372,6 +426,39 @@ public enum CKSideSchema {
                 Migration(fromVersion: 8, toVersion: 9, operations: [
                     .createTable(deviceIdentityDecl),
                 ]),
+                // v9 → v10: FULL-WIDTH HLC PERSISTENCE, EVERY CARRIER (gap 6,
+                //   2026-07, D38.1). Adds `col_hlc_wire` to _ck_sync_meta_cols,
+                //   `sync_hlc_wire` to _ck_sync_meta, and `hlc_wire` to _ck_outbox
+                //   — all three legacy-column siblings of the same defect: a
+                //   40-bit-truncated `packed` value compared against a lossless
+                //   counterpart elsewhere in the chain, making a last-arriving
+                //   stale write win regardless of true HLC order. See
+                //   ColumnHLCStore.swift / SyncMetaStore.swift / OutboxEntry.swift
+                //   file headers for the full per-carrier writeup.
+                //
+                //   `col_hlc_wire` and `hlc_wire` (_ck_sync_meta_cols, _ck_outbox):
+                //   develop/1.1.x-only tables (confirmed absent from the shipped
+                //   v1.0.33 tag) — CLEAN REGENERATE. addColumn leaves existing rows'
+                //   new column NULL; `ColumnHLCStore.readAll`/`OutboxStore.decodeRow`
+                //   treat a NULL/absent wire column exactly like "never observed
+                //   under full-width tracking" — self-healing, no data backfill
+                //   possible or needed (the original un-truncated physicalTime was
+                //   never persisted pre-v10).
+                //
+                //   `sync_hlc_wire` (_ck_sync_meta): the ONE carrier with real
+                //   shipped v1.0.33 data. addColumn alone is NOT sufficient here —
+                //   `CKSideSchema.ensure(storage:)` runs an explicit BACKFILL pass
+                //   immediately after this migration (`backfillSyncHLCWireIfNeeded`,
+                //   below) that reconstructs the full-width value from the legacy
+                //   `sync_hlc` packed column via `LegacyPackedHLCMigration` — see
+                //   that file for the recoverability proof (verified lossless in
+                //   practice for every row this system has ever legitimately
+                //   written).
+                Migration(fromVersion: 9, toVersion: 10, operations: [
+                    .addColumn(table: syncMetaColsTable, column: colHLCWireDecl),
+                    .addColumn(table: syncMetaTable, column: syncHLCWireDecl),
+                    .addColumn(table: outboxTable, column: hlcWireDecl),
+                ]),
             ]
         )
     }()
@@ -389,7 +476,52 @@ public enum CKSideSchema {
     /// From v9 onward, this call also ensures _ck_device_identity; a separate
     /// DeviceIdentityStore.ensureSchema(storage:) call in enable() is no longer
     /// needed (the method now delegates here for call-site stability).
+    /// From v10 onward, this call also runs the `_ck_sync_meta.sync_hlc_wire`
+    /// backfill (gap 6, D38.1) — see `backfillSyncHLCWireIfNeeded` below.
     public static func ensure(storage: any Storage) async throws {
         try await storage.migrate(to: declaration)
+        try await backfillSyncHLCWireIfNeeded(storage: storage)
+    }
+
+    // MARK: - Gap 6 backfill (_ck_sync_meta.sync_hlc_wire)
+
+    /// One-time backfill of `sync_hlc_wire` from the legacy `sync_hlc` packed
+    /// column, for devices upgrading from a pre-v10 (including shipped
+    /// v1.0.33) schema (gap 6, D38.1).
+    ///
+    /// Idempotent and cheap on repeat calls: only rows where `sync_hlc_wire
+    /// IS NULL` are touched. A fresh v10 install never has NULL rows here
+    /// (`SyncMetaStore.writeSyncHLC`/`writeTombstoneHLC` always populate
+    /// `sync_hlc_wire` going forward), so this becomes a no-op empty query
+    /// after the first successful backfill on any given estate — safe to run
+    /// on every `ensure(storage:)` call (every `enable()`), not just once.
+    ///
+    /// Uses `LegacyPackedHLCMigration.reconstruct(fromLegacyPacked:)` — see
+    /// that file for the recoverability proof. Reconstruction is exact (not
+    /// an approximation) for every row this system has ever legitimately
+    /// written; there is no partial/best-effort case to handle here.
+    static func backfillSyncHLCWireIfNeeded(storage: any Storage) async throws {
+        let rows = try await storage.rowStore.query(
+            table: syncMetaTable,
+            where: .isNull(Column(table: syncMetaTable, name: "sync_hlc_wire"))
+        )
+        guard !rows.isEmpty else { return }
+        for row in rows {
+            guard
+                case .text(let tableName) = row["table_name"],
+                case .text(let primaryKey) = row["primary_key"],
+                case .int(let legacyPacked) = row["sync_hlc"]
+            else { continue }
+            let reconstructed = LegacyPackedHLCMigration.reconstruct(fromLegacyPacked: legacyPacked)
+            _ = try await storage.rowStore.upsertSync(
+                table: syncMetaTable,
+                values: [
+                    "table_name":    .text(tableName),
+                    "primary_key":   .text(primaryKey),
+                    "sync_hlc_wire": .blob(Data(reconstructed.wireBytes)),
+                ],
+                conflictColumns: ["table_name", "primary_key"]
+            )
+        }
     }
 }

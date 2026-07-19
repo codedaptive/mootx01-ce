@@ -165,11 +165,9 @@ private let testZoneID = CKRecordZone.ID(
     ownerName: CKCurrentUserDefaultName
 )
 
-/// HLC nodeID encoded in a packed HLC.
-private func nodeID(ofPackedHLC packed: Int64) -> Int {
-    // nodeID is in bits 56–63 of the packed UInt64 (signed Int8 for slots > 127,
-    // but slots 1–15 fit in Int8 without sign issues).
-    Int(Int8(bitPattern: UInt8((UInt64(bitPattern: packed) >> 56) & 0xFF)))
+/// HLC nodeID decoded from an OutboxEntry's full-width wire HLC (gap 6).
+private func nodeID(ofWireBytes wire: Data) -> Int {
+    Int((try? HLC(wireBytes: [UInt8](wire)))?.nodeID ?? -1)
 }
 
 /// Make a DeviceSlot for use as a fake registry entry.
@@ -445,7 +443,7 @@ struct RemintTests {
                 rowKey: UUID().uuidString,
                 event: .insert,
                 valuesData: nil,
-                packedHLC: Int64(bitPattern: hlc.packed),
+                hlcWireBytes: Data(hlc.wireBytes),
                 enqueuedAt: ISO8601DateFormatter().string(from: now)
             )
             try await OutboxStore.append(entry: entry, to: storage)
@@ -455,8 +453,8 @@ struct RemintTests {
         let beforeEntries = try await OutboxStore.readBatch(from: storage)
         #expect(beforeEntries.count == 5)
         for entry in beforeEntries {
-            #expect(nodeID(ofPackedHLC: entry.packedHLC) == 3,
-                    "pre-remint: expected nodeID 3, got \(nodeID(ofPackedHLC: entry.packedHLC))")
+            #expect(nodeID(ofWireBytes: entry.hlcWireBytes) == 3,
+                    "pre-remint: expected nodeID 3, got \(nodeID(ofWireBytes: entry.hlcWireBytes))")
         }
 
         // Re-mint all entries under new nodeID=7 (new slot after re-enrollment)
@@ -467,12 +465,12 @@ struct RemintTests {
         let afterEntries = try await OutboxStore.readBatch(from: storage)
         #expect(afterEntries.count == 5, "remint must preserve entry count")
         for entry in afterEntries {
-            #expect(nodeID(ofPackedHLC: entry.packedHLC) == 7,
-                    "post-remint: expected nodeID 7, got \(nodeID(ofPackedHLC: entry.packedHLC))")
+            #expect(nodeID(ofWireBytes: entry.hlcWireBytes) == 7,
+                    "post-remint: expected nodeID 7, got \(nodeID(ofWireBytes: entry.hlcWireBytes))")
         }
 
         // Verify the entries are still in ascending HLC order (ordering preserved)
-        let hlcs = afterEntries.map { UInt64(bitPattern: $0.packedHLC) }
+        let hlcs = afterEntries.map { (try? HLC(wireBytes: [UInt8]($0.hlcWireBytes))) ?? .zero }
         for i in 0..<(hlcs.count - 1) {
             #expect(hlcs[i] < hlcs[i + 1], "HLC ordering must be preserved after remint")
         }

@@ -466,4 +466,64 @@ struct CKRecordTypeFidelityTests {
             Issue.record("expected .json, got \(String(describing: decoded.values["data"]))")
         }
     }
+
+    // MARK: - Gap 6: columnHLCs wire round-trip at REAL magnitude (> 40-bit truncation ceiling)
+
+    /// Group (b) of the gap 6 regression tests: a column HLC with
+    /// `physicalTime` above the old 40-bit `HLC.packed` truncation ceiling
+    /// (`0xFF_FFFF_FFFF`, ~1.0995e12) must survive the ACTUAL production
+    /// `_syncColumnHLCs` wire path — `CKRecordMapping.record(from:...)`'s
+    /// `JSONEncoder().encode(map)` into `record["_syncColumnHLCs"]` as
+    /// `NSData`, then `CKRecordMapping.decode(_:)`'s
+    /// `JSONDecoder().decode(ColumnHLCMap.self, from:)` — byte-exact, with
+    /// no truncation. This is the WIRE half of gap 6's fix; the PERSIST half
+    /// (ColumnHLCStore round-trip through storage) is covered by
+    /// `ColumnHLCFullWidthRoundTripTests`.
+    ///
+    /// Contrast: this path was NEVER lossy (SyncRecord's `PackedHLC` is a
+    /// plain Codable struct with a full-width `Int64 physicalTime` field —
+    /// no bit-packing). The defect gap 6 fixes was entirely in
+    /// `ColumnHLCStore`'s SQL persistence, which used the LOSSY
+    /// `HLC.packed`/`HLC(packed:)` round-trip. This test documents and locks
+    /// in that the wire path was — and remains — full-width, so any future
+    /// change that accidentally routes columnHLCs through `packed(hlc)` (the
+    /// row-grain `_syncHLC` field's encoding, which DOES truncate) would be
+    /// caught here.
+    @Test("columnHLCs with physicalTime above the 40-bit truncation ceiling survive the CKRecord wire round-trip byte-exact")
+    func columnHLCsRealMagnitudeWireRoundTrip() throws {
+        let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
+        let rowKey = UUID()
+        // Real wall-clock-scale physicalTime values (2026-ish, ms since Unix
+        // epoch), well above the old 40-bit ceiling (0xFF_FFFF_FFFF ≈ 1.0995e12).
+        let truncationCeiling: Int64 = 0xFF_FFFF_FFFF
+        let noteHLC = HLC(physicalTime: 1_784_477_500_577, logicalCount: 1, nodeID: 3)
+        let scoreHLC = HLC(physicalTime: 1_784_477_440_577, logicalCount: 0, nodeID: 7)
+        #expect(noteHLC.physicalTime > truncationCeiling, "test precondition: real magnitude")
+        #expect(scoreHLC.physicalTime > truncationCeiling, "test precondition: real magnitude")
+        let columnHLCs = ColumnHLCMap(entries: [
+            "note":  PackedHLC(noteHLC),
+            "score": PackedHLC(scoreHLC),
+        ])
+
+        let record = try CKRecordMapping.record(
+            from: ["note": .text("hi"), "score": .int(1)],
+            table: "items",
+            rowKey: rowKey,
+            hlc: HLC(physicalTime: 1_784_477_500_577, logicalCount: 1, nodeID: 3),
+            schemaVersion: 1,
+            kitID: "TK",
+            zone: zoneID,
+            columnHLCs: columnHLCs
+        )
+        let decoded = try CKRecordMapping.decode(record)
+
+        let decodedNote = try #require(decoded.columnHLCs?.entries["note"])
+        let decodedScore = try #require(decoded.columnHLCs?.entries["score"])
+        #expect(decodedNote.physicalTime == noteHLC.physicalTime, "physicalTime must survive the wire round-trip byte-exact")
+        #expect(decodedNote.logicalCount == noteHLC.logicalCount)
+        #expect(decodedNote.nodeID == noteHLC.nodeID)
+        #expect(decodedScore.physicalTime == scoreHLC.physicalTime, "physicalTime must survive the wire round-trip byte-exact")
+        #expect(decodedScore.logicalCount == scoreHLC.logicalCount)
+        #expect(decodedScore.nodeID == scoreHLC.nodeID)
+    }
 }

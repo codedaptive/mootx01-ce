@@ -50,15 +50,27 @@ private func makeEntry(
     valuesData: Data? = nil,
     packedHLC: Int64 = 1_000
 ) -> OutboxEntry {
-    OutboxEntry(
+    // Gap 6: `packedHLC` is a plain logical ordinal (test convenience, param
+    // name kept so every call site below is unchanged) — wrapped into a
+    // full-width HLC.wireBytes. `ordinal(of:)` below inverts this for
+    // assertions that used to read `entry.packedHLC` directly.
+    let hlc = HLC(physicalTime: packedHLC, logicalCount: 0, nodeID: 1)
+    return OutboxEntry(
         id: UUID(),
         tableName: tableName,
         rowKey: rowKey,
         event: event,
         valuesData: valuesData,
-        packedHLC: packedHLC,
+        hlcWireBytes: Data(hlc.wireBytes),
         enqueuedAt: ISO8601DateFormatter().string(from: Date())
     )
+}
+
+/// Inverse of `makeEntry`'s `packedHLC` convenience — decode an entry's
+/// wire-format HLC back to the physicalTime ordinal used to construct it,
+/// for assertions that used to read `entry.packedHLC` directly (gap 6).
+private func ordinal(of entry: OutboxEntry) -> Int64 {
+    (try? HLC(wireBytes: [UInt8](entry.hlcWireBytes)))?.physicalTime ?? -1
 }
 
 // MARK: - Suite
@@ -103,7 +115,7 @@ struct OutboxStoreTests {
         #expect(batch.count == 1)
         #expect(batch.first?.id == newer.id)
         #expect(batch.first?.event == .update)
-        #expect(batch.first?.packedHLC == 200)
+        #expect(ordinal(of: batch.first!) == 200)
     }
 
     @Test("coalescing: older entry does NOT replace newer entry (stale write rejected)")
@@ -121,7 +133,7 @@ struct OutboxStoreTests {
         #expect(batch.count == 1)
         #expect(batch.first?.id == newer.id)
         #expect(batch.first?.event == .update)
-        #expect(batch.first?.packedHLC == 300)
+        #expect(ordinal(of: batch.first!) == 300)
     }
 
     @Test("coalescing: entries for different rowKeys coexist")
@@ -260,7 +272,7 @@ struct OutboxStoreTests {
             rowKey: rowID.uuidString,
             event: .insert,
             valuesData: valuesData,
-            packedHLC: 42,
+            hlcWireBytes: Data(HLC(physicalTime: 42, logicalCount: 0, nodeID: 1).wireBytes),
             enqueuedAt: "2026-07-16T00:00:00Z"
         )
 
@@ -273,7 +285,7 @@ struct OutboxStoreTests {
         #expect(recovered.tableName == "items")
         #expect(recovered.rowKey == rowID.uuidString)
         #expect(recovered.event == .insert)
-        #expect(recovered.packedHLC == 42)
+        #expect(ordinal(of: recovered) == 42)
         #expect(recovered.enqueuedAt == "2026-07-16T00:00:00Z")
         #expect(recovered.valuesData != nil)
 

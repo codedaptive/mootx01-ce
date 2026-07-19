@@ -54,26 +54,24 @@ private func makeStorage() async throws -> any Storage {
     return storage
 }
 
-/// Pack a physical-time-only HLC: node=1, logicalCount=0, physicalTime=ms.
-private func makePackedHLC(physicalMs: Int64) -> Int64 {
-    let node: Int64    = 1
-    let logical: Int64 = 0
-    return (node << 56) | (logical << 40) | (physicalMs & 0xFF_FFFF_FFFF)
-}
-
 /// Insert a tombstone entry (is_deleted=1) into _fed_sync_meta.
+///
+/// Gap 6 (D38.1): writes the full-width `sync_hlc_wire` BLOB (HLC.wireBytes)
+/// — the column `TombstoneGC.compact` now reads. No bit-packing, no 40-bit
+/// masking; see that function's gap-6 doc comment.
 private func insertFedTombstone(
     storage: any Storage,
     table: String,
     key: String,
     physicalMs: Int64
 ) async throws {
+    let hlc = HLC(physicalTime: physicalMs, logicalCount: 0, nodeID: 1)
     _ = try await storage.rowStore.upsert(
         table: "_fed_sync_meta",
         values: [
             "table_name":     .text(table),
             "primary_key":    .text(key),
-            "sync_hlc":       .int(makePackedHLC(physicalMs: physicalMs)),
+            "sync_hlc_wire":  .blob(Data(hlc.wireBytes)),
             "schema_version": .int(1),
             "kit_id":         .text("TestKit"),
             "is_deleted":     .int(1),
@@ -110,7 +108,11 @@ struct FederationTombstoneGCTests {
 
         let nowMs       = TombstoneGCSchedule.gcIntervalMs
         let retentionMs = SyncTombstone.gcRetentionSeconds * 1_000
-        let oldMs       = max(0, nowMs - retentionMs - 1_000)
+        // Gap 6 (D38.1): TombstoneGC.compact's cutoff (nowMs - retentionMs) is
+        // no longer 40-bit-masked, so with this test's deliberately-tiny
+        // synthetic `nowMs` the cutoff is genuinely negative — do NOT clamp
+        // to 0 (see CloudKit TombstoneGCSchedulerTests.swift's identical fix).
+        let oldMs       = nowMs - retentionMs - 1_000
 
         try await insertFedTombstone(storage: storage, table: "items",
                                      key: UUID().uuidString, physicalMs: oldMs)
@@ -163,7 +165,9 @@ struct FederationTombstoneGCTests {
         let retentionMs = SyncTombstone.gcRetentionSeconds * 1_000
         let nowMs       = TombstoneGCSchedule.gcIntervalMs + retentionMs + 10_000
 
-        let cutoffMs    = (nowMs - retentionMs) & 0xFF_FFFF_FFFF
+        // Gap 6 (D38.1): cutoff = nowMs - retentionMs, NO masking
+        // (TombstoneGC.compact no longer bit-masks — sync_hlc_wire is full-width).
+        let cutoffMs    = nowMs - retentionMs
         let oldMs       = max(0, cutoffMs - 1_000)
         let oldKey      = UUID().uuidString
         try await insertFedTombstone(storage: storage, table: "items",

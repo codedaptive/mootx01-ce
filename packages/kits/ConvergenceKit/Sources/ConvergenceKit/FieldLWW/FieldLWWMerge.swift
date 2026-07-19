@@ -69,6 +69,19 @@ public enum FieldLWWMerge {
     /// must persist this map to `ColumnHLCStore` after applying the
     /// columns to the application row.
     ///
+    /// GAP 6 VERIFICATION: the `>=` comparison below relies on
+    /// `PackedHLC: Comparable` (ColumnHLCMap.swift), which compares the raw
+    /// `physicalTime`/`logicalCount`/`nodeID` fields lexicographically —
+    /// already full-width, lossless, with no bit-packing. This function
+    /// required NO CHANGE for gap 6: the defect was entirely in
+    /// `localColumnHLCs`' PROVENANCE (read from `_ck_sync_meta_cols` via the
+    /// formerly-truncating `ColumnHLCStore.readAll`) being compared against
+    /// a lossless `incomingColumnHLC` — a width MISMATCH, not a comparison-
+    /// logic bug. Once `ColumnHLCStore.readAll`/`writeAll` both use the
+    /// full-width columns, `local` and `incomingColumnHLC` are both
+    /// full-width `PackedHLC` values and this existing `>=` is already
+    /// correct.
+    ///
     /// - Parameters:
     ///   - incomingValues: Row values from the incoming SyncRecord.
     ///   - incomingColumnHLCs: Per-column HLCs from the incoming record.

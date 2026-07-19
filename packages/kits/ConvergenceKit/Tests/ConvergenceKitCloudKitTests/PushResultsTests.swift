@@ -40,13 +40,17 @@ private func makeStorage() async throws -> any Storage {
 }
 
 private func makeEntry(packedHLC: Int64 = 1_000) -> OutboxEntry {
-    OutboxEntry(
+    // Gap 6: `packedHLC` is a plain logical ordinal (test convenience, param
+    // name kept so every call site below is unchanged) — wrapped into a
+    // full-width HLC.wireBytes.
+    let hlc = HLC(physicalTime: packedHLC, logicalCount: 0, nodeID: 1)
+    return OutboxEntry(
         id: UUID(),
         tableName: "items",
         rowKey: UUID().uuidString,
         event: .insert,
         valuesData: nil,
-        packedHLC: packedHLC,
+        hlcWireBytes: Data(hlc.wireBytes),
         enqueuedAt: ISO8601DateFormatter().string(from: Date())
     )
 }

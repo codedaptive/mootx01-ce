@@ -163,11 +163,14 @@ struct FederationTombstoneTests {
                 "tombstone HLC must persist in _fed_sync_meta after delete (A6)")
         #expect(metaRows[0]["is_deleted"] == .int(1),
                 "is_deleted must be 1 for tombstone entries")
-        guard case .int(let packed) = metaRows[0]["sync_hlc"] else {
-            Issue.record("sync_hlc not found in _fed_sync_meta tombstone entry")
+        // Gap 6 (D38.1): sync_hlc_wire is the authoritative full-width column;
+        // the legacy sync_hlc INT column is dead (retained, always 0).
+        guard case .blob(let wire) = metaRows[0]["sync_hlc_wire"] else {
+            Issue.record("sync_hlc_wire not found in _fed_sync_meta tombstone entry")
             return
         }
-        #expect(packed != 0, "tombstone sync_hlc must be non-zero")
+        let decoded = try HLC(wireBytes: [UInt8](wire))
+        #expect(decoded.physicalTime != 0, "tombstone sync_hlc_wire must be non-zero")
     }
 
     // MARK: - Stale resurrect via Federation

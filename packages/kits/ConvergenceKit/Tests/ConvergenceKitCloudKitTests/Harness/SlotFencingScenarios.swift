@@ -89,13 +89,12 @@ private func p4m3Slot(
     )
 }
 
-/// Extract the HLC nodeID from bits 56–63 of a packed HLC Int64.
-/// Applies to OUTBOX ENTRIES where packedHLC = Int64(bitPattern: hlc.packed).
-/// Layout (HLC.swift, HLC.packed): node 8 | logical 16 | physical 40.
-/// Matches the signed-byte reinterpretation in nodeID(ofPackedHLC:) in
-/// SlotRegistryTests.swift so assertions are comparable.
-private func p4m3NodeIDOf(_ packedHLC: Int64) -> Int {
-    Int(Int8(bitPattern: UInt8((UInt64(bitPattern: packedHLC) >> 56) & 0xFF)))
+/// Extract the HLC nodeID from an OutboxEntry's full-width wire HLC (gap 6).
+/// Applies to OUTBOX ENTRIES where hlcWireBytes = Data(hlc.wireBytes).
+/// Matches nodeID(ofWireBytes:) in SlotRegistryTests.swift so assertions are
+/// comparable.
+private func p4m3NodeIDOf(_ hlcWireBytes: Data) -> Int {
+    Int((try? HLC(wireBytes: [UInt8](hlcWireBytes)))?.nodeID ?? -1)
 }
 
 /// Extract the HLC nodeID from bits 3–0 of a CKRecord `_syncHLC` field value.
@@ -382,29 +381,28 @@ struct SlotFencingScenarios {
         // Seed 5 outbox entries under old slot nodeID=5.
         let oldNodeID = Int32(5)
         var gen = HLCGenerator(nodeID: oldNodeID)
-        var originalPackedHLCs: [Int64] = []
+        var originalHLCs: [HLC] = []
         for i in 0..<5 {
-            let hlc    = gen.send(now: baseNowMs + Int64(i))
-            let packed = Int64(bitPattern: hlc.packed)
-            originalPackedHLCs.append(packed)
+            let hlc = gen.send(now: baseNowMs + Int64(i))
+            originalHLCs.append(hlc)
             let entry = OutboxEntry(
                 id:         UUID(),
                 tableName:  "items",
                 rowKey:     UUID().uuidString,
                 event:      .insert,
                 valuesData: nil,
-                packedHLC:  packed,
+                hlcWireBytes: Data(hlc.wireBytes),
                 enqueuedAt: ISO8601DateFormatter().string(from: now)
             )
             try await OutboxStore.append(entry: entry, to: storage)
         }
-        let originalMaxHLC = UInt64(bitPattern: originalPackedHLCs.max()!)
+        let originalMaxHLC = originalHLCs.max()!
 
         // Verify pre-remint: all 5 entries carry nodeID=5.
         let before = try await OutboxStore.readBatch(from: storage)
         #expect(before.count == 5)
         for entry in before {
-            let nid = p4m3NodeIDOf(entry.packedHLC)
+            let nid = p4m3NodeIDOf(entry.hlcWireBytes)
             #expect(nid == 5, "pre-remint: expected nodeID 5, got \(nid)")
         }
 
@@ -421,11 +419,11 @@ struct SlotFencingScenarios {
 
         // (b) All entries now carry nodeID=9.
         for entry in after {
-            let nid = p4m3NodeIDOf(entry.packedHLC)
+            let nid = p4m3NodeIDOf(entry.hlcWireBytes)
             #expect(nid == Int(newNodeID), "post-remint: expected nodeID \(newNodeID), got \(nid)")
         }
 
-        let remintedHLCs = after.map { UInt64(bitPattern: $0.packedHLC) }
+        let remintedHLCs = after.map { (try? HLC(wireBytes: [UInt8]($0.hlcWireBytes))) ?? .zero }
 
         // (c) Ascending order preserved (chronological integrity for the push drain).
         for i in 0..<(remintedHLCs.count - 1) {

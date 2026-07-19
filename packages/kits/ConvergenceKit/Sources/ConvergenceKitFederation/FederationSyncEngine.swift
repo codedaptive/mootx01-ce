@@ -1368,12 +1368,33 @@ actor FederationStateActor {
     /// - v4: `_fed_identity` persistent estate Ed25519 identity (I-8, WC1)
     /// - v5: `_fed_outbox` durable outbound SyncRecord queue (WC2)
     /// - v6: `_fed_peers` persistent paired-peer registry (WC6)
+    /// - v7: FULL-WIDTH HLC PERSISTENCE, EVERY FEDERATION CARRIER (gap 6,
+    ///       2026-07, D38.1). `_fed_sync_meta` gains `sync_hlc_wire`;
+    ///       `_fed_sync_meta_cols` gains `col_hlc_wire`; `_fed_outbox` gains
+    ///       `hlc_wire` (FedOutboxStore.swift). All three tables are
+    ///       develop/1.1.x-only (confirmed absent from the shipped v1.0.33
+    ///       tag) — CLEAN REGENERATE, no backfill needed (contrast CloudKit's
+    ///       `_ck_sync_meta`, which DOES carry shipped data and needs a
+    ///       BACKFILL migration — see SideSchema.swift). Fixes the
+    ///       truncation defect where the legacy `*_hlc`/`col_hlc` packed
+    ///       columns' 40-bit-masked physicalTime was compared against a
+    ///       lossless counterpart elsewhere in the chain, making a last-
+    ///       arriving stale write win regardless of true HLC order — see
+    ///       ColumnHLCStore.swift's file header for the full defect writeup.
     static func ensureFedSyncMetaTable(storage: any Storage) async throws {
+        // sync_hlc_wire: full-width HLC.wireBytes (gap 6). _fed_sync_meta is
+        // develop/1.1.x-only — clean regenerate, existing rows (if any, on a
+        // develop-branch pre-release estate) get NULL until next write,
+        // treated as "not yet observed" (self-healing, see readFedSyncHLC).
+        let syncHLCWireDecl = ColumnDeclaration(name: "sync_hlc_wire", type: .blob, nullable: true)
         let fedSyncMetaDecl = TableDeclaration(
             name: fedSyncMetaTable,
             columns: [
                 ColumnDeclaration(name: "table_name",    type: .text, nullable: false),
                 ColumnDeclaration(name: "primary_key",   type: .text, nullable: false),
+                // LEGACY, dead since gap 6 (40-bit-truncated packed HLC).
+                // Retained for additive-migration safety; sync_hlc_wire is
+                // authoritative.
                 ColumnDeclaration(name: "sync_hlc",      type: .int,  nullable: false,
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "schema_version",type: .int,  nullable: false,
@@ -1385,12 +1406,27 @@ actor FederationStateActor {
                 // after SyncTombstone.gcRetentionSeconds.
                 ColumnDeclaration(name: "is_deleted",    type: .int,  nullable: false,
                                   defaultValue: .int(0)),
+                syncHLCWireDecl,
             ],
             primaryKey: ["table_name", "primary_key"]
         )
 
         // _fed_sync_meta_cols: per-column HLC for fieldLevelLWW (v2, CVK-ICLOUD P2-M1).
-        // Schema mirrors _ck_sync_meta_cols in CKSideSchema v6.
+        // Schema mirrors _ck_sync_meta_cols in CKSideSchema v10.
+        //
+        // Gap 6 (2026-07, D38.1): gained col_hlc_wire at v7 — full-width
+        // (unpacked) column HLC storage via HLC.wireBytes, the already
+        // Swift/Rust lockstep-audited 16-byte lossless format (uniform
+        // encoding across every gap-6 carrier, not a per-carrier shape).
+        // `col_hlc` stored a 40-bit-truncated `HLC.packed` value while the
+        // wire format (SyncRecord's PackedHLC) carries physicalTime
+        // losslessly — comparing truncated-persisted-local against
+        // lossless-incoming in FieldLWWMerge.merge made the last-arriving
+        // column edit always win regardless of true HLC order. See
+        // ColumnHLCStore.swift's file header for the full defect writeup.
+        // `col_hlc` is retained (additive-only migration policy) but is
+        // dead — ColumnHLCStore no longer reads it.
+        let colHLCWireDecl = ColumnDeclaration(name: "col_hlc_wire", type: .blob, nullable: true)
         let fedSyncMetaColsDecl = TableDeclaration(
             name: fedSyncMetaColsTable,
             columns: [
@@ -1399,6 +1435,7 @@ actor FederationStateActor {
                 ColumnDeclaration(name: "column_name", type: .text, nullable: false),
                 ColumnDeclaration(name: "col_hlc",     type: .int,  nullable: false,
                                   defaultValue: .int(0)),
+                colHLCWireDecl,
             ],
             primaryKey: ["table_name", "primary_key", "column_name"]
         )
@@ -1443,12 +1480,14 @@ actor FederationStateActor {
 
         // _fed_outbox: durable outbound SyncRecord queue (WC2).
         // Stores post-encoded SyncRecord payloads (JSON BLOB) pending relay delivery.
-        // packed_hlc: Int64 bit-cast of SubstrateTypes.HLC.packed (UInt64 MSB-node
-        //   layout per SPEC §4). Used for coalescing: same (table_name, row_key) pair
-        //   keeps the entry with the higher packed_hlc; stale entries are deleted on
-        //   append. packed_hlc INT DEFAULT 0 (signed, not UInt — matches PersistenceKit
-        //   .int TypedValue).
+        // packed_hlc: LEGACY, dead since gap 6 (40-bit-truncated packed HLC).
+        //   Retained for additive-migration safety; hlc_wire is authoritative for
+        //   the newest-wins coalescing comparison (FedOutboxStore.append).
+        // hlc_wire: HLC.wireBytes, full-width lossless BLOB (gap 6, D38.1).
+        //   `_fed_outbox` is develop/1.1.x-only (confirmed absent from the shipped
+        //   v1.0.33 tag) — clean regenerate, no backfill needed.
         // enqueued_at: ISO8601 TEXT wall-clock timestamp (schema invariant: never REAL).
+        let hlcWireDecl = ColumnDeclaration(name: "hlc_wire", type: .blob, nullable: true)
         let fedOutboxDecl = TableDeclaration(
             name: fedOutboxTable,
             columns: [
@@ -1459,6 +1498,7 @@ actor FederationStateActor {
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "payload",     type: .blob, nullable: false),
                 ColumnDeclaration(name: "enqueued_at", type: .text, nullable: false),
+                hlcWireDecl,
             ],
             primaryKey: ["id"]
         )
@@ -1481,7 +1521,7 @@ actor FederationStateActor {
 
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitFederation",
-            version: 6,
+            version: 7,
             tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl, fedIdentityDecl, fedOutboxDecl, fedPeersDecl],
             migrations: [
                 // v1 → v2: add per-column HLC side table for fieldLevelLWW.
@@ -1512,6 +1552,22 @@ actor FederationStateActor {
                 // upgrading from an existing v5 estate.
                 Migration(fromVersion: 5, toVersion: 6, operations: [
                     .createTable(fedPeersDecl),
+                ]),
+                // v6 → v7: FULL-WIDTH HLC PERSISTENCE, EVERY FEDERATION CARRIER
+                // (gap 6, 2026-07, D38.1). Adds `sync_hlc_wire` to
+                // _fed_sync_meta, `col_hlc_wire` to _fed_sync_meta_cols, and
+                // `hlc_wire` to _fed_outbox. All three tables are develop/1.1.x-
+                // only (confirmed absent from the shipped v1.0.33 tag) — clean
+                // regenerate. addColumn leaves existing rows' new column NULL;
+                // a NULL/absent wire value is treated as "not yet observed
+                // under full-width tracking" everywhere it's read (self-
+                // healing — see readFedSyncHLC/readFedTombstoneHLC and
+                // ColumnHLCStore.readAll), so the next incoming edit for that
+                // row/column always wins and repopulates the full-width value.
+                Migration(fromVersion: 6, toVersion: 7, operations: [
+                    .addColumn(table: fedSyncMetaTable, column: syncHLCWireDecl),
+                    .addColumn(table: fedSyncMetaColsTable, column: colHLCWireDecl),
+                    .addColumn(table: fedOutboxTable, column: hlcWireDecl),
                 ]),
             ]
         )
@@ -1556,8 +1612,9 @@ actor FederationStateActor {
         )
         guard let row = rows.first,
               case .int(let isDeleted) = row["is_deleted"], isDeleted == 1,
-              case .int(let packed) = row["sync_hlc"] else { return nil }
-        return HLC(packed: UInt64(bitPattern: packed))
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else { return nil }
+        return hlc
     }
 
     /// Read the persisted sync HLC from `_fed_sync_meta` for a given row.
@@ -1574,8 +1631,9 @@ actor FederationStateActor {
             ])
         )
         guard let row = rows.first,
-              case .int(let packed) = row["sync_hlc"] else { return nil }
-        return HLC(packed: UInt64(bitPattern: packed))
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else { return nil }
+        return hlc
     }
 
     /// Persist the sync HLC in `_fed_sync_meta` after a successful upsert.
@@ -1616,7 +1674,7 @@ actor FederationStateActor {
             values: [
                 "table_name": .text(table),
                 "primary_key": .text(primaryKey.uuidString),
-                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "sync_hlc_wire": .blob(Data(hlc.wireBytes)),
                 "schema_version": .int(Int64(schemaVersion)),
                 "kit_id": .text(kitID),
                 "is_deleted": .int(0)
@@ -1663,7 +1721,7 @@ actor FederationStateActor {
             values: [
                 "table_name": .text(table),
                 "primary_key": .text(primaryKey.uuidString),
-                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "sync_hlc_wire": .blob(Data(hlc.wireBytes)),
                 "schema_version": .int(Int64(schemaVersion)),
                 "kit_id": .text(kitID),
                 "is_deleted": .int(1)
@@ -1819,11 +1877,26 @@ actor FederationStateActor {
     // sentinel row with table_name='_gc_state', primary_key='_tombstone_sweep'.
     // Underscore-prefixed names cannot collide with real application table
     // names (application tables come from the SyncManifest and use plain
-    // identifiers). The sync_hlc column stores the last-GC wall time in ms
-    // directly (not as a packed HLC) — this is an internal convention limited
-    // to the sentinel row. Adding a new side table would require a schema
-    // version bump and migration; reusing the existing table is both minimal
-    // and correct for a single sentinel value.
+    // identifiers). Adding a new side table would require a schema version
+    // bump and migration; reusing the existing table is both minimal and
+    // correct for a single sentinel value.
+    //
+    // GAP 6 RECONCILIATION (2026-07, D38.1): the sentinel's wall-clock ms
+    // value is NOT a real HLC (no node/logical identity — it is a bare
+    // timestamp), but `_fed_sync_meta` now has exactly one wire-format
+    // column (`sync_hlc_wire`) shared by every row, sentinel or not. Rather
+    // than adding a SEPARATE column just for this one sentinel row (a schema
+    // exception non-uniform with every other gap-6 carrier), the sentinel
+    // wraps its raw ms value as a synthetic `HLC(physicalTime: ms,
+    // logicalCount: 0, nodeID: 0)` and encodes/decodes through the SAME
+    // `HLC.wireBytes` codec every other row uses. `nodeID: 0` is safe and
+    // unambiguous here: real HLCs from a live HLCGenerator are
+    // `precondition`-enforced to `nodeID` `1...15`
+    // (SlotRecordMapping.swift:66-69), so `nodeID == 0` can never collide
+    // with a genuine per-device HLC — it is a self-marking sentinel value,
+    // not merely a repurposed one. The legacy `sync_hlc` INT column (which
+    // stored the raw ms directly, not a packed HLC) is retained dead, same
+    // as every other row.
     //
     // CRITICAL INVARIANT: SyncTombstone.gcRetentionSeconds (90 d) MUST STRICTLY exceed
     // the slot-eviction long window (P1-M3 DeviceSlotRegistry, not yet shipped).
@@ -1867,23 +1940,25 @@ actor FederationStateActor {
             ])
         )
         guard let row = rows.first,
-              case .int(let ms) = row["sync_hlc"] else {
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else {
             // No prior GC run — return 0 so (nowMs - 0) is always >= gcIntervalMs.
             return 0
         }
-        return ms
+        return hlc.physicalTime
     }
 
     private func writeFedLastGCMs(_ ms: Int64, to storage: any Storage) async throws {
         // upsertSync: marks the write as .syncApply origin so recordOutbound's
         // echo-suppression gate drops it. The sentinel row has no application
         // meaning and must never be pushed to peers.
+        let sentinelHLC = HLC(physicalTime: ms, logicalCount: 0, nodeID: 0)
         _ = try await storage.rowStore.upsertSync(
             table: Self.fedSyncMetaTable,
             values: [
                 "table_name":     .text(Self.gcSentinelTableName),
                 "primary_key":    .text(Self.gcSentinelPrimaryKey),
-                "sync_hlc":       .int(ms),
+                "sync_hlc_wire":  .blob(Data(sentinelHLC.wireBytes)),
                 "schema_version": .int(0),
                 "kit_id":         .text(""),
                 "is_deleted":     .int(0),

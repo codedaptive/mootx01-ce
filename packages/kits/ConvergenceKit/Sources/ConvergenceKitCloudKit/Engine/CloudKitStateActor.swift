@@ -462,7 +462,9 @@ actor CloudKitStateActor {
         // Mint HLC if the observation did not carry one (the InMemory and
         // SQLite observers do not stamp HLCs on TableChange notifications today).
         let hlc = change.hlc ?? hlcGenerator.send(now: nowMillis())
-        let packedHLC = Int64(bitPattern: hlc.packed)
+        // Gap 6 (D38.1): full-width wire encoding, not the legacy 40-bit-
+        // truncated `HLC.packed`. See OutboxEntry.swift's file header.
+        let hlcWireBytes = Data(hlc.wireBytes)
 
         // Encode values as a JSON SyncValueMap blob for transport-agnostic storage.
         // effectiveValues is the projection-stripped set (R2) — excluded columns
@@ -527,7 +529,7 @@ actor CloudKitStateActor {
             rowKey: change.rowKey?.uuidString ?? "",
             event: SyncEventKind(from: change.event),
             valuesData: valuesData,
-            packedHLC: packedHLC,
+            hlcWireBytes: hlcWireBytes,
             enqueuedAt: enqueuedAt,
             columnHLCsData: columnHLCsData
         )
