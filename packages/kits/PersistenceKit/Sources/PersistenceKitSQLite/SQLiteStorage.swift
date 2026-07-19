@@ -515,7 +515,7 @@ actor SQLiteBackend {
             }
             throw error
         }
-        let key = extractRowKey(values: values)
+        let key = extractRowKey(table: table, values: values)
         // changedColumns for insert = all columns in the written row.
         notifyObservers(TableChange(
             table: table, event: .insert, rowKey: key, values: values, origin: origin,
@@ -574,7 +574,7 @@ actor SQLiteBackend {
         let existingRowForDiff = try? fetchRowByConflictColumns(
             table: table, values: values, conflictColumns: conflictColumns)
         _ = try stmt.step()
-        let key = extractRowKey(values: values)
+        let key = extractRowKey(table: table, values: values)
         let changedCols: Set<String>
         if let existing = existingRowForDiff {
             // Upsert-as-update: stamp only columns that differ from the stored row.
@@ -996,9 +996,21 @@ actor SQLiteBackend {
         return Int(stmt.columnInt64(0))
     }
 
-    private func extractRowKey(values: [String: TypedValue]) -> RowKey {
-        // Prefer "row_id" column if present and UUID-typed.
-        if let v = values["row_id"] {
+    /// Derive the outbound `RowKey` for a just-written row from its column
+    /// values, using the schema-declared primary key for `table` — the same
+    /// resolution `fetchMatchingRowKeys`/`fetchMatchingRowValues` already use
+    /// (`schemaDeclaration?.tables…primaryKey.first ?? "row_id"`). Before this
+    /// fix the lookup was hardcoded to a literal `"row_id"` column and fell
+    /// back to a freshly-minted random `UUID()` for any table whose PK is
+    /// named something else (e.g. `"id"`). That random fallback silently
+    /// forked row identity on the outbound sync path: the row inserted with
+    /// key K was announced to observers/replication under a random key K',
+    /// so the send-side identity never matched the row actually persisted.
+    private func extractRowKey(table: String, values: [String: TypedValue]) -> RowKey {
+        let pkCol = schemaDeclaration?
+            .tables.first(where: { $0.name == table })?
+            .primaryKey.first ?? "row_id"
+        if let v = values[pkCol] {
             if case .uuid(let u) = v { return u }
             if case .text(let s) = v, let u = UUID(uuidString: s) { return u }
         }

@@ -270,4 +270,93 @@ struct SQLiteObserverTests {
 
         await storage.close()
     }
+
+    // MARK: - extractRowKey honors the schema-declared PK, not a hardcoded "row_id"
+
+    /// Schema whose primary key column is named "id" rather than "row_id" —
+    /// the exact shape that exposed the bug: `extractRowKey` only ever looked
+    /// at a literal `"row_id"` key in the values dict, so on a table like this
+    /// it always fell through to the `UUID()` random fallback.
+    func makeSchemaWithNonRowIdPrimaryKey() -> SchemaDeclaration {
+        SchemaDeclaration(
+            kitID: "ObserverTestKit",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "docs",
+                    columns: [.uuid("id"), .text("label")],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+    }
+
+    @Test func insertReturnsRealSchemaPKNotRandomUUID() async throws {
+        let storage = try makeStorage()
+        try await storage.open(schema: makeSchemaWithNonRowIdPrimaryKey())
+
+        let realID = UUID()
+        let handle = try await storage.rowStore.insert(
+            table: "docs",
+            values: ["id": .uuid(realID), "label": .text("a")]
+        )
+
+        // Before the fix: extractRowKey never found "id" in values (it only
+        // checked "row_id"), so handle.key was a freshly-minted random UUID
+        // that never matched `realID` — an outbound identity fork.
+        #expect(handle.key == realID, "insert must return the schema-declared PK value, not a random UUID")
+
+        await storage.close()
+    }
+
+    @Test func insertNotificationCarriesRealSchemaPK() async throws {
+        let storage = try makeStorage()
+        try await storage.open(schema: makeSchemaWithNonRowIdPrimaryKey())
+
+        let stream = storage.observer.observe(table: "docs", events: [.insert])
+        let collected = Task<TableChange?, Never> {
+            for await change in stream { return change }
+            return nil
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let realID = UUID()
+        _ = try await storage.rowStore.insert(
+            table: "docs",
+            values: ["id": .uuid(realID), "label": .text("b")]
+        )
+
+        let change = await withTaskGroup(of: TableChange?.self) { group in
+            group.addTask { await collected.value }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                collected.cancel()
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+
+        #expect(change != nil, "insert must fire a notification")
+        #expect(change?.rowKey == realID, "insert notification must carry the schema-declared PK, not a random UUID")
+
+        await storage.close()
+    }
+
+    @Test func upsertReturnsRealSchemaPKNotRandomUUID() async throws {
+        let storage = try makeStorage()
+        try await storage.open(schema: makeSchemaWithNonRowIdPrimaryKey())
+
+        let realID = UUID()
+        let handle = try await storage.rowStore.upsert(
+            table: "docs",
+            values: ["id": .uuid(realID), "label": .text("c")],
+            conflictColumns: ["id"]
+        )
+
+        #expect(handle.key == realID, "upsert must return the schema-declared PK value, not a random UUID")
+
+        await storage.close()
+    }
 }
