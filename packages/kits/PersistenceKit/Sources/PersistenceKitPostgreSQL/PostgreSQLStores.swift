@@ -32,6 +32,26 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         self.txn = txn
     }
 
+    /// Resolve the internal `RowKey` for a row about to be written, from its
+    /// primary-key column(s) and the values being written.
+    ///
+    /// Single-column PK only (composite/multi-column PKs are out of gap-5's
+    /// scope — Kong's guard — and fall through to the random-mint default,
+    /// unchanged). For a `.uuid`-typed PK, the value itself IS the key. For
+    /// a `.text`-typed PK, gap 5: previously this branch did not exist at
+    /// all — every `.text`-PK row (including a UUID-shaped one) got a fresh
+    /// random `RowKey`, forking row identity between the row actually
+    /// persisted and what observers/ConvergenceKit's federation gate saw.
+    /// `RowKeyDerivation.deterministicRowKey(from:)` parses a UUID-shaped
+    /// string directly, or derives a stable UUID from SHA-256 of the string
+    /// otherwise — see `RowKeyDerivation.swift` for the full rationale.
+    private static func resolveRowKey(primaryKey: [String], values: [String: TypedValue]) -> RowKey {
+        guard primaryKey.count == 1, let pkVal = values[primaryKey[0]] else { return UUID() }
+        if case .uuid(let u) = pkVal { return u }
+        if case .text(let s) = pkVal { return RowKeyDerivation.deterministicRowKey(from: s) }
+        return UUID()
+    }
+
     private func withConnection<T: Sendable>(_ block: @Sendable (PostgresConnection) async throws -> T) async throws -> T {
         if let txn { return try await block(txn.connection) }
         let conn = try await backend.pool.acquire()
@@ -66,12 +86,7 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         let sql = "INSERT INTO \"\(table)\" (\(colList)) VALUES (\(placeholders))"
         let bindings = cols.map { values[$0]! }
         let pk = await backend.primaryKey(for: table)
-        let key: RowKey
-        if pk.count == 1, let pkVal = values[pk[0]], case let .uuid(u) = pkVal {
-            key = u
-        } else {
-            key = UUID()
-        }
+        let key: RowKey = Self.resolveRowKey(primaryKey: pk, values: values)
         try await withConnection { conn in
             _ = try await conn.executeParameterized(sql, bindings: bindings, logger: Logger(label: "pg.row.insert"))
         }
@@ -110,10 +125,7 @@ final class PostgreSQLRowStore: RowStore, Sendable {
             _ = try await conn.executeParameterized(sql, bindings: bindings, logger: Logger(label: "pg.row.upsert"))
         }
         let pk = await backend.primaryKey(for: table)
-        if pk.count == 1, let pkVal = values[pk[0]], case let .uuid(u) = pkVal {
-            return RowHandle(table: table, key: u)
-        }
-        return RowHandle(table: table, key: UUID())
+        return RowHandle(table: table, key: Self.resolveRowKey(primaryKey: pk, values: values))
     }
 
     func update(table: String, values: [String: TypedValue], where predicate: StoragePredicate) async throws -> Int {

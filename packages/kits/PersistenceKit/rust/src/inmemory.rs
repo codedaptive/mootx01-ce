@@ -417,11 +417,29 @@ struct InMemoryRowStore {
 }
 
 impl InMemoryRowStore {
+    /// Resolve the internal `RowKey` for a row about to be written.
+    ///
+    /// Single-column PK only (composite/multi-column PKs fall through to
+    /// the random-mint default below — unchanged, out of gap-5's scope).
+    /// For a `.uuid`-typed PK, the value itself IS the key (unchanged fast
+    /// path). For a `.text`-typed PK, gap 5: derive the key
+    /// DETERMINISTICALLY from the PK's content via
+    /// `row_key_derivation::deterministic_row_key` instead of minting a
+    /// fresh random UUID. Before this fix, two storage instances (e.g. two
+    /// federation spokes) writing the same logical row (same `.text` PK
+    /// value) resolved two unrelated random `RowKey`s, so ConvergenceKit's
+    /// HLC-ordering gates — keyed by `RowKey` — compared against mismatched
+    /// side-table entries and ordering silently degraded to pull-order
+    /// instead of HLC-order. See `row_key_derivation.rs` for the full
+    /// rationale and the sibling relationship to `deterministic_uuid`
+    /// (LocusKit's `merkle_rollup.rs`).
     fn resolve_key(table: &Table, values: &BTreeMap<String, TypedValue>) -> RowKey {
         if table.declaration.primary_key.len() == 1 {
             let pk = &table.declaration.primary_key[0];
-            if let Some(TypedValue::Uuid(u)) = values.get(pk) {
-                return *u;
+            match values.get(pk) {
+                Some(TypedValue::Uuid(u)) => return *u,
+                Some(TypedValue::Text(s)) => return crate::row_key_derivation::deterministic_row_key(s),
+                _ => {}
             }
         }
         uuid::Uuid::new_v4()

@@ -496,10 +496,28 @@ actor InMemoryStateActor {
         return t.rows.count
     }
 
+    /// Resolve the internal `RowKey` for a row about to be written.
+    ///
+    /// Single-column PK only (composite/multi-column PKs fall through to the
+    /// random-mint default below — unchanged, out of gap-5's scope). For a
+    /// `.uuid`-typed PK, the value itself IS the key (unchanged fast path).
+    /// For a `.text`-typed PK, gap 5: derive the key DETERMINISTICALLY from
+    /// the PK's content via `RowKeyDerivation.deterministicRowKey(from:)`
+    /// instead of minting a fresh random `UUID()`. Before this fix, two
+    /// storage instances (e.g. two federation spokes) writing the same
+    /// logical row (same `.text` PK value) resolved two unrelated random
+    /// `RowKey`s, so ConvergenceKit's HLC-ordering gates — keyed by
+    /// `RowKey` — compared against mismatched side-table entries and
+    /// ordering silently degraded to pull-order instead of HLC-order. See
+    /// `RowKeyDerivation.swift` for the full rationale and the sibling
+    /// relationship to `Estate.deterministicUUID(from:)`.
     private func resolveOrAllocateKey(table: InMemoryTable, values: [String: TypedValue]) -> RowKey {
         if table.declaration.primaryKey.count == 1 {
             let pkName = table.declaration.primaryKey[0]
-            if let pkValue = values[pkName], case .uuid(let u) = pkValue { return u }
+            if let pkValue = values[pkName] {
+                if case .uuid(let u) = pkValue { return u }
+                if case .text(let s) = pkValue { return RowKeyDerivation.deterministicRowKey(from: s) }
+            }
         }
         return UUID()
     }

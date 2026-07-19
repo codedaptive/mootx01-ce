@@ -1006,13 +1006,32 @@ actor SQLiteBackend {
     /// forked row identity on the outbound sync path: the row inserted with
     /// key K was announced to observers/replication under a random key K',
     /// so the send-side identity never matched the row actually persisted.
+    /// The `pkCol = schemaDeclaration?...primaryKey.first ?? "row_id"`
+    /// resolution above is UNCHANGED by gap 5: it still applies to the
+    /// `.uuid` fast path and the UUID-parseable-`.text` case regardless of
+    /// composite-PK shape, exactly as before.
+    ///
+    /// Gap 5 adds exactly one new branch: a `.text` PK value that does NOT
+    /// parse as a UUID string, on a genuinely SINGLE-COLUMN PK (composite/
+    /// multi-column PKs are out of scope — Kong's guard — and fall through
+    /// to the random-mint default, unchanged). `RowKeyDerivation.
+    /// deterministicRowKey(from:)` derives a stable UUID from SHA-256 of the
+    /// string, closing the gap where a genuinely non-UUID-shaped `.text` PK
+    /// value (LocusKit's documented, not-yet-exercised deterministic-id
+    /// capability) still forked row identity between federation spokes even
+    /// on this SQLite backend. See RowKeyDerivation.swift for the full
+    /// rationale.
     private func extractRowKey(table: String, values: [String: TypedValue]) -> RowKey {
-        let pkCol = schemaDeclaration?
-            .tables.first(where: { $0.name == table })?
-            .primaryKey.first ?? "row_id"
+        let pkColumns = schemaDeclaration?.tables.first(where: { $0.name == table })?.primaryKey ?? []
+        let pkCol = pkColumns.first ?? "row_id"
         if let v = values[pkCol] {
             if case .uuid(let u) = v { return u }
-            if case .text(let s) = v, let u = UUID(uuidString: s) { return u }
+            if case .text(let s) = v {
+                if let u = UUID(uuidString: s) { return u }
+                if pkColumns.count == 1 {
+                    return RowKeyDerivation.deterministicRowKey(from: s)
+                }
+            }
         }
         return UUID()
     }
