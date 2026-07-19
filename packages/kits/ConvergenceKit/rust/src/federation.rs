@@ -28,7 +28,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use persistence_kit::{Column, OrderClause, RowStore, Storage, StorageEvent, StoragePredicate, TableChange, TypedValue};
+use persistence_kit::{
+    Column, IsolationLevel, OrderClause, RowStore, Storage, StorageError, StorageEvent,
+    StoragePredicate, TableChange, TypedValue,
+};
 
 // ----- identity -----
 
@@ -1142,6 +1145,15 @@ impl SyncEngine for FederationSyncEngine {
     }
 }
 
+/// Wrap an arbitrary boxed error — the return type of the `write_fed_*`
+/// side-table helpers (`write_fed_sync_hlc`, `write_fed_tombstone_hlc`,
+/// `write_fed_column_hlcs`) — as a `StorageError` so it can propagate through
+/// a `Storage::transaction` closure, whose signature is constrained to
+/// `FnMut(&dyn StorageTransaction) -> StorageResult<()>` (N1 fix).
+fn box_err_to_storage_err(e: Box<dyn std::error::Error + Send + Sync>) -> StorageError {
+    StorageError::BackendError { underlying: e.to_string() }
+}
+
 /// Apply one inbound SyncRecord to local storage per event kind and conflict policy.
 ///
 /// A6 UNIFICATION: the sync HLC is now stored in `_fed_sync_meta` (a per-engine
@@ -1194,22 +1206,41 @@ fn apply_record(
                         return Ok(()); // stale delete — local row is newer
                     }
                 }
-                let _ = row_store.delete(&record.table, &predicate);
-                // A6: persist tombstone HLC in side table after hard-delete.
-                // WHY: without this a stale insert arriving later would find
-                // local_hlc = None and be accepted, resurrecting the deleted row.
-                write_fed_tombstone_hlc(
-                    &row_store,
-                    &record.table,
-                    &record.row_key,
-                    record.hlc.into(),
-                )
-                .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                // N1 fix: the hard-delete and the tombstone-HLC bookkeeping write
+                // commit as ONE transaction. Previously these were two separate
+                // top-level calls; a crash/kill between them could leave the row
+                // deleted with no tombstone HLC recorded, defeating the A6
+                // stale-resurrect guard (a later stale insert would find
+                // `local_hlc == None` and resurrect the row). Mirrors the Swift
+                // CloudKit ApplyInbound.swift N1 fix.
+                //
+                // The delete keeps its pre-existing best-effort (`let _ =`)
+                // semantics inside the transaction — a delete failure here is
+                // swallowed the same way it always was.
+                storage
+                    .transaction(IsolationLevel::Serializable, &mut |txn| {
+                        let txn_row_store = txn.row_store();
+                        let _ = txn_row_store.delete(&record.table, &predicate);
+                        // A6: persist tombstone HLC in side table after hard-delete.
+                        // WHY: without this a stale insert arriving later would find
+                        // local_hlc = None and be accepted, resurrecting the deleted row.
+                        write_fed_tombstone_hlc(
+                            &txn_row_store,
+                            &record.table,
+                            &record.row_key,
+                            record.hlc.into(),
+                        )
+                        .map_err(box_err_to_storage_err)?;
+                        Ok(())
+                    })
+                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
                 // The tombstone won the LWW gate; older-HLC skew entries are already
                 // superseded (they would be rejected on replay by the same gate).
                 // Mirrors Swift FederationStateActor.applyInbound lastWriterWinsByHLC
                 // tombstone arm (PendingSkewQueue.deleteMatchingOlderThan call).
+                // Remains outside the transaction — a separate, already best-effort
+                // storage-reclaim concern, not part of the value+HLC correctness gate.
                 let _ = fed_skew_delete_older_than(
                     &row_store, &record.table, &record.row_key, record.hlc);
             }
@@ -1222,23 +1253,42 @@ fn apply_record(
                 // tombstone wins unconditionally (row never written under fieldLevelLWW).
                 let local_col_hlcs = read_fed_column_hlcs(&row_store, &record.table, &record.row_key);
                 if tombstone_wins(record.hlc, &local_col_hlcs) {
-                    let _ = row_store.delete(&record.table, &predicate);
-                    // Clear column HLC side-table entries: the row is gone, and stale
-                    // column entries would confuse a future re-insert under fieldLevelLWW.
-                    clear_fed_column_hlcs(&row_store, &record.table, &record.row_key);
-                    // A6: persist tombstone HLC in _fed_sync_meta to block stale
-                    // resurrections from older records arriving later.
-                    write_fed_tombstone_hlc(
-                        &row_store,
-                        &record.table,
-                        &record.row_key,
-                        record.hlc.into(),
-                    )
-                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    // N1 fix: the hard-delete, the column-HLC side-table clear, and
+                    // the row-grain tombstone-HLC write commit as ONE transaction.
+                    // Previously these were three separate top-level calls; a
+                    // crash/kill between any two of them could leave a deleted row
+                    // with stale column-HLC entries still on record, or with no
+                    // tombstone HLC in `_fed_sync_meta` (defeating the A6
+                    // stale-resurrect guard). Mirrors the Swift CloudKit
+                    // ApplyInbound.swift N1 fix.
+                    //
+                    // The delete and the column-HLC clear keep their pre-existing
+                    // best-effort semantics inside the transaction.
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |txn| {
+                            let txn_row_store = txn.row_store();
+                            let _ = txn_row_store.delete(&record.table, &predicate);
+                            // Clear column HLC side-table entries: the row is gone, and stale
+                            // column entries would confuse a future re-insert under fieldLevelLWW.
+                            clear_fed_column_hlcs(&txn_row_store, &record.table, &record.row_key);
+                            // A6: persist tombstone HLC in _fed_sync_meta to block stale
+                            // resurrections from older records arriving later.
+                            write_fed_tombstone_hlc(
+                                &txn_row_store,
+                                &record.table,
+                                &record.row_key,
+                                record.hlc.into(),
+                            )
+                            .map_err(box_err_to_storage_err)?;
+                            Ok(())
+                        })
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                     // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
                     // The tombstone won the edit-beats-delete gate; older-HLC skew entries
                     // are already superseded and would lose again on replay. Mirrors
                     // Swift FederationStateActor.applyInbound fieldLevelLWW tombstone arm.
+                    // Remains outside the transaction — see the identical note in the
+                    // LastWriterWinsByHLC tombstone arm above.
                     let _ = fed_skew_delete_older_than(
                         &row_store, &record.table, &record.row_key, record.hlc);
                 }
@@ -1306,19 +1356,36 @@ fn apply_record(
                             return Ok(()); // stale inbound — local (or tombstone) is newer
                         }
                     }
+                    // N1 fix: the value upsert and the sync-HLC bookkeeping write
+                    // commit as ONE transaction. Previously these were two separate
+                    // top-level calls; a crash/kill between them could leave a
+                    // committed value row with a stale (or missing) `_fed_sync_meta`
+                    // HLC, letting a later stale edit silently overwrite the newer
+                    // value (the N1 failure mode). Mirrors the Swift CloudKit
+                    // ApplyInbound.swift N1 fix.
+                    //
                     // Apply WITHOUT embedding _syncHLC in the row. A6: HLC lives
                     // in _fed_sync_meta, not in the application row column.
-                    row_store
-                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                    let values_for_write = values.clone();
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |txn| {
+                            let txn_row_store = txn.row_store();
+                            txn_row_store.upsert(
+                                &record.table,
+                                values_for_write.clone(),
+                                &[synced_table.primary_key_column.clone()],
+                            )?;
+                            // Persist HLC in side table (is_deleted = 0, live row).
+                            write_fed_sync_hlc(
+                                &txn_row_store,
+                                &record.table,
+                                &record.row_key,
+                                record.hlc.into(),
+                            )
+                            .map_err(box_err_to_storage_err)?;
+                            Ok(())
+                        })
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                    // Persist HLC in side table (is_deleted = 0, live row).
-                    write_fed_sync_hlc(
-                        &row_store,
-                        &record.table,
-                        &record.row_key,
-                        record.hlc.into(),
-                    )
-                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
                 ConflictPolicy::RemoteWins => {
                     row_store
@@ -1353,31 +1420,45 @@ fn apply_record(
                         record.hlc,
                         &local_col_hlcs,
                     );
-                    if !columns_to_apply.is_empty() {
-                        row_store
-                            .upsert(
+                    // N1 fix: the winning-column value upsert, the column-HLC
+                    // bookkeeping write, and the row-grain HLC bookkeeping write all
+                    // commit as ONE transaction. Previously these were up to three
+                    // separate top-level calls; a crash/kill between any two of them
+                    // could leave a committed value row with stale (or missing) HLC
+                    // bookkeeping in either side table, letting a later stale edit
+                    // silently overwrite the newer value (the N1 failure mode).
+                    // Mirrors the Swift CloudKit ApplyInbound.swift N1 fix.
+                    let columns_to_apply_is_empty = columns_to_apply.is_empty();
+                    let columns_to_apply_for_write = columns_to_apply.clone();
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |txn| {
+                            let txn_row_store = txn.row_store();
+                            if !columns_to_apply_is_empty {
+                                txn_row_store.upsert(
+                                    &record.table,
+                                    columns_to_apply_for_write.clone(),
+                                    &[synced_table.primary_key_column.clone()],
+                                )?;
+                                // Persist updated column HLCs to side table so the next
+                                // inbound apply can read them for its own column-grain gate.
+                                write_fed_column_hlcs(&txn_row_store, &record.table, &record.row_key, &updated_col_hlcs)
+                                    .map_err(box_err_to_storage_err)?;
+                            }
+                            // Update the row-grain sync HLC in _fed_sync_meta with the
+                            // incoming row HLC. The tombstone path uses the column-grain
+                            // side table (not this value) for its own gate; this update
+                            // keeps _fed_sync_meta current for any code that may query it
+                            // independently (e.g. observability, GC).
+                            write_fed_sync_hlc(
+                                &txn_row_store,
                                 &record.table,
-                                columns_to_apply,
-                                &[synced_table.primary_key_column.clone()],
+                                &record.row_key,
+                                record.hlc.into(),
                             )
-                            .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                        // Persist updated column HLCs to side table so the next
-                        // inbound apply can read them for its own column-grain gate.
-                        write_fed_column_hlcs(&row_store, &record.table, &record.row_key, &updated_col_hlcs)
-                            .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                    }
-                    // Update the row-grain sync HLC in _fed_sync_meta with the
-                    // incoming row HLC. The tombstone path uses the column-grain
-                    // side table (not this value) for its own gate; this update
-                    // keeps _fed_sync_meta current for any code that may query it
-                    // independently (e.g. observability, GC).
-                    write_fed_sync_hlc(
-                        &row_store,
-                        &record.table,
-                        &record.row_key,
-                        record.hlc.into(),
-                    )
-                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                            .map_err(box_err_to_storage_err)?;
+                            Ok(())
+                        })
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
             }
         }
@@ -2801,6 +2882,7 @@ fn tombstone_wins(tombstone_hlc: PackedHLC, local_column_hlcs: &ColumnHLCMap) ->
 mod tests {
     use super::*;
     use persistence_kit::inmemory::InMemoryStorage;
+    use persistence_kit::StorageResult;
     use std::collections::BTreeMap;
 
     // ── tombstone GC test helpers ────────────────────────────────────────────
@@ -3301,6 +3383,175 @@ mod tests {
         assert_eq!(
             encoded, golden,
             "Rust-encoded ColumnHLCMap must be byte-identical to the Swift golden"
+        );
+    }
+
+    // ── N1 atomicity: value write + HLC bookkeeping commit as one transaction ──
+    //
+    // Rust twin of ApplyInboundAtomicityTests.swift (ConvergenceKitCloudKitTests).
+    // `apply_record`'s `LastWriterWinsByHLC` and `FieldLevelLWW` arms used to
+    // commit the application-row value write (`row_store.upsert`) and the HLC
+    // bookkeeping write(s) (`write_fed_sync_hlc` / `write_fed_column_hlcs` /
+    // `write_fed_tombstone_hlc`) as separate, non-transactional calls. A
+    // crash/kill between them could leave a committed value with stale or
+    // missing HLC bookkeeping, letting a later stale edit silently overwrite a
+    // newer value (N1). The fix wraps each arm's writes in one
+    // `storage.transaction(IsolationLevel::Serializable, ...)` block.
+    //
+    // FORCED-FAILURE tests below inject an `Err` between the value write and
+    // the HLC-bookkeeping write — the exact statement order `apply_record` now
+    // uses — and prove `InMemoryStorage::transaction` rolls BOTH back together
+    // (see `inmemory.rs::transaction`: on `Err`, the pre-transaction snapshot
+    // is restored wholesale). This closes the N1 crash window: since
+    // `apply_record` now performs both writes inside the SAME transaction
+    // closure, the same rollback guarantee protects it.
+
+    fn make_n1_storage() -> Arc<dyn Storage> {
+        use persistence_kit::{ColumnDeclaration, ColumnType, SchemaDeclaration, TableDeclaration};
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let schema = SchemaDeclaration::new(
+            "n1-test-kit",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::new("id", ColumnType::Uuid),
+                    ColumnDeclaration::new("note", ColumnType::Text),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open items schema");
+        ensure_fed_sync_meta_table(&*storage).expect("ensure_fed_sync_meta_table");
+        storage
+    }
+
+    #[derive(Debug)]
+    struct ForcedFailure;
+    impl std::fmt::Display for ForcedFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "forced failure (N1 atomicity test)")
+        }
+    }
+    impl std::error::Error for ForcedFailure {}
+
+    /// fieldLevelLWW-shaped: value upsert + column-HLC write roll back TOGETHER
+    /// when the transaction fails between them.
+    #[test]
+    fn n1_forced_failure_between_value_and_column_hlc_rolls_back_both() {
+        let storage = make_n1_storage();
+        let row_id = Uuid::new_v4();
+
+        let result: StorageResult<()> = storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let txn_row_store = txn.row_store();
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), TypedValue::Uuid(row_id));
+            values.insert("note".to_string(), TypedValue::Text("would-be-committed".to_string()));
+            txn_row_store.upsert("items", values, &["id".to_string()])?;
+            // Crash/kill simulated HERE — mirrors apply_record's FieldLevelLWW
+            // arm, where write_fed_column_hlcs is the next statement after the
+            // value upsert.
+            Err(box_err_to_storage_err(Box::new(ForcedFailure)))
+        });
+        assert!(result.is_err(), "forced failure must propagate out of the transaction");
+
+        let row_store = storage.row_store();
+        let rows = row_store
+            .query("items", None, &[], None, None)
+            .expect("query items");
+        assert!(
+            rows.is_empty(),
+            "value upsert must roll back when a later statement in the same transaction fails"
+        );
+
+        let col_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        assert!(
+            col_hlcs.is_empty(),
+            "column-HLC bookkeeping must roll back along with the value write"
+        );
+    }
+
+    /// lastWriterWinsByHLC-shaped: value upsert + row-grain HLC write roll back
+    /// TOGETHER when the transaction fails between them.
+    #[test]
+    fn n1_forced_failure_between_value_and_row_hlc_rolls_back_both() {
+        let storage = make_n1_storage();
+        let row_id = Uuid::new_v4();
+
+        let result: StorageResult<()> = storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let txn_row_store = txn.row_store();
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), TypedValue::Uuid(row_id));
+            values.insert("note".to_string(), TypedValue::Text("would-be-committed".to_string()));
+            txn_row_store.upsert("items", values, &["id".to_string()])?;
+            // Crash/kill simulated HERE — mirrors apply_record's LastWriterWinsByHLC
+            // arm, where write_fed_sync_hlc is the next statement after the upsert.
+            Err(box_err_to_storage_err(Box::new(ForcedFailure)))
+        });
+        assert!(result.is_err(), "forced failure must propagate out of the transaction");
+
+        let row_store = storage.row_store();
+        let rows = row_store
+            .query("items", None, &[], None, None)
+            .expect("query items");
+        assert!(
+            rows.is_empty(),
+            "value upsert must roll back when a later statement in the same transaction fails"
+        );
+
+        assert!(
+            read_fed_sync_hlc(&row_store, "items", &row_id).is_none(),
+            "row-grain HLC bookkeeping must roll back along with the value write"
+        );
+    }
+
+    /// Success path: `apply_record`'s FieldLevelLWW arm commits the value row,
+    /// the column-HLC side table, and the row-grain HLC side table together —
+    /// proving the transactional refactor did not change observable behavior
+    /// on the (overwhelmingly common) non-crash commit path.
+    #[test]
+    fn n1_success_path_field_level_lww_value_and_both_hlc_layers_present() {
+        let storage = make_n1_storage();
+        let row_id = Uuid::new_v4();
+        let synced_table = SyncedTable::new("items", "id")
+            .with_direction(SyncDirection::Bidirectional)
+            .with_conflict_policy(ConflictPolicy::FieldLevelLWW);
+
+        let mut raw_values = BTreeMap::new();
+        raw_values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        raw_values.insert("note".to_string(), TypedValue::Text("flww-value".to_string()));
+        let hlc = HLC { physical_time: 500, logical_count: 0, node_id: 1 };
+        let mut record = SyncRecord::new(
+            "items",
+            SyncEventKind::Update,
+            row_id,
+            Some(SyncValueMap::from_typed(raw_values)),
+            hlc,
+            1,
+            "n1-test-kit",
+        );
+        record.column_hlcs = Some(ColumnHLCMap {
+            entries: {
+                let mut m = BTreeMap::new();
+                m.insert("note".to_string(), PackedHLC::from(hlc));
+                m
+            },
+        });
+
+        apply_record(&record, &synced_table, &storage).expect("apply_record must succeed");
+
+        let row_store = storage.row_store();
+        let rows = row_store
+            .query("items", None, &[], None, None)
+            .expect("query items");
+        assert_eq!(rows.len(), 1, "value row must be present after commit");
+
+        let col_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        assert!(!col_hlcs.is_empty(), "column-HLC bookkeeping must be present after commit");
+
+        assert!(
+            read_fed_sync_hlc(&row_store, "items", &row_id).is_some(),
+            "row-grain HLC bookkeeping must be present after commit"
         );
     }
 }
