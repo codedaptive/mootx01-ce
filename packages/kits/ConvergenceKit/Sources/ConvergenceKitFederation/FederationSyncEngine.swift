@@ -572,12 +572,13 @@ actor FederationStateActor {
             logger.warning("federation recordOutbound: JSON encode failed for \(change.table)/\(rowKey) — entry dropped")
             return
         }
-        let packedHLC = Int64(bitPattern: hlc.packed)
+        // Gap 6 (D38.1): full-width wire encoding, not the legacy 40-bit-
+        // truncated `HLC.packed`. See FedOutboxStore.swift's file header.
         let entry = FedOutboxEntry(
             id: UUID(),
             tableName: record.table,
             rowKey: rowKey.uuidString,
-            packedHLC: packedHLC,
+            hlcWireBytes: Data(hlc.wireBytes),
             payload: payload,
             enqueuedAt: iso8601Now()
         )

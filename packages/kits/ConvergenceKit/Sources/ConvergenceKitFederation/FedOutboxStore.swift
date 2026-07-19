@@ -16,10 +16,20 @@
 //
 // COALESCING RULE:
 // Multiple changes to the same (table_name, row_key) collapse to the entry
-// with the highest packed_hlc. Newer-HLC write subsumes the older one,
-// bounding hot-row growth in high-write workloads. Column HLC merging is not
-// needed here because the payload IS the final SyncRecord; a newer SyncRecord
-// already carries the up-to-date column HLC map.
+// with the highest HLC (decoded from `hlc_wire`, gap 6). Newer-HLC write
+// subsumes the older one, bounding hot-row growth in high-write workloads.
+// Column HLC merging is not needed here because the payload IS the final
+// SyncRecord; a newer SyncRecord already carries the up-to-date column HLC
+// map.
+//
+// GAP 6 (2026-07, D38.1): `hlc_wire` (full-width `HLC.wireBytes`) replaced
+// the legacy `packed_hlc` (`HLC.packed`, 40-bit-truncated) as the
+// authoritative coalescing/ordering key — mirrors the Rust twin
+// (federation.rs's `FedOutboxEntry`/`fed_outbox_append`/
+// `fed_outbox_read_batch`) and CloudKit's `OutboxEntry.hlcWireBytes`. This
+// file was the one sibling gap 6's initial full-width-atomic pass missed —
+// the Rust leg was fixed but this Swift leg was not, caught in Kong's
+// adversarial verify.
 //
 // CONFIRMATION SEMANTICS (WC2, in-process relay):
 // relay.send is synchronous. confirm(ids:from:) is called after every
@@ -66,13 +76,14 @@ public struct FedOutboxEntry: Sendable {
     /// TEXT column per schema invariants (UUID stored as text, not blob).
     public let rowKey: String
 
-    /// Packed HLC for this change, stored as Int64 bit-pattern of the
-    /// `SubstrateTypes.HLC.packed` UInt64. Used for coalescing: the entry
-    /// with the lower packed HLC is discarded when two entries share the
-    /// same (tableName, rowKey). The MSB-node layout (`SubstrateTypes.HLC`)
-    /// guarantees correct chronological ordering by packed integer compare
-    /// — matches `_fed_outbox.packed_hlc` documented in SPEC §4.
-    public let packedHLC: Int64
+    /// Full-width wire-format HLC for this change (`HLC.wireBytes` — 16
+    /// bytes: 8 bytes physicalTime LE + 4 bytes logicalCount LE + 4 bytes
+    /// nodeID LE; gap 6, D38.1). Used for coalescing: the entry decoding to
+    /// the lower HLC is discarded when two entries share the same
+    /// (tableName, rowKey). Matches `_fed_outbox.hlc_wire` — the Rust twin
+    /// (`FedOutboxEntry.hlc_wire`) and CloudKit's `OutboxEntry.hlcWireBytes`
+    /// use the identical encoding.
+    public let hlcWireBytes: Data
 
     /// JSON-encoded SyncRecord — the complete wire unit the push path
     /// delivers to the relay. Pre-encoded at observe time so the push
@@ -81,7 +92,7 @@ public struct FedOutboxEntry: Sendable {
     public let payload: Data
 
     /// ISO8601 wall-clock timestamp recorded at append time. Observability
-    /// only — not used for ordering (packedHLC is the ordering primitive).
+    /// only — not used for ordering (hlcWireBytes is the ordering primitive).
     /// TEXT per schema invariants (never REAL).
     public let enqueuedAt: String
 
@@ -89,14 +100,14 @@ public struct FedOutboxEntry: Sendable {
         id: UUID,
         tableName: String,
         rowKey: String,
-        packedHLC: Int64,
+        hlcWireBytes: Data,
         payload: Data,
         enqueuedAt: String
     ) {
         self.id = id
         self.tableName = tableName
         self.rowKey = rowKey
-        self.packedHLC = packedHLC
+        self.hlcWireBytes = hlcWireBytes
         self.payload = payload
         self.enqueuedAt = enqueuedAt
     }
@@ -122,12 +133,12 @@ public enum FedOutboxStore {
     /// Append `entry` to the durable outbox table, coalescing with any
     /// existing entry for the same `(tableName, rowKey)`.
     ///
-    /// **Coalescing rule (newest-wins by packed HLC):** if an entry already
-    /// exists for `(entry.tableName, entry.rowKey)` and its `packed_hlc` is
-    /// strictly less than `entry.packedHLC`, the existing entry is deleted
-    /// and `entry` is inserted in its place. If the existing entry's HLC is
-    /// greater-or-equal, the append is a no-op (stale write, preserves newer
-    /// existing entry).
+    /// **Coalescing rule (newest-wins by HLC):** if an entry already
+    /// exists for `(entry.tableName, entry.rowKey)` and its decoded HLC
+    /// (`hlc_wire`, gap 6) is strictly less than `entry`'s, the existing
+    /// entry is deleted and `entry` is inserted in its place. If the
+    /// existing entry's HLC is greater-or-equal, the append is a no-op
+    /// (stale write, preserves newer existing entry).
     ///
     /// WHY no column HLC merge (unlike CloudKit OutboxStore.append):
     /// The payload IS the complete SyncRecord, which already embeds the
@@ -177,7 +188,10 @@ public enum FedOutboxStore {
         )
 
         if let existingRow = existing.first {
-            guard case .int(let existingHLC) = existingRow["packed_hlc"] else {
+            guard
+                case .blob(let existingWire) = existingRow["hlc_wire"],
+                let existingHLC = try? HLC(wireBytes: [UInt8](existingWire))
+            else {
                 // Corrupt row — delete and replace.
                 if case .uuid(let oldID) = existingRow["id"] {
                     _ = try await rowStore.delete(
@@ -188,9 +202,16 @@ public enum FedOutboxStore {
                 try await insertEntry(entry, to: rowStore, table: table)
                 return
             }
+            guard let incomingHLC = try? HLC(wireBytes: [UInt8](entry.hlcWireBytes)) else {
+                // Malformed incoming entry — should never happen (always minted
+                // via HLC.wireBytes at capture time); fail loud rather than
+                // silently coalescing against an undecodable value.
+                assertionFailure("FedOutboxStore.append: entry.hlcWireBytes failed to decode")
+                return
+            }
 
             // Newest-wins: existing entry is already newer-or-equal — skip.
-            if existingHLC >= entry.packedHLC {
+            if existingHLC >= incomingHLC {
                 return
             }
 
@@ -211,26 +232,32 @@ public enum FedOutboxStore {
 
     // MARK: - Read batch
 
-    /// Read all pending outbox entries, ordered by packed_hlc ascending
-    /// (oldest first for chronological delivery ordering).
+    /// Read all pending outbox entries, ordered by HLC ascending (oldest
+    /// first for chronological delivery ordering).
     ///
     /// Does NOT delete the entries — they remain until the caller confirms
     /// them via `confirm(ids:from:table:)` after successful relay delivery.
     /// This is the read-without-consume pattern: if relay send fails, the
     /// entries stay for the next push cycle's retry.
+    ///
+    /// GAP 6 (D38.1): ordering is done IN SWIFT after decode, not via SQL
+    /// `ORDER BY` — `hlc_wire` is little-endian-first-8-bytes-physicalTime,
+    /// and raw byte-lexicographic BLOB comparison (what SQLite's `ORDER BY`
+    /// would do) does NOT preserve numeric order for little-endian
+    /// multi-byte integers. Mirrors CloudKit `OutboxStore.readBatch`'s
+    /// identical gap-6 doc comment and the Rust twin
+    /// (`fed_outbox_read_batch`).
     public static func readBatch(
         from storage: any Storage,
         table: String
     ) async throws -> [FedOutboxEntry] {
-        let rows = try await storage.rowStore.query(
-            table: table,
-            where: nil,
-            orderBy: [OrderClause(column: Column(table: table, name: "packed_hlc"),
-                                  direction: .ascending)],
-            limit: nil,
-            offset: nil
-        )
-        return rows.compactMap { decodeRow($0) }
+        let rows = try await storage.rowStore.query(table: table, where: nil)
+        let entries = rows.compactMap { decodeRow($0) }
+        return entries.sorted { lhs, rhs in
+            let lhsHLC = (try? HLC(wireBytes: [UInt8](lhs.hlcWireBytes))) ?? .zero
+            let rhsHLC = (try? HLC(wireBytes: [UInt8](rhs.hlcWireBytes))) ?? .zero
+            return lhsHLC < rhsHLC
+        }
     }
 
     // MARK: - Confirm (delete on transport success)
@@ -260,7 +287,7 @@ public enum FedOutboxStore {
     ///
     /// Called from `FederationStateActor.enable()` to discover unconfirmed
     /// changes so the host knows to trigger a push cycle. Returns all entries
-    /// in packed_hlc ascending order. Semantically equivalent to
+    /// in HLC ascending order. Semantically equivalent to
     /// `readBatch(from:table:)` with an explicit enable-time intent.
     public static func drainLeftovers(
         from storage: any Storage,
@@ -302,6 +329,12 @@ public enum FedOutboxStore {
     }
 
     /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    ///
+    /// Gap 6: writes `hlc_wire` (full-width) directly from
+    /// `entry.hlcWireBytes`. The legacy `packed_hlc` column is deliberately
+    /// OMITTED from `values`: it is NOT NULL with a SQL DEFAULT of 0, so the
+    /// backend fills it in without our having to write a now-meaningless
+    /// value.
     private static func insertEntry(
         _ entry: FedOutboxEntry,
         to rowStore: any RowStore,
@@ -311,7 +344,7 @@ public enum FedOutboxStore {
             "id":          .uuid(entry.id),
             "table_name":  .text(entry.tableName),
             "row_key":     .text(entry.rowKey),
-            "packed_hlc":  .int(entry.packedHLC),
+            "hlc_wire":    .blob(entry.hlcWireBytes),
             "payload":     .blob(entry.payload),
             "enqueued_at": .text(entry.enqueuedAt),
         ]
@@ -325,7 +358,7 @@ public enum FedOutboxStore {
             case .uuid(let id)         = row["id"],
             case .text(let tableName)  = row["table_name"],
             case .text(let rowKey)     = row["row_key"],
-            case .int(let packedHLC)   = row["packed_hlc"],
+            case .blob(let hlcWire)    = row["hlc_wire"],
             case .blob(let payload)    = row["payload"],
             case .text(let enqueuedAt) = row["enqueued_at"]
         else { return nil }
@@ -334,7 +367,7 @@ public enum FedOutboxStore {
             id: id,
             tableName: tableName,
             rowKey: rowKey,
-            packedHLC: packedHLC,
+            hlcWireBytes: hlcWire,
             payload: payload,
             enqueuedAt: enqueuedAt
         )

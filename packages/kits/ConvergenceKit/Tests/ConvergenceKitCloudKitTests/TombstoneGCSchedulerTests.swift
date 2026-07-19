@@ -16,8 +16,10 @@
 //
 // INVARIANT verified in test 3: the retention window (30 d) must exceed the
 // slot-eviction long window (P1-M3 constant, not yet shipped). An entry whose
-// physical time is close to the cutoff survives because the 40-bit mask
-// comparison in TombstoneGC.compact respects the full retention window.
+// physical time is close to the cutoff survives because TombstoneGC.compact
+// compares the full-width `sync_hlc_wire` (HLC.wireBytes, gap 6, D38.1)
+// directly against the (unmasked) retention cutoff — see that function's
+// current doc comment and insertTombstone's below for the full writeup.
 //
 // Setup: InMemoryStorage + CKSideSchema.ensure (creates _ck_sync_meta and
 // _ck_change_token). CloudKitStateActor is created without an active CloudKit

@@ -20,10 +20,16 @@
 //   packed = (nodeID_low8 << 56) | (logicalCount_low16 << 40)
 //            | (physicalTime & 0xFF_FFFF_FFFF)
 //
-// - nodeID is `precondition`-enforced to `1...15`
-//   (SlotRecordMapping.swift:66-69) — fits losslessly in the low 8 bits of
-//   the packed form and recovers exactly via the Int8 bit-pattern round
-//   trip already used by `HLC(packed:)`.
+// - nodeID has been minted in range `1...15` since the shipped v1.0.33 tag
+//   (`CloudKitSyncEngine.swift:108`, `HLCGenerator(nodeID: Int32.random(in:
+//   1...0x0F))`) — this is the actual shipped-data guarantee this backfill
+//   depends on for EVERY row it will ever touch, not merely the current-pin
+//   precondition (SlotRecordMapping.swift:66-69, which documents today's
+//   constraint on freshly-claimed slots but says nothing about what data
+//   v1.0.33 devices already wrote). Both sources agree on the same 1...15
+//   range, so nodeID fits losslessly in the low 8 bits of the packed form
+//   and recovers exactly via the Int8 bit-pattern round trip already used
+//   by `HLC(packed:)`.
 // - logicalCount is a same-millisecond tie-break counter that increments
 //   by 1 per collision and resets to 0 whenever physical time advances
 //   (HLCGenerator.send/receive, HLC.swift:139-174) — it never remotely

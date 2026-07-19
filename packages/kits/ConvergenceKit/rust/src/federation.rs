@@ -633,8 +633,8 @@ impl FederationSyncEngine {
                             let Some(change) = change else { continue };
                             // WC2: encode the SyncRecord at observe time (not push time)
                             // and append to the durable _fed_outbox side table.
-                            // Coalescing by (table_name, row_key) newest-packed_hlc
-                            // bounds hot-row growth in high-write workloads.
+                            // Coalescing by (table_name, row_key) newest-HLC (hlc_wire,
+                            // gap 6) bounds hot-row growth in high-write workloads.
                             if let Some(record) =
                                 change_to_record(change, schema_version, &kit_id, &hlc_generator, conflict_policy)
                             {
@@ -3238,48 +3238,59 @@ mod tests {
         );
     }
 
-    /// 2026-scale packed-HLC regression: a tombstone from 1 day ago must NOT be
-    /// compacted when now_ms exceeds 2^40 and both sides of the cutoff comparison
-    /// are correctly masked to 40 bits.
+    /// 2026-scale full-width-HLC regression (gap 6, D38.1): a tombstone from
+    /// 1 day ago must NOT be compacted when now_ms exceeds the OLD 40-bit
+    /// truncation ceiling (2^40 ≈ 1.0995e12 ms) — i.e. at any real 2026-era
+    /// wall-clock magnitude.
     ///
-    /// Without the 40-bit mask on the cutoff, any packed physical time (which IS
-    /// already masked to 40 bits) would appear older than the unmasked cutoff
-    /// (~1.76e12), causing every tombstone to be silently compacted — destroying
-    /// the A6 stale-resurrect guard. This is the same failure class as the
-    /// SlotTable eviction bug (Perkins P4-M4 finding). The mask on both sides
-    /// wraps the comparison into the same 40-bit space so tombstones within the
-    /// retention window are correctly identified.
+    /// GAP 6 HISTORY: this test predates gap 6 and originally proved the
+    /// opposite mechanism — that BOTH sides of `tombstone_compact`'s cutoff
+    /// comparison had to be masked to the same lossy 40-bit space (matching
+    /// the then-truncating `sync_hlc` packed column) or every 2026-scale
+    /// tombstone would look ~35 years old and get compacted instantly,
+    /// destroying the A6 stale-resurrect guard (same failure class as the
+    /// SlotTable eviction bug, Perkins P4-M4 finding). Gap 6 removed that
+    /// masking entirely: `write_fed_tombstone_hlc` now persists the
+    /// full-width `sync_hlc_wire` (`HLC::wire_bytes()`, no truncation) and
+    /// `tombstone_compact`'s cutoff is a plain, unmasked
+    /// `physical_time <= cutoff_ms` comparison — see both functions' current
+    /// doc comments. This test's BODY still genuinely exercises that
+    /// unmasked path end-to-end (write via `write_fed_tombstone_hlc`, sweep
+    /// via `gc_if_due`/`tombstone_compact`) at real 2026-era magnitude; only
+    /// this comment previously described the removed (masked) approach as
+    /// if it were still required.
     ///
-    /// Approximate 2026-07-17 wall-clock: 1_766_779_200_000 ms > 2^40 (1_099_511_627_776).
-    /// Physical time in the stored packed HLC is masked to 40 bits:
-    ///   stored_physical = tombstone_physical_time & 0xFF_FFFF_FFFF
-    ///   Without mask: cutoff ≈ 1.76e12 > any 40-bit stored value → all compacted (BUG).
-    ///   With mask:    cutoff & 0xFF_FFFF_FFFF < stored_physical → tombstone kept (CORRECT).
+    /// Approximate 2026-07-17 wall-clock: 1_766_779_200_000 ms, comfortably
+    /// above the old 2^40 (1_099_511_627_776) truncation ceiling — exactly
+    /// the magnitude range every pre-gap-6 unit test's small synthetic
+    /// values (0-300) never reached, which is why the original truncation
+    /// defect survived undetected until gap 5's money test happened to use
+    /// real magnitudes.
     #[test]
     fn gc_2026_scale_packed_hlc_regression() {
         let storage = make_gc_storage();
         let row_store = storage.row_store();
 
-        // Approximate 2026-07-17 wall-clock ms. Exceeds 2^40 = 1_099_511_627_776.
+        // Approximate 2026-07-17 wall-clock ms. Exceeds the old 2^40 = 1_099_511_627_776
+        // truncation ceiling (gap 6 no longer truncates; this magnitude is just
+        // realistic wall-clock time, not a boundary condition to defeat a mask).
         let now_ms: i64 = 1_766_779_200_000;
 
-        // Tombstone minted 1 day ago — physical_time > 2^40, so the HLC packer
-        // truncates it to 40 bits when storing sync_hlc.
+        // Tombstone minted 1 day ago, at real 2026-era magnitude.
         let tombstone_physical = now_ms - 86_400_000; // 1 day ago, still within 90 d
         let recent_hlc = HLC { physical_time: tombstone_physical, logical_count: 0, node_id: 1 };
         let row_key = Uuid::new_v4();
         write_fed_tombstone_hlc(&row_store, "test_items", &row_key, recent_hlc)
             .expect("write 2026-scale tombstone");
 
-        // Sentinel = 0 → GC runs. If the mask is absent on the cutoff,
-        // the tombstone would be incorrectly compacted here.
+        // Sentinel = 0 → GC runs.
         gc_if_due(&row_store, now_ms);
 
         assert_eq!(
             count_tombstones(&row_store),
             1,
-            "2026-scale tombstone 1 day old must survive (within 90 d retention) — \
-             failure means the 40-bit mask is missing from the cutoff comparison"
+            "2026-scale tombstone 1 day old must survive (within 90 d retention) at \
+             real magnitude — full-width sync_hlc_wire compared unmasked against the cutoff"
         );
 
         // Also verify the invariant directly: retention must strictly exceed the
