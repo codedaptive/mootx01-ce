@@ -529,6 +529,16 @@ actor FederationStateActor {
         // Precision path (CVK-WB4): when changedColumns is present, stamp only
         // the columns that were actually written. Columns in the row snapshot but
         // not changed retain their existing remote HLC — they are not displaced.
+        //
+        // Gap 3: `columnHLCs` (the actual map, not just the SyncRecord field it
+        // ends up in) is kept in scope below so the SAME local write's HLC that
+        // gets shipped to peers on the wire is also stamped into the LOCAL
+        // `_fed_sync_meta_cols` side table (ColumnHLCStore.writeAll below) —
+        // closing the "local write never HLC-gated" window. Without this,
+        // applyInbound's fieldLevelLWW gate has no truthful local baseline for
+        // a column this device just wrote, so a later-arriving stale remote
+        // edit for that column wins unconditionally (FieldLWWMerge.merge:
+        // `localColumnHLC == nil` → `shouldApply = true`).
         let columnHLCs: ColumnHLCMap?
         if let raw = effectiveChange.values,
            syncedTable.conflictPolicy == .fieldLevelLWW,
@@ -572,7 +582,34 @@ actor FederationStateActor {
             enqueuedAt: iso8601Now()
         )
         do {
-            try await FedOutboxStore.append(entry: entry, to: storage, table: Self.fedOutboxTable)
+            // Gap 3: when this local write has a non-empty column-HLC stamp
+            // (fieldLevelLWW table, non-delete event, at least one written
+            // column), the local `_fed_sync_meta_cols` bookkeeping write and
+            // the durable outbox append commit as ONE transaction — the same
+            // atomicity guarantee shipped for the receive side in gap 4. This
+            // does NOT (and cannot) extend to the original application-level
+            // row write itself: that write already committed, via arbitrary
+            // caller code, before the storage observer delivered this
+            // `TableChange` to recordOutbound — recordOutbound is a reactive
+            // notification handler, not the write path. What this transaction
+            // guarantees is that recordOutbound's OWN two writes (column-HLC
+            // bookkeeping + outbox entry) never partially land.
+            if let columnHLCs, !columnHLCs.isEmpty {
+                // `effectiveChange` is a `var` above (mutated by the projection-strip
+                // branch) — snapshot the one field the transaction closure needs into
+                // a `let` so the `@Sendable` closure can capture it (Swift 6 strict
+                // concurrency forbids capturing a `var` directly).
+                let tableName = effectiveChange.table
+                try await storage.transaction(isolation: .serializable) { txn in
+                    try await ColumnHLCStore.writeAll(
+                        map: columnHLCs,
+                        to: txn, sideTable: Self.fedSyncMetaColsTable,
+                        tableName: tableName, primaryKey: rowKey)
+                    try await FedOutboxStore.append(entry: entry, to: txn, table: Self.fedOutboxTable)
+                }
+            } else {
+                try await FedOutboxStore.append(entry: entry, to: storage, table: Self.fedOutboxTable)
+            }
         } catch {
             logger.warning("federation recordOutbound: outbox append failed for \(change.table)/\(rowKey): \(error)")
         }

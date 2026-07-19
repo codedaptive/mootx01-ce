@@ -647,10 +647,45 @@ impl FederationSyncEngine {
                                         payload,
                                         enqueued_at: iso8601_utc_now(),
                                     };
+                                    // Gap 3 fix: `record.column_hlcs` is the SAME
+                                    // map that was just JSON-encoded into
+                                    // `entry.payload` for the wire — for
+                                    // fieldLevelLWW tables this map must ALSO be
+                                    // persisted locally into `_fed_sync_meta_cols`,
+                                    // committed atomically with the outbox append
+                                    // (same transaction overloads used by the
+                                    // gap-4 fix). Without this, a device's own
+                                    // local write never gains a local column-HLC
+                                    // baseline: `apply_record`'s fieldLevelLWW gate
+                                    // then has nothing to compare a later stale
+                                    // remote edit against, and `field_lww_merge`'s
+                                    // "no local HLC recorded" fallback lets the
+                                    // stale remote value win unconditionally.
+                                    let result: Result<(), String> =
+                                        match record.column_hlcs.as_ref().filter(|m| !m.is_empty()) {
+                                            Some(column_hlcs) => worker_storage
+                                                .transaction(IsolationLevel::Serializable, &mut |txn| {
+                                                    let txn_row_store = txn.row_store();
+                                                    write_fed_column_hlcs(
+                                                        &txn_row_store,
+                                                        &record.table,
+                                                        &record.row_key,
+                                                        column_hlcs,
+                                                    )
+                                                    .map_err(box_err_to_storage_err)?;
+                                                    fed_outbox_append(&*txn_row_store, &entry, FED_OUTBOX_TABLE)
+                                                        .map_err(|e| StorageError::BackendError { underlying: e })?;
+                                                    Ok(())
+                                                })
+                                                .map_err(|e| e.to_string()),
+                                            None => {
+                                                let row_store = worker_storage.row_store();
+                                                fed_outbox_append(&*row_store, &entry, FED_OUTBOX_TABLE)
+                                            }
+                                        };
                                     // Best-effort: log failure, continue — a missed outbox
                                     // write is recoverable on the next push cycle.
-                                    let row_store = worker_storage.row_store();
-                                    if let Err(e) = fed_outbox_append(&*row_store, &entry, FED_OUTBOX_TABLE) {
+                                    if let Err(e) = result {
                                         eprintln!("[federation] observer: outbox append failed for {}/{}: {}", record.table, record.row_key, e);
                                     }
                                 }
@@ -2883,6 +2918,7 @@ mod tests {
     use super::*;
     use persistence_kit::inmemory::InMemoryStorage;
     use persistence_kit::StorageResult;
+    use persistence_kit::{ColumnDeclaration, ColumnType, SchemaDeclaration, TableDeclaration};
     use std::collections::BTreeMap;
 
     // ── tombstone GC test helpers ────────────────────────────────────────────
@@ -3553,5 +3589,196 @@ mod tests {
             read_fed_sync_hlc(&row_store, "items", &row_id).is_some(),
             "row-grain HLC bookkeeping must be present after commit"
         );
+    }
+
+    // ── Gap 3: local writes are HLC-gated into ColumnHLCStore ───────────────
+    //
+    // Rust twin of LocalWriteColumnHLCGateTests.swift (ConvergenceKitFederationTests).
+    // See that file's header for the full gap-3 writeup. Summary:
+    // `start_observers`'s background-thread worker computed a `ColumnHLCMap`
+    // (via `change_to_record`) for fieldLevelLWW tables and shipped it on the
+    // wire (JSON-encoded into the outbox entry's payload) but never persisted
+    // it locally into `_fed_sync_meta_cols` — so a device's own local write
+    // never gained a local column-HLC baseline, letting a later stale remote
+    // edit clobber it (`field_lww_merge`'s "no local HLC recorded" fallback:
+    // first write wins unconditionally). The fix persists that SAME map
+    // locally, atomically with the outbox append, mirroring gap 4's
+    // transaction pattern.
+    //
+    // These tests exercise the REAL local-write path end-to-end: `enable()`
+    // spawns the observer background thread that calls the fixed code after a
+    // plain (non-echo-suppressed) row write — exactly how a host app's local
+    // edit reaches the Rust engine in production.
+
+    fn gap3_make_storage() -> Arc<dyn Storage> {
+        let s = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let schema = SchemaDeclaration::new(
+            "gap3-test-kit",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::new("id", ColumnType::Uuid),
+                    ColumnDeclaration::new("note", ColumnType::Text),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        s.open(&schema).expect("open items schema");
+        s
+    }
+
+    fn gap3_manifest() -> SyncManifest {
+        SyncManifest::new(
+            "gap3-test-kit",
+            1,
+            "gap3-zone",
+            vec![SyncedTable::new("items", "id")
+                .with_direction(SyncDirection::Bidirectional)
+                .with_conflict_policy(ConflictPolicy::FieldLevelLWW)],
+        )
+    }
+
+    fn gap3_write_row(storage: &Arc<dyn Storage>, row_id: Uuid, note: &str) {
+        let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        values.insert("note".to_string(), TypedValue::Text(note.to_string()));
+        storage
+            .row_store()
+            .upsert("items", values, &["id".to_string()])
+            .expect("upsert row");
+    }
+
+    fn gap3_outbox_count(storage: &Arc<dyn Storage>) -> usize {
+        storage
+            .row_store()
+            .query(FED_OUTBOX_TABLE, None, &[], None, None)
+            .map(|r| r.len())
+            .unwrap_or(0)
+    }
+
+    /// Poll (bounded, no busy-spin) until `condition` is true or the deadline
+    /// passes. The observer worker runs on a background thread, so the write
+    /// and the resulting outbox/column-HLC persistence are not synchronous
+    /// with the test's main thread. Mirrors `push_until_nonzero` in
+    /// federation_observer_outbox_tests.rs.
+    fn gap3_poll_until(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if condition() { return true; }
+            if std::time::Instant::now() >= deadline { return false; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn gap3_local_write_records_column_hlc() {
+        let storage = gap3_make_storage();
+        let relay: Arc<dyn Relay> = Arc::new(FederationRelay::new());
+        let identity = Arc::new(LocalIdentity::generate());
+        let mut engine = FederationSyncEngine::new(identity, relay);
+        engine.enable(gap3_manifest(), storage.clone()).unwrap();
+
+        let row_id = Uuid::new_v4();
+        let before = gap3_outbox_count(&storage);
+        gap3_write_row(&storage, row_id, "local-edit");
+
+        let observed = gap3_poll_until(|| gap3_outbox_count(&storage) > before);
+        assert!(observed, "outbox must reflect the local write (observer must have run)");
+
+        let row_store = storage.row_store();
+        let column_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        assert!(
+            !column_hlcs.is_empty(),
+            "local write must record a column-HLC baseline in _fed_sync_meta_cols (gap 3 fix)"
+        );
+        assert!(
+            column_hlcs.entries.get("note").is_some(),
+            "note column's HLC must be recorded"
+        );
+
+        engine.disable().unwrap();
+    }
+
+    #[test]
+    fn gap3_local_write_survives_stale_remote_edit() {
+        let storage = gap3_make_storage();
+        let relay: Arc<dyn Relay> = Arc::new(FederationRelay::new());
+        let identity = Arc::new(LocalIdentity::generate());
+        let mut engine = FederationSyncEngine::new(identity, relay);
+        engine.enable(gap3_manifest(), storage.clone()).unwrap();
+
+        let row_id = Uuid::new_v4();
+
+        // 1. Local write at HLC_local, via the REAL engine (its own observer
+        // thread, hlc_generator, and the fixed outbox-worker code).
+        let before = gap3_outbox_count(&storage);
+        gap3_write_row(&storage, row_id, "local-fresh");
+        let observed = gap3_poll_until(|| gap3_outbox_count(&storage) > before);
+        assert!(observed, "outbox must reflect the local write before the stale remote edit arrives");
+
+        let row_store = storage.row_store();
+        let local_column_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        let local_packed = *local_column_hlcs.entries.get("note").expect(
+            "local write must have stamped a column HLC for 'note' (gap 3 fix) — \
+             without it this test cannot construct a definitely-older remote HLC",
+        );
+        let local_hlc: HLC = local_packed.into();
+
+        // 2. THEN a stale remote edit at HLC_remote < HLC_local arrives, applied
+        // directly through `apply_record` (mirrors how the N1 tests above and
+        // the FieldLWW conformance tests exercise it) against the SAME storage.
+        let stale_hlc = HLC {
+            physical_time: (local_hlc.physical_time - 1_000).max(0),
+            logical_count: 0,
+            node_id: 999,
+        };
+        assert!(
+            stale_hlc < local_hlc,
+            "test precondition: constructed remote HLC must be strictly older than the local HLC"
+        );
+
+        let synced_table = gap3_manifest().tables[0].clone();
+        let mut stale_values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        stale_values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        stale_values.insert(
+            "note".to_string(),
+            TypedValue::Text("STALE-REMOTE-MUST-NOT-WIN".to_string()),
+        );
+        let mut stale_record = SyncRecord::new(
+            "items",
+            SyncEventKind::Update,
+            row_id,
+            Some(SyncValueMap::from_typed(stale_values)),
+            stale_hlc,
+            1,
+            "gap3-test-kit",
+        );
+        let mut col_entries = BTreeMap::new();
+        col_entries.insert("note".to_string(), PackedHLC::from(stale_hlc));
+        stale_record.column_hlcs = Some(ColumnHLCMap { entries: col_entries });
+
+        apply_record(&stale_record, &synced_table, &storage).expect("apply_record must succeed");
+
+        // 3. THE MONEY ASSERTION: the local value must survive. Before the
+        // gap-3 fix, this failed — the stale remote clobbered the local edit
+        // because `_fed_sync_meta_cols` had no entry for "note" (first-write-
+        // wins fallback in `field_lww_merge` treated the stale remote as the
+        // first-ever write).
+        let pred = StoragePredicate::Eq(
+            Column::new("items".to_string(), "id".to_string()),
+            TypedValue::Uuid(row_id),
+        );
+        let rows = row_store
+            .query("items", Some(&pred), &[], None, None)
+            .expect("query items");
+        let note = rows.into_iter().next().and_then(|r| r.get("note").cloned());
+        assert_eq!(
+            note,
+            Some(TypedValue::Text("local-fresh".to_string())),
+            "local write must survive a stale remote edit that arrives afterward (gap 3 money test)"
+        );
+
+        engine.disable().unwrap();
     }
 }

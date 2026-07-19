@@ -139,8 +139,36 @@ public enum FedOutboxStore {
         to storage: any Storage,
         table: String
     ) async throws {
+        try await append(entry: entry, to: storage.rowStore, table: table)
+    }
+
+    /// Transactional variant of `append(entry:to:table:)`.
+    ///
+    /// Gap 3 fix: `FederationStateActor.recordOutbound`'s local-write path
+    /// calls this overload from inside an open `storage.transaction { txn in
+    /// ... }` block so the durable outbox append commits atomically with the
+    /// local column-HLC bookkeeping write (`ColumnHLCStore.writeAll`) that now
+    /// runs alongside it — closing the window where a device's own local edit
+    /// could otherwise be recorded in the outbox (and shipped to peers)
+    /// without ever gaining a truthful local `_fed_sync_meta_cols` baseline,
+    /// letting a later stale remote edit clobber it (N1-shaped atomicity
+    /// guarantee, same as the gap-4 fix).
+    public static func append(
+        entry: FedOutboxEntry,
+        to transaction: any StorageTransaction,
+        table: String
+    ) async throws {
+        try await append(entry: entry, to: transaction.rowStore, table: table)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private static func append(
+        entry: FedOutboxEntry,
+        to rowStore: any RowStore,
+        table: String
+    ) async throws {
         // Check for an existing entry for the same (table_name, row_key).
-        let existing = try await storage.rowStore.query(
+        let existing = try await rowStore.query(
             table: table,
             where: .and([
                 .eq(Column(table: table, name: "table_name"), .text(entry.tableName)),
@@ -152,12 +180,12 @@ public enum FedOutboxStore {
             guard case .int(let existingHLC) = existingRow["packed_hlc"] else {
                 // Corrupt row — delete and replace.
                 if case .uuid(let oldID) = existingRow["id"] {
-                    _ = try await storage.rowStore.delete(
+                    _ = try await rowStore.delete(
                         table: table,
                         where: .eq(Column(table: table, name: "id"), .uuid(oldID))
                     )
                 }
-                try await insertEntry(entry, to: storage, table: table)
+                try await insertEntry(entry, to: rowStore, table: table)
                 return
             }
 
@@ -168,17 +196,17 @@ public enum FedOutboxStore {
 
             // Incoming is newer: delete the stale entry and insert the new one.
             if case .uuid(let oldID) = existingRow["id"] {
-                _ = try await storage.rowStore.delete(
+                _ = try await rowStore.delete(
                     table: table,
                     where: .eq(Column(table: table, name: "id"), .uuid(oldID))
                 )
             }
-            try await insertEntry(entry, to: storage, table: table)
+            try await insertEntry(entry, to: rowStore, table: table)
             return
         }
 
         // No existing entry for (tableName, rowKey) — insert fresh.
-        try await insertEntry(entry, to: storage, table: table)
+        try await insertEntry(entry, to: rowStore, table: table)
     }
 
     // MARK: - Read batch
@@ -260,6 +288,25 @@ public enum FedOutboxStore {
         to storage: any Storage,
         table: String
     ) async throws {
+        try await insertEntry(entry, to: storage.rowStore, table: table)
+    }
+
+    /// Transactional variant of `insertEntry(_:to:table:)`. See `append(entry:to
+    /// transaction:table:)` above for why this overload exists (gap 3).
+    static func insertEntry(
+        _ entry: FedOutboxEntry,
+        to transaction: any StorageTransaction,
+        table: String
+    ) async throws {
+        try await insertEntry(entry, to: transaction.rowStore, table: table)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private static func insertEntry(
+        _ entry: FedOutboxEntry,
+        to rowStore: any RowStore,
+        table: String
+    ) async throws {
         let values: [String: TypedValue] = [
             "id":          .uuid(entry.id),
             "table_name":  .text(entry.tableName),
@@ -270,7 +317,7 @@ public enum FedOutboxStore {
         ]
         // Use insert (not upsert) because coalescing above guarantees no
         // existing entry for this (table_name, row_key) by the time we arrive.
-        _ = try await storage.rowStore.insert(table: table, values: values)
+        _ = try await rowStore.insert(table: table, values: values)
     }
 
     private static func decodeRow(_ row: StorageRow) -> FedOutboxEntry? {

@@ -55,8 +55,27 @@ public enum OutboxStore {
     /// The coalescing key is `(table_name, row_key)`, not the entry's UUID —
     /// each surviving entry carries a fresh UUID minted at its own append time.
     public static func append(entry: OutboxEntry, to storage: any Storage) async throws {
+        try await append(entry: entry, to: storage.rowStore)
+    }
+
+    /// Transactional variant of `append(entry:to:)`.
+    ///
+    /// Gap 3 fix: `recordOutbound`'s local-write path calls this overload from
+    /// inside an open `storage.transaction { txn in ... }` block so the durable
+    /// outbox append commits atomically with the local column-HLC bookkeeping
+    /// write (`ColumnHLCStore.writeAll`) that now runs alongside it — closing
+    /// the window where a device's own local edit could otherwise be recorded
+    /// in the outbox (and shipped to peers) without ever gaining a truthful
+    /// local `_ck_sync_meta_cols` baseline, letting a later stale remote edit
+    /// clobber it (N1-shaped atomicity guarantee, same as the gap-4 fix).
+    public static func append(entry: OutboxEntry, to transaction: any StorageTransaction) async throws {
+        try await append(entry: entry, to: transaction.rowStore)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private static func append(entry: OutboxEntry, to rowStore: any RowStore) async throws {
         // Check for an existing entry for the same (table, row_key).
-        let existing = try await storage.rowStore.query(
+        let existing = try await rowStore.query(
             table: table,
             where: .and([
                 .eq(Column(table: table, name: "table_name"), .text(entry.tableName)),
@@ -69,12 +88,12 @@ public enum OutboxStore {
             guard case .int(let existingHLC) = existingRow["hlc"] else {
                 // Corrupt row; delete and replace.
                 if case .uuid(let oldID) = existingRow["id"] {
-                    _ = try await storage.rowStore.delete(
+                    _ = try await rowStore.delete(
                         table: table,
                         where: .eq(Column(table: table, name: "id"), .uuid(oldID))
                     )
                 }
-                try await insertEntry(entry, to: storage)
+                try await insertEntry(entry, to: rowStore)
                 return
             }
 
@@ -129,18 +148,18 @@ public enum OutboxStore {
                 // No merge needed if only one side has column HLC data (or neither does);
                 // the incoming entry's columnHLCsData is used as-is.
 
-                _ = try await storage.rowStore.delete(
+                _ = try await rowStore.delete(
                     table: table,
                     where: .eq(Column(table: table, name: "id"), .uuid(oldID))
                 )
             }
 
-            try await insertEntry(entryToInsert, to: storage)
+            try await insertEntry(entryToInsert, to: rowStore)
             return
         }
 
         // No existing entry for (tableName, rowKey) — insert fresh.
-        try await insertEntry(entry, to: storage)
+        try await insertEntry(entry, to: rowStore)
     }
 
     // MARK: - Read batch
@@ -401,6 +420,17 @@ public enum OutboxStore {
     // callers can share the insert path without duplicating the column map.
 
     static func insertEntry(_ entry: OutboxEntry, to storage: any Storage) async throws {
+        try await insertEntry(entry, to: storage.rowStore)
+    }
+
+    /// Transactional variant of `insertEntry(_:to:)`. See `append(entry:to
+    /// transaction:)` above for why this overload exists (gap 3).
+    static func insertEntry(_ entry: OutboxEntry, to transaction: any StorageTransaction) async throws {
+        try await insertEntry(entry, to: transaction.rowStore)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private static func insertEntry(_ entry: OutboxEntry, to rowStore: any RowStore) async throws {
         var values: [String: TypedValue] = [
             "id":           .uuid(entry.id),
             "table_name":   .text(entry.tableName),
@@ -421,7 +451,7 @@ public enum OutboxStore {
         // Use insert (not upsert) because coalescing already guarantees no
         // existing entry for this (table_name, row_key) by the time we reach
         // this point. The `id` UUID is fresh per entry.
-        _ = try await storage.rowStore.insert(table: table, values: values)
+        _ = try await rowStore.insert(table: table, values: values)
     }
 
     private static func decodeRow(_ row: StorageRow) -> OutboxEntry? {

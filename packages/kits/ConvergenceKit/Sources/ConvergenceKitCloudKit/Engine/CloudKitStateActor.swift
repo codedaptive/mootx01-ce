@@ -487,6 +487,16 @@ actor CloudKitStateActor {
         // Fallback (changedColumns nil = unknown/all): stamp all present columns.
         // This is the pre-CVK-WB4 behavior and remains correct — it is conservative
         // (the receiver applies more columns than strictly necessary) but safe.
+        //
+        // Gap 3: `colMap` (the actual map, not just its encoded Data) is kept in
+        // scope below so the SAME local write's HLC that gets shipped to peers on
+        // the wire is also stamped into the LOCAL `_ck_sync_meta_cols` side table
+        // (ColumnHLCStore.writeAll below) — closing the "local write never
+        // HLC-gated" window. Without this, ApplyInbound's fieldLevelLWW gate has
+        // no truthful local baseline for a column this device just wrote, so a
+        // later-arriving stale remote edit for that column wins unconditionally
+        // (FieldLWWMerge.merge: `localColumnHLC == nil` → `shouldApply = true`).
+        let colMap: ColumnHLCMap?
         let columnHLCsData: Data?
         if let stripped = effectiveValues,
            let syncedTable = manifest?.table(named: change.table),
@@ -499,12 +509,14 @@ actor CloudKitStateActor {
                 // Unknown: stamp all projected columns (backward-compatible fallback).
                 keysToStamp = Array(stripped.keys)
             }
-            let colMap = ColumnHLCMap.stampAll(
+            let map = ColumnHLCMap.stampAll(
                 keys: keysToStamp,
                 hlc: PackedHLC(hlc)
             )
-            columnHLCsData = try? JSONEncoder().encode(colMap)
+            colMap = map
+            columnHLCsData = try? JSONEncoder().encode(map)
         } else {
+            colMap = nil
             columnHLCsData = nil
         }
 
@@ -521,7 +533,29 @@ actor CloudKitStateActor {
         )
 
         do {
-            try await OutboxStore.append(entry: entry, to: storage)
+            // Gap 3: when this local write has a non-empty column-HLC stamp
+            // (fieldLevelLWW table, non-delete event, at least one written
+            // column), the local `_ck_sync_meta_cols` bookkeeping write and the
+            // durable outbox append commit as ONE transaction — the same
+            // atomicity guarantee shipped for the receive side in gap 4. This
+            // does NOT (and cannot) extend to the original application-level
+            // row write itself: that write already committed, via arbitrary
+            // caller code, before the storage observer delivered this
+            // `TableChange` to recordOutbound — recordOutbound is a reactive
+            // notification handler, not the write path. What this transaction
+            // guarantees is that recordOutbound's OWN two writes (column-HLC
+            // bookkeeping + outbox entry) never partially land.
+            if let colMap, !colMap.isEmpty, let rowKey = change.rowKey {
+                try await storage.transaction(isolation: .serializable) { txn in
+                    try await ColumnHLCStore.writeAll(
+                        map: colMap,
+                        to: txn, sideTable: CKSideSchema.syncMetaColsTable,
+                        tableName: change.table, primaryKey: rowKey)
+                    try await OutboxStore.append(entry: entry, to: txn)
+                }
+            } else {
+                try await OutboxStore.append(entry: entry, to: storage)
+            }
             // Arm the debouncer after a successful durable append (B-11).
             // The debouncer coalesces rapid writes into one push cycle, preventing
             // per-keystroke push storms. arm() is a no-op if the engine is being
