@@ -26,6 +26,48 @@ pub trait RowStore: Send + Sync {
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize>;
 
+    // ----------------------------------------------------------------
+    // Sync-tagged write paths (I-10, CVK-ICLOUD P1-M1)
+    //
+    // These methods mark writes as originating from `apply_inbound` so
+    // ConvergenceKit's outbound observer can discard them (echo
+    // suppression). The Rust federation uses an orthogonal suppression
+    // mechanism (`pulling: Arc<AtomicBool>`), so the default
+    // implementations simply delegate to the ordinary write paths —
+    // correct for all Rust backends. Backends that want to stamp
+    // `ChangeOrigin::SyncApply` on the emitted `TableChange` can override
+    // these methods (mirrors the Swift `insertSync`/`upsertSync`/`deleteSync`
+    // pattern).
+    // ----------------------------------------------------------------
+
+    /// Insert a row, tagging the resulting `TableChange` as `SyncApply`.
+    /// Default delegates to `insert` (Rust federation's `pulling` flag
+    /// already prevents echo; no origin override needed in the default path).
+    fn insert_sync(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<RowHandle> {
+        self.insert(table, values)
+    }
+
+    /// Upsert a row, tagging the resulting `TableChange` as `SyncApply`.
+    /// Default delegates to `upsert`.
+    fn upsert_sync(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        conflict_columns: &[String],
+    ) -> StorageResult<RowHandle> {
+        self.upsert(table, values, conflict_columns)
+    }
+
+    /// Delete rows matching `predicate`, tagging the resulting `TableChange`
+    /// as `SyncApply`. Default delegates to `delete`.
+    fn delete_sync(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
+        self.delete(table, predicate)
+    }
+
     fn query(
         &self,
         table: &str,

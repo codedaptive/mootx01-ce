@@ -23,9 +23,10 @@ use uuid::Uuid;
 use crate::{
     AeadProvider, AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore,
     CachingRowStore, ColumnType, EstateConfiguration, EstateEncryptionConfig,
-    IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle, RowKey, RowStore,
-    SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate,
-    StorageResult, StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
+    ChangeOrigin, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle,
+    RowKey, RowStore, SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver,
+    StoragePredicate, StorageResult, StorageRow, StorageTransaction, TableChange,
+    TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
 
@@ -1368,8 +1369,123 @@ fn fetch_matching_keys(
     .unwrap_or_default()
 }
 
-/// Resolve the row's primary key: a single-column UUID primary key reads
-/// the UUID from the row; anything else gets a fresh v4.
+/// Fetch the full column values for the first row matching `conflict_columns`
+/// from `values`. Returns `None` if no matching row exists or on error.
+///
+/// Used by `upsert` to compute `changed_columns` before the INSERT ON CONFLICT.
+/// Cost: one O(1) SELECT on the conflict-column index. The Mutex serializes
+/// writes so there is no interleaving between this read and the upsert.
+fn fetch_row_by_conflict_columns(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    values: &BTreeMap<String, TypedValue>,
+    conflict_columns: &[String],
+) -> Option<BTreeMap<String, TypedValue>> {
+    if conflict_columns.is_empty() {
+        return None;
+    }
+    let pairs: Vec<(&String, &TypedValue)> = conflict_columns
+        .iter()
+        .filter_map(|col| values.get(col).map(|v| (col, v)))
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let where_sql = pairs
+        .iter()
+        .map(|(col, _)| format!("\"{col}\" = ?"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql} LIMIT 1");
+    let binds: Vec<SqlValue> = pairs.iter().map(|(_, v)| to_sql(v)).collect();
+    let mut stmt = conn.prepare_cached(&sql).ok()?;
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(params_from_iter(binds)).ok()?;
+    let row = rows.next().ok()??;
+    let mut result: BTreeMap<String, TypedValue> = BTreeMap::new();
+    for (i, name) in col_names.iter().enumerate() {
+        let vref = row.get_ref(i).ok()?;
+        let kit = table_column_type(schema, table, name);
+        if let Ok(v) = read_value(vref, kit, table, name) {
+            result.insert(name.clone(), v);
+        }
+    }
+    Some(result)
+}
+
+/// Fetch full column values for every row matching `predicate`.
+/// Returns a map of `RowKey → BTreeMap<String, TypedValue>`.
+///
+/// Used by `update` to compute `changed_columns` (diff between pre-update
+/// row and SET values — CVK-WB4). Cost: one `SELECT *` before the `UPDATE`.
+/// The Mutex serializes writes so there is no interleaving. On any error
+/// the function returns an empty map; `update` then falls back to `changed_columns: None`.
+fn fetch_matching_rows_with_values(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    predicate: &StoragePredicate,
+) -> std::collections::HashMap<RowKey, BTreeMap<String, TypedValue>> {
+    let pk_col = schema
+        .and_then(|s| s.tables.iter().find(|t| t.name == table))
+        .and_then(|t| t.primary_key.first().cloned())
+        .unwrap_or_else(|| "row_id".to_string());
+    let mut binds: Vec<SqlValue> = Vec::new();
+    let where_sql = match compile_predicate(predicate, &mut binds) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let sql = format!("SELECT * FROM \"{table}\" WHERE {where_sql}");
+    let mut stmt = match conn.prepare_cached(&sql) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows_q = match stmt.query(params_from_iter(binds)) {
+        Ok(r) => r,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let mut result = std::collections::HashMap::new();
+    while let Ok(Some(row)) = rows_q.next() {
+        let mut row_map: BTreeMap<String, TypedValue> = BTreeMap::new();
+        let mut row_key: Option<RowKey> = None;
+        for (i, name) in col_names.iter().enumerate() {
+            let vref = match row.get_ref(i) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let kit = table_column_type(schema, table, name);
+            if let Ok(v) = read_value(vref, kit, table, name) {
+                if name == &pk_col {
+                    if let TypedValue::Uuid(u) = &v {
+                        row_key = Some(*u);
+                    }
+                }
+                row_map.insert(name.clone(), v);
+            }
+        }
+        if let Some(k) = row_key {
+            result.insert(k, row_map);
+        }
+    }
+    result
+}
+
+/// Derive the outbound `RowKey` for a just-written row from its column
+/// values, using the schema-declared primary key for `table`.
+///
+/// Single-column PK only (composite/multi-column PKs fall through to the
+/// random-mint default below — unchanged, out of gap-5's scope — Kong's
+/// guard). For a `.uuid`-typed PK, the value itself IS the key (unchanged
+/// fast path). For a `.text`-typed PK: parses as a UUID string when
+/// possible (unchanged from before gap 5); otherwise, gap 5: derive the key
+/// DETERMINISTICALLY from the PK's content via
+/// `row_key_derivation::deterministic_row_key` instead of falling through
+/// to a fresh random UUID. Before this fix, a genuinely non-UUID-shaped
+/// `.text` PK value (LocusKit's documented, not-yet-exercised deterministic-
+/// id capability) still forked row identity between spokes even on the
+/// SQLite backend — see `row_key_derivation.rs` for the full rationale.
 fn extract_row_key(
     schema: Option<&SchemaDeclaration>,
     table: &str,
@@ -1377,8 +1493,13 @@ fn extract_row_key(
 ) -> RowKey {
     if let Some(decl) = schema.and_then(|s| s.tables.iter().find(|t| t.name == table)) {
         if decl.primary_key.len() == 1 {
-            if let Some(TypedValue::Uuid(u)) = values.get(&decl.primary_key[0]) {
-                return *u;
+            match values.get(&decl.primary_key[0]) {
+                Some(TypedValue::Uuid(u)) => return *u,
+                // deterministic_row_key parses a UUID-shaped string directly
+                // (unchanged behavior from before gap 5) and only falls to
+                // the SHA-256 derivation for a genuinely non-UUID string.
+                Some(TypedValue::Text(s)) => return crate::row_key_derivation::deterministic_row_key(s),
+                _ => {}
             }
         }
     }
@@ -1450,12 +1571,16 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        // changedColumns for insert = all written column names (CVK-WB4).
+        let changed_cols: std::collections::HashSet<String> = values.keys().cloned().collect();
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Insert,
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1512,6 +1637,11 @@ impl RowStore for SqliteRowStore {
                 sql.push_str(&format!(" DO UPDATE SET {}", updates.join(", ")));
             }
         }
+        // Pre-read existing row for changedColumns diff BEFORE the upsert (CVK-WB4).
+        // One O(1) SELECT on the conflict-column index. The Mutex serializes writes
+        // so there is no interleaving between this read and the INSERT ON CONFLICT.
+        let existing_row = fetch_row_by_conflict_columns(
+            &guard.conn, guard.schema.as_ref(), table, &values, conflict_columns);
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
         // prepare_cached: the SQL text for a given (table, column-set) shape is
         // identical across a bulk loop, so the statement parses ONCE and replays
@@ -1525,12 +1655,21 @@ impl RowStore for SqliteRowStore {
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        let changed_cols: std::collections::HashSet<String> = if let Some(old) = &existing_row {
+            // Upsert-as-update: stamp only columns that differ from the stored row.
+            values.keys().filter(|col| old.get(*col) != values.get(*col)).cloned().collect()
+        } else {
+            // Upsert-as-insert: all written columns are new.
+            values.keys().cloned().collect()
+        };
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Update,
             row_key: Some(key),
             values: Some(values),
             hlc: None,
+            origin: ChangeOrigin::Local,
+            changed_columns: Some(changed_cols),
         });
         Ok(RowHandle::new(table, key))
     }
@@ -1557,11 +1696,11 @@ impl RowStore for SqliteRowStore {
             validate_sql_identifier(k)?;
         }
         let guard = self.inner.lock().unwrap();
-        // Pre-query row keys before mutating. The `values` map carries only
-        // the SET columns (not the primary key). The Mutex serializes all
-        // operations so no interleaving is possible between this SELECT and
-        // the UPDATE.
-        let matched_keys = fetch_matching_keys(&guard.conn, guard.schema.as_ref(), table, predicate);
+        // Pre-read full row values BEFORE mutating for changedColumns diff (CVK-WB4).
+        // One SELECT * per update; the Mutex serializes all operations so no
+        // interleaving is possible between this read and the UPDATE.
+        // On error (empty map) each notification falls back to changed_columns: None.
+        let pre_rows = fetch_matching_rows_with_values(&guard.conn, guard.schema.as_ref(), table, predicate);
         let keys: Vec<&String> = values.keys().collect();
         let set_clause = keys
             .iter()
@@ -1579,13 +1718,21 @@ impl RowStore for SqliteRowStore {
             .map_err(|e| map_sql_err(e, table))?
             .execute(params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
-        for key in matched_keys {
+        for (key, old_row) in &pre_rows {
+            // Compute changed columns: those whose stored value differed from the SET values.
+            let changed_cols: std::collections::HashSet<String> = values
+                .keys()
+                .filter(|col| old_row.get(*col) != values.get(*col))
+                .cloned()
+                .collect();
             self.observers.emit(&TableChange {
                 table: table.to_string(),
                 event: StorageEvent::Update,
-                row_key: Some(key),
+                row_key: Some(*key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                changed_columns: Some(changed_cols),
             });
         }
         Ok(changed)
@@ -1619,6 +1766,9 @@ impl RowStore for SqliteRowStore {
                 row_key: Some(key),
                 values: None,
                 hlc: None,
+                origin: ChangeOrigin::Local,
+                // Delete carries no column-level granularity; nil = unknown/all.
+                changed_columns: None,
             });
         }
         Ok(changed)
@@ -3038,6 +3188,93 @@ mod hlc_roundtrip_tests {
             }
             other => panic!("expected TypedValue::Hlc, got {:?}", other),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// extract_row_key schema-PK tests (Gap 1 parity check — the Swift
+// `SQLiteBackend.extractRowKey` sibling was hardcoded to a literal
+// "row_id" column and fell back to a random UUID for any table whose
+// primary key was declared under a different name. `extract_row_key`
+// here (src/sqlite.rs, above) already reads `decl.primary_key[0]` from
+// the schema declaration rather than a hardcoded literal, so it never
+// had the defect — these tests lock that correct behavior in as a
+// regression guard, matching the Swift-side coverage added for the
+// same gap (SQLiteObserverTests.swift:
+// insertReturnsRealSchemaPKNotRandomUUID /
+// insertNotificationCarriesRealSchemaPK /
+// upsertReturnsRealSchemaPKNotRandomUUID).
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod extract_row_key_schema_pk_tests {
+    use super::*;
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
+        Storage, TableDeclaration, TypedValue,
+    };
+    use uuid::Uuid;
+
+    /// Schema whose primary key column is named "id", not "row_id" — the
+    /// exact shape that exposed the Swift-side bug.
+    fn make_storage_with_non_row_id_pk() -> SqliteStorage {
+        let path = std::env::temp_dir()
+            .join(format!("extract_row_key_pk_{}.sqlite", Uuid::new_v4()));
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("open sqlite");
+        let schema = SchemaDeclaration::new(
+            "extract-row-key-test",
+            1,
+            vec![TableDeclaration::new(
+                "docs",
+                vec![ColumnDeclaration::uuid("id"), ColumnDeclaration::text("label")],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open schema");
+        storage
+    }
+
+    #[test]
+    fn insert_returns_real_schema_pk_not_random_uuid() {
+        let storage = make_storage_with_non_row_id_pk();
+        let rs = Storage::row_store(&storage);
+
+        let real_id = Uuid::new_v4();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(real_id));
+        values.insert("label".into(), TypedValue::Text("a".into()));
+
+        let handle = rs.insert("docs", values).expect("insert");
+        assert_eq!(
+            handle.key, real_id,
+            "insert must return the schema-declared PK value, not a random UUID"
+        );
+    }
+
+    #[test]
+    fn upsert_returns_real_schema_pk_not_random_uuid() {
+        let storage = make_storage_with_non_row_id_pk();
+        let rs = Storage::row_store(&storage);
+
+        let real_id = Uuid::new_v4();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(real_id));
+        values.insert("label".into(), TypedValue::Text("b".into()));
+
+        let handle = rs
+            .upsert("docs", values, &["id".to_string()])
+            .expect("upsert");
+        assert_eq!(
+            handle.key, real_id,
+            "upsert must return the schema-declared PK value, not a random UUID"
+        );
     }
 }
 

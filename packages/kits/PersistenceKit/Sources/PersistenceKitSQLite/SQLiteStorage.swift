@@ -476,7 +476,7 @@ actor SQLiteBackend {
 
     // MARK: - Row operations
 
-    func insertRow(table: String, values: [String: TypedValue]) throws -> RowHandle {
+    func insertRow(table: String, values: [String: TypedValue], origin: ChangeOrigin = .local) throws -> RowHandle {
         // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
         // the table name before it is interpolated into the INSERT statement, and
         // validate all column names from the caller-supplied `values` map before
@@ -515,8 +515,12 @@ actor SQLiteBackend {
             }
             throw error
         }
-        let key = extractRowKey(values: values)
-        notifyObservers(TableChange(table: table, event: .insert, rowKey: key, values: values))
+        let key = extractRowKey(table: table, values: values)
+        // changedColumns for insert = all columns in the written row.
+        notifyObservers(TableChange(
+            table: table, event: .insert, rowKey: key, values: values, origin: origin,
+            changedColumns: Set(values.keys)
+        ))
         return RowHandle(table: table, key: key)
     }
 
@@ -530,7 +534,7 @@ actor SQLiteBackend {
     // null keyID (an unreadable row). A future content-upsert path must
     // extend the encryption seam symmetrically with insertRow before this
     // guard would let such a write through.
-    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) throws -> RowHandle {
+    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String], origin: ChangeOrigin = .local) throws -> RowHandle {
         // SQL-identifier injection guard (CAND-047 / SECFIX-WS2-PK F9): validate
         // the table name, all value-map column names, and the conflict-column list
         // before interpolating into the INSERT … ON CONFLICT … DO UPDATE SQL.
@@ -562,9 +566,27 @@ actor SQLiteBackend {
         for (i, key) in sortedKeys.enumerated() {
             try stmt.bind(values[key]!, at: Int32(i + 1))
         }
+        // Pre-read existing row before the upsert for changedColumns diff (CVK-WB4).
+        // One O(1) SELECT on the conflict-column index before the INSERT ON CONFLICT.
+        // The SQLite actor serializes writes so there is no interleaving between
+        // this read and the upsert below. If the row exists, compute the column diff;
+        // if not, treat as insert (all columns are new).
+        let existingRowForDiff = try? fetchRowByConflictColumns(
+            table: table, values: values, conflictColumns: conflictColumns)
         _ = try stmt.step()
-        let key = extractRowKey(values: values)
-        notifyObservers(TableChange(table: table, event: .update, rowKey: key, values: values))
+        let key = extractRowKey(table: table, values: values)
+        let changedCols: Set<String>
+        if let existing = existingRowForDiff {
+            // Upsert-as-update: stamp only columns that differ from the stored row.
+            changedCols = Set(values.keys.filter { existing[$0] != values[$0] })
+        } else {
+            // Upsert-as-insert: all written columns are "new".
+            changedCols = Set(values.keys)
+        }
+        notifyObservers(TableChange(
+            table: table, event: .update, rowKey: key, values: values, origin: origin,
+            changedColumns: changedCols
+        ))
         return RowHandle(table: table, key: key)
     }
 
@@ -582,11 +604,15 @@ actor SQLiteBackend {
         // write paths. All current callers update only bitmap/timestamp
         // columns, so this is a no-op for them.
         try assertContentKeyIDInvariant(values, table: table, config: encryptionConfig)
-        // Pre-query row keys before mutating. The `values` dict carries only
-        // the SET columns (not the primary key), so keys must be resolved via
-        // a SELECT. The SQLiteBackend actor serializes all operations, so no
-        // interleaving is possible between this SELECT and the UPDATE.
-        let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
+        // Pre-read full rows before mutating (CVK-WB4 changedColumns diff).
+        // `fetchMatchingRowValues` does a SELECT * so we have the pre-update
+        // column values to diff against the incoming SET values. The SQLiteBackend
+        // actor serializes all writes, so no interleaving is possible between
+        // this SELECT and the UPDATE below. Cost: one extra round-trip for the
+        // full-row pre-read per `updateRows` call; acceptable because updateRows
+        // is low-frequency and the precision enables fieldLevelLWW column stamping
+        // and mixed-column storm-kill (Scorandum Q1) in ConvergenceKit.
+        let oldRows = (try? fetchMatchingRowValues(table: table, predicate: predicate)) ?? [:]
         let sortedKeys = values.keys.sorted()
         let setClause = sortedKeys.map { "\"\($0)\" = ?" }.joined(separator: ", ")
         let compiled = try SQLitePredicateCompiler.compile(predicate)
@@ -606,13 +632,18 @@ actor SQLiteBackend {
         }
         _ = try stmt.step()
         let changes = Int(sqlite3_changes(connection.handle))
-        for key in matchedKeys {
-            notifyObservers(TableChange(table: table, event: .update, rowKey: key, values: nil))
+        for key in oldRows.keys {
+            let oldRow = oldRows[key]
+            let changedCols: Set<String> = Set(values.keys.filter { oldRow?[$0] != values[$0] })
+            notifyObservers(TableChange(
+                table: table, event: .update, rowKey: key, values: nil,
+                changedColumns: changedCols
+            ))
         }
         return changes
     }
 
-    func deleteRows(table: String, where predicate: StoragePredicate) throws -> Int {
+    func deleteRows(table: String, where predicate: StoragePredicate, origin: ChangeOrigin = .local) throws -> Int {
         // SQL-identifier injection guard (SECFIX-WS2-PK F9): validate the table
         // name before interpolation. Predicate column names are validated by
         // SQLitePredicateCompiler.compile (SECFIX-WS2-PK F7).
@@ -635,7 +666,12 @@ actor SQLiteBackend {
         _ = try stmt.step()
         let changes = Int(sqlite3_changes(connection.handle))
         for key in matchedKeys {
-            notifyObservers(TableChange(table: table, event: .delete, rowKey: key, values: nil))
+            // changedColumns for delete = nil. Column-level information is not
+            // meaningful on a tombstone; consumers use the rowKey only.
+            notifyObservers(TableChange(
+                table: table, event: .delete, rowKey: key, values: nil, origin: origin,
+                changedColumns: nil
+            ))
         }
         return changes
     }
@@ -960,11 +996,42 @@ actor SQLiteBackend {
         return Int(stmt.columnInt64(0))
     }
 
-    private func extractRowKey(values: [String: TypedValue]) -> RowKey {
-        // Prefer "row_id" column if present and UUID-typed.
-        if let v = values["row_id"] {
+    /// Derive the outbound `RowKey` for a just-written row from its column
+    /// values, using the schema-declared primary key for `table` — the same
+    /// resolution `fetchMatchingRowKeys`/`fetchMatchingRowValues` already use
+    /// (`schemaDeclaration?.tables…primaryKey.first ?? "row_id"`). Before this
+    /// fix the lookup was hardcoded to a literal `"row_id"` column and fell
+    /// back to a freshly-minted random `UUID()` for any table whose PK is
+    /// named something else (e.g. `"id"`). That random fallback silently
+    /// forked row identity on the outbound sync path: the row inserted with
+    /// key K was announced to observers/replication under a random key K',
+    /// so the send-side identity never matched the row actually persisted.
+    /// The `pkCol = schemaDeclaration?...primaryKey.first ?? "row_id"`
+    /// resolution above is UNCHANGED by gap 5: it still applies to the
+    /// `.uuid` fast path and the UUID-parseable-`.text` case regardless of
+    /// composite-PK shape, exactly as before.
+    ///
+    /// Gap 5 adds exactly one new branch: a `.text` PK value that does NOT
+    /// parse as a UUID string, on a genuinely SINGLE-COLUMN PK (composite/
+    /// multi-column PKs are out of scope — Kong's guard — and fall through
+    /// to the random-mint default, unchanged). `RowKeyDerivation.
+    /// deterministicRowKey(from:)` derives a stable UUID from SHA-256 of the
+    /// string, closing the gap where a genuinely non-UUID-shaped `.text` PK
+    /// value (LocusKit's documented, not-yet-exercised deterministic-id
+    /// capability) still forked row identity between federation spokes even
+    /// on this SQLite backend. See RowKeyDerivation.swift for the full
+    /// rationale.
+    private func extractRowKey(table: String, values: [String: TypedValue]) -> RowKey {
+        let pkColumns = schemaDeclaration?.tables.first(where: { $0.name == table })?.primaryKey ?? []
+        let pkCol = pkColumns.first ?? "row_id"
+        if let v = values[pkCol] {
             if case .uuid(let u) = v { return u }
-            if case .text(let s) = v, let u = UUID(uuidString: s) { return u }
+            if case .text(let s) = v {
+                if let u = UUID(uuidString: s) { return u }
+                if pkColumns.count == 1 {
+                    return RowKeyDerivation.deterministicRowKey(from: s)
+                }
+            }
         }
         return UUID()
     }
@@ -1002,6 +1069,84 @@ actor SQLiteBackend {
             }
         }
         return keys
+    }
+
+    /// Fetch the full column values for every row matching `predicate`.
+    ///
+    /// Returns a dict of `RowKey → [String: TypedValue]`. The key is the
+    /// primary-key UUID column (same resolution as `fetchMatchingRowKeys`).
+    ///
+    /// Used by `updateRows` to compute `changedColumns` (the diff between the
+    /// pre-update row and the SET values — CVK-WB4). Cost: one `SELECT *`
+    /// before the `UPDATE`. Acceptable because `updateRows` is already O(n) on
+    /// the matched rows, and the pre-read avoids a conservative "stamp all SET
+    /// columns" that would defeat fieldLevelLWW precision. The pre-read is on
+    /// the hot actor so there is no interleaving between SELECT and UPDATE.
+    private func fetchMatchingRowValues(
+        table: String,
+        predicate: StoragePredicate
+    ) throws -> [RowKey: [String: TypedValue]] {
+        let schema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        let compiled = try SQLitePredicateCompiler.compile(predicate)
+        let sql = "SELECT * FROM \"\(table)\" WHERE \(compiled.sql)"
+        let stmt = try connection.prepareCached(sql)
+        defer { stmt.finalize() }
+        for (i, v) in compiled.bindings.enumerated() {
+            try stmt.bind(v, at: Int32(i + 1))
+        }
+        let pkCol = schema?.primaryKey.first ?? "row_id"
+        let colCount = stmt.columnCount()
+        var result: [RowKey: [String: TypedValue]] = [:]
+        while try stmt.step() {
+            var row: [String: TypedValue] = [:]
+            var rowKey: RowKey? = nil
+            for i in 0..<colCount {
+                let name = stmt.columnName(i)
+                let val = try readColumn(stmt: stmt, index: i, schema: schema, columnName: name, table: table)
+                row[name] = val
+                if name == pkCol, case .uuid(let u) = val { rowKey = u }
+            }
+            if let k = rowKey { result[k] = row }
+        }
+        return result
+    }
+
+    /// Fetch a single existing row matching all `conflictColumns` from `values`.
+    ///
+    /// Used by `upsertRow` to compute `changedColumns` (diff between the pre-
+    /// upsert row and the incoming values — CVK-WB4). Cost: one SELECT on a
+    /// unique/conflict-column index before the INSERT ON CONFLICT. The SQLite
+    /// actor serializes writes so there is no interleaving between this read
+    /// and the subsequent upsert. When `conflictColumns` is empty or no
+    /// matching values are available, returns `nil` (treat upsert as insert).
+    private func fetchRowByConflictColumns(
+        table: String,
+        values: [String: TypedValue],
+        conflictColumns: [String]
+    ) throws -> [String: TypedValue]? {
+        guard !conflictColumns.isEmpty else { return nil }
+        let schema = schemaDeclaration?.tables.first(where: { $0.name == table })
+        // Build WHERE clause from conflict columns that have a value in `values`.
+        let pairs = conflictColumns.compactMap { col -> (String, TypedValue)? in
+            guard let v = values[col] else { return nil }
+            return (col, v)
+        }
+        guard !pairs.isEmpty else { return nil }
+        let whereSQL = pairs.map { "\"\($0.0)\" = ?" }.joined(separator: " AND ")
+        let sql = "SELECT * FROM \"\(table)\" WHERE \(whereSQL) LIMIT 1"
+        let stmt = try connection.prepareCached(sql)
+        defer { stmt.finalize() }
+        for (i, pair) in pairs.enumerated() {
+            try stmt.bind(pair.1, at: Int32(i + 1))
+        }
+        guard try stmt.step() else { return nil }
+        var row: [String: TypedValue] = [:]
+        let colCount = stmt.columnCount()
+        for i in 0..<colCount {
+            let name = stmt.columnName(i)
+            row[name] = try readColumn(stmt: stmt, index: i, schema: schema, columnName: name, table: table)
+        }
+        return row
     }
 
     /// Read one column from the current statement row into a TypedValue.

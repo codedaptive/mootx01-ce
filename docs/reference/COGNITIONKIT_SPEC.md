@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Specification
-version: 1.2.0
+version: 1.4.0
 status: active
-date: 2026-06-17
+date: 2026-07-16
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -21,19 +21,22 @@ purpose: |
   recipes) or delegates to SubstrateML (for analytics recipes), and
   returns a typed result. The recipe surface is two foundational
   behaviours (grounded synthesis, migration benchmark), a taxonomy of
-  eighteen reasoning-lens recipes — each a deliberate read that sequences
+  twenty reasoning-lens recipes — each a deliberate read that sequences
   one gated NeuronKit reasoning surface over the estate — and three
   analytics recipes (association_rules, apriori_rules, formal_concepts)
-  that mine structural patterns by delegating to SubstrateML engines, and
-  the exploratory-recall recipe (recall_exploratory) that walks a wing's
-  tunnel graph with restart from a seed drawer. The companion INTERFACE
+  that mine structural patterns by delegating to SubstrateML engines, the
+  exploratory-recall recipe (recall_exploratory) that walks a wing's
+  tunnel graph with restart from a seed drawer, and three
+  distillation-family recipes (consolidate, distilled_recall, recollect)
+  that compact working memory, search the distilled tier, and expand
+  factoids back to their source memories. The companion INTERFACE
   document carries the signatures.
 ---
 
 # CognitionKit Specification
 
 > This specification settles the recipe surface as first-class design. The
-> eighteen reasoning-lens recipes (§ 4) are specified here as a deliberate
+> twenty reasoning-lens recipes (§ 4) are specified here as a deliberate
 > taxonomy with a shared construction archetype (§ 5, "read-sequence-
 > shape"), parallel to the NeuronKit lens taxonomy they consume
 > (`NEURONKIT_SPEC.md` § 7). Both the Swift and Rust versions realise the
@@ -47,7 +50,7 @@ It sits above NeuronKit and assembles NeuronKit reasoning and
 GeniusLocusKit estate verbs into named, reusable **recipes** — behaviours
 a caller invokes by intent.
 
-It offers three recipe families:
+It offers five recipe families:
 
 - **Foundational recipes (§ 3).** The two deliberate substrate
   behaviours that gate on capability and explicit confirmation:
@@ -57,15 +60,16 @@ It offers three recipe families:
   corpus under a zero-silent-loss gate, rank survivors, gated-promote the
   winner).
 
-- **Reasoning-lens recipes (§ 4).** A taxonomy of eighteen deliberate
+- **Reasoning-lens recipes (§ 4).** A taxonomy of twenty deliberate
   reads, each of which shapes the estate into the input of one gated
   NeuronKit reasoning surface, calls that surface, and returns the
   reasoning result. The structural lenses (keystones, constellation,
-  free association), the topic lenses (latent themes, theme weather), the
-  preference lens (bias), the surprise lenses (drift, contradiction), the
-  grounding lens (trust), the associative lens (feels-like), the
-  prediction lenses (anticipate, tunnel successor), and the federated
-  lenses (mind overlap, estate divergence).
+  free association), the topic lenses (latent themes, theme weather,
+  complexity), the preference lens (bias), the surprise lenses (drift,
+  cohesion, lens_contradiction, node_motion), the grounding lens (trust),
+  the associative lens (feels-like), the prediction lenses (anticipate,
+  tunnel successor), the federated lenses (mind overlap, estate
+  divergence), and the temporal lenses (moment, rhythm, precedence).
 
 - **Analytics recipes (§ 4.3).** Three knowledge-discovery recipes —
   `association_rules`, `apriori_rules`, and `formal_concepts` — that mine
@@ -80,6 +84,14 @@ It offers three recipe families:
   ranked by visit frequency. Delegates entirely to
   `SubstrateML.RandomWalks.walkWithRestart`; declares the
   `exploratoryRecall` capability.
+
+- **Distillation-family recipes (§ 4.5).** Three recipes that operate on
+  the distilled memory tier: `consolidate` (sweep active items and produce
+  factoid drawers), `distilled_recall` (Hamming NN search over the
+  distilled tier, returning factoid prose without embedding inference), and
+  `recollect` (fan out from a factoid to its source memories via
+  `_distilled_from` tunnels). All three have empty `requiredCapabilities`
+  and are read-only except Consolidate, which writes factoid drawers.
 
 - **The catalog (§ 8).** An enumerable registry of the recipes that have
   graduated to a product surface, with each recipe's descriptor (name,
@@ -233,15 +245,27 @@ page.
 each branch's recall fidelity against the origin corpus under the
 zero-silent-loss gate, and rank the survivors; promotion of the winner is
 a separate, explicitly confirmed step. Sequences the branch-derivation,
-benchmark, tournament, and branch-promotion surfaces. A plan set with
-duplicate plan names is rejected before any branch is derived
+benchmark, tournament, and branch-promotion surfaces.
+
+Input size is bounded before any branch derivation begins: a plan list
+exceeding MAX_MIGRATION_PLANS (20) is rejected with `tooManyPlans`; an
+origin corpus exceeding MAX_MIGRATION_ORIGIN_ENTRIES (5000) is rejected
+with `tooManyOriginEntries`. These DoS bounds protect against unbounded
+resource usage — each plan derives a COW branch (O(plans) work) and each
+origin entry is captured into every branch (O(plans × entries) work).
+
+A plan set with duplicate plan names is rejected before any branch is derived
 (`duplicatePlanName`); a plan whose branch silently lost an origin concept
 is disqualified from ranking and can never be promoted
 (`silentConceptLoss`, a non-recoverable gate, C-5); a tournament with no
 rankable survivor surfaces `tournamentNoWinner`; promotion without
 confirmation surfaces `userConfirmationRequired` (B-3).
 
-## § 4.2 — The reasoning-lens recipe taxonomy (18)
+Guard evaluation order: `insufficientBranches` → `tooManyPlans` →
+`tooManyOriginEntries` → `duplicatePlanName` → recipe start emit →
+branch derivation loop.
+
+## § 4.2 — The reasoning-lens recipe taxonomy (20)
 
 Each lens recipe is a deliberate read that shapes the estate into the input
 of one gated NeuronKit reasoning surface, calls that surface, and returns
@@ -249,7 +273,8 @@ its reasoning result. The lenses are grouped by the cognitive question they
 answer; the category numbers match the NeuronKit lens headers
 (`NEURONKIT_SPEC.md` § 7). Every lens recipe obeys I-1 (no algorithm),
 I-2 (no direct substrate), I-6 (read-only, deterministic), and the
-read-sequence-shape archetype (§ 5).
+read-sequence-shape archetype (§ 5). The catalog-registered name for each
+lens is given in parentheses where it differs from the prose name.
 
 ### Structure (category 1) — over the drawer/tunnel graph
 
@@ -308,9 +333,27 @@ read-sequence-shape archetype (§ 5).
   NeuronKit's drift between the two halves. "How far the distribution has
   moved."
 
-- **Contradiction** — recall a frame and surface NeuronKit's anomaly
-  detection (with a shingle-similarity tie-break) to find the odd one out.
-  "Which memory is the outlier."
+- **Cohesion** (`cohesion`) — recall a frame and surface NeuronKit's
+  anomaly detection (with a shingle-similarity tie-break) to find the
+  memories whose content cohesion with the recalled set is anomalously low.
+  "Which memory is the odd one out." (Previously named `contradiction` in
+  the catalog; renamed to distinguish statistical cohesion anomaly detection
+  from the semantic contradiction lens below.)
+
+- **Lens contradiction** (`lens_contradiction`) — surface genuine
+  contradictions in the estate: drawer pairs linked by an explicit
+  `contradicts` tunnel and KG facts with conflicting objects for the same
+  subject+predicate key. "What explicitly contradicts what."
+  Catalog-only registration; the implementing recipe is forthcoming.
+
+### Diffusion node layer (ADR-DIFFUSION-001) — per-memory motion
+
+- **Node motion** (`node_motion`) — read a single memory's recent audit
+  history and surface its mutation volatility (decay-weighted recent-churn
+  mass), its topic trajectory (the UDC anchors it has occupied over time),
+  whether it has reanchored, and a write-time anomaly verdict
+  (churning / reanchored / stable). "How this memory has moved."
+  Catalog-only registration; the implementing recipe is forthcoming.
 
 ### Grounding / trust (category 6)
 
@@ -376,6 +419,47 @@ capability.
 `substrate_types::fnv::hash64(seed_drawer_id)` in Rust — both produce the same
 64-bit value for the same UUID string, so the walk is reproducible and cross-version
 deterministic on the same input.
+
+## § 4.5 — Distillation-family recipes (3)
+
+Three recipes that operate on or with the distilled memory tier — the dense
+factoid drawers produced by the per-item distillation pipeline. All three
+have empty `requiredCapabilities`, obey B-1/B-2 (pure sequencing, no
+direct substrate kit access), and obey I-6 (read-only, deterministic,
+except `consolidate` which produces factoid drawers as its intended side
+effect).
+
+**Consolidate** (`consolidate`). Triggers an on-demand distillation sweep
+over the estate. Delegates entirely to `GeniusLocusKit.distillItemsSweep` /
+`EstateCoordinator::distill_items_sweep`, which iterates active
+not-yet-distilled items, applies the NeuronKit HMM feature extractor via
+the distillation pipeline, and persists produced factoid drawers in room
+`_distilled`. The `clusterID` and `includeHeld` input parameters are
+accepted for API stability but are currently no-ops at this layer; the
+sweep operates estate-wide. Returns the count of factoid drawers produced.
+
+**DistilledRecall** (`distilled_recall`). Dense-tier recall: searches the
+distilled memory tier using structural fingerprint Hamming nearest-neighbor
+over the `distillation-features-v1` VectorKit lane. No embedding model
+inference required; no full corpus scan. Returns `DistilledMatch` records
+(drawer UUID, factoid prose, confidence, source count, SNR, delta type,
+uncertainty flag, injection depth) and a `DistilledDiscriminationLevel`
+signal (how well the top result separates from the rest). The
+discrimination signal is derived from the confidence-score gap between
+rank-1 and rank-2 matches. Hydration is frame-aware and enforces the
+sensitivity ceiling; tombstoned or restricted drawers are excluded before
+DIST content is parsed.
+
+**Recollect** (`recollect`). Fan-out from a distilled factoid to its
+source memories. Follows the outgoing `_distilled_from` tunnel graph from
+a `_distilled` drawer and returns the full episodic content of the M
+source memories that produced it. Three error gates enforce structural
+invariants: `factoidNotFound` (the drawer ID is not in this estate);
+`notADistilledDrawer` (the drawer exists but carries no DIST header);
+`noSourceTunnels` (the factoid has no outgoing `_distilled_from` tunnels,
+indicating it predates tunnel wiring). Source memories are ordered
+oldest→newest by tunnel `filedAt`; withdrawn sources are silently skipped,
+so `sourceCount` (from the DIST header) may exceed `sources.count`.
 
 **Association rules** (`association_rules`). Recalls a frame via the estate handle,
 projects each drawer's categorical facets (kind, channel, sensitivity, room) into a
@@ -443,13 +527,21 @@ not an accident:
   during sequencing. This is a closed set: a required capability is
   unavailable (`missingCapability`, raised at the gate before any
   execution); a branch-deriving recipe got fewer inputs than its minimum
-  (`insufficientBranches`); two plans share a name (`duplicatePlanName`); a
+  (`insufficientBranches`); the plan list exceeds the DoS bound of 20
+  (`tooManyPlans`); the origin corpus exceeds the DoS bound of 5000 entries
+  (`tooManyOriginEntries`); two plans share a name (`duplicatePlanName`); a
   branch silently lost an origin concept (`silentConceptLoss`, non-
   recoverable — a disqualified branch can never be promoted, C-5); a
   tournament produced no rankable survivor (`tournamentNoWinner`); or a
   destructive step requires confirmation that was not provided
   (`userConfirmationRequired` — a recipe never auto-confirms on the
   caller's behalf, B-3).
+
+  The DoS-guard cases (`tooManyPlans`, `tooManyOriginEntries`) are checked
+  after `insufficientBranches` and before `duplicatePlanName`, so they fire
+  before any branch is derived. Their maximum values are constants in both
+  ports (`MAX_MIGRATION_PLANS = 20`, `MAX_MIGRATION_ORIGIN_ENTRIES = 5000`)
+  and their human-readable messages match across versions byte-for-byte.
 
 - **A propagated substrate failure** — a read or verb behind the estate
   boundary failed (a recall, a tunnel read, a branch derivation). The
@@ -509,8 +601,10 @@ are retired rather than relabeled; it fits the descriptor model; and both
 versions of the recipe land together, so the anchor never sees a recipe
 present in one version and absent from the other. A recipe registered in
 the catalog is registered in both versions or in neither. This applies to
-all recipe families: the two foundational recipes, the eighteen lens
-recipes, the three analytics recipes, and the exploratory-recall recipe.
+all recipe families: the two foundational recipes, the twenty lens
+recipes, the three analytics recipes, the exploratory-recall recipe, and
+the three distillation-family recipes. The thirty catalog entries are
+listed in the concordance in `COGNITIONKIT_INTERFACE.md` § 7.
 
 ## § 9 — Invariants
 
@@ -578,11 +672,14 @@ stable keys so a lens recipe's result is reproducible. (B-6, I-6.)
 
 **C-7 (full recipe surface on both versions):** both the Swift and Rust
 versions realise the complete recipe surface — the two foundational recipes,
-the eighteen lens recipes, the three analytics recipes, and the
-exploratory-recall recipe — with matching recipe names, descriptors, and
-result shapes, and bit-for-bit-equal numeric results on shared vectors where
-a recipe surfaces a deterministic reasoning result. A recipe present in one
-version and absent from the other is non-conformant.
+the twenty lens recipes, the three analytics recipes, the exploratory-recall
+recipe, and the three distillation-family recipes — with matching recipe
+names, descriptors, and result shapes, and bit-for-bit-equal numeric results
+on shared vectors where a recipe surfaces a deterministic reasoning result.
+A recipe present in one version and absent from the other is non-conformant.
+The two catalog-only lens entries (`node_motion` and `lens_contradiction`)
+are registered as descriptors in both versions; their implementing recipes
+are forthcoming and will be added to both versions together when they land.
 
 **C-8 (catalog parity anchor):** the catalog descriptors match across
 versions byte-for-byte; the catalog lists exactly the recipes present in
@@ -657,6 +754,30 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 *End of CognitionKit Specification.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-07-16
+Closed missing DoS-bound invariants (verifier gap):
+
+- § 4.1 migration benchmark: added DoS-bound description (`tooManyPlans` at
+  MAX_MIGRATION_PLANS = 20, `tooManyOriginEntries` at MAX_MIGRATION_ORIGIN_ENTRIES
+  = 5000) with rationale (O(plans × entries) work) and the guard evaluation order.
+  Both constants are enforced in `migration_orchestration.rs` before any branch
+  derivation begins.
+- § 6 error model: added `tooManyPlans` and `tooManyOriginEntries` to the closed
+  recipe-guard set with their triggering conditions, guard-order placement, and
+  the note that their Display/description messages match byte-for-byte across ports.
+
+### 1.3.0 -- 2026-07-16
+Additive audit (MX-TAB dataset series + distillation-family): updated § 1
+purpose to cite twenty reasoning-lens recipes and add the distillation-family
+recipe family. Updated § 4.2 header (18→20) and Surprise sub-section:
+renamed `Contradiction` lens entry to `Cohesion` (`cohesion` in the catalog,
+reflecting the catalog rename from `contradiction`); added `lens_contradiction`
+(catalog-only, explicit KG contradiction detection) and a new "Diffusion node
+layer" sub-section for `node_motion` (catalog-only). Added § 4.5
+Distillation-family recipes (Consolidate, DistilledRecall, Recollect).
+Updated § 8 catalog count (25→30) and C-7 recipe surface count. Updated
+catalog-only lens entry clause in C-7.
 
 ### 1.2.0 -- 2026-06-17
 Additive (A-2 exploratory-recall): added § 4.4 (exploratory-recall recipe family,

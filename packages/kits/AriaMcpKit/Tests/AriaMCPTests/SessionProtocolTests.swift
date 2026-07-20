@@ -89,12 +89,12 @@ struct SessionProtocolTests {
                 "protocol block must reference moot_memory_search even on empty estate")
     }
 
-    // MARK: - Test 3: teachme expands to full nine-tier guide
+    // MARK: - Test 3: teachme expands to full tier-based guide
 
-    /// `moot_estate_status teachme:true` returns the nine-tier orientation guide.
-    /// The guide must name every tier from Tier 1 through Tier 9 and state the
-    /// total tool count ("56 tools").
-    @Test func teachmeExpandsToNineTierGuide() async throws {
+    /// `moot_estate_status teachme:true` returns the ten-tier orientation guide.
+    /// The guide must name every tier from Tier 1 through Tier 10, and its
+    /// stated total tool count must match ToolProjection.tools() (vault-on).
+    @Test func teachmeExpandsToTierBasedGuide() async throws {
         let dispatcher = try await makeDispatcher(ownerID: "sp-3")
 
         let result = try await dispatcher.dispatch(
@@ -103,10 +103,40 @@ struct SessionProtocolTests {
 
         #expect(!isErrorResult(result))
         let t = text(of: result)
-        #expect(t.contains("Tier 1"), "nine-tier guide must mention Tier 1")
-        #expect(t.contains("Tier 9"), "nine-tier guide must mention Tier 9")
-        #expect(t.contains("56 tools"),
-                "nine-tier guide must state the total tool count")
+        #expect(t.contains("Tier 1"), "guide must mention Tier 1")
+        #expect(t.contains("Tier 9"), "guide must mention Tier 9")
+        #expect(t.contains("Tier 10"), "guide must mention Tier 10")
+        // Guide total is computed at runtime from ToolProjection.tools().
+        // Verify it contains the live vault-on count so it never goes stale.
+        let expectedVaultOnCount = ToolProjection.tools(environment: [:]).count
+        #expect(t.contains("\(expectedVaultOnCount) tools"),
+                "guide must state the live vault-on tool count (\(expectedVaultOnCount)); got: \(t)")
+    }
+
+    // MARK: - Test 3b: guide count matches live registry
+
+    /// The tool count in the estate-status teachme guide matches ToolProjection's
+    /// live vault-on count. This test enforces that the guide can never silently
+    /// drift from the real tool surface.
+    @Test func teachmeGuideCountMatchesRegistry() async throws {
+        let dispatcher = try await makeDispatcher(ownerID: "sp-3b")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_status",
+            arguments: .object(["teachme": .bool(true)]))
+
+        #expect(!isErrorResult(result))
+        let t = text(of: result)
+
+        // Both the vault-on and vault-off counts must appear in the guide text.
+        // The guide is computed from ToolProjection.tools() so these must match.
+        let vaultOn  = ToolProjection.tools(environment: [:]).count
+        let vaultOff = ToolProjection.tools(environment: ["MOOTX01_VAULT": "0"]).count
+
+        #expect(t.contains("\(vaultOn)"),
+                "guide must contain vault-on count \(vaultOn); got guide excerpt: \(t.prefix(500))")
+        #expect(t.contains("\(vaultOff)"),
+                "guide must contain vault-off count \(vaultOff); got guide excerpt: \(t.prefix(500))")
     }
 
     // MARK: - Test 4: list_lenses returns all 27 cognition tools

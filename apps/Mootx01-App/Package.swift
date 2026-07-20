@@ -67,6 +67,9 @@ let package = Package(
                 .product(name: "MootIntentKit", package: "MootIntentKit"),
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
                 .product(name: "ConvergenceKitCloudKit", package: "ConvergenceKit"),
+                // FED-OD-3: QR pairing ceremony uses ConvergenceKitFederation types
+                // (PairingProposal, PairingAcceptance, HyperplaneFamilySpec, etc.)
+                .product(name: "ConvergenceKitFederation", package: "ConvergenceKit"),
             ],
             path: "Sources/MootGateway"
         ),
@@ -76,6 +79,9 @@ let package = Package(
                 "MootGateway",
                 .product(name: "MootIntentKit", package: "MootIntentKit"),
                 .product(name: "MootFoundationModelsKit", package: "MootFoundationModelsKit"),
+                // FED-OD-3: QR pairing views reference ConvergenceKitFederation types
+                // (LocalIdentity, HyperplaneFamilySpec) passed in from the app layer.
+                .product(name: "ConvergenceKitFederation", package: "ConvergenceKit"),
             ],
             path: "Sources/GatewayUI"
         ),
@@ -94,6 +100,11 @@ let package = Package(
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
                 .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
+                // P5-M2 push nudge tests: need @testable access to
+                // CloudKitSyncEngine.cloudKitZoneName (internal method).
+                .product(name: "ConvergenceKitCloudKit", package: "ConvergenceKit"),
+                // FED-OD-3: QR pairing ceremony tests use ConvergenceKitFederation types.
+                .product(name: "ConvergenceKitFederation", package: "ConvergenceKit"),
             ],
             path: "Tests/MootGatewayTests"
         ),

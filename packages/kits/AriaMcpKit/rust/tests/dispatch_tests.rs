@@ -24,7 +24,7 @@ use aria_mcp::{
     estate_registry::EstateRegistry,
     jsonrpc::{JSONRPCErrorCode, JsonValue},
     surfaced_recall_ledger::SurfacedRecallLedger,
-    tool_list::{build_tool_list, build_tool_list_with_vault_flag, vault_enabled},
+    tool_list::{build_tool_list, build_tool_list_with_flags, build_tool_list_with_vault_flag, vault_enabled},
 };
 
 // ---------------------------------------------------------------------------
@@ -270,8 +270,11 @@ fn tools_list_count_is_68() {
     // ----
     //    4  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc, moot_palace_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   71  total
-    let tools = build_tool_list();
+    //   71  total (memory adapter excluded — opt-in, off by default)
+    // Use build_tool_list_with_flags with memory_on=false for deterministic count:
+    // the 3 memory-tool tests in this file hold memory_env_lock() while setting
+    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 72.
+    let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
     assert_eq!(arr.len(), 71, "expected 71 tools; got {}", arr.len());
 }
@@ -380,7 +383,11 @@ fn tools_list_name_set_matches_expected_71_names() {
     .copied()
     .collect();
 
-    let tools = build_tool_list();
+    // Use build_tool_list_with_flags with memory_on=false: this test gates the
+    // baseline 71-name set; the `memory` tool's opt-in appearance is tested in
+    // memory_adapter_tests.rs. Deterministic flag prevents racing the env-var
+    // mutations in the three memory_env_lock()-gated tests below.
+    let tools = build_tool_list_with_flags(vault_enabled(), false);
     let arr = tools.as_array().expect("build_tool_list must return an array");
     let actual: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
@@ -2803,6 +2810,7 @@ fn estate_ping_includes_injected_build_serial() {
         "TESTSERIAL-XYZ",
         "",
         None,
+        None,
     )
     .expect("estate_ping must not throw");
     assert!(is_success(&result));
@@ -2828,7 +2836,7 @@ fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
 
     for tool in ["moot_estate_ping", "moot_estate_status"] {
         let with_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", advisory, None,
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", advisory, None, None,
         )
         .expect("dispatch must not throw");
         let text = content_text(&with_skew);
@@ -2838,13 +2846,59 @@ fn version_skew_advisory_surfaces_when_present_and_omitted_when_absent() {
         );
 
         let without_skew = interface_tools::dispatch(
-            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", "", None,
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", "", None, None,
         )
         .expect("dispatch must not throw");
         let text2 = content_text(&without_skew);
         assert!(
             !text2.contains("version_skew"),
             "{tool} must omit version_skew when the host injected none; got: {text2}"
+        );
+    }
+}
+
+/// Upstream-release advisory: a wired provider's line is surfaced under an
+/// `update_available:` line in both moot_estate_ping and moot_estate_status;
+/// a provider answering None (up to date / probe failed — the host's advisor
+/// collapses both) omits the field, mirroring version_skew's opt-in shape.
+/// The no-provider default is covered implicitly by every other test in this
+/// file. Mirrors Swift ServerTests.testUpdateAdvisorySurfacesInPingAndStatus /
+/// testNilUpdateAdvisoryOmitsField.
+#[test]
+fn update_advisory_surfaces_when_wired_and_omitted_when_none() {
+    use aria_mcp::dispatcher::UpdateAdvisoryProvider;
+    use aria_mcp::interface_tools;
+    use aria_mcp::sensitivity_grant_ledger::SensitivityGrantLedger;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    let registry = EstateRegistry::new_inmemory();
+    let ledger = SurfacedRecallLedger::new();
+    let sensitivity_ledger = SensitivityGrantLedger::new();
+    let line = "v9.9.9 is available (installed 1.0.33) -- upgrade with `mootx01 upgrade`";
+    let some_provider: UpdateAdvisoryProvider = Arc::new(move || Some(line.to_owned()));
+    let none_provider: UpdateAdvisoryProvider = Arc::new(|| None);
+
+    for tool in ["moot_estate_ping", "moot_estate_status"] {
+        let with_update = interface_tools::dispatch(
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", "",
+            Some(&some_provider), None,
+        )
+        .expect("dispatch must not throw");
+        let text = content_text(&with_update);
+        assert!(
+            text.contains(&format!("update_available: {line}")),
+            "{tool} must surface the provider's update advisory; got: {text}"
+        );
+
+        let without_update = interface_tools::dispatch(
+            tool, &BTreeMap::new(), &registry, &ledger, &sensitivity_ledger, "SERIAL", "",
+            Some(&none_provider), None,
+        )
+        .expect("dispatch must not throw");
+        let text2 = content_text(&without_update);
+        assert!(
+            !text2.contains("update_available"),
+            "{tool} must omit update_available when the provider answers None; got: {text2}"
         );
     }
 }
@@ -6991,7 +7045,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
     let before = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
     ).expect("dispatch must not throw");
     assert!(
         !content_text(&before).contains("classified briefing"),
@@ -7003,7 +7057,7 @@ fn restricted_drawer_grant_makes_it_visible_in_search() {
     let after = interface_tools::dispatch(
         "moot_memory_search",
         &args!["query" => "unlock-marker-restricted"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
     ).expect("dispatch must not throw");
     assert!(
         content_text(&after).contains("classified briefing"),
@@ -7045,14 +7099,14 @@ fn restricted_drawer_grant_makes_it_found_by_id() {
     let sensitivity_ledger = SensitivityGrantLedger::new();
     let before = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id.clone()],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
     );
     assert!(before.is_err(), "without a grant, moot_memory_get must report not-found for a restricted drawer");
 
     sensitivity_ledger.grant_restricted(wall_now(), 0);
     let after = interface_tools::dispatch(
         "moot_memory_get", &args!["id" => drawer_id],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
     ).expect("with a live grant, moot_memory_get must find the drawer");
     assert!(content_text(&after).contains("restricted content body"));
 }
@@ -7080,7 +7134,7 @@ fn restricted_read_under_grant_emits_audit_entry_via_search_and_get() {
     sensitivity_ledger.grant_restricted(wall_now(), 0);
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-search-marker"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
     ).expect("dispatch must not throw");
 
     let coord = registry.coord.lock().unwrap();
@@ -7111,7 +7165,7 @@ fn normal_drawer_read_during_live_grant_does_not_emit_audit_entry() {
     sensitivity_ledger.grant_restricted(wall_now(), 0);
     interface_tools::dispatch(
         "moot_memory_search", &args!["query" => "audit-normal-marker"],
-        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None,
+        &registry, &SurfacedRecallLedger::new(), &sensitivity_ledger, "", "", None, None,
     ).expect("dispatch must not throw");
 
     let coord = registry.coord.lock().unwrap();

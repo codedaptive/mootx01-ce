@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.7.0
+version: 1.9.0
 status: active
-date: 2026-06-25
+date: 2026-07-16
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -22,8 +22,8 @@ purpose: |
   mutate, withdraw, expunge, reanchor, propose, associate, learn). It
   encodes all boolean and categorical row state in Int64 bitmaps (no
   Bool stored properties), keeps an append-only bitmap-audit trail with
-  XOR-fold historical reconstruction, and prunes recall with
-  per-container OR fingerprints. It depends on PersistenceKit for
+  HLC-keyed forward-fold historical reconstruction (via AuditLogFold), and
+  prunes recall with per-container OR fingerprints. It depends on PersistenceKit for
   storage and SubstrateLib for fingerprint math; it does not coordinate
   multiple estates (that is GeniusLocusKit). The companion INTERFACE
   document carries the signatures.
@@ -68,8 +68,8 @@ This specification defines:
 - The recall pipeline: `RecallFrame`, the `Filter` algebra,
   `HydrationLevel`, `Ordering`, the paged `RecallStream`/`RecallPage`
   contract, and container-fingerprint pruning.
-- The append-only `bitmap_audit` trail and XOR-fold historical
-  reconstruction (`auditTrail`, `bitmapState`).
+- The append-only audit trail and HLC-keyed historical reconstruction
+  (`auditTrail`, `bitmapState` via `AuditLogFold.projectStateAt`).
 - The `Manifest`/`ManifestValues` key-value contract and the
   `LocusKitSchema` registration handed to PersistenceKit.
 - The `Estate` consumer metadata surface (`meta`/`setMeta`) — the public,
@@ -178,7 +178,7 @@ never a file path. The kit depends only on the PersistenceKit protocol and
 never constructs a concrete backend; the caller owns the connection's
 lifecycle.
 
-**I-11 (cross-port parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and XOR-fold reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
+**I-11 (cross-port parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and audit-log reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
 
 **I-12 (`ext` forward-compat slot, ADR-012):** every persistent entity table
 carries exactly one nullable `.json` column named `ext`, reserving migration-free
@@ -358,12 +358,16 @@ string is preserved in the substrate audit trail for forensic inspection.
 
 Direct callers (not via GLK) use `sealAudit: true` and are unaffected.
 
-**B-9 (XOR-fold reconstruction):** `bitmapState(rowID:at:)` reconstructs a
-row's three bitmaps as of a past timestamp by XOR-folding each post-`at`
-audit delta `(prior XOR new)` back into the live value (architecture spec
-§ 6.8). XOR is associative and commutative, so any ordering yields the same
-result. A timestamp preceding the drawer's `filedAt` collapses onto
-`drawerNotFound`.
+**B-9 (HLC-keyed forward-fold reconstruction):** `bitmapState(rowID:asOf:)`
+reconstructs a row's three bitmaps at a specific HLC (hybrid logical clock)
+by forward-folding the row's audit log via `AuditLogFold.projectStateAt`
+(SubstrateML, cookbook § 5.3). The audit log is replayed in HLC order from
+the genesis capture event forward; events at or before `asOf` are included.
+State is keyed on HLC, not wall-clock (§11 clock decision;
+DECISION_CLOCK_TRIANGLE_TIME_MODEL). An `asOf` before the genesis event
+throws `drawerNotFound`. The parameter label is `asOf:` and the type is
+`HLC`, not `Date`. Both legs (`EstateAudit.swift` / `estate_audit.rs`) call
+the substrate primitive; no XOR arithmetic appears in the kit layer.
 
 **B-10 (recall trace hook):** trace writes are opt-in via `RecallFrame.traceLimit`.
 `traceLimit = nil` (the default) writes NO trace rows — internal scans and
@@ -403,8 +407,8 @@ drawer is silently truncated.
 by-id load that applies the frame's filter chain through the SAME
 `BitmapEvaluator` pipeline `recall` uses — so the returned `admissible` set is
 exactly the frame-filtered subset of `ids`, with the default insertions of B-4
-(implied `currentlyBelieve`/`trustworthy`/`userConfirmed`/sensitivity ceiling)
-and tombstone exclusion applied identically. A frame override (e.g.
+(implied `currentlyBelieve`/`trustworthy`/sensitivity ceiling — NO confirmation
+default; see B-4) and tombstone exclusion applied identically. A frame override (e.g.
 `.usedToBelieve`) admits the corresponding non-active drawers, just as it does
 on the full `recall` path. The result also reports `loadedIDs` (Swift) /
 `loaded_ids` (Rust): every id whose row physically loaded, REGARDLESS of the
@@ -458,8 +462,8 @@ suppression rule.
 
 **C-4 (audit append-only + reconstruction):** every state mutation writes
 its audit row in the mutation's transaction (I-8); `bitmapState` reconstructs
-past state by XOR-fold (B-9); UPDATE/DELETE on `bitmap_audit` is rejected by
-trigger.
+past state by HLC-keyed forward-fold via `AuditLogFold.projectStateAt` (B-9);
+the audit log rejects non-INSERT writes at the storage level.
 
 **C-5 (manifest gate):** `Estate.open` admits storage only when
 `bitmap_layout_version` equals `expectedBitmapLayoutVersion`, otherwise
@@ -873,9 +877,88 @@ public func countRecallTraces() async throws -> Int
 fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 ```
 
+---
+
+## § 13 — Dataset handle behavioral contracts
+
+The MX-TAB-4 dataset-handle feature introduces `contentKind == .dataset` drawers
+managed through the dedicated Estate extension in `DatasetHandle.swift` /
+`estate_verbs.rs`. Three behavioral contracts govern this surface.
+
+**B-13 (authorized creation seam — FDC-classifier barring):**
+`contentKind == .dataset` drawers may only be created through
+`Estate.captureDatasetHandle(...)` / `Estate::capture_dataset_handle(...)`. The FDC
+classifier (`moot_n_fdc` / `runReclassifyFDC`) is explicitly barred from emitting
+`contentKind .dataset`; dataset handles are skipped during every reclassification
+sweep. The ordinary `capture(_:CaptureFrame)` verb does not set `contentKind` to
+`.dataset` — `CaptureFrame` has no `contentKind` parameter (it predates the dataset
+kind). This seam assembles the correct operational bitmap (`ContentKind.dataset` raw 7
+in bits 6–11), structures the `DatasetHandleContent` JSON payload, and stamps the
+sentinel `embeddingModelID = "dataset-handle"` (satisfying the non-empty invariant
+I-4 while signalling to the VectorKit encode pipeline that no embedding should be
+generated). Any path other than `captureDatasetHandle` that produces a `.dataset`-kind
+drawer is a conformance defect.
+
+**B-14 (sensitivity floor — operator convention, v1):** rows appended to the backing
+dataset table are expected to carry sensitivity at or below the handle drawer's
+`sensitivity` tier (`AdjectiveSensitivity`). This is an operator convention in v1 —
+no per-row enforcement exists in the LocusKit or PersistenceKit layer at this revision.
+MX-TAB-5 will add column-level row-sensitivity gating. The handle itself participates
+in the normal recall pipeline under its adjective bitmap sensitivity field; individual
+dataset rows stored in the PersistenceKit `DatasetStore` are not recallable through the
+drawer recall pipeline and are not subject to bitmap-sensitivity filtering.
+
+**B-15 (handle lifecycle — withdrawal vs. erase, and the expunge cascade):**
+`Estate.resolveActiveDatasetHandle` / `Estate::resolve_active_dataset_handle` returns
+the cluster-A (currently-believed: `active`/`pending`/`contested`/`accepted`) non-tombstoned
+handle for a given `datasetId`. Withdrawal of a handle is a belief-state change only: the
+backing dataset table is NOT dropped by `withdraw` or by a state-axis `mutate`. A full
+erase — dropping both the handle drawer and the backing dataset table — requires routing
+through GLK `VerbSurface.expunge`, which implements the erase cascade in two steps:
+
+1. Reads the handle's `DatasetHandleContent` JSON BEFORE the storage expunge zeroes the
+   blob (via `drawerById`) to extract the `datasetId`, then calls
+   `DatasetStore.dropDataset(id:)` to drop the backing table.
+2. After the storage expunge commits, appends a supplementary audit event recording the
+   table-drop (via `appendAuditEvent` / `append_audit_event`), carrying verb
+   `"datasetTableDrop"` and the `datasetId` as reason context.
+
+`drawerById` and `appendAuditEvent` are `public extension Estate` methods consumed
+exclusively by GLK in this cascade path; they are not intended for general direct use.
+Direct callers that need only belief-state withdrawal use `Estate.withdraw` / the
+normal verb surface.
+
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.9.0 -- 2026-07-16
+Added § 13 — Dataset handle behavioral contracts. Three new behavioral clauses:
+
+- **B-13 (authorized creation seam — FDC-classifier barring):** `contentKind == .dataset`
+  drawers may only be created through `Estate.captureDatasetHandle`. The FDC classifier
+  is barred from emitting this content kind; dataset handles are skipped during
+  reclassification. The ordinary `capture(_:CaptureFrame)` verb is not a valid path for
+  dataset drawers.
+- **B-14 (sensitivity floor, v1):** rows in the backing dataset table are expected at or
+  below the handle's sensitivity tier. Operator convention only — no per-row enforcement
+  yet; MX-TAB-5 will add column-level gating.
+- **B-15 (handle lifecycle — withdrawal vs. erase cascade):** withdrawal is belief-state
+  only (backing table not dropped). Full erase routes through GLK VerbSurface.expunge,
+  which reads `DatasetHandleContent` via `drawerById` BEFORE zeroing the blob, drops the
+  backing table, then appends a supplementary `"datasetTableDrop"` audit event via
+  `appendAuditEvent`. Contracts `drawerById` and `appendAuditEvent` as GLK-exclusive
+  cascade methods.
+
+### 1.8.0 -- 2026-07-16
+- **B-9 corrected**: XOR-backward-fold description replaced with the shipped
+  implementation — `AuditLogFold.projectStateAt` (SubstrateML, forward-fold
+  in HLC order from genesis). `bitmapState` parameter label is `asOf:` (not
+  `at:`), type is `HLC` (not `Date`). Wall-clock is not the ordering axis.
+- **C-4 corrected**: "XOR-fold (B-9)" updated to "HLC-keyed forward-fold via
+  `AuditLogFold.projectStateAt` (B-9)".
+- **B-12 corrected**: removed `userConfirmed` from the B-4 default-insertions
+  list; B-4 explicitly states no confirmation default is inserted.
 
 ### 1.7.0 -- 2026-06-25
 Documented the `Estate` consumer metadata surface (`meta`/`setMeta`): the public,

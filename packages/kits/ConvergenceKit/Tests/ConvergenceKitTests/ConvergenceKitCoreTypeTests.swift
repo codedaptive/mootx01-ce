@@ -21,8 +21,11 @@ import ConvergenceKit
 @Suite("ConvergenceKit core types")
 struct ConvergenceKitCoreTypeTests {
 
-    @Test("SyncManifest round-trips through Codable")
-    func manifestRoundtripCodable() throws {
+    // NOTE: SyncManifest is NOT Codable — it carries a closure (postApplyIntegrityHook)
+    // that cannot be serialised. The conformance test below verifies structural
+    // construction and field access rather than Codable round-trip.
+    @Test("SyncManifest constructs with expected field values")
+    func manifestConstruction() {
         let manifest = SyncManifest(
             kitID: "TestKit",
             schemaVersion: 1,
@@ -32,11 +35,15 @@ struct ConvergenceKitCoreTypeTests {
                 SyncedTable(name: "audit", direction: .bidirectional, primaryKeyColumn: "event_id", conflictPolicy: .appendOnly)
             ]
         )
-        let encoded = try JSONEncoder().encode(manifest)
-        let decoded = try JSONDecoder().decode(SyncManifest.self, from: encoded)
-        #expect(decoded.kitID == "TestKit")
-        #expect(decoded.tables.count == 2)
-        #expect(decoded.tables[1].conflictPolicy == .appendOnly)
+        #expect(manifest.kitID == "TestKit")
+        #expect(manifest.schemaVersion == 1)
+        #expect(manifest.zoneIdentifier == "test-zone")
+        #expect(manifest.tables.count == 2)
+        #expect(manifest.tables[1].conflictPolicy == .appendOnly)
+        #expect(manifest.postApplyIntegrityHook == nil)
+        // table(named:) lookup is driven by the tables array.
+        #expect(manifest.table(named: "drawers")?.primaryKeyColumn == "row_id")
+        #expect(manifest.table(named: "missing") == nil)
     }
 
     @Test("SyncRecord round-trips through Codable")

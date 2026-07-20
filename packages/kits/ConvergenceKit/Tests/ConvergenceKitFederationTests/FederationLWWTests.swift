@@ -29,8 +29,12 @@ struct FederationLWWTests {
 
     // MARK: - Helpers
 
-    /// Open InMemory storage with an `items` table; no _syncHLC column
-    /// declaration needed — InMemory accepts extra columns on upsert.
+    /// Open InMemory storage with an `items` table and the `_fed_sync_meta` side
+    /// table required by the A6 LWW side-table path in `applyInbound`.
+    ///
+    /// These tests call `applyInbound` directly (bypassing `enable()`), so the
+    /// side table must be created explicitly here — mirroring the pattern in
+    /// `LWWDurableHLCTests.makeLWWStorage()` for the CloudKit path.
     func makeStorage() async throws -> any Storage {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(),
@@ -49,6 +53,10 @@ struct FederationLWWTests {
             indices: [],
             migrations: []
         ))
+        // A6: ensure _fed_sync_meta exists so applyInbound can read/write HLCs
+        // from the side table (not from the row). Production path: enable() calls
+        // this. Tests calling applyInbound directly must call it in setup.
+        try await FederationStateActor.ensureFedSyncMetaTable(storage: storage)
         return storage
     }
 
@@ -134,28 +142,46 @@ struct FederationLWWTests {
                 "newer inbound write must win LWW")
     }
 
-    @Test("_syncHLC is written durably so the next inbound comparison fires")
+    @Test("sync HLC is written to _fed_sync_meta side table so LWW guards next inbound")
     func syncHLCPersistedAfterApply() async throws {
         let storage = try await makeStorage()
         let actor = FederationStateActor()
         let rowID = UUID()
 
-        // Apply at T=2000 — _syncHLC must be stored in the row.
+        // Apply at T=2000 — HLC must be stored in _fed_sync_meta (A6: not in row).
         let first = makeRecord(id: rowID, note: "local-at-T2000", hlcTime: 2000)
         try await actor.applyInbound(first, syncedTable: syncedTable, storage: storage)
 
-        let stored = try await storage.rowStore.query(
+        // Verify HLC is in _fed_sync_meta, not in the application row.
+        // A6: the row must not carry _syncHLC; that column is gone from the row path.
+        let appRow = try await storage.rowStore.query(
             table: "items",
             where: .eq(Column(table: "items", name: "id"), .uuid(rowID))
         )
-        #expect(stored.count == 1)
-        guard case .hlc(_) = stored[0]["_syncHLC"] ?? .null else {
-            Issue.record("_syncHLC not persisted in row after first write — LWW cannot guard on next inbound")
+        #expect(appRow.count == 1, "row must exist after apply")
+        #expect(appRow[0]["_syncHLC"] == nil,
+                "A6: _syncHLC must NOT be in the application row after A6 migration")
+
+        // Verify the HLC landed in the side table.
+        let metaRows = try await storage.rowStore.query(
+            table: "_fed_sync_meta",
+            where: .and([
+                .eq(Column(table: "_fed_sync_meta", name: "table_name"), .text("items")),
+                .eq(Column(table: "_fed_sync_meta", name: "primary_key"), .text(rowID.uuidString))
+            ])
+        )
+        #expect(metaRows.count == 1, "_fed_sync_meta must have an entry after apply")
+        // Gap 6 (D38.1): sync_hlc_wire is the authoritative full-width column;
+        // the legacy sync_hlc INT column is dead (retained, always 0).
+        guard case .blob(let wire) = metaRows[0]["sync_hlc_wire"] else {
+            Issue.record("sync_hlc_wire not persisted in _fed_sync_meta — LWW cannot guard on next inbound")
             return
         }
+        let decoded = try HLC(wireBytes: [UInt8](wire))
+        #expect(decoded.physicalTime != 0, "sync_hlc_wire in _fed_sync_meta must be non-zero")
 
-        // Stale second inbound at T=1500 — must be rejected because
-        // the persisted _syncHLC (T=2000) is newer.
+        // Stale second inbound at T=1500 — must be rejected because the persisted
+        // side-table HLC (T=2000) is newer.
         let stale = makeRecord(id: rowID, note: "stale-at-T1500", hlcTime: 1500)
         try await actor.applyInbound(stale, syncedTable: syncedTable, storage: storage)
 
@@ -165,7 +191,7 @@ struct FederationLWWTests {
         )
         #expect(finalRows.count == 1)
         #expect(finalRows[0]["note"] == .text("local-at-T2000"),
-                "persisted _syncHLC must guard against stale second inbound")
+                "side-table HLC must guard against stale second inbound (A6)")
     }
 
     // MARK: - Delete path

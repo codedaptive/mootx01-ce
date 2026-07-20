@@ -81,43 +81,36 @@ struct FederationJSONConformanceTests {
         #expect(record.hlc.nodeID == 1)
     }
 
-    // MARK: - SyncManifest
+    // MARK: - SyncedTable (replaces former SyncManifest Codable conformance tests)
+    //
+    // SyncManifest is NOT Codable: it carries postApplyIntegrityHook, a closure
+    // that cannot be serialised. SyncManifest is a local configuration object —
+    // it is never transmitted over the wire. The cross-port wire contract for
+    // the manifest's nested data is verified through SyncedTable, which IS Codable
+    // and IS exchanged (embedded in SyncRecord batch headers in some transports).
 
-    @Test("SyncManifest encodes camelCase field names")
-    func syncManifestFieldNames() throws {
-        let manifest = SyncManifest(
-            kitID: "TestKit",
-            schemaVersion: 1,
-            zoneIdentifier: "zone-1",
-            tables: [SyncedTable(name: "t", primaryKeyColumn: "id")]
-        )
-        let json = try JSONEncoder().encode(manifest)
+    @Test("SyncedTable encodes camelCase field names matching Rust serde_rename_all = camelCase")
+    func syncedTableFieldNames() throws {
+        let table = SyncedTable(name: "drawers", primaryKeyColumn: "row_id")
+        let json = try JSONEncoder().encode(table)
         let dict = try JSONSerialization.jsonObject(with: json) as! [String: Any]
-        #expect(dict.keys.contains("kitID"))
-        #expect(dict.keys.contains("schemaVersion"))
-        #expect(dict.keys.contains("zoneIdentifier"))
-        #expect(!dict.keys.contains("kit_id"))
-        #expect(!dict.keys.contains("schema_version"))
-        #expect(!dict.keys.contains("zone_identifier"))
-        let tables = dict["tables"] as! [[String: Any]]
-        #expect(tables[0].keys.contains("primaryKeyColumn"))
-        #expect(tables[0].keys.contains("conflictPolicy"))
-        #expect(!tables[0].keys.contains("primary_key_column"))
+        #expect(dict.keys.contains("primaryKeyColumn"))
+        #expect(dict.keys.contains("conflictPolicy"))
+        #expect(!dict.keys.contains("primary_key_column"))
+        #expect(!dict.keys.contains("conflict_policy"))
     }
 
-    /// Decode the exact JSON that Rust produces for a SyncManifest.
-    @Test("SyncManifest decodes Rust golden JSON")
-    func syncManifestDecodeRustGolden() throws {
+    /// Decode the exact JSON that Rust produces for a SyncedTable.
+    @Test("SyncedTable decodes Rust golden JSON")
+    func syncedTableDecodeRustGolden() throws {
         let golden = """
-        {"kitID":"TestKit","schemaVersion":1,"zoneIdentifier":"zone-1","tables":[{"name":"drawers","direction":"bidirectional","primaryKeyColumn":"row_id","conflictPolicy":"lastWriterWinsByHLC"}]}
+        {"name":"drawers","direction":"bidirectional","primaryKeyColumn":"row_id","conflictPolicy":"lastWriterWinsByHLC"}
         """
-        let manifest = try JSONDecoder().decode(SyncManifest.self, from: Data(golden.utf8))
-        #expect(manifest.kitID == "TestKit")
-        #expect(manifest.schemaVersion == 1)
-        #expect(manifest.zoneIdentifier == "zone-1")
-        #expect(manifest.tables[0].name == "drawers")
-        #expect(manifest.tables[0].primaryKeyColumn == "row_id")
-        #expect(manifest.tables[0].conflictPolicy == .lastWriterWinsByHLC)
+        let table = try JSONDecoder().decode(SyncedTable.self, from: Data(golden.utf8))
+        #expect(table.name == "drawers")
+        #expect(table.primaryKeyColumn == "row_id")
+        #expect(table.conflictPolicy == .lastWriterWinsByHLC)
+        #expect(table.direction == .bidirectional)
     }
 
     // MARK: - SyncValueBox
@@ -204,6 +197,101 @@ struct FederationJSONConformanceTests {
         #expect(boxes[4].asTypedValue == .bitmap(255))
         #expect(boxes[5].asTypedValue == .float(3.14))
         #expect(boxes[6].asTypedValue == .timestamp(Date(timeIntervalSince1970: 1_700_000_000)))
+    }
+
+    // MARK: - SyncValueBox depth cap (CVK-WC5, Perkins defense-in-depth)
+    //
+    // SYNC_VALUE_BOX_MAX_ARRAY_DEPTH = 3. Depth-3 round-trips; depth-4 is
+    // rejected on both encode and decode (DecodingError / EncodingError),
+    // never a crash or accept.
+
+    /// Helper: build a SyncValueBox nested `depth` array levels deep.
+    /// The innermost array contains one Int(42) element.
+    /// Uses dot-syntax so TypedValue is inferred from SyncValueBox.init's parameter type.
+    private func makeNestedArray(depth: Int) -> SyncValueBox {
+        var inner = SyncValueBox(.array([.int(42)]))
+        for _ in 1 ..< depth {
+            inner = SyncValueBox(.array([inner.asTypedValue]))
+        }
+        return inner
+    }
+
+    /// Depth-3 SyncValueBox.array round-trips through JSONEncoder/JSONDecoder.
+    /// LocusKit usage is ≤2; 3 is the headroom level — must succeed.
+    @Test("SyncValueBox depth-3 array round-trips encode/decode")
+    func syncValueBoxArrayDepth3RoundTrips() throws {
+        let v = makeNestedArray(depth: 3)
+        let json = try JSONEncoder().encode(v)
+        let back = try JSONDecoder().decode(SyncValueBox.self, from: json)
+        // Structural check: depth-3 box survives encode→decode.
+        // depth1 wraps depth2 wraps depth3 wraps int(42).
+        guard case .array(let level2) = back.payload,
+              let l2 = level2.first,
+              case .array(let level3) = l2.payload,
+              let l3 = level3.first,
+              case .array(let leaves) = l3.payload,
+              let leaf = leaves.first else {
+            Issue.record("depth-3 structure not preserved through encode/decode")
+            return
+        }
+        #expect(leaf.asTypedValue == .int(42))
+        // Also verify re-encoding does not throw (depth cap accepts depth 3).
+        let _ = try JSONEncoder().encode(back)
+    }
+
+    /// Depth-4 decode must throw DecodingError, not succeed or crash.
+    @Test("SyncValueBox depth-4 array decode throws DecodingError")
+    func syncValueBoxArrayDepth4DecodeRejected() throws {
+        // Handcrafted depth-4 JSON: array → array → array → array → int(42)
+        let json = """
+        {"kind":"array","payload":[{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"int","payload":42}]}]}]}]}
+        """
+        #expect(throws: Error.self) {
+            _ = try JSONDecoder().decode(SyncValueBox.self, from: Data(json.utf8))
+        }
+    }
+
+    /// Depth-4 encode must throw EncodingError, not succeed or crash.
+    @Test("SyncValueBox depth-4 array encode throws EncodingError")
+    func syncValueBoxArrayDepth4EncodeRejected() throws {
+        // Build depth-4 in memory via the same helper used for depth-4 decode.
+        // makeNestedArray(depth: 4) constructs entirely from TypedValue so no
+        // encode path is involved during construction — the SyncValueBox is a
+        // valid in-memory structure; the depth cap only fires at encode time.
+        let depth4 = makeNestedArray(depth: 4)
+        #expect(throws: Error.self) {
+            _ = try JSONEncoder().encode(depth4)
+        }
+    }
+
+    /// Cross-leg golden: depth-3 JSON produced by Rust decodes correctly in Swift.
+    /// The same golden string is verified in the Rust test
+    /// `sync_value_box_array_depth3_cross_leg_golden`.
+    ///
+    /// WHY structural (not byte) comparison: Foundation's JSONEncoder and serde_json
+    /// produce the same key order for this format (kind before payload), but comparing
+    /// raw bytes makes the test brittle across encoder versions. The parity contract is
+    /// that the same data round-trips, not that encoders produce byte-identical output.
+    @Test("SyncValueBox depth-3 cross-leg golden round-trips")
+    func syncValueBoxArrayDepth3CrossLegGolden() throws {
+        // Exact JSON produced by Rust's serde_json for Array(Array(Array(Int(42)))).
+        let golden = """
+        {"kind":"array","payload":[{"kind":"array","payload":[{"kind":"array","payload":[{"kind":"int","payload":42}]}]}]}
+        """
+        let decoded = try JSONDecoder().decode(SyncValueBox.self, from: Data(golden.utf8))
+        // Structural check: depth-3 nested array of int(42).
+        guard case .array(let level2) = decoded.payload,
+              let l2 = level2.first,
+              case .array(let level3) = l2.payload,
+              let l3 = level3.first,
+              case .array(let leaves) = l3.payload,
+              let leaf = leaves.first else {
+            Issue.record("depth-3 cross-leg golden did not decode to expected structure")
+            return
+        }
+        #expect(leaf.asTypedValue == .int(42))
+        // Verify re-encode succeeds (depth cap accepts depth 3).
+        let _ = try JSONEncoder().encode(decoded)
     }
 
     /// Full SyncRecord with values: decode Rust golden JSON.

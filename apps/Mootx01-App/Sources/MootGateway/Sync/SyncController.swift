@@ -1,6 +1,7 @@
 import Foundation
 import ConvergenceKit
 import PersistenceKit
+import LocusKit
 import OSLog
 
 // MARK: - SyncController  (app-side orchestration of ConvergenceKit sync)
@@ -32,18 +33,65 @@ public actor SyncController {
     private var engine: (any SyncEngine)?
     private let log = Logger(subsystem: "com.codedaptive.mootx01", category: "sync")
 
+    /// Optional federation session manager. When set, `disable()` cascades to
+    /// `federationSessionManager?.endSession()` (try?) after disabling the
+    /// CloudKit engine, ensuring both sync paths tear down together.
+    ///
+    /// Wire via `setFederationSessionManager(_:)` after construction.
+    /// Not set at init to avoid circular dependencies.
+    private var federationSessionManager: FederationSessionManager?
+
     public init(bridge: MootBridge) {
         self.bridge = bridge
+    }
+
+    /// Wire a `FederationSessionManager` so it is torn down when this controller
+    /// is disabled. The manager's `endSession()` is called (best-effort via `try?`)
+    /// only when a session is active — it is a no-op if no session is active.
+    ///
+    /// Call this after constructing the session manager and before any sync beats.
+    public func setFederationSessionManager(_ manager: FederationSessionManager) {
+        self.federationSessionManager = manager
     }
 
     /// Enable the injected engine against the estate's OWN Storage instance —
     /// the same one the ARIA verbs write through, so the engine observes the
     /// exact rows the estate mutates. For real device sync inject
     /// `CloudKitSyncEngine(containerIdentifier:)`; tests inject `NoSyncEngine()`.
-    public func enable(engine: any SyncEngine, manifest: SyncManifest) async throws {
-        try await engine.enable(manifest: manifest, storage: bridge.estateStorage())
+    ///
+    /// The sensitivity ceiling wraps storage BEFORE it is passed to `engine.enable()`.
+    ///
+    /// WHY this ordering is mandatory (Perkins Amendment 1, CVK-ICLOUD P5-M1):
+    /// `AppliedBatch.storage` (IntegrityHook.swift:56) IS the handle engine.enable()
+    /// received. Hook writes carry origin == .local and flow into the outbox
+    /// (hook-writes-must-ship, Kong Q2 adjudication). Passing the unwrapped rawStorage
+    /// to enable() would let hook-repair writes on restricted/secret rows carry
+    /// origin == .local, enter the outbox, and cross the CloudKit wire — leaking
+    /// above-ceiling content even though the initial change event was filtered.
+    /// The SensitivityFilteredStorage wrapper must be the single handle the engine holds.
+    ///
+    /// - Parameters:
+    ///   - engine: Concrete sync engine (`CloudKitSyncEngine` or `NoSyncEngine`).
+    ///   - manifest: The per-estate sync manifest (tables, policies, kitID).
+    ///   - ceiling: Sensitivity ceiling for outbound suppression and inbound gating.
+    ///     Defaults to `.elevated` (normal + elevated sync; restricted + secret gated).
+    ///   - backendName: Human-readable label registered with GeniusLocusKit for
+    ///     `moot_estate_status sync:` reporting ("cloudkit", "none", etc.).
+    public func enable(
+        engine: any SyncEngine,
+        manifest: SyncManifest,
+        ceiling: AdjectiveSensitivity = .elevated,
+        backendName: String = "cloudkit"
+    ) async throws {
+        let rawStorage = await bridge.estateStorage()
+        // Wrap storage before enable() — Perkins Amendment 1 invariant (see above).
+        let filteredStorage = SensitivityFilteredStorage(wrapping: rawStorage, ceiling: ceiling)
+        try await engine.enable(manifest: manifest, storage: filteredStorage)
         self.engine = engine
-        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public)")
+        // Register with GeniusLocusKit so moot_estate_status sync: reports real state.
+        // This is status-reporting only — it does NOT drive the engine lifecycle.
+        try await bridge.registerSyncEngine(engine, backendName: backendName)
+        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public), ceiling \(ceiling.rawValue, privacy: .public)")
     }
 
     /// Pull remote changes (engine applies + reconciles), then push local.
@@ -70,6 +118,10 @@ public actor SyncController {
     public func disable() async throws {
         try await engine?.disable()
         engine = nil
+        // Cascade to federation session if one is active.
+        // Uses try? — a failing endSession during controller teardown is logged
+        // by the session manager itself; we do not re-throw here.
+        try? await federationSessionManager?.endSession()
     }
 
     public func state() async -> SyncState? {

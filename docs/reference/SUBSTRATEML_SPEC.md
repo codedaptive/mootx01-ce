@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Specification
-version: 1.0.0
+version: 1.0.2
 status: active
-date: 2026-06-14
+date: 2026-07-16
 description: "Behavioral specification for SubstrateML: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -183,6 +183,25 @@ This specification defines:
   `concept_implications.json`. The estate-backed entry point lives in
   `GeniusLocusKit` (`EstateFormalConcepts.conceptImplications`). The
   recipe surface lives in `CognitionKit` (`FormalConcepts.Output.implications`).
+- **Jacobi SVD** (`SVDResult`, `JacobiSVD`) — deterministic one-sided
+  cyclic Jacobi SVD for real matrices (m × n, m ≥ n). Used by
+  CorpusKit's `LsaProvider` for LSA distributional embeddings. Bit-identical
+  across ports via fixed sweep count, fixed tournament column-pair order,
+  scalar Float32, and a canonical sign convention. ADR-010 Decision B.
+- **Distillation pipeline** (`DistillationFeatureType`, `TypedDecayWeighting`,
+  `DeltaType`, `DeltaAnalysis`, `DeltaFeatureExtractor`, `ExtractedFeature`,
+  `DistillationSNR`, `FeatureGraph`, `DistillationScorer`, `DistillationInput`,
+  `DistillationOutput`, `DistilledHeader`, `DistillationPipeline`) — the
+  five-stage cold-path memory distillation algorithm per
+  DISTILLATION_MATH_SSA.md §1–7 and DISTILLATION_MATH_DIFFUSION.md §1–8.
+  Feature extraction is injected by the caller. Stage 2.5 rescues CONVERGENT
+  and MONOTONE features via `DeltaFeatureExtractor`. Consumed by NeuronKit's
+  `distillCluster` and CognitionKit's `DistilledRecall` and `Recollect` recipes.
+- **ConflictCue** (`ConflictCueKind`, `ConflictCueResult`, `ConflictCue`) —
+  deterministic pairwise text-conflict screen with three cues (valueDivergence,
+  negationAsymmetry, markerRevision). Backed by `ShingleSimilarity`. Consumed
+  by GeniusLocusKit's `ContradictionScoutSignal` and AriaMcpKit's
+  `moot_hunt_contradictions`.
 
 This specification does NOT define:
 
@@ -756,6 +775,238 @@ identical deltas in identical order. No clocks or randomness.
 test-harness/vectors/temporal_causality_fold.json`. Swift and Rust ports must
 produce identical deltas on canonical test cases.
 
+### § 5.23 JacobiSVD
+
+Deterministic one-sided cyclic Jacobi SVD for real matrices (m × n, m ≥ n).
+`decompose(A:rank:sweeps:)` returns the top-k singular triplets.
+
+**Algorithm:** fixed `sweeps` rounds of the round-robin tournament column-pair
+schedule. Each round contains column-disjoint (p, q) pairs, enabling
+column-disjoint parallel sweeps. Default sweep count: 30, pinned in both Swift
+and Rust.
+
+**Bit-identity contract** (cross-port):
+1. Fixed sweep count (no float-comparison convergence criterion).
+2. Fixed tournament column-pair order (`tournamentRounds(_:)` is a pure integer
+   function of n; both ports implement the identical algorithm).
+3. Identical scalar Float32 arithmetic — no SIMD, no Accelerate, no LAPACK on
+   either port.
+4. Identical `jacobiCS` expression tree (α, β, γ → c, s).
+5. Canonical sign convention: for each left singular vector U[:,j], find the
+   component with the largest absolute value (ties broken by lowest index) and
+   force it positive; apply the same sign flip to V[:,j].
+
+**Preconditions** (precondition-terminated in Swift, panic in Rust): A
+non-empty, rectangular, m ≥ n, rank ≥ 1, sweeps ≥ 0.
+
+**Truncation:** `rank` is clamped to `min(m, n)`.
+
+**Consumers:** CorpusKit's `LsaProvider` (LSA term-document matrix
+factorization). SubstrateML owns the SVD math primitive; CorpusKit holds no
+SVD arithmetic.
+
+**Conformance vectors:** `JacobiSVDTests.swift` pins a 4×3 canonical input
+with expected singular values and vectors; both ports assert bit-for-bit
+agreement.
+
+### § 5.24 Distillation Pipeline
+
+The distillation subsystem occupies four files and covers six algorithm stages.
+All components are pure — no I/O, no state, no randomness except where an
+explicit seed is threaded.
+
+**§ 5.24.1 TypedDecayWeighting**
+
+Type-specific exponential temporal decay per DISTILLATION_MATH_DIFFUSION.md §2.
+Four feature types with associated λ: ENT=0.1, REL=0.2, TMP=0.5, NUM=0.8.
+
+`weight(featureType:ageInUnits:)` = `exp(-λ × max(0, ageInUnits))`. Returns
+1.0 at age 0; negative ages are clamped to 0 (future timestamps treated as
+present).
+
+`weightedDocFrequency` computes `df_w(f) = Σ_{present} weight(i) /
+Σ_{all} weight(i)`. Returns 0 when the all-memory timestamp list is empty.
+Returns uniform (unweighted) doc frequency when no timestamps are supplied.
+
+**§ 5.24.2 DeltaFeatureExtractor (Stage 2.5)**
+
+Trajectory analysis over an ordered (value, timestamp) sequence for a single
+feature. Detection order (early-exit) for categorical sequences:
+1. M = 1 → STATIC.
+2. All values identical → STATIC.
+3. Period-2 pattern (A→B→A→B) on last 4 observations → OSCILLATING.
+4. Trailing-match score C = k/M ≥ `decayLambda` (default 0.5) → CONVERGENT.
+5. Otherwise → DIVERGENT.
+
+Detection order for numerical sequences:
+1. M = 1 → STATIC.
+2. All consecutive differences zero → STATIC.
+3. All differences positive or all negative → MONOTONE.
+4. Signs strictly alternate across all steps → OSCILLATING.
+5. Otherwise → DIVERGENT.
+
+`slope` (non-nil for MONOTONE) is the average per-step difference.
+`convergenceScore` is k/M for CONVERGENT categorical; 1.0 for MONOTONE/STATIC.
+`confidence` for MONOTONE is `decayLambda` (default 0.8 for numerical).
+
+**§ 5.24.3 DistillationScorer**
+
+Structural scoring and PMI coherence graph over extracted features.
+
+`structuralThreshold(M:)` = 2 / M. A feature is structural iff it recurs in at
+least 2 of M units — the minimal meaningful-repetition bar for intra-item
+distillation.
+
+`computeSNR(features:M:)` computes `snr = structuralSignal /
+max(episodicNoise, 1e-6)`. `readyToDistill` is true when snr ≥ 2.0. The 1e-6
+floor prevents division by zero when all features are structural.
+
+`computeStructuralScores` sets `σ(f) = df × (1 − H(df))` (binary entropy; `H`
+is 0 at p=0 and p=1). Rewards features appearing often and consistently.
+
+`buildPMIGraph` constructs the symmetric PMI matrix over threshold-passing
+features. `PMI(f_j, f_k) = log₂(p(j∧k) / (p(j)×p(k)))`; set to −∞ when the
+joint probability is zero. Connected components are sorted by total weighted
+doc frequency descending so `components[0]` is always the dominant semantic
+cluster.
+
+`computeConfidence(selected:allThreshold:)` = `mean_df(F*) ×
+(|F*| / |V_thresh|)`. The coherence ratio penalizes fragmented V_thresh.
+
+**§ 5.24.4 DistillationPipeline**
+
+Five-stage pure pipeline: Stage 1 (feature extraction and incidence matrix),
+Stage 2 (typed decay weighting, SNR gate, structural recurrence threshold),
+Stage 2.5 (DeltaFeatureExtractor rescue pass), Stage 3 (PMI coherence graph,
+dominant component), Stage 4 (structural scores), Stage 5 (confidence,
+content, fingerprint).
+
+`featureSimHashSeed` is `0x44495354494C4C41` ("DISTILLA" as ASCII big-endian
+UInt64). Changing it invalidates all stored distillation fingerprints and
+requires a full re-distillation sweep.
+
+`featureHash(_:)` mixes each UTF-8 byte into the seed via SplitMix64 avalanche
+steps, then expands the 64-bit state to four blocks via SplitMix64. Identical
+in the Rust port.
+
+`queryFingerprint(query:extractFeatures:)` = OR-reduce of `featureHash` over
+all extracted feature values. Pure Hamming arithmetic — no embedding model
+inference.
+
+`run(input:extractFeatures:intraItem:)` — when `intraItem = true`, the SNR
+hold and PMI dominant-component pruning are bypassed: a single document is one
+coherent thing, so every recurring feature is its content.
+
+`DistilledHeader.parse(_:)` is co-located with the pipeline because the code
+that writes the DIST format owns the parser. Returns nil if the content does
+not start with `"[DIST|"`.
+
+Output `drawerContent` format: `"[DIST|conf=X.XX|src=N|snr=Y.YY|delta=Z]
+prose text"`, with `|uncertain` appended when `conf ∈ [0.4, 0.7)`.
+
+**§ 5.24.5 Conformance**
+
+Bit-identical Swift ↔ Rust output is required for `featureHash`, `queryFingerprint`,
+and `run` (given the same inputs and a stateless `FeatureExtractor`). The Rust
+port uses `fn` pointers rather than `@Sendable` closures; only stateless
+extractors are conformance-testable cross-port. Parity is asserted by
+`DistillationConformanceTests.swift` against `rust:distillation_pipeline::tests`.
+
+### § 5.25 ConflictCue
+
+Deterministic pairwise text-conflict screen. Pure function of two input
+strings — no locale-sensitive transforms beyond ASCII-safe lowercasing, no
+stemming, no randomness, no clock. Results are bit-identical across ports.
+
+**Tokenizer contract** (mirrored exactly in both ports): lowercase the input,
+then a token is a maximal run of `[a-z0-9.]`; leading/trailing `.` are trimmed;
+empty tokens after trimming are dropped. Operates at Unicode scalar level (not
+grapheme cluster) for locale independence.
+
+**Three cues, checked strongest-first:**
+
+1. **valueDivergence** — both streams are the same length (≥ 4 tokens), every
+   differing position carries a digit in both tokens. Score: fraction of shared
+   template. Highest-precision signal.
+
+2. **negationAsymmetry** — exactly one side carries a negation cue (standalone
+   tokens or bigrams: `not`, `never`, `without`, `stopped`, `cannot`, `isn't`,
+   `no longer`, etc.) AND stripped-claim shingle similarity ≥ `borderlineThreshold`.
+   Score: the shingle similarity after stripping negation cues.
+
+3. **markerRevision** — exactly one side carries a revision/supersession marker
+   (`deprecated`, `superseded`, `replaced`, `instead of`, `moved to`, etc.)
+   AND shingle similarity ≥ `borderlineThreshold`.
+   Score: the shingle similarity.
+
+**Thresholds:**
+- `strongThreshold` = 0.70 — auto-propose a `contradicts` tunnel (lifecycle
+  `.proposed`, still user-reviewable).
+- `borderlineThreshold` = 0.45 — surface for BYOAI client adjudication; never
+  auto-proposed.
+
+**`kind == .none`** is always returned with score 0. Identical inputs (same
+token stream) return `.none` — agreement is not conflict.
+
+**Consumers:** GeniusLocusKit `ContradictionScoutSignal` (dreaming's
+content-driven phase); AriaMcpKit `moot_hunt_contradictions` (on-demand sweep).
+
+**Conformance:** `ShingleSimilarity` (already conformance-gated to f32
+bit-identity, CRC `0x8a5d8888`) provides the similarity scores, so ConflictCue
+scores are deterministic and cross-port identical by composition.
+
+### § 5.26 AnomalyDetection
+
+Statistical anomaly scoring for ambient streams and matrix-tier cells
+(cookbook § 8.13). The namespace exposes five pure functions; all are
+stateless and free of clocks and randomness.
+
+**`zScore(value:mean:stddev:)`** — classic z-score: `(value − mean) / stddev`.
+Returns 0 when `stddev` is zero (no statistical structure to score against).
+
+**`rollingZScore(window:current:estate:ts:)`** — computes mean and stddev
+from the supplied window in one pass, then delegates to `zScore`. Empty
+window returns 0 (no baseline). When monitoring is enabled, emits one
+`VizGraphSignals.anomalyFlag` sample with `value = abs(z)`, tagged
+`method: "z_score"` and the window size; off-path cost is a single
+atomic-bool load.
+
+**`modifiedZScore(value:median:mad:)`** — 0.6745 × (value − median) / MAD.
+Returns 0 when MAD is zero. The 0.6745 scaling constant makes the score
+consistent with the classical z-score on normally distributed data, so the
+same threshold applies to both methods.
+
+**`rollingModifiedZScore(window:current:estate:ts:)`** — computes the median
+and MAD from the window in-place (sort a single clone, no extra allocation).
+Empty window returns 0. When monitoring is enabled, emits one
+`VizGraphSignals.anomalyFlag` sample with `value = abs(z_mod)`, tagged
+`method: "modified_z_score"` and the window size; off-path cost is a single
+atomic-bool load.
+
+**`isAnomalous(zScore:threshold:)`** — returns `true` when `|zScore| >= threshold`.
+Default threshold 3.0 yields approximately 0.27% false positive rate under a
+normal distribution. The same threshold applies to both classical and modified
+z-scores because of the 0.6745 normalization above.
+
+**Invariants:**
+
+- All five functions are pure: same inputs → same output; no mutation of
+  caller state; no clock reads.
+- Zero-guard behaviour is identical across ports: Swift returns `0` via
+  `guard` on `stddev <= 0` and `mad <= 0`; Rust returns `0.0` via the
+  same condition.
+- The `isAnomalous` threshold parameter has a Swift default of 3.0; the
+  Rust function requires the caller to supply the threshold explicitly
+  (no default argument in Rust's type system).
+- The rolling functions emit at most one VizGraph signal per call regardless
+  of window size. The emit is a pure side-effect and does not alter outputs
+  (monitored and unmonitored calls produce bit-identical return values).
+
+**Conformance:** the four rolling/scalar functions are regression-tested in
+`AnomalyDetectionTests.swift` and inline asserts in `rust:anomaly`. The emit
+path is non-conformance-critical (side-effect only); monitoring on/off
+conformance is verified by `VizGraphSignalsTests.swift` / `viz_graph_signals_tests.rs`.
+
 ## § 6 — Error model (conceptual)
 
 ML algorithms here reject out-of-domain input at the public entry
@@ -774,6 +1025,8 @@ convention for programmer-error contract violations):
 - `FFT` raises on non-power-of-two signal lengths.
 - `BradleyTerryEstimator` raises on observation weights ≤ 0.
 - `PairingHandshake.validate` raises on signature mismatch.
+- `JacobiSVD.decompose` requires A non-empty, rectangular, m ≥ n,
+  rank ≥ 1, sweeps ≥ 0.
 
 All other failure modes are non-error returns (empty result,
 `nil`, default-valued).
@@ -880,6 +1133,23 @@ verified by the `conformance*` tests in `VizGraphSignalsTests.swift` and
 `viz_graph_signals_tests.rs`.
 
 ## Changelog
+
+### 1.0.2 -- 2026-07-16
+Additive (audit): closed AnomalyDetection behavioral contract gap. Added § 5.26
+covering all five methods (`zScore`, `rollingZScore`, `modifiedZScore`,
+`rollingModifiedZScore`, `isAnomalous`): formula, zero-guard behavior, 0.6745
+normalization rationale, VizGraph emit contract, threshold default asymmetry
+between Swift (3.0 default) and Rust (caller-supplied), and conformance note.
+
+### 1.0.1 -- 2026-07-16
+Additive (audit): added behavioral contracts for six algorithm groups that
+shipped in the package but were absent from the spec. § 2 scope updated to
+list JacobiSVD, the distillation subsystem, and ConflictCue. New sections:
+§ 5.23 JacobiSVD (tournament schedule, sign convention, bit-identity contract);
+§ 5.24 Distillation Pipeline (§§ 5.24.1–5.24.5 covering TypedDecayWeighting,
+DeltaFeatureExtractor, DistillationScorer, DistillationPipeline, conformance);
+§ 5.25 ConflictCue (tokenizer contract, three-cue taxonomy, thresholds,
+conformance). § 6 error model extended with JacobiSVD preconditions.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

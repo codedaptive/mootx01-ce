@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.19.0
+version: 1.22.0
 status: active
-date: 2026-07-12
+date: 2026-07-16
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -20,7 +20,7 @@ purpose: |
   The companion SPEC carries the behavioral contracts.
 
   TRANSPORT NOTE: two transports are implemented behind the same
-  `AriaMcpDispatcher`.
+  `ARIA_MCPDispatcher`.
   **Fallback:** `StdioServer` + the newline-delimited JSON-RPC loop (PoC,
   testing, migrations). **Primary:** `HTTPServer`
   (`Sources/AriaMCP/HTTPServer.swift`; Rust `rust/src/http_server.rs`) — a
@@ -52,7 +52,11 @@ purpose: |
   per-tool usage guide strings (`TeachmeGuides.swift`),
   coaching-hint trigger logic (`CoachingEngine.swift`),
   CognitionKit recipe tools (`RecipeTools.swift`), reasoning-lens tools
-  (`LensTools.swift`), vault control tools (`VaultTools.swift`).
+  (`LensTools.swift`), vault control tools (`VaultTools.swift`),
+  tabular dataset tools (`DatasetTools.swift`),
+  recall discrimination helper (`RecallDiscrimination.swift`),
+  Anthropic memory_20250818 adapter (`MemoryToolAdapter.swift`; Rust: `memory_adapter.rs`),
+  monitoring-control injection seam (`MonitoringControl.swift`).
 - `Sources/aria-mcp/` — the `aria-mcp` executable (`AriaMCPMain.swift`):
   opens an estate and runs the selected transport — stdio by default, the
   resident loopback HTTP transport when `MOOTX01_HTTP_PORT` is set.
@@ -64,9 +68,11 @@ purpose: |
 The Rust binary is a parity sibling; the shipped runtime is the Swift binary —
 the `mootx01` executable target in `apps/mootx01/Package.swift`, which links the
 `AriaMCP` library and runs `mootx01 serve` (the default subcommand on macOS).
-The Rust binary
-links the same 55-tool surface backed by the Rust kit stack (genius-locus-kit,
-locus-kit, vault-kit, cognition-kit, neuron-kit). All five
+The Rust binary links the same 71-tool surface (65 vault-off) backed by the Rust kit stack
+(genius-locus-kit, locus-kit, vault-kit, cognition-kit, neuron-kit). The opt-in
+Anthropic memory_20250818 adapter (`memory_adapter.rs`) adds one `memory` tool when
+`MOOTX01_MEMORY_TOOL=1`, raising the count to 72/66 — same gate as the Swift port
+(`MemoryToolAdapter.swift`). Default (absent/≠ "1") preserves the 71/65 baseline. All five
 `moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
 (`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
 manifest owned by the ARIA layer. The fifth vault
@@ -150,7 +156,7 @@ AI-client-oriented interface. `ToolProjection.tools()` assembles all
 
 ```swift
 public enum ToolProvenance: Sendable, Equatable {
-    case interface     // 27 tools: 22 five-tier AI-client tools + moot_monitoring_status + 4 maintenance
+    case interface     // 30 tools: 22 five-tier AI-client tools + moot_monitoring_status + 4 maintenance + 3 dataset
     case federation    // 1 federated-search tool (moot_federated_search)
     case recipe        // 12 recipe + 23 lens tools via CognitionKit/LensTools
     case vault         // 5 vault control tools (export, import, status, reconcile, job)
@@ -163,7 +169,9 @@ public struct ProjectedTool: Sendable, Equatable {
 }
 public enum ToolProjection {
     public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
-    public static func tools() -> [ProjectedTool]   // all 68 tools (interface+federation+recipe+lens+vault+maintenance)
+    public static func tools() -> [ProjectedTool]   // vault-on: 71 tools; vault-off: 65 tools (interface+federation+recipe+lens+vault+maintenance+dataset)
+    public static func memoryToolEnabled(environment: [String: String]) -> Bool  // opt-in memory_20250818 adapter (MOOTX01_MEMORY_TOOL=1); default OFF
+    public static var memoryToolEnabled: Bool
     public static func federationTool() -> ProjectedTool
 }
 ```
@@ -204,6 +212,13 @@ for semantic knobs such as `estateID`, `teachme`, `filter`, `limit`, `scoring`,
 `ordering`, `sensitivity`, `exportability`, `kind`, `impatient`, `agent`, and
 similar optional primitive fields. This keeps AI clients from forcing the server
 to guess whether `null` meant "default", "unset", or a bug in the caller.
+
+`moot_file_memory` also accepts an optional `classificationScheme` (string,
+default `"udc"`) that identifies the classification scheme of the supplied
+`latticeAnchor` code. Valid values: `"udc"` (Universal Decimal Classification)
+and `"mdcc"` (MOOTx01 Decimal Content Classification). An unknown string returns
+`invalidParams`. Absent defaults to `"udc"`, preserving prior bare-UDC behavior.
+See `ClassificationScheme` in §2 for the type declaration.
 
 `moot_file_memory` also accepts an optional `impatient: bool` (default `false`)
 — the Dual-Path Intake write-mode execution option. It is an option on the
@@ -426,6 +441,60 @@ recursed (not hashed) and a broken symlink is skipped. The `Dispatcher` `Arc<Mut
 serializes all dispatch calls so at most one import runs at a time — no concurrent
 preflight fan-out is possible and no slot can leak in the Rust port.
 
+### Dataset tools (`.interface` provenance, 3 tools, MX-TAB-7)
+
+Three tools expose user-owned tabular datasets (`moot_file_dataset`,
+`moot_dataset_query`, `moot_dataset_stats`). They carry `.interface` provenance
+and accept the standard optional `estateID`. They are always present — not
+vault-gated — and are inserted after vault tools in `ToolProjection.tools()`.
+
+Both legs (Swift `DatasetTools.swift`, Rust `dataset_tools.rs`) are at parity;
+the dispatch contracts are identical. The `DatasetTools` enum is internal; its
+tools reach callers solely through `ToolProjection.tools()` and
+`ToolDispatcher.dispatch`.
+
+#### `moot_file_dataset`
+
+Create a dataset handle (a Drawer in the estate) plus its backend storage
+table, then bulk-load rows. Returns the dataset UUID and handle metadata.
+Inline rows or a CSV file path (not both). CSV imports are confined to the
+home directory by component-wise prefix match after symlink resolution (path
+security gate MX-TAB-SEC-1 A1). The CSV size cap is 100 MiB.
+
+Required args: `name` (dataset label), `location` (room for the estate
+handle). Either `rows` (JSON array of objects) or `csv_path` (string) must be
+supplied, never both. When using `rows`, `columns` (array of `{name, type}`
+objects) is also required; types are `"text"`, `"int"`, `"float"`, `"bool"`.
+When using `csv_path`, column types are inferred from the CSV header. Optional:
+`wing` (estate wing, default `"Agentic Memory"`).
+
+Column names must be valid identifiers (ASCII letter or `_` start, ASCII
+alphanumeric or `_` body only) — SQL-injection names are rejected before any
+DDL.
+
+Tier-1 (table) and tier-2 (column) signatures are computed on bulk load
+(MX-TAB-5) and stored in the drawer's `ContentSignature`; they travel with
+the handle in vault round-trips.
+
+#### `moot_dataset_query`
+
+Predicate query over a dataset's rows. Refuses withdrawn handles.
+
+Required: `id` (UUID string from `moot_file_dataset`). Optional: `where`
+(predicate tree: `{col, op, val}` leaves composed with `{and: [...]}` /
+`{or: [...]}` nodes; supported ops: `eq`, `ne`, `lt`, `le`, `gt`, `ge`,
+`contains`, `starts_with`, `ends_with`, `is_null`, `not_null`), `order_by`
+(array of `{col, dir}` objects, `dir` is `"asc"` or `"desc"`), `limit`
+(integer ≥ 1, default 1000). The `limit` is capped at 10 000.
+
+#### `moot_dataset_stats`
+
+Per-column aggregate statistics for a dataset. Refuses withdrawn handles.
+
+Required: `id` (UUID string). Optional: `column` (single column name; omit
+to get stats for all columns). Returns count, null count, distinct count, and
+for numeric columns: min, max, mean, stddev.
+
 ### `moot_estate_status` — sync field vocabulary
 
 The `moot_estate_status` response includes a `sync:` field on its own line
@@ -504,6 +573,45 @@ This kit never reads `~/.claude/plugins/` or knows a product version
 itself — the host binary computes the advisory string and injects it,
 same separation of concerns as `buildSerial`/`serverIdentity`.
 
+### Upstream-release advisory (`update_available`)
+
+Both `moot_estate_ping` and `moot_estate_status` append an OPT-IN
+`update_available: <text>` line — present only when a newer product release
+exists on the release feed than the running binary; absent entirely
+otherwise. Sibling of `version_skew` (which reports LOCAL plugin/binary
+skew) and confined to the same two session-orientation tools on purpose:
+MCP clients orient with ping/status at session start, so one line there
+informs every client once without nagging on the other tools.
+
+**Field text:** ``v<latest> is available (installed <current>) — upgrade with `mootx01 upgrade` ``.
+
+**Threading — a provider, NOT a startup-computed string:** the resident
+daemon is long-lived and releases ship while it is running, so unlike
+`version_skew` the value cannot be computed once at startup. The host
+injects a closure the two tools evaluate lazily:
+- Swift: `ToolDispatcher.updateAdvisoryProvider: (@Sendable () async -> String?)?`,
+  wired by `ServeCommand` from `MootInstallerCore.UpdateAdvisor` (an actor
+  wrapping `ReleaseDownloader.latestTag()`).
+- Rust: `Dispatcher.update_advisory: Option<UpdateAdvisoryProvider>` via the
+  `with_update_advisory` builder, wired by `commands::serve::run` from
+  `core::update_advisor::UpdateAdvisor` (wrapping
+  `release::latest_version_within(Some(4))`).
+
+**Non-annoying / non-blocking contract (host-owned):** the advisor caches
+the probe result behind a 24h TTL (one release-feed hit per day per daemon,
+and only when ping/status is actually called), bounds a single probe to ~4s
+(a hung feed host cannot hold a ping), and collapses failures to silence
+AND caches them (an offline machine probes once per TTL window, not once
+per ping). `MOOTX01_NO_UPDATE_CHECK` disables the surface entirely — the
+same kill switch honored by the Claude Code plugin's SessionStart update
+hook (`moot_update_check.py`), so one documented variable turns off every
+update phone-home surface.
+
+**Scope:** resident daemons only. stdio one-shot serves and
+`aria-mcp-server` (both ports) never wire a provider — ping is documented
+as returning immediately, and plugin-capable hosts reach the resident over
+HTTP anyway (ADR-024 §2).
+
 ### Session protocol block — `ToolDispatcher.ARIASessionProtocol`
 
 Static string constant appended unconditionally to every
@@ -527,7 +635,7 @@ Static per-tool usage guides. Called by `ToolDispatcher.dispatch` when
 enum TeachmeGuides {
     static func guide(for toolName: String) -> String
     // Per-tool guide for all 20 Tier 1–5 tools and moot_federated_search.
-    // moot_estate_status returns the nine-tier orientation guide.
+    // moot_estate_status returns the ten-tier orientation guide.
     // Generic guide for lens, recipe, migration, and vault tools.
     // Fallback for unknown names: "Unknown tool '…'. Call moot_estate_status…"
 }
@@ -578,13 +686,13 @@ public struct ToolDispatcher: Sendable {
 }
 ```
 
-### Server — `AriaMcpDispatcher` / `StdioServer` / `HTTPServer`
+### Server — `ARIA_MCPDispatcher` / `StdioServer` / `HTTPServer`
 
 The transport-neutral method router and the two transports that drive it: the
 newline-delimited stdio loop and the loopback HTTP (Streamable-HTTP) transport.
 
 ```swift
-public struct AriaMcpDispatcher: Sendable {
+public struct ARIA_MCPDispatcher: Sendable {
     public struct ServerInfo: Sendable { public let name: String; public let version: String
                                          public init(name: String, version: String) }
     public let info: ServerInfo
@@ -596,8 +704,8 @@ public struct AriaMcpDispatcher: Sendable {
 }
 
 public struct StdioServer {
-    public let dispatcher: AriaMcpDispatcher
-    public init(dispatcher: AriaMcpDispatcher)
+    public let dispatcher: ARIA_MCPDispatcher
+    public init(dispatcher: ARIA_MCPDispatcher)
     public func run(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) async
     public func handleFrame(_ frame: Data, output: FileHandle) async
     public func write(_ response: JSONRPCResponse, to output: FileHandle)
@@ -607,10 +715,10 @@ public struct StdioServer {
 // via the same dispatcher; loopback-only bind; no auth (CE) but a CSRF/DNS-rebinding
 // Origin guard (non-loopback Origin -> 403). Rust mirror: rust/src/http_server.rs.
 public struct HTTPServer: Sendable {
-    public let dispatcher: AriaMcpDispatcher
+    public let dispatcher: ARIA_MCPDispatcher
     public let port: UInt16            // default 4242; 0 = OS-assigned (tests)
     public let maxBodyBytes: Int       // default 4 MiB
-    public init(dispatcher: AriaMcpDispatcher, port: UInt16 = 4242, maxBodyBytes: Int = 4 * 1024 * 1024)
+    public init(dispatcher: ARIA_MCPDispatcher, port: UInt16 = 4242, maxBodyBytes: Int = 4 * 1024 * 1024)
     public func run() async throws     // resident; returns only on bind failure
     public func bind() throws -> (fd: Int32, port: UInt16)   // bind without accepting (tests)
 }
@@ -686,14 +794,90 @@ public enum Logging {
 public struct StderrLogger: Sendable { public init(); public func log(_ message: String) }
 ```
 
+### Recall discrimination — `DiscriminationLevel` / `RecallDiscrimination`
+
+A pure confidence heuristic appended to ranked recall results. Classifies how
+well the top hit separates from the rest of the list using a relative gap
+ratio (scale-independent). Applied by `moot_memory_search` and `moot_recall_precise`.
+Swift and Rust thresholds are named constants mirrored verbatim; any change
+must update both ports simultaneously.
+
+```swift
+public enum DiscriminationLevel: Sendable, Equatable {
+    case single    // fewer than two results — nothing to compare
+    case high      // top result clearly separated (topGap >= HIGH_MARGIN = 0.25)
+    case medium    // partial separation
+    case low       // top results within epsilon — effectively unranked
+    case notFound  // distinctive query tokens with zero candidate matches
+}
+public enum RecallDiscrimination {
+    public static func classify(_ scores: [Double]) -> DiscriminationLevel
+    // Returns a result-line string for the given level. When denseLaneDark is
+    // true the classification is capped at .medium and a caveat is appended.
+    public static func resultLine(for level: DiscriminationLevel, denseLaneDark: Bool = false) -> String
+}
+```
+
+### Monitoring control — `MonitoringControl`
+
+Injection seam for daemon telemetry monitoring state. Defined in AriaMcpKit;
+the concrete implementation (`StatsStoreMonitoringControl`) lives in the serve
+host layer (AriaResident in Swift, `http_server.rs` in Rust), keeping AriaMcpKit
+free of ObserverSink / IntellectusLib. The `moot_monitoring_status` tool reads
+and optionally writes through this seam. `nil` from `read()` means a transient
+store error or no store wired — reports `"monitoring: unavailable"`, never
+fabricates a state.
+
+```swift
+public protocol MonitoringControl: Sendable {
+    func read() async -> Bool?      // nil on transient error or no store
+    func set(_ enabled: Bool) async // best-effort; errors logged by implementation
+}
+```
+
+### Sensitivity tiers — `SensitivityTier`
+
+The two lockable sensitivity tiers governed by ADR-025. Used as the
+`tier` discriminator in the `/api/control/unlock` POST body and in
+`SensitivityGrantLedger` method signatures (§4.6). Raw string values
+match the JSON wire values accepted by the unlock endpoint.
+
+```swift
+public enum SensitivityTier: String, Sendable, Equatable, CaseIterable {
+    case restricted   // raw: "restricted" — expires at next local midnight
+    case secret       // raw: "secret"    — expires 30 min after grant (fixed, non-sliding)
+}
+```
+
+Rust mirror: `pub enum SensitivityTier` in `sensitivity_grant_ledger.rs`, same
+two cases and raw-string wire values.
+
+### Classification scheme — `ClassificationScheme`
+
+The lattice-anchor classification scheme discriminator. Accepted by
+`moot_file_memory` (and other capture paths) as the optional
+`classificationScheme` argument. Absent defaults to `.udc`, preserving
+prior bare-UDC behavior. The substrate's `LatticeAnchor` does not yet carry
+a scheme tag — this type validates and echoes the scheme at the ARIA boundary.
+
+```swift
+public enum ClassificationScheme: String, Sendable, CaseIterable {
+    case udc    // raw: "udc"  — Universal Decimal Classification (default)
+    case mdcc   // raw: "mdcc" — MOOTx01 Decimal Content Classification
+}
+```
+
+Rust mirror: `pub enum ClassificationScheme` in `ToolDispatch` module,
+same two cases and raw-string values.
+
 ## § 3 — Public functions
 
-MCP methods are routed by `AriaMcpDispatcher.handle(_:)`:
+MCP methods are routed by `ARIA_MCPDispatcher.handle(_:)`:
 `initialize` (echoes `protocolVersion`, advertises the `tools`
 capability), `ping`, `tools/list` (from `ToolProjection.tools()`),
 `tools/call` (→ `ToolDispatcher.dispatch(name:arguments:)`). The
 `aria-mcp` executable wires a `GeniusLocusKit` estate into a
-`ToolDispatcher`, builds an `AriaMcpDispatcher`, and runs the selected
+`ToolDispatcher`, builds an `ARIA_MCPDispatcher`, and runs the selected
 transport: `StdioServer.run()` by default, or `HTTPServer.run()` when
 `MOOTX01_HTTP_PORT` is set. Behavioral contracts: SPEC.
 
@@ -925,13 +1109,11 @@ teachme guides and coaching hints.)
 cargo test --manifest-path packages/kits/AriaMcpKit/rust/Cargo.toml
 ```
 
-(Rust test targets: `dispatch_tests` — 93 tests including 5 new moot_vault_job
-tests (schema parity, export→job_id→complete record, import→job_id→complete
-record, unknown id→Swift-identical not-found, missing job_id→INVALID_PARAMS,
-ledger eviction at 100 entries). `jsonrpc_tests`, `persistence_tests`,
-`stdio_framing_tests`, `http_transport_tests` — 4 loopback HTTP round-trips
-(initialize, tools/list, non-POST 405, malformed-body parse error). Total Rust
-suite: 188 tests, 0 failures. Tool census: 55/55 (Rust matches Swift exactly).)
+(Rust test targets: `dispatch_tests`, `jsonrpc_tests`, `persistence_tests`,
+`stdio_framing_tests`, `http_transport_tests`, `autonomic_governor_tests`,
+`dataset_tools` coverage in `dispatch_tests`, and additional integration
+test modules. Tool census: 71/71 vault-on, 65/65 vault-off (Rust matches
+Swift exactly). Run `cargo test` for the current pass count.)
 
 ## § 6 — Examples
 
@@ -939,7 +1121,7 @@ suite: 188 tests, 0 failures. Tool census: 55/55 (Rust matches Swift exactly).)
 import AriaMCP
 import GeniusLocusKit
 
-let dispatcher = AriaMcpDispatcher(
+let dispatcher = ARIA_MCPDispatcher(
     info: .init(name: "aria-mcp", version: "1.0.0"),
     tooling: ToolDispatcher(kit: kit, handle: estate)
 )
@@ -1162,6 +1344,54 @@ alongside `build_serial`. Computed once at server startup by the host binary
 the kit itself, which does not read `~/.claude/plugins/` or know a product
 version. `aria-mcp-server` (both ports) has no plugin concept and always
 passes the empty/nil default. Both ports at parity.
+
+### 1.22.0 -- 2026-07-16
+Upstream-release advisory: `moot_estate_ping` / `moot_estate_status` gain an
+opt-in `update_available:` line (see the "Upstream-release advisory"
+subsection beside the version-skew one) when a newer product release exists
+than the running binary. `ToolDispatcher` (Swift) gains
+`updateAdvisoryProvider: (@Sendable () async -> String?)?` (defaulted `nil`);
+`Dispatcher` (Rust) gains `update_advisory: Option<UpdateAdvisoryProvider>`
+via the `with_update_advisory` builder (the Rust equivalent of the defaulted
+Swift parameter — existing `Dispatcher::new` call sites unchanged), threaded
+through `dispatch_tool_with_ledgers` / `interface_tools::dispatch` alongside
+`version_skew`. Unlike `version_skew` the value is a lazily-evaluated
+provider, not a startup-computed string — the resident daemon outlives
+releases. Rate limiting (24h TTL), the 4s probe bound, failure caching, and
+the `MOOTX01_NO_UPDATE_CHECK` kill switch live in the host advisor
+(`MootInstallerCore.UpdateAdvisor` / `mootx01-cli::core::update_advisor`);
+the kit only renders the line. Resident daemons only; stdio one-shots and
+`aria-mcp-server` (both ports) never wire a provider. Both ports at parity.
+
+### 1.21.0 -- 2026-07-16
+Rust leg Anthropic memory_20250818 adapter parity (M-MEMTOOL-1): `memory_adapter.rs`
+implements all six commands (view, create, str_replace, insert, delete, rename),
+the `MOOTX01_MEMORY_TOOL=1` opt-in gate, the Normal-tier sensitivity filter (mirrors
+`isMemoryAdapterVisible` in Swift), and sensitivity-tier carry-forward on edits so
+elevated-tier drawers are not silently downgraded. `tool_list.rs` gains
+`memory_enabled()`, `build_tool_list_with_flags(vault_on, memory_on)`, and the
+`memory_adapter_tool()` schema; `build_tool_list()` and `build_tool_list_with_vault_flag()`
+delegate to it. When `memory_on=true` the `memory` tool is prepended (first in list,
+mirrors Swift `memoryAdapterTools()` prepend order), raising the count to 72/66.
+Existing dispatch and count tests updated to use `build_tool_list_with_flags(vault_enabled(), false)`
+for determinism (prevents racing with env-var mutations in memory-tool tests). New test
+file `tests/memory_adapter_tests.rs`: 19 tests covering env gate, tool-list projection,
+and per-command happy + error paths. Updated §1 Rust package layout and Rust binary
+description to document `memory_adapter.rs` and the opt-in gate.
+
+### 1.20.0 -- 2026-07-16
+Dataset tools (MX-TAB-7): three new tools `moot_file_dataset`,
+`moot_dataset_query`, `moot_dataset_stats` with `.interface` provenance —
+always visible, not vault-gated. Both ports (Swift `DatasetTools.swift`,
+Rust `dataset_tools.rs`) at parity. Tool count: 68 → 71 (vault-on), 62 → 65
+(vault-off). Adds new "Dataset tools" subsection in §2. Also adds previously
+undocumented public types: `DiscriminationLevel`, `RecallDiscrimination`
+(scale-independent recall confidence heuristic, both ports mirrored), and
+`MonitoringControl` protocol (ADR-025 wave 8.2 injection seam). Adds
+`memoryToolEnabled` to ToolProjection block (opt-in memory_20250818 adapter,
+MOOTX01_MEMORY_TOOL=1). Updates stale Rust tool census (55 → 71).
+Updates `DatasetTools.swift`, `RecallDiscrimination.swift`, and
+`MemoryToolAdapter.swift` / `MonitoringControl.swift` to §1 package layout.
 
 ### 1.19.0 -- 2026-07-12
 Contradiction hunter MCP surface (both ports at parity, tool count 66 → 68):

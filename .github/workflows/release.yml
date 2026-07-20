@@ -734,6 +734,11 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-x64' }}
     needs: build-windows-x86_64
     runs-on: windows-latest
+    # Binds the OIDC token subject to repo:<owner/repo>:environment:release so an
+    # Azure federated credential can match tag-triggered runs (tag refs cannot be
+    # wildcarded in a federated credential subject; the environment can). See
+    # distribution/windows/SIGNING.md §2 Option A.
+    environment: release
     permissions:
       id-token: write   # Azure OIDC login for code signing
       contents: read    # checkout the .iss installer script
@@ -953,6 +958,11 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows-arm64' }}
     needs: build-windows-arm64
     runs-on: windows-11-arm
+    # Binds the OIDC token subject to repo:<owner/repo>:environment:release so an
+    # Azure federated credential can match tag-triggered runs (tag refs cannot be
+    # wildcarded in a federated credential subject; the environment can). See
+    # distribution/windows/SIGNING.md §2 Option A.
+    environment: release
     permissions:
       id-token: write   # Azure OIDC login for code signing
       contents: read    # checkout the .iss installer script
@@ -1118,6 +1128,26 @@ jobs:
           # the GITHUB_TOKEN env), not via git push — so nothing here needs the
           # token persisted in .git/config.
           persist-credentials: false
+
+      # Version integrity gate. The in-source stamps are what `mootx01 --version`
+      # prints; bump_version.py updates them as a MANUAL step before flowing to
+      # stable. Without this gate a forgotten bump ships a binary whose --version
+      # disagrees with the release tag (e.g. tag v1.0.33 over a tree still stamped
+      # 1.0.32). Assert every stamp equals the tag BEFORE any asset is published;
+      # a mismatch fails the release loudly instead of shipping the wrong number.
+      # (scripts/release/README.md — "run it in CI and immediately before tagging".)
+      - name: Verify version stamps match the release tag
+        env:
+          # The tag name is untrusted input — hand it in via env, validate it as
+          # strict vMAJOR.MINOR.PATCH before it reaches the verifier.
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          version="${TAG_NAME#v}"
+          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: tag '$TAG_NAME' is not a vMAJOR.MINOR.PATCH release tag" >&2
+            exit 1
+          fi
+          python3 scripts/release/verify_version.py "$version"
 
       - name: Download all assets
         # Downloads every artifact uploaded by the build jobs into assets/<name>/.

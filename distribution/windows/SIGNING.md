@@ -61,10 +61,15 @@ Most secure: no long-lived secret in GitHub. On the App Registration, add
   **Environment** (e.g. `release`) on the two Windows release jobs, then a
   federated credential with subject
   `repo:codedaptive/mootx01-ce:environment:release`.
-  > NOTE: the release Windows jobs do **not** yet declare `environment: release`.
-  > Adding it is the remaining wiring step for the OIDC-on-tags path — ping me to
-  > add it once the environment exists, or use Option B, which needs no
-  > environment.
+  > The two release Windows jobs (`sign-windows-x86_64`, `sign-windows-arm64`)
+  > declare `environment: release`. Two things must exist for tag-triggered
+  > signing to authenticate: (1) a GitHub Actions **Environment** named `release`
+  > (repo → Settings → Environments), and (2) a federated credential of entity
+  > type **Environment** with value `release` on the `mootx01-ce-signing-ci` app
+  > registration. Candidate signing uses **Branch** federated credentials instead
+  > (`refs/heads/candidate/1.0.x`, `refs/heads/candidate/1.1.x`) and needs no
+  > environment. A `stable/1.0.x` Branch credential does nothing — releases are
+  > tag-triggered, not stable-branch-triggered.
 
 ### Option B — client secret (simplest; works on branch and tag triggers)
 

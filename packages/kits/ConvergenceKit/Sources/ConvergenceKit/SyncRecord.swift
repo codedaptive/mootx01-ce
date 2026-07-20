@@ -34,11 +34,38 @@ public struct SyncRecord: Sendable, Codable {
     public let hlc: PackedHLC
     public let schemaVersion: Int
     public let kitID: String
+    /// Set to `true` when this record represents a delete tombstone.
+    ///
+    /// WHY a separate field instead of relying solely on `event == .delete`:
+    /// the tombstone concept is distinct from the event kind in that it
+    /// also signals that the deletion HLC must persist in the side table
+    /// after the row is hard-deleted (A6 adjudication). Explicit flag
+    /// keeps the semantics clear and matches the Rust wire format
+    /// (`sync_deleted: Option<bool>`, omitted when nil — C-8 parity).
+    ///
+    /// Omitted (nil) in JSON when not a tombstone; decoded as nil when
+    /// absent (Rust `#[serde(default)]` provides the same null default).
+    public let syncDeleted: Bool?
+
+    /// Per-column HLC map for the `fieldLevelLWW` conflict policy (B-8).
+    ///
+    /// WHY wire-carried (not receiver-derived — A7):
+    /// The sender knows exactly which columns were written and at which
+    /// HLC. The receiver does not: it sees only the full row snapshot.
+    /// Receivers must not fabricate column HLCs from the row-grain HLC —
+    /// that would treat all columns as written simultaneously, erasing the
+    /// finer-grained write ordering the protocol is designed to preserve.
+    ///
+    /// Nil when `conflictPolicy != .fieldLevelLWW` or when the sender does
+    /// not support field-level LWW (backward-compat: treat as row-grain LWW).
+    /// Omitted from JSON when nil (C-8 parity with Rust `skip_serializing_if`).
+    public let columnHLCs: ColumnHLCMap?
 
     /// Explicit CodingKeys documenting the cross-port JSON contract.
-    /// Rust serde renames match these exact strings.
+    /// Rust serde renames match these exact strings (`rename_all = "camelCase"`
+    /// plus explicit `rename = "kitID"` for the ID suffix convention).
     private enum CodingKeys: String, CodingKey {
-        case table, event, rowKey, values, hlc, schemaVersion, kitID
+        case table, event, rowKey, values, hlc, schemaVersion, kitID, syncDeleted, columnHLCs
     }
 
     public init(
@@ -48,7 +75,9 @@ public struct SyncRecord: Sendable, Codable {
         values: SyncValueMap?,
         hlc: PackedHLC,
         schemaVersion: Int,
-        kitID: String
+        kitID: String,
+        syncDeleted: Bool? = nil,
+        columnHLCs: ColumnHLCMap? = nil
     ) {
         self.table = table
         self.event = event
@@ -57,6 +86,38 @@ public struct SyncRecord: Sendable, Codable {
         self.hlc = hlc
         self.schemaVersion = schemaVersion
         self.kitID = kitID
+        self.syncDeleted = syncDeleted
+        self.columnHLCs = columnHLCs
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(table, forKey: .table)
+        try container.encode(event, forKey: .event)
+        try container.encode(rowKey, forKey: .rowKey)
+        try container.encodeIfPresent(values, forKey: .values)
+        try container.encode(hlc, forKey: .hlc)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(kitID, forKey: .kitID)
+        // Omit syncDeleted when nil — Rust serde `skip_serializing_if = "Option::is_none"` parity.
+        try container.encodeIfPresent(syncDeleted, forKey: .syncDeleted)
+        // Omit columnHLCs when nil — present only for fieldLevelLWW records.
+        try container.encodeIfPresent(columnHLCs, forKey: .columnHLCs)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        table = try container.decode(String.self, forKey: .table)
+        event = try container.decode(SyncEventKind.self, forKey: .event)
+        rowKey = try container.decode(UUID.self, forKey: .rowKey)
+        values = try container.decodeIfPresent(SyncValueMap.self, forKey: .values)
+        hlc = try container.decode(PackedHLC.self, forKey: .hlc)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        kitID = try container.decode(String.self, forKey: .kitID)
+        // Absent in JSON from older peers — defaults to nil (not a tombstone).
+        syncDeleted = try container.decodeIfPresent(Bool.self, forKey: .syncDeleted)
+        // Absent when sender does not support fieldLevelLWW — backward compat.
+        columnHLCs = try container.decodeIfPresent(ColumnHLCMap.self, forKey: .columnHLCs)
     }
 }
 
@@ -205,6 +266,28 @@ public struct SyncValueBox: Sendable {
 }
 
 extension SyncValueBox: Codable {
+
+    /// Maximum nesting depth for `SyncValueBox.array` on both encode and decode.
+    ///
+    /// WHY 3: LocusKit's actual usage is ≤2 (an array-of-scalars inside an
+    /// array-of-rows). 3 gives one level of headroom. Deeper nesting is either
+    /// adversarial inbound data or a local bug — in both cases it should fail
+    /// loudly (DecodingError / EncodingError) rather than exhaust the stack or
+    /// ship a hostile payload downstream (CVK-WC5, Perkins defense-in-depth).
+    static let syncValueBoxMaxArrayDepth = 3
+
+    /// Returns the deepest array nesting level within `items`.
+    ///
+    /// Array([scalars]) → 1. Array([Array([scalars])]) → 2. Etc.
+    /// Non-array elements contribute 0 and are ignored when computing the max.
+    private static func arrayNestingDepth(of items: [SyncValueBox]) -> Int {
+        let childMax = items.compactMap { item -> Int? in
+            guard case .array(let inner) = item.payload else { return nil }
+            return arrayNestingDepth(of: inner)
+        }.max() ?? 0
+        return 1 + childMax
+    }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(kind, forKey: .kind)
@@ -251,11 +334,37 @@ extension SyncValueBox: Codable {
         case .fingerprint(let v):
             try container.encode(v, forKey: .payload)
         case .array(let v):
+            // Depth cap: refuse to encode arrays nested deeper than the max.
+            // A local bug that produces deep nesting should fail loudly at
+            // encode rather than ship a payload that peers will reject on decode.
+            let nestingDepth = Self.arrayNestingDepth(of: v)
+            guard nestingDepth <= Self.syncValueBoxMaxArrayDepth else {
+                throw EncodingError.invalidValue(
+                    nestingDepth,
+                    EncodingError.Context(
+                        codingPath: container.codingPath + [CodingKeys.payload],
+                        debugDescription:
+                            "SyncValueBox array nesting depth \(nestingDepth) exceeds " +
+                            "maximum \(Self.syncValueBoxMaxArrayDepth) (CVK-WC5). " +
+                            "LocusKit usage is ≤2; deeper nesting is adversarial or corrupt."
+                    )
+                )
+            }
             try container.encode(v, forKey: .payload)
         }
     }
 
     public init(from decoder: Decoder) throws {
+        try self.init(from: decoder, depth: 0)
+    }
+
+    /// Depth-tracked decode. Called recursively for nested arrays.
+    ///
+    /// `depth` is the number of enclosing `array` layers at the call site.
+    /// When `depth` reaches `syncValueBoxMaxArrayDepth`, any further `array`
+    /// element throws a DecodingError — the record is counted as a per-record
+    /// conflict by the engine, never a crash or stack exhaustion.
+    private init(from decoder: Decoder, depth: Int) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         kind = try container.decode(String.self, forKey: .kind)
         switch kind {
@@ -284,7 +393,28 @@ extension SyncValueBox: Codable {
         case "fingerprint":
             payload = .fingerprint(try container.decode(FingerprintWire.self, forKey: .payload))
         case "array":
-            payload = .array(try container.decode([SyncValueBox].self, forKey: .payload))
+            // Depth cap: reject arrays nested deeper than syncValueBoxMaxArrayDepth.
+            // depth is the number of array layers enclosing this node. If we decoded
+            // this element we'd be at depth+1, so check depth >= max (not >).
+            guard depth < Self.syncValueBoxMaxArrayDepth else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .payload, in: container,
+                    debugDescription:
+                        "SyncValueBox array nesting depth \(depth + 1) exceeds " +
+                        "maximum \(Self.syncValueBoxMaxArrayDepth) (CVK-WC5). " +
+                        "LocusKit usage is ≤2; depth >\(Self.syncValueBoxMaxArrayDepth) " +
+                        "is adversarial or corrupt input. Counted as per-record conflict."
+                )
+            }
+            // Decode elements manually via superDecoder() so we can pass depth+1
+            // to each child, tracking nesting without decoder.userInfo mutation.
+            var arrayContainer = try container.nestedUnkeyedContainer(forKey: .payload)
+            var elements: [SyncValueBox] = []
+            while !arrayContainer.isAtEnd {
+                let elementDecoder = try arrayContainer.superDecoder()
+                elements.append(try SyncValueBox(from: elementDecoder, depth: depth + 1))
+            }
+            payload = .array(elements)
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container,

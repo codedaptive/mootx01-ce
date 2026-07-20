@@ -99,12 +99,16 @@ targets:
         # so ITSAppUsesNonExemptEncryption is false. This lets App Store
         # Connect accept uploads without the per-build compliance prompt.
         ITSAppUsesNonExemptEncryption: false
-        # A2 discovery: browse for LAN resident daemons. Both keys are
-        # required for NWBrowser — the OS denies undeclared service types.
-        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        # A2 discovery + FED-OD-1 federation discovery: browse for LAN daemons
+        # and discover paired Mootx01 estates for on-demand federation.
+        # Both NSLocalNetworkUsageDescription and NSBonjourServices are required —
+        # the OS denies NWBrowser/NWListener for undeclared service types, and
+        # App Store review rejects builds with missing local-network usage strings.
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons, to serve this estate to MCP clients on your LAN, and to discover other Mootx01 estates for on-demand federation."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
         NSBonjourServices:
           - _mootx01._tcp
+          - _mootx01-fed._tcp
 
   Mootx01-iOS:
     type: application
@@ -167,6 +171,10 @@ targets:
           - com.codedaptive.mootx01.mining.refresh
         UIBackgroundModes:
           - fetch
+          # CVK-ICLOUD P5-M2: silent-push zone-change notifications require
+          # remote-notification mode so the OS wakes the app to handle
+          # CKRecordZoneSubscription payloads without user interaction.
+          - remote-notification
         CFBundleURLTypes:
           - CFBundleURLName: com.codedaptive.mootx01.callback
             CFBundleURLSchemes:
@@ -174,12 +182,20 @@ targets:
         # Export compliance: only exempt encryption ships (SQLCipher,
         # CryptoKit, OS TLS) — see the macOS target for the rationale.
         ITSAppUsesNonExemptEncryption: false
-        # A2 discovery: browse for LAN resident daemons. Both keys are
-        # required for NWBrowser — iOS denies undeclared service types.
-        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons and to serve this estate to MCP clients on your LAN."
+        # A2 discovery + FED-OD-1 federation discovery: browse for LAN daemons
+        # and discover paired Mootx01 estates for on-demand federation.
+        # Both NSLocalNetworkUsageDescription and NSBonjourServices are required —
+        # iOS denies NWBrowser/NWListener for undeclared service types, and
+        # App Store review rejects builds with missing local-network usage strings.
+        NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to find MOOT daemons, to serve this estate to MCP clients on your LAN, and to discover other Mootx01 estates for on-demand federation."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
         NSBonjourServices:
           - _mootx01._tcp
+          - _mootx01-fed._tcp
+        # FED-OD-5 UWB proximity pairing: NearbyInteraction requires this key
+        # or App Store submission is rejected. iOS-only — NI framework is not
+        # available on macOS. Shown to the user on first proximity-pairing attempt.
+        NSNearbyInteractionUsageDescription: "MOOTx01 uses Ultra Wideband to detect when another Mootx01 device is nearby, so you can pair estates by holding iPhones together instead of scanning a QR code."
 
   # Recall widget targets (Tier 3) — WidgetKit extensions rendering the
   # derived projection (WidgetSnapshotStore) from the app group. One estate,

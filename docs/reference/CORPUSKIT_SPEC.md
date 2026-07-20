@@ -1,8 +1,8 @@
 ---
 title: CorpusKit Specification
-version: 1.12.0
+version: 1.13.0
 status: active
-date: 2026-06-25
+date: 2026-07-16
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -194,6 +194,18 @@ The `globalCorpusMerkleRoot()` query computes the interior hash over all
 per-corpus roots, enabling an estate-level integrity check across all
 corpora.
 
+**I-15 (removed-source persistence):** `RemovedSourceStore` records the set of
+source IDs whose recall has been suppressed by `Corpus.remove` or
+`Corpus.expunge`. Because `BundleStore.chunks` is append-only (I-2), every
+rebuild path (reindex, InvertedIndexStore reload on open) must filter the corpus
+through `removedIDs()` to exclude suppressed sources. A source exits the removed
+set when it is re-ingested: `Corpus.ingest` calls `clearRemoved` before writing
+new chunks so a subsequent reindex includes the source again. The table is
+wiped by `destroyRecallIndex` so no orphaned removal records survive (I-9
+analogue for the removed-sources table). Schema: kit-ID "CorpusKitRemovedSources"
+v1, `removed_sources(source_id TEXT PK, removed_at TEXT ISO8601)`; no Bool
+columns, dates TEXT ISO8601.
+
 **I-14 (Apple NL providers are Swift-only, opt-in, absent-lane safe, ADR-019):**
 `CorpusKitProviders` ships two Apple NaturalLanguage embedding providers —
 `NLEmbeddingProvider` (sentence-level, always-available) and
@@ -258,6 +270,31 @@ provider's stable `projectionSeed`. Two providers with distinct seeds
 produce distinct engrams for the same pooled vector; one provider
 produces bit-identical engrams across calls and across ports for the
 same vector. `embedBatch` defaults to sequential `embed`.
+
+**B-15 (expunge contract):** `Corpus.expunge(sourceID:)` is a two-step
+irreversible operation. Step 1 scrubs the verbatim `text` field of every chunk
+row for the source in `BundleStore` (setting it to empty string at the database
+level before step 2); step 2 delegates to `Corpus.remove` (removes BM25 postings
+and vector rows, marks the source removed in `RemovedSourceStore`). The scrub
+commit is durable before the recall-removal step begins, so content is erased even
+if step 2 fails. BundleStore rows survive with emptied `text` fields — the
+append-only invariant (I-2) holds; chunk IDs, offsets, metadata, and HLC values
+are preserved. `expunge` does NOT delete the rows and does NOT prevent reindex
+from re-embedding the emptied chunks (which yield near-zero vectors — the source
+remains recall-suppressed via I-15).
+
+**B-16 (source-aggregated BM25):** `Corpus.bm25TopKBySource(query:limit:)`
+returns up to `limit` `(sourceID, score)` pairs, one per source, scored by the
+MAXIMUM BM25 chunk score across that source's chunks. Used as the Hunter BM25
+prefilter path: candidates are raw source handles, not chunk handles. Empty query,
+empty token set after tokenization, or limit ≤ 0 returns []. Not fused with the
+vector lane; the caller decides how to combine.
+
+**B-17 (indexed source IDs):** `Corpus.indexedSourceIDs()` returns the set of
+all source IDs present in the BundleStore (the append-only verbatim-chunk
+universe). This includes sources that have been `remove`d or `expunge`d, because
+BundleStore rows are never deleted. It is NOT the set of actively-recalled
+sources. Callers that need the active recall set must exclude `RemovedSourceStore.removedIDs()`.
 
 **B-7 (determinism):** chunking, id derivation, BM25 scoring, and RRF
 fusion are deterministic functions of their inputs. Time enters only as
@@ -515,6 +552,8 @@ Corpus's active recall capability without deleting verbatim content:
   — no orphaned basis survives a destroyed corpus (I-9, B-13)
 - All persisted counts rows in `corpus_provider_counts` (via
   `CorpusProviderCountsStore.deleteAll`) — no orphaned counts survive (B-14)
+- All removed-source rows in `removed_sources` (via
+  `RemovedSourceStore.deleteAll`) — no orphaned removal records survive (I-15)
 
 **What is preserved:**
 - BundleStore `chunks` rows — the append-only invariant holds. Verbatim
@@ -584,6 +623,27 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.13.0 -- 2026-07-16
+Surface audit against both Swift and Rust source trees.
+
+Added **I-15** (removed-source persistence): `RemovedSourceStore` records the
+set of recall-suppressed source IDs so every rebuild path (reindex, IIS reload)
+can exclude them. Schema kit-ID "CorpusKitRemovedSources" v1. Updated
+`destroyRecallIndex` (§ 10 "what is destroyed") to include
+`RemovedSourceStore.deleteAll()` — the omission was an oversight; the code
+already deletes the rows; the spec now matches.
+
+Added **B-15** (expunge contract): the two-step scrub-then-remove sequence, step
+ordering guarantee (scrub durable before recall removal), and the statement that
+expunged chunk rows survive with emptied text (append-only invariant holds).
+
+Added **B-16** (source-aggregated BM25): `bm25TopKBySource` scores one result
+per source (max chunk BM25 score), the Hunter BM25 prefilter path.
+
+Added **B-17** (indexed source IDs): `indexedSourceIDs()` returns the
+append-only universe (includes removed sources); callers who need the active
+recall set must subtract `RemovedSourceStore.removedIDs()`.
 
 ### 1.12.0 -- 2026-06-25
 T4 (ADR-021 Decision 7): the encode queue moved off its own plaintext

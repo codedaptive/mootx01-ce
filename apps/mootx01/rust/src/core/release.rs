@@ -61,8 +61,19 @@ impl From<std::io::Error> for ReleaseError {
 
 /// Latest release version (leading `v` stripped) from the GitHub API.
 pub fn latest_version() -> Result<String, ReleaseError> {
+    latest_version_within(None)
+}
+
+/// `latest_version` with a hard cap on the whole transfer (curl
+/// `--max-time`). The resident daemon's update advisory calls this from
+/// inside a tool dispatch (behind the dispatcher mutex), so an
+/// unreachable-but-not-refusing feed host must fail at the deadline
+/// instead of holding tool dispatch for curl's own default (which can
+/// run to minutes). `None` preserves the interactive `upgrade`
+/// command's unbounded behavior unchanged.
+pub fn latest_version_within(timeout_secs: Option<u64>) -> Result<String, ReleaseError> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let out = curl_stdout(&url)?;
+    let out = curl_stdout_within(&url, timeout_secs)?;
     let v: serde_json::Value = serde_json::from_slice(&out)
         .map_err(|e| ReleaseError::Network(format!("GitHub API returned non-JSON: {e}")))?;
     let tag = v
@@ -430,8 +441,18 @@ pub fn validate_tarball_members(tarball: &Path) -> Result<(), ReleaseError> {
 }
 
 fn curl_stdout(url: &str) -> Result<Vec<u8>, ReleaseError> {
-    let out = Command::new("curl")
-        .args(["-fsSL", url])
+    curl_stdout_within(url, None)
+}
+
+/// `curl_stdout` with an optional whole-transfer deadline (`--max-time`).
+/// See `latest_version_within` for why the daemon-side caller bounds it.
+fn curl_stdout_within(url: &str, timeout_secs: Option<u64>) -> Result<Vec<u8>, ReleaseError> {
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsSL", url]);
+    if let Some(secs) = timeout_secs {
+        cmd.args(["--max-time", &secs.to_string()]);
+    }
+    let out = cmd
         .output()
         .map_err(|e| ReleaseError::Network(format!("cannot run curl: {e}")))?;
     if !out.status.success() {

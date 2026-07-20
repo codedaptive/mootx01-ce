@@ -87,6 +87,9 @@ pub fn dispatch_tool_with_ledgers(
     sensitivity_ledger: &SensitivityGrantLedger,
     build_serial: &str,
     version_skew: &str,
+    // Upstream-release advisory provider — evaluated by ping/status only.
+    // None when the host wired none (stdio one-shots, tests, aria-mcp dev).
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
     // ADR-025 wave 8.2: monitoring seam, threaded to interface_tools::dispatch.
     // None when no stats store is wired (stdio, test harnesses, provision-less contexts).
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
@@ -94,7 +97,7 @@ pub fn dispatch_tool_with_ledgers(
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, sensitivity_ledger,
         crate::tool_list::vault_enabled(), build_serial, version_skew,
-        monitoring_control,
+        update_advisory, monitoring_control,
     )
 }
 
@@ -115,7 +118,7 @@ pub fn dispatch_tool_with_vault_flag(
     // Monitoring control: None — test/non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, &VaultJobLedger::new(), &SensitivityGrantLedger::new(),
-        vault_on, "", "", None,
+        vault_on, "", "", None, None,
     )
 }
 
@@ -139,7 +142,7 @@ pub fn dispatch_tool_with_vault_ledger(
     // Monitoring control: None — non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, &SensitivityGrantLedger::new(),
-        crate::tool_list::vault_enabled(), build_serial, version_skew, None,
+        crate::tool_list::vault_enabled(), build_serial, version_skew, None, None,
     )
 }
 
@@ -165,11 +168,12 @@ fn dispatch_tool_with_vault_ledger_and_flag(
     vault_on: bool,
     build_serial: &str,
     version_skew: &str,
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let routed = route_tool(
         name, args, registry, ledger, vault_ledger, sensitivity_ledger,
-        vault_on, build_serial, version_skew, monitoring_control,
+        vault_on, build_serial, version_skew, update_advisory, monitoring_control,
     );
     surface_dispatch_failure(name, routed)
 }
@@ -220,6 +224,7 @@ fn route_tool(
     vault_on: bool,
     build_serial: &str,
     version_skew: &str,
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // 0. Teachme interception — intercepts BEFORE any runner fires.
@@ -254,7 +259,7 @@ fn route_tool(
                 "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
             ));
         }
-        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, build_serial, version_skew, monitoring_control)?;
+        let result = crate::interface_tools::dispatch(name, args, registry, ledger, sensitivity_ledger, build_serial, version_skew, update_advisory, monitoring_control)?;
         return Ok(inject_hint(name, args, result));
     }
 

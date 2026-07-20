@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Interface
-version: 1.1.0
+version: 1.1.2
 status: active
-date: 2026-06-17
+date: 2026-07-16
 description: Public API surface for SubstrateML in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -13,7 +13,7 @@ relates_to:
   - docs/reference/SUBSTRATETYPES_INTERFACE.md
   - docs/reference/SUBSTRATEKERNEL_INTERFACE.md
 purpose: |
-  Public API surface of SubstrateML in both ports. Twenty-nine Swift
+  Public API surface of SubstrateML in both ports. Thirty-nine Swift
   files publish the cold-path algorithms over substrate types: the
   audit-log fold, matrix decay, Bradley-Terry estimation, NMF, FFT,
   eigenvalue centrality, lattice distance, anomaly / community
@@ -23,8 +23,12 @@ purpose: |
   reduction, LLM calibration curve, information theory, temporal
   compression, temporal-causality fold, pairwise association-rule
   mining, Apriori rule mining, row-attribute projection, bounded
-  formal concept analysis, and the Duquenne–Guigues concept-implication
-  basis. The Rust mirror exposes the same shapes.
+  formal concept analysis, the Duquenne–Guigues concept-implication
+  basis, a deterministic Jacobi SVD, the five-stage distillation
+  pipeline (TypedDecayWeighting, DeltaFeatureExtractor,
+  DistillationScorer, DistillationPipeline, DistilledHeader), and the
+  ConflictCue pairwise text-conflict screen. The Rust mirror exposes
+  the same shapes.
 ---
 
 # SubstrateML Interface
@@ -33,9 +37,12 @@ purpose: |
 
 **Swift:** `packages/libs/SubstrateML/`
 
-- `Sources/SubstrateML/` — 29 files, one per algorithm or family
+- `Sources/SubstrateML/` — 39 files, one per algorithm or family
   (including `TemporalCausalityFold.swift`, `RowAttributeView.swift`,
-  `AprioriMining.swift`, and `ConceptImplications.swift`).
+  `AprioriMining.swift`, `ConceptImplications.swift`, `JacobiSVD.swift`,
+  `ConflictCue.swift`, `DeltaFeatureExtractor.swift`,
+  `TypedDecayWeighting.swift`, `DistillationScorer.swift`, and
+  `DistillationPipeline.swift`).
 - `Tests/SubstrateMLTests/` — unit + conformance.
 - `Package.swift` — depends on `SubstrateTypes`, `SubstrateKernel`.
 
@@ -988,10 +995,37 @@ impl TemporalCompression {
 
 ### `AnomalyDetection`, `CommunityDetection`, `Calibration`
 
-SPEC § 5 (background).
+SPEC § 5.26 (AnomalyDetection behavioral contract); see also § 8 (VizGraph telemetry).
 
 ```swift
-public enum AnomalyDetection { /* … */ }
+public enum AnomalyDetection {
+    /// Classic z-score: (value − mean) / stddev. Returns 0 when stddev is zero.
+    @inlinable
+    public static func zScore(value: Float32, mean: Float32, stddev: Float32) -> Float32
+
+    /// Rolling-window z-score using the supplied window as the baseline distribution.
+    /// Empty window returns 0.
+    /// Emits `VizGraphSignals.anomalyFlag` (abs z-score, method: "z_score", estate, window_size)
+    /// when monitoring is enabled; off-path cost is a single atomic-bool load.
+    public static func rollingZScore(window: [Float32], current: Float32,
+                                     estate: String = "", ts: Double = 0) -> Float32
+
+    /// Modified z-score: 0.6745 × (value − median) / MAD. Returns 0 when MAD is zero.
+    /// The 0.6745 constant makes the score consistent with the normal-distribution z-score.
+    public static func modifiedZScore(value: Float32, median: Float32, mad: Float32) -> Float32
+
+    /// Rolling modified z-score. Computes median and MAD from the window in-place.
+    /// Empty window returns 0.
+    /// Emits `VizGraphSignals.anomalyFlag` (abs modified z-score, method: "modified_z_score",
+    /// estate, window_size) when monitoring is enabled; off-path cost is a single atomic-bool load.
+    public static func rollingModifiedZScore(window: [Float32], current: Float32,
+                                              estate: String = "", ts: Double = 0) -> Float32
+
+    /// Returns true when |zScore| >= threshold.
+    /// Default threshold 3.0 yields ~0.27% false positive rate under a normal distribution.
+    @inlinable
+    public static func isAnomalous(zScore: Float32, threshold: Float32 = 3.0) -> Bool
+}
 
 public enum CommunityDetection {
     public typealias Adjacency = [[(neighbor: Int, weight: Double)]]
@@ -1021,7 +1055,22 @@ public struct LLMCalibrationCurve { /* … see § 5.17 */ }
 ```
 
 ```rust
-pub mod anomaly { /* … */ }
+pub struct AnomalyDetection;
+impl AnomalyDetection {
+    /// Classic z-score. Returns 0 when stddev is zero.
+    pub fn z_score(value: f32, mean: f32, stddev: f32) -> f32;
+    /// Rolling-window z-score. Empty window returns 0.
+    /// Emits VizGraphSignals::ANOMALY_FLAG (abs z-score, method: "z_score") when monitoring is enabled.
+    pub fn rolling_z_score(window: &[f32], current: f32, estate: &str, ts: f64) -> f32;
+    /// Modified z-score using MAD. Returns 0 when MAD is zero.
+    pub fn modified_z_score(value: f32, median: f32, mad: f32) -> f32;
+    /// Rolling modified z-score. Computes median and MAD in-place.
+    /// Emits VizGraphSignals::ANOMALY_FLAG (abs modified z-score, method: "modified_z_score")
+    /// when monitoring is enabled.
+    pub fn rolling_modified_z_score(window: &[f32], current: f32, estate: &str, ts: f64) -> f32;
+    /// No default threshold in Rust; caller must supply explicitly (Swift default: 3.0).
+    pub fn is_anomalous(z_score: f32, threshold: f32) -> bool;
+}
 
 pub mod community_detection {
     pub struct CommunityDetection;
@@ -1441,6 +1490,9 @@ public struct FoldResult: Sendable {
     public init(deltas: [(TemporalCausalityKey, Int64)], newWatermark: HLC)
 }
 public enum TemporalCausalityFold {
+    public static let lagBuckets: [Int]          // [1, 2, 4, 8, 16, 32, 64, 128] — log-spaced bucket boundaries (minutes)
+    public static let defaultWindowMinutes: Int  // 256 — window cap for T (cookbook §6.4)
+    public static let maxWindowOccupancy: Int    // 512 — pairing-buffer occupancy cap; bounds fold to O(n × cap)
     public static func lagBucket(forMinutes minutes: Int) -> Int
     public static func fold(
         entries: [TemporalAuditEntry],
@@ -1457,9 +1509,393 @@ pub struct TemporalCausalityKey { pub source: TemporalFieldCoord, pub target: Te
 /// Named result struct; Swift mirrors as `public struct FoldResult`.
 pub struct FoldResult { pub deltas: Vec<(TemporalCausalityKey, i64)>, pub new_watermark: HLC }
 impl TemporalCausalityFold {
+    pub const LAG_BUCKETS: [i32; 8];         // [1, 2, 4, 8, 16, 32, 64, 128]; re-exports module const
+    pub const DEFAULT_WINDOW_MINUTES: i32;   // 256; re-exports module const
+    // MAX_WINDOW_OCCUPANCY (= 512, usize) is a module-level pub const, not re-exported on the impl
     pub fn lag_bucket(minutes: i64) -> i64;
     pub fn fold(entries: &[TemporalAuditEntry], window_minutes: i64, start_watermark: HLC) -> FoldResult;
 }
+```
+
+### `SVDResult`, `JacobiSVD`
+
+SPEC § 5.23.
+
+One-sided cyclic Jacobi SVD for real matrices (m × n, m ≥ n). Bit-identical
+output in Swift and Rust is guaranteed by a fixed sweep count, a fixed
+round-robin tournament column-pair order (column-disjoint within each round,
+enabling parallel sweeps), identical scalar Float32 arithmetic, and a
+canonical sign convention (force the largest-magnitude component of each left
+singular vector positive). Consumed by CorpusKit's `LsaProvider` for LSA
+distributional embeddings. Default sweep count: 30 (pinned in both ports).
+
+```swift
+/// Result of a JacobiSVD decomposition: A ≈ U · diag(singularValues) · Vᵀ.
+public struct SVDResult: Sendable {
+    public let U: [[Float]]             // m × rank, row-major left singular vectors
+    public let singularValues: [Float]  // rank values in non-increasing order (≥ 0)
+    public let Vt: [[Float]]            // rank × n, row-major right singular vectors
+    public let rank: Int                // requested truncation rank k
+    public init(U: [[Float]], singularValues: [Float], Vt: [[Float]], rank: Int)
+}
+public enum JacobiSVD {
+    // Preconditions: A non-empty, rectangular, m ≥ n, rank ≥ 1, sweeps ≥ 0.
+    // rank is clamped to min(m, n). Violations trigger precondition (process-terminating).
+    public static func decompose(A: [[Float]], rank: Int, sweeps: Int = 30) -> SVDResult
+    // Round-robin tournament schedule for n columns. Each round contains
+    // column-disjoint (p, q) pairs so a full sweep covers every unordered
+    // pair exactly once. Pairs within a round are sorted (p < q) for
+    // determinism. Pure integer function of n — no floats, no drift.
+    public static func tournamentRounds(_ n: Int) -> [[(p: Int, q: Int)]]
+}
+```
+
+```rust
+// substrate_ml::svd
+pub struct SvdResult {
+    pub u: Vec<Vec<f32>>,             // m × rank, row-major
+    pub singular_values: Vec<f32>,    // non-increasing, all ≥ 0
+    pub vt: Vec<Vec<f32>>,            // rank × n, row-major
+    pub rank: usize,
+}
+pub struct JacobiSvd;
+impl JacobiSvd {
+    // Preconditions same as Swift; violations panic.
+    pub fn decompose(a: &[Vec<f32>], rank: usize, sweeps: usize) -> SvdResult;
+    pub fn tournament_rounds(n: usize) -> Vec<Vec<(usize, usize)>>;
+}
+```
+
+### `DistillationFeatureType`, `TypedDecayWeighting`
+
+SPEC § 5.24.
+
+Feature type classification and type-specific exponential decay weighting for
+the distillation pipeline. `DistillationFeatureType` carries the canonical
+type tag (`ENT`, `REL`, `TMP`, `NUM`) and its associated λ. Higher λ means
+faster staleness — NUM (version numbers) decays fastest; ENT (domain concepts)
+persists longest.
+
+```swift
+public enum DistillationFeatureType: String, Sendable, Codable, CaseIterable {
+    case entity    = "ENT"   // λ = 0.1
+    case relation  = "REL"   // λ = 0.2
+    case temporal  = "TMP"   // λ = 0.5
+    case numerical = "NUM"   // λ = 0.8
+    public var decayLambda: Float32 { get }
+}
+public enum TypedDecayWeighting {
+    // w = exp(-λ × max(0, ageInUnits)). Returns 1.0 at age 0.
+    public static func weight(featureType: DistillationFeatureType, ageInUnits: Float32) -> Float32
+    // Weighted document frequency per DISTILLATION_MATH_DIFFUSION.md §2.
+    // Returns 0 when allMemoryTimestamps is empty.
+    public static func weightedDocFrequency(
+        featureType: DistillationFeatureType,
+        presenceTimestamps: [Date],
+        allMemoryTimestamps: [Date],
+        referenceDate: Date,
+        timeUnit: Double = 86_400   // 1 day in seconds
+    ) -> Float32
+}
+```
+
+```rust
+// substrate_ml::typed_decay_weighting
+pub enum DistillationFeatureType { Entity, Relation, Temporal, Numerical }
+impl DistillationFeatureType {
+    pub fn decay_lambda(&self) -> f32;
+}
+pub struct TypedDecayWeighting;
+impl TypedDecayWeighting {
+    pub fn weight(feature_type: DistillationFeatureType, age_in_units: f32) -> f32;
+    // Timestamps are epoch-second f64 in Rust (Rust has no Date type).
+    pub fn weighted_doc_frequency(
+        feature_type: DistillationFeatureType,
+        presence_timestamps: &[f64],
+        all_memory_timestamps: &[f64],
+        reference_date: f64,
+        time_unit: f64,
+    ) -> f32;
+}
+```
+
+### `DeltaType`, `DeltaAnalysis`, `DeltaFeatureExtractor`
+
+SPEC § 5.24 (Stage 2.5).
+
+Trajectory analysis for a feature's value sequence across a memory cluster.
+Stage 2.5 of the distillation pipeline: rescues CONVERGENT and MONOTONE
+features that would otherwise fail the structural recurrence threshold.
+
+```swift
+public enum DeltaType: String, Sendable, Codable, Equatable {
+    case `static`    = "STATIC"      // all values identical
+    case convergent  = "CONVERGENT"  // categorical sequence converges to stable terminal
+    case monotone    = "MONOTONE"    // numerical sequence trends monotonically
+    case oscillating = "OSCILLATING" // period-2 pattern A→B→A→B
+    case divergent   = "DIVERGENT"   // no classifiable pattern
+}
+public struct DeltaAnalysis: Sendable, Equatable {
+    public let deltaType: DeltaType
+    public let terminalValue: String    // most recent value in the sequence
+    public let convergenceScore: Float32 // k/M trailing matches (categorical); 1.0 for MONOTONE/STATIC
+    public let slope: Float32?           // average per-step diff; non-nil for MONOTONE only
+    public let confidence: Float32
+    public init(deltaType: DeltaType, terminalValue: String,
+                convergenceScore: Float32, slope: Float32?, confidence: Float32)
+}
+public enum DeltaFeatureExtractor {
+    // sequence: chronologically ordered (value, timestamp) pairs, oldest first.
+    // decayLambda: convergence threshold (default 0.5 for categorical, 0.8 for numerical).
+    public static func analyzeCategorical(
+        sequence: [(value: String, timestamp: Date)], decayLambda: Float32 = 0.5
+    ) -> DeltaAnalysis
+    public static func analyzeNumerical(
+        sequence: [(value: Double, timestamp: Date)], decayLambda: Float32 = 0.8
+    ) -> DeltaAnalysis
+}
+```
+
+```rust
+// substrate_ml::delta_feature_extractor
+pub enum DeltaType { Static, Convergent, Monotone, Oscillating, Divergent }
+impl DeltaType { pub fn as_str(&self) -> &'static str; }
+pub struct DeltaAnalysis {
+    pub delta_type: DeltaType,
+    pub terminal_value: String,
+    pub convergence_score: f32,
+    pub slope: Option<f32>,
+    pub confidence: f32,
+}
+pub struct DeltaFeatureExtractor;
+impl DeltaFeatureExtractor {
+    // Timestamps are (String, f64) / (f64, f64) epoch seconds in Rust.
+    pub fn analyze_categorical(sequence: &[(String, f64)], decay_lambda: f32) -> DeltaAnalysis;
+    pub fn analyze_numerical(sequence: &[(f64, f64)], decay_lambda: f32) -> DeltaAnalysis;
+}
+```
+
+### `ExtractedFeature`, `DistillationSNR`, `FeatureGraph`, `DistillationScorer`
+
+SPEC § 5.24.
+
+Core distillation scoring types and namespace. All methods are pure functions
+— no I/O, no state, no randomness. Per DISTILLATION_MATH_SSA.md §2–6.
+
+```swift
+public struct ExtractedFeature: Sendable, Equatable {
+    public let type: DistillationFeatureType
+    public let value: String              // canonical stem; vocabulary dedup and fingerprint key
+    public let display: String            // surface form for prose (defaults to value)
+    public var docFrequency: Float32      // df(f) = count_present / M
+    public var weightedDocFrequency: Float32
+    public var structuralScore: Float32   // σ(f) = df × (1 − H(df)), set by computeStructuralScores
+    public init(type: DistillationFeatureType, value: String, docFrequency: Float32,
+                display: String? = nil)
+}
+public struct DistillationSNR: Sendable, Equatable {
+    public let snr: Float32
+    public let structuralSignal: Float32  // Σ df(f) for features with df ≥ τ
+    public let episodicNoise: Float32     // Σ df(f) for features below threshold
+    public let readyToDistill: Bool       // snr ≥ 2.0
+}
+public struct FeatureGraph: Sendable {
+    public let nodes: [ExtractedFeature]
+    public let pmiMatrix: [[Float32]]     // symmetric; diagonal 0; -∞ when joint = 0
+    public let components: [[Int]]        // connected components, sorted by total weighted df desc
+}
+public enum DistillationScorer {
+    public static func structuralThreshold(M: Int) -> Float32   // 2 / M
+    public static func applyStructuralThreshold(features: [ExtractedFeature], M: Int)
+        -> (passing: [ExtractedFeature], failing: [ExtractedFeature])
+    public static func computeSNR(features: [ExtractedFeature], M: Int) -> DistillationSNR
+    public static func computeStructuralScores(features: inout [ExtractedFeature])
+    public static func buildPMIGraph(thresholdFeatures: [ExtractedFeature],
+                                     incidenceMatrix: [[Bool]], M: Int) -> FeatureGraph
+    public static func selectDominantComponent(graph: FeatureGraph) -> [ExtractedFeature]
+    public static func computeConfidence(selected: [ExtractedFeature],
+                                         allThreshold: [ExtractedFeature]) -> Float32
+}
+```
+
+```rust
+// substrate_ml::distillation_scorer
+pub struct ExtractedFeature {
+    pub feature_type: DistillationFeatureType,
+    pub value: String,
+    pub display: String,
+    pub doc_frequency: f32,
+    pub weighted_doc_frequency: f32,
+    pub structural_score: f32,
+}
+impl ExtractedFeature {
+    pub fn new(feature_type: DistillationFeatureType, value: impl Into<String>,
+               doc_frequency: f32) -> Self;
+    pub fn new_with_display(feature_type: DistillationFeatureType, value: impl Into<String>,
+                            display: impl Into<String>, doc_frequency: f32) -> Self;
+}
+pub struct DistillationSNR { pub snr: f32, pub structural_signal: f32,
+                             pub episodic_noise: f32, pub ready_to_distill: bool }
+pub struct FeatureGraph { pub nodes: Vec<ExtractedFeature>,
+                          pub pmi_matrix: Vec<Vec<f32>>, pub components: Vec<Vec<usize>> }
+pub struct DistillationScorer;
+impl DistillationScorer {
+    pub fn structural_threshold(m: usize) -> f32;
+    pub fn apply_structural_threshold(features: &[ExtractedFeature], m: usize)
+        -> (Vec<ExtractedFeature>, Vec<ExtractedFeature>);
+    pub fn compute_snr(features: &[ExtractedFeature], m: usize) -> DistillationSNR;
+    pub fn compute_structural_scores(features: &mut Vec<ExtractedFeature>);
+    pub fn build_pmi_graph(threshold_features: &[ExtractedFeature],
+                           incidence_matrix: &[Vec<bool>], m: usize) -> FeatureGraph;
+    pub fn select_dominant_component(graph: &FeatureGraph) -> Vec<ExtractedFeature>;
+    pub fn compute_confidence(selected: &[ExtractedFeature],
+                              all_threshold: &[ExtractedFeature]) -> f32;
+}
+```
+
+### `DistillationInput`, `DistillationOutput`, `DistilledHeader`, `DistillationPipeline`
+
+SPEC § 5.24.
+
+Five-stage cold-path distillation pipeline. Per DISTILLATION_MATH_SSA.md §1–7
+and DISTILLATION_MATH_DIFFUSION.md §1–8. Feature extraction is injected via the
+`FeatureExtractor` typealias so callers (NeuronKit) supply the EideticLib HMM
+tagger or a test stub. `DistilledHeader.parse` is co-located with the pipeline
+because the code that writes the format owns the parser.
+
+**Swift/Rust timestamp difference:** `DistillationInput.memoryTimestamps` is
+`[Date]?` in Swift; Rust uses `Option<Vec<f64>>` (epoch seconds). Semantics
+are identical; the port adapts at the boundary.
+
+```swift
+public struct DistillationInput: Sendable {
+    public let memoryContents: [String]
+    public let memoryTimestamps: [Date]?
+    public let clusterID: String
+    public let sourceIDs: [String]
+    public var M: Int { get }   // memoryContents.count
+    public init(memoryContents: [String], memoryTimestamps: [Date]? = nil,
+                clusterID: String, sourceIDs: [String])
+}
+public struct DistillationOutput: Sendable {
+    public let drawerContent: String    // "[DIST|conf=X.XX|src=N|snr=Y.YY|delta=Z] prose"
+    public let confidence: Float32      // conf(F*) ∈ [0, 1]
+    public let uncertain: Bool          // conf ∈ [0.4, 0.7)
+    public let snr: Float32
+    public let deltaType: DeltaType?    // non-nil when a delta feature was dominant
+    public let succeeded: Bool          // conf ≥ 0.4 and SNR gate passed
+    public let failureReason: String?
+    public let featureFingerprint: Fingerprint256  // OR-reduce of featureHash(f.value)
+}
+public struct DistilledHeader: Sendable, Equatable {
+    public let prose: String
+    public let confidence: Float32
+    public let sourceCount: Int
+    public let snr: Float32
+    public let deltaType: DeltaType?
+    public let uncertain: Bool
+    // Returns nil if content does not start with "[DIST|".
+    public static func parse(_ content: String) -> DistilledHeader?
+}
+public enum DistillationPipeline {
+    public typealias FeatureExtractor =
+        @Sendable (String, DistillationFeatureType) -> [ExtractedFeature]
+    // "DISTILLA" encoded as ASCII big-endian UInt64. Changing this invalidates all stored fingerprints.
+    public static let featureSimHashSeed: UInt64  // 0x44495354494C4C41
+    public static func featureHash(_ value: String) -> Fingerprint256
+    public static func queryFingerprint(query: String,
+                                        extractFeatures: FeatureExtractor) -> Fingerprint256
+    public static let defaultExtractor: FeatureExtractor   // capitalization-heuristic stub
+    public static func run(input: DistillationInput,
+                           extractFeatures: FeatureExtractor,
+                           intraItem: Bool = false) -> DistillationOutput
+}
+```
+
+```rust
+// substrate_ml::distillation_pipeline
+// FeatureExtractor is a fn pointer in Rust (not a closure/Fn trait).
+pub type FeatureExtractor = fn(&str, DistillationFeatureType) -> Vec<ExtractedFeature>;
+pub struct DistillationInput {
+    pub memory_contents: Vec<String>,
+    pub memory_timestamps: Option<Vec<f64>>,   // epoch seconds; Swift uses [Date]?
+    pub cluster_id: String,
+    pub source_ids: Vec<String>,
+}
+impl DistillationInput {
+    pub fn new(memory_contents: Vec<String>, memory_timestamps: Option<Vec<f64>>,
+               cluster_id: String, source_ids: Vec<String>) -> Self;
+    pub fn m(&self) -> usize;
+}
+pub struct DistillationOutput {
+    pub drawer_content: String,
+    pub confidence: f32,
+    pub uncertain: bool,
+    pub snr: f32,
+    pub delta_type: Option<DeltaType>,
+    pub succeeded: bool,
+    pub failure_reason: Option<String>,
+    pub feature_fingerprint: Fingerprint256,
+}
+pub struct DistilledHeader {
+    pub prose: String, pub confidence: f32, pub source_count: usize,
+    pub snr: f32, pub delta_type: Option<DeltaType>, pub uncertain: bool,
+}
+impl DistilledHeader { pub fn parse(content: &str) -> Option<DistilledHeader>; }
+pub struct DistillationPipeline;
+impl DistillationPipeline {
+    pub const FEATURE_SIM_HASH_SEED: u64;  // 0x44495354494C4C41
+    pub fn feature_hash(value: &str) -> Fingerprint256;
+    pub fn query_fingerprint(query: &str, extract_features: FeatureExtractor) -> Fingerprint256;
+    pub fn default_extractor(text: &str, feature_type: DistillationFeatureType) -> Vec<ExtractedFeature>;
+    pub fn run(input: &DistillationInput, extract_features: FeatureExtractor,
+               intra_item: bool) -> DistillationOutput;
+}
+```
+
+### `ConflictCueKind`, `ConflictCueResult`, `ConflictCue`
+
+SPEC § 5.25.
+
+Deterministic pairwise text-conflict screen backed by `ShingleSimilarity`
+(already conformance-gated to f32 bit-identity). Three cues checked
+strongest-first: `valueDivergence` (same token template, digit-bearing
+positions differ), `negationAsymmetry` (negation cue on exactly one side over
+substantially similar content), `markerRevision` (revision/supersession marker
+over substantially similar content). Results are bit-identical across ports.
+
+**Rust note:** `ConflictCue` is not a named Rust type — `evaluate` is a free
+function in the `conflict_cue` module (same pattern as `FloatSimHash`,
+`FFT`, and other namespace-enum → free-fn mappings).
+
+```swift
+public enum ConflictCueKind: String, Sendable, Equatable {
+    case valueDivergence   = "value_divergence"
+    case negationAsymmetry = "negation_asymmetry"
+    case markerRevision    = "marker_revision"
+    case none              = "none"
+}
+public struct ConflictCueResult: Sendable, Equatable {
+    public let kind: ConflictCueKind
+    public let score: Float   // confidence in [0, 1]; always 0 when kind == .none
+    public init(kind: ConflictCueKind, score: Float)
+}
+public enum ConflictCue {
+    public static let strongThreshold: Float      // 0.70 — auto-propose contradicts tunnel
+    public static let borderlineThreshold: Float  // 0.45 — surface for BYOAI adjudication
+    public static func evaluate(_ a: String, _ b: String) -> ConflictCueResult
+}
+```
+
+```rust
+// substrate_ml::conflict_cue
+pub enum ConflictCueKind { ValueDivergence, NegationAsymmetry, MarkerRevision, None }
+impl ConflictCueKind { pub fn as_str(&self) -> &'static str; }
+pub struct ConflictCueResult { pub kind: ConflictCueKind, pub score: f32 }
+pub const STRONG_THRESHOLD: f32;      // 0.70
+pub const BORDERLINE_THRESHOLD: f32;  // 0.45
+// No ConflictCue type in Rust — free function at module level.
+pub fn evaluate(a: &str, b: &str) -> ConflictCueResult;
 ```
 
 ## § 3 — Public functions
@@ -1507,6 +1943,13 @@ returns (empty, `nil`, default-valued).
   - `InformationTheoryTests.swift`
   - `TemporalCompressionTests.swift`
   - `ConceptImplicationsTests.swift`
+  - `JacobiSVDTests.swift`
+  - `TypedDecayWeightingTests.swift`
+  - `DeltaFeatureExtractorTests.swift`
+  - `DistillationScorerTests.swift`
+  - `DistillationPipelineTests.swift`
+  - `DistillationConformanceTests.swift`
+  - `ConflictCueTests.swift`
 - **Rust:** per-module `#[cfg(test)] mod tests` blocks, plus
   `tests/` for cross-port conformance.
   - `row_attribute_view::tests` — 15 tests for `RowAttributeView::from`, dedup, sort, extraction rules.
@@ -1669,6 +2112,24 @@ the Swift suites against the same canonical inputs the Rust module tests use.
 | NMF-DF² namespace | `NMFDoubleFrobeniusSquared` (enum) | `NMFDoubleFrobeniusSquared` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace; delegates to canonical f32 NMF internally | `NMFDoubleFrobeniusSquaredTests.swift` / `rust:nmf_double_frobenius_squared::tests` | Confirmed |
 | Sampling namespace | `Sampling` (enum) | `sampling` (pub mod, no type) | public | Swift caseless `enum` groups static fns; Rust `pub mod sampling` exposes free fns. No Rust type named `Sampling` — a Swift namespace enum without a Rust type mirror (see § 7.2). | `SamplingTests.swift` / `rust:sampling (inline tests)` | Confirmed |
 | VizGraph signal names | `VizGraphSignals` (enum-of-statics) | `VizGraphSignals` (`pub mod` consts) | public | Swift caseless enum of `static let` metric-name strings / Rust `pub mod` of `pub const` strings — same five names (`community.assignment`, `centrality.score`, `nmf.factor`, `anomaly.flag`, `edge.decayed_weight`) | `VizGraphSignalsTests.swift` / `rust:viz_graph_signals_tests` | Confirmed |
+| SVD result | `SVDResult` | `SvdResult` | public | Swift `U/Vt` (CamelCase) / Rust `u/vt` (snake_case); `[[Float]]`/`Vec<Vec<f32>>`, `[Float]`/`Vec<f32>`; identical field semantics | `JacobiSVDTests.swift` / `rust:svd::tests` | Confirmed |
+| Jacobi SVD namespace | `JacobiSVD` (enum) | `JacobiSvd` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace; `decompose` + `tournamentRounds` in both; Swift precondition / Rust panic; `sweeps` default 30 pinned in both | `JacobiSVDTests.swift` / `rust:svd::tests` | Confirmed |
+| Distillation feature type | `DistillationFeatureType` (enum: String) | `DistillationFeatureType` (enum) | public | Identical cases (`entity/relation/temporal/numerical`); raw String values in Swift (`ENT`/`REL`/`TMP`/`NUM`); `decay_lambda()` method in both | `TypedDecayWeightingTests.swift` / `rust:typed_decay_weighting::tests` | Confirmed |
+| Typed decay weighting namespace | `TypedDecayWeighting` (enum) | `TypedDecayWeighting` (unit struct) | public | Swift `[Date]` timestamps / Rust `&[f64]` epoch seconds (semantic equivalent); `weight` and `weightedDocFrequency`/`weighted_doc_frequency` in both | `TypedDecayWeightingTests.swift` / `rust:typed_decay_weighting::tests` | Confirmed |
+| Delta type | `DeltaType` (enum: String) | `DeltaType` (enum) | public | Identical cases; raw String values (`STATIC`/`CONVERGENT`/`MONOTONE`/`OSCILLATING`/`DIVERGENT`) in Swift | `DeltaFeatureExtractorTests.swift` / `rust:delta_feature_extractor::tests` | Confirmed |
+| Delta analysis | `DeltaAnalysis` | `DeltaAnalysis` | public | Identical fields (snake_case Rust); sequence timestamps `Date` (Swift) vs `f64` epoch seconds (Rust) — boundary adaptation | `DeltaFeatureExtractorTests.swift` / `rust:delta_feature_extractor::tests` | Confirmed |
+| Delta feature extractor namespace | `DeltaFeatureExtractor` (enum) | `DeltaFeatureExtractor` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace; `analyzeCategorical`/`analyzeNumerical` in both; `Date` vs `f64` timestamp boundary (see § 7.2) | `DeltaFeatureExtractorTests.swift` / `rust:delta_feature_extractor::tests` | Confirmed |
+| Extracted feature | `ExtractedFeature` | `ExtractedFeature` | public | Identical fields (Swift `type: DistillationFeatureType` / Rust `feature_type`); `display` defaults to `value` | `DistillationScorerTests.swift` / `rust:distillation_scorer::tests` | Confirmed |
+| Distillation SNR | `DistillationSNR` | `DistillationSNR` | public | Identical fields (snake_case Rust); `readyToDistill`/`ready_to_distill` (snr ≥ 2.0) | `DistillationScorerTests.swift` / `rust:distillation_scorer::tests` | Confirmed |
+| Feature graph | `FeatureGraph` | `FeatureGraph` | public | Identical fields; `components: [[Int]]` / `Vec<Vec<usize>>` sorted by total weighted df desc | `DistillationScorerTests.swift` / `rust:distillation_scorer::tests` | Confirmed |
+| Distillation scorer namespace | `DistillationScorer` (enum) | `DistillationScorer` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace; all seven public methods present in both | `DistillationScorerTests.swift` / `rust:distillation_scorer::tests` | Confirmed |
+| Distillation input | `DistillationInput` | `DistillationInput` | public | `memoryTimestamps: [Date]?` (Swift) / `memory_timestamps: Option<Vec<f64>>` (Rust) epoch seconds — semantically equivalent; all other fields identical | `DistillationPipelineTests.swift` / `rust:distillation_pipeline::tests` | Confirmed |
+| Distillation output | `DistillationOutput` | `DistillationOutput` | public | Identical fields (snake_case Rust); `featureFingerprint`/`feature_fingerprint: Fingerprint256` | `DistillationPipelineTests.swift` / `rust:distillation_pipeline::tests` | Confirmed |
+| Distilled header | `DistilledHeader` | `DistilledHeader` | public | Identical fields; `parse`/`parse` static method returns `Optional`/`Option` | `DistillationConformanceTests.swift` / `rust:distillation_pipeline::tests` | Confirmed |
+| Distillation pipeline namespace | `DistillationPipeline` (enum) | `DistillationPipeline` (unit struct) | public | Swift `FeatureExtractor` is `@Sendable` closure / Rust `FeatureExtractor` is fn pointer (see § 7.2); `featureSimHashSeed`/`FEATURE_SIM_HASH_SEED` identical; `run` in both | `DistillationPipelineTests.swift`, `DistillationConformanceTests.swift` / `rust:distillation_pipeline::tests` | Confirmed |
+| Conflict cue kind | `ConflictCueKind` (enum: String) | `ConflictCueKind` (enum) | public | Identical cases; `as_str()` method in Rust (Swift uses `rawValue`) | `ConflictCueTests.swift` / `rust:conflict_cue::tests` | Confirmed |
+| Conflict cue result | `ConflictCueResult` | `ConflictCueResult` | public | Identical fields | `ConflictCueTests.swift` / `rust:conflict_cue::tests` | Confirmed |
+| Conflict cue namespace | `ConflictCue` (enum) | — (free fns in `conflict_cue` mod) | public | Swift enum namespace / Rust free fn; `strongThreshold`/`STRONG_THRESHOLD` = 0.70, `borderlineThreshold`/`BORDERLINE_THRESHOLD` = 0.45; bit-identical `evaluate` results | `ConflictCueTests.swift` / `rust:conflict_cue::tests` | Confirmed |
 
 ### § 7.2 — Notes on apparent asymmetries (verified non-drift)
 
@@ -1710,6 +2171,23 @@ the Swift suites against the same canonical inputs the Rust module tests use.
 - **No platform-bound types** exist in SubstrateML. The package is pure
   cold-path math/CRDT with no Metal/BNNS/CoreML/CloudKit/Keychain surface;
   every concept has a real counterpart in both ports.
+- **`ConflictCue` (Swift namespace enum) has no Rust named type.** `evaluate`
+  is a free function at `conflict_cue` module level; the threshold constants
+  are module-level `pub const`. This is the same pattern as `FloatSimHash`,
+  `FFT`, `RhythmAnalysis`, and `AprioriMining`.
+- **Timestamp types in distillation and delta-feature types:** Swift uses
+  `Date` for `DistillationInput.memoryTimestamps`, `DeltaFeatureExtractor`
+  sequence timestamps, and `TypedDecayWeighting.weightedDocFrequency`. The
+  Rust ports use `f64` epoch seconds at those boundaries. Semantics are
+  identical; the boundary adapter converts at the kit interface.
+- **`DistillationPipeline.FeatureExtractor`** is `@Sendable (String,
+  DistillationFeatureType) -> [ExtractedFeature]` in Swift (a closure type);
+  in Rust it is `pub type FeatureExtractor = fn(&str, DistillationFeatureType)
+  -> Vec<ExtractedFeature>` (a plain fn pointer). Behavior is equivalent for
+  stateless extractors (the only kind the pipeline uses).
+- **`SVDResult` / `SvdResult`** naming: Rust uses all-lowercase `u`, `vt`,
+  `singular_values` while Swift uses `U`, `Vt`, `singularValues`. Both carry
+  row-major `Float`/`f32` nested arrays for the singular-vector matrices.
 
 ### § 7.3 — Cross-module type bindings
 
@@ -1810,6 +2288,30 @@ target dependencies (authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
 `Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.
 
 ## Changelog
+
+### 1.1.2 -- 2026-07-16
+Additive (audit): closed two CRITICAL gaps left after the 1.1.1 pass.
+(1) `AnomalyDetection`: expanded the placeholder `{ /* … */ }` stub to all five
+public methods (`zScore`, `rollingZScore`, `modifiedZScore`, `rollingModifiedZScore`,
+`isAnomalous`) in both Swift and Rust; updated SPEC cross-reference to § 5.26.
+(2) `TemporalCausalityFold`: added the three public constants
+(`lagBuckets`/`defaultWindowMinutes`/`maxWindowOccupancy` in Swift;
+`LAG_BUCKETS`/`DEFAULT_WINDOW_MINUTES` as associated consts + `MAX_WINDOW_OCCUPANCY`
+as module-level pub const in Rust) to the existing signature block.
+
+### 1.1.1 -- 2026-07-16
+Additive (audit): documented six previously-undocumented Swift source files and
+their Rust counterparts, all present in the shipped package but missing from the
+interface doc. Updated file count (29 → 39) and purpose paragraph. Added § 2
+sections for: `SVDResult`/`JacobiSVD` (ADR-010 Decision B Jacobi SVD for LSA);
+`DistillationFeatureType`/`TypedDecayWeighting` (Ds2 type-specific decay);
+`DeltaType`/`DeltaAnalysis`/`DeltaFeatureExtractor` (Ds1 Stage 2.5 trajectory
+analysis); `ExtractedFeature`/`DistillationSNR`/`FeatureGraph`/`DistillationScorer`
+(Ds3 scoring); `DistillationInput`/`DistillationOutput`/`DistilledHeader`/
+`DistillationPipeline` (Ds4 five-stage pipeline); `ConflictCueKind`/
+`ConflictCueResult`/`ConflictCue` (pairwise text-conflict screen). Added 21
+concordance rows to § 7.1, three asymmetry notes to § 7.2, and 8 test file
+references to § 5.
 
 ### 1.1.0 -- 2026-06-17
 Additive (A-2 exploratory-recall): added `RandomWalks.walkWithRestart` in both ports —

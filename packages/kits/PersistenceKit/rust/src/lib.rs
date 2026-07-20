@@ -39,6 +39,7 @@ pub mod postgres_tls;
 pub mod predicate;
 pub mod incremental_replication;
 pub mod replication;
+pub mod row_key_derivation;
 pub mod row_store;
 pub mod schema;
 pub mod snapshot_registry;
@@ -70,6 +71,7 @@ pub use postgres::PostgresStorage;
 pub use predicate::*;
 // Replication types are not re-exported at crate root to avoid namespace collision.
 // Import them as `use persistence_kit::replication::{replicate, flush, hydrate, ...}`.
+pub use row_key_derivation::deterministic_row_key;
 pub use row_store::*;
 pub use schema::*;
 pub use sqlite::SqliteStorage;

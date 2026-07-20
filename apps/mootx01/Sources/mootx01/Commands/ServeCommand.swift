@@ -230,11 +230,33 @@ struct ServeCommand: AsyncParsableCommand {
             binaryVersion: Mootx01.currentVersion,
             homeDirectory: home
         )
+        // Upstream-release advisory (`update_available` in ping/status):
+        // resident daemons only. A resident outlives releases, so this must
+        // be evaluated lazily at ping/status time — UpdateAdvisor rate-limits
+        // the release-feed probe to once per 24h and collapses failures to
+        // silence. stdio one-shots stay network-free on purpose: ping is
+        // documented as returning immediately, and an offline probe timeout
+        // there would break that; every plugin-capable host talks to the
+        // resident over HTTP anyway (ADR-024 §2). Repo slug honors the same
+        // MOOTX01_REPO override as `mootx01 upgrade`.
+        let updateAdvisoryProvider: (@Sendable () async -> String?)?
+        if residentPort != nil {
+            let advisor = UpdateAdvisor(installedVersion: Mootx01.currentVersion) {
+                try await ReleaseDownloader(
+                    repo: UpgradeCommand.repoSlug(),
+                    currentVersion: Mootx01.currentVersion
+                ).latestTag()
+            }
+            updateAdvisoryProvider = { await advisor.advisory() }
+        } else {
+            updateAdvisoryProvider = nil
+        }
         // Server identity injected so facts/memories filed via this host are
         // stamped "mootx01" — the product binary running mootx01 serve.
         let tooling = ToolDispatcher(
             kit: kit, handle: handle, serverIdentity: "mootx01",
-            versionSkewAdvisory: versionSkewAdvisory
+            versionSkewAdvisory: versionSkewAdvisory,
+            updateAdvisoryProvider: updateAdvisoryProvider
         )
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
