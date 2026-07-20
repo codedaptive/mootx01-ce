@@ -500,8 +500,7 @@ defers to a focused later pass.
 - Evidence: evidenced. Demonstrated by the LocusKit
   `DrawerStateValidator` suite and the theorem demonstrations.
 - Evidence pointer: LocusKit DrawerStateValidator;
-  `GeniusLocusKit/Tests/GeniusLocusKitTests/TheoremsTests.swift`
- .
+  `GeniusLocusKit/Tests/GeniusLocusKitTests/TheoremsTests.swift`.
 
 ### T5: Performance budget (paper Theorem 5)
 
@@ -513,8 +512,8 @@ defers to a focused later pass.
   on the iPhone profile and enrichment at least 60 drawers per
   hour on the Mac profile.
 - Evidence pointer:
-  `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
- ; the perf gate reports P99 capture
+  `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`;
+  the perf gate reports P99 capture
   0.262 ms (well under the 100 ms budget) and enrichment far above
   the 60 drawers per hour floor.
 
