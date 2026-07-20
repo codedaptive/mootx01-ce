@@ -552,8 +552,7 @@ substrate must meet. Three are pinned as load-bearing.
   three orders of magnitude under the 100 ms budget on iPhone
   profile.
 - Evidence pointer:
-  `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
- .
+  `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`.
 
 ### HP2: Enrichment rate at least 60 drawers per hour on Mac
 
@@ -563,8 +562,7 @@ substrate must meet. Three are pinned as load-bearing.
 - Evidence: evidenced. The perf gate measured enrichment rate far above
   the 60 drawers per hour floor on Mac profile.
 - Evidence pointer:
-  `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
- .
+  `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`.
 
 ### HP3: Hamming top-K (K=10 over 1M rows) under 100 microseconds
 
