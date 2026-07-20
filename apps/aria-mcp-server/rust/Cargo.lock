@@ -891,6 +891,8 @@ dependencies = [
  "lattice-lib",
  "persistence-kit",
  "rand_core 0.6.4",
+ "serde",
+ "serde_json",
  "substrate-kernel",
  "substrate-lib",
  "substrate-ml",
