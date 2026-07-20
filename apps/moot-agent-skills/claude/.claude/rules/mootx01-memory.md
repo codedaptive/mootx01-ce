@@ -31,7 +31,7 @@ Automatically reach for MOOTx01 when the task involves:
 2. Analyze with `moot_list_lenses`, relevant `moot_lens_*` tools, or `moot_synthesize`.
 3. Write back durable results with `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal`.
 4. Correct memory with confirm/update/withdraw/retire tools instead of silently overwriting history.
-5. Run `moot_reindex` after batch import, then `moot_dream` after large imports or significant memory growth.
+5. Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
 
 If MOOTx01 is unavailable, disclose that and proceed only from current context.
 

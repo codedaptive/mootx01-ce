@@ -31,7 +31,7 @@ checks, or durable writeback.
 - Use lenses and `moot_synthesize` for analysis.
 - Write durable knowledge with `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal`.
 - Correct stale knowledge instead of silently overwriting it.
-- Run `moot_reindex` after batch import, then `moot_dream` after bulk import or significant memory growth.
+- Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
 
 Disclose unavailable or thin recall.
 
