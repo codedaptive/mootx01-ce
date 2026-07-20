@@ -177,10 +177,14 @@ def main():
     cache["notified_tag"] = tag
     save_cache(cache)
 
+    # `mootx01 upgrade` is the primary path (verified download + service
+    # restart + plugin/permission convergence); the releases page is kept
+    # as the fallback for users who prefer package managers.
     print(
         "[MOOTx01] A newer MOOTx01 release is available: %s (installed: "
         "%s). Briefly mention this to the user once at a natural moment — "
-        "do not interrupt the current task. Updates: %s"
+        "do not interrupt the current task. Upgrade with `mootx01 upgrade` "
+        "(or see %s)."
         % (tag, local[1], RELEASES_PAGE)
     )
     sys.exit(0)

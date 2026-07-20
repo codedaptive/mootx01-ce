@@ -12,7 +12,7 @@ import Foundation
 ///
 /// - **Tier 1 — Core Memory (8):** file, search, get, update, withdraw,
 ///   erase, confirm, move. The main CRUD surface for memory drawers.
-/// - **Tier 2 — Connections (3):** link, search outgoing, map incoming.
+/// - **Tier 2 — Connections (4):** link, review, search outgoing, map incoming.
 ///   Directed graph edges between memories.
 /// - **Tier 3 — Knowledge Graph (4):** file fact, search facts, retire fact,
 ///   fact timeline. Structured triple assertions on the estate.
@@ -155,9 +155,11 @@ public enum ToolProjection {
         [memoryTool()]
     }
 
-    // MARK: - Tier 1: Core Memory (8 tools)
+    // MARK: - Tier 1: Core Memory (9 tools)
 
-    private static func coreMemoryTools() -> [ProjectedTool] {
+    // Internal (not private) so TeachmeGuides can derive per-tier counts at
+    // runtime; the guide's tallies stay in sync with the registry automatically.
+    static func coreMemoryTools() -> [ProjectedTool] {
         [
             ProjectedTool(
                 name: "moot_file_memory",
@@ -283,9 +285,10 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Tier 2: Connections (3 tools)
+    // MARK: - Tier 2: Connections (4 tools)
 
-    private static func connectionTools() -> [ProjectedTool] {
+    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    static func connectionTools() -> [ProjectedTool] {
         [
             ProjectedTool(
                 name: "moot_link_memories",
@@ -342,7 +345,8 @@ public enum ToolProjection {
 
     // MARK: - Tier 3: Knowledge Graph (4 tools)
 
-    private static func knowledgeGraphTools() -> [ProjectedTool] {
+    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    static func knowledgeGraphTools() -> [ProjectedTool] {
         [
             ProjectedTool(
                 name: "moot_file_fact",
@@ -396,7 +400,8 @@ public enum ToolProjection {
 
     // MARK: - Tier 4: Journal (2 tools)
 
-    private static func journalTools() -> [ProjectedTool] {
+    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    static func journalTools() -> [ProjectedTool] {
         [
             ProjectedTool(
                 name: "moot_write_journal",
@@ -425,9 +430,12 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Tier 5: Estate (3 tools) + Maintenance (3 tools)
+    // MARK: - Tier 5: Estate (3 tools) + Maintenance + Monitoring (8 total; palace_import vault-gated)
 
-    private static func estateTools() -> [ProjectedTool] {
+    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    // Returns 8 tools including moot_palace_import. tools() removes palace_import
+    // from the result when vault is off; the remaining 7 are always present.
+    static func estateTools() -> [ProjectedTool] {
         [
             ProjectedTool(
                 name: "moot_estate_status",

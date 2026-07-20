@@ -17,6 +17,7 @@ pub fn guide(tool_name: &str) -> &'static str {
         // Tier 1 — Core memory
         "moot_file_memory" => GUIDE_FILE_MEMORY,
         "moot_memory_search" => GUIDE_MEMORY_SEARCH,
+        "moot_memory_list" => GUIDE_MEMORY_LIST,
         "moot_memory_get" => GUIDE_MEMORY_GET,
         "moot_update_memory" => GUIDE_UPDATE_MEMORY,
         "moot_withdraw_memory" => GUIDE_WITHDRAW_MEMORY,
@@ -99,6 +100,35 @@ Response: \"found N memory(s)\\n<id>  [<room>]  <content_preview>\"
 Mistakes:
   — Queries over 200 characters trigger a hint to shorten the query.
   — Zero results usually means the estate is empty or the query is too specific.";
+
+const GUIDE_MEMORY_LIST: &str = "\
+moot_memory_list — enumerate all memory drawer IDs in a wing
+
+Returns each drawer's ID, room, and an 80-character content preview.
+Capped at 200 results. Use for structural inventory, not semantic search.
+
+When to use vs siblings:
+  — moot_memory_search: when you need ranked semantic results by query
+  — moot_memory_get:    when you already have an ID and need the full record
+  — moot_estate_map:    when you want wing/room counts, not individual IDs
+
+Required args:
+  wing (string) wing name to enumerate, e.g. \"Agentic Memory\"
+
+Optional args:
+  room (string) further narrow to a single room within the wing
+
+Example:
+  { \"wing\": \"Agentic Memory\" }
+  { \"wing\": \"Agentic Memory\", \"room\": \"architecture\" }
+
+Response: \"drawers in wing <wing>: N\\n<uuid>  [<room>]  <80-char preview>\"
+
+Mistakes:
+  — Calling without wing: wing is required; omitting it returns an error.
+  — Using this as a search tool: it is a structural enumerator; use
+    moot_memory_search for semantic recall.
+  — Expecting more than 200 results: for large wings, filter by room.";
 
 const GUIDE_MEMORY_GET: &str = "\
 moot_memory_get — fetch one memory drawer by id, in full

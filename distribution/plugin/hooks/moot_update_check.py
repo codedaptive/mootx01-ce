@@ -45,7 +45,18 @@ USER_AGENT = "mootx01-update-check"
 THROTTLE_SECONDS = 24 * 60 * 60
 TIMEOUT_SECONDS = 3
 
-CACHE_PATH = os.path.join(tempfile.gettempdir(), "mootx01-update-check.json")
+# Per-user cache directory — never the shared /tmp, which is world-writable
+# and lets another user pre-create the file to inject text into the model
+# context via the cached "latest version" field.
+def _user_cache_dir():
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        return os.path.join(xdg, "mootx01")
+    return os.path.join(os.path.expanduser("~"), ".cache", "mootx01")
+
+_cache_dir = _user_cache_dir()
+os.makedirs(_cache_dir, mode=0o700, exist_ok=True)
+CACHE_PATH = os.path.join(_cache_dir, "update-check.json")
 
 VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)((?:[-.][0-9A-Za-z]+)*)")
 
@@ -166,10 +177,14 @@ def main():
     cache["notified_tag"] = tag
     save_cache(cache)
 
+    # `mootx01 upgrade` is the primary path (verified download + service
+    # restart + plugin/permission convergence); the releases page is kept
+    # as the fallback for users who prefer package managers.
     print(
         "[MOOTx01] A newer MOOTx01 release is available: %s (installed: "
         "%s). Briefly mention this to the user once at a natural moment — "
-        "do not interrupt the current task. Updates: %s"
+        "do not interrupt the current task. Upgrade with `mootx01 upgrade` "
+        "(or see %s)."
         % (tag, local[1], RELEASES_PAGE)
     )
     sys.exit(0)

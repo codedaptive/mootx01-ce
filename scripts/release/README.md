@@ -7,7 +7,7 @@ read 1.0.31 — because the bump was done by hand and the *embedded* copies (whi
 are generated-looking and easy to forget) were missed. These two scripts make
 that class of mistake impossible to ship.
 
-## The two scripts
+## The three scripts
 
 - **`bump_version.py <version> [--date YYYY-MM-DD]`** — bumps every stamp in one
   shot, preserving each file's exact byte format. Refuses to run unless the tree
@@ -16,7 +16,39 @@ that class of mistake impossible to ship.
 - **`verify_version.py [version]`** — the gate. Trusts no single site: asserts
   every stamp agrees, the two embedded copies are byte-identical, and
   `install-bundle.json` is valid JSON. Exits non-zero on any disagreement. Run it
-  in CI and immediately before tagging.
+  in CI (it is wired into `release.yml` as a fail-closed gate keyed to the tag)
+  and immediately before tagging.
+- **`sync-plugin-version.py`** — forces the plugin version to equal the CE
+  product version, tolerant of whatever version the plugin arrived with. Run it
+  after every EE→CE plugin publish (see "Plugin version sync" below).
+
+## Plugin version sync
+
+External tools reject a plugin whose version disagrees with the binary that
+installs it, so the plugin version must ALWAYS equal the CE product version. The
+plugin (the `distribution/plugin/` manifests and the embedded installer bundle)
+is produced by the private EE generator and published into CE wholesale — but
+that generator is deliberately **decoupled** from CE versioning: it stamps a
+sentinel (`0.0.0`) and never needs to know the CE version.
+
+CE owns the version. The invariant holds by three mechanisms, no manual tracking:
+
+1. **Publish → `sync-plugin-version.py`.** After dropping a fresh regen into CE,
+   run it. It reads the CE product version (the binary's own `[package]` version
+   in `Cargo.toml`) and rewrites every plugin/embedded version token to match —
+   from the `0.0.0` sentinel or any stale value. The tree is then consistent at
+   the current version, so `bump_version.py`'s guard keeps working.
+2. **Release → `bump_version.py`.** The common case is a version-only release
+   (the plugin rarely changes): bump moves plugin manifests + embedded copies to
+   the new version alongside the binary stamps, so the plugin tracks CE for free.
+3. **Gate → `verify_version.py`.** In `release.yml`, before any asset is
+   published, it asserts plugin == embedded == binary == the release tag. A
+   divergent plugin version cannot ship — the release aborts.
+
+The embedded bundle carries all 10 host plugins as one EE-generated artifact; CE
+cannot regenerate its *content* (only the `claude-code` host has source in
+`distribution/plugin/`). These scripts stamp the *version* in place — content
+freshness is the publish step's responsibility.
 
 ## The 16 stamp sites (what the scripts own)
 

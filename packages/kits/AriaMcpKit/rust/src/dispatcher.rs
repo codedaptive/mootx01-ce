@@ -55,6 +55,16 @@ use crate::vault_tools::VaultJobLedger;
 /// Parity: mirrors Swift `ARIA_MCPDispatcher.supportedProtocolVersions` exactly.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-03-26", "2024-11-05"];
 
+/// Host-injected provider for the upstream-release advisory surfaced as an
+/// `update_available:` line by `moot_estate_ping` / `moot_estate_status`.
+/// Returns the advisory line (e.g. "v1.0.34 is available (installed 1.0.33)
+/// — upgrade with `mootx01 upgrade`") or `None` when there is nothing to
+/// say. The host owns rate limiting, timeouts, and the network boundary;
+/// the kit only calls it from the two orientation tools and renders the
+/// line. `Arc` because the dispatcher is shared across HTTP connection
+/// threads. Rust twin of Swift's `ToolDispatcher.updateAdvisoryProvider`.
+pub type UpdateAdvisoryProvider = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// The method router and tool registry. Owns the estate registry and
 /// the tool list; dispatches each inbound request to the right handler.
 pub struct Dispatcher {
@@ -89,6 +99,19 @@ pub struct Dispatcher {
     /// Computed once at server startup by the host binary (mootx01-cli's
     /// `serve` command); this kit never reads `~/.claude/plugins/` itself.
     pub(crate) version_skew: String,
+    /// Upstream-release advisory provider: returns a one-line "a newer
+    /// release exists" message, or `None` when there is nothing to say.
+    /// Unlike `version_skew` this is a CLOSURE, not a startup-computed
+    /// string: the resident daemon is long-lived and releases ship while
+    /// it is running, so freshness requires evaluation at call time. The
+    /// host owns rate limiting and the network boundary (mootx01-cli's
+    /// `UpdateAdvisor` — this kit never touches the network); the kit only
+    /// renders the returned line. Evaluated in `moot_estate_ping` /
+    /// `moot_estate_status` ONLY, mirroring Swift's
+    /// `ToolDispatcher.updateAdvisoryProvider`. `None` (the default) means
+    /// the host wired no provider — stdio one-shots and the aria-mcp dev
+    /// server.
+    pub(crate) update_advisory: Option<UpdateAdvisoryProvider>,
     /// Injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
     ///
     /// `None` when no stats store is configured (stdio mode, test harnesses,
@@ -127,8 +150,22 @@ impl Dispatcher {
             sensitivity_ledger: SensitivityGrantLedger::new(),
             build_serial: build_serial.to_owned(),
             version_skew: version_skew.to_owned(),
+            // Wired post-construction via `with_update_advisory` — the Rust
+            // equivalent of Swift's defaulted `updateAdvisoryProvider: nil`
+            // initializer parameter, chosen so the many existing
+            // `Dispatcher::new` call sites (tests included) stay unchanged.
+            update_advisory: None,
             monitoring_control,
         }
+    }
+
+    /// Builder-style injection of the upstream-release advisory provider
+    /// (see `UpdateAdvisoryProvider`). Called by the serve hosts after
+    /// `new`; `None` (the default) leaves ping/status without an
+    /// `update_available` line.
+    pub fn with_update_advisory(mut self, provider: Option<UpdateAdvisoryProvider>) -> Self {
+        self.update_advisory = provider;
+        self
     }
 
     /// Handle one parsed inbound request. Returns the response.
@@ -234,6 +271,9 @@ impl Dispatcher {
         crate::dispatch::dispatch_tool_with_ledgers(
             name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
             &self.build_serial, &self.version_skew,
+            // Upstream-release advisory provider — evaluated by ping/status
+            // only; None when the host wired none.
+            self.update_advisory.as_ref(),
             // ADR-025 wave 8.2: thread the monitoring-control seam so the
             // interface-tools layer can reach it without importing observer_sink.
             self.monitoring_control.as_deref(),

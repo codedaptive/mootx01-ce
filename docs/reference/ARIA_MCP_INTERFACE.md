@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.19.0
+version: 1.21.0
 status: active
-date: 2026-07-12
+date: 2026-07-16
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -52,7 +52,10 @@ purpose: |
   per-tool usage guide strings (`TeachmeGuides.swift`),
   coaching-hint trigger logic (`CoachingEngine.swift`),
   CognitionKit recipe tools (`RecipeTools.swift`), reasoning-lens tools
-  (`LensTools.swift`), vault control tools (`VaultTools.swift`).
+  (`LensTools.swift`), vault control tools (`VaultTools.swift`),
+  recall discrimination helper (`RecallDiscrimination.swift`),
+  Anthropic memory_20250818 adapter (`MemoryToolAdapter.swift`; Rust: `memory_adapter.rs`),
+  monitoring-control injection seam (`MonitoringControl.swift`).
 - `Sources/aria-mcp/` — the `aria-mcp` executable (`AriaMCPMain.swift`):
   opens an estate and runs the selected transport — stdio by default, the
   resident loopback HTTP transport when `MOOTX01_HTTP_PORT` is set.
@@ -64,9 +67,11 @@ purpose: |
 The Rust binary is a parity sibling; the shipped runtime is the Swift binary —
 the `mootx01` executable target in `apps/mootx01/Package.swift`, which links the
 `AriaMCP` library and runs `mootx01 serve` (the default subcommand on macOS).
-The Rust binary
-links the same 55-tool surface backed by the Rust kit stack (genius-locus-kit,
-locus-kit, vault-kit, cognition-kit, neuron-kit). All five
+The Rust binary links the same 68-tool surface (62 vault-off) backed by the Rust kit stack
+(genius-locus-kit, locus-kit, vault-kit, cognition-kit, neuron-kit). The opt-in
+Anthropic memory_20250818 adapter (`memory_adapter.rs`) adds one `memory` tool when
+`MOOTX01_MEMORY_TOOL=1`, raising the count to 69/63 — same gate as the Swift port
+(`MemoryToolAdapter.swift`). Default (absent/≠ "1") preserves the 68/62 baseline. All five
 `moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
 (`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
 manifest owned by the ARIA layer. The fifth vault
@@ -503,6 +508,45 @@ install time) catches skew regardless of install order.
 This kit never reads `~/.claude/plugins/` or knows a product version
 itself — the host binary computes the advisory string and injects it,
 same separation of concerns as `buildSerial`/`serverIdentity`.
+
+### Upstream-release advisory (`update_available`)
+
+Both `moot_estate_ping` and `moot_estate_status` append an OPT-IN
+`update_available: <text>` line — present only when a newer product release
+exists on the release feed than the running binary; absent entirely
+otherwise. Sibling of `version_skew` (which reports LOCAL plugin/binary
+skew) and confined to the same two session-orientation tools on purpose:
+MCP clients orient with ping/status at session start, so one line there
+informs every client once without nagging on the other tools.
+
+**Field text:** ``v<latest> is available (installed <current>) — upgrade with `mootx01 upgrade` ``.
+
+**Threading — a provider, NOT a startup-computed string:** the resident
+daemon is long-lived and releases ship while it is running, so unlike
+`version_skew` the value cannot be computed once at startup. The host
+injects a closure the two tools evaluate lazily:
+- Swift: `ToolDispatcher.updateAdvisoryProvider: (@Sendable () async -> String?)?`,
+  wired by `ServeCommand` from `MootInstallerCore.UpdateAdvisor` (an actor
+  wrapping `ReleaseDownloader.latestTag()`).
+- Rust: `Dispatcher.update_advisory: Option<UpdateAdvisoryProvider>` via the
+  `with_update_advisory` builder, wired by `commands::serve::run` from
+  `core::update_advisor::UpdateAdvisor` (wrapping
+  `release::latest_version_within(Some(4))`).
+
+**Non-annoying / non-blocking contract (host-owned):** the advisor caches
+the probe result behind a 24h TTL (one release-feed hit per day per daemon,
+and only when ping/status is actually called), bounds a single probe to ~4s
+(a hung feed host cannot hold a ping), and collapses failures to silence
+AND caches them (an offline machine probes once per TTL window, not once
+per ping). `MOOTX01_NO_UPDATE_CHECK` disables the surface entirely — the
+same kill switch honored by the Claude Code plugin's SessionStart update
+hook (`moot_update_check.py`), so one documented variable turns off every
+update phone-home surface.
+
+**Scope:** resident daemons only. stdio one-shot serves and
+`aria-mcp-server` (both ports) never wire a provider — ping is documented
+as returning immediately, and plugin-capable hosts reach the resident over
+HTTP anyway (ADR-024 §2).
 
 ### Session protocol block — `ToolDispatcher.ARIASessionProtocol`
 
@@ -1162,6 +1206,40 @@ alongside `build_serial`. Computed once at server startup by the host binary
 the kit itself, which does not read `~/.claude/plugins/` or know a product
 version. `aria-mcp-server` (both ports) has no plugin concept and always
 passes the empty/nil default. Both ports at parity.
+
+### 1.21.0 -- 2026-07-16
+Rust leg Anthropic memory_20250818 adapter parity (M-MEMTOOL-1): `memory_adapter.rs`
+implements all six commands (view, create, str_replace, insert, delete, rename),
+the `MOOTX01_MEMORY_TOOL=1` opt-in gate, the Normal-tier sensitivity filter (mirrors
+`isMemoryAdapterVisible` in Swift), and sensitivity-tier carry-forward on edits so
+elevated-tier drawers are not silently downgraded. `tool_list.rs` gains
+`memory_enabled()`, `build_tool_list_with_flags(vault_on, memory_on)`, and the
+`memory_adapter_tool()` schema; `build_tool_list()` and `build_tool_list_with_vault_flag()`
+delegate to it. When `memory_on=true` the `memory` tool is prepended (first in list,
+mirrors Swift `memoryAdapterTools()` prepend order), raising the count to 72/66.
+Existing dispatch and count tests updated to use `build_tool_list_with_flags(vault_enabled(), false)`
+for determinism (prevents racing with env-var mutations in memory-tool tests). New test
+file `tests/memory_adapter_tests.rs`: 19 tests covering env gate, tool-list projection,
+and per-command happy + error paths. Updated §1 Rust package layout and Rust binary
+description to document `memory_adapter.rs` and the opt-in gate.
+
+### 1.20.0 -- 2026-07-16
+Upstream-release advisory: `moot_estate_ping` / `moot_estate_status` gain an
+opt-in `update_available:` line (see the "Upstream-release advisory"
+subsection beside the version-skew one) when a newer product release exists
+than the running binary. `ToolDispatcher` (Swift) gains
+`updateAdvisoryProvider: (@Sendable () async -> String?)?` (defaulted `nil`);
+`Dispatcher` (Rust) gains `update_advisory: Option<UpdateAdvisoryProvider>`
+via the `with_update_advisory` builder (the Rust equivalent of the defaulted
+Swift parameter — existing `Dispatcher::new` call sites unchanged), threaded
+through `dispatch_tool_with_ledgers` / `interface_tools::dispatch` alongside
+`version_skew`. Unlike `version_skew` the value is a lazily-evaluated
+provider, not a startup-computed string — the resident daemon outlives
+releases. Rate limiting (24h TTL), the 4s probe bound, failure caching, and
+the `MOOTX01_NO_UPDATE_CHECK` kill switch live in the host advisor
+(`MootInstallerCore.UpdateAdvisor` / `mootx01-cli::core::update_advisor`);
+the kit only renders the line. Resident daemons only; stdio one-shots and
+`aria-mcp-server` (both ports) never wire a provider. Both ports at parity.
 
 ### 1.19.0 -- 2026-07-12
 Contradiction hunter MCP surface (both ports at parity, tool count 66 → 68):

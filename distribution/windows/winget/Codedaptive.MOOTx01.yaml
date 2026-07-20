@@ -9,7 +9,7 @@
 # (see WINGET.md).
 
 PackageIdentifier: Codedaptive.MOOTx01
-PackageVersion: 1.0.32
+PackageVersion: 1.0.33
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.12.0
