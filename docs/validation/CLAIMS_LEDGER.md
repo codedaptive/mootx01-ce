@@ -578,8 +578,8 @@ substrate must meet. Three are pinned as load-bearing.
   is Swift SimdKernel at 594 microseconds (11% above floor) and
   Rust SimdKernel at 631 microseconds (18% above floor); see
   the baseline in
-  `docs/validation/substrate_math_performance/README.md`
- . The 100 microsecond budget is unmet by
+  `docs/validation/substrate_math_performance/README.md`.
+  The 100 microsecond budget is unmet by
   any kernel measured; section 17.5 analysis suggests the
   memory bandwidth floor is the binding constraint, not the
   algorithm. Future work would require either reducing bytes
@@ -590,8 +590,8 @@ substrate must meet. Three are pinned as load-bearing.
 ## Protocol contracts: the nine-verb surface
 
 Invariant I-7 fixes the verb count at nine. The verbs are
-defined in the cookbook section 10 and implemented at commit
-the interface specs. Each verb has signature, preconditions,
+defined in the cookbook section 10 and implemented in the
+GeniusLocusKit verb surface. Each verb has signature, preconditions,
 and postconditions that conformance tests must verify.
 
 ### V1: capture
@@ -601,9 +601,8 @@ and postconditions that conformance tests must verify.
 - Status: active in v1.0
 - Evidence: evidenced by the verb-surface tests.
 - Evidence pointer:
-  `GeniusLocusKit/Sources/GeniusLocusKit/Verbs/VerbSurface.swift`
- ; specific test path to
-  confirm.
+  `GeniusLocusKit/Sources/GeniusLocusKit/Verbs/VerbSurface.swift`;
+  specific test path to confirm.
 
 ### V2: recall
 
@@ -666,7 +665,7 @@ and postconditions that conformance tests must verify.
 - Status: active in v1.0
 - Evidence: evidenced by the verb-surface tests; propose is
   the emission path for the six standing signals.
-- Evidence pointer: same as V1; the standing-signals tests at.
+- Evidence pointer: same as V1, plus the standing-signals tests.
 
 ### V9: associate
 
