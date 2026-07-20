@@ -4,7 +4,7 @@ import Foundation
 
 /// `NoteIR` is the language-neutral boundary contract. These tests pin
 /// the JSON-serializability that lets a future non-Swift producer emit
-/// the same IR with a mechanical port (ADR-VAULTKIT-001 (f)).
+/// the same IR with a mechanical port (Vault import/export (f)).
 @Suite("NoteIR boundary contract")
 struct NoteIRTests {
 

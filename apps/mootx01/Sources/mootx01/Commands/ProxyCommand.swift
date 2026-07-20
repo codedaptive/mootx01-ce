@@ -16,8 +16,7 @@
 // into Claude Desktop's config (instead of the bare serve entry) when the
 // client has useProxyBridge: true — see ClientConfig.swift and Installer.swift.
 //
-// References: ADR-LOOPBACKHTTP-001, ARIA_MCP_SPEC_v0.2 §6 (transport),
-// INSTALLER_SPEC_v0.1 §client-wiring.
+// The proxy owns transport adaptation only; the installer owns client wiring.
 
 #if os(macOS)
 import Foundation

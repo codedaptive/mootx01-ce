@@ -38,7 +38,7 @@ uuid       = { version = "1", features = ["v4"] }
 interprocess = { version = "2" }
 
 # In-repo kit path deps. From apps/moot-mgr/rust/, the repo root is ../../../
-# Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 — the host composes
+# Permitted per in-repository dependency direction — the host composes
 # these kits (it is the composition/host layer, not a primitive). Recorded as
 # CONSUMED in the mission blast-radius report.
 #
@@ -59,7 +59,7 @@ locus-kit        = { path = "../../../packages/kits/LocusKit/rust" }
 # corpus-kit-providers: the five-signal ensemble (default_ensemble()) moot-mgr
 # threads into provision (the provision-with-corpus path that lights Lane D —
 # DEBT-2). moot-mgr is the production caller that owns the 1.0 recall default.
-# Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; recorded in the
+# Permitted per in-repository dependency direction; recorded in the
 # 6a-iii-wire blast-radius report. Downstream of providers — no inversion.
 corpus-kit-providers = { path = "../../../packages/kits/CorpusKit/rust-providers" }
 # genius-locus-kit: EstateCoordinator::provision (provision-with-corpus, DEBT-2)
@@ -69,7 +69,7 @@ genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 # aria-lexicon-lib: the ARIA grammar vocabulary (Noun, Verb, Adjective, accepted_verbs)
 # used to build the /api/lexicon read-surface payload. The host is the composition
 # layer for the read-API; sourcing the lexicon from the canonical lib gives byte-
-# identical JSON to the Swift host. Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# identical JSON to the Swift host. Permitted per in-repository dependency direction.
 aria-lexicon-lib = { path = "../../../packages/libs/AriaLexiconLib/rust" }
 # lattice-lib: Fdc::is_available(), Fdc::data_version(), and Fdc::version() for
 # the /api/lexicon fdcAvailable / fdcDataVersion / latticeVersion fields. Same
@@ -79,6 +79,6 @@ lattice-lib      = { path = "../../../packages/libs/LatticeLib/rust" }
 # NeuronKit capabilities shipped in this build, sourced the same way the Swift
 # host sources shippedNeuronKitCapabilities. Replaces the dead metrics-read path
 # (collect_capabilities), closing the Swift/Rust divergence (Finding #3).
-# Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; host layer dep,
+# Permitted per in-repository dependency direction; host layer dep,
 # not a kit-to-kit inversion. cognition-kit has no runtime external deps (serde only).
 cognition-kit    = { path = "../../../packages/kits/CognitionKit/rust" }

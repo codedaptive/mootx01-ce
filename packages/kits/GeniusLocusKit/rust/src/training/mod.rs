@@ -5,7 +5,7 @@
 // semantics, same numeric outputs against shared test vectors.
 //
 // References:
-//   DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21  manifest-set,
+//   the training transition threshold  manifest-set,
 //                                                  transition-count
 //                                                  gate, default 500.
 //   Engineering cookbook §11 / §15                 enrichment pipeline

@@ -141,7 +141,7 @@ struct EstateMaintenanceReaderTests {
     @Test("fingerprintBaselines returns a real per-node drift observation after capture")
     func fingerprintBaselinesReturnsRealObservationAfterCapture() async throws {
         // The reader computes OR-aggregates of drawer bitmaps grouped by
-        // parentNodeId (room-level node per ADR-017). After a capture the
+        // parentNodeId (room-level node under the node-tree model). After a capture the
         // reader returns one observation for that node with a real,
         // non-negative drift fraction.
         let (kit, handle) = try await makeKit()

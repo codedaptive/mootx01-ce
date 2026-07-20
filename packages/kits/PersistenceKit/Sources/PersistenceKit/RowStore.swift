@@ -174,7 +174,7 @@ public extension RowStore {
         }
     }
 
-    // MARK: - As-of temporal query (ADR-017 §15)
+    // MARK: - As-of temporal query
 
     /// Temporal query: returns rows visible at the given `AsOfCoordinate`.
     ///

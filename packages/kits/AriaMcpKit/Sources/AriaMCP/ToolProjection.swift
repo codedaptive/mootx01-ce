@@ -65,7 +65,7 @@ public enum ToolProjection {
     ///
     /// The env var `MOOTX01_VAULT` governs the choice: any value other than
     /// the literal string `"0"` (including absent/empty) means vault is ON.
-    /// Default is vault-on per ADR-015.
+    /// Default is vault-on.
     ///
     /// Takes an explicit environment dictionary so the logic is testable
     /// without mutating `ProcessInfo.processInfo.environment` (which is
@@ -80,7 +80,7 @@ public enum ToolProjection {
     /// the literal string `"0"` (including absent/empty) means vault is ON.
     /// The daemon has this variable set from the `mootx01 install --vault-on/--vault-off`
     /// flag at install time (written into the launchd plist EnvironmentVariables
-    /// block so it survives restarts). Default is vault-on per ADR-015.
+    /// block so it survives restarts). Default is vault-on.
     public static var vaultEnabled: Bool {
         vaultEnabled(environment: ProcessInfo.processInfo.environment)
     }
@@ -103,7 +103,7 @@ public enum ToolProjection {
     /// `teachme: true` on any tool to receive its usage guide.
     ///
     /// Vault tools are omitted when `MOOTX01_VAULT=0` (installed with
-    /// `--vault-off`). All other tiers are unaffected. See ADR-015.
+    /// `--vault-off`). All other tiers are unaffected. See the open 1.0 Vault posture.
     public static func tools() -> [ProjectedTool] {
         tools(environment: ProcessInfo.processInfo.environment)
     }
@@ -130,7 +130,7 @@ public enum ToolProjection {
         // Vault tools and the filesystem-importing palace import tool are gated:
         // omitted from tools/list when MOOTX01_VAULT=0 (installed with
         // --vault-off). Default (env absent or any value ≠ "0") is vault-on
-        // (ADR-015). `moot_palace_import` is an interface-shaped maintenance
+        //. `moot_palace_import` is an interface-shaped maintenance
         // tool, but it reads from the local filesystem and opens arbitrary
         // SQLite files, so it carries the same security posture as vault
         // import/export and is hidden under the same gate.
@@ -168,7 +168,7 @@ public enum ToolProjection {
                     properties: [
                         "content": stringSchema("The text content to remember."),
                         "location": stringSchema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
-                        "wing": stringSchema("Optional wing name to route this memory into a specific wing (ADR-016). When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
+                        "wing": stringSchema("Optional wing name to route this memory into a specific wing. When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
                         "sensitivity": stringSchema("Optional sensitivity: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
                         "exportability": stringSchema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Use moot_update_memory with mutation=correctExportability(public) to promote an existing private memory. Drawers born public are immediately returned by filter:exportable searches. Omit to use the default; null is invalid."),
                         "kind": stringSchema("Optional content kind: prose (default), code, transcript, list, structuredJSON, imageCaption. Omit to use the default; null is invalid."),
@@ -187,7 +187,7 @@ public enum ToolProjection {
                         "query": stringSchema("Natural-language search query."),
                         "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
                         "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. null is invalid."),
-                        "wing": stringSchema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                        "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                         "explain": booleanSchema("Return per-hit explanation blocks when true. Omit to use the default; null is invalid."),
                         "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                         "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
@@ -276,7 +276,7 @@ public enum ToolProjection {
                     properties: [
                         "id": stringSchema("Memory row identifier."),
                         "location": stringSchema("New location hint (free-form string; server resolves to room coordinate)."),
-                        "wing": stringSchema("Optional target wing name for cross-wing moves (ADR-016). When supplied, the memory is moved to this wing AND the given location. When absent, only the room changes and the wing stays unchanged. Example: \"Professional\", \"Personal\". null is invalid."),
+                        "wing": stringSchema("Optional target wing name for cross-wing moves. When supplied, the memory is moved to this wing AND the given location. When absent, only the room changes and the wing stays unchanged. Example: \"Professional\", \"Personal\". null is invalid."),
                     ],
                     required: ["id", "location"]
                 )),
@@ -464,7 +464,7 @@ public enum ToolProjection {
                 )),
                 provenance: .interface
             ),
-            // Monitoring control (ADR-025 wave 8.2) — sibling to moot_estate_status.
+            // Monitoring control — sibling to moot_estate_status.
             // Read/write the daemon's telemetry monitoring flag via the injected
             // MonitoringControl seam. "absent enabled" = read path (no mutation);
             // "present enabled" = write path (persists flag + monitoring_source=user).

@@ -36,7 +36,7 @@
 
 import Foundation
 
-/// Outcome of `Installer.uninstall` for a JSON-format client (ADR-024 §4:
+/// Outcome of `Installer.uninstall` for a JSON-format client (plugin-owned MCP connections:
 /// ownership-aware removal). Non-JSON formats (TOML, Continue/Hermes YAML)
 /// do not yet carry the ownership check and always report `.removed` when a
 /// prior entry existed — see the doc comment on `uninstall(...)`.
@@ -46,12 +46,12 @@ public enum UninstallOutcome: Equatable, Sendable {
     /// An entry existed and was removed (JSON: only when `.oursDefault`;
     /// other formats: unconditionally, pre-existing behavior).
     case removed
-    /// A JSON entry existed but classified `.foreign` (ADR-024 §4) — left
+    /// A JSON entry existed but classified `.foreign` — left
     /// untouched. Carries the reason and the config path for reporting.
     case retainedForeign(reason: String, path: String)
 }
 
-/// Outcome of `Installer.dedupeDirectEntry` (ADR-024 §3: install-time
+/// Outcome of `Installer.dedupeDirectEntry` (plugin-owned MCP connections: install-time
 /// dedupe when a client's plugin already owns the connection).
 public enum DirectEntryDedupeOutcome: Equatable, Sendable {
     /// No existing direct entry (or the config format isn't a dedupe target
@@ -514,7 +514,7 @@ public enum Installer {
         }
     }
 
-    /// ADR-024 §3/§4: when `client`'s plugin already owns the MCP connection
+    /// when `client`'s plugin already owns the MCP connection
     /// (detected by the caller via `PluginDetector`), the CLI installer must
     /// skip writing a competing direct entry AND clean up any direct entry a
     /// PRIOR install wrote — but only when that entry is confirmed
@@ -652,7 +652,7 @@ public enum Installer {
     ///   - homeDirectory: user's home directory.
     ///   - workingDirectory: CWD at uninstall time.
     ///   - local: when true and client is Claude Code, target `.mcp.json`.
-    /// - Returns: the outcome (ADR-024 §4). JSON-format clients are
+    /// - Returns: the outcome. JSON-format clients are
     ///   ownership-aware: a `.foreign` entry (env override — e.g. a
     ///   development rig) is reported and left untouched rather than
     ///   removed. Other formats (TOML, Continue/Hermes YAML) remove
@@ -988,7 +988,7 @@ public enum Installer {
     /// When `url` is non-nil the entry is written as a URL entry
     /// (`url: <url>`). When `url` is nil a command entry is written
     /// (`command: <binaryPath>\nargs: []`) to avoid trusting a fixed
-    /// unauthenticated loopback address (ADR-LOOPBACKHTTP-001).
+    /// unauthenticated loopback address.
     public static func mergeIntoHermesYAML(
         at configURL: URL,
         serverName: String,
@@ -1184,7 +1184,7 @@ public enum Installer {
         return result
     }
 
-    /// Ownership-aware JSON removal (ADR-024 §4). A `.foreign` entry (env
+    /// Ownership-aware JSON removal. A `.foreign` entry (env
     /// override — e.g. a development rig pointed at a non-default data dir
     /// or estate) is reported and left untouched; only a `.oursDefault`
     /// entry is actually removed from the file. Absent file content, absent

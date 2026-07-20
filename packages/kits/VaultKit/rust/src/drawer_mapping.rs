@@ -49,11 +49,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// Resolve a batch of drawer parent_node_ids to (wing_name, room_name)
-/// pairs using the estate's NodeStore. ADR-017 removed wing/room from
+/// pairs using the estate's NodeStore. node-tree integrity removed wing/room from
 /// the Drawer struct; consumers obtain display names from the node tree.
 ///
 /// Returns an empty map when the estate has no node store (legacy estates
-/// opened before ADR-017). Callers fall back to empty strings for
+/// opened before node-tree integrity). Callers fall back to empty strings for
 /// unresolved IDs.
 pub fn resolve_drawer_node_names(
     coordinator: &EstateCoordinator,
@@ -108,7 +108,7 @@ fn build_node_name_map(
 // MARK: - ExportProjection
 
 /// The notes an export projects plus the per-tier exclusion counts the
-/// ADR-007 Decision 2 bulk-channel rules produced. Exclusions are reported,
+/// data-movement privacy tiers bulk-channel rules produced. Exclusions are reported,
 /// never silent (zero-loss reporting symmetry with C-13). Mirrors Swift
 /// `DrawerMapping.ExportProjection`.
 #[derive(Debug, Clone, PartialEq)]
@@ -204,7 +204,7 @@ impl DrawerMapping {
     // MARK: - Export: estate → IR
 
     /// Read an estate's drawers and outgoing `.references` tunnels and project
-    /// each drawer to a `NoteIR`, enforcing the ADR-007 Decision 2 privacy-tier
+    /// each drawer to a `NoteIR`, enforcing the data-movement privacy tiers privacy-tier
     /// rules and counting what they excluded. Mirrors Swift
     /// `DrawerMapping.export(kit:handle:scope:)`.
     ///
@@ -300,7 +300,7 @@ impl DrawerMapping {
             }
         }
 
-        // ADR-007 Decision 2 tier partition. The predicates encode the
+        // data-movement privacy tiers tier partition. The predicates encode the
         // normative 4→3 mapping (Normal → normal+elevated, Private →
         // restricted, Secret → secret) — see `AdjectiveSensitivity` in
         // LocusKit's `adjectives.rs`.
@@ -324,12 +324,12 @@ impl DrawerMapping {
         }
 
         // Resolve display names (wing, room) for all filtered drawers in one
-        // batch. ADR-017 removed wing/room from the Drawer struct; consumers
+        // batch. node-tree integrity removed wing/room from the Drawer struct; consumers
         // obtain them from the node tree via Estate.node_store().
         let node_names = resolve_drawer_node_names(coordinator, handle, &drawers);
 
         // Fetch tunnels once per distinct source wing, not once per drawer.
-        // Wing names are resolved from the node tree (ADR-017).
+        // Wing names are resolved from the node tree.
         let wings: std::collections::HashSet<String> = drawers
             .iter()
             .filter_map(|d| node_names.get(&d.parent_node_id).map(|(w, _)| w.clone()))
@@ -466,9 +466,9 @@ impl DrawerMapping {
     ///   - A fact with `subject == "record:kind"` and `predicate == "is"`
     ///     becomes the drawer's kind discriminator (hard-close #29-B round-trip).
     ///
-    /// ADR-016 vault layout:
+    /// wing organization vault layout:
     ///   - stable_source_key: `"<wing>/<room>/<slug>"` — wing is the top-level
-    ///     vault folder (ADR-016 Consequences: wing = top folder; all drawers
+    ///     vault folder (wing organization Consequences: wing = top folder; all drawers
     ///     including hint memories in AI_Charter_Hint room export normally).
     ///     Layout is wing-aware and wing-scopable.
     ///   - frontmatter gains `moot_id`: the drawer's `lineage_id` UUID string
@@ -476,7 +476,7 @@ impl DrawerMapping {
     ///   - original_path: the substrate room (not the vault path).
     ///   - NoteIR.moot_id: set to `drawer.lineage_id` for identity pass-through.
     ///
-    /// Wing round-trip note (ADR-016): wing is preserved in the vault folder path
+    /// Wing round-trip note: wing is preserved in the vault folder path
     /// AND in the `wing` frontmatter key. On re-import, `make_capture_frame` reads
     /// the wing from `frontmatter["wing"]` and (a) strips it from path_components
     /// used for the room value and (b) sets `CaptureFrame.wing` so the capture verb
@@ -486,8 +486,8 @@ impl DrawerMapping {
     pub fn note_ir_from(drawer: &Drawer, wing: &str, room: &str, references: &[&Tunnel], kg_facts: &[KGFact]) -> NoteIR {
         // Human-readable slug from the drawer's content. Collision-safe via UUID suffix.
         let slug = Self::slug(&drawer.content, &drawer.id);
-        // Path: <wing>/<room>/<slug> — wing is the top-level vault folder (ADR-016).
-        // Wing and room are resolved from the node tree (ADR-017) and passed by the caller.
+        // Path: <wing>/<room>/<slug> — wing is the top-level vault folder.
+        // Wing and room are resolved from the node tree and passed by the caller.
         let stable_key = format!("{}/{}/{}", wing, room, slug);
 
         let mut frontmatter: std::collections::HashMap<String, String> =
@@ -509,7 +509,7 @@ impl DrawerMapping {
         frontmatter.insert("moot_id".to_owned(), drawer.lineage_id.to_string());
         // Origin date rides frontmatter (no substrate origin-date column).
         // `created:` is the Obsidian key the adapter reads back.
-        // drawer.event_time is epoch MILLISECONDS (ADR-023) — format it with
+        // drawer.event_time is epoch MILLISECONDS — format it with
         // ms_to_iso8601 so the exported `created:` date carries the same
         // sub-second precision Swift's OccurredAt writes.
         let event_iso = ms_to_iso8601(drawer.event_time);
@@ -521,7 +521,7 @@ impl DrawerMapping {
             }
         }
         // Sensitivity rides frontmatter so a round-trip preserves the tier
-        // (ADR-007 Decision 2; import reads the key back into
+        // (data-movement privacy tiers; import reads the key back into
         // `CaptureFrame.sensitivity`). `Normal` is omitted — it is the
         // capture default, so absence round-trips to the same value and
         // pre-existing exports stay byte-identical.
@@ -598,7 +598,7 @@ impl DrawerMapping {
             frontmatter,
             links,
             tags,
-            room.to_owned(), // original_path: room only — no wing prefix (ADR-017: resolved from node tree)
+            room.to_owned(), // original_path: room only — no wing prefix (node-tree integrity: resolved from node tree)
             Some(OccurredAt::new(event_iso)),
             None,
             Some(drawer.lineage_id), // moot_id: the stable lineage UUID
@@ -822,7 +822,7 @@ impl DrawerMapping {
         // re-imports and must not abort the whole batch. Gracefully skip the note
         // and continue. Other errors (storage failures, I/O) propagate.
         // `now` is epoch-MILLISECONDS at the bridge boundary and the drawer's
-        // `filed_at`/`event_time` columns are epoch-milliseconds too (ADR-023),
+        // `filed_at`/`event_time` columns are epoch-milliseconds too,
         // so it flows through directly — no unit conversion, sub-second preserved.
         let drawer = match coordinator.capture_with_mode(handle, frame, now, WriteMode::Regular) {
             Ok(d) => d,
@@ -854,7 +854,7 @@ impl DrawerMapping {
             }
         };
 
-        // Apply KG facts from the note (ADR-007 Decision 1 / P0 BLOCKER
+        // Apply KG facts from the note (data-movement privacy tiers / P0 BLOCKER
         // resolution: facts must land as substrate KG facts, not report-only).
         // Each FactIR triple becomes one KGFact anchored to the captured drawer.
         // Mirrors Swift DrawerMapping.importNote facts loop.
@@ -866,7 +866,7 @@ impl DrawerMapping {
                     &fact.predicate,
                     &fact.object,
                     &drawer.id,
-                    now, // epoch-milliseconds (ADR-023)
+                    now, // epoch-milliseconds
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -884,7 +884,7 @@ impl DrawerMapping {
                     "has_value",
                     value,
                     &drawer.id,
-                    now, // epoch-milliseconds (ADR-023)
+                    now, // epoch-milliseconds
                 )
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         }
@@ -935,7 +935,7 @@ impl DrawerMapping {
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
         let mut tunnels_created = 0;
 
-        // Resolve wing/room for tunnel endpoints from the node tree (ADR-017:
+        // Resolve wing/room for tunnel endpoints from the node tree (node-tree integrity:
         // Drawer no longer stores wing/room). Fall back to note frontmatter
         // when node resolution fails (e.g. no NodeStore available).
         let (drawer_wing, drawer_room) = if let Some(ns) = estate.node_store() {
@@ -1061,7 +1061,7 @@ impl DrawerMapping {
     pub fn make_capture_frame(&self, note: &NoteIR, content: &str) -> (CaptureFrame, bool) {
         // Room resolution — priority order (mirrors Swift DrawerMapping.makeCaptureFrame):
         //   1. Explicit frontmatter `room` (round-trip identity; always wins).
-        //   2. Wing-prefix stripping (ADR-016): if the first path_component matches
+        //   2. Wing-prefix stripping: if the first path_component matches
         //      the `wing` frontmatter value and there is more than one component,
         //      strip the wing prefix before joining the remainder as the room.
         //   3. Full hierarchy from `path_components` joined with "/" when more than
@@ -1072,7 +1072,7 @@ impl DrawerMapping {
         //      only original_path).
         //   5. Hard default "imported" so I-5's non-empty room guard always holds.
         //
-        // Wing resolution (ADR-016): `CaptureFrame.wing` routes the drawer into
+        // Wing resolution: `CaptureFrame.wing` routes the drawer into
         // the named wing at capture time. Priority order:
         //   1. Frontmatter `wing` key — written by VaultKit on export, so a
         //      round-trip import restores the original wing faithfully.
@@ -1082,7 +1082,7 @@ impl DrawerMapping {
             explicit
         } else {
             // Determine content_components, stripping the wing prefix if the first
-            // component matches the `wing` frontmatter value (ADR-016 vault layout).
+            // component matches the `wing` frontmatter value (wing organization vault layout).
             let wing_key = note.frontmatter.get("wing").map(|s| s.as_str()).unwrap_or("");
             let content_components: &[String] =
                 if !wing_key.is_empty()
@@ -1156,7 +1156,7 @@ impl DrawerMapping {
         frame.source_type = SourceType::Imported;
         frame.provenance_channel = Channel::FileImport;
         // Sensitivity preserved from the IR when the adapter supplies it
-        // (ADR-007 Decision 2 — import is ungated, but the tier rides in).
+        // (data-movement privacy tiers — import is ungated, but the tier rides in).
         // Absent or unrecognised labels land at the `Normal` capture default
         // rather than failing the import.
         if let Some(label) = non_empty(note.frontmatter.get("sensitivity")) {
@@ -1210,7 +1210,7 @@ impl DrawerMapping {
             }
         });
 
-        // Wing resolution (ADR-016, see comment above).
+        // Wing resolution (wing organization, see comment above).
         // Frontmatter `wing` was written by VaultKit on export and is the
         // authoritative source for round-trip import. Human-authored notes
         // with no frontmatter wing get None → DEFAULT_WING_NAME at the seam.

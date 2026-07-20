@@ -1,4 +1,4 @@
-//! dreaming_omega_tests.rs — REM-OMEGA retire cycle (T13, ADR-021 Phase 7).
+//! dreaming_omega_tests.rs — REM-OMEGA retire cycle.
 //!
 //! Rust parity of `NeuronKitTests/DreamingOmegaTests.swift`.
 //!

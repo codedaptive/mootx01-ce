@@ -11,7 +11,7 @@
 //! substrate-lib and supplies `MerkleHash::leaf` or an accelerated kernel
 //! dispatch. This keeps PersistenceKit kernel-agnostic: the accelerated
 //! SHA-256 path (sha2 crate on Rust, CryptoKit on Apple) lives in the
-//! callback supplier, not here (ADR-017 §16 / NT-P2 Part 3).
+//! callback supplier, not here (node-tree integrity / NT-P2 Part 3).
 //!
 //! Decorator chain: caller → HashingRowStore → CachingRowStore → backend.
 
@@ -132,7 +132,7 @@ impl HashingRowStore {
     /// `content_hash` column into the values map. Non-hashable tables
     /// return the original values unchanged. Hash is computed BEFORE
     /// the backing write so the column is stored atomically with the
-    /// row (ADR-017 §16 — synchronous with the write).
+    /// row (node-tree integrity — synchronous with the write).
     fn augment_with_hash(
         &self,
         table: &str,

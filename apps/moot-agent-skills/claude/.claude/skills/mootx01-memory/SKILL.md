@@ -47,7 +47,7 @@ happened unless you actually queried it.
    - `moot_write_journal` for session continuity.
 
 5. Dream:
-   - Run `moot_reindex` after batch import to populate semantic indexes.
+   - Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
    - Run `moot_dream` after bulk import, major filing, or substantial memory growth.
    - Run `moot_consolidate` periodically to populate the distilled factoid tier.
 

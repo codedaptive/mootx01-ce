@@ -133,7 +133,7 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         // properties (node-tree migration); wing and room are both
         // recovered from the node tree via resolveNodeNames.
         //
-        // Wing integrity (ADR-016): wing is a grant/federation boundary.
+        // Wing integrity: wing is a grant/federation boundary.
         // All security/placement/lifecycle fields are preserved so a
         // branch snapshot is a faithful copy of the parent's estate state.
         // lineageID is intentionally NOT preserved — branch promotion is

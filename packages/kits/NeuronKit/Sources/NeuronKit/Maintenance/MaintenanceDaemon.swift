@@ -127,7 +127,7 @@ public actor MaintenanceDaemon {
         if let stored = try await policyStore.loadPolicy() {
             policy = stored
         }
-        // F6 / ADR-020: restore the daemon's idempotency/cycle memory so a restart
+        //  / manifest-backed daemon state: restore the daemon's idempotency/cycle memory so a restart
         // does not repeat suppressed proposals or reset its counters. Absent state
         // leaves the in-memory defaults in place.
         if let state = try await policyStore.loadDaemonState() {
@@ -434,8 +434,8 @@ public actor MaintenanceDaemon {
             ts: cycleTs
         ))
 
-        // ── Step 5.9: ADR-017 node invariant verification ────────────────
-        // Verify a subset of ADR-017 node-tree containment invariants from
+        // ── Step 5.9: node-tree invariant verification ────────────────
+        // Verify a subset of node-tree containment invariants from
         // the drawer corpus already fetched. Full invariant verification
         // (I-NT-1 through I-NT-6) requires node-table access not yet
         // exposed through the GLK public surface; the subset below uses
@@ -483,7 +483,7 @@ public actor MaintenanceDaemon {
         try await sink.recordCycleDiary(entry)
 
         lastTickAt = now
-        // F6 / ADR-020: persist the daemon's idempotency/cycle memory after every
+        //  / manifest-backed daemon state: persist the daemon's idempotency/cycle memory after every
         // cycle so a restart resumes from here. All cycle mutations — cycleCount,
         // proposedKeys, lastAuditCheckAt, lastTickAt — are complete by this point.
         // Default store impl is a no-op, so in-memory/test daemons are unaffected.

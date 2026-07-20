@@ -2,7 +2,7 @@
 //! vector storage. Parallel to the Swift `VectorKit` Swift Package.
 //!
 //! Refactored 2026-05-19 (Rust mission 6) per
-//! DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md section 4.6:
+//! current kit ownership section 4.6:
 //! - Storage flows through `persistence-kit`, not direct rusqlite. The
 //!   `VectorStore` is backend-agnostic: it holds an `Arc<dyn Storage>` and
 //!   never names a backend. The application selects the backend. The

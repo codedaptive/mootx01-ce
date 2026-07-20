@@ -1,4 +1,4 @@
-//! F6 / ADR-020: the manifest-backed policy stores persist dreaming/maintenance
+//!  / manifest-backed daemon state: the manifest-backed policy stores persist dreaming/maintenance
 //! policy and daemon cycle state THROUGH the substrate's public KV surface
 //! (DrawerStore::get_meta/set_meta). These tests prove the round-trip through a
 //! live in-memory estate store. Mirrors Swift `EstateManifestPolicyStoreTests`.

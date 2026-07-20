@@ -1,6 +1,6 @@
 // MerkleHash.swift
 //
-// Public hash pipeline for the Merkle content-integrity tree (ADR-017 §16).
+// Public hash pipeline for the Merkle content-integrity tree.
 //
 // Three functions: leaf (drawer content + vectors), interior (subtree of
 // children), tombstone (expunged payload). All three use SubstrateKernel's
@@ -25,7 +25,7 @@ import SubstrateKernel
 ///
 /// SubstrateLib cannot import VectorKit (dependency inversion), so this
 /// struct captures the fields needed to serialize vectors into the
-/// canonical byte format per ADR-017 §16. The caller (a kit that has
+/// canonical byte format under the node-tree model. The caller (a kit that has
 /// VectorKit in scope) converts VectorPayload to MerkleVectorInput
 /// before calling MerkleHash.leaf.
 public struct MerkleVectorInput: Sendable {
@@ -54,7 +54,7 @@ public enum MerkleHash {
 
     /// Hash a drawer's content and vectors into a ContentHash.
     ///
-    /// Canonical byte format per ADR-017 §16 v2:
+    /// Canonical byte format using the canonical node format:
     /// - MerkleDomain.LEAF (0x00)
     /// - drawer id: 16 bytes big-endian UUID
     /// - content: u64 BE length prefix + UTF-8 bytes
@@ -162,7 +162,7 @@ public enum MerkleHash {
 
     // MARK: - Canonical byte encoding (shared with KeyedCommitment)
 
-    /// Build the canonical leaf payload bytes per ADR-017 §16 v2.
+    /// Build the canonical leaf payload bytes using the canonical node format.
     ///
     /// Shared between MerkleHash.leaf (domain tag 0x00) and
     /// KeyedCommitment.commit (domain tag 0x03) — one encoding,
@@ -211,7 +211,7 @@ public enum MerkleHash {
             // Float payload: u32 BE float count, then IEEE-754 LE floats.
             appendU32BE(&bytes, UInt32(vec.floats.count))
             for f in vec.floats {
-                // IEEE-754 single-precision, little-endian per ADR-017 §16.
+                // IEEE-754 single-precision, little-endian under the node-tree model.
                 var le = f.bitPattern.littleEndian
                 withUnsafeBytes(of: &le) { bytes.append(contentsOf: $0) }
             }

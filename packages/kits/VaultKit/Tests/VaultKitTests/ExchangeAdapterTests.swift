@@ -369,7 +369,7 @@ struct ExchangeAdapterTests {
         let reread = try ExchangeAdapter().toIR(vaultURL: out)
         #expect(reread.count == 2)
 
-        // The audit receipt landed in the estate diary (ADR-007 D2).
+        // The audit receipt landed in the estate diary.
         let receipts = try await kit.readDiaryEntries(
             in: handle, agentName: VaultBridge.receiptAgentName)
         #expect(receipts.count == 1)

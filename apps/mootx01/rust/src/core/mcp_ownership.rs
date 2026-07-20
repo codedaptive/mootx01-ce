@@ -1,4 +1,4 @@
-//! core/mcp_ownership.rs — ADR-024 §3/§4: MCP connection ownership and
+//! core/mcp_ownership.rs — plugin-owned MCP connections: MCP connection ownership and
 //! install-moment dedupe. Rust twin of Swift's MCPEntryOwnership.swift —
 //! keep the two in sync by hand; there is no shared source between the
 //! ports for this classification.
@@ -6,7 +6,7 @@
 //! Two install moments can wire a client's MCP connection: the CLI installer
 //! (this binary) and the Claude Code plugin (`mootx01@mootx01`, a
 //! declarative manifest with no install-time script). When both are
-//! present, the plugin is the preferred connection owner (ADR-024 §1) and
+//! present, the plugin is the preferred connection owner and
 //! the installer must detect it, skip writing a competing direct entry, and
 //! clean up any direct entry a PRIOR install wrote — but only when that
 //! entry is confirmed `OursDefault` (§4). An entry carrying a data-dir/
@@ -18,7 +18,7 @@ use std::path::Path;
 use serde_json::Value;
 
 /// Ownership classification for an existing direct `mcpServers.<name>` (or
-/// equivalent per-format) MCP entry, per ADR-024 §4.
+/// equivalent per-format) MCP entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpEntryOwnership {
     /// Our server name, and no data-dir/estate env override. Mechanically on
@@ -32,7 +32,7 @@ pub enum McpEntryOwnership {
 }
 
 /// Env keys whose presence on an existing entry marks it as pointing at a
-/// non-default database (ADR-024 §4): `serve` resolves the default data dir
+/// non-default database: `serve` resolves the default data dir
 /// unless one of these overrides it, so an entry carrying neither is on the
 /// default database by construction.
 pub const OVERRIDE_ENV_KEYS: [&str; 2] = ["MOOTX01_DATA_DIR", "ARIA_MCP_SQLITE_PATH"];
@@ -40,7 +40,7 @@ pub const OVERRIDE_ENV_KEYS: [&str; 2] = ["MOOTX01_DATA_DIR", "ARIA_MCP_SQLITE_P
 /// The exact loopback daemon port this installer's default wiring ever
 /// writes. Mirrors Swift's `MootPaths.defaultResidentPort`. A loopback URL
 /// on any OTHER port fails the shape check in `classify` (see its doc
-/// comment) — a known Swift/Rust asymmetry (ADR-024's recorded static-port
+/// comment) — a known Swift/Rust asymmetry (the plugin-ownership rule's recorded static-port
 /// limitation, #3) does not change this: the classifier is intentionally
 /// conservative rather than permissive.
 const DEFAULT_RESIDENT_PORT: u16 = 4242;
@@ -61,7 +61,7 @@ const DEFAULT_RESIDENT_PORT: u16 = 4242;
 ///
 /// Once the shape check passes: HTTP entries (no `env` key in every shape
 /// this installer writes) cannot disagree about the database — they reach
-/// whatever estate the resident daemon holds (ADR-024 §4) — so the absence
+/// whatever estate the resident daemon holds — so the absence
 /// of an `env` map is itself `OursDefault`. Command/stdio entries (the
 /// proxy bridge, or a legacy bare `serve`) are `OursDefault` only when
 /// their `env` carries neither override key.
@@ -157,7 +157,7 @@ pub fn is_plugin_installed(plugin_id: &str, home: &Path) -> bool {
 
 /// Returns the installed plugin manifest version (e.g. `"1.0.15"`) from the
 /// first entry for `plugin_id`, or `None` when not installed. Used by
-/// `version_skew_advisory` (ADR-024 §5) to compare the plugin's declared
+/// `version_skew_advisory` to compare the plugin's declared
 /// version against the running binary's version.
 pub fn installed_version(plugin_id: &str, home: &Path) -> Option<String> {
     installed_entry(plugin_id, home)?
@@ -181,7 +181,7 @@ fn installed_entry(plugin_id: &str, home: &Path) -> Option<Value> {
         .cloned()
 }
 
-/// ADR-024 §5: at daemon startup (and in `moot_estate_ping` /
+/// at daemon startup (and in `moot_estate_ping` /
 /// `moot_estate_status`), when a plugin is detected, compare the plugin
 /// manifest version against the binary version and report skew. Rust twin
 /// of Swift's `MootInstallerCore.VersionSkewAdvisory.compute` — keep the two
@@ -288,7 +288,7 @@ pub fn is_plugin_enabled(plugin_id: &str, home: &Path) -> bool {
 
 /// True when the plugin both HAS an installed entry and IS enabled — the
 /// combined condition that actually means "this plugin owns the MCP
-/// connection right now" (ADR-024 §1/§3, Adams #5 correction). Callers
+/// connection right now" (plugin-owned MCP connections, Adams #5 correction). Callers
 /// deciding whether to skip/remove a direct entry must use this, not
 /// `is_plugin_installed` alone.
 pub fn owns_connection(plugin_id: &str, home: &Path) -> bool {

@@ -8,7 +8,7 @@
 //! same envelope a `NoteIR` drawer would, so the two paths agree on drawer
 //! bytes.
 //!
-//! ## The read seam (DECISION_PALACE_PUMP_CANONICAL_2026-06-12)
+//! ## The read seam
 //!
 //! VaultKit does NOT read the four nouns itself (it sits above GeniusLocusKit).
 //! The operator driver reads each noun through GLK public verbs and projects it

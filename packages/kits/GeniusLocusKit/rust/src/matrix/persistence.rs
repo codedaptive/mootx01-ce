@@ -1,7 +1,7 @@
 // matrix/persistence.rs — selectable persistence backend.
 //
 // Rust mirror of `MatrixPersistence.swift`. Per
-// DECISION_MATRIX_TIER_PERSISTENCE_2026-05-21, persistence is a
+// durable matrix snapshots, persistence is a
 // per-estate mode:
 //   - InMemory: the tier is rebuilt from the audit log on cold start;
 //                load returns None; save is a no-op.

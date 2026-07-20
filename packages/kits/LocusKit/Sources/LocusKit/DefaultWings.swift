@@ -1,6 +1,6 @@
 // DefaultWings.swift — Seven seeded default wings and their hint content.
 //
-// ADR-016: Wings are the provenance/role axis. A fresh estate seeds these
+// Wings are the provenance/role axis. A fresh estate seeds these
 // seven wings, each with a hint memory in the normal `AI_Charter_Hint` room
 // that describes the wing's role. The set is a suggestion, not a constraint —
 // callers may create any wing; these seven are seeded at provision time to
@@ -11,7 +11,7 @@
 
 /// The default wing for `capture` when no explicit wing is supplied.
 ///
-/// ADR-016: renamed from the prior dynamic `"wing_<owner>"` derivation.
+/// renamed from the prior dynamic `"wing_<owner>"` derivation.
 /// All new captures without an explicit wing land here. Existing captures
 /// that landed in the prior `"wing_<owner>"` form are not migrated — the
 /// schema is unfrozen and no data exists that requires migration.
@@ -19,7 +19,7 @@ public let defaultWingName: String = "Agentic Memory"
 
 /// The room name for per-wing hint memories seeded at provision.
 ///
-/// ADR-016: each seeded wing carries one memory in this room stating in
+/// each seeded wing carries one memory in this room stating in
 /// plain language what the lane is for. Hint drawers are seeded at
 /// estate provision and are normal recallable memories — they may be
 /// updated or deleted by the AI or user like any other drawer.
@@ -40,7 +40,7 @@ public let hintAddedBy: String = "estate-provision"
 /// A wing name paired with its hint text.
 ///
 /// The hint is seeded as a drawer in the wing's `AI_Charter_Hint` room at
-/// estate provision time (ADR-016 §2).
+/// estate provision time.
 public struct WingDefinition: Sendable, Equatable {
     /// The wing's display name (also the value stored in the `wing` column).
     public let name: String
@@ -53,7 +53,7 @@ public struct WingDefinition: Sendable, Equatable {
     }
 }
 
-// MARK: - Default wing set (ADR-016 §1)
+// MARK: - Default wing set
 
 /// The seven default wings seeded at estate provision.
 ///

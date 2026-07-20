@@ -1,7 +1,7 @@
 // NmfProvider.swift
 //
 // NMF (Non-Negative Matrix Factorization) distributional-semantics
-// embedding provider. Part of the ADR-010 Decision B honest classical-
+// embedding provider. Part of the honest semantic fusion honest classical-
 // fusion signal set.
 //
 // ## Algorithm
@@ -75,7 +75,7 @@
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/nmf_provider.rs
 //
-// ADR-010 reference: Decision B signal set — NMF latent-factor provider.
+// honest semantic fusion reference: Decision B signal set — NMF latent-factor provider.
 
 import Foundation
 import CorpusKit
@@ -154,7 +154,7 @@ public let nmfFactorizationSeed: UInt64 = 0xDEADBEEFCAFEBABE
 /// modelID = "nmf-v1", modelVersion = "1.0.0".
 /// Projection seed = `nmfProjectionSeed`.
 ///
-/// ADR-010 Decision B — NMF latent-factor provider in the classical-
+/// — NMF latent-factor provider in the classical-
 /// fusion dense recall lane.
 public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
 
@@ -166,7 +166,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     /// NMF rank k (latent dimensionality).
     public let rank: Int
 
-    /// Reduced-vocabulary cap K for the dense factorization (ADR-022). NMF
+    /// Reduced-vocabulary cap K for the dense factorization. NMF
     /// factors a `K × numDocs` matrix over the top-K informative terms instead
     /// of `full-vocab × numDocs`. Optimizer knob; default `defaultReducedVocabCap`.
     public let reducedVocabCap: Int
@@ -199,7 +199,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     private var docEmbeddings: [[Float]]
 
     /// The frozen reduced vocabulary (term → reduced row) the basis was trained
-    /// on (ADR-022). Query projection and basis serialization key on THIS, not
+    /// on. Query projection and basis serialization key on THIS, not
     /// the full `counts.vocab`. Empty until `finalize()`.
     private var basisVocab: [String: Int]
 
@@ -267,7 +267,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         let numDocs = counts.documentCount
         guard numDocs > 0, counts.vocabularySize > 0 else { return }
 
-        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // factor over a reduced, informative sub-vocabulary so the
         // dense NMF is `K × numDocs` (feasible) instead of `full-vocab × numDocs`
         // (infeasible). The reduced vocab is a corpus property shared with LSA;
         // it is frozen here and drives query projection. `vocabSize` below is the
@@ -396,7 +396,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         guard !terms.isEmpty else { return nil }
 
         let k = result.rank
-        // Query projection keys on the REDUCED basis vocab (ADR-022). Reduced-set
+        // Query projection keys on the REDUCED basis vocab. Reduced-set
         // terms map to their row; OOV terms (outside top-K) contribute nothing
         // and are covered by RI.
         let vocabSize = basisVocab.count
@@ -509,7 +509,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
         w.writeU64(projectionSeed)
         w.writeU32(UInt32(counts.documentCount))
         w.writeU32(UInt32(nmf?.rank ?? 0))
-        // ADR-022: persist the REDUCED basis vocab (term → reduced row) —
+        // persist the REDUCED basis vocab (term → reduced row) —
         // projection keys on it. The full counts vocab is persisted separately
         // by serializeCounts() as the drift-trigger anchor.
         w.writeStringU32Map(basisVocab)
@@ -546,7 +546,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
                   maxIterations: maxIterations,
                   seed: seed,
                   projectionSeed: projectionSeed)
-        // The persisted map IS the reduced basis vocab (ADR-022); projection
+        // The persisted map IS the reduced basis vocab; projection
         // keys on `basisVocab`. counts is restored from the same map so a
         // reconstructed provider reports the basis vocab it embeds against
         // (round-trip). The FULL vocab lives in the counts blob, not here.
@@ -643,7 +643,7 @@ extension NmfProvider: TrainableEmbeddingBasis {
         try NmfProvider(deserializing: basis)
     }
 
-    /// ADR-026: release the in-memory NMF factorization and embeddings.
+    /// release the in-memory NMF factorization and embeddings.
     public func releaseBasis() {
         nmf = nil
         docEmbeddings.removeAll(keepingCapacity: false)

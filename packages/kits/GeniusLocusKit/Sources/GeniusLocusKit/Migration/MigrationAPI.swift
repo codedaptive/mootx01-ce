@@ -6,7 +6,7 @@
 //
 // Mass data ingestion (decoding an external tool export and capturing
 // its content into an estate) lives in VaultKit behind the adapter →
-// bridge path per ADR-007 Decision 1: ExchangeAdapter → VaultBridge.importVault
+// bridge path per data-movement privacy tiers: ExchangeAdapter → VaultBridge.importVault
 // with CaptureChannel.importedFile and SourceType.imported provenance.
 //
 // All verbs take an explicit `now: Date` parameter per the fleet

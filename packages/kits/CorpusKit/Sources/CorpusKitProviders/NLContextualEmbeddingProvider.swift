@@ -38,7 +38,7 @@
 //
 //   Same as NLEmbeddingProvider: NaturalLanguage is an Apple system
 //   framework. Gated `#if canImport(NaturalLanguage)`. Rust has no
-//   counterpart. Recorded in ADR-019.
+//   counterpart. Recorded in opt-in Apple embedding providers.
 //
 // ## Projection seed
 //
@@ -49,8 +49,8 @@
 // Model ID  = "apple-nlcontextual-v1"
 // Version   = "1.0.0"
 //
-// Rust port: none — sanctioned Swift-only divergence (see ADR-019).
-// ADR-019 reference: Swift-only Apple NL embedding providers.
+// Rust port: none — sanctioned Swift-only divergence (see opt-in Apple embedding providers).
+// opt-in Apple embedding providers reference: Swift-only Apple NL embedding providers.
 
 #if canImport(NaturalLanguage)
 import NaturalLanguage
@@ -114,7 +114,7 @@ public let nlContextualEmbeddingProjectionSeed: UInt64 = 0x4150_4E4C_4354_5831
 ///
 /// ## Sanctioned divergence
 ///
-/// Swift-only (`#if canImport(NaturalLanguage)`). See ADR-019. The package
+/// Swift-only (`#if canImport(NaturalLanguage)`). See opt-in Apple embedding providers. The package
 /// minimum deployment target is macOS 26 / iOS 26, which is above the
 /// NLContextualEmbedding API floor (macOS 13 / iOS 16), so no @available
 /// guard is needed beyond the `#if canImport(NaturalLanguage)` gate.

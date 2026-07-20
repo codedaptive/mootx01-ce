@@ -7,21 +7,21 @@
 // swappable backends (SQLite, PostgreSQL, InMemory for tests).
 //
 // PersistenceKit owns no vector-search engine. Dense-embedding k-NN
-// lives solely in VectorKit (ADR-008 persistencekit-vector-contract-
+// lives solely in VectorKit (VectorKit-owned vector search persistencekit-vector-contract-
 // correction). Every backend instead guarantees the ACCOMMODATION
 // contract: it accommodates vector workloads' storage needs (vector-
 // payload round-trip, bulk hydration, count, delete) through the
 // general RowStore / BlobStore surfaces.
 //
-// Design per DECISION_STORAGEKIT_DESIGN_2026-05-19.md.
-// Eleven-kit graph per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
+// Design per the PersistenceKit storage surface.
+// Eleven-kit graph per current kit ownership.
 //
 // cp-persistencekit-report (2026-06-06): added IntellectusLib as a
 // package dependency so the PersistenceKit core target can emit
 // storage-health metrics via Intellectus.report(_:). IntellectusLib is
 // the zero-dep telemetry floor; adding it here is strictly
 // downstream→upstream (PersistenceKit → IntellectusLib), no cycle.
-// Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 +
+// Authority: in-repository dependency direction +
 //            MANAGER_1.0_PLAN §4 (P2 self-report coverage for PersistenceKit).
 
 import PackageDescription
@@ -60,7 +60,7 @@ let package = Package(
         // health metrics (size, WAL, cache, tx stats) via Intellectus.report(_:),
         // which is a no-op when monitoring is disabled (the default). Off-path
         // cost: one Atomic<Bool> load + branch (~1 ns, lock-free). No lock on
-        // the off-path. Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // the off-path. Authority: in-repository dependency direction.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
     ],
     targets: [
@@ -71,7 +71,7 @@ let package = Package(
                 "SubstrateTypes",
                 // IntellectusLib: PersistenceKitTelemetry.swift emits storage-health
                 // metrics via Intellectus.report(_:). Zero cost when monitoring is
-                // disabled (the default). Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+                // disabled (the default). Authority: in-repository dependency direction.
                 "IntellectusLib",
             ],
             path: "Sources/PersistenceKit"
@@ -151,7 +151,7 @@ let package = Package(
 
         // Replication primitive (§5).
         // NET-NEW module — no existing target gains a dependency on it.
-        // Rationale: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 permits controlled
+        // Rationale: in-repository dependency direction permits controlled
         // intra-repo dependency additions when a recorded architectural decision requires it.
         .target(
             name: "PersistenceKitReplication",

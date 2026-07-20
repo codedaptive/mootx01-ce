@@ -45,6 +45,6 @@ Before ending meaningful work:
 - Link related memories with `moot_link_memories`.
 - Confirm, update, withdraw, or retire stale knowledge as needed.
 - Write continuity with `moot_write_journal`.
-- Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
+- Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
 
 Never claim MOOTx01 recall unless you actually queried it.

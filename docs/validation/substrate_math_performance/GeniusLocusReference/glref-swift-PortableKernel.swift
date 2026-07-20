@@ -77,7 +77,7 @@ public protocol SubstrateKernel: Sendable {
                         families: [HyperplaneFamily]) -> Fingerprint256
 
     // ----- Batched variants (Phase 1 trait extension per
-    //       DECISION_KERNEL_LEARNED_DISPATCH_2026-05-17).
+    //       portable kernel dispatch).
     //
     // Default impls in the extension below are loops over the
     // pair-at-a-time ops above, so trait extensions are non-
@@ -200,7 +200,7 @@ public enum PortableKernel {
     /// Select the best kernel for the current platform. Resolution
     /// order: on aarch64 (Apple silicon and ARM64 Linux), return
     /// `SimdKernel` (portable SIMD via `import simd`, compiles to
-    /// NEON `orr.16b` for or_reduce per DECISION_OR_REDUCE_BACKENDS_2026-05-17).
+    /// NEON `orr.16b` for or_reduce per measured SIMD OR-reduce selection).
     /// On x86_64 with AVX-512 or AVX2, future overlays may return
     /// specialized kernels; the reference build falls back to scalar.
     /// Substrate ALWAYS provides the scalar reference; the platform-

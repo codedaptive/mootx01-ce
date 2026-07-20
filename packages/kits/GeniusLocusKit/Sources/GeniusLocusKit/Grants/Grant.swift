@@ -2,7 +2,7 @@ import Foundation
 
 /// A grant is the unit of sharing in the federation model.
 ///
-/// Per DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §6, a grant is an
+/// Per federation disclosure controls, a grant is an
 /// explicit, signed, audited row naming the grantee, the scope
 /// granularity, the content level, the lifetime, the custody mode, the
 /// re-share permission, and the remaining inference budget. The row is

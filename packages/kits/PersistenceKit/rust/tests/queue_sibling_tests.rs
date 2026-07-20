@@ -1,4 +1,4 @@
-//! Tests for `EstateConfiguration::queue_sibling` — ADR-021 T3.
+//! Tests for `EstateConfiguration::queue_sibling` — recall-driven dreaming.
 //!
 //! Coverage:
 //!   1. SQLite estate: sibling is at `<estate-dir>/<estate-stem>.<filename>`,
@@ -60,7 +60,7 @@ fn sqlite_sibling_path_is_in_same_directory() {
 }
 
 /// Two distinct estate DB files in the SAME directory produce DIFFERENT
-/// sibling paths — the core ADR-021 Decision 7 isolation invariant.
+/// sibling paths — the core recall-driven dreaming isolation invariant.
 /// Before this fix both derived the same `<dir>/queue.sqlite`, enabling
 /// cross-estate corpus disclosure. After the fix each estate's queue is
 /// at `<dir>/<estate-stem>.queue.sqlite`, unique per estate.
@@ -112,7 +112,7 @@ fn two_estates_in_same_directory_get_different_sibling_paths() {
 }
 
 /// The same estate DB produces the same sibling path across repeated calls
-/// (all processes that open the same estate share one queue file per ADR-021 D7).
+/// (all processes that open the same estate share one queue file per recall-driven dreaming).
 #[test]
 fn same_estate_same_sibling_path() {
     let estate_id = uuid::Uuid::new_v4();
@@ -162,7 +162,7 @@ fn sqlite_sibling_preserves_busy_timeout() {
 /// Encryption config is carried over verbatim to the sibling — mode and key
 /// identifier are the same (key bytes are cloned, not regenerated).
 ///
-/// This is the core ADR-021 Decision 7 invariant: the queue DB uses the same
+/// This is the core recall-driven dreaming invariant: the queue DB uses the same
 /// cipher key as the estate so QueueKit can open it without additional key
 /// distribution.
 ///
@@ -280,7 +280,7 @@ fn inmemory_sibling_is_deterministic() {
 // PostgreSQL backend — deferred, must fail loud
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The PostgreSQL branch is deferred per ADR-021 SQLite-first sequencing.
+/// The PostgreSQL queue-sibling branch is not implemented.
 /// `queue_sibling` on a PostgreSQL estate must return `StorageError::FeatureGated`,
 /// never silently produce a wrong or half-initialised config.
 #[test]
@@ -299,8 +299,9 @@ fn postgresql_sibling_returns_feature_gated() {
     match result.unwrap_err() {
         StorageError::FeatureGated { feature } => {
             assert!(
-                feature.contains("ADR-021"),
-                "FeatureGated message must mention ADR-021, got: {feature}"
+                feature.contains("PostgreSQL backend is deferred")
+                    && feature.contains("SQLite or InMemory"),
+                "FeatureGated message must name the deferred backend and supported alternatives, got: {feature}"
             );
         }
         other => panic!("expected StorageError::FeatureGated, got {other:?}"),

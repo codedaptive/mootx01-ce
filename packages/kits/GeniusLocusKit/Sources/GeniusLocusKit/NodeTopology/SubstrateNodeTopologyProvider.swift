@@ -1,6 +1,6 @@
 // SubstrateNodeTopologyProvider.swift
 //
-// Concrete adapter (ADR-017 §10) that bridges LocusKit's NodeStore
+// Concrete adapter that bridges LocusKit's NodeStore
 // (UUID ids, async throws) to GeniusLocusKit's GLKNodeTopologyProvider
 // protocol (String ids, async non-throwing).
 //
@@ -95,7 +95,7 @@ public final class SubstrateNodeTopologyProvider: GLKNodeTopologyProvider, @unch
     ///
     /// Walks the substrate's node tree via BFS from the root, collecting
     /// all active parent-child pairs. The tree is fixed-depth (max
-    /// depth 2: estate→wing→room per ADR-017 I-NT-2), so the walk is
+    /// depth 2: estate→wing→room under the maximum node depth of two), so the walk is
     /// bounded.
     ///
     /// When `scope` is nil, the full forest is returned. When `scope`

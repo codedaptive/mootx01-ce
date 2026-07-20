@@ -14,8 +14,8 @@
 //   item-local: the vector is a pure function of the input text,
 //   computed once on write. No trainable basis, no counts, no shadow
 //   swap machinery. Sits alongside FDCProvider as a stateless,
-//   compute-once-on-write provider (ADR-010 Decision B extended by
-//   ADR-019).
+//   compute-once-on-write provider (honest semantic fusion extended by
+//   opt-in Apple embedding providers).
 //
 //   float lane: NLEmbedding.vector(for:) returns [Double] with the
 //   underlying sentence-embedding dimension. We cast to [Float] and
@@ -35,7 +35,7 @@
 //   baseline is the classical deterministic providers (bit-identical).
 //   The NL lanes are present/absent per platform; recall fusion already
 //   handles absent lanes correctly. This divergence is recorded in
-//   ADR-019 (Apple NL Embedding Providers).
+//   opt-in Apple embedding providers (Apple NL Embedding Providers).
 //
 // ## Projection seed
 //
@@ -46,8 +46,8 @@
 // Model ID  = "apple-nlembedding-v1"
 // Version   = "1.0.0"
 //
-// Rust port: none — sanctioned Swift-only divergence (see ADR-019).
-// ADR-019 reference: Swift-only Apple NL embedding providers.
+// Rust port: none — sanctioned Swift-only divergence (see opt-in Apple embedding providers).
+// opt-in Apple embedding providers reference: Swift-only Apple NL embedding providers.
 
 #if canImport(NaturalLanguage)
 import NaturalLanguage
@@ -104,7 +104,7 @@ public let nlEmbeddingProjectionSeed: UInt64 = 0x4150_4E4C_454D_4231
 /// ## Sanctioned divergence
 ///
 /// This provider is Swift-only (`#if canImport(NaturalLanguage)`).
-/// See ADR-019 for the rationale; parity is preserved by the deterministic
+/// See opt-in Apple embedding providers for the rationale; parity is preserved by the deterministic
 /// providers.
 ///
 /// The package minimum deployment target is macOS 26 / iOS 26, which is

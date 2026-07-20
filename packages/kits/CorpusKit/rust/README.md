@@ -48,4 +48,4 @@ Requires Rust 1.75+ and sibling `substrate-kit`, `engram-kit`, `storage-kit`, `s
 
 - Swift counterpart: `CorpusKit/Sources/`
 - Sibling providers crate: `CorpusKit/rust-providers/`
-- Kit graph ADR: `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`
+- Kit graph rule: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`

@@ -68,7 +68,7 @@ public struct EstateDreamingReader: DreamingSubstrateReader {
         try await kit.allTunnels(in: handle)
     }
 
-    /// All non-retired dreamed tunnels (T13 / ADR-021 Phase 7).
+    /// All non-retired dreamed tunnels.
     ///
     /// Fetches the active-tunnel set from GLK and filters to those with
     /// `isDreamed == true`. Declared tunnels (`isDreamed == false`) are never

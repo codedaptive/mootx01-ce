@@ -371,7 +371,7 @@ public actor HTTPReadAPI {
 
         // The SSE live-tail is the one streaming path. Decide it here, before
         // routing: LoopbackHTTP's response writer is buffered-only, and the
-        // stream's source + lifetime are the consumer's (ADR-LOOPBACKHTTP-001).
+        // stream's source + lifetime are the consumer's.
         // streamEvents owns the fd from here and closes it when the stream ends.
         if request.method == "GET", request.path == "/api/events", request.wantsEventStream {
             // CSRF/Origin guard: a browser from an origin other than a loopback

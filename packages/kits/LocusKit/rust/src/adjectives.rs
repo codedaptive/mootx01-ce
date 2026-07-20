@@ -215,10 +215,10 @@ impl AdjectiveSensitivity {
     }
 
     // -------------------------------------------------------------------------
-    // Privacy-tier predicates — ADR-007 Decision 2
+    // Privacy-tier predicates — data-movement privacy tiers
     //
     // Three predicates record the normative mapping of the four sensitivity
-    // values onto the three ADR-007 privacy tiers. The predicates are mutually
+    // values onto the three data-movement privacy tiers privacy tiers. The predicates are mutually
     // exclusive and collectively exhaustive: exactly one is `true` for every
     // variant. They are pure computed functions — no new fields, no new bitmap
     // bits, no schema changes.
@@ -231,7 +231,7 @@ impl AdjectiveSensitivity {
     // -------------------------------------------------------------------------
 
     /// `true` for sensitivity values that belong to the **Normal tier**
-    /// per ADR-007 Decision 2: `Normal` (raw 0) and `Elevated` (raw 16).
+    /// per data-movement privacy tiers: `Normal` (raw 0) and `Elevated` (raw 16).
     ///
     /// Normal-tier drawers are eligible for free bulk export. VaultKit's
     /// export path consults this predicate to determine whether a drawer
@@ -243,7 +243,7 @@ impl AdjectiveSensitivity {
     }
 
     /// `true` for sensitivity values that belong to the **Private tier**
-    /// per ADR-007 Decision 2: `Restricted` (raw 32).
+    /// per data-movement privacy tiers: `Restricted` (raw 32).
     ///
     /// Private-tier drawers require an owner-held key at execution time before
     /// participating in bulk operations (v1.0 gold deliverable). By default
@@ -256,7 +256,7 @@ impl AdjectiveSensitivity {
     }
 
     /// `true` for sensitivity values that belong to the **Secret tier**
-    /// per ADR-007 Decision 2: `Secret` (raw 48).
+    /// per data-movement privacy tiers: `Secret` (raw 48).
     ///
     /// Secret-tier drawers never ride bulk channels under any scope option.
     /// VaultKit's export path must reject secret-tier drawers regardless of
@@ -527,7 +527,7 @@ mod tests {
         }
     }
 
-    // --- Privacy-tier predicates — ADR-007 Decision 2 ---
+    // --- Privacy-tier predicates — data-movement privacy tiers ---
     //
     // Truth table: four sensitivity values × three tier predicates.
     // Mirrors the Swift AdjectivePrivacyTierTests suite — cross-port
@@ -539,7 +539,7 @@ mod tests {
     fn is_bulk_exportable_true_for_normal() {
         assert!(
             AdjectiveSensitivity::Normal.is_bulk_exportable(),
-            "Normal is in the Normal tier — free bulk export (ADR-007 Decision 2)"
+            "Normal is in the Normal tier — free bulk export"
         );
     }
 
@@ -547,7 +547,7 @@ mod tests {
     fn is_bulk_exportable_true_for_elevated() {
         assert!(
             AdjectiveSensitivity::Elevated.is_bulk_exportable(),
-            "Elevated is in the Normal tier — free bulk export (ADR-007 Decision 2)"
+            "Elevated is in the Normal tier — free bulk export"
         );
     }
 
@@ -555,7 +555,7 @@ mod tests {
     fn is_bulk_exportable_false_for_restricted() {
         assert!(
             !AdjectiveSensitivity::Restricted.is_bulk_exportable(),
-            "Restricted is in the Private tier — not bulk-exportable (ADR-007 Decision 2)"
+            "Restricted is in the Private tier — not bulk-exportable"
         );
     }
 
@@ -563,7 +563,7 @@ mod tests {
     fn is_bulk_exportable_false_for_secret() {
         assert!(
             !AdjectiveSensitivity::Secret.is_bulk_exportable(),
-            "Secret is in the Secret tier — not bulk-exportable (ADR-007 Decision 2)"
+            "Secret is in the Secret tier — not bulk-exportable"
         );
     }
 
@@ -573,7 +573,7 @@ mod tests {
     fn requires_owner_key_false_for_normal() {
         assert!(
             !AdjectiveSensitivity::Normal.requires_owner_key_for_bulk(),
-            "Normal is in the Normal tier — no key required (ADR-007 Decision 2)"
+            "Normal is in the Normal tier — no key required"
         );
     }
 
@@ -581,7 +581,7 @@ mod tests {
     fn requires_owner_key_false_for_elevated() {
         assert!(
             !AdjectiveSensitivity::Elevated.requires_owner_key_for_bulk(),
-            "Elevated is in the Normal tier — no key required (ADR-007 Decision 2)"
+            "Elevated is in the Normal tier — no key required"
         );
     }
 
@@ -589,7 +589,7 @@ mod tests {
     fn requires_owner_key_true_for_restricted() {
         assert!(
             AdjectiveSensitivity::Restricted.requires_owner_key_for_bulk(),
-            "Restricted is in the Private tier — owner key required (ADR-007 Decision 2)"
+            "Restricted is in the Private tier — owner key required"
         );
     }
 
@@ -597,7 +597,7 @@ mod tests {
     fn requires_owner_key_false_for_secret() {
         assert!(
             !AdjectiveSensitivity::Secret.requires_owner_key_for_bulk(),
-            "Secret is in the Secret tier — excluded entirely, not key-gated (ADR-007 Decision 2)"
+            "Secret is in the Secret tier — excluded entirely, not key-gated"
         );
     }
 
@@ -607,7 +607,7 @@ mod tests {
     fn is_excluded_from_bulk_false_for_normal() {
         assert!(
             !AdjectiveSensitivity::Normal.is_excluded_from_bulk(),
-            "Normal is in the Normal tier — not excluded (ADR-007 Decision 2)"
+            "Normal is in the Normal tier — not excluded"
         );
     }
 
@@ -615,7 +615,7 @@ mod tests {
     fn is_excluded_from_bulk_false_for_elevated() {
         assert!(
             !AdjectiveSensitivity::Elevated.is_excluded_from_bulk(),
-            "Elevated is in the Normal tier — not excluded (ADR-007 Decision 2)"
+            "Elevated is in the Normal tier — not excluded"
         );
     }
 
@@ -623,7 +623,7 @@ mod tests {
     fn is_excluded_from_bulk_false_for_restricted() {
         assert!(
             !AdjectiveSensitivity::Restricted.is_excluded_from_bulk(),
-            "Restricted is in the Private tier — key-gated, not hard-excluded (ADR-007 Decision 2)"
+            "Restricted is in the Private tier — key-gated, not hard-excluded"
         );
     }
 
@@ -631,11 +631,11 @@ mod tests {
     fn is_excluded_from_bulk_true_for_secret() {
         assert!(
             AdjectiveSensitivity::Secret.is_excluded_from_bulk(),
-            "Secret is in the Secret tier — always excluded from bulk (ADR-007 Decision 2)"
+            "Secret is in the Secret tier — always excluded from bulk"
         );
     }
 
-    /// ADR-007 Decision 2 exhaustiveness: the three predicates are mutually
+    /// data-movement privacy tiers exhaustiveness: the three predicates are mutually
     /// exclusive and collectively exhaustive — exactly one is `true` for
     /// every variant. Cross-port conformance: matches the Swift exhaustiveness
     /// test in `AdjectivePrivacyTierTests`.
@@ -658,7 +658,7 @@ mod tests {
             .count();
             assert_eq!(
                 true_count, 1,
-                "{variant:?}: expected exactly 1 true predicate but got {true_count} (ADR-007 Decision 2)"
+                "{variant:?}: expected exactly 1 true predicate but got {true_count}"
             );
         }
     }

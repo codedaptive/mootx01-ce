@@ -643,7 +643,7 @@ impl SyncEngine for FederationSyncEngine {
             // verification proves key ownership; this check enforces the
             // pairing authorization boundary before applying any records.
             // Without this gate an attacker can craft a valid self-signed
-            // envelope (ADR-013) and inject records even without a pairing
+            // envelope and inject records even without a pairing
             // handshake — the signature alone does not prove authorization.
             if !self
                 .state

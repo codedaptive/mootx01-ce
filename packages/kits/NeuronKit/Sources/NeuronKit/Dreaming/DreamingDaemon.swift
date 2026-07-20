@@ -59,7 +59,7 @@ public protocol DreamingSubstrateReader: Sendable {
     /// an alignment the substrate already records (step 5).
     func existingTunnels() async throws -> [Tunnel]
 
-    /// All non-retired tunnels whose `isDreamed` bit is set (T13 / ADR-021 Phase 7).
+    /// All non-retired tunnels whose `isDreamed` bit is set.
     ///
     /// OMEGA calls this to enumerate the active dreamed-tunnel population.
     /// The retire predicate is: `isDreamed AND not reinforced by recall in the
@@ -104,7 +104,7 @@ public protocol DreamingProposalSink: Sendable {
     @discardableResult
     func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int
 
-    /// Retire a tunnel by flipping bit 13 of its `operationalBitmap` (T13 / ADR-021 Phase 7).
+    /// Retire a tunnel by flipping bit 13 of its `operationalBitmap`.
     ///
     /// Called by OMEGA after determining that the dreamed tunnel is unreinforced
     /// within the OMEGA window. The tunnel is removed from active reads but
@@ -275,7 +275,7 @@ public actor DreamingDaemon {
     /// Wall-clock instant of the last REM-THETA (daily consolidation) run.
     /// Nil = never run. The dispatch table's THETA due-check gates on
     /// `now >= lastThetaRunAt + 24 h` (D5a cadence). Persisted in
-    /// `DreamingDaemonState.lastThetaRunAt` via the F6/ADR-020 path so the
+    /// `DreamingDaemonState.lastThetaRunAt` via the /manifest-backed daemon state path so the
     /// gate survives restarts (D5c: stdio-only estates consolidate lazily on
     /// invocation, not on a clock). Mirrors Rust `last_theta_run_secs`.
     private var lastThetaRunAt: Date? = nil
@@ -388,7 +388,7 @@ public actor DreamingDaemon {
             }
             // else: malformed persisted bandit — keep the in-memory uniform prior
         }
-        // F6 / ADR-020: restore the daemon's idempotency/cycle memory so a restart
+        //  / manifest-backed daemon state: restore the daemon's idempotency/cycle memory so a restart
         // does not re-propose already-proposed candidates, re-consolidate, or reset
         // the cycle counter. Absent state leaves the in-memory defaults in place.
         // T11: also restore the periodic-cycle last-run timestamps so THETA/BETA/OMEGA
@@ -861,7 +861,7 @@ public actor DreamingDaemon {
         triggerMode = bandit.select(seed: banditSeed)
         try await policyStore.saveBandit(bandit)
 
-        // F6 / ADR-020: persist the daemon's idempotency/cycle memory after every
+        //  / manifest-backed daemon state: persist the daemon's idempotency/cycle memory after every
         // cycle so a restart resumes from here (no re-proposing, no re-consolidating,
         // no cycle-counter reset). All cycle mutations — cycleCount, consolidated,
         // proposedKeys, lastReindexVocab — are complete by this point; lastTickAt
@@ -886,7 +886,7 @@ public actor DreamingDaemon {
         )
     }
 
-    // MARK: - REM dispatch table — due-checks (T11, ADR-021 Phase 6)
+    // MARK: - REM dispatch table — due-checks
 
     /// True iff the REM-THETA daily-consolidation cycle is due at `now`.
     ///
@@ -920,7 +920,7 @@ public actor DreamingDaemon {
         return now.timeIntervalSince(last) >= Self.omegaCadenceSecs
     }
 
-    // MARK: - REM-THETA cycle (T11, ADR-021 Phase 6)
+    // MARK: - REM-THETA cycle
 
     /// Daily bounded consolidation sweep (NEURONKIT_SPEC § 12.6 THETA row).
     ///
@@ -1097,7 +1097,7 @@ public actor DreamingDaemon {
         )
     }
 
-    // MARK: - REM-BETA cycle (T12, ADR-021 Phase 7)
+    // MARK: - REM-BETA cycle
 
     /// Confidence floor — a `consolidated` entry strictly below this value
     /// is pruned by REM-BETA. An entry below `betaPruneFloor` has decayed to
@@ -1115,7 +1115,7 @@ public actor DreamingDaemon {
     /// Mirrors Rust `BETA_PRUNE_FLOOR`.
     public static let betaPruneFloor: Float = 0.01
 
-    /// REM-BETA (weekly prune/GC) — ADR-021 Phase 7.
+    /// REM-BETA (weekly prune/GC) — recall-driven dreaming
     ///
     /// Memory-only GC that keeps the two in-memory dreaming stores bounded
     /// by recall activity. Mutates only `consolidated` and `coRecallCounts`
@@ -1178,7 +1178,7 @@ public actor DreamingDaemon {
         // ── Advance last-run timestamp and persist the shrunken state ────────
         // Persisting here (not just advancing the timestamp) is what makes
         // the GC durable: the shrunken consolidated + co_recall_counts maps
-        // survive a daemon restart via the existing F6/ADR-020 path.
+        // survive a daemon restart via the existing /manifest-backed daemon state path.
         lastBetaRunAt = now
         try await policyStore.saveDaemonState(currentDaemonState())
 
@@ -1193,9 +1193,9 @@ public actor DreamingDaemon {
         return nil
     }
 
-    // MARK: - REM-OMEGA cycle (T13 / ADR-021 Phase 7)
+    // MARK: - REM-OMEGA cycle
 
-    /// REM-OMEGA (biweekly retire) — ADR-021 Phase 7.
+    /// REM-OMEGA (biweekly retire) — recall-driven dreaming
     ///
     /// Retires dreamed tunnels that have not been reinforced by co-recall
     /// within the 14-day OMEGA window. The retire predicate is:

@@ -1,13 +1,13 @@
 // node_motion.rs
 //
-// The node-layer motion model (ADR-DIFFUSION-001 §2/§4, build step §11.2).
+// The node-layer motion model.
 // Rust port of NodeMotion.swift's pure fold. Diffusion is the time-axis peer of
 // distillation; this is the BOTTOM layer (the node), folding one node's audit
 // history {verb, hlc, anchor} into volatility + topic trajectory + reanchor.
 //
 // The decay weight exp(-λ·Δt_days) is the per-layer noise schedule: the node
 // layer is HIGH frequency, so λ is LARGE. λ is an open ablation parameter
-// (ADR §12). `fold` is pure and deterministic; the live convenience over the
+// remains subject to ablation. `fold` is pure and deterministic; the live convenience over the
 // estate audit log is Swift-side glue (storage orchestration), not ported.
 //
 // Conformance: the structural outputs (trajectory, event_count, reanchored,
@@ -19,7 +19,7 @@ use std::collections::HashSet;
 
 const MS_PER_DAY: f64 = 86_400_000.0;
 
-/// Informed-prior node decay constant, per day (fast layer). Ablate (ADR §12).
+/// Informed-prior node decay constant, per day (fast layer). Subject to ablation.
 pub const DEFAULT_NODE_LAMBDA: f64 = 0.5;
 
 /// The node-layer motion model for a single row. Mirrors Swift `NodeMotion`.

@@ -2,9 +2,9 @@
 
 The Apple presentation layer for MOOTx01 (macOS · iOS · iPadOS). It projects the ARIA
 surface onto Siri, Spotlight, Shortcuts, and App Intents, and demonstrates MOOTx01 as a
-bridge into the Apple ecosystem. Architecture of record: **`docs/decisions/ADR-005`**.
+bridge into the Apple ecosystem. Architecture of record: **`docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#22-apple-application-envelope-and-host-ownership`**.
 
-## The model (ADR-005, in one breath)
+## The model (the app-envelope contract, in one breath)
 
 The clean, **Rust-mirrored** `mootx01`/`aria-mcp` server is a separate binary. This app
 **envelopes** it — it never absorbs it (that would break Swift↔Rust parity). The parity

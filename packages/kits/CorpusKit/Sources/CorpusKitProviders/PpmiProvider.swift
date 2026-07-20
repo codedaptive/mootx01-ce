@@ -73,7 +73,7 @@
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/ppmi.rs
 //
-// ADR-010 reference: Decision B, signal #3 of the honest fusion.
+// honest semantic fusion reference: Decision B, signal #3 of the honest fusion.
 
 import Foundation
 import CorpusKit
@@ -148,7 +148,7 @@ public let ppmiProjectionSeed: UInt64 = 0x5050_4D49_5F56_314D
 /// modelID = "ppmi-v1", modelVersion = "1.0.0".
 /// Projection seed = `ppmiProjectionSeed`.
 ///
-/// ADR-010 Decision B, signal #3 — PPMI co-occurrence provider in the
+/// honest semantic fusion, signal #3 — PPMI co-occurrence provider in the
 /// dense recall lane.
 public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
@@ -599,7 +599,7 @@ extension PpmiProvider: TrainableEmbeddingBasis {
         try PpmiProvider(deserializing: basis)
     }
 
-    /// ADR-026: release the in-memory ppmiVectors dictionary (~1GB on a 50K estate).
+    /// release the in-memory ppmiVectors dictionary (~1GB on a 50K estate).
     /// The next embed call must go through reconstructBasis from BasisStore.
     public func releaseBasis() {
         ppmiVectors.removeAll(keepingCapacity: false)

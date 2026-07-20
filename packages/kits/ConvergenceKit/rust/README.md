@@ -29,7 +29,7 @@ Rust port of the Swift `ConvergenceKit` package. Sync abstraction layer over Per
 ## What does NOT ship at v1.0
 
 - CloudKit backend (Apple-only; the Swift side handles iCloud)
-- Cross-machine wire transport for Federation beyond the in-process relay (out of scope for v1.0; cross-machine transport is ConvergenceKit v1.1 scope per `docs/decisions/DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md`). The outbox auto-population (observer → outbox) ships in both ports at v1.0; only the cross-machine drain/transmit to a remote peer remains v1.1.
+- Cross-machine wire transport for Federation beyond the in-process relay (out of scope for v1.0; cross-machine transport is ConvergenceKit v1.1 scope per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract`). The outbox auto-population (observer → outbox) ships in both ports at v1.0; only the cross-machine drain/transmit to a remote peer remains v1.1.
 
 ## Building
 
@@ -44,5 +44,5 @@ Requires Rust 1.75+ and sibling `substrate-kit`, `storage-kit` crates.
 ## See also
 
 - Swift counterpart: `ConvergenceKit/Sources/`
-- Design record: `docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md`
-- Kit graph ADR: `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`
+- Design record: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract`
+- Kit graph rule: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`

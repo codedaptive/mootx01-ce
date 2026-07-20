@@ -38,7 +38,7 @@ struct StateTransitionTests {
         try? FileManager.default.removeItem(at: url.appendingPathExtension("sqlite-shm"))
     }
 
-    // Row identity is a UUID (DECISION_ROW_IDENTITY_UUID): fixtures use
+    // Row identity is a UUID: fixtures use
     // real UUIDs, matching the contract any synced estate already requires.
     static let idD1 = "11111111-1111-4111-8111-111111111111"
     static let idD2 = "22222222-2222-4222-8222-222222222222"

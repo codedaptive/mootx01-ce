@@ -47,7 +47,7 @@
 //!
 //! Swift port: `packages/kits/CorpusKit/Sources/CorpusKitProviders/PpmiProvider.swift`
 //!
-//! ADR-010 reference: Decision B, signal #3 of the honest fusion.
+//! honest semantic fusion reference: Decision B, signal #3 of the honest fusion.
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -126,7 +126,7 @@ pub const PPMI_COUNTS_MAGIC: &[u8; 4] = b"PPMC";
 /// `model_id = "ppmi-v1"`, `model_version = "1.0.0"`.
 /// Projection seed = `PPMI_PROJECTION_SEED`.
 ///
-/// ADR-010 Decision B, signal #3 — PPMI co-occurrence provider in the
+/// honest semantic fusion, signal #3 — PPMI co-occurrence provider in the
 /// dense recall lane.
 pub struct PpmiProvider {
     model_id: String,

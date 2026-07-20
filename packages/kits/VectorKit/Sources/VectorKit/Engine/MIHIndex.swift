@@ -39,7 +39,7 @@
 // (which routes to SubstrateKernel). MIH does candidate generation; the
 // kernel does every distance. Zero XOR/popcount in this file.
 //
-// Enumeration-budget guard (DECISION_MIH_ENUM_BUDGET_2026-06-12):
+// Enumeration-budget guard:
 //   MIH progressive-radius expansion is sub-linear only on clustered data.
 //   On sparse/random data the k-th best Hamming distance can be ~120 bits,
 //   causing the per-band colex enumeration to reach C(64,~30) ≈ 10^17 masks
@@ -265,7 +265,7 @@ public actor MIHIndex: DenseIndex {
     /// that need deterministic fallback thresholds regardless of n.
     /// Both Swift and Rust use the same formula so both fall back at
     /// the same radius (bit-identical projection arithmetic per
-    /// DECISION_MIH_ENUM_BUDGET_2026-06-12).
+    /// the bounded MIH enumeration budget).
     public nonisolated let fixedMaskBudget: Int?
 
     // MARK: - DenseIndex protocol requirement
@@ -704,7 +704,7 @@ public actor MIHIndex: DenseIndex {
 /// We cap the running sum at Int.max to avoid overflow — a saturating
 /// return still correctly triggers the budget guard. This matches the
 /// Rust port's saturating_add logic exactly so both fall back at the
-/// same radius (DECISION_MIH_ENUM_BUDGET_2026-06-12 §conformance).
+/// same radius (the bounded MIH enumeration budget conformance).
 ///
 /// The function is integer-only (no floats) so results are bit-identical
 /// across Swift (macOS/iOS arm64) and Rust (x86_64/aarch64).

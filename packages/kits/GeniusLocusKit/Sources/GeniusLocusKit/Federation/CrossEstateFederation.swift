@@ -30,7 +30,7 @@ import LocusKit
 /// Enforced: grant **existence, validity, and grantee match** — the
 /// binary "may the requester read the source at all" gate, fail-closed.
 /// This is the executable form of the A-versus-C refusal
-/// (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §13, cookbook I-23):
+/// (federation disclosure controls, cookbook I-23):
 /// B answers A only from B-authored or B-to-A-granted content; absent a
 /// grant, the read is refused, not silently empty.
 ///
@@ -204,8 +204,7 @@ public extension GeniusLocusKit {
             )
         }
 
-        // 4.5. Federation-auth: grant signature verification (D9 hardening,
-        // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+        // Verify the grant signature before any cross-estate recall.
         //
         // Verify the grant's Ed25519 signature against the GRANTER's registered
         // identity public key. Trust derives from the estate registry (the key

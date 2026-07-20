@@ -12,7 +12,7 @@
 // This is a GENUINE distributional method — "car" and "vehicle"
 // share similar context vectors when they co-occur with the same
 // neighbours ("drive", "road", "engine"). It captures co-occurrence
-// meaning, not surface form, satisfying ADR-010 D-1's honesty
+// meaning, not surface form, satisfying honest semantic fusion D-1's honesty
 // requirement: the dense lane must not lie about what it computes.
 //
 // The provider conforms to VectorKit.EmbeddingProvider:
@@ -50,7 +50,7 @@
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/random_indexing.rs
 //
-// ADR-010 reference: Decision B, signal #2 of the honest fusion.
+// honest semantic fusion reference: Decision B, signal #2 of the honest fusion.
 
 import Foundation
 import CorpusKit
@@ -158,7 +158,7 @@ public func riIndexVector(term: String) -> [Float] {
 /// Conforms to `VectorKit.EmbeddingProvider`. modelID = "random-indexing-v1",
 /// modelVersion = "1.0.0". Projection seed = `riProjectionSeed`.
 ///
-/// ADR-010 Decision B, signal #2 — the first honest distributional
+/// honest semantic fusion, signal #2 — the first honest distributional
 /// provider in the dense recall lane.
 public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendable {
 
@@ -432,7 +432,7 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
         try RandomIndexingProvider(deserializing: basis)
     }
 
-    /// ADR-026: release the in-memory vocab dictionary (~1GB on a 50K estate).
+    /// release the in-memory vocab dictionary (~1GB on a 50K estate).
     /// The next embed call must go through reconstructBasis from BasisStore.
     public func releaseBasis() {
         vocab.removeAll(keepingCapacity: false)

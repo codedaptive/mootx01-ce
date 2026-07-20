@@ -41,7 +41,7 @@ pub fn guide(tool_name: &str) -> &'static str {
         "moot_estate_status" => GUIDE_ESTATE_STATUS,
         "moot_estate_map" => GUIDE_ESTATE_MAP,
         "moot_estate_ping" => GUIDE_ESTATE_PING,
-        // Monitoring control (ADR-025 wave 8.2)
+        // Monitoring control
         "moot_monitoring_status" => GUIDE_MONITORING_STATUS,
         // Federation
         "moot_federated_search" => GUIDE_FEDERATED_SEARCH,
@@ -552,7 +552,7 @@ the vault directory). Add teachme:true to any specific vault tool for its
 full argument reference.";
 
 // ---------------------------------------------------------------------------
-// Monitoring control (ADR-025 wave 8.2)
+// Monitoring control
 // ---------------------------------------------------------------------------
 
 const GUIDE_MONITORING_STATUS: &str = "\

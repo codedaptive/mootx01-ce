@@ -7,12 +7,12 @@ description: "Behavioral specification for SubstrateKernel: invariants, conforma
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
-  - docs/decisions/DECISION_SIMHASH_BACKENDS_2026-05-18.md
+  - docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md#7-production-kernel-selection
   - docs/reference/SUBSTRATEKERNEL_INTERFACE.md
   - docs/reference/SUBSTRATETYPES_SPEC.md
   - docs/reference/SUBSTRATEML_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
-  - docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md
+  - docs/engineering/HARNESS_REFERENCE.md#6-the-four-package-substrate-split
   - docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md
 ---
 
@@ -164,8 +164,8 @@ silicon):
 
 BnnsKernel was measured on 2026-06-06 (apple-m5-max, macOS 26.5) and
 removed: slower than SimdKernel on every op, with BNNSGraph matmul
-crashing on current macOS. See DECISION_OR_REDUCE_BACKENDS_2026-05-17,
-DECISION_HAMMING_BACKENDS_2026-05-17, and DECISION_SIMHASH_BACKENDS_2026-05-18
+crashing on current macOS. See the measured OR-reduce selection,
+the measured Hamming selection, and the measured SimHash selection
 addenda for the disposal numbers.
 
 Rust version today exposes `ScalarKernel` plus portable SIMD via the
@@ -183,7 +183,7 @@ dispatch op of this surface, with `ScalarKernel` as the canonical oracle
 bypassing the dispatch; promoting it gives the float variant the same
 multi-backend treatment `simhashSign` (the bitmap variant) already has.
 
-Backend selection follows `DECISION_SIMHASH_BACKENDS_2026-05-18`:
+Backend selection follows `the measured SimHash selection`:
 
 - **`SimdKernel` is the production backend**, via the measured
   over-hyperplanes vertical-SIMD pattern: the 256 hyperplanes are
@@ -300,14 +300,14 @@ occur. The fallback rate is N/A for this kit.
 SubstrateKernel now depends on `IntellectusLib` (both `Package.swift` and `Cargo.toml`).
 `IntellectusLib` is a zero-dependency leaf; adding it as a SubstrateKernel dependency does
 not introduce a layering cycle. The in-repo dependency declaration is authorized by
-`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md`, which permits a kit to declare a dependency
+`the package-dependency rule`, which permits a kit to declare a dependency
 on another in-repo kit when a recorded decision requires it. The telemetry it enables here is
 the single `substrate.kernel.backend_selected` metric described in § 8.1.
 
 ## Changelog
 
 ### 1.1.0 -- 2026-06-23
-Added § 5.4: the float-input SimHash projection (`SubstrateML.FloatSimHash.project`) is promoted from a scalar-only standalone function into this backend-selected dispatch surface — `ScalarKernel` oracle, `SimdKernel` production backend via the over-hyperplanes pattern (bit-identical cross-port and cross-backend), crossover ~bs 4, Metal declined per DECISION_SIMHASH_BACKENDS_2026-05-18. Listed as a planned dispatch op in § 5.1. `l2Normalize` parallelized across vectors as the secondary feeder op.
+Added § 5.4: the float-input SimHash projection (`SubstrateML.FloatSimHash.project`) is promoted from a scalar-only standalone function into this backend-selected dispatch surface — `ScalarKernel` oracle, `SimdKernel` production backend via the over-hyperplanes pattern (bit-identical cross-port and cross-backend), crossover ~bs 4, Metal declined per the measured SimHash selection. Listed as a planned dispatch op in § 5.1. `l2Normalize` parallelized across vectors as the secondary feeder op.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

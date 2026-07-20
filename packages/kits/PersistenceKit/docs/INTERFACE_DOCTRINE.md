@@ -270,4 +270,6 @@ If you find yourself wanting to:
 - Add a backend-specific escape hatch
 - Treat one backend differently from another in downstream code
 
-Stop. Write a decision record in `docs/decisions/` proposing the change. The closed-enum design depends on every change being deliberate.
+Stop. Update the owning reference specification and engineering master before
+changing code. The closed-enum design depends on an explicit compatibility
+effect, migration rule, and backend conformance requirement.

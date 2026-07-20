@@ -9,7 +9,7 @@
 // 1M rows under 100 us.
 //
 // The Swift counterpart produced the number cited in row 5 of
-// DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md (commit 8e7916d,
+// the measured production kernel table (commit 8e7916d,
 // apple-m5-max, K=10 N=1M = 604 us for SimdKernel, 51x over
 // scalar). This Rust binary mirrors the CLI and the JSON output
 // schema so the two languages produce field-comparable files,

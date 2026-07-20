@@ -1,6 +1,6 @@
 // RowState.swift
 //
-// Phase 6.4 (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.6)
+
 // Moved from SubstrateLib/Sources/SubstrateLib/RowStateAutomaton.swift.
 //
 // The three pure-data types that describe row lifecycle:

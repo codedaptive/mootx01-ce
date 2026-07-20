@@ -17,7 +17,7 @@ relates_to:
   - docs/reference/ENGRAMLIB_SPEC.md
   - docs/reference/LOCUSKIT_SPEC.md
   - docs/reference/COGNITIONKIT_SPEC.md
-  - docs/decisions/ADR-021-recall-driven-dreaming-queue.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#55-brain-layer-ownership-and-dreaming
   - docs/reference/QUEUEKIT_SPEC.md
 purpose: |
   NeuronKit is the subconscious mind of the MOOTx01 substrate: the
@@ -542,7 +542,7 @@ importing new math into NeuronKit.
 
 ## § 9 — Conformance requirements
 
-**C-1 (dreaming cadence — v2 model, ADR-021):** dreaming runs on the
+**C-1 (dreaming cadence — v2 model, the recall-driven dreaming contract):** dreaming runs on the
 shared REM dispatch table at four cadences. REM-ALPHA (30 s) is gated on
 `pending_count(stream:"dreaming") > 0` — the daemon fires only when the
 dreaming queue has items, driven by the resident governor (`.timer`) or a
@@ -691,7 +691,7 @@ Swift `@Suite("§5", .serialized)` and Rust `§5` tests enforce this.
 ### 10.3 Dependency
 
 IntellectusLib is the zero-dependency telemetry leaf. NeuronKit declares
-it as an in-repo dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28,
+it as an in-repo dependency per the package-dependency rule,
 for self-report coverage.
 Layering is safe: IntellectusLib depends only on the Swift/Rust standard
 library and does not depend on NeuronKit or any substrate kit.
@@ -849,8 +849,8 @@ is the designated successor and is specified in its own mission.
 
 ## § 12 — Recall-driven dreaming (v2)
 
-> **Status: ratified target (ADR-021), Phase 0.** This section is the
-> normative form of ADR-021. It supersedes the v1 dreaming model (the blind
+> **Status: ratified target (the recall-driven dreaming contract), Phase 0.** This section is the
+> normative form of the recall-driven dreaming contract. It supersedes the v1 dreaming model (the blind
 > `tickIntervalMs` cadence in § 9 C-1 and the co-location candidate model) on
 > Phase-3 landing. Until then the shipped behavior is v1; this section is the
 > contract the implementation builds to. The contrastive-confidence and EWC++
@@ -877,7 +877,7 @@ enqueue a **dreaming item** onto the **one per-estate queue** under
 `stream_id="dreaming"` (one queue per estate, many streams by type; backend by
 the estate's storage class — an encrypted SQLite queue DB for SQLite estates,
 Postgres for Postgres, InMemory for ephemeral; never a plaintext maildir for a
-private estate — see QUEUEKIT_SPEC § 3 and ADR-021 Decision 7). The item is the
+private estate — see QUEUEKIT_SPEC § 3 and the recall-driven dreaming contract Decision 7). The item is the
 HLC-stamped set of drawer ids **used** in that recall (the reward targets);
 items with fewer than two used drawers are not enqueued (no pair possible).
 Enqueue is batched (one commit per batch). "Dreaming fires" = a **stream-scoped
@@ -1009,7 +1009,7 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 ## Changelog
 
 ### 1.4.1 -- 2026-06-25
-Corrected § 12.2 to ADR-021 Decision 7: the dreaming work is a
+Corrected § 12.2 to the recall-driven dreaming contract Decision 7: the dreaming work is a
 `stream_id="dreaming"` stream in the **one per-estate queue** (backend by
 estate storage class — encrypted SQLite queue DB / Postgres / InMemory, never a
 plaintext maildir for a private estate), drained by a **stream-scoped drain** —
@@ -1017,8 +1017,8 @@ not a separate dreaming maildir. `recall_trace` stays the durable record (the
 queue item carries the per-event co-recall grouping). Doc only.
 
 ### 1.4.0 -- 2026-06-25
-Recall-driven dreaming v2 (ADR-021, Phase 0 — spec + conformance vectors only;
-no code yet). Added § 12 as the normative form of ADR-021: dreaming is sourced
+Recall-driven dreaming v2 (the recall-driven dreaming contract, Phase 0 — spec + conformance vectors only;
+no code yet). Added § 12 as the normative form of the recall-driven dreaming contract: dreaming is sourced
 from a recall-driven QueueKit stream (co-recall pairing, § 12.2–12.3),
 `attempts` becomes the co-recall count (§ 12.4), the decide math is unchanged
 (§ 12.5), and the daemon runs the four-cycle REM schedule (REM-ALPHA/THETA/
@@ -1039,7 +1039,7 @@ run identical dreaming/maintenance algorithms with the same persisted state shap
 (this makes the 1.2.0 "Both ports … bandit" clause fully true on the Rust side).
 
 ### 1.2.0 -- 2026-06-25
-F6 / ADR-020 — daemon state is substrate-resident in the manifest. The dreaming
+F6 / the daemon-state persistence contract — daemon state is substrate-resident in the manifest. The dreaming
 and maintenance policy-store seams gain `loadDaemonState`/`saveDaemonState`
 (default no-op), and production wires manifest-backed stores
 (`EstateManifestDreamingPolicyStore` / `EstateManifestMaintenancePolicyStore`)
@@ -1065,14 +1065,14 @@ year. See NEURONKIT_INTERFACE.md § Distillation lens.
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
 
 ### 1.5.0 -- 2026-06-26
-ADR-021 v2 reconciliation (T14). § 9 C-1 updated from the v1 blind-timer model
+the recall-driven dreaming contract v2 reconciliation (T14). § 9 C-1 updated from the v1 blind-timer model
 (`tickIntervalMs` fires a cycle once elapsed) to the v2 REM dispatch table model:
 four cadences (ALPHA 30 s / THETA 24 h / BETA 7 d / OMEGA 14 d), ALPHA gated on
 `pending_count(stream:"dreaming") > 0`, THETA/BETA/OMEGA gated on persisted
 last-run timestamps; driven by resident governor (`.timer`) or forked `mootx01
 dream` (`.event`). § 12 (ratified target, Phase 0) is the normative v2 contract
 and is unchanged; § 9 C-1 previously contradicted it. The v2 build (T1–T14) is
-shipped; ADR-021 status updated to decided.
+shipped; the recall-driven dreaming contract status updated to decided.
 
 ### 1.6.0 -- 2026-07-09
 AUDIT-ALERT-RESTORE (Bob's option-1 ruling). Added § 9 C-4 and C-12 — both

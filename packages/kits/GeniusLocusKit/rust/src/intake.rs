@@ -187,7 +187,7 @@ impl EstateCoordinator {
                     if let Some(corpus) = self.corpus_for(handle) {
                         // Corpus::ingest/enqueue_ingest expect now_millis
                         // (MILLISECONDS); drawer.filed_at is epoch MILLISECONDS
-                        // (ADR-023), so it is passed directly.
+                        //, so it is passed directly.
                         corpus
                             .enqueue_ingest(&drawer.content, &drawer.id, drawer.filed_at)
                             .map_err(|e| verb_fail(format!("corpus enqueue_ingest failed: {e:?}")))?;
@@ -342,7 +342,7 @@ impl EstateCoordinator {
                 continue;
             }
             // G4: source_id = drawer.id so BM25/vector hits hydrate back to the
-            // Drawer row. drawer.filed_at is epoch MILLISECONDS (ADR-023) —
+            // Drawer row. drawer.filed_at is epoch MILLISECONDS —
             // exactly the now_millis enqueue_ingest expects — so pass it directly.
             jobs.push((drawer.content, drawer.id, drawer.filed_at));
         }
@@ -436,7 +436,7 @@ impl EstateCoordinator {
                 }
                 // G4: source_id = drawer.id so BM25/vector hits hydrate back
                 // to the Drawer row. drawer.filed_at is epoch MILLISECONDS
-                // (ADR-023) — exactly what enqueue_ingest expects.
+                // — exactly what enqueue_ingest expects.
                 jobs.push((drawer.content, drawer.id, drawer.filed_at));
             }
             if page_len < SCAN_PAGE_SIZE {
@@ -498,7 +498,7 @@ impl EstateCoordinator {
         }
         corpus
             // `Corpus::ingest` expects `now_millis` (MILLISECONDS — it divides by
-            // 1000 internally); `drawer.filed_at` is epoch MILLISECONDS (ADR-023),
+            // 1000 internally); `drawer.filed_at` is epoch MILLISECONDS,
             // so it is passed directly.
             .ingest(&drawer.content, &drawer.id, drawer.filed_at)
             .map_err(|e| verb_fail(format!("corpus ingest failed: {e:?}")))?;

@@ -152,7 +152,7 @@ impl EstateRegistry {
         // fail in a correct build; the InMemory backend never returns I/O errors.
         wire_inmemory_semantic_recall(&handle, &coord)
             .expect("in-memory semantic recall wiring must succeed");
-        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // Idempotently seed the seven default wings. Non-fatal: seeding
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "in-memory");
@@ -297,7 +297,7 @@ impl EstateRegistry {
         })?;
         wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
-        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // Idempotently seed the seven default wings. Non-fatal: seeding
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, path);
@@ -445,7 +445,7 @@ impl EstateRegistry {
         // Uses a separate PostgresStorage handle on the same connection string.
         wire_postgres_semantic_recall(conn_str, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for postgres: {e}"))?;
-        // Idempotently seed the seven ADR-016 default wings. Non-fatal: seeding
+        // Idempotently seed the seven default wings. Non-fatal: seeding
         // failure logs and continues — the estate is open and functional.
         // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
         seed_wings_non_fatal(&coord, &handle, "postgres");
@@ -621,7 +621,7 @@ impl EstateRegistry {
 // Default wing seeding helper
 // ---------------------------------------------------------------------------
 
-/// Idempotently seed the seven ADR-016 default wings for `handle`.
+/// Idempotently seed the seven default wings for `handle`.
 ///
 /// Reads existing `AI_Charter_Hint` drawers and skips wings that are already
 /// present — safe to call on re-opens of an existing estate. Failure is

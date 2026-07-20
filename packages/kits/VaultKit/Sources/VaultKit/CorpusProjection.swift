@@ -3,7 +3,7 @@ import GeniusLocusKit
 
 // VK-ADAPT-01 — corpus projection for migration verification.
 //
-// ADR-007 Decision 1 retired GLK's flat import verb but kept the
+// data-movement privacy tiers retired GLK's flat import verb but kept the
 // substrate's recall-based migration verification (`verifyMigration`)
 // and NeuronKit's in-product fidelity benchmark, both of which consume
 // the reference-corpus type `ExternalCorpus`. This projection feeds

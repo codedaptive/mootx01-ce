@@ -18,7 +18,7 @@
 //   - Never read a clock inside substrate-ml. The `ts` argument is
 //     forwarded directly to report!().
 //
-// Dependency authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+// Dependency authority: in-repository dependency direction.
 
 /// Canonical metric names for the VizGraph telemetry layer.
 ///

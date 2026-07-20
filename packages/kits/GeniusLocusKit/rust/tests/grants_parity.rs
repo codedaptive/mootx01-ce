@@ -358,7 +358,7 @@ fn grt03f_grant_store_populated_after_issue() {
 //   Grantee UUID:  ABCDEF01-2345-6789-ABCD-EF0123456789
 //
 // How to re-derive expected values if needed:
-//   python3 -c "import hmac, hashlib; ..."  (see docs/decisions/ADR-... for
+//   python3 -c "import hmac, hashlib;..."  (see the current engineering specification for
 //   the full script), or run SubstrateKernel HKDFTests.grantDomainVector.
 // ---------------------------------------------------------------------------
 

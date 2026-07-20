@@ -206,7 +206,7 @@ struct FormalConceptsTests {
         #expect(concept.intent.contains("locus.qid=Q11397"))
         // Grouping is by the spine, not filing: facets the two drawers
         // disagree on cannot appear in the shared intent. The room
-        // attribute carries parentNodeId (ADR-017), so check no
+        // attribute carries parentNodeId, so check no
         // locus.room= entry appears at all (the two drawers have
         // different parentNodeIds).
         #expect(!concept.intent.contains { $0.hasPrefix("locus.room=") })

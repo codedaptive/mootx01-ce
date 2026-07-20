@@ -141,7 +141,11 @@ When two estates aggregate to a tier above them (a household, a team), we add bo
 
 **Why we chose it.** Bandwidth, not arithmetic, is the bottleneck for these operations. The right backend on a given chip is an empirical question, not a theoretical one. By measuring rather than assuming, we settled on SIMD as the production default for Apple Silicon, with the matrix coprocessor retained for the genuine matrix work in the matrix tier. The GPU path was tested and rejected at the sizes we operate on; it remains compiled and benchmarked so we can re-evaluate as hardware changes.
 
-**Where it lives.** SubstrateLib holds the kernel trait and the backends. The conformance harness lives in `docs/validation/substrate_math_performance/test-harness/`. The decision records in `docs/decisions/` show every measurement that drove a selection.
+**Where it lives.** SubstrateLib holds the kernel trait and the backends. The
+conformance harness lives in
+`docs/validation/substrate_math_performance/test-harness/`. The current
+selection and measurements live in
+`docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md`.
 
 **Conformance gate.** Non-negotiable. A faster kernel that produces different output is broken, not faster. Every backend, on every platform, is gated against the byte-identical output of the scalar reference before it can ship.
 
@@ -171,7 +175,11 @@ A handful of operating principles, distilled from the math and the engineering r
 
 **The four-block fingerprint is the structural coordinate of the substrate.** When in doubt about how two rows relate, measure their Hamming distance. The blocks are designed so that distance has meaning across noun types, which is what lets one moment summary aggregate drawers and ambient samples together.
 
-**Where to go next.** The engineering cookbook in `docs/validation/substrate_math_performance/` is the working reference for any kernel or algorithm change. The decision records in `docs/decisions/` are the trail of every selection and rejection. The conformance harness in `test-harness/` is the way you prove a change is correct before it ships.
+**Where to go next.** Start with `docs/engineering/README.md`, use the GeniusLocus
+cookbook for the algorithm contract, the performance gate for current backend
+selection, and the conformance harness in
+`docs/validation/substrate_math_performance/test-harness/` to prove a change
+before it ships.
 
 The mathematics behind this guide is held internally. If you find yourself needing it to make a change, that is a sign the change belongs upstream with the substrate team, not in a kit-level mission. Ask before you reach for it.
 

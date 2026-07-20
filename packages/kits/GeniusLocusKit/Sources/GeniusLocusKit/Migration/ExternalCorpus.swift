@@ -4,7 +4,7 @@
 // against (NEURONKIT_SPEC § 4.7). A corpus is any enumerable reference
 // set flattened to a list of id/content/tags entries.
 //
-// Corpus construction paths (VK-ADAPT-01, ADR-007):
+// Corpus construction paths (VK-ADAPT-01, data-movement privacy tiers):
 //   - VaultKit's CorpusProjection converts [NoteIR] → ExternalCorpus for
 //     the adapter → bridge import pipeline.
 //   - ARIA_MCP can construct a corpus inline from wire args.
@@ -12,7 +12,7 @@
 //     from captured drawer content.
 //
 // Decode knowledge for the external memory-tool JSON export format lives
-// in VaultKit's ExchangeAdapter per ADR-007 Decision 1; it is not
+// in VaultKit's ExchangeAdapter per data-movement privacy tiers; it is not
 // reproduced here.
 //
 // Ownership rationale: "external" means external to a GeniusLocus

@@ -19,7 +19,7 @@ pub mod serve;
 pub mod status;
 pub mod uninstall;
 pub mod upgrade;
-/// ADR-025 unlock/lock commands (password-based, Rust/Linux/Windows path).
+/// out-of-band sensitivity grants unlock/lock commands (password-based, Rust/Linux/Windows path).
 pub mod unlock;
 
 pub fn dispatch(command: Command) -> ExitCode {
@@ -43,7 +43,7 @@ pub fn dispatch(command: Command) -> ExitCode {
         Command::Upgrade { from, check, yes, no_restart } => {
             upgrade::run(from, check, yes, no_restart)
         }
-        // ADR-025: sensitivity unlock / lock.
+        // sensitivity unlock / lock.
         Command::Unlock { tier, db: _ } => {
             // Resolve the data directory for the sidecar and daemon-port files.
             // The `--db` flag (estate override) is accepted by the parser but the

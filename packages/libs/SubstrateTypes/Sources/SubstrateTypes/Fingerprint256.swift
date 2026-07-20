@@ -224,7 +224,7 @@ extension Fingerprint256 {
 
 // MARK: - Phase 1 combinator layer
 //
-// Per DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6 Phase 1
+// Per the four-package substrate layout
 // (Clojure convergent A; APL convergent A; Cursor convergent D; ML
 // convergent D). The four-block unroll that appears in 7+ files
 // (`ORReduce.reduce`, `ORReduce.merge`, `BitwiseArithmetic.intersect`,

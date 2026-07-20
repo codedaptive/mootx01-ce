@@ -38,7 +38,7 @@ Automatically use MOOTx01 for:
 7. Use `moot_list_lenses`, `moot_lens_*`, and `moot_synthesize` before spending many tokens on manual analysis.
 8. Write durable knowledge with `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal`.
 9. Correct trust state with confirm/update/withdraw/retire tools.
-10. Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
+10. Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
 
 If MOOTx01 is unavailable, disclose that and proceed only from current context.
 

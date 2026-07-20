@@ -102,7 +102,7 @@ use crate::verbs::lexicon::VerbError;
 
 /// Build a lookup map from parent_node_id to (wing_name, room_name)
 /// for all drawers. Uses the coordinator's `node_stores` registry
-/// (ADR-017 §3) — `estate.node_store` is `pub(crate)` in LocusKit
+/// — `estate.node_store` is `pub(crate)` in LocusKit
 /// and not accessible from GeniusLocusKit.
 fn build_node_name_map(
     ns: Option<&Arc<locus_kit::node_store::NodeStore>>,
@@ -219,8 +219,7 @@ pub enum FederatedReadRefusalReason {
     CustodyRefused,
 
     /// The grant's Ed25519 signature does not verify against the GRANTER's
-    /// registered identity public key (D9 hardening,
-    /// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+    /// registered identity public key.
     ///
     /// Trust derives from the estate registry (the manifest-persisted public key),
     /// not from any field in the grant blob — same registered-key trust anchor
@@ -565,7 +564,7 @@ pub fn format_sync_state_token(state: &SyncState, backend_name: &str) -> String 
 /// scoring — the same behavior as before CorpusKit/VectorKit were wired.
 /// Mirroring the Swift actor's `corpusKits` and `vectorStores` dictionaries.
 
-/// The dreaming-queue job payload (ADR-021 Phase 2b).
+/// The dreaming-queue job payload.
 ///
 /// Encoded as JSON in `Job.payload`. Field names use snake_case to match the
 /// Swift `DreamingItem` CodingKeys exactly (`recall_event_id`, `drawer_ids`)
@@ -674,8 +673,8 @@ pub struct EstateCoordinator {
     // coordinator reaches them through `corpus_kits[handle]` and is pure
     // orchestration — it enqueues work and, via the Corpus `on_encoded`
     // callback wired at provision, rolls up the touched LocusKit rooms.
-    /// Per-estate unified audit-log G-Set. Minted empty on `open`. Bug 4 fix
-    /// (ADR025-AUDITLOG-GOVERNOR): `current_audit_log` / `verify_audit_chain`
+    /// Per-estate unified audit-log G-Set. Minted empty on `open`.
+    /// `current_audit_log` / `verify_audit_chain`
     /// / `verify_audit_chain_with_rejections` no longer read from or write to
     /// this registry — each builds a fresh transient log per call via
     /// `hydration::feed_audit_log_from_estate` and returns it directly.
@@ -731,7 +730,7 @@ pub struct EstateCoordinator {
     node_topology_providers: HashMap<EstateHandle, Arc<dyn crate::node_topology::NodeTopologyProvider>>,
 
     /// Per-estate NodeStore references for resolving drawer parent_node_id
-    /// to human-readable (wing, room) display names (ADR-017 §3). Populated
+    /// to human-readable (wing, room) display names. Populated
     /// alongside the topology provider during `open`. The NodeStore is the
     /// same Arc that backs the SubstrateNodeTopologyProvider, so no extra
     /// database connection is created. Used by `resolve_drawer_node_names`.
@@ -764,12 +763,12 @@ pub struct EstateCoordinator {
     /// Mirrors Swift actor's `syncEngines: [EstateHandle: SyncEngineEntry]`.
     sync_engines: HashMap<EstateHandle, SyncEngineEntry>,
 
-    /// Per-estate dreaming queue handles (ADR-021 Phase 2b).
+    /// Per-estate dreaming queue handles.
     ///
     /// Lazy-mounted in `ensure_dreaming_queue` on the first external-origin scored
     /// recall (`recall_scored` with `request.origin == RecallOrigin::External`) for
     /// each estate. The queue opens the same per-estate `queue.sqlite` that the
-    /// encode and signals streams use — one queue, three streams (ADR-021 Decision 7),
+    /// encode and signals streams use — one queue, three streams,
     /// isolated by `stream_id = "dreaming"`. Backend selection mirrors the signals
     /// lane in `build_signals_queue` (NeuronKit): SQLite estate → encrypted
     /// `queue.sqlite` sibling; InMemory / absent → transient in-memory backend.
@@ -957,7 +956,7 @@ impl EstateCoordinator {
     // state managed by `ensure_dreaming_queue` and `enqueue_dreaming_item`;
     // these accessors expose only the observable properties tests need.
     // They follow the same `#[cfg(any(test, ...))]` pattern as the
-    // `inject_*` seams above (ADR-021 §4).
+    // `inject_*` seams above.
 
     /// Returns `true` if a dreaming queue has been mounted for `handle`.
     ///
@@ -981,7 +980,7 @@ impl EstateCoordinator {
         queue.pending_count_for_stream(&stream).ok()
     }
 
-    /// Production dreaming-queue pending-count probe (ADR-021 Phase 4, §12.2).
+    /// Production dreaming-queue pending-count probe.
     ///
     /// Returns the number of jobs pending on the `"dreaming"` stream for
     /// `handle`, or `None` if the queue is not yet mounted for this estate
@@ -1018,7 +1017,7 @@ impl EstateCoordinator {
     /// On mount failure (e.g. `queue.sqlite` cannot be opened), falls back to a
     /// transient in-memory backend — the same degradation path as `enqueue_dreaming_item`.
     ///
-    /// Mirrors Swift `GeniusLocusKit.mountDreamingQueue(for:)` (ADR-021 Phase 5).
+    /// Mirrors Swift `GeniusLocusKit.mountDreamingQueue(for:)`.
     pub fn mount_dreaming_queue(&self, handle: &EstateHandle) {
         self.ensure_dreaming_queue(handle);
     }
@@ -1226,7 +1225,7 @@ impl EstateCoordinator {
     ) -> Result<EstateHandle, GeniusLocusKitError> {
         // Capture the underlying Storage before Estate::open moves the
         // DrawerStore Arc. Used below for auto-registering the substrate
-        // topology provider (ADR-017 §10, NT-G1).
+        // topology provider (node-tree integrity, NT-G1).
         let topology_storage = store.storage();
         let estate =
             Estate::open(store, owner).map_err(|e| GeniusLocusKitError::EstateOpenFailed {
@@ -1259,7 +1258,7 @@ impl EstateCoordinator {
         self.scope_vaults.insert(handle, ScopeKeyVault::new());
         // Mark the estate mounted (GLK_PROVISION_001).
         self.mount_states.insert(handle, EstateMountState::Mounted);
-        // Auto-register substrate-native topology provider (ADR-017 §10,
+        // Auto-register substrate-native topology provider (node-tree integrity,
         // NT-G1). Wraps the estate's NodeStore so NodeTreeNative recall
         // works without a host-supplied provider.
         if let Some(storage) = topology_storage {
@@ -1276,8 +1275,8 @@ impl EstateCoordinator {
         }
         // Mint an empty unified audit log for the estate (GLK-03 parity). The
         // log starts empty so a verify pass before any feed reports a clean,
-        // zero-entry chain. Bug 4 fix (ADR025-AUDITLOG-GOVERNOR): nothing
-        // populates this registry entry on demand any more — `current_audit_log`
+        // zero-entry chain. Nothing populates this registry entry on demand
+        // any more — `current_audit_log`
         // / `verify_audit_chain` build a fresh transient log per call instead
         // (see the `audit_logs` field doc). Only `set_audit_log` (the
         // hydrate-on-launch path) ever overwrites this entry. Mirrors Swift
@@ -1342,7 +1341,7 @@ impl EstateCoordinator {
         // must not resolve to a stale provider; parity of Swift `close` which
         // drops `nodeTopologyProviders[handle]`.
         self.node_topology_providers.remove(handle);
-        // Drop the node store (ADR-017 §3 name resolution). Mirrors the
+        // Drop the node store (node-tree integrity name resolution). Mirrors the
         // topology provider cleanup above.
         self.node_stores.remove(handle);
         // Drop the retained Storage arc (GLK_BATCH1 `capture_batch`). Mirrors
@@ -1351,7 +1350,7 @@ impl EstateCoordinator {
         // Drop the sync engine so no engine reference outlives the estate.
         // Parity of Swift `close` which drops `syncEngines[handle]`.
         self.sync_engines.remove(handle);
-        // Drop the dreaming queue + HLC (ADR-021 Phase 2b). No drain worker to
+        // Drop the dreaming queue + HLC. No drain worker to
         // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
         // Mirrors Swift `close` which nils `dreamingQueues[handle]` and
         // `dreamingHLCs[handle]`.
@@ -1697,7 +1696,7 @@ impl EstateCoordinator {
     // MARK: - Merkle composition
 
     /// Create a snapshot with composed Merkle attestations from both
-    /// LocusKit (node-tree integrity) and CorpusKit (content-hash
+    /// LocusKit and CorpusKit (content-hash
     /// integrity). All attestations land in one atomic snapshot row.
     ///
     /// When no Corpus is registered for the handle, falls back to
@@ -1998,7 +1997,7 @@ impl EstateCoordinator {
     /// — the production ARIA boundary uses `recall_scored` for all three external
     /// recall tools (moot_memory_search, moot_recall_precise, moot_recall_shaped).
     /// This method provides the trace-limit wiring for the legacy flat-array
-    /// surface; it is not the dreaming enqueue site (ADR-021 Phase 2b, B-10a).
+    /// surface; it is not the dreaming enqueue site (recall-driven dreaming, B-10a).
     pub fn recall_external(
         &self,
         handle: &EstateHandle,
@@ -2051,7 +2050,7 @@ impl EstateCoordinator {
         Ok(result.admissible)
     }
 
-    // MARK: - dreaming queue (ADR-021 Phase 2b)
+    // MARK: - dreaming queue
 
     /// Lazy-mount the per-estate dreaming queue and its HLC generator.
     ///
@@ -2065,7 +2064,7 @@ impl EstateCoordinator {
     /// Backend selection mirrors `build_signals_queue` in NeuronKit:
     ///   - SQLite estate → `queue_sibling("queue.sqlite")` → `SqliteStorage` →
     ///     `PersistenceKitBackend`. Same encrypted sibling the encode and signals
-    ///     streams already share (one queue, three streams — ADR-021 Decision 7).
+    ///     streams already share (one queue, three streams — recall-driven dreaming).
     ///   - InMemory / absent → transient `InMemoryStorage`-backed backend.
     ///     No `DrainLease` is acquired — T6 is enqueue-only; the lease is a T9
     ///     drainer concern.
@@ -2145,7 +2144,7 @@ impl EstateCoordinator {
                     queuekit::QueueKit::new(Box::new(backend) as Box<dyn queuekit::QueueBackend>)
                 }
                 _ => {
-                    // InMemory estate, Postgres estate (deferred per ADR-021), or no
+                    // InMemory estate, Postgres estate (deferred per recall-driven dreaming), or no
                     // storage: all get a transient in-memory backend. No crash recovery
                     // needed for ephemeral estates.
                     let (q, _) = Self::build_inmemory_dreaming_queue(handle);
@@ -2256,9 +2255,8 @@ impl EstateCoordinator {
             }
         };
 
-        // HLC stamp: physical time is epoch-ms (HLC substrate convention). The `now`
-        // parameter throughout recall_scored is epoch-ms too (ADR-023, wall_now()
-        // from dispatch), so it stamps the HLC directly with no conversion.
+        // HLC physical time and the `now` parameter from dispatch are both epoch
+        // milliseconds, so the value needs no conversion.
         let submitted_at = hlc.send(now);
         let job = queuekit::Job {
             id: queuekit::JobId(uuid::Uuid::new_v4().simple().to_string()),
@@ -2452,7 +2450,7 @@ impl EstateCoordinator {
     /// so re-running the sweep skips items whose UUID already appears as a
     /// `lineage_id` in `_distilled` drawers.
     ///
-    /// `now` is epoch milliseconds (ADR-023) — deterministic clock, mirrors
+    /// `now` is epoch milliseconds — deterministic clock, mirrors
     /// Swift's `Date` parameter. `limit` caps the number of factoids produced this sweep
     /// (`None` = all eligible items, matching the Swift `limit: Int? = nil`).
     ///
@@ -2488,7 +2486,7 @@ impl EstateCoordinator {
 
         // Build a node-name lookup so we can resolve each drawer's room
         // display name from its parent_node_id (Drawer no longer stores
-        // wing/room strings directly — ADR-017 node tree migration).
+        // wing/room strings directly — the node-tree migration).
         let node_names = build_node_name_map(self.node_stores.get(handle), &all_drawers);
 
         // Build the set of source drawer UUIDs that already have a factoid:
@@ -2504,7 +2502,7 @@ impl EstateCoordinator {
             .map(|d| d.lineage_id.to_string())
             .collect();
 
-        // Default wing for factoid capture — ADR-016 "Agentic Memory" matches Swift.
+        // Default wing for factoid capture — wing organization "Agentic Memory" matches Swift.
         let factoid_wing = locus_kit::default_wings::DEFAULT_WING_NAME;
 
         // Optional VectorStore reference for fingerprint storage. Absence is non-fatal:
@@ -2627,7 +2625,7 @@ impl EstateCoordinator {
 
             // Write one _distilled_from tunnel: factoid → source drawer.
             // Resolve source drawer's wing/room names from the node tree
-            // (Drawer no longer stores wing/room directly — ADR-017).
+            // (Drawer no longer stores wing/room directly — node-tree integrity).
             let (src_wing, src_room) = node_names.get(&drawer.parent_node_id)
                 .cloned()
                 .unwrap_or_default();
@@ -3588,7 +3586,7 @@ impl EstateCoordinator {
     /// callers can retain the generated id. Mirrors the Swift
     /// `GeniusLocusKit.captureKGFact(_:subject:predicate:object:sourceDrawerID:now:)`.
     ///
-    /// `now` is epoch milliseconds (ADR-023). Always pass the current time from
+    /// `now` is epoch milliseconds. Always pass the current time from
     /// the caller; never call time inside this method — keeps the coordinator deterministic.
     pub fn add_kg_fact(
         &self,
@@ -3639,7 +3637,7 @@ impl EstateCoordinator {
     /// substitute `"no-embedding"` so the non-empty model-id contract is
     /// satisfied. Mirrors the Swift `GeniusLocusKit.addDiaryEntry(in:_:)`.
     ///
-    /// `now` is epoch milliseconds (ADR-023). `topic` and `embedding_model_id` are
+    /// `now` is epoch milliseconds. `topic` and `embedding_model_id` are
     /// caller-supplied; callers that have no topic may pass `""`.
     pub fn add_diary_entry(
         &self,
@@ -3796,7 +3794,7 @@ impl EstateCoordinator {
     // MARK: - resolve_drawer_node_names
 
     /// Resolve `parent_node_id` values to human-readable `(wing, room)`
-    /// display-name pairs using the estate's node tree (ADR-017 §3).
+    /// display-name pairs using the estate's node tree.
     ///
     /// For each unique `parent_node_id` in `node_ids`, looks up the room
     /// node (depth 2) via the estate's `NodeStore`, then its parent wing
@@ -3859,7 +3857,7 @@ impl EstateCoordinator {
     // MARK: - glk_fingerprints_captured
 
     /// Fingerprints of every non-tombstoned drawer captured in the closed
-    /// epoch-milliseconds window `[start_epoch, end_epoch]` (ADR-023), in
+    /// epoch-milliseconds window `[start_epoch, end_epoch]`, in
     /// HLC-ascending order within the window.
     ///
     /// The Moment lens (CognitionKit) folds these into an OR-reduced window
@@ -3886,7 +3884,7 @@ impl EstateCoordinator {
     /// Time-bucketed fingerprint bit-activity series for `bit` over the most
     /// recent `bucket_count` buckets of width `bucket_seconds` (a SECONDS width;
     /// the store scales it to ms internally), ending at `ending_at` (epoch
-    /// milliseconds, ADR-023 — deterministic clock, never read system time).
+    /// milliseconds, epoch-millisecond instants — deterministic clock, never read system time).
     ///
     /// Top-level GLK surface for the Rhythm recipe. Delegates to
     /// `Estate::fingerprint_bit_series`, which passes through to
@@ -4159,11 +4157,11 @@ impl EstateCoordinator {
 
         // Build the event_time map (audit row_id → authored-in-world epoch ms) so
         // the temporal (T) matrix pass keys off event_time, not the capture HLC —
-        // ADR-004: all temporal-cognition primitives key off eventTime. A bulk
+        // all temporal-cognition primitives key off eventTime. A bulk
         // historical import stamps every capture with one HLC, so hlc-based lags
         // are all 0 and no causality pairs form; the real ordering lives in each
         // drawer's event_time. event_time and the fold's physical_time are both
-        // epoch-ms (ADR-023), so it flows through directly. The row_id key mirrors
+        // epoch-ms, so it flows through directly. The row_id key mirrors
         // bridge_audit_event's `EntryUUID(row_uuid.to_be_bytes())`.
         let event_times: std::collections::HashMap<crate::audit::EntryUUID, i64> = {
             let estate = self.estate_for_verb(handle)?;
@@ -4271,7 +4269,7 @@ impl EstateCoordinator {
         estate.all_tunnels().map_err(|e| remap("all_tunnels", "", e).into())
     }
 
-    /// All non-tombstoned, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
+    /// All non-tombstoned, non-retired tunnels across all wings.
     ///
     /// OMEGA uses this to enumerate the active dreamed-tunnel population before
     /// applying its retire predicate (`isDreamed AND not reinforced`). Retired
@@ -4289,7 +4287,7 @@ impl EstateCoordinator {
         estate.all_active_tunnels().map_err(|e| remap("all_active_tunnels", "", e).into())
     }
 
-    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap` (T13 / ADR-021 Phase 7).
+    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap`.
     ///
     /// Called by OMEGA through the GLK seam (B-1: NeuronKit reaches the substrate
     /// only through GLK verb surface, never directly). Delegates to
@@ -4715,7 +4713,7 @@ impl EstateCoordinator {
         Ok(())
     }
 
-    // MARK: - ADR-025 sensitivity-unlock audit verbs
+    // MARK: - sensitivity unlock audit verbs
     //
     // Mirror of Swift `SensitivityAuditVerbs.swift`. Uses NEW dedicated
     // `UnifiedAuditVerb` cases (sensitivityGrantIssued/Denied/Revoked,
@@ -4735,7 +4733,7 @@ impl EstateCoordinator {
     /// Record that a sensitivity-unlock grant was approved and is now
     /// live. `grant_id` is a fresh identifier the caller mints per grant;
     /// `expires_at_ms` (epoch-milliseconds) is stored in `after_value` so
-    /// expiry is derivable from the log alone (ADR-025 §4: expiry is
+    /// expiry is derivable from the log alone (out-of-band sensitivity grants: expiry is
     /// passive, no dedicated expiry-time writer).
     pub fn record_sensitivity_grant_issued(
         &mut self,
@@ -5147,8 +5145,7 @@ impl EstateCoordinator {
         // mode 4 attenuates it by its decay policy in the custody gate below.
         let mut effective_content_level = authorizing_grant.content_level;
 
-        // 4.5. Federation-auth: grant signature verification (D9 hardening,
-        // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+        // Verify the grant signature before any cross-estate recall.
         //
         // Verify the grant's Ed25519 signature against the GRANTER's registered
         // identity public key. Trust derives from the registry — the manifest-persisted
@@ -5347,7 +5344,7 @@ impl EstateCoordinator {
         // Dot-boundary guard for LatticeSubtree: "500" must match "500"
         // and "500.1" but NOT "5001" — same guard as Swift and ARIA secondary.
         // Resolve node names for Wing/Room scope matching (Drawer stores
-        // parent_node_id, not wing/room strings — ADR-017).
+        // parent_node_id, not wing/room strings — node-tree integrity).
         let node_names = build_node_name_map(self.node_stores.get(source), &drawers);
         let drawers: Vec<_> = match &authorizing_grant.scope {
             crate::grants::GrantScope::WholeEstate => drawers,
@@ -5398,7 +5395,7 @@ impl EstateCoordinator {
         self.mount_states.get(handle).copied()
     }
 
-    /// Idempotently seed the seven ADR-016 default wings on an open estate.
+    /// Idempotently seed the seven default wings on an open estate.
     ///
     /// This is the single seam that owns the default-wing seeding loop.
     /// Both the `provision` path (fresh estate) and the serve open path (bare
@@ -5440,7 +5437,7 @@ impl EstateCoordinator {
             })?;
         // Identify already-seeded wings by finding drawers in room HINT_ROOM
         // ("AI_Charter_Hint") and resolving their wing names from the node tree
-        // (Drawer no longer stores wing/room — ADR-017).
+        // (Drawer no longer stores wing/room — node-tree integrity).
         let node_names = build_node_name_map(self.node_stores.get(handle), &existing_drawers);
         let seeded_wings: std::collections::HashSet<String> = existing_drawers
             .into_iter()
@@ -5754,7 +5751,7 @@ impl EstateCoordinator {
             }
         }
 
-        // Step 2c: Seed the seven default wings (ADR-016 §1 and §2) — AFTER wiring,
+        // Step 2c: Seed the seven default wings (the default-wing policy) — AFTER wiring,
         // so each hint drawer is stamped with the corpus's normal model id rather
         // than the "estate-provision" sentinel (matches the serve open path and the
         // Swift provision order). Hints are filed row-only (seed_wing does not
@@ -6042,7 +6039,7 @@ impl EstateCoordinator {
             }
         }?;
 
-        // ADR-021 Phase 2b: enqueue a dreaming item for external-origin scored recalls.
+        // Enqueue a dreaming item for external-origin scored recalls.
         //
         // Guard (spec §12.2 + B-10a):
         //   - origin must be External — only ARIA boundary recalls are dreaming
@@ -6054,8 +6051,8 @@ impl EstateCoordinator {
         //     enforced inside `enqueue_dreaming_item`; zero cost if < 2.
         //
         // The enqueue is non-fatal: `enqueue_dreaming_item` catches and logs all
-        // failures. `now` here is epoch-milliseconds (ADR-023, same unit as the rest
-        // of recall_scored); enqueue_dreaming_item stamps the HLC with it directly.
+        // failures. `now` uses the same epoch-millisecond unit as `recall_scored`,
+        // so `enqueue_dreaming_item` stamps the HLC with it directly.
         // No SystemTime::now() inside this engine — determinism rule.
         if request.origin == RecallOrigin::External {
             let drawers: Vec<Drawer> = result.hits.iter()
@@ -7314,7 +7311,7 @@ impl EstateCoordinator {
                 // from a registered GraphCache / PreferenceStore. (Swift's director does
                 // not surface any matrix/graph/preference path in `sources`; that is a
                 // pre-existing Swift↔Rust sources divergence NOT introduced here — the
-                // score-column parity that closes ADR-011 D-4 is over `final` and the
+                // score-column parity that closes cross-port RecallShape steering is over `final` and the
                 // graph/preference columns, both of which now agree cross-port.)
                 if ff_s > 0.0 { sources.push(RecallEvidencePath::MatrixFieldPresence); }
                 if co_s > 0.0 { sources.push(RecallEvidencePath::MatrixCoOccurrence); }

@@ -1,7 +1,7 @@
 //! LSA (Latent Semantic Analysis) distributional-semantics embedding provider.
 //! Rust port of Swift's `LsaProvider` in `CorpusKitProviders`.
 //!
-//! ADR-010 Decision B, signal #1 — LSA/SVD provider in the classical-
+//! honest semantic fusion, signal #1 — LSA/SVD provider in the classical-
 //! fusion dense recall lane.
 //!
 //! ## Algorithm
@@ -133,11 +133,11 @@ pub struct LsaProvider {
     /// Effective SVD rank after finalize().
     effective_rank: usize,
 
-    /// Reduced-vocabulary cap K for the dense factorization (ADR-022).
+    /// Reduced-vocabulary cap K for the dense factorization.
     reduced_vocab_cap: usize,
 
     /// The frozen reduced vocabulary (term → reduced column) the basis was
-    /// trained on (ADR-022). Projection + serialization key on THIS, not the
+    /// trained on. Projection + serialization key on THIS, not the
     /// full `counts.vocab`. Empty until `finalize()`.
     basis_vocab: HashMap<String, usize>,
 }
@@ -201,7 +201,7 @@ impl LsaProvider {
             return;
         }
 
-        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // factor over a reduced, informative sub-vocabulary so the
         // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
         // (~10^15 ops, infeasible). Shared with NMF; frozen here; drives query
         // projection. `vocab_size` below is the REDUCED column count — the SVD
@@ -369,7 +369,7 @@ impl LsaProvider {
         w.write_u64(self.projection_seed);
         w.write_u32(self.counts.document_count() as u32);
         w.write_u32(self.effective_rank as u32);
-        // ADR-022: persist the REDUCED basis vocab; projection keys on it. The
+        // persist the REDUCED basis vocab; projection keys on it. The
         // full counts vocab is persisted by serialize_counts as the drift anchor.
         w.write_string_u32_map(&self.basis_vocab);
         w.write_f32_array(&self.idf_weights);
@@ -441,7 +441,7 @@ impl LsaProvider {
             return None;
         }
 
-        // Projection keys on the REDUCED basis vocab (ADR-022); OOV terms
+        // Projection keys on the REDUCED basis vocab; OOV terms
         // outside top-K contribute nothing (covered by RI).
         let vocab_size = self.basis_vocab.len();
         let k = self.effective_rank;

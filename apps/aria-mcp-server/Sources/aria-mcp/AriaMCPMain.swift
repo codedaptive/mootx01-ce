@@ -161,7 +161,7 @@ struct AriaMCPMain {
             // Construct the SQLite storage. busyTimeout of 5.0 seconds is
             // the PersistenceKit BackendConfiguration.sqlite default; sufficient
             // for a single-process server with no concurrent writers.
-            // Whole-file encryption (ADR-014): open the estate as FullDatabase
+            // Whole-file encryption: open the estate as FullDatabase
             // with this estate's per-estate key from the Keychain (keyed by the
             // estate file path), so the file — schema and content — is
             // SQLCipher-encrypted at rest. The app and this server point at the

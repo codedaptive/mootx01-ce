@@ -173,7 +173,7 @@ struct EvaluatorTests {
 
     @Test("Tier boundary: elevated included in DEFAULT recall; restricted excluded")
     func tierBoundary_defaultCeiling_elevatedIncluded_restrictedExcluded() async throws {
-        // Per ADR-007 Decision 2 / VK-TIER-01: the Normal-tier ceiling is
+        // Per data-movement privacy tiers / VK-TIER-01: the Normal-tier ceiling is
         // `.elevated`. `restricted` is Private tier and must be absent from
         // default (no-claims) recall.
         let estate = try await makeEstate()
@@ -206,7 +206,7 @@ struct EvaluatorTests {
         #expect(rows.count == 1)
     }
 
-    // MARK: - Secret-exclusion proofs (ADR-007 Decision 2)
+    // MARK: - Secret-exclusion proofs
 
     @Test("Secret exclusion: secret drawer absent from unconstrained recall")
     func secretExclusion_unconstrainedRecall() async throws {
@@ -313,7 +313,7 @@ struct EvaluatorTests {
         let rows = await drain(stream)
         #expect(rows.count == 2)
         // Room filter correctness is enforced by the filter predicate; Drawer.room
-        // was removed per ADR-017, so room cannot be verified on the result struct.
+        // was removed under the node-tree model, so room cannot be verified on the result struct.
     }
 
     @Test(".createdAfter returns only drawers filed strictly after the timestamp")
@@ -487,7 +487,7 @@ struct EvaluatorTests {
         let rows = await drain(stream)
         #expect(rows.count == 5)
         // Room filter correctness is enforced by the filter predicate; Drawer.room
-        // was removed per ADR-017, so room cannot be verified on the result struct.
+        // was removed under the node-tree model, so room cannot be verified on the result struct.
         // Descending by filedAt
         let sorted = rows.sorted { $0.filedAt > $1.filedAt }
         #expect(rows.map(\.id) == sorted.map(\.id))

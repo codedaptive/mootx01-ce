@@ -52,7 +52,7 @@ fn env_observer_enabled() -> bool {
 
 /// Run the server to completion. See module docs. The `banner` is the
 /// stderr identity line (e.g. "aria-mcp" or "mootx01"), so logs say who is
-/// hosting the runtime. `version_skew` is ADR-024 §5's advisory — empty when
+/// hosting the runtime. `version_skew` is the plugin-ownership rule's advisory — empty when
 /// the caller detected no plugin/binary version mismatch (the common case,
 /// and the only option for `aria-mcp-server`, which has no plugin concept),
 /// or the advisory text to surface verbatim in `moot_estate_ping` /

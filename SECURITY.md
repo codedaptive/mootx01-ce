@@ -54,11 +54,15 @@ unlocked keyboard. None of the application controls (sensitivity
 tiers, export gates, receipts) defend against code already running on
 your machine. At that level the protections are the operating
 system's: file permissions, FileVault, and your own judgment about
-what you install. The committed exception is encryption at rest for
-`secret` rows under a key only you hold, scheduled for the v1.x
-series. That is the one layer built to survive a hostile local
-process. Until it ships, `secret` means excluded from recall and from
-every bulk channel. It does not mean unreadable on disk.
+what you install. Estates on the default SQLite backend are whole-database encrypted
+at rest by SQLCipher under a 256-bit per-install key,
+Secure-Enclave-wrapped on Apple, with fail-closed key handling.
+Two caveats. Estates created before the encryption lockdown
+(circa v1.0.2) remain plaintext files until migrated. A
+PostgreSQL backend you configure yourself is protected by that
+server's controls, not by MOOTx01. `secret` rows remain excluded
+from recall and from every bulk channel in addition to at-rest
+encryption.
 
 **The AI reads what you let it recall.** This is a knowledge engine.
 Anything the AI can recall can leave through a conversation, slowly
@@ -155,16 +159,14 @@ bug bounty and no response-time guarantee.
 
 ## Current posture
 
-This project is in beta (pre-1.0). The security review gate in the
-[README](README.md) status tables has not yet run on any kit: build
-status reflects functionality only, and nothing here has been hardened
-or audited. The invariants above describe what the substrate is built
-to guarantee; until the gate runs, evaluate them as designed and
-claimed, not as certified.
+This project completed an independent external security review in
+July 2026. All findings, 108 across medium, low, and informational
+severities, have been remediated. The review covered the codebase
+at review time; the invariants above are design guarantees
+exercised continuously by the test suite.
 
 ## Supported versions
 
-Only the tip of `stable/1.0.x` (the default branch) is supported. There
-are no other maintained release branches during the beta.
+Only the tip of `stable/1.0.x` (the default branch) is supported.
 
 

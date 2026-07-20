@@ -5,7 +5,7 @@
 //! read itself into the canonical `NoteIR` and write `NoteIR` back out.
 //! Everything above this seam — `DrawerMapping` and `VaultBridge` — is
 //! format-agnostic and never names a concrete adapter, so a new format adds
-//! one `VaultAdapter` implementor with no change to the core (ADR-VAULTKIT-001 (c)).
+//! one `VaultAdapter` implementor with no change to the core (Vault import/export (c)).
 //!
 //! Both methods touch the filesystem and therefore return `Result`.
 //! Both are pure with respect to the substrate — an adapter never reaches

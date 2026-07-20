@@ -7,7 +7,7 @@ import Testing
 /// Five-level ancestor chain proof: flat drawers wired into a deep
 /// outline via `.parent` tunnels, demonstrating that the containment
 /// tree (parent_node_id) and the outline graph (typed parent edges)
-/// are fully orthogonal.  ADR-017 §11 / NT-L5 Part 3.
+/// are fully orthogonal.  node-tree integrity / NT-L5 Part 3.
 @Suite("OutlineProofTests — five-level ancestor chain on flat drawers")
 struct OutlineProofTests {
 

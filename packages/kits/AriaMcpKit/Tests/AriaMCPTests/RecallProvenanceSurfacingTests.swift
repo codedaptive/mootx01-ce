@@ -21,11 +21,9 @@
 //      a recall over a bare locus-only estate surfaces a provenance line that is
 //      present. Section E verifies the bare-locus (sparse-only) path explicitly.
 //
-// Rationale: the embedding ADR (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12)
-// requires the ARIA surface to let callers distinguish "real semantic space" from
-// "deterministic/structural fallback". Before this mission, denseLaneStatus and
-// degradedStages were computed in the kit but silently dropped at the ARIA
-// boundary. These tests close that gap.
+// The ARIA surface lets callers distinguish "real semantic space" from
+// "deterministic/structural fallback" by returning denseLaneStatus and
+// degradedStages at the boundary.
 
 import Testing
 import Foundation

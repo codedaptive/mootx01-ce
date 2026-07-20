@@ -1,4 +1,4 @@
-// UnlockAuthority.swift — ADR-025 sensitivity unlock: identity-verification
+// UnlockAuthority.swift — sensitivity unlock: identity-verification
 // seam for the `mootx01 unlock` CLI command (macOS only).
 //
 // Two roles:
@@ -18,8 +18,7 @@
 //
 //      We NEVER prompt the user for a mootx01-specific password on macOS —
 //      the OS attests user presence through the system credential store
-//      (ADR-025 §2: "Swift/macOS uses LocalAuthentication; no stored password
-//      of ours exists on that platform").
+//      through LocalAuthentication; mootx01 stores no password on macOS.
 //
 // On Rust/Linux/Windows the approval mechanism is password-based
 // (PBKDF2-HMAC-SHA256); that path lives in the Rust vertical's
@@ -32,7 +31,7 @@ import AriaMCP   // SensitivityTier
 
 // MARK: - Protocol
 
-/// The identity-verification seam for ADR-025 sensitivity unlock.
+/// The identity-verification seam for sensitivity unlock.
 ///
 /// `UnlockCommand` calls `requestApproval(tier:reason:)` before sending a
 /// grant request to the daemon's `/api/control/unlock` REST endpoint.

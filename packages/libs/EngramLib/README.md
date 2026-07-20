@@ -1,6 +1,6 @@
 # EngramLib
 
-EngramLib is the product-facing API for 256-bit engram similarity and retrieval over the GeniusLocus substrate. Fourth kit in the eleven-kit family per `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`.
+EngramLib is the product-facing API for 256-bit engram similarity and retrieval over the GeniusLocus substrate. Fourth kit in the eleven-kit family per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`.
 
 EngramLib wraps SubstrateLib's kernel layer behind a stable, minimal surface. Consumers do not see kernel selection, dispatcher logic, or substrate internals.
 

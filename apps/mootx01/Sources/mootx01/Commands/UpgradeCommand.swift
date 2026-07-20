@@ -161,7 +161,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
         #endif
 
-        // ADR-024 Wave 3, Defect 1: an upgrade alone never touches
+        // an upgrade alone never touches
         // ~/.claude/mootx01-plugin or Claude Code's plugin cache — without
         // this, a machine upgraded via `mootx01 upgrade` keeps a stranded
         // plugin package (and Claude Code keeps a stranded cached snapshot)
@@ -195,7 +195,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// cache) converge on whatever the CURRENT embedded bundle carries, and
     /// prints the per-host CLI result. `vaultOff` is not tracked across
     /// upgrades — passing `false` here is safe regardless: every
-    /// plugin-capable host's package is HTTP-shaped today (ADR-024 §2), so
+    /// plugin-capable host's package is HTTP-shaped today, so
     /// `vaultOff` has no effect on rematerialization (Defect 2); the vault
     /// posture that matters lives in the resident daemon's own launchd
     /// environment, which `mootx01 upgrade` does not touch (it restarts the

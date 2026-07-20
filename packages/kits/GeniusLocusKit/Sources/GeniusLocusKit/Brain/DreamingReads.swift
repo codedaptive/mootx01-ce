@@ -40,7 +40,7 @@ public extension GeniusLocusKit {
         return try await estate.allTunnels()
     }
 
-    /// All confirmed-active, non-retired tunnels across all wings (T13 / ADR-021 Phase 7).
+    /// All confirmed-active, non-retired tunnels across all wings.
     ///
     /// OMEGA uses this to enumerate the active dreamed-tunnel population before
     /// applying its retire predicate (`isDreamed AND not reinforced`). Only
@@ -56,7 +56,7 @@ public extension GeniusLocusKit {
         return try await estate.allActiveTunnels()
     }
 
-    /// Retire a tunnel by flipping bit 13 of its `operationalBitmap` (T13 / ADR-021 Phase 7).
+    /// Retire a tunnel by flipping bit 13 of its `operationalBitmap`.
     ///
     /// Called by OMEGA through the GLK seam (B-1: NeuronKit reaches the substrate
     /// only through GLK verb surface, never directly). Delegates to

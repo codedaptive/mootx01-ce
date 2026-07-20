@@ -3,7 +3,7 @@
 Layer 2 — bandwidth-bound bit operations of the four-package substrate split.
 
 **Status:** built; four-package split complete (per
-`docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md`
+`docs/engineering/HARNESS_REFERENCE.md#6-the-four-package-substrate-split`
 Phase 6 and the 2026-05-29 addendum). Consumers depend on this package
 directly; the transitional `@_exported` re-export shim has been removed.
 `SubstrateLib` is RETAINED as the orchestration package of the

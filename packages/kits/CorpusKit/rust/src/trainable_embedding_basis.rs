@@ -95,7 +95,7 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
         basis: &[u8],
     ) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError>;
 
-    /// ADR-026: release the in-memory trained vocabulary to free heap.
+    /// release the in-memory trained vocabulary to free heap.
     /// The next embed call must go through reconstruct_basis from BasisStore.
     fn release_basis(&mut self);
 

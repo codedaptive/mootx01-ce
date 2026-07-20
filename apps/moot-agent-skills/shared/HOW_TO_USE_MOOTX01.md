@@ -202,7 +202,7 @@ Use `moot_recall_distilled` to search the distilled tier. Use
 
 ## Reindexing
 
-`moot_reindex` backfills BM25 and vector indexes for memories not yet encoded.
+`moot_reindex` is a recovery tool: it backfills BM25 and vector indexes for memories not yet encoded, after an index loss or for estates created before encode-on-capture.
 Use it only to recover if semantic recall appears dark, or for content captured
 before encode-on-capture. You do NOT need it after a normal import — imports
 trigger their own indexing in the background (poll `moot_drain_status` to watch

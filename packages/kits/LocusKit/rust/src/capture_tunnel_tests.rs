@@ -84,7 +84,7 @@ fn byte_identical_to_cascade() {
         .get_tunnel(&format!("supersedes:{}:{}", second.id, first.id))
         .unwrap()
         .unwrap();
-    // ADR-017: wing/room resolved from node tree via parent_node_id.
+    // wing/room resolved from node tree via parent_node_id.
     let names = store.resolve_node_names(&[second.parent_node_id.clone(), first.parent_node_id.clone()]).unwrap();
     let (second_wing, second_room) = names.get(&second.parent_node_id).expect("second must resolve");
     let (first_wing, first_room) = names.get(&first.parent_node_id).expect("first must resolve");

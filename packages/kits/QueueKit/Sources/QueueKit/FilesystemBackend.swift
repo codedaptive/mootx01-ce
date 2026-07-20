@@ -347,7 +347,7 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
         return (try? fm.contentsOfDirectory(atPath: newDir.path).count) ?? 0
     }
 
-    // MARK: - Stream-scoped drain (ADR-021 Decision 7 / T1)
+    // MARK: - Stream-scoped drain
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///
@@ -377,7 +377,7 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
         // never touched, so concurrent drainers of different streams (encode +
         // dreaming) cannot steal or race on each other's jobs. (The earlier
         // claim-all-then-unclaim form transiently moved every stream's files into
-        // cur/, which collided under concurrent stream drains — ADR-021 D7 requires
+        // cur/, which collided under concurrent stream drains — recall-driven dreaming  requires
         // that one stream's drain never disturbs another's.)
         var results: [(Job, SessionID)] = []
         for entry in entries {
@@ -515,7 +515,7 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
     ///
     /// Safe to call ONLY at mount, when no drain session is live: a freshly
     /// started process owns no in-flight work, so every entry in `cur/` is a crash
-    /// orphan from a previous run. With one writer per estate (ADR-LOOPBACKHTTP-001),
+    /// orphan from a previous run. With one writer per estate,
     /// that precondition holds. Returns the number of jobs reclaimed.
     @discardableResult
     public func reclaimInFlight() async throws -> Int {

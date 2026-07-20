@@ -11,8 +11,8 @@ relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
-  - docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md
-  - docs/decisions/DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#72-disclosure-model
 purpose: |
   ConvergenceKit is the optional sync layer for the substrate. It
   replicates PersistenceKit row mutations across device or perimeter

@@ -1,5 +1,5 @@
 //! Rust leg of the cross-language bit-identity gate for
-//! `RandomIndexingProvider` (ADR-010 Decision B, signal #2).
+//! `RandomIndexingProvider` (honest semantic fusion, signal #2).
 //!
 //! Reads the SAME canonical fixture the Swift leg emits:
 //!   `Tests/SharedVectors/ri_canonical_vectors.json`

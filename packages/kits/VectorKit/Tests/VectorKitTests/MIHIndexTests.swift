@@ -982,7 +982,7 @@ struct CumulativeChooseTests {
 // MARK: - Suite 9: Enumeration-budget guard — deep-k random probes (m=4, small n)
 
 /// Gate for the enumeration-budget guard introduced in
-/// DECISION_MIH_ENUM_BUDGET_2026-06-12. Before this guard, a deep-k random
+/// the bounded MIH enumeration budget. Before this guard, a deep-k random
 /// probe with m=4 on any non-trivial n would attempt C(64,~30) ≈ 10^17 mask
 /// evaluations and hang. After the guard, such queries fall back to the brute
 /// scan and complete in O(n), returning results identical to BruteForce.

@@ -3,7 +3,7 @@
 // Package.swift — SubstrateLib
 //
 // SubstrateLib is the orchestration layer of the four-package substrate
-// split (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR addendum 2026-05-29). It
+// split. It
 // owns the nine-verb mechanics and the row-state automaton — the control
 // surface that composes the three sub-packages — plus the AuditGate write
 // gate. The value types live in SubstrateTypes, the hardware-dispatched
@@ -18,7 +18,7 @@
 //
 // SubstrateLib was promoted from
 // docs/engineering/substrate_reference/GeniusLocusReference/
-// on 2026-05-19 per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
+// on 2026-05-19 per current kit ownership.
 
 import PackageDescription
 
@@ -47,7 +47,7 @@ let package = Package(
         // report gate. It sits BELOW SubstrateLib in the topology
         // (depends on nothing in the repo), so this dependency does not
         // invert layering. Wired here per PACKAGES.md "Mission 2" note
-        // and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // and in-repository dependency direction.
         .package(path: "../IntellectusLib"),
     ],
     targets: [

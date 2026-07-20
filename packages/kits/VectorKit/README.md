@@ -16,7 +16,7 @@ VectorKit is complete on its own. You do not need LocusKit, CorpusKit, or Genius
 
 ## Mission 6 changes (2026-05-19)
 
-Refactored per `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md` section 4.6.
+Refactored per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership` section 4.6.
 
 1. Storage now consumes PersistenceKit's `Storage` protocol. The direct SQLite I/O in `VectorStore` is gone. Callers pass `any Storage` (SQLite, PostgreSQL, or InMemory) and `VectorStore.schemaDeclaration` to `storage.open(schema:)` before constructing the store.
 

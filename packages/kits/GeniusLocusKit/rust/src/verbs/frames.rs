@@ -87,7 +87,7 @@ pub struct CaptureFrame {
     pub lattice_anchor: LatticeAnchor,
     pub added_by: String,
     pub embedding_model_id: String,
-    /// Wing to file the drawer into (ADR-016). `None` falls through to the
+    /// Wing to file the drawer into. `None` falls through to the
     /// estate default ("Agentic Memory"). Supply `Some(name)` to route a
     /// drawer into a specific wing at capture time (e.g. "User Canon",
     /// "Personal"). Mirrors Swift `CaptureFrame.wing: String?`.

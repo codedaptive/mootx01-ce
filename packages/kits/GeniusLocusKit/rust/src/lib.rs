@@ -96,7 +96,7 @@ pub use brain::scheduler::{
     SignalRouteOutcome as SchedulerSignalRouteOutcome, SignalSpec as SchedulerSignalSpec,
     SignalState as SchedulerSignalState, SignalTrigger as SchedulerSignalTrigger,
     SubscriptionID as SchedulerSubscriptionID, EMISSION_CLASS_TAGS,
-    // T5 (ADR-021 Decision 7): stream_id stamped on every signal Job sent to the
+    // stream_id stamped on every signal Job sent to the
     // shared per-estate queue.sqlite. The drain loop uses drain_for_stream to
     // claim only "signals" jobs, leaving encode jobs or dreaming jobs untouched.
     SIGNAL_STREAM_ID,
@@ -132,7 +132,7 @@ pub use coordinator::{
     FederatedRecallResult, FederatedReadRefusalReason,
     SyncEngineEntry, format_sync_state_token,
     ExpungeIntegritySweepResult, DrainStatus,
-    // ADR-021 Phase 2b: dreaming-queue job payload. Public so the T9 drainer
+    // dreaming-queue job payload. Public so the  drainer
     // (a downstream crate) and integration tests can decode queue.sqlite payloads.
     DreamingItem,
 };

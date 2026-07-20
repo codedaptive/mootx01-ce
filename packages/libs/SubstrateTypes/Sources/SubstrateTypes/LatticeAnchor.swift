@@ -1,6 +1,6 @@
 // LatticeAnchor.swift
 //
-// Phase 6.3 (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.6)
+
 // Moved from SubstrateLib/Sources/SubstrateLib/Verbs.swift.
 //
 // Lattice anchor reference per cookbook §2.7 / I-16: sixteen

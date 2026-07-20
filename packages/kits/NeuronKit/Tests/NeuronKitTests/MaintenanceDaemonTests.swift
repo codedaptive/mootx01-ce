@@ -771,7 +771,7 @@ struct MaintenanceDaemonTests {
         #expect(second != nil, "tick fires once the interval has elapsed")
     }
 
-    // MARK: - ADR-017 node invariant verification
+    // MARK: - node-tree invariant verification
 
     @Test("node invariant: consistent drawers produce zero violations")
     func nodeInvariantConsistentDrawersZeroViolations() async throws {

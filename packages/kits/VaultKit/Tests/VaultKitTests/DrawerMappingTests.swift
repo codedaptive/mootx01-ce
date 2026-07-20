@@ -87,10 +87,10 @@ struct DrawerMappingTests {
             filedAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
 
-        // Wing and room are resolved from the node tree (ADR-017); in tests
+        // Wing and room are resolved from the node tree; in tests
         // they are passed directly to the pure projection function.
         let note = DrawerMapping.noteIR(from: drawer, wing: "wing_owner", room: "research", references: [tunnel])
-        // Path: <wing>/<room>/<slug>.md — ADR-016 vault layout; wing is the
+        // Path: <wing>/<room>/<slug>.md — wing organization vault layout; wing is the
         // top-level vault folder. Slug derived from first heading.
         #expect(note.stableSourceKey == "wing_owner/research/aromatics")
         #expect(note.flattenedBody.contains("A study of arene rings."))

@@ -1,4 +1,4 @@
-// DreamingQueueAPI.swift — per-estate dreaming queue lifecycle (ADR-021 Phase 2b).
+// DreamingQueueAPI.swift — per-estate dreaming queue lifecycle.
 //
 // T6 is ENQUEUE-ONLY. This file owns:
 //   - `ensureDreamingQueue(for:)` — lazy-mount the per-estate dreaming queue.
@@ -73,7 +73,7 @@ internal extension GeniusLocusKit {
 
         if case .sqlite = cfg?.backend {
             // Persistent estate: open the shared queue.sqlite sibling (same file
-            // the encode and signals streams use). One queue, many streams per ADR-021
+            // the encode and signals streams use). One queue carries many isolated streams.
             // Decision 7. The sibling cfg carries the estate's encryption key so the
             // dreaming payloads (which include drawer ids) are encrypted at rest.
             do {
@@ -217,7 +217,7 @@ internal extension GeniusLocusKit {
 
 }
 
-// MARK: - Pending-count probe (REM-ALPHA gate, ADR-021 Phase 4)
+// MARK: - Pending-count probe (REM-ALPHA gate, recall-driven dreaming)
 
 public extension GeniusLocusKit {
 
@@ -227,8 +227,8 @@ public extension GeniusLocusKit {
     /// if the dreaming queue has not yet been mounted for this estate (no
     /// external-origin recall has fired yet, so the queue file is not open).
     ///
-    /// Used by `AutonomicGovernor.tick()` as the §12.2 cheap trigger (ADR-021
-    /// Phase 4): `nil` or `0` ⇒ skip the dreaming cycle entirely — no reader,
+    /// Used by `AutonomicGovernor.tick` as a cheap trigger: `nil` or `0` skips
+    /// the dreaming cycle entirely — no reader,
     /// no estate scan, no drain. Only a positive count proceeds to the full
     /// dreaming-daemon pump. This makes idle cycles and bulk-import cycles
     /// (where the dreaming queue was never populated) true no-ops.
@@ -263,7 +263,7 @@ public extension GeniusLocusKit {
     /// to process" — the lease check is still correct.
     ///
     /// Mirrors Rust `EstateCoordinator.ensure_dreaming_queue` (public variant for
-    /// external callers, ADR-021 Phase 5).
+    /// external callers, recall-driven dreaming).
     func mountDreamingQueue(for handle: EstateHandle) async {
         // Guard: already mounted — nothing to do.
         guard dreamingQueues[handle] == nil else { return }

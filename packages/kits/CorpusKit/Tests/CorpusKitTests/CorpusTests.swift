@@ -373,7 +373,7 @@ struct CorpusTests {
         }
     }
 
-    /// T4 (ADR-021 Decision 7): a file-backed (SQLite) estate persists the Corpus
+    /// a file-backed (SQLite) estate persists the Corpus
     /// ingest queue to a per-estate SQLite file BESIDE the estate — not a plaintext
     /// maildir. The sibling filename is `<estate-stem>.queue.sqlite` so two estates
     /// in the same directory never share a queue. Proven by:
@@ -424,7 +424,7 @@ struct CorpusTests {
         }
     }
 
-    /// T4 (ADR-021 Decision 7): the encode drain claims only stream="encode" jobs and
+    /// the encode drain claims only stream="encode" jobs and
     /// does not disturb jobs on other streams sharing the same queue.sqlite.
     @Test func encodeDrainIsStreamScoped() async throws {
         try await GlobalTestLock.shared.withLock {

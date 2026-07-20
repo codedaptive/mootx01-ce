@@ -8,7 +8,7 @@
 //!   Tier 3 (4)  — knowledge graph: file, search, retire, timeline
 //!   Tier 4 (2)  — journal: write, read
 //!   Tier 5 (3)  — estate: status, map, ping
-//!   Monitoring (1) — moot_monitoring_status (ADR-025 wave 8.2, telemetry flag R/W)
+//!   Monitoring (1) — moot_monitoring_status (out-of-band sensitivity grants, telemetry flag R/W)
 //!   Maintenance (3/4) — moot_reindex, moot_drain_status, moot_reclassify_fdc,
 //!                       and vault-gated moot_palace_import
 //!   Federation (1) — moot_federated_search
@@ -21,7 +21,7 @@
 //! The 9th Tier-1 tool is moot_memory_get (fetch one memory drawer by id, in
 //! full — closes the fetch-drawer-by-ID gap, build-now per Bob's ruling).
 //!
-//! Vault-on (default): 68 tools (ADR-025 wave 8.2 added moot_monitoring_status;
+//! Vault-on (default): 68 tools (out-of-band sensitivity grants added moot_monitoring_status;
 //! FDC reset added moot_reclassify_fdc; the contradiction hunter added
 //! moot_hunt_contradictions + moot_review_tunnel).
 //! Vault-off (MOOTX01_VAULT=0): 62 tools —
@@ -48,7 +48,7 @@ use serde_json::json;
 /// the literal string `"0"` (including absent/empty) means vault is ON.
 /// The daemon has this variable set from the install-time `--vault-on/--vault-off`
 /// choice (written into the systemd unit Environment= line or Windows Task
-/// Scheduler cmd wrapper). Default is vault-on per ADR-015.
+/// Scheduler cmd wrapper). Default is vault-on.
 pub fn vault_enabled() -> bool {
     std::env::var("MOOTX01_VAULT")
         .map(|v| v != "0")
@@ -73,8 +73,8 @@ pub fn memory_enabled() -> bool {
 /// `MOOTX01_VAULT=0` (installed with `--vault-off`). Adding 1 each when
 /// `MOOTX01_MEMORY_TOOL=1` (the opt-in memory adapter). The filesystem-importing
 /// `moot_palace_import` tool is hidden with the vault surface (same security
-/// posture). All other non-vault tiers are always present. See ADR-015.
-/// ADR-025 wave 8.2 added `moot_monitoring_status`; the FDC reset tool added
+/// posture). All other non-vault tiers are always present. See the open 1.0 Vault posture.
+/// out-of-band sensitivity grants added `moot_monitoring_status`; the FDC reset tool added
 /// `moot_reclassify_fdc`.
 pub fn build_tool_list() -> serde_json::Value {
     build_tool_list_with_flags(vault_enabled(), memory_enabled())
@@ -142,14 +142,14 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
     tools.push(estate_map_tool());
     tools.push(estate_ping_tool());
 
-    // Monitoring control (1) — ADR-025 wave 8.2: read/write daemon telemetry flag.
+    // Monitoring control (1) — out-of-band sensitivity grants: read/write daemon telemetry flag.
     // Always available: reports "unavailable" when no stats store wired rather than
     // gating on the store's presence. Honest and safe to expose unconditionally.
     tools.push(monitoring_status_tool());
 
     // Maintenance — index backfill and drain status are always available.
     // Direct palace import opens arbitrary local SQLite files, so it is
-    // gated with the vault import/export surface (ADR-015).
+    // gated with the vault import/export surface.
     tools.push(reindex_tool());
     tools.push(drain_status_tool());
     tools.push(reclassify_fdc_tool());
@@ -194,12 +194,12 @@ pub fn build_tool_list_with_flags(vault_on: bool, memory_on: bool) -> serde_json
         tools.push(lens_tool(lens_name));
     }
 
-    // Vault (5) — gated by MOOTX01_VAULT env var (ADR-015).
+    // Vault (5) — gated by MOOTX01_VAULT env var.
     // Default (env absent or ≠ "0") is vault-on: tools appear in tools/list.
     // When MOOTX01_VAULT=0 (installed with --vault-off), all five vault tools
     // are omitted from the surface and dispatch returns a clear refusal.
-    // Both Swift and Rust ports are live (ADR-VAULTKIT-002 decision a superseded;
-    // see DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md).
+    // Both Swift and Rust ports are live (Vault drift and candidate handling decision a superseded;
+    // see Vault lineage identity and export scope).
     // `moot_vault_export` accepts an optional `scope` arg (default "believed").
     // `moot_vault_job` provides tool-surface parity (Bob's ruling 2026-06-12):
     // Rust vault ops complete synchronously; the ledger records completed results
@@ -262,7 +262,7 @@ fn file_memory_tool() -> serde_json::Value {
             json!({
                 "content": string_schema("Verbatim content to file."),
                 "location": string_schema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
-                "wing": string_schema("Optional wing name to route this memory into a specific wing (ADR-016). When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
+                "wing": string_schema("Optional wing name to route this memory into a specific wing. When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
                 "sensitivity": string_schema("Sensitivity tier: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
                 "exportability": string_schema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Omit to use the default; null is invalid."),
                 "kind": string_schema("Content kind: prose (default), code, transcript, list, structuredJSON, imageCaption, fingerprintOnly. Omit to use the default; null is invalid."),
@@ -283,7 +283,7 @@ fn memory_search_tool() -> serde_json::Value {
                 "query": string_schema("Natural-language search query."),
                 "limit": integer_schema("Max results to return (default 20). Omit to use the default; null is invalid."),
                 "filter": filter_schema(),
-                "wing": string_schema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                 "explain": boolean_schema("Include scoring explanation (default false). Omit to use the default; null is invalid."),
                 "scoring": string_schema("Scoring mode: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
                 "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
@@ -386,7 +386,7 @@ fn move_memory_tool() -> serde_json::Value {
             json!({
                 "id": string_schema("UUID of the memory to move."),
                 "location": string_schema("New location hint (free-form string; server resolves to room coordinate)."),
-                "wing": string_schema("Optional target wing name for cross-wing moves (ADR-016). When supplied, the memory is moved to this wing AND the given location. When absent, only the room changes and the wing stays unchanged. Example: \"Professional\", \"Personal\".")
+                "wing": string_schema("Optional target wing name for cross-wing moves. When supplied, the memory is moved to this wing AND the given location. When absent, only the room changes and the wing stays unchanged. Example: \"Professional\", \"Personal\".")
             }),
             json!(["id", "location"])
         )))
@@ -576,7 +576,7 @@ fn estate_ping_tool() -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Monitoring control (ADR-025 wave 8.2)
+// Monitoring control
 // ---------------------------------------------------------------------------
 
 /// moot_monitoring_status — read or write the daemon telemetry monitoring flag.
@@ -771,7 +771,7 @@ fn recall_precise_tool() -> serde_json::Value {
                 "pool": integer_schema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit."),
                 "composition": string_schema("Named reduction composition selecting how the coarse pool is re-ranked. E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, text+temporal, text+assembly, dense-fused, weighted-all. An unknown name is rejected (the boundary validates against the grid)."),
                 "filter": filter_schema(),
-                "wing": string_schema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
+                "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
             json!(["query"])
         )))
@@ -811,7 +811,7 @@ fn recall_shaped_tool() -> serde_json::Value {
                 },
                 "limit": integer_schema("Max ranked matches to return. Default 20."),
                 "filter": filter_schema(),
-                "wing": string_schema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
+                "wing": string_schema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid.")
             }),
             json!(["query"])
         )))

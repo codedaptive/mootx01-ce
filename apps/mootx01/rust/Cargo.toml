@@ -16,7 +16,7 @@
 
 [package]
 name = "mootx01-cli"
-version = "1.0.33"
+version = "1.0.34"
 edition = "2021"
 rust-version = "1.75"
 description = "mootx01 — ARIA MCP server and estate management CLI (Rust vertical for Linux/Windows). Conforms to CLI_SURFACE_SPEC_v1.0."
@@ -46,9 +46,9 @@ libc       = { version = "0.2" }
 # this library's ServerConfig.
 aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
 # queuekit: dream command acquires the "dreaming" DrainLease to prevent
-# concurrent dreamers for the same estate (ADR-021 Decision 7). Already
+# concurrent dreamers for the same estate. Already
 # a transitive dep via aria-mcp; named here so commands/dream.rs can
-# import DrainLease explicitly. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# import DrainLease explicitly. Per in-repository dependency direction.
 queuekit = { path = "../../../packages/kits/QueueKit/rust", features = ["persistencekit"] }
 # uuid: per-process instance token for the dreaming DrainLease — prevents
 # a reused PID after a crash from impersonating the prior lease holder.

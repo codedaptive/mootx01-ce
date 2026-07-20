@@ -44,7 +44,7 @@ import LocusKit
 /// ── Fingerprint drift (real reads) ────────────────────────────────────
 /// `fingerprintBaselines()` computes the OR-aggregate of each container
 /// node's drawer bitmaps (adjectiveBitmap, operationalBitmap, provenance)
-/// grouped by `parentNodeId` (room-level node per ADR-017) and maps each
+/// grouped by `parentNodeId` (room-level node under the node-tree model) and maps each
 /// to a v1 drift fraction: the set-bit density of the aggregate over the
 /// three bitmap lanes (192 bits). The scope key is the parentNodeId —
 /// native node IDs as scope keys per NT-N1. A focused container reads low
@@ -140,7 +140,7 @@ public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
     ///
     /// Computes the OR-aggregate of each container node's drawer bitmaps
     /// (adjectiveBitmap, operationalBitmap, provenance) grouped by
-    /// `parentNodeId` (room-level node per ADR-017). The v1 drift fraction
+    /// `parentNodeId` (room-level node under the node-tree model). The v1 drift fraction
     /// is the set-bit density of the aggregate over the three bitmap lanes
     /// (192 bits). The `scopeKey` and `nodeId` are the parentNodeId — the
     /// native node ID scope key. One observation per container node; the
@@ -193,7 +193,7 @@ public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
     /// Delegates to `GeniusLocusKit.currentAuditLog(in:)`, which delegates to
     /// `auditLog(for:)` — a single bounded SQL query against
     /// `_storagekit_audit`, replacing the removed N+1 per-drawer
-    /// `feedAuditLog` walk (ADR025-AUDITLOG-GOVERNOR). `AuditChainVerifier.verify`
+    /// `feedAuditLog` walk. `AuditChainVerifier.verify`
     /// consumes the returned snapshot in the daemon's audit-integrity monitor
     /// (§ 3.5); the snapshot's `rejectedEntryCount` (AUDIT-ALERT-RESTORE,
     /// 2026-07-09) feeds the same monitor's ingress-rejection alert.

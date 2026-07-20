@@ -430,7 +430,7 @@ actor FederationStateActor {
             for envelope in envelopes {
                 // Only accept envelopes from explicitly paired peers. A valid
                 // signature alone does not prove pairing authorization
-                // (ADR-013): an attacker could craft a self-signed envelope
+                //: an attacker could craft a self-signed envelope
                 // and inject records without completing the pairing handshake.
                 // This check enforces the authorization boundary before any
                 // further processing. Mirrors Rust federation.rs pull().

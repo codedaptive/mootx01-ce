@@ -33,7 +33,7 @@ enum LensTools {
         "moot_lens_keystones", "moot_lens_constellation", "moot_lens_free_association",
         "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
         "moot_lens_drift",
-        // Diffusion node layer (ADR-DIFFUSION-001): a single memory's motion over time.
+        // Diffusion node layer: a single memory's motion over time.
         "moot_lens_node_motion",
         // Renamed from moot_lens_contradiction (the lexical-cohesion outlier detector).
         "moot_lens_cohesion",

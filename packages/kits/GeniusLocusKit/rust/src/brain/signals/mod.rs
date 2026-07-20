@@ -1,7 +1,7 @@
 // brain/signals/mod.rs — Rust mirror of the standing signals.
 //
 // Mission GLK-05 (six v1 signals) + DG2 (DistillationSignal, signal 8)
-// + ADR-018 F1 (TemporalCausalitySignal signal 7, TrainingSignal signal 9).
+// + brain-layer governor ownership  (TemporalCausalitySignal signal 7, TrainingSignal signal 9).
 //
 // Each signal is a thin factory that produces a `SignalSpec` carrying the
 // same name, cadence, and emit semantics as its Swift counterpart. The

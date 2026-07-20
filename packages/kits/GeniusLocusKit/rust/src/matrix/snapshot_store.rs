@@ -23,7 +23,7 @@
 //!     snapshot       BLOB NOT NULL,    -- length-prefixed MatrixSnapshot bytes
 //!     last_hlc       TEXT NOT NULL,    -- F/O/C cursor watermark (human-readable)
 //!     updated_at     TIMESTAMP NOT NULL, -- TEXT ISO8601 at SQLite layer; never REAL
-//!     ext            JSON              -- forward-compat slot (ADR-012); nullable
+//!     ext            JSON              -- forward-compat slot; nullable
 //!   )  PRIMARY KEY (estate_id)
 //!
 //! `schema_version` is its own column so a format change can be detected with one
@@ -79,7 +79,7 @@ impl MatrixSnapshotStore {
                     ColumnDeclaration::text("last_hlc"),
                     // TIMESTAMP maps to TEXT ISO8601 (schema invariant) — never REAL.
                     ColumnDeclaration::timestamp("updated_at"),
-                    // ADR-012 forward-compat slot; nullable JSON; omitted on upsert in 1.0.
+                    // nullable entity ext slots forward-compat slot; nullable JSON; omitted on upsert in 1.0.
                     ColumnDeclaration::json("ext").nullable(),
                 ],
                 vec!["estate_id".to_string()],

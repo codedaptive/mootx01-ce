@@ -351,10 +351,10 @@ fn run_precise_recall_tool(
         PRECISE_DEFAULT_POOL,
         crate::dispatch::LIMIT_HARD_CEILING,
     )?;
-    // ADR-016 §4: optional `wing` scopes recall to a single wing.
+    // optional `wing` scopes recall to a single wing.
     // When present, compose with the explicit filter via Filter::All.
     // When absent, the base filter stands alone (existing behavior unchanged).
-    // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit filter API.
+    // node-tree integrity bridge consumer: user-supplied wing name passed to LocusKit filter API.
     let base_filter = decode_precise_filter(args)?;
     let filter = match optional_string(args, "wing")? {
         Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
@@ -378,7 +378,7 @@ fn run_precise_recall_tool(
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
-    // ADR-017 §3: resolve parentNodeIds to room display names via the
+    // resolve parentNodeIds to room display names via the
     // node tree, matching moot_memory_search's resolution path.
     let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
     let parent_ids: Vec<String> = {
@@ -481,9 +481,9 @@ fn run_shaped_recall_tool(
     let limit = crate::dispatch::clamp_limit(
         optional_integer(args, "limit")?, "limit", 20, crate::dispatch::LIMIT_HARD_CEILING
     )?;
-    // ADR-016 §4: optional `wing` scopes recall to a single wing.
+    // optional `wing` scopes recall to a single wing.
     // When present, compose with the explicit filter via Filter::All.
-    // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit filter API.
+    // node-tree integrity bridge consumer: user-supplied wing name passed to LocusKit filter API.
     let base_filter = decode_precise_filter(args)?;
     let filter = match optional_string(args, "wing")? {
         Some(wing_name) => Filter::All(vec![base_filter, Filter::InWing(wing_name.to_string())]),
@@ -506,7 +506,7 @@ fn run_shaped_recall_tool(
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
-    // ADR-017 §3: resolve parentNodeIds to room display names via the
+    // resolve parentNodeIds to room display names via the
     // node tree, matching moot_memory_search's resolution path.
     let all_drawers = coord.all_drawers(&estate.handle).unwrap_or_default();
     let parent_ids: Vec<String> = {
@@ -561,7 +561,7 @@ fn run_migration_benchmark_tool(
         ));
     }
 
-    // ADR-007 Decision 1 (VK-ADAPT-01): vault-kit's adapter pipeline owns
+    // data-movement privacy tiers (VK-ADAPT-01): vault-kit's adapter pipeline owns
     // the export-decode knowledge. Re-encode the wire entries as an export
     // document and run ExchangeAdapter → corpus_projection — the same
     // consolidated path file import uses — instead of decoding entries
@@ -765,7 +765,7 @@ fn run_dream_tool(
     // to delete ALL recall traces (every trace is older than a far-future minus 30 days).
     // Reject any `now` more than 24 hours (86400 seconds) in the future. Parity with
     // Swift RecipeTools.runDream.
-    // `now` is epoch-MILLISECONDS (ADR-023). The storage path (matrix rebuild,
+    // `now` is epoch-MILLISECONDS. The storage path (matrix rebuild,
     // ISO bounds, the dreaming sink's diary/proposal writes) consumes ms; the
     // DreamingDaemon works internally in seconds (its cadence/retention windows
     // are tuned in seconds), so a seconds view is derived below.
@@ -837,7 +837,7 @@ fn run_dream_tool(
     // EstateDreamingSink routes all writes through the GLK EstateCoordinator
     // verb surface (B-1 compliant). The coordinator stamps canonical
     // dreaming-daemon provenance. Its `now` stamps the diary/proposal `filed_at`,
-    // which is epoch-ms (ADR-023) — so pass `now_epoch_ms`, not the seconds view.
+    // which is epoch-ms — so pass `now_epoch_ms`, not the seconds view.
     // No recall-scored calls, no trace-row writes (B-10a internal-origin proof).
     let mut sink = EstateDreamingSink::new(&coord, estate.handle.clone(), now_epoch_ms);
 
@@ -1038,12 +1038,12 @@ fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
     let jdn = day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
     let days_since_epoch = jdn - 2440588;
 
-    // Return epoch MILLISECONDS (ADR-023) — second precision (the fractional
+    // Return epoch MILLISECONDS — second precision (the fractional
     // field is dropped upstream), scaled to the ms the storage path expects.
     Some((days_since_epoch * 86_400 + hour * 3600 + min * 60 + sec) * 1000)
 }
 
-/// Format Unix epoch MILLISECONDS (ADR-023) as `YYYY-MM-DDTHH:MM:SSZ`.
+/// Format Unix epoch MILLISECONDS as `YYYY-MM-DDTHH:MM:SSZ`.
 ///
 /// Used to construct the `since`/`now` ISO8601 bounds for `EstateDreamingReader::new`.
 /// Delegates to the `neuron_kit::topology_analysis::epoch_to_iso8601` helper (which

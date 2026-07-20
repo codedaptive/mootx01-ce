@@ -1,6 +1,6 @@
 // MCPEntryOwnership.swift
 //
-// ADR-024 §3/§4: MCP connection ownership and install-moment dedupe.
+// MCP connection ownership and install-moment dedupe.
 //
 // Two install moments can wire a client's MCP connection: the CLI installer
 // (this binary) and the Claude Code plugin (`mootx01@mootx01`, a declarative
@@ -25,7 +25,7 @@
 import Foundation
 
 /// Ownership classification for an existing direct `mcpServers.<name>` (or
-/// equivalent per-format) MCP entry, per ADR-024 §4.
+/// equivalent per-format) MCP entry.
 public enum MCPEntryOwnership: Equatable, Sendable {
     /// Our server name, and no data-dir/estate env override. Mechanically on
     /// the default database by construction (`serve` resolves the default
@@ -44,7 +44,7 @@ public enum MCPEntryOwnership: Equatable, Sendable {
 /// object (or env map) to `classify`.
 public enum MCPEntryClassifier {
     /// Env keys whose presence on an existing entry marks it as pointing at
-    /// a non-default database (ADR-024 §4): `serve` resolves the default
+    /// a non-default database: `serve` resolves the default
     /// data dir unless one of these overrides it, so an entry carrying
     /// neither is on the default database by construction.
     public static let overrideEnvKeys: [String] = ["MOOTX01_DATA_DIR", "ARIA_MCP_SQLITE_PATH"]
@@ -68,7 +68,7 @@ public enum MCPEntryClassifier {
     /// Once the shape check passes: HTTP entries (no `env` key at all in
     /// every shape this installer writes) cannot disagree about the
     /// database — they reach whatever estate the resident daemon holds
-    /// (ADR-024 §4) — so the absence of an `env` map is itself
+    /// — so the absence of an `env` map is itself
     /// `.oursDefault`. Command/stdio entries (the proxy bridge, or a legacy
     /// bare `serve`) are `.oursDefault` only when their `env` carries
     /// neither override key.
@@ -195,7 +195,7 @@ public enum PluginDetector {
 
     /// True when the plugin both HAS an installed entry and IS enabled —
     /// the combined condition that actually means "this plugin owns the
-    /// MCP connection right now" (ADR-024 §1/§3, Adams #5 correction).
+    /// MCP connection right now" (plugin-owned MCP connections, Adams #5 correction).
     /// Callers deciding whether to skip/remove a direct entry must use
     /// this, not `isPluginInstalled` alone.
     public static func ownsConnection(pluginID: String, homeDirectory: URL) -> Bool {
@@ -205,7 +205,7 @@ public enum PluginDetector {
 
     /// Returns the installed plugin manifest version (e.g. `"1.0.15"`) from
     /// the first entry for `pluginID`, or `nil` when not installed. Used by
-    /// the daemon's version-skew advisory (ADR-024 §5) to compare the
+    /// the daemon's version-skew advisory to compare the
     /// plugin's declared version against the running binary's version.
     public static func installedVersion(pluginID: String, homeDirectory: URL) -> String? {
         installedEntry(pluginID: pluginID, homeDirectory: homeDirectory)?["version"] as? String
@@ -224,7 +224,7 @@ public enum PluginDetector {
     }
 }
 
-/// ADR-024 §5: at daemon startup (and in `moot_estate_ping` /
+/// at daemon startup (and in `moot_estate_ping` /
 /// `moot_estate_status`), when a plugin is detected, compare the plugin
 /// manifest version against the binary version and report skew. Checking at
 /// runtime (rather than only at install time) catches skew regardless of

@@ -1,4 +1,4 @@
-//! Cross-language bit-identity gate for `PpmiProvider` (ADR-010 Decision B, signal #3).
+//! Cross-language bit-identity gate for `PpmiProvider` (honest semantic fusion, signal #3).
 //!
 //! Reads the canonical fixture emitted by the Swift leg:
 //!   `Tests/SharedVectors/ppmi_canonical_vectors.json`

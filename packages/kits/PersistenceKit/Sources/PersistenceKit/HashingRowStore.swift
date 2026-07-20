@@ -12,7 +12,7 @@
 // SubstrateLib and supplies `MerkleHash.leaf` or an accelerated kernel
 // dispatch. This keeps PersistenceKit kernel-agnostic: the accelerated
 // SHA-256 path (CryptoKit on Apple, sha2 on Rust) lives in the callback
-// supplier, not here (ADR-017 §16 / NT-P2 Part 3).
+// supplier, not here (node-tree integrity / NT-P2 Part 3).
 //
 // Decorator chain: caller → HashingRowStore → CachingRowStore → backend.
 

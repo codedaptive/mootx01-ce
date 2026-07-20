@@ -12,7 +12,7 @@ relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
   - docs/reference/NEURONKIT_SPEC.md
-  - docs/decisions/ADR-021-recall-driven-dreaming-queue.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#55-brain-layer-ownership-and-dreaming
 purpose: |
   QueueKit is a general-purpose fill-and-drain serial job queue. A
   sender submits a Job without knowing who processes it or when; a
@@ -122,12 +122,12 @@ does **not** import ConvergenceKit (§ 8).
   CorpusKit is a standalone database substrate and now owns its own ingest
   queue + drain + worker pool, talking to QueueKit directly. GLK only
   orchestrates (it enqueues into the Corpus and coordinates the room rollup).
-- **One per-estate queue, many streams** (ADR-021 Decision 7). mootx01's
+- **One per-estate queue, many streams** (the recall-driven dreaming contract Decision 7). mootx01's
   consumers share **one queue per estate**, discriminated by `stream_id`
   (`encode`, `dreaming`, `signals`), rather than standing up a separate queue
   instance per consumer. Each consumer uses a **stream-scoped drain** (the
   additive `drainAvailable(stream:)` / complete / `pendingCount(stream:)`
-  capability, ADR-021 Decision 7, landing in its Phase 1) so it claims only its
+  capability, the recall-driven dreaming contract Decision 7, landing in its Phase 1) so it claims only its
   own stream. Recall verbs enqueue the co-recalled drawer
   set under `stream="dreaming"`; the governor (resident) or a forked
   `mootx01 dream` process (stdio) drains that stream and hands the items to
@@ -373,11 +373,11 @@ since it stores rows rather than files.)
 ## Changelog
 
 ### 1.4.1 -- 2026-06-25
-Corrected the § 3 dreaming-queue note to ADR-021 Decision 7 (the design moved
+Corrected the § 3 dreaming-queue note to the recall-driven dreaming contract Decision 7 (the design moved
 from a separate dreaming maildir to one per-estate queue with streams). mootx01
 shares **one queue per estate**, streamed by `stream_id` (`encode`/`dreaming`/
 `signals`), each consumer using a **stream-scoped drain** (additive
-`drainAvailable(stream:)` capability, lands in ADR-021 Phase 1; the
+`drainAvailable(stream:)` capability, lands in the recall-driven dreaming contract Phase 1; the
 `(stream_id, status)` index already anticipates it). mootx01 selects the
 backend by estate storage class — encrypted SQLite queue DB / Postgres /
 InMemory, **never the maildir** for a private estate (plaintext + injectable);
@@ -385,7 +385,7 @@ the maildir stays a valid backend for other SDK consumers. Doc only; no
 protocol/byte-identity change.
 
 ### 1.4.0 -- 2026-06-25
-Additive (ADR-021 Phase 0 — doc only). Documented a second GeniusLocusKit-owned
+Additive (the recall-driven dreaming contract Phase 0 — doc only). Documented a second GeniusLocusKit-owned
 consumer in § 3: the **dreaming queue** (recall-driven dreaming v2). Recall
 verbs enqueue the co-recalled drawer set; the resident governor or a forked
 `mootx01 dream` process drains it and feeds NeuronKit's dreaming decide.
