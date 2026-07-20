@@ -1,8 +1,8 @@
 ---
 title: VectorKit Specification
-version: 1.4.0
-status: active
-date: 2026-06-17
+version: 1.5.0
+status: accepted-1.1-target
+date: 2026-07-20
 description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -18,7 +18,7 @@ purpose: |
   layer for one estate. It defines the `EmbeddingProvider` abstraction
   (text → model-tagged 256-bit `Engram`), the built-in deterministic
   `FloatSimHashEmbeddingProvider`, and a PersistenceKit-backed
-  `VectorStore` that holds one model-tagged vector per (drawer, model)
+  `VectorStore` that holds model-tagged vectors per (item, index, model)
   pair and answers Hamming-distance nearest-neighbour and coarse keyword
   queries. Every stored vector carries the identity and version of the
   model that produced it, so mixed-version corpora stay filterable and
@@ -53,7 +53,8 @@ table) and has a lifecycle (an opened `Storage` handle). It does not own
 tokenizers, model bundles, model identity, or BM25 keyword scoring —
 those live in CorpusKit. VectorKit supplies the low-level building block
 ("host supplies inference, kit supplies the canonical projection and the
-model-tagged store"); CorpusKit composes it into RAG bundles.
+model-tagged store"); CorpusKit composes it into standalone or attached RAG
+indexes.
 
 ## § 2 — Scope
 
@@ -64,7 +65,7 @@ This specification defines:
   closure projected through SubstrateLib's canonical FloatSimHash.
 - The `StoredVector` storage record and its model-tag fields.
 - The `VectorStore` CRUD surface, its schema, and its
-  one-row-per-(drawer, model) upsert semantics.
+  one-row-per-(item, index, model) upsert semantics.
 - The single-row write path (`addPayload` / `add_payload`) and its
   write-behind sidecar policy.
 - The batch write path (`addPayloads` / `add_payloads`): amortised
@@ -94,7 +95,7 @@ This specification does NOT define:
   InMemory), backend selection, and the row/vector index protocols —
   those are PersistenceKit's (`PERSISTENCEKIT_SPEC.md`).
 - Tokenization, model bundles, model identity assignment, BM25 keyword
-  scoring, and RAG bundle composition — those are CorpusKit's.
+  scoring, and RAG indexing/content-source composition — those are CorpusKit's.
 
 ## § 3 — Position in the kit family
 
@@ -106,7 +107,7 @@ EngramLib                 │
    └──────────┬───────────┘
           VectorKit        ← this package
               ▲
-          CorpusKit        (RAG bundles: content + model-tagged vectors)
+          CorpusKit        (standalone content or attached derived RAG index)
               ▲
         GeniusLocusKit     (composition layer, N estates)
 ```
@@ -195,6 +196,13 @@ nullable `.json` column named `ext` (schema v3), reserving migration-free space
 for future per-vector typed metadata. In 1.0 `ext` is inert — written NULL /
 omitted on insert and never read; it carries no behavior. Provisioned during the
 1.0.0 free-migration window. See the forward-compatible ext-slot contract.
+
+**I-9 (GLK canonical identity and scoped ownership):** VectorKit treats
+`itemID` as opaque. In GLK, CorpusKit-derived vector rows use canonical
+`Drawer.id`; passage/index-unit IDs are permitted only in standalone
+CorpusKit. Every composed vector row also belongs to a declared lane/model
+scope so Corpus rebuild, expunge, and migration can delete their own rows
+without touching unrelated Drawer-keyed vectors.
 
 ## § 5 — Behavioral contracts
 
@@ -446,6 +454,10 @@ mismatches the table binary-row count, the stale sidecar is discarded,
 and the array is rebuilt once from the `vectors` table. Search results
 after recovery are identical to results before the kill.
 
+**C-13 (GLK identity and selective deletion):** attached Corpus fixtures write
+only Drawer-keyed vector items. Deleting/rebuilding the Corpus-owned scope
+leaves an unrelated GLK lane for the same Drawer byte-identical and recallable.
+
 ## § 8 — Self-report telemetry
 
 VectorStore emits
@@ -587,19 +599,26 @@ field counts stale-sidecar rebuilds from the table (0 in the normal path).
 ## § 10 — VectorStore lifecycle (destroyAllVectors)
 
 `destroyAllVectors` (Swift) / `destroy_all_vectors` (Rust) deletes all rows
-from the `vectors` table. This is the estate-destruction primitive called by
-`GeniusLocusKit.destroy(storage:corpusStorage:handle:)` when tearing down a
-provisioned estate.
+from the `vectors` table. It is a standalone VectorKit administrative primitive
+for a store whose caller owns every row. It is forbidden for a composed GLK
+store because multiple lanes/models can share the table; GLK uses exact
+item/lane/model deletion or a CorpusKit-owned scope delete instead.
 
 **Invariants:**
 - The backing storage schema is preserved; only data rows are deleted.
-- The caller (GLK) is responsible for closing the LocusKit estate before calling
-  this method.
+- The caller must prove exclusive ownership of the entire vector store.
 - The method does not close or remove the backing storage file.
 - Parity: Swift uses `StoragePredicate.like(column("id"), "%")` (any non-null id);
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 1.5.0 -- 2026-07-20
+
+- Defined canonical `Drawer.id` keys for GLK Corpus vectors and limited passage
+  identities to standalone CorpusKit.
+- Required lane/model ownership-scoped deletion in GLK and removed
+  `destroyAllVectors` from composed lifecycle and migration paths.
 
 ### 1.4.0 -- 2026-07-16
 Added B-3d — behavioral contract for `replaceModelVectors(modelID:_:)` /

@@ -1,8 +1,8 @@
 ---
 title: Reference Directory Index
-version: 1.0.1
+version: 1.0.2
 status: active
-date: 2026-06-15
+date: 2026-07-20
 description: Index of the reference contract surface — the SPEC and INTERFACE documents for every kit, lib, protocol, and canonical encoder.
 authors: MOOTx01 maintainers
 relates_to:
@@ -52,14 +52,14 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 | Package | Spec | Interface | What it is |
 |---|---|---|---|
 | LocusKit | [SPEC](LOCUSKIT_SPEC.md) | [INTERFACE](LOCUSKIT_INTERFACE.md) | Spatial memory and the knowledge graph for one estate — the four nouns, bitmap state, full audit trail. |
-| VectorKit | [SPEC](VECTORKIT_SPEC.md) | [INTERFACE](VECTORKIT_INTERFACE.md) | On-device embeddings and nearest-neighbour search (HNSW, hybrid BM25 plus vector). |
-| CorpusKit | [SPEC](CORPUSKIT_SPEC.md) | [INTERFACE](CORPUSKIT_INTERFACE.md) | Content-plus-vector RAG bundles, built over VectorKit. |
+| VectorKit | [SPEC](VECTORKIT_SPEC.md) | [INTERFACE](VECTORKIT_INTERFACE.md) | On-device model-tagged vector storage and nearest-neighbour machinery. |
+| CorpusKit | [SPEC](CORPUSKIT_SPEC.md) | [INTERFACE](CORPUSKIT_INTERFACE.md) | Standalone-capable RAG database; in GLK, derived indexing over the canonical LocusKit Drawer source. |
 
 ## Composition and brain
 
 | Package | Spec | Interface | What it is |
 |---|---|---|---|
-| GeniusLocusKit | [SPEC](GENIUSLOCUSKIT_SPEC.md) | [INTERFACE](GENIUSLOCUSKIT_INTERFACE.md) | The composition layer and write surface: unifies LocusKit and CorpusKit, exposes the nine verbs, runs the Brain layer. |
+| GeniusLocusKit | [SPEC](GENIUSLOCUSKIT_SPEC.md) | [INTERFACE](GENIUSLOCUSKIT_INTERFACE.md) | GLK Super System and write surface: composes LocusKit and CorpusKit over one canonical Drawer dataset, exposes the nine verbs, and runs the Brain layer. |
 | NeuronKit | [SPEC](NEURONKIT_SPEC.md) | [INTERFACE](NEURONKIT_INTERFACE.md) | The algorithm BrainKit: hybrid recall, the dreaming daemon, Bradley-Terry, SolverBandit. |
 | CognitionKit | [SPEC](COGNITIONKIT_SPEC.md) | [INTERFACE](COGNITIONKIT_INTERFACE.md) | The behaviour BrainKit: named, composable workflows (recipes). Sequences NeuronKit; contains no algorithms of its own. |
 | VaultKit | — | [INTERFACE](VAULTKIT_INTERFACE.md) | A bidirectional bridge between a MOOTx01 estate and a human-readable vault. |

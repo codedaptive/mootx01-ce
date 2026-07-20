@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.13.0
+version: 1.14.0
 status: active
-date: 2026-07-16
+date: 2026-07-20
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -22,7 +22,7 @@ SURFACE — the internal stores, validators, fingerprint machinery, and bitmap
 helpers that are public for testing and intra-kit use, consumed by the kit's
 own pipeline and tests rather than another package; a table of contents
 (name + role + source file). The companion SPEC carries the behavioral
-contracts (invariants I-1…I-11, conformance C-1…C-7).
+contracts (invariants I-1…I-13, conformance C-1…C-8).
 
 ## § 1 — Package layout
 
@@ -44,6 +44,25 @@ Rust `add_drawer` / `bitmap_audit_trail`). The two ports also differ in
 *shape* — Swift is `actor`/`async`, the Rust version is synchronous and takes
 `now: i64` explicitly; the Rust `DrawerStore` is a trait with an in-memory
 implementation only. The value-level results agree (SPEC § 8, I-11).
+
+### GLK shared-content composition (1.1 target)
+
+LocusKit's public API remains independent of CorpusKit. When composed by GLK,
+the existing `Drawer` surface is the canonical content-source surface:
+
+- `Drawer.id` is the identity used by CorpusKit indexes and returned by Corpus
+  recall; GLK does not mint a chunk or passage identity for it.
+- `Drawer.content` is read through a GLK-owned `CorpusContentSource` adapter.
+  CorpusKit receives content for indexing but does not own or copy the Drawer.
+- capture, supersession, withdrawal, and expunge are converted by GLK into
+  revision/digest/cursor-bearing source changes. Attached Corpus queue payloads
+  carry those references, not verbatim Drawer text.
+- LocusKit exposes no CorpusKit type and writes no CorpusKit table. CorpusKit
+  likewise imports no LocusKit type; GLK owns the adapter and lifecycle.
+
+`Drawer.chunkIndex` is source/provenance metadata already present on a canonical
+Drawer. It is not a CorpusKit RAG passage, does not authorize a second content
+row, and is not used as GLK recall identity.
 
 > **Two-tier surface.** LocusKit declares 74 public types in the Swift version,
 > of which 33 are referenced by another package (GeniusLocusKit, NeuronKit,
@@ -1358,6 +1377,13 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.14.0 -- 2026-07-20
+
+- Documented the 1.1 GLK shared-content seam: LocusKit owns canonical Drawer
+  content and identity while a GLK-owned adapter supplies it to CorpusKit.
+- Clarified that `Drawer.chunkIndex` is provenance metadata, not CorpusKit RAG
+  chunk storage or result identity.
 
 ### 1.13.0 -- 2026-07-16
 Closed CRITICAL documentation gaps identified by the post-pass verifier:

@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.22.0
-status: active
-date: 2026-07-16
+version: 1.23.0
+status: accepted-1.1-target
+date: 2026-07-20
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -224,7 +224,8 @@ See `ClassificationScheme` in §2 for the type declaration.
 — the Dual-Path Intake write-mode execution option. It is an option on the
 write verb (threaded MCP arg → GLK verb param `mode`), NOT a `CaptureFrame`
 field; it mirrors how `scoring` is an option on `moot_memory_search`. When
-`true`, the memory is encoded for semantic search (chunk + BM25 + embed) INLINE
+`true`, the canonical Drawer is indexed for semantic search (BM25 + provider
+embeddings under that same Drawer ID) INLINE
 before the write returns, so it is immediately recallable by the BM25/vector
 lanes — at the cost of a slower write. When `false` (default), the write returns
 as soon as the drawer row lands and encoding happens asynchronously: in the
@@ -1133,6 +1134,13 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.23.0 -- 2026-07-20
+
+- Updated intake/search language for GLK shared content: impatient writes index
+  the canonical Drawer directly, and Corpus drain counts are Drawer-index
+  counts rather than chunk counts.
+- Confirmed that no ARIA/MOOTx01 surface enables CorpusKit passage chunking.
 
 ### 1.11.0 -- 2026-06-28
 Security hardening — three ARIA tool gate changes (secfix/batch2-aria).

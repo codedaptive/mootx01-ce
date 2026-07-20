@@ -2,8 +2,8 @@
 title: MOOTx01 and ARIA — Canonical Definitions
 status: canon
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-07-20
+version: 1.1.0
 description: The durable definitions of MOOTx01 (GeniusLocusKit in union with the BrainKits) and ARIA (the portable interface language within it).
 ---
 
@@ -15,7 +15,7 @@ These are the durable definitions. The engineering detail and the release plan l
 
 MOOTx01 is GeniusLocusKit in union with the two BrainKits, NeuronKit and CognitionKit.
 
-- GeniusLocusKit (GLK) is the composition layer and the write surface. It composes LocusKit (spatial memory and the knowledge graph) and CorpusKit (content-plus-vector RAG bundles, built over VectorKit) into one estate, and it coordinates persistence through QueueKit, which uses PersistenceKit directly.
+- GeniusLocusKit (GLK) is the composition layer and the write surface. It composes LocusKit (spatial memory, canonical GLK Drawers, and the knowledge graph) with CorpusKit (RAG/index machinery over an injected content source, built over VectorKit) into one estate. Both lanes operate on the same Drawer identity: content is stored once in LocusKit, CorpusKit stores only derived retrieval state, and GLK coordinates change-driven indexing through QueueKit over PersistenceKit. CorpusKit's optional standalone passage facility is dark in GLK and therefore dark in MOOTx01.
 - NeuronKit is the algorithm BrainKit: reasoning functions and autonomic daemons (hybrid recall, the dreaming daemon, branch scoring, and similar).
 - CognitionKit is the behaviour BrainKit: named, composable workflows, the recipes.
 
@@ -49,7 +49,12 @@ ARIA_MacOS and ARIA_iOS are the Swift-side demonstrations. ARIA_Rust is the Rust
 
 ## Instance mode and the write surface
 
-A single MOOTx01 instance runs in GLK mode. The write surface is always GLK. Every write goes through GLK, which keeps the underlying databases in sync by way of QueueKit over PersistenceKit. Reads may be taken in narrower lenses on the same instance, a CorpusKit-only query or a LocusKit-only query, but those are read projections of the union, not separate writable stores. Narrowing applies to reads; writing is uniformly GLK.
+A single MOOTx01 instance runs in GLK mode. The write surface is always GLK.
+Every write creates or changes one canonical LocusKit Drawer; GLK then advances
+CorpusKit's derived indexes for that same ID through QueueKit over
+PersistenceKit. Reads may use a CorpusKit-only or LocusKit-only lens, but those
+are projections of the same objects, not separate writable content stores.
+Narrowing applies to reads; writing is uniformly GLK.
 
 ## API mode and the instance fleet
 

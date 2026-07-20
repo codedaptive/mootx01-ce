@@ -222,6 +222,48 @@ re-roots future attestations while preserving the audit fact that expunge
 occurred. Detailed fold, commitment, and state-machine rules live in the
 GeniusLocus cookbook.
 
+### 3.6 Shared content across composed kits
+
+Standalone kits may own the content required to make their product complete in
+their own domain. Standalone LocusKit stores Drawer content. Standalone
+CorpusKit stores corpus documents and may derive passage-level retrieval units.
+Those standalone storage capabilities do not imply duplicate content in a
+GeniusLocusKit composition.
+
+Within GeniusLocusKit, LocusKit's Drawer is the single canonical content
+object. GeniusLocusKit owns the composition and supplies CorpusKit with an
+adapter implementing CorpusKit's content-source contract. CorpusKit does not
+import LocusKit and does not own a second verbatim-content table in that mode.
+It stores only derived retrieval state and keys that state to the canonical
+Drawer UUID. Every CorpusKit result returned to GeniusLocusKit identifies that
+same Drawer UUID, so lane fusion and deduplication operate on one object
+identity rather than translating between storage identities.
+
+CorpusKit passage segmentation is an optional standalone indexing policy. It
+is dark in GeniusLocusKit and therefore dark in MOOTx01. If standalone
+CorpusKit enables passage indexing, passage rows contain only revision-bound
+ranges into the canonical standalone document; they do not contain a second
+copy of passage text, and passage identity never replaces document identity in
+public results. Passage sizing is based on the selected provider's token budget,
+not a global character-count threshold.
+
+The two operating modes use the same CorpusKit indexing, provider, ranking,
+invalidation, and retrieval engine behind interchangeable content-source
+adapters. CorpusKit publishes one black-box conformance suite that runs against
+its standalone content store and the GeniusLocusKit/LocusKit adapter. A working
+GeniusLocusKit composition therefore exercises the same CorpusKit core as the
+standalone product; the standalone suite additionally covers its local content
+store, migrations, close/reopen behavior, and optional passage policy.
+
+The 1.1 migration from the 1.0 chunk-backed GeniusLocusKit schema treats all
+chunk rows and chunk-keyed retrieval artifacts as regenerable derived state.
+Canonical Drawers, their audit history, and unrelated Drawer-keyed vectors are
+preserved. CorpusKit recall remains dark while its BM25 state, provider
+bases/counts, and CorpusKit vector partitions are rebuilt once per active Drawer
+under the Drawer UUID. The migration is ordered and resumable through
+PersistenceKit; it must never use an unscoped vector wipe that could delete
+non-CorpusKit Drawer vectors.
+
 ## 4. Persistence, vectors, and convergence
 
 ### 4.1 PersistenceKit contract

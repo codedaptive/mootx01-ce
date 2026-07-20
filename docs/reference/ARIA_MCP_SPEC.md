@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.18.0
-status: active
-date: 2026-07-16
+version: 1.19.0
+status: accepted-1.1-target
+date: 2026-07-20
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -46,9 +46,9 @@ The `capture_drawer` tool's frame carries a single lattice-anchor classification
 
 ## § 3. Instance mode, API mode, and the dispatch path
 
-A MOOTx01 instance runs in GLK mode (canon). The write surface is always GLK. The write verbs (capture, mutate, withdraw, expunge, reanchor, learn) always target GLK, which keeps the databases in sync through QueueKit, which uses PersistenceKit directly. ARIA calls only the GLK verb surface for writes and never reaches the kits beneath; GLK is what fans out and coordinates.
+A MOOTx01 instance runs in GLK mode (canon). The write surface is always GLK. The write verbs (capture, mutate, withdraw, expunge, reanchor, learn) always target GLK, which stores content once as a canonical LocusKit Drawer and advances CorpusKit's derived indexes for that same Drawer ID through QueueKit over PersistenceKit. ARIA calls only the GLK verb surface for writes and never reaches the kits beneath; GLK owns the content-source adapter and coordination.
 
-recall is the verb that may be lensed. In GLK mode the default recall is hybrid, spanning LocusKit spatial and KG retrieval and CorpusKit BM25-plus-vector retrieval (CorpusKit exposes Chunk, ScoredChunk, BundleStore, BM25Index, HybridRecall). On the same instance a caller may request a narrower read lens, CorpusKit-only or LocusKit-only, as a recall argument. The lens narrows the read; it does not create a separate store, and it does not change the write path.
+recall is the verb that may be lensed. In GLK mode the default recall is hybrid, spanning LocusKit spatial and KG retrieval and CorpusKit BM25-plus-vector retrieval. Both lanes return the same canonical Drawer IDs; CorpusKit's standalone `Chunk`, `ScoredChunk`, and `BundleStore` compatibility surface is unreachable, and passage chunking is dark in MOOTx01. On the same instance a caller may request a narrower read lens, CorpusKit-only or LocusKit-only, as a recall argument. The lens narrows the read over the same Drawer objects; it does not create a separate content store or change the write path.
 
 API mode is the fleet. An operator configures many separate instances of different kinds, for example three CorpusKit, two LocusKit, three GeniusLocus, and ARIA routes each call to the database it belongs to. QueueKit over PersistenceKit is the mechanism for both the per-database operations and the cross-database coherence. Fleet routing is an API-layer concern (v1.1), distinct from the read-lensing available inside a single instance.
 
@@ -876,6 +876,14 @@ The detection is a cheap pair of limit-1 bitmap-filter probes (no BM25/vector co
 no recall-trace rows written — `origin: internal` per B-10a).
 
 ## Changelog
+
+### 1.19.0 -- 2026-07-20
+
+- Aligned the ARIA projection with GLK 1.1 shared content: writes store one
+  canonical Drawer, CorpusKit indexes that Drawer ID, and every recall lens
+  returns the same object identity.
+- Made standalone Corpus passage/chunk compatibility explicitly unreachable
+  from MOOTx01.
 
 ### 1.18.0 -- 2026-07-16
 Upstream-release advisory: `moot_estate_ping` / `moot_estate_status` gain an

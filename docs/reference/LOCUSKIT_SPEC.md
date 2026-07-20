@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.9.0
+version: 1.10.0
 status: active
-date: 2026-07-16
+date: 2026-07-20
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -78,6 +78,8 @@ This specification defines:
   keys to avoid collision with the typed v1 `ManifestKey` set; values survive
   restarts (the manifest table is durable).
 - The Swift ⇄ Rust conformance obligation and the documented port gap.
+- LocusKit's role as the canonical Drawer content and identity owner when it is
+  composed into GeniusLocusKit.
 
 This specification does NOT define:
 
@@ -188,6 +190,14 @@ behavior. The slot was provisioned across all persistent entity tables during th
 1.0.0 free-migration window (`keys` gained it at LocusKit schema v2). `ext` is
 excluded from regenerable/cache/bookkeeping tables (manifest, container_fingerprints,
 node_bundles). See the forward-compatible ext-slot contract for the full inclusion/exclusion list.
+
+**I-13 (canonical GLK content owner):** when an Estate is composed into GLK,
+LocusKit's `Drawer` row is the one canonical stored representation of that
+content and `Drawer.id` is its canonical identity. CorpusKit may index the
+Drawer only through a GLK-owned adapter over LocusKit reads and change events;
+it may not persist a second verbatim document, passage, or chunk copy. This
+composition rule adds no CorpusKit dependency to LocusKit and does not change
+LocusKit's ability to operate standalone.
 
 ## § 5 — Behavioral contracts
 
@@ -421,6 +431,13 @@ so a withdrawn drawer is dropped from default recall but surfaces under a
 `.usedToBelieve` frame — identical to the Rust recall path whose `drawer_index`
 is derived from a frame-filtered `estate.recall(frame)` scan.
 
+**B-16 (GLK content-source projection):** GLK projects the existing Drawer
+read/capture/mutation lifecycle into CorpusKit's `CorpusContentSource` contract.
+The projection exposes canonical id, current content, revision/digest metadata,
+and an incremental cursor without transferring ownership. Corpus indexing and
+recall results remain keyed by `Drawer.id`; LocusKit never imports CorpusKit or
+writes CorpusKit tables.
+
 ## § 6 — Error model (conceptual)
 
 | Category | Trigger | Recovery posture |
@@ -478,6 +495,11 @@ engine reads the system clock internally (I-6).
 value-level results for C-1…C-4 and C-6 against shared behaviour, allowing
 for the documented surface gap (§ 8). A value-level divergence fails the
 conformance gate.
+
+**C-8 (GLK shared-content composition):** the GLK adapter conformance fixture
+must prove that capture/change/delete are observed under the original
+`Drawer.id`, that Corpus recall returns that same id, and that indexing creates
+no second verbatim-content row. The fixture runs against both ports.
 
 ## § 8 — Out of scope
 
@@ -931,6 +953,14 @@ normal verb surface.
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.10.0 -- 2026-07-20
+
+- Defined LocusKit as the canonical Drawer content and identity owner in GLK.
+- Added the dependency-inversion rule: GLK adapts LocusKit to CorpusKit's
+  content-source protocol; neither kit imports the other.
+- Added conformance coverage proving Drawer identity preservation and absence
+  of duplicated Corpus content.
 
 ### 1.9.0 -- 2026-07-16
 Added § 13 — Dataset handle behavioral contracts. Three new behavioral clauses:

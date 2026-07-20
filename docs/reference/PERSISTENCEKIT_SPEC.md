@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.8.0
+version: 1.9.0
 status: active
-date: 2026-07-16
+date: 2026-07-20
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -114,7 +114,9 @@ This specification does NOT define:
   projection) — GeniusLocusKit owns those.
 - Sync / replication — ConvergenceKit owns those.
 - Each consumer's schema content — every consumer kit declares its own
-  tables.
+  tables. A standalone and a composed operating profile may declare different
+  table sets; GLK's attached CorpusKit profile intentionally omits standalone
+  document/passage tables.
 
 ## § 3 — Position in the kit family
 
@@ -128,7 +130,7 @@ PersistenceKit               ← the Storage protocol + value model
    ▲
    ├── LocusKit          (one estate's rows, blobs, audit)
    ├── VectorKit         (embeddings + in-house k-NN → rows/blobs)
-   ├── CorpusKit         (RAG bundles → rows + vectors)
+   ├── CorpusKit         (standalone content or attached derived RAG indexes)
    ├── QueueKit          (durable work queue → rows + observer)
    ├── ConvergenceKit    (outbound replication → observer, TableChange)
    └── GeniusLocusKit    (estate composition, opens backends)
@@ -845,6 +847,12 @@ Authority for the Package.swift / Cargo.toml addition:
 `the package-dependency rule`.
 
 ## Changelog
+
+### 1.9.0 -- 2026-07-20
+
+Clarified that consumer kits may declare standalone and composed schema
+profiles; GLK's attached CorpusKit profile omits standalone content/passage
+tables. PersistenceKit behavior is unchanged.
 
 ### 1.8.0 -- 2026-07-16
 CVK-ICLOUD P1-M1: Added behavioral contract B-19 (change origin tag). Every

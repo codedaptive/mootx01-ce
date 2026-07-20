@@ -2,8 +2,8 @@
 title: Kit Interface Inventory
 status: canon
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-07-20
+version: 1.1.0
 description: A per-kit inventory of every kit's public interface — types, functions, and protocol conformances — across the MOOTx01 substrate.
 ---
 
@@ -272,26 +272,32 @@ description: A per-kit inventory of every kit's public interface — types, func
 ---
 
 ### CorpusKit
-**Role:** Content-plus-vector RAG bundles (hybrid retrieval, no cloud).  
+**Role:** Standalone-capable RAG database and shared-content indexing engine.
 **Language:** Swift + Rust
 
 **Public Types:**
-- `RAGBundle`
+- `CorpusContentSource` (read/change input shared by both modes)
+- `CorpusContentStore` (standalone canonical document ownership)
+- `Corpus`, `CorpusOperatingMode`, `CorpusContentID`, `CorpusHit`
+- `CorpusIndexUnitPolicy`, `PassagePolicy`
 - `BM25Index` (inverted text index)
 - `TokenizerProtocol`
 - `SyncManifest` (replication metadata)
 
 **Public Functions:**
-- `CorpusKit.addDocument(_ content: String, to: RAGBundle)`
-- `CorpusKit.queryBM25(_ term: String, in: RAGBundle) -> [Result]`
-- `CorpusKit.queryVector(_ embedding: Vector, in: RAGBundle, k: Int) -> [Result]`
-- `CorpusKit.queryHybrid(_ term: String, embedding: Vector, in: RAGBundle) -> [Result]`
+- standalone document `put`/`remove` through `CorpusContentStore`
+- `Corpus.applySourceChanges`, `rebuildFromSource`, and canonical-ID `recall`
+- BM25/vector/provider operations shared by standalone and attached modes
 
 **Chunking:**
-- `Chunker` (splits content into semantic units)
+- Whole-content indexing is the GLK/MOOTx01 policy.
+- Optional token-budgeted, range-only passages are standalone-only.
+- The text-copying 1.0 `Chunker`/`BundleStore` surface is compatibility-only
+  and dark in GLK.
 
 **Targets:**
-- `CorpusKit` (core: tokenizer, chunker, BM25, bundle storage)
+- `CorpusKit` (content-source contracts, indexing/retrieval engine, optional
+  standalone content store)
 - `CorpusKitProviders` (text embedding providers with CoreML models)
 
 ---

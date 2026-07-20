@@ -1,11 +1,11 @@
 ---
 title: GeniusLocus Architecture Specification
-version: 1.0.0
+version: 1.1.0
 description: "Authoritative architecture specification for the GeniusLocus substrate: estate model, Brain layer, recall pipeline, and audit reconstruction."
-status: active
+status: accepted-1.1-target
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-14
+date: 2026-07-20
 relates_to:
   - the recorded engineering rule-05-07.md (lattice decision)
   - the provenance-bitmap contract (provenance bitmap decision)
@@ -87,11 +87,17 @@ The following invariants hold for every conforming GeniusLocus. An implementatio
 
 **I-11. Bitmap layouts within a published version are stable.** Once a bitmap layout is published in a versioned manifest, the layout is not mutated. New layouts produce new manifest versions; old data is readable via the manifest's `bitmap_layout_version` value.
 
-**I-12. The substrate provides storage; applications do not bring their own.** GeniusLocusKit composes LocusKit (content, KG), VectorKit (vectors), and CorpusKit (RAG content-plus-vectors). The application calls verbs against the kit; the kit owns the database files.
+**I-12. The substrate provides storage; applications do not bring their own.** GeniusLocusKit composes LocusKit (canonical content and KG), VectorKit (vector machinery), and CorpusKit (RAG/index machinery over an injected content source). The application calls verbs against the kit; the kit owns the database files and composition adapters.
 
 **I-13. Federation is not a substrate concern.** Multi-estate operation is mediated by a separate access surface (aria-mcp). The substrate does not communicate with other substrates.
 
 **I-14. Provenance is set at write and mutated only via the audit-recorded path.** `capture`, `propose`, `learn`, and `associate` set the provenance bitmap at write time. Subsequent mutations go through `mutate_bitmap`, which writes an audit row.
+
+**I-15. A composed GLK stores content once.** LocusKit's Drawer is the canonical
+content row and `Drawer.id` is the cross-lane identity. GLK supplies that same
+object to CorpusKit through an adapter. CorpusKit stores rebuildable index state,
+not another document, passage, chunk, or queue copy. Optional passage chunking is
+a standalone CorpusKit facility and is dark in GLK and MOOTx01.
 
 ---
 
@@ -1644,10 +1650,10 @@ Full canonical evaluation is in § 7.9.7.
 
 A GeniusLocus is produced by composing kits:
 
-- **LocusKit** — content + KG storage. Drawers, tunnels, KG facts, diary, manifest, audit.
-- **VectorKit** — vectors. Embedding storage and nearest-neighbor query. Composed by CorpusKit as its vector half and by GeniusLocusKit as a tier in its own right; also usable standalone for vector-only workloads. A vector database is not a RAG database.
-- **GeniusLocusKit** — LocusKit + VectorKit + CorpusKit + the Brain layer (standing-signals, matrix layer, training pipeline). Three databases orchestrated as distinct tiers: a SemanticDB (LocusKit, structured-content-and-KG), a VectorDB (VectorKit, vectors), and a RAGDB (CorpusKit, RAG content-plus-vectors).
-- **CorpusKit** — the RAG kit. Content-plus-vector storage as a single bundle (its own content store composed with VectorKit for the vector half), providing the substrate's RAG tier. A RAG database composes a vector database but is not one: CorpusKit owns retrieval over content, and VectorKit owns vectors and nearest-neighbor math. GeniusLocusKit may orchestrate VectorKit directly for non-RAG vector work, while RAG retrieval always routes through CorpusKit. Required by GeniusLocusKit (which uses it as one of its three internal storage tiers); also usable standalone for RAG-only workloads.
+- **LocusKit** — a standalone semantic database and the canonical content + KG owner in GLK. Drawers, tunnels, KG facts, diary, manifest, audit.
+- **VectorKit** — standalone-capable vector storage and nearest-neighbor machinery. In GLK every Corpus-derived vector row is keyed by canonical `Drawer.id`; other vector lanes retain explicit independent ownership.
+- **CorpusKit** — a standalone-capable RAG database. Standalone it owns documents and may optionally index token-budgeted passage ranges. In GLK it receives LocusKit Drawers through a GLK-owned content-source adapter and stores only derived BM25/vector/provider/checkpoint state. Passage production is disabled.
+- **GeniusLocusKit** — the GLK Super System: LocusKit + VectorKit + CorpusKit + the Brain layer. It composes three independently usable kit capabilities over one canonical Drawer dataset, so every lane retrieves the same object and deduplication is by identity rather than content reconciliation.
 - **aria-mcp** — MCP access surface. Composes one or more underlying kit configurations.
 
 Applications use a kit; the kit owns its database files. There is no application-supplied substrate adapter.
@@ -1664,6 +1670,11 @@ Migration between minor spec versions:
 - New bitmap reserved bits remain unused; old data continues to read.
 - New noun shapes appear as empty tables in old estates.
 - New verbs (forbidden by I-7) do not occur within v1; v2 successor architecture handles new verbs.
+- The 1.1 shared-content migration validates legacy Corpus sources against
+  Drawers, removes redundant GLK content/chunk state, selectively clears only
+  Corpus-owned derived vectors/indexes, rebuilds those indexes under Drawer ids,
+  verifies coverage, and only then enables the Corpus lane. Canonical Drawers,
+  audit/history, and unrelated vectors are preserved.
 
 Migration from v1 to v2 (when the 4-bit field width or another constitutional-adjacent constraint forces a successor architecture) is a separate spec exercise outside the scope of this document.
 
@@ -1932,6 +1943,12 @@ versioning discipline makes this possible additively.
 *End of Addendum A.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-07-20
+
+Defined shared-content kit composition: one canonical LocusKit Drawer dataset,
+CorpusKit attached indexing, Drawer-id results, standalone-only passage
+chunking, and the required pre-1.1 migration/rebuild gate.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

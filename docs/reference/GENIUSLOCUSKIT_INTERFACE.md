@@ -1,9 +1,9 @@
 ---
 title: GeniusLocusKit Interface
-status: active
+status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-12
-version: 1.20.0
+date: 2026-07-20
+version: 1.21.0
 spec_type: kit
 description: Public API surface for GeniusLocusKit in both the Swift and Rust ports.
 package: GeniusLocusKit
@@ -24,7 +24,7 @@ purpose: |
   by the kit's own pipeline rather than another package; a table of
   contents (name + role + source
   file). The companion SPEC carries the behavioral contracts (invariants
-  I-1…I-15, conformance C-1…C-12).
+  I-1…I-19, conformance C-1…C-13).
 ---
 
 # GeniusLocusKit Interface
@@ -52,6 +52,33 @@ in *shape* — Swift is the `GeniusLocusKit` actor with `async` methods; the
 Rust version is synchronous (`EstateCoordinator` struct, a stateless verb
 `Surface`, `SerialLaneScheduler`). Value-level results agree across the
 whole surface (SPEC § 8, I-15).
+
+### Shared-content composition surface (1.1 target)
+
+GLK owns the adapter and the operating-mode selection between the standalone
+kits:
+
+```swift
+// GeniusLocusKit-owned implementation; not a LocusKit or CorpusKit dependency.
+struct LocusDrawerCorpusContentSource: CorpusContentSource { /* Estate-backed */ }
+```
+
+```rust
+pub(crate) struct LocusDrawerCorpusContentSource { /* Estate-backed */ }
+impl CorpusContentSource for LocusDrawerCorpusContentSource { /* ... */ }
+```
+
+For each `.glk` or `.corpusOnly` estate, `open`/`provision` constructs this
+adapter and opens CorpusKit in attached `.wholeContent` mode. The adapter
+projects Drawer id, content, revision/digest, and change cursor. CorpusKit
+persists only derived Drawer-keyed state. GLK rejects a standalone Corpus or a
+passage-enabled policy at `registerCorpus`; LocusKit and CorpusKit remain
+independently usable because neither imports the other.
+
+Legacy pre-1.1 layouts are migrated inside the open/provision lifecycle before
+Corpus registration. The Corpus lane stays dark until redundant content/chunk
+rows are removed, derived state is rebuilt from Drawers, and verification
+succeeds. This is a lifecycle gate, not a new public migration verb.
 
 > **Two-tier surface.** GeniusLocusKit declares 118 top-level public
 > nominal types (plus 18 public typealiases) in the Swift version, of
@@ -89,10 +116,13 @@ public actor GeniusLocusKit {
 
     // Composition-aware provisioning and lifecycle (EstateLifecycle.swift):
     // provision() is the GLK-owned create+open+wire path. It seeds the manifest with the
-    // kind-prefixed framework profile and zoom window, then wires sub-stores (Corpus,
-    // VectorStore) based on EstateKind. Idempotent re-provision raises .duplicateEstate.
+    // kind-prefixed framework profile and zoom window, then wires sub-stores based
+    // on EstateKind. Corpus is always attached to a LocusKit-backed content source
+    // with .wholeContent; no Corpus content/chunk table is opened.
+    // Idempotent re-provision raises .duplicateEstate.
     // quiesce/drain update EstateMountState; destroy closes the estate and tears down all
-    // sub-stores (BM25 + vectors cleared; BundleStore chunks preserved — append-only invariant).
+    // derived sub-stores using ownership-scoped deletion. Canonical Drawers are
+    // unaffected by Corpus cleanup; broad destroyAllVectors is forbidden.
     // embeddingModels defaults to the canonical 1.0 five-signal recall ensemble
     // (CorpusEnsemble.defaultEnsemble(): RI/PPMI/LSA/NMF/FDC). Every provisioned
     // estate gets the honest multi-signal default; the trainable signals train and
@@ -102,6 +132,7 @@ public actor GeniusLocusKit {
     // arg in Rust — the app caller supplies `default_ensemble()`).
     public func provision(
         storage: any Storage,
+        // Optional physical store for Corpus DERIVED state only; never Drawer text.
         corpusStorage: (any Storage)? = nil,
         owner: OwnerCredentials,
         params: EstateProvisionParams,
@@ -112,6 +143,7 @@ public actor GeniusLocusKit {
     public func drain(_ handle: EstateHandle) async throws
     public func destroy(
         storage: any Storage,
+        // Optional physical store for Corpus DERIVED state only.
         corpusStorage: (any Storage)? = nil,
         handle: EstateHandle
     ) async throws
@@ -127,9 +159,10 @@ public actor GeniusLocusKit {
     @discardableResult
     public func captureBatch(_ handle: EstateHandle, _ frames: [CaptureFrame]) async throws -> [Drawer]
     // Dual-Path Intake — mode-aware capture (EncodeIntake.swift). Stores the
-    // drawer row (same as the verb above) then encodes it into the estate's
-    // Corpus per `mode`: .regular enqueues the drawer onto the Corpus's OWN
-    // ingest queue (Corpus.enqueueIngest); .impatient ingests inline before
+    // Drawer row (same as the verb above) then indexes that canonical object in
+    // Corpus per `mode`: .regular enqueues a revision/digest source change onto
+    // the Corpus's own queue (Corpus.enqueueSourceChange); .impatient resolves
+    // the Drawer through CorpusContentSource and indexes inline before
     // returning. The write mode is a verb execution option, NOT a CaptureFrame
     // field. A no-op encode when no Corpus is registered (.locusOnly).
     //
@@ -137,8 +170,8 @@ public actor GeniusLocusKit {
     // Corpus self-drains — see CORPUSKIT_INTERFACE). GeniusLocusKit is the
     // orchestrator: at provision it mounts the Corpus ingest queue and sets the
     // Corpus `onEncoded` callback to roll up the touched LocusKit rooms; it
-    // never owns the queue or performs the encode. EncodeJob (the former
-    // GLK-owned payload) was deleted — the payload is CorpusKit-internal now.
+    // never owns the queue or performs the encode. The CorpusKit-internal payload
+    // contains Drawer identity/revision/cursor only, never verbatim content.
     @discardableResult
     public func capture(_ handle: EstateHandle, _ frame: CaptureFrame, mode: WriteMode) async throws -> Drawer
     // Dual-Path Intake — await-empty barrier (EncodeIntake.swift):
@@ -274,8 +307,10 @@ public actor GeniusLocusKit {
     // Recall substrate registration (GeniusLocusKit.swift) — SPEC B-recall:
     // Wire the BM25/vector/matrix substrate lanes for a given estate. Call after
     // open(_:owner:) and before the first recall(_:GLKRecallRequest) that uses
-    // corpusOnly, hybrid, or unionBest mode. Re-registering replaces the existing
-    // entry for the handle. These methods are actor-isolated (called with `await`).
+    // corpusOnly, hybrid, or unionBest mode. Corpus must have been constructed
+    // with this estate's LocusDrawerCorpusContentSource and .wholeContent policy;
+    // standalone or passage-enabled Corpus values are rejected with modeViolation.
+    // Re-registering replaces the existing entry for the handle.
     public func registerCorpus(_ corpus: Corpus, for handle: EstateHandle)
     public func registerVectorStore(_ store: VectorStore, for handle: EstateHandle)
     public func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle)
@@ -335,7 +370,8 @@ public actor GeniusLocusKit {
     // Hydration (EstateHydration.swift):
     // Open an in-memory estate hydrated from a durable (SQLite) backend.
     // Schema gate: opens both backends with the composite GLK SchemaDeclaration
-    // (version 3: LocusKit v1 + VectorKit v1 + CorpusKit v1) before calling
+    // (version derived from the live LocusKit + VectorKit + attached-CorpusKit
+    // profiles; standalone Corpus content schemas excluded) before calling
     // StorageReplicator.hydrate. Six-step sequence:
     //   1. Schema open both sides. 2. Row + audit snapshot. 3. Estate open.
     //   4. Audit log feed. 5. MatrixTier.fullRebuild (both passes).
@@ -550,7 +586,7 @@ public enum WriteMode: String, Sendable, Codable, CaseIterable {
 > payload are now CorpusKit-internal (`IngestJob`, not part of any public
 > surface). GeniusLocusKit's intake is pure orchestration —
 > `capture(_:_:mode:)`, `awaitEncodeDrain`, and `reindexMissing` delegate to the
-> estate's `Corpus.enqueueIngest` / `Corpus.awaitIngestDrain`. See
+> estate's `Corpus.enqueueSourceChange` / `Corpus.awaitIngestDrain`. See
 > `CORPUSKIT_INTERFACE.md`.
 >
 > **Drain monitoring.** `drainStatuses(_ handle:) async throws -> [DrainStatus]`
@@ -880,7 +916,7 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     // or inline (aria-mcp wire args). Export-JSON decode lives in VaultKit's ExchangeAdapter
     // (the data-movement contract Decision 1); the former load(from:) is retired.
     public func asRecallFrames() -> [LocusKit.RecallFrame]   // LocusKit content-match path; used by verifyMigration
-    public func hybridRecall(via corpus: CorpusKit.Corpus, limit: Int = 10, now: Date) async throws -> [[CorpusKit.ScoredChunk]]  // hybrid BM25+vector via CorpusKit
+    public func hybridRecall(via corpus: CorpusKit.Corpus, limit: Int = 10, now: Date) async throws -> [[CorpusKit.CorpusHit]]  // canonical Drawer-keyed hybrid BM25+vector results
 }
 public struct MigrationReport: Sendable, Codable {
     public let rowsByNoun: [String: Int]; public let unmappedConcepts: [UnmappedConcept]; public let warnings: [MigrationWarning]
@@ -964,10 +1000,9 @@ role, source file. Full signatures live in the cited file.
   `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:corpus:)` —
   production factory; captures `VectorStore` (and the estate's `Corpus`
   when registered), scans row embeddings via `findNearest` on each
-  5-minute pass across two lanes — drawer-keyed rows under `modelID`,
-  and chunk-keyed corpus rows mapped back to owning drawers via
-  `Corpus.sourceIDs(forChunkIDs:)` (the lane production estates actually
-  populate) — and emits `AssociateFrames` carrying drawer ids for pairs
+  5-minute pass across two lanes — Drawer-keyed rows under `modelID`,
+  and Corpus-derived rows already keyed by Drawer id (no chunk-owner map) —
+  and emits `AssociateFrames` carrying Drawer ids for pairs
   within Hamming threshold (default 64).
 - **Recall cold-path signals:** `GraphCache`,
   `PreferenceStore` — public protocols defined in `GeniusLocusKit.swift`.
@@ -1643,7 +1678,7 @@ aliases. Foundation `UUID` on the Swift side is a `[u8;16]` newtype alias
 |---|---|---|---|---|---|---|
 | Dreaming signal | `DreamingSignal` (`Brain/Signals/DreamingSignal.swift`) | `DreamingSignal` (`rust/src/brain/signals/dreaming.rs`) | public / pub | identical spec factory | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | Maintenance signal | `MaintenanceSignal` (`Brain/Signals/MaintenanceSignal.swift`) | `MaintenanceSignal` (`rust/src/brain/signals/maintenance.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
-| Vector-similarity signal | `VectorSimilaritySignal` (`Brain/Signals/VectorSimilaritySignal.swift`) | `VectorSimilaritySignal` (`rust/src/brain/signals/vector_similarity.rs`) | public / pub | identical; Hamming threshold default 64; two-lane mining (drawer-keyed `modelID` rows + chunk-keyed corpus rows mapped to owning drawers via `Corpus.sourceIDs(forChunkIDs:)` / `source_ids_for_chunks` when a Corpus is supplied) | `standing_signals_parity.rs`, `rag_wiring_parity.rs` (incl. corpus-lane test) / `RAGWiringTests.swift` | Confirmed |
+| Vector-similarity signal | `VectorSimilaritySignal` (`Brain/Signals/VectorSimilaritySignal.swift`) | `VectorSimilaritySignal` (`rust/src/brain/signals/vector_similarity.rs`) | public / pub | 1.1 target: identical; Hamming threshold default 64; both GLK and Corpus-derived lanes are keyed directly by Drawer id, so no chunk-owner translation exists | shared-content and standing-signal parity suites | Accepted target |
 | Contradiction-scout signal | `ContradictionScoutSignal` (`Brain/Signals/ContradictionScoutSignal.swift`) | `ContradictionScoutSignal` (`rust/src/brain/signals/contradiction_scout.rs`) | public / pub | identical; hourly cadence, closure-injected hunt cycle (single-write invariant: the hunt persists, the signal emits one diagnostic) | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | Decay-sweep signal | `DecaySweepSignal` (`Brain/Signals/DecaySweepSignal.swift`) | `DecaySweepSignal` (`rust/src/brain/signals/decay_sweep.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
 | By-reference validity signal | `ByReferenceValiditySignal` (`Brain/Signals/ByReferenceValiditySignal.swift`) | `ByReferenceValiditySignal` (`rust/src/brain/signals/by_reference_validity.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
@@ -1736,7 +1771,7 @@ a durable (SQLite) backend at launch.
 
 | Concept | Swift | Rust | Notes |
 |---|---|---|---|
-| Composite schema declaration | `GeniusLocusKitSchema.estateSchemaDeclaration: SchemaDeclaration` (`GeniusLocusKitSchema.swift`) | `composite_schema() -> SchemaDeclaration` (`hydration.rs`) | kitID / kit_id = "GeniusLocusKit", version = 7 = LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore) v2 (the the forward-compatible ext-slot contract `ext` pre-provisioning bumped all three). The version is DERIVED from the live component declarations in both ports, so component and composite can never drift; conformance-tested (`CompositeSchemaVersionTests` / `composite_version_tests`). Aggregates all 14 tables + indices from component schemas. migrations = []. |
+| Composite schema declaration | `GeniusLocusKitSchema.estateSchemaDeclaration: SchemaDeclaration` (`GeniusLocusKitSchema.swift`) | `composite_schema() -> SchemaDeclaration` (`hydration.rs`) | kitID / kit_id = "GeniusLocusKit". Version is derived from the live LocusKit, VectorKit, and CorpusKit **attached-profile** declarations in both ports. The 1.1 declaration excludes standalone Corpus document/passage/chunk tables and includes an explicit migration from historical composite v7. Component and composite cannot drift; conformance-tested by `CompositeSchemaVersionTests` / `composite_version_tests`. |
 
 ### Hydrate-on-open surface
 
@@ -2043,6 +2078,17 @@ section above.
 *End of GeniusLocusKit Interface.*
 
 ## Changelog
+
+### 1.21.0 -- 2026-07-20
+
+- Added the GLK-owned `LocusDrawerCorpusContentSource` adapter contract and
+  attached `.wholeContent` mode requirement.
+- Changed encode queue payloads and hybrid recall identity to canonical Drawer
+  changes/results; retired the chunk-to-Drawer translation from the GLK surface.
+- Defined `corpusStorage` as derived-state-only and made Corpus/vector teardown
+  ownership-scoped.
+- Updated composite schema/hydration language for the pre-1.1 migration gate;
+  standalone Corpus content/passage schemas are excluded from GLK.
 
 ### 1.19.0 -- 2026-07-16
 Audit corrections and MX-TAB dataset surface (shipped 2026-07-11/12, not

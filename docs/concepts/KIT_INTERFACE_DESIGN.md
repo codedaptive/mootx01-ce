@@ -2,8 +2,8 @@
 title: Kit Interface Design
 status: canon
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-07-20
+version: 1.1.0
 description: The cross-kit rollup of how each kit's public interface composes into the MOOTx01 substrate, grounding, composition, reasoning, and access layers.
 ---
 
@@ -301,7 +301,7 @@ aggregation families listed below.
 
 ### LocusKit (SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit)
 
-**Canonical Role:** Spatial memory system with knowledge graph. One estate per instance.
+**Canonical Role:** Spatial memory system with knowledge graph. One estate per instance. Owns canonical GLK Drawer content and identity when composed by GeniusLocusKit.
 
 **Spec:** docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
 
@@ -387,36 +387,41 @@ aggregation families listed below.
 
 ### CorpusKit (VectorKit, PersistenceKit, ConvergenceKit, EngramLib)
 
-**Canonical Role:** Content-plus-vector RAG bundles with hybrid BM25 + vector retrieval.
+**Canonical Role:** Standalone-capable RAG database with hybrid BM25 + vector retrieval over an interchangeable content source.
 
 **Spec:** TOPOLOGY.md § Standalone substrate
 
 **Core Types:**
-- `RAGBundle` — Content + vectors + metadata
+- `CorpusContentSource` — Read/change contract consumed by the indexing engine
+- `CorpusContentStore` — Standalone document-owning implementation
+- `CorpusContentID` — Canonical result identity supplied by the content source
+- `CorpusHit` — Ranked content identity plus lane scores and optional evidence range
 - `BM25Index` — Inverted text index
-- `ChunkingStrategy` — Document segmentation
+- `IndexUnitPolicy` — Whole-content default or optional standalone token-budgeted passages
 - `SyncManifest` — Replication metadata
 
-**Public Functions:**
-- `CorpusKit.addDocument(_ content: String, to: RAGBundle) async throws`
-- `CorpusKit.queryBM25(_ term: String, in: RAGBundle) -> [Result]`
-- `CorpusKit.queryVector(_ embedding: Vector, in: RAGBundle, k: Int) -> [Result]`
-- `CorpusKit.queryHybrid(_ term: String, embedding: Vector, in: RAGBundle) -> [Result]`
+**Operating modes:**
+- Standalone — CorpusKit owns canonical documents and may enable passage indexing.
+- Composed — GLK injects a LocusKit-backed content source; CorpusKit stores only derived indexes and returns GLK Drawer IDs.
 
 **Chunker:**
-- `Chunker` — Splits content into semantic units
+- `Chunker` — Optional standalone passage-index policy, internal to CorpusKit
+- Passage rows are revision-bound offsets, never copied passage text
+- Passage sizing follows provider token budgets, not a global character threshold
 
 **Tokenization:**
 - `TokenizerProtocol` — Text tokenization (lives here, not VectorKit)
 
 **Targets:**
-- `CorpusKit` — Core: tokenizer, chunker, BM25, storage, sync
+- `CorpusKit` — Core: content-source contract, tokenizer, BM25, indexing, storage adapters, sync
 - `CorpusKitProviders` — Providers with CoreML models (MiniLM, mpnet, Gemma)
 
 **Key Design:**
 - Tokenization in CorpusKit, not VectorKit
 - Providers (with weights) in CorpusKitProviders to keep weights out of core
 - Hybrid retrieval fuses BM25 + vector signals
+- One engine and conformance suite run against both standalone and GLK adapters
+- Result identity is always the content source's canonical identity
 
 **Dependencies:** VectorKit, PersistenceKit, ConvergenceKit, EngramLib
 
@@ -424,7 +429,14 @@ aggregation families listed below.
 
 ### GeniusLocusKit (LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit)
 
-**Canonical Role:** Composition layer. Unifies LocusKit and CorpusKit into one estate, runs Brain layer, coordinates persistence.
+**Canonical Role:** Composition layer. Unifies LocusKit and CorpusKit over the same canonical GLK Drawer dataset, runs the Brain layer, and coordinates persistence.
+
+**Shared-content contract:**
+- GLK owns construction and lifecycle of the shared content-source instance.
+- LocusKit owns the GLK Drawer aggregate and verbatim content.
+- GLK supplies a LocusKit-backed `CorpusContentSource` adapter to CorpusKit.
+- CorpusKit passage chunking is dark in GLK and MOOTx01.
+- BM25, vectors, provider state, and evidence remain derived CorpusKit state keyed by GLK Drawer ID.
 
 **Spec:** TOPOLOGY.md § Composition, MOOTX01_AND_ARIA_CANON.md § Instance mode
 
@@ -693,6 +705,7 @@ When reviewing for placement and shape correctness:
 - [ ] Spatial primitives correct
 - [ ] Estate actor serialization correct
 - [ ] Audit trail complete and immutable
+- [ ] Canonical GLK Drawer content remains single-owner in composed mode
 
 **VectorKit:**
 - [ ] Every vector tagged with model ID and version
@@ -702,7 +715,10 @@ When reviewing for placement and shape correctness:
 **CorpusKit:**
 - [ ] Tokenization lives here, not VectorKit
 - [ ] Hybrid BM25 + vector retrieval
-- [ ] Bundle is unit of sync and persistence
+- [ ] Same engine runs over standalone and injected content sources
+- [ ] Standalone content storage is complete and independently usable
+- [ ] Passage indexing is optional, token-budgeted, and stores offsets rather than copied text
+- [ ] Public results retain canonical content identity
 
 **GeniusLocusKit:**
 - [ ] Multi-estate coordinator correct
@@ -712,6 +728,8 @@ When reviewing for placement and shape correctness:
 - [ ] COW branches retained through all lifecycle states
 - [ ] Standing-signal scheduler per-estate, serial lane
 - [ ] Persistence through QueueKit over PersistenceKit
+- [ ] One canonical GLK Drawer dataset is shared by LocusKit and CorpusKit
+- [ ] CorpusKit chunking remains dark and no duplicate RAG content table is composed
 
 **NeuronKit:**
 - [ ] Reasoning surface thin wrapper over EideticLib

@@ -2,8 +2,8 @@
 title: MOOTx01 Topology
 status: canon
 authors: MOOTx01 maintainers
-date: 2026-06-15
-version: 1.0.1
+date: 2026-07-20
+version: 1.1.0
 description: A readable front door to the repository — the two products, the kit stack, FDC, the license shape, and how a developer reaches the substrate.
 ---
 
@@ -29,13 +29,13 @@ Behaviour
     NeuronKit          AI algorithms: hybrid recall, dreaming, branch scoring
 
 Composition (the write surface)
-    GeniusLocusKit     LocusKit + CorpusKit unified into one estate; nine verbs;
+    GeniusLocusKit     LocusKit + CorpusKit over one shared Drawer dataset; nine verbs;
                        Brain layer (standing-signal daemons, matrix tier,
                        training daemon); persistence via QueueKit over PersistenceKit
 
 Standalone substrate
     LocusKit           Spatial memory + knowledge graph (one estate)
-    CorpusKit             Content-plus-vector RAG bundles
+    CorpusKit          Standalone-capable RAG database; indexes an injected content source
     VectorKit          On-device embeddings + nearest-neighbour search (HNSW)
 
 Grounding
@@ -80,17 +80,17 @@ Foundation
 
 Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib; each consumer depends on the precise sub-package it uses, with no umbrella re-export), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. These are not five independent peers: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (FDC code + Wikidata Q-ID + confidence) via LatticeLib's FDC encoder and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
 
-Standalone substrate is three usable estates in their own right: LocusKit for spatial memory and the knowledge graph, VectorKit for on-device semantic search, CorpusKit for content-plus-vector bundles. Each is shippable on its own.
+Standalone substrate is three usable databases in their own right: LocusKit for spatial memory and the knowledge graph, VectorKit for on-device semantic search, and CorpusKit for RAG retrieval. Standalone CorpusKit owns its document content and may optionally index token-budgeted passages. Each Kit is shippable on its own.
 
 The grounding pair, LatticeLib and EideticLib, sits beside the substrate rather than under it. LatticeLib is the code-and-data side: the FDC encoder (`FDCMatcher` / `FDCRuntime`) plus the FDC frame and signatures it matches against. EideticLib is the lookup side: `EideticLib.lookup` delegates to LatticeLib's `FDC.encodeAnchor`, canonicalizing a term to a concept bag, matching it against the pinned FDC signatures, and emitting an anchor (FDC code + dominant Wikidata Q-ID + confidence). Both ship with frozen FDC reference artifacts so they work out of the box; neither imports a substrate kit.
 
-GeniusLocusKit is the composition layer and the write surface. It unifies LocusKit and CorpusKit (which itself sits over VectorKit) into one estate, exposes the nine verbs of the ARIA grammar against that estate, coordinates persistence through QueueKit over PersistenceKit, and runs the Brain layer: standing-signal daemons (dreaming, maintenance, vector-similarity, decay-sweep, byReference-validity, end-of-day-tournament), the matrix tier (F/C/O/T families with calibration and NMF), and a training daemon gated by manifest-set transition counts.
+GeniusLocusKit is the composition layer and the write surface. It unifies LocusKit and CorpusKit over one canonical Drawer dataset, exposes the nine verbs of the ARIA grammar against that estate, coordinates persistence through QueueKit over PersistenceKit, and runs the Brain layer: standing-signal daemons (dreaming, maintenance, vector-similarity, decay-sweep, byReference-validity, end-of-day-tournament), the matrix tier (F/C/O/T families with calibration and NMF), and a training daemon gated by manifest-set transition counts. LocusKit owns each GLK Drawer's content and identity. GLK injects a LocusKit-backed content source into CorpusKit, which stores only derived retrieval state keyed by the same Drawer ID. CorpusKit passage chunking is disabled in this composition.
 
 The BrainKits sit on top. NeuronKit is the algorithm BrainKit: reasoning functions and autonomic daemons (hybrid recall, dreaming, Bradley-Terry, SolverBandit). CognitionKit is the behaviour BrainKit: named, composable workflows. A MOOTx01 instance is GLK plus both BrainKits.
 
 ### Instance mode and the write surface
 
-A single MOOTx01 instance runs in GLK mode. The write surface is always GLK; every write goes through it, and GLK keeps the underlying databases in sync via QueueKit over PersistenceKit. Reads may be taken in narrower lenses on the same instance — a CorpusKit-only query, a LocusKit-only query — but those are read projections of the union, not separate writable stores. Narrowing applies to reads; writing is uniformly GLK.
+A single MOOTx01 instance runs in GLK mode. The write surface is always GLK; every content write creates or supersedes one canonical GLK Drawer through LocusKit, and CorpusKit observes that same object through the injected content source. QueueKit and PersistenceKit coordinate derived indexing work; they do not maintain a duplicate RAG content store. Reads may be taken in narrower lenses on the same instance — a CorpusKit-only query, a LocusKit-only query — but those are read projections over the same Drawer identities, not separate writable stores. Narrowing applies to reads; writing is uniformly GLK.
 
 This applies to estate mode. When consuming kits independently via the SDK (LocusKit, CorpusKit, VectorKit standalone), GLK is not required and writes go directly to the kit. See `packages/SDK.md` for the independently-consumable kit model.
 

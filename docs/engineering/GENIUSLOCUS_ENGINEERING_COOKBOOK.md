@@ -1,10 +1,10 @@
 ---
 title: GeniusLocus Engineering Specification Cookbook
-version: 1.2.0
-status: implementation-grade specification
+version: 1.3.0
+status: accepted-1.1-target
 description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (23 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code."
 author: MOOTx01 maintainers
-date: 2026-06-21
+date: 2026-07-20
 relates_to:
   - docs/engineering/HARNESS_REFERENCE.md (the 23 conformance-gated primitives, agentic discovery index)
   - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md (cross-cutting system, identity, persistence, and federation rules)
@@ -1672,7 +1672,7 @@ verifiable read-only replica that can project state and verify
 every seal but structurally cannot mint an event — useful as a
 federation or audit-verification sandbox.
 
-## §5.12. Merkle attestation composition (v1.0)
+## §5.12. Merkle attestation composition (1.1 shared-content target)
 
 Snapshot attestations compose across kits. A snapshot is an atomic
 point-in-time record with one or more `SnapshotAttestation` rows,
@@ -1684,14 +1684,21 @@ Merkle root hash.
   containment hierarchy.
 - Estate-root attestation: interior hash over all per-wing roots.
 
-**CorpusKit** provides content attestations:
-- Per-corpus attestation: Merkle root over a single source
-  document's chunk hashes (via `BundleStore.corpusMerkleRoot`).
-- Global-corpus attestation: interior hash over all per-corpus
-  roots (via `BundleStore.globalCorpusMerkleRoot`).
+In a GLK composition, **CorpusKit does not provide a second content
+attestation**. The LocusKit Drawer root already attests the canonical bytes.
+CorpusKit may provide a clearly typed *derived-index attestation* over canonical
+Drawer id + revision/digest + index version/checkpoint. That attestation proves
+which content revision the rebuildable BM25/vector state represents; it must not
+hash or persist another copy of Drawer text.
 
-**GeniusLocusKit** composes both sets via
-`createComposedSnapshot(for:label:now:)`. Both kit roots land in
+Standalone CorpusKit may attest its own canonical document store. Optional
+passage state contributes only revision-bound range/index metadata. The legacy
+`BundleStore.corpusMerkleRoot` / `globalCorpusMerkleRoot` surface remains a
+standalone 1.0 compatibility mechanism and is not part of GLK 1.1.
+
+**GeniusLocusKit** composes the canonical LocusKit content root and any
+CorpusKit derived-index root via `createComposedSnapshot(for:label:now:)`. Both
+typed roots land in
 one atomic `snapshot_attestations` table write. When no Corpus is
 registered, falls back to LocusKit-only attestations.
 
@@ -1702,10 +1709,11 @@ attestations alongside the LocusKit-generated ones. The
 estate assigns the real snapshot ID atomically.
 
 **Verification.** Replay the Merkle root computations from current
-data and compare to the stored attestation roots. A mismatch
-indicates tampering or silent corruption. The per-kit roots are
-independently verifiable: LocusKit's root can be recomputed from
-the node tree alone, CorpusKit's from the chunk store alone.
+data and compare to the stored attestation roots. A mismatch indicates
+tampering, silent corruption, or a stale derived index. The roots are
+independently verifiable without duplicating content: LocusKit's content root is
+recomputed from canonical Drawers; CorpusKit's optional derived root is
+recomputed from Drawer revision/digest plus derived index state.
 
 ---
 
@@ -4322,6 +4330,12 @@ Sections trace back to designer artifacts as follows:
 | §19 (out of scope) | First and final math passes §5 | Roadmap |
 
 ## Changelog
+
+### 1.3.0 -- 2026-07-20
+
+- Revised §5.12 for the 1.1 shared-content architecture: LocusKit attests
+  canonical Drawer content once; CorpusKit may attest only rebuildable index
+  state in GLK. Legacy chunk-store roots are standalone compatibility only.
 
 ### 1.1.0 -- 2026-06-21
 - §5.12: Merkle attestation composition. Documents how LocusKit
