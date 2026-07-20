@@ -1,6 +1,6 @@
 //! BundleStore: persistence-kit-backed chunks table. Mirror of
 //! Swift's `BundleStore`. Schema mirrors the Swift declaration
-//! exactly. v3 adds hash-on-write via HashingRowStore (ADR-017 §14).
+//! exactly. v3 adds hash-on-write via HashingRowStore.
 //!
 //! CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
 //! self-report telemetry to `insert`. The `report!` macro calls are
@@ -108,9 +108,9 @@ impl BundleStore {
     /// Schema declaration consumed by `Storage::open`. Mirrors
     /// the Swift `BundleStore.schemaDeclaration` exactly.
     pub fn schema_declaration() -> SchemaDeclaration {
-        // v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012).
+        // v2 adds the nullable `.json` `ext` forward-compat slot.
         // v3 adds `content_hash` BLOB column and marks the table `hashable`
-        // for hash-on-write via HashingRowStore (ADR-017 §14, NT-C1).
+        // for hash-on-write via HashingRowStore (node-tree integrity, NT-C1).
         // The `content_hash` column is nullable: NULL for rows inserted
         // before v3 (backward-compatible migration, no backfill required).
         SchemaDeclaration::new(
@@ -127,7 +127,7 @@ impl BundleStore {
                     ColumnDeclaration::hlc("hlc"),
                     ColumnDeclaration::json("metadata"),
                     ColumnDeclaration::timestamp("created_at"),
-                    // ADR-012 forward-compat slot (v2). Nullable JSON; distinct
+                    // nullable entity ext slots forward-compat slot (v2). Nullable JSON; distinct
                     // from `metadata`. 1.0 omits it on insert and never reads it.
                     ColumnDeclaration::json("ext").nullable(),
                     // NT-C1 (v3): SHA-256 content hash computed by

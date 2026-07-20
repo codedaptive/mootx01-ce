@@ -108,7 +108,7 @@ enum AuditBridge {
         }
 
         // Lattice anchor (the FDC zone) → the diffusion zone / topic-trajectory
-        // motion model (ADR-DIFFUSION-001 §5, Option 3a). The anchor is already
+        // motion model (node motion modeling, Option 3a). The anchor is already
         // on the event (before/after); bridging it through gives the
         // UnifiedAuditLog the zone time-series with no substrate change. Emit on
         // capture (no prior anchor) and whenever a reanchor changes it; a mutate
@@ -187,7 +187,7 @@ enum AuditBridge {
         // Grant-lifecycle verbs (VerbSurface.swift's `appendGrantAuditEntry`,
         // GLK-03 seam / FUP-C) and sensitivity-unlock verbs
         // (SensitivityAuditVerbs.swift's `appendSensitivityAuditEntry`,
-        // ADR-025 §4) both write their case name verbatim as
+        // out-of-band sensitivity grants) both write their case name verbatim as
         // `AuditEvent.verb` (UnifiedAuditVerb has no custom rawValues, so
         // `verb.rawValue == "grantIssued"` etc. at the write site) — these
         // six cases are the read-back symmetric to that write. Before

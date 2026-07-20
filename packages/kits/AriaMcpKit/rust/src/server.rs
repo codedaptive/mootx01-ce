@@ -51,7 +51,7 @@ pub struct ServerConfig {
     /// construction via `crate::build_serial::derive()` so the filesystem
     /// is not touched on every ping call.
     pub build_serial: String,
-    /// ADR-024 §5: version-skew advisory (empty ⇒ none to report). This
+    /// version-skew advisory (empty ⇒ none to report). This
     /// reference server has no plugin concept, so it always constructs
     /// with the empty default via `String::new()` — kept as a real field
     /// (not a constant) so `Dispatcher::new` has one signature shared by

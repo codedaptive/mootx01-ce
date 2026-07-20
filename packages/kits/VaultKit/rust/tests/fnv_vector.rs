@@ -2,7 +2,7 @@
 //!
 //! Every UUID in this file was produced by the Swift
 //! `DrawerMapping.lineageID(forStableSourceKey:)` implementation, which is
-//! the reference of record per ADR-VAULTKIT-001 (f). The Rust
+//! the reference of record per Vault import/export (f). The Rust
 //! `DrawerMapping::lineage_id` must produce bit-identical output for the
 //! same inputs — this is the cross-language conformance anchor.
 //!

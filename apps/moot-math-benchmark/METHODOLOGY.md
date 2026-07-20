@@ -8,7 +8,7 @@ framework instead of paper estimates.
 ## Why this exists
 
 The methodology gate (see
-`docs/decisions/METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md`)
+`docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md`)
 requires every kernel candidate to be implemented and measured, not
 rejected on paper. The first OR-reduce decision record contained a
 line like "rejected for 8x bandwidth amplification" that was a

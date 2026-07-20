@@ -30,7 +30,7 @@ public enum StorageError: Error, Sendable, Equatable {
     /// land. The `feature` string names the gate so the caller knows which
     /// capability is unavailable and why.
     ///
-    /// The as-of query gate (ADR-017 §17) stays closed until NT-L4
+    /// The as-of query gate stays closed until NT-L4
     /// (lineage-wide expunge) and NT-P3 (erasure overlay) merge, preventing
     /// the governance defect where an as-of read resurfaces un-erased payload
     /// from a superseded lineage version.

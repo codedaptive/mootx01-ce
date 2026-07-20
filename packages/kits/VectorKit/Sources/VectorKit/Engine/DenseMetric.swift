@@ -6,7 +6,7 @@
 // binary-lane metrics (Hamming, Jaccard) and the float-lane metrics
 // (cosine, l2, dot — VectorKit's FloatMetric). Both metric families
 // are owned by VectorKit: dense-embedding distance is a VectorKit
-// concern (ADR-008 persistencekit-vector-contract-correction).
+// concern (VectorKit-owned vector search persistencekit-vector-contract-correction).
 //
 // Design rationale: the engine seam (DenseIndex.search) takes one
 // parameter of type DenseMetric. Binary and float metrics live in one
@@ -35,7 +35,7 @@
 /// Metrics defined over float32 dense embedding vectors (the float lane).
 ///
 /// VectorKit owns this type: dense-embedding distance is a VectorKit
-/// concern (ADR-008 persistencekit-vector-contract-correction). The float
+/// concern (VectorKit-owned vector search persistencekit-vector-contract-correction). The float
 /// lane is reproducible-within-config, NOT four-way bit-identical — see the
 /// determinism boundary note above.
 public enum FloatMetric: Sendable, Equatable, Hashable {

@@ -60,7 +60,7 @@ public actor DrawerStore {
     let storage: any Storage
 
     /// The HLC clock this store stamps audit events with. Per the clock
-    /// decision (DECISION_CLOCK_TRIANGLE_TIME_MODEL): the top-ranking
+    /// decision: the top-ranking
     /// entity *makes* the clock, holders *receive* it. A `nil` argument
     /// to `init` means "I am top — make my own clock" (a standalone
     /// LocusKit estate); a supplied generator means "I am a holder,
@@ -1181,7 +1181,7 @@ public actor DrawerStore {
     /// version sharing its lineageID. For each version: set state to
     /// Tombstoned with dreaming_recalc_required (bit 26), zero the
     /// content blob, stamp tombstonedAt, and record the drawer id in
-    /// the erasure ledger (ADR-017 §17). Already-tombstoned siblings
+    /// the erasure ledger. Already-tombstoned siblings
     /// have their content re-zeroed and erasure ledger entry ensured
     /// but are not re-gated.
     ///
@@ -1320,7 +1320,7 @@ public actor DrawerStore {
             )
             try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
 
-            // Record head drawer in the erasure ledger (ADR-017 §17).
+            // Record head drawer in the erasure ledger.
             try await ErasureLedgerOps.recordErasure(
                 rowStore: txn.rowStore,
                 drawerId: drawerId,
@@ -1762,7 +1762,7 @@ public actor DrawerStore {
                 updateValues["wikidataQID"] = newLattice.wikidataQID.map { .text($0) } ?? .null
                 updateValues["wikidataQidsSecondary"] = newLattice.wikidataQidsSecondary.map { .text($0) } ?? .null
             }
-            // ADR-017: reanchor resolves target wing/room names to a node
+            // reanchor resolves target wing/room names to a node
             // ID via NodeStore create-on-demand, then updates parent_node_id.
             if toRoom != nil || toWing != nil {
                 let currentParentId = Self.string(row["parent_node_id"])
@@ -1910,9 +1910,9 @@ public actor DrawerStore {
     }
 
     /// Audit-log events for a row, in HLC order — the source of truth
-    /// (DECISION_CLOCK_TRIANGLE_TIME_MODEL: state is the projection,
+    /// (single-maker HLC and event integrity: state is the projection,
     /// the log is authoritative). Thin pass-through to PersistenceKit's
-    /// AuditLog. rowID is the row's UUID per DECISION_ROW_IDENTITY_UUID.
+    /// AuditLog. rowID is the row's UUID per UUID row identity.
     public func auditEventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
         try await storage.auditLog.eventsForRow(rowID)
     }
@@ -1953,7 +1953,7 @@ public actor DrawerStore {
         try Self.validateNonEmpty(t.label, label: "label")
         try Self.validateNonEmpty(t.addedBy, label: "addedBy")
 
-        // One parent per child (ADR-017 §11): a drawer may have at
+        // One parent per child: a drawer may have at
         // most one active .parent tunnel. Kit-level constraint
         // (not a DB-level partial unique index, which PersistenceKit's
         // schema declaration does not expose).
@@ -2090,7 +2090,7 @@ public actor DrawerStore {
         return try rows.map(Self.tunnelFromRow)
     }
 
-    // MARK: - Tunnel retirement (T13 / ADR-021 Phase 7)
+    // MARK: - Tunnel retirement
 
     /// All confirmed-active, non-retired tunnels estate-wide, ordered by filedAt.
     ///
@@ -2116,7 +2116,7 @@ public actor DrawerStore {
         return all.filter { !$0.isRetired && $0.lifecycle == .active }
     }
 
-    /// Flip bit 13 of `operationalBitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Flip bit 13 of `operationalBitmap` to retire a tunnel.
     ///
     /// Retrieves the current tunnel, sets the retirement bit, and persists
     /// the updated bitmap. Throws `notFound` if no non-tombstoned tunnel with
@@ -2195,7 +2195,7 @@ public actor DrawerStore {
         )
     }
 
-    /// Clear bit 13 of `operationalBitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Clear bit 13 of `operationalBitmap` to un-retire a tunnel.
     ///
     /// Reverses a prior `retireTunnel` call. The tunnel re-enters active reads
     /// (`allActiveTunnels`) and the dreaming suppression set once persisted.
@@ -2215,7 +2215,7 @@ public actor DrawerStore {
         )
     }
 
-    // MARK: - Outline helpers (ADR-017 §11, NT-L5)
+    // MARK: - Outline helpers (node-tree integrity, NT-L5)
 
     /// Children of a parent drawer in the outline graph, sorted by
     /// `orderKey` ascending. Returns only active (non-tombstoned)
@@ -3315,7 +3315,7 @@ public actor DrawerStore {
 
     /// Find the wing node by lookup_name, then return IDs of all active
     /// room nodes (depth=2) under it. Uses NFC + casefold normalization
-    /// matching Node.normalizeLookupName (ADR-017 §8).
+    /// matching Node.normalizeLookupName.
     private func roomNodeIdsInWing(wingName: String) async throws -> [String] {
         let wingLookup = Node.normalizeLookupName(wingName)
         let wingRows = try await storage.rowStore.query(
@@ -3371,10 +3371,10 @@ public actor DrawerStore {
     /// Build a lookup: room node ID → (wing display name, room display name).
     /// Two queries: one for the room nodes, one for their parent wing nodes.
     /// Used by all drawer fetch paths to populate the computed wing/room
-    /// bridge properties from the node tree (ADR-017 §3).
+    /// bridge properties from the node tree.
     /// Resolve parentNodeId UUIDs to display names (wing, room) from
     /// the node tree. Higher kits call this to obtain display names
-    /// after ADR-017 removed them from the Drawer struct.
+    /// after node-tree integrity removed them from the Drawer struct.
     public func resolveNodeNames(
         parentNodeIds: [String]
     ) async throws -> [String: (wing: String, room: String)] {

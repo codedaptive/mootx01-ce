@@ -119,7 +119,7 @@ A backend that wins the benchmark but fails conformance is rejected.
 ## Decision-doc protocol
 
 When a new kernel backend is proposed, the protocol per
-`docs/decisions/METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md`:
+`docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md`:
 
 1. Implement the candidate as a new `SubstrateKernel` conformer.
 2. Register it in `kernel_registry` on both ports.

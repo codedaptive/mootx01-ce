@@ -1,7 +1,7 @@
 // merkle_root.rs
 //
 // Typed 32-byte root hash of an interior node's children per
-// ADR-017 §16. MerkleRoot is semantically distinct from
+// node-tree integrity. MerkleRoot is semantically distinct from
 // ContentHash — a root summarizes a subtree of children's
 // hashes, a content hash summarizes one leaf payload. The type
 // system prevents substituting one for the other.

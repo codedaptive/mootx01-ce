@@ -4,7 +4,7 @@ import Testing
 
 // VK_IR_01 — NoteIR full-fidelity extension tests.
 //
-// Covers the four fields added per ADR-007 Decision 1 (`facts`,
+// Covers the four fields added per data-movement privacy tiers (`facts`,
 // `pathComponents`, `scope`, `kind`) and the back-compat guarantee:
 // JSON serialized BEFORE the extension (no new keys) must decode with
 // the documented defaults. Pre-existing NoteIR behavior is covered by

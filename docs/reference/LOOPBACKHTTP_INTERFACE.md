@@ -8,7 +8,7 @@ authors: MOOTx01 maintainers
 date: 2026-06-14
 relates_to:
   - docs/reference/LOOPBACKHTTP_SPEC.md
-  - docs/decisions/ADR-LOOPBACKHTTP-001.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#23-loopback-http-boundary
 ---
 
 # LoopbackHTTP Interface
@@ -139,7 +139,7 @@ public struct SSEStream: Sendable {
 
 ## Rust
 
-**None — `LoopbackHTTP` is Swift-only by decision (ADR-LOOPBACKHTTP-001).**
+**None — `LoopbackHTTP` is Swift-only by decision (the loopback HTTP contract).**
 
 The Swift+Rust parity discipline governs deterministic substrate compute
 conformance-gated at shared test vectors; it does not extend to OS-transport
@@ -154,11 +154,11 @@ moot-mgr has no Rust port. A Rust port of `LoopbackHTTP` would have no consumer.
 
 `LoopbackHTTP` is Swift-only (see §Rust above). All public types are
 Swift-only and Exempt from Swift+Rust parity requirements per
-ADR-LOOPBACKHTTP-001.
+the loopback HTTP contract.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
-| POSIX socket namespace | `POSIXSocket` | — | public enum (caseless namespace) / — | Swift caseless-enum namespace for POSIX socket operations; no Rust parity (OS-transport glue, per ADR-LOOPBACKHTTP-001) | — | Exempt (platform binding) |
+| POSIX socket namespace | `POSIXSocket` | — | public enum (caseless namespace) / — | Swift caseless-enum namespace for POSIX socket operations; no Rust parity (OS-transport glue, per the loopback HTTP contract) | — | Exempt (platform binding) |
 | Socket error | `SocketError` | — | public enum / — | Swift-only error enum for socket-level failures; Rust aria-mcp uses `std::net` errors natively | — | Exempt (platform binding) |
 | HTTP request wire type | `HTTPRequest` | — | public struct / — | Swift-only wire DTO for incoming HTTP requests; Rust side uses its own parse layer | — | Exempt (platform binding) |
 | HTTP response wire type | `HTTPResponse` | — | public struct / — | Swift-only wire DTO for HTTP responses; Rust side builds responses directly | — | Exempt (platform binding) |

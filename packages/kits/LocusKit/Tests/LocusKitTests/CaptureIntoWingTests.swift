@@ -3,7 +3,7 @@ import SubstrateTypes
 import Foundation
 @testable import LocusKit
 
-/// Tests for `CaptureFrame.wing` — ADR-016 wing targeting at capture time.
+/// Tests for `CaptureFrame.wing` — wing targeting at capture time.
 ///
 /// Verifies that:
 ///   - Supplying an explicit `wing` in `CaptureFrame` causes the stored
@@ -11,7 +11,7 @@ import Foundation
 ///   - Omitting `wing` (nil) falls through to the estate default
 ///     ("Agentic Memory"), preserving byte-identical behaviour for all
 ///     existing callers.
-@Suite("Capture-into-wing — CaptureFrame.wing slot (ADR-016)")
+@Suite("Capture-into-wing — CaptureFrame.wing slot")
 struct CaptureIntoWingTests {
 
     /// Build a fresh estate on a unique temp SQLite file.

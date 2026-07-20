@@ -1,15 +1,13 @@
-//! ExchangeAdapter — the first programmatic-tool adapter (ADR-007
-//! Decision 1). Rust twin of Swift `ExchangeAdapter.swift`
+//! ExchangeAdapter — the first programmatic-tool adapter. Rust twin of Swift `ExchangeAdapter.swift`
 //! (VK-ADAPT-01 read side, VK-EXPORT-01 write side).
 //!
 //! Both directions of the MOOT exchange format v1 (our canonical
 //! interchange JSON): `to_ir`/`decode` read it into the canonical
 //! `NoteIR`, and `from_ir`/`encode` write `NoteIR` back out as an
-//! exchange document — the programmatic exit promise (ADR-007
-//! Decision 4, gold item 7). Per ADR-007 Decision 1 this adapter is the
-//! single owner of the export's codec knowledge: mass import is
+//! exchange document. This adapter is the single owner of the export codec:
+//! mass import is
 //! exclusively adapter → `VaultBridge::import_vault`, and mass export is
-//! `VaultBridge::export` → adapter, which applies the Decision 2 tier
+//! `VaultBridge::export` → adapter, which applies the privacy-tier
 //! rules and writes the audit receipt BEFORE the adapter sees the notes.
 //!
 //! Adapters are pure transforms (`tool format ⇄ NoteIR`): no process
@@ -267,7 +265,7 @@ impl VaultAdapter for ExchangeAdapter {
     }
 
     /// Write canonical notes out as the external tool's export document —
-    /// the programmatic exit promise (ADR-007 Decision 4, gold item 7).
+    /// the programmatic exit promise (data-movement privacy tiers, gold item 7).
     /// Mirrors Swift `ExchangeAdapter.fromIR(_:to:)`.
     ///
     /// As with `to_ir`, the "vault" is a single JSON export file, so

@@ -297,7 +297,7 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
 
     // Create the `_distilled_from` provenance tunnel (factoid → source),
     // exactly as DistillationCycle does.
-    // Resolve wing/room display names from the node tree (ADR-017).
+    // Resolve wing/room display names from the node tree.
     let both_drawers = vec![factoid_drawer.clone(), source_drawer.clone()];
     let node_names = resolve_drawer_node_names(&coord1, &handle1, &both_drawers);
     let (factoid_wing, _) = node_names.get(&factoid_drawer.parent_node_id).cloned().unwrap_or_default();
@@ -386,7 +386,7 @@ fn distilled_from_provenance_round_trips_as_tunnel_not_body_text() {
     // --- Assertion 3: `_distilled_from` tunnel must exist after import. ---
     // Use Estate::tunnels_from_wing — the only surface that returns tunnels
     // originating from a specific wing without going through the recall pipeline.
-    // Resolve the factoid's wing name from the node tree (ADR-017).
+    // Resolve the factoid's wing name from the node tree.
     let (factoid_wing_imported, _) = imported_names.get(&factoid.parent_node_id).cloned().unwrap_or_default();
     let estate2 = coord2.estate_for(&handle2).expect("estate_for target");
     let tunnels = estate2
@@ -454,7 +454,7 @@ fn prov_all_markdown(vault: &PathBuf) -> String {
 
 /// CAND-EXP-PROV: A factoid with a `_distilled_from` tunnel to a SECRET source
 /// drawer must NOT include the secret drawer's wing/room in `distilled_from_sources`
-/// frontmatter. Secret drawers are excluded from bulk export (ADR-007 Decision 2);
+/// frontmatter. Secret drawers are excluded from bulk export;
 /// writing their location into frontmatter leaks it to any vault reader.
 ///
 /// Mirrors Swift `PrivacyTierAndReceiptTests.provenanceTunnelToSecretDrawerExcluded`.
@@ -487,7 +487,7 @@ fn provenance_tunnel_to_secret_drawer_excluded_from_frontmatter() {
     );
     let factoid_drawer = coord.capture(&handle, factoid_frame, NOW).expect("capture factoid");
 
-    // Resolve display names (ADR-017).
+    // Resolve display names.
     let both = vec![secret_drawer.clone(), factoid_drawer.clone()];
     let names = resolve_drawer_node_names(&coord, &handle, &both);
     let (secret_wing, _) = names.get(&secret_drawer.parent_node_id).cloned().unwrap_or_default();

@@ -137,7 +137,7 @@ struct InstallCommand: AsyncParsableCommand {
         var installed: [String] = []
         var skipped: [String] = []
 
-        // ADR-024 §1/§3: plugins the CLI installer knows how to detect and
+        // plugins the CLI installer knows how to detect and
         // defer to. Keyed by client id → the plugin registry id
         // (`installed_plugins.json`'s top-level key). Only Claude Code has a
         // live plugin today; the table is intentionally small rather than
@@ -174,7 +174,7 @@ struct InstallCommand: AsyncParsableCommand {
                 }
                 print("  ⓘ MOOTx01 plugin already installed — \(client.displayName) connects through it; skipping direct wiring.")
                 // Wave 6, Defect A (live 1.0.16 machine finding): the
-                // ADR-024 ownership skip above applies ONLY to the direct
+                // plugin-owned MCP connections ownership skip above applies ONLY to the direct
                 // mcpServers entry. Before this fix, `continue` here left
                 // `client.displayName` out of `installed` entirely, and the
                 // depth loop below filters on `installed.contains(...)` —
@@ -299,7 +299,7 @@ struct InstallCommand: AsyncParsableCommand {
                     // 6b08d56b). HTTP-shaped entries are untouched — the
                     // resident daemon carries the vault posture in its own
                     // launchd environment (`daemonEnv` above), independent
-                    // of this call (ADR-024 Wave 3, Defect 2).
+                    // of this call.
                     let outcome = try DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,
@@ -419,7 +419,7 @@ struct InstallCommand: AsyncParsableCommand {
             // MOOTX01_VAULT: "0" = vault-off (--vault-off); "1" = vault-on (default).
             // The flag pair is mutually exclusive by convention: if both are set
             // (CLI parse does not block this) --vault-off wins (safer default).
-            // When neither is set, vault is on (ADR-015 §1: default = vault-on).
+            // When neither is set, vault is on (the open 1.0 Vault posture: default = vault-on).
             let vaultValue = vaultOff ? "0" : "1"
             let daemonEnv = [
                 "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
@@ -513,7 +513,7 @@ struct InstallCommand: AsyncParsableCommand {
         print("")
         print("Run `mootx01 status` to confirm your setup.")
 
-        // ADR-015 §1 mandatory disclosure: tell the user about the Vault
+        // the open 1.0 Vault posture mandatory disclosure: tell the user about the Vault
         // surface so they can make an informed security choice. Disclosure
         // is always printed regardless of which Vault flag was passed, so
         // the user knows the current state and how to change it.

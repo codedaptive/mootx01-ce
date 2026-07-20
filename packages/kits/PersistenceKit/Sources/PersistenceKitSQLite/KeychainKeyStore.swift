@@ -6,13 +6,13 @@
 // One 256-bit data key per estate, keyed by the estate's file path (see
 // `estateAccount(for:)`), generated once and stored in the Keychain. Every
 // process that opens a given estate (the app and the managed server it spawns,
-// per ADR-005) derives the same account from the same estate path, loads the
+// per the app/engine boundary) derives the same account from the same estate path, loads the
 // same key, and passes it to `EstateEncryptionConfig.fullDatabase(key:)`, so
 // SQLCipher opens the file with one consistent key. Distinct estates get
 // distinct keys, mirroring the Rust port's per-estate `db.key`: a key compromise
 // is scoped to one estate, and deleting an estate disposes its key (`deleteKey`).
 //
-// Key protection (ADR-014):
+// Key protection:
 //   - `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` — the key is available
 //     to the resident process for background work after the first device unlock,
 //     never leaves the device, and is not synced to iCloud.

@@ -3,7 +3,7 @@
 Layer 1 — pure data types of the four-package SubstrateLib split.
 
 **Status:** built; four-package split mid-migration (per
-`docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md`
+`docs/engineering/HARNESS_REFERENCE.md#6-the-four-package-substrate-split`
 Phase 6 and the 2026-05-29 addendum). Symbols here hold real code;
 remaining symbols are still resident in `SubstrateLib`, which is
 RETAINED as the orchestration package (the four-package end-state),

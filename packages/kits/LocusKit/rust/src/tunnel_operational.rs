@@ -18,14 +18,14 @@
 //! bits 6–8   TunnelOriginClass  (3 bits, contiguous, 5 cases)
 //! bits 9–11  TunnelStrength     (3 bits, scale-gapped, raws 0/2/4/6)
 //! bit  12    has_inverse        (1 bit, exclusive)
-//! bit  13    is_retired         (1 bit, T13 / ADR-021 Phase 7)
+//! bit  13    is_retired         (1 bit,  / recall-driven dreaming)
 //! bits 14–63 reserved
 //! ```
 //!
 //! ## Tunnel provenance layout (low-to-high)
 //!
 //! ```text
-//! bit  0     is_dreamed         (1 bit, T13 / ADR-021 Phase 7)
+//! bit  0     is_dreamed         (1 bit,  / recall-driven dreaming)
 //! bits 1–63  reserved
 //! ```
 //!
@@ -69,7 +69,7 @@ pub enum TunnelKind {
     Covers = 6,
     Elaborates = 7,
     RespondsTo = 8,
-    /// Outline containment edge (ADR-017 §11). Source is the child,
+    /// Outline containment edge. Source is the child,
     /// target is the parent. One parent per child enforced in
     /// `add_tunnel` (kit-level constraint, not a DB-level partial
     /// unique index). The companion `order_key` on the Tunnel
@@ -279,9 +279,9 @@ impl Tunnel {
         bit_field::extract_flag(self.operational_bitmap, 12)
     }
 
-    // ─── Retirement accessors (T13 / ADR-021 Phase 7) ───────────────
+    // ─── Retirement accessors ───────────────
 
-    /// Bit 13 of `operational_bitmap` — retirement flag (T13 / ADR-021 Phase 7).
+    /// Bit 13 of `operational_bitmap` — retirement flag.
     ///
     /// Set to 1 when OMEGA retires an unreinforced dreamed tunnel. Cleared
     /// to 0 by `unretire_tunnel` when a subsequent co-recall re-forms the
@@ -342,7 +342,7 @@ impl Tunnel {
 
 // MARK: - Tunnel provenance accessors
 
-// Tunnel `provenance_bitmap` layout (T13 / ADR-021 Phase 7, low-to-high):
+// Tunnel `provenance_bitmap` layout (recall-driven dreaming, low-to-high):
 //   bit  0   is_dreamed   (1 bit) — set by dreaming pipeline when the
 //            tunnel was proposed by REM-ALPHA or REM-THETA (emergent channel).
 //            Cleared for declared tunnels (palace tunnels.json, vault wikilinks,
@@ -352,9 +352,9 @@ impl Tunnel {
 //            NEVER retired by OMEGA regardless of recall activity.
 //   bits 1–63 reserved for future provenance axes.
 impl Tunnel {
-    // ─── Provenance accessors (T13 / ADR-021 Phase 7) ───────────────
+    // ─── Provenance accessors ───────────────
 
-    /// Bit 0 of `provenance_bitmap` — dreamed-provenance flag (T13 / ADR-021 Phase 7).
+    /// Bit 0 of `provenance_bitmap` — dreamed-provenance flag.
     ///
     /// Set to 1 when this tunnel entered the substrate through the dreaming
     /// pipeline (REM-ALPHA or REM-THETA co-recall proposal, subsequently accepted).
@@ -500,7 +500,7 @@ mod tests {
         assert!(!t.has_inverse());
     }
 
-    // ─── Retirement accessor tests (T13 / ADR-021 Phase 7) ──────────
+    // ─── Retirement accessor tests ──────────
 
     #[test]
     fn is_retired_is_bit_thirteen() {
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(Tunnel::IS_RETIRED_BIT, 8192);
     }
 
-    // ─── Provenance accessor tests (T13 / ADR-021 Phase 7) ──────────
+    // ─── Provenance accessor tests ──────────
 
     fn p_with(prov_bits: i64) -> Tunnel {
         let mut t = Tunnel::new(

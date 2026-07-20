@@ -1,6 +1,6 @@
 // EstateConfigurationQueueSiblingTests.swift
 //
-// Tests for EstateConfiguration.queueSibling(filename:) — ADR-021 T3.
+// Tests for EstateConfiguration.queueSibling(filename:) — recall-driven dreaming.
 //
 // Coverage:
 //   1. SQLite estate: sibling is at <estate-dir>/<estate-stem>.<filename>,
@@ -54,7 +54,7 @@ struct EstateConfigurationQueueSiblingTests {
     }
 
     /// Two distinct estate DB files in the SAME directory produce DIFFERENT
-    /// sibling paths — the core ADR-021 Decision 7 isolation invariant.
+    /// sibling paths — the core recall-driven dreaming isolation invariant.
     /// Before this fix both derived the same `<dir>/queue.sqlite`, enabling
     /// cross-estate corpus disclosure. After the fix each estate's queue is
     /// at `<dir>/<estate-stem>.queue.sqlite`, which is unique per estate.
@@ -127,7 +127,7 @@ struct EstateConfigurationQueueSiblingTests {
     /// Encryption config is carried over verbatim to the sibling — mode,
     /// key identifier, and (package-visible) key bytes are the same object.
     ///
-    /// This is the core ADR-021 Decision 7 invariant: the queue DB uses the
+    /// This is the core recall-driven dreaming invariant: the queue DB uses the
     /// same cipher key as the estate so QueueKit can open it without
     /// additional key distribution.
     @Test func sqliteSiblingCarriesEncryptionConfig() throws {
@@ -223,7 +223,7 @@ struct EstateConfigurationQueueSiblingTests {
     // PostgreSQL backend — deferred, must fail loud
     // ──────────────────────────────────────────────────────────────────────
 
-    /// The PostgreSQL branch is deferred per ADR-021 SQLite-first sequencing.
+    /// The PostgreSQL queue-sibling branch is not implemented.
     /// Calling `queueSibling` on a PostgreSQL estate must throw
     /// `StorageError.featureGated`, never silently return a wrong config.
     @Test func postgresqlSiblingThrowsFeatureGated() throws {

@@ -1,6 +1,6 @@
 // SnapshotReplicationTests.swift
 //
-// Snapshot replication atomicity conformance test (ADR-017 §15).
+// Snapshot replication atomicity conformance test.
 // Part 6 of mission NT-P3.
 //
 // Verifies that snapshot registry + attestations replicate atomically:

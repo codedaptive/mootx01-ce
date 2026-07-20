@@ -721,7 +721,7 @@ public actor ResidentArrayStore {
         guard offset + vectorsBytes <= data.count else {
             throw VectorKitError.decodingFailure("ResidentArrayStore: truncated in vectors block")
         }
-        // ADR-026: pass the Data slice directly instead of copying into
+        // pass the Data slice directly instead of copying into
         // a heap-allocated [UInt8]. When the sidecar was loaded via
         // .mappedIfSafe, this keeps the vector bytes mmap-backed — the OS
         // page cache manages residency instead of a 2GB+ malloc. The Data
@@ -730,7 +730,7 @@ public actor ResidentArrayStore {
         offset += vectorsBytes
 
         // --- Keys block ---
-        // ADR-026 string interning: on a 200K-vector estate with 1 model,
+        // disk-default storage residency string interning: on a 200K-vector estate with 1 model,
         // decoding modelID + modelVersion per key allocates 400K identical
         // String heap objects (~500MB). Interning collapses these to one
         // shared instance per unique string. Swift String is CoW, so
@@ -791,7 +791,7 @@ public actor ResidentArrayStore {
     /// Decode one key record from the sidecar binary format.
     ///
     /// The `intern` closure deduplicates modelID and modelVersion strings
-    /// (ADR-026): on a typical estate all 200K keys share one modelID and
+    ///: on a typical estate all 200K keys share one modelID and
     /// one modelVersion. Without interning, each key allocates its own
     /// String heap object for those fields (~500MB on a 50K estate).
     /// itemID is NOT interned — it's unique per slot.

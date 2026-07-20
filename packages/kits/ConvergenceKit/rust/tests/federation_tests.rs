@@ -170,7 +170,7 @@ fn two_peer_push_pull_roundtrip() {
 /// Push routes envelopes only to explicitly paired peers. A third engine
 /// registered on the same relay but not paired with the sender must not
 /// receive any envelope. Enforces the pairing authorization boundary at
-/// the push path (ADR-013).
+/// the push path.
 #[test]
 fn push_routes_only_to_paired_peers() {
     let relay = Arc::new(FederationRelay::new());
@@ -205,7 +205,7 @@ fn push_routes_only_to_paired_peers() {
 
 /// Pull rejects a valid self-signed envelope from an engine that is NOT
 /// a paired peer. A valid signature alone does not prove pairing
-/// authorization (ADR-013); the sender must be in the paired peer list.
+/// authorization; the sender must be in the paired peer list.
 #[test]
 fn pull_rejects_signed_envelope_from_unpaired_sender() {
     let relay = Arc::new(FederationRelay::new());

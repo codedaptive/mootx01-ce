@@ -179,7 +179,7 @@ public extension GeniusLocusKit {
         // hints seeded in step 2c are stamped with the corpus's real model id, not
         // a sentinel. This matches the serve open path, which also wires before it
         // seeds. (Seeding does not depend on the wiring; the order is purely so the
-        // hint drawers carry the normal model id — ADR-016 §2.)
+        // hint drawers carry the normal model id — wing organization.)
         let backingStorage = corpusStorage ?? storage
         do {
             // Wire via the shared seam (also called by the serve entry points so a
@@ -198,7 +198,7 @@ public extension GeniusLocusKit {
             )
         }
 
-        // Step 2c: Seed the seven default wings (ADR-016 §1 and §2).
+        // Step 2c: Seed the seven default wings.
         // Delegates to `seedDefaultWings(for:now:)` — the single seam that owns
         // the idempotent seeding loop. Provision passes a fresh Date() as `now`;
         // the serve open path calls the same method unconditionally so bare estates
@@ -211,7 +211,7 @@ public extension GeniusLocusKit {
         // are filed row-only (LocusKit `seedWing` does not enqueue): their semantic
         // vectors are produced by the next full-corpus reindex, alongside user
         // content, rather than training a basis on the 7 hints alone. This is the
-        // intended ADR-016 §2 behaviour — normal drawers, embedded under the normal
+        // intended wing organization behaviour — normal drawers, embedded under the normal
         // model at reindex.
         //
         // Failure policy: wing seeding is part of provision — if seeding fails
@@ -244,7 +244,7 @@ public extension GeniusLocusKit {
 
     // MARK: - seedDefaultWings(for:now:)
 
-    /// Idempotently seed the seven ADR-016 default wings on an open estate.
+    /// Idempotently seed the seven default wings on an open estate.
     ///
     /// This is the single seam that owns the default-wing seeding loop. Both the
     /// `provision` path (fresh estate) and the `mootx01 serve` open path (bare
@@ -301,7 +301,7 @@ public extension GeniusLocusKit {
 
         // Seed each wing that is not yet present. Missing wings emerge when an
         // estate was created via the bare `Estate.create` + `open` path that
-        // predates ADR-016 (e.g. the `mootx01 serve` first-run path before this
+        // predates wing organization (e.g. the `mootx01 serve` first-run path before this
         // fix). For estates already seeded via `provision`, this loop is a no-op.
         var seededCount = 0
         for wing in LocusKit.defaultWings where !seededWings.contains(wing.name) {

@@ -50,7 +50,7 @@ let package = Package(
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 // CorpusKitProviders: the concrete five-signal ensemble
                 // (CorpusEnsemble.defaultEnsemble()) the server wires into Lane D.
-                // Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; the
+                // Dependency per in-repository dependency direction; the
                 // server is downstream of the providers, no layering inversion.
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
                 .product(name: "VectorKit", package: "VectorKit"),

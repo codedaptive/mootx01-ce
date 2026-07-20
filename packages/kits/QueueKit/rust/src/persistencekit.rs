@@ -349,7 +349,7 @@ impl PersistenceKitBackend {
     ///
     /// Stream-scoped: only this stream's "cur" rows are reset; other streams'
     /// rows are never touched. This mirrors the stream isolation of
-    /// `drain_available_for_stream` (ADR-021 Decision 7: one per-estate queue,
+    /// `drain_available_for_stream` (recall-driven dreaming: one per-estate queue,
     /// per-stream drainers).
     ///
     /// Swift twin: `PersistenceKitBackend.reclaimInFlight(stream:)`.
@@ -602,7 +602,7 @@ impl QueueBackend for PersistenceKitBackend {
             .map_err(storage_err)
     }
 
-    // ── Stream-scoped drain (ADR-021 Decision 7 / T1) ──────────────────────
+    // ── Stream-scoped drain ──────────────────────
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///

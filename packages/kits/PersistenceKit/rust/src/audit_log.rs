@@ -1,5 +1,5 @@
 //! AuditLog trait: append-only audit log per
-//! DECISION_STORAGEKIT_DESIGN section 9 (Q7).
+//! the PersistenceKit storage surface section 9 (Q7).
 //!
 //! AuditEvent here is a Rust-side mirror of Swift's `AuditEvent`
 //! with two simplifications: bitmap triples are flat fields

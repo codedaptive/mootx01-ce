@@ -48,7 +48,7 @@ let package = Package(
         // IntellectusLib is the zero-dependency telemetry leaf.
         // CognitionKit emits self-report metrics at recipe-run boundaries
         // (cp-cognitionkit-report P2 self-report coverage;
-        // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28). When monitoring is
+        // in-repository dependency direction). When monitoring is
         // off (the default), every Intellectus.report(...) call is a single
         // atomic load + branch — zero allocation, no clock. IntellectusLib
         // depends on nothing; layering is safe (it is the new dependency

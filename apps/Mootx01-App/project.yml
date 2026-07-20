@@ -1,4 +1,4 @@
-# xcodegen spec for the MOOTx01 ecosystem app (ADR-005, the Apple layer).
+# xcodegen spec for the MOOTx01 ecosystem app (the app/engine boundary, the Apple layer).
 # Regenerate: xcodegen generate   (run in apps/Mootx01-App)
 #
 # Two app targets — macOS and iOS/iPadOS — sharing the App/ sources and the
@@ -38,7 +38,7 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
         # Spawning the managed daemon needs no sandbox for this dev prototype.
         ENABLE_APP_SANDBOX: NO
-    # App-group container (ADR-014, macOS 15+): when the estate lives in the
+    # App-group container (whole-file estate encryption, macOS 15+): when the estate lives in the
     # group container, the OS gives it System Integrity Protection even WITHOUT
     # App Sandbox — a process outside the group is prompted before it can touch
     # the estate. Defense-in-depth on top of SQLCipher whole-file encryption. The

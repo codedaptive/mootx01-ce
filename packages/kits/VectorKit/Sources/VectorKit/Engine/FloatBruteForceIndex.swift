@@ -7,7 +7,7 @@
 // lane's conformance oracle and its production search path (arch spec §3.1).
 //
 // Metrics: cosine, L2, dot — via DenseMetric.float(FloatMetric), VectorKit's
-// own float-lane metric type (ADR-008 persistencekit-vector-contract-correction).
+// own float-lane metric type (VectorKit-owned vector search persistencekit-vector-contract-correction).
 //
 // Determinism boundary (arch spec §6, §0):
 // ─────────────────────────────────────────────────────────────────────

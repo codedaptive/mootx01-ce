@@ -50,7 +50,7 @@ pub enum ManifestKey {
     /// the raw 32-byte representation. Generated on first open and used
     /// as the estate's federation identity once a non-manifest private-key
     /// storage/wrapping layer is available for signing grants.
-    /// Per DECISION_SYNCKIT_DESIGN_2026-05-19 §8.
+    /// Per the ConvergenceKit replication surface.
     Ed25519PublicKey,
 
     /// Reserved seam for a future hardware/OS-wrapped Ed25519 private

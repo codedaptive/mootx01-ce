@@ -25,7 +25,7 @@ rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"]
 # health metrics via the report! macro, which is a no-op when monitoring is
 # disabled (the default). Off-path cost: one AtomicBool load + branch.
 # Layering: intellectus-lib has no repo deps; this is downstream→upstream.
-# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+# Repository-owned dependencies use local package paths.
 intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # ISO-8601 timestamp formatting for TEXT date columns (schema invariant).
 chrono = "0.4"
@@ -34,7 +34,7 @@ chrono = "0.4"
 # chrono::DateTime<Utc>.
 postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
 # AES-GCM-256 at-rest row encryption (PAR-5-PK). C-1 per-crate exception
-# recorded in DECISION_RUST_AEAD_CRATE_2026-06-05.md. Rationale: at-rest
+# recorded in the Rust AES-GCM seam. Rationale: at-rest
 # AEAD; never hand-roll a cipher; random nonces are non-deterministic by
 # design so this is not conformance-byte-identity-gated.
 # getrandom feature required for OsRng-backed nonce generation on all targets.
@@ -43,7 +43,7 @@ postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
 # byte-identity of the ciphertext layout. Exact pinning prevents silent upgrades.
 aes-gcm = { version = "=0.10.3", features = ["aes"] }
 # PostgreSQL TLS transport (CAND-029 — SECFIX-WS2-PK F3). C-1 per-crate
-# exception recorded in DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md.
+# exception recorded in the Rust PostgreSQL TLS seam.
 # Wraps the platform TLS stack (Security.framework on macOS, SChannel on
 # Windows, OpenSSL on Linux) via the `native-tls` crate — zero bundled
 # cryptographic implementations. Achieves parity with the Swift NIOSSL

@@ -2,12 +2,12 @@
 //
 // Package.swift — QueueKit
 //
-// General-purpose queuing library per docs/canon/QUEUEKIT_SPEC.md.
+// General-purpose queuing library.
 // Two conforming backends: FilesystemBackend (POSIX maildir) and
 // PersistenceKitBackend. Dependencies: SubstrateTypes (HLC), PersistenceKit
-// (spec §13), IntellectusLib (self-report telemetry, DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
+// and IntellectusLib supplies self-report telemetry.
 // ConvergenceKit is application-layer composition and is intentionally NOT a
-// dependency (spec §11).
+// dependency.
 
 import PackageDescription
 
@@ -21,7 +21,7 @@ let package = Package(
         .package(path: "../../libs/SubstrateTypes"),
         .package(path: "../PersistenceKit"),
         // IntellectusLib: self-report telemetry via QueueKitTelemetry.swift
-        // (DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28). Lib-layer dependency;
+        //. Lib-layer dependency;
         // layering does not invert.
         .package(path: "../../libs/IntellectusLib"),
         // ConvergenceKit is NOT listed here — spec §11.

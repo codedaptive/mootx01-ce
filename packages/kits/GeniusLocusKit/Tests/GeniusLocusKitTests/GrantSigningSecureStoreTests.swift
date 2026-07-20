@@ -7,7 +7,7 @@ import PersistenceKitInMemory
 @testable import GeniusLocusKit
 
 /// Tests for Ed25519 grant-signing behavior after the Keychain migration
-/// (secfix/ed25519-keychain, ADR-007).
+/// (secfix/ed25519-keychain, data-movement privacy tiers).
 ///
 /// Verifies:
 ///   (a) `estate_meta` does NOT contain the private key after `Estate.open`

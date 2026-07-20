@@ -2,11 +2,9 @@ import Foundation
 
 // VaultKit — the canonical interchange envelope.
 //
-// `CorpusDocument` is THE versioned canonical JSON document mandated by
-// ADR-007 Decision 1: "NoteIR is the single interchange representation …
-// Its serialized form is a versioned canonical JSON document — the JSON
-// is the payload, never a per-tool mapping DSL." `[NoteIR]` passed in
-// memory has no version or identity; this envelope gives a corpus both,
+// `CorpusDocument` is the versioned canonical JSON representation of a
+// corpus. The JSON is the payload, never a per-tool mapping DSL. `[NoteIR]`
+// passed in memory has no version or identity; this envelope gives it both,
 // so a serialized corpus can be stored, shipped, and decoded years later
 // with an explicit compatibility contract.
 //
@@ -73,14 +71,14 @@ public enum VaultKitError: Error, Equatable, Sendable {
 /// The versioned canonical envelope around a corpus of `NoteIR` entries.
 ///
 /// `{ formatVersion, name, notes }` — nothing else. The envelope is the
-/// unit of mass data movement (ADR-007 Decision 1): exporters produce
+/// unit of mass data movement: exporters produce
 /// one, importers consume one, and `formatVersion` is the explicit
 /// compatibility gate between producers and consumers built years apart.
 public struct CorpusDocument: Codable, Sendable, Equatable {
 
     /// The format version this build reads and writes. Bumping it is a
-    /// deliberate act recorded in `docs/decisions/` — shapes froze at
-    /// v0.9 beta (ADR-007 Decision 4, deliverable 2).
+    /// deliberate compatibility change that requires the versioned interface
+    /// specification, fixtures, and both language implementations to advance together.
     public static let currentFormatVersion = 1
 
     /// The document's declared format version. Always

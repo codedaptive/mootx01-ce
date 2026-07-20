@@ -23,7 +23,7 @@ import LocusKit
 /// deterministic unclassified sentinel `"000"` otherwise. Classification
 /// happens in the GeniusLocusKit capture seam (one-door principle) —
 /// the seam classifies the sentinel content via EideticLib on the way in
-/// (ADR-VAULTKIT-001 (g)).
+/// (Vault import/export (g)).
 public struct DrawerMapping: Sendable {
 
     /// Default actor identifier stamped on imported drawers and tunnels
@@ -65,7 +65,7 @@ public struct DrawerMapping: Sendable {
     // MARK: - Export: estate → IR
 
     /// The notes an export projects plus the per-tier exclusion counts the
-    /// ADR-007 Decision 2 bulk-channel rules produced. Exclusions are
+    /// data-movement privacy tiers bulk-channel rules produced. Exclusions are
     /// reported, never silent (zero-loss reporting symmetry with C-13).
     public struct ExportProjection: Sendable {
         /// Drawers that passed the scope filters AND the tier rules,
@@ -73,7 +73,7 @@ public struct DrawerMapping: Sendable {
         public var notes: [NoteIR]
         /// Secret-tier drawers the scope filters admitted but the bulk
         /// channel excluded. Secret never rides bulk export, under any
-        /// scope (ADR-007 Decision 2).
+        /// scope.
         public var excludedSecretTier: Int
         /// Private-tier (`.restricted`) drawers the scope filters admitted
         /// but the bulk channel excluded because the scope does not carry
@@ -82,7 +82,7 @@ public struct DrawerMapping: Sendable {
     }
 
     /// Read an estate's drawers and outgoing `.references` tunnels and
-    /// project each drawer to a `NoteIR`, enforcing the ADR-007 Decision 2
+    /// project each drawer to a `NoteIR`, enforcing the data-movement privacy tiers
     /// privacy-tier rules and counting what they excluded.
     ///
     /// Drawers are recalled using the `scope` parameter's filter chain plus
@@ -94,7 +94,7 @@ public struct DrawerMapping: Sendable {
     /// unless `scope.includesPrivateTier`, and each exclusion is counted.
     ///
     /// Tunnels are read per wing; only `.references` edges originating at an
-    /// included drawer become wikilinks (ADR-VAULTKIT-001 (a)/(d)).
+    /// included drawer become wikilinks (Vault import/export (a)/(d)).
     ///
     /// - Parameters:
     ///   - kit: the open `GeniusLocusKit` instance.
@@ -176,13 +176,13 @@ public struct DrawerMapping: Sendable {
         }
 
         // Resolve display names (wing, room) for all recalled drawers in one
-        // batch. ADR-017 removed wing/room from the Drawer struct; consumers
+        // batch. node-tree integrity removed wing/room from the Drawer struct; consumers
         // obtain them from the node tree via Estate.resolveNodeNames.
         let estate = try await kit.estate(for: handle)
         let allNodeNames = try await estate.resolveNodeNames(
             parentNodeIds: recalled.map(\.parentNodeId))
 
-        // ADR-007 Decision 2 tier partition. The predicates encode the
+        // data-movement privacy tiers tier partition. The predicates encode the
         // normative 4→3 mapping (Normal → normal+elevated, Private →
         // restricted, Secret → secret) — see AdjectiveSensitivity in LocusKit.
         var drawers: [Drawer] = []
@@ -205,7 +205,7 @@ public struct DrawerMapping: Sendable {
         }
 
         // Fetch tunnels once per distinct source wing, not once per drawer.
-        // Wing names are resolved from the node tree (ADR-017).
+        // Wing names are resolved from the node tree.
         //
         // CAND-EXP-PROV: the tunnel read mirrors the drawer-side tier rule —
         // the private-scope opt-in (`includesPrivateTier`) also carries
@@ -226,11 +226,11 @@ public struct DrawerMapping: Sendable {
         //
         // CAND-050: Filter facts to only those anchored to a tier-included drawer.
         // A KG fact anchored to a secret or (scope-excluded) private drawer must
-        // not appear in export output, consistent with ADR-007 Decision 2 tier
+        // not appear in export output, consistent with data-movement privacy tiers tier
         // rules. Without this guard, a secret drawer's tags and kind would leak
         // into export even after the drawer itself was excluded. The included-
         // drawer ID set is computed from the post-partition `drawers` array so
-        // the exact same ADR-007 rules apply to facts that apply to their anchors.
+        // the exact same data-movement privacy tiers rules apply to facts that apply to their anchors.
         let includedDrawerIDs = Set(drawers.map(\.id))
         let allKGFacts = try await kit.recallKGFacts(handle)
         var kgFactsByDrawerID: [String: [KGFact]] = [:]
@@ -293,7 +293,7 @@ public struct DrawerMapping: Sendable {
     /// the pre-fetched parameters — testable in isolation.
     ///
     /// `wing` and `room` are the display names resolved from the estate's
-    /// node tree via `Estate.resolveNodeNames(parentNodeIds:)`. ADR-017
+    /// node tree via `Estate.resolveNodeNames(parentNodeIds:)`. node-tree integrity
     /// removed these stored properties from `Drawer`; callers resolve them
     /// once in batch and pass them in.
     ///
@@ -307,11 +307,11 @@ public struct DrawerMapping: Sendable {
     ///   - A fact with `subject == "record:kind"` and `predicate == "is"`
     ///     becomes the drawer's kind discriminator (hard-close #29-B round-trip).
     ///
-    /// ## Filename / path (ADR-016, Decision cp-vault-bidir)
+    /// ## Filename / path (wing organization, Decision cp-vault-bidir)
     ///
     /// The vault path is `"<wing>/<room>/<slug>.md"` — the wing is the
     /// top-level folder so the vault tree mirrors the estate's wing structure
-    /// and export/import is wing-scopable (ADR-016 Consequences). Hint
+    /// and export/import is wing-scopable (wing organization Consequences). Hint
     /// memories (`AI_Charter_Hint` room) export as `<wing>/AI_Charter_Hint/<slug>.md`
     /// alongside regular content drawers — hint drawers are normal vault entries.
     ///
@@ -328,7 +328,7 @@ public struct DrawerMapping: Sendable {
     /// write. Re-importing an exported note with `moot_id` maps back to
     /// the same substrate lineage regardless of filename changes.
     ///
-    /// ## Wing round-trip note (ADR-016)
+    /// ## Wing round-trip note
     ///
     /// The wing value is preserved in the vault folder path AND in the
     /// `wing` frontmatter key. On re-import, `makeCaptureFrame` reads the
@@ -339,7 +339,7 @@ public struct DrawerMapping: Sendable {
     /// re-imports into "User Canon", not into `defaultWingName`.
     static func noteIR(from drawer: Drawer, wing: String, room: String, references: [Tunnel], kgFacts: [KGFact] = []) -> NoteIR {
         // Path: <wing>/<room>/<slug>.md — wing is the top-level vault folder.
-        // ADR-016 Consequences: wing = top folder; all drawers (including hint
+        // wing organization Consequences: wing = top folder; all drawers (including hint
         // memories in AI_Charter_Hint room) export normally. Layout is wing-aware.
         let slug = Self.slug(from: drawer.content, id: drawer.lineageID)
         let stableKey = "\(wing)/\(room)/\(slug)"
@@ -364,7 +364,7 @@ public struct DrawerMapping: Sendable {
             frontmatter["wikidataQID"] = qid
         }
         // Sensitivity rides frontmatter so a round-trip preserves the tier
-        // (ADR-007 Decision 2; import reads the key back into
+        // (data-movement privacy tiers; import reads the key back into
         // `CaptureFrame.sensitivity`). `.normal` is omitted — it is the
         // capture default, so absence round-trips to the same value and
         // pre-existing exports stay byte-identical.
@@ -578,7 +578,7 @@ public struct DrawerMapping: Sendable {
     /// `existingSensitivityByLineage` carries the current tier of every
     /// believed drawer (across ALL tiers) so the sensitivity FLOOR can be
     /// enforced: a re-import may RAISE a drawer's tier but never LOWER it.
-    /// This closes the supersession-downgrade attack (ADR-007 Decision 2).
+    /// This closes the supersession-downgrade attack.
     // MARK: - Batch helpers (GLK_BATCH1)
 
     /// Apply import guards and build a `CaptureFrame` for `note` without
@@ -872,7 +872,7 @@ public struct DrawerMapping: Sendable {
         //      makes the gap visible. The gap is structural (no transactional
         //      rollback at the PersistenceKit level); a reconciliation pass that
         //      calls `reindexMissing` and inspects the orphaned successor is the
-        //      intended remediation path (ADR-015 owner-key ceremony, v1.1).
+        //      intended remediation path (the open 1.0 Vault posture owner-key ceremony, v1.1).
         let drawer: Drawer
         do {
             drawer = try await kit.capture(handle, frame, mode: .regular)
@@ -894,7 +894,7 @@ public struct DrawerMapping: Sendable {
             throw verbErr
         }
 
-        // Apply KG facts from the note (ADR-007 Decision 1 / P0 BLOCKER
+        // Apply KG facts from the note (data-movement privacy tiers / P0 BLOCKER
         // resolution: facts must land as substrate KG facts, not report-only).
         // Each FactIR triple becomes one KGFact anchored to the captured drawer.
         for fact in note.facts {
@@ -966,7 +966,7 @@ public struct DrawerMapping: Sendable {
         let estate = try await kit.estate(for: handle)
 
         // Resolve the captured drawer's display names from the node tree
-        // (ADR-017: Drawer no longer stores wing/room). These names are
+        // (node-tree integrity: Drawer no longer stores wing/room). These names are
         // needed for tunnel source endpoints and de-duplication signatures.
         let drawerNodeNames = try await estate.resolveNodeNames(
             parentNodeIds: [drawer.parentNodeId])
@@ -1095,11 +1095,11 @@ public struct DrawerMapping: Sendable {
         //
         // Room resolution — priority order:
         //   1. Explicit frontmatter `room` (round-trip identity; always wins).
-        //      For exports produced by VaultKit after ADR-016, the `room`
+        //      For exports produced by VaultKit after wing organization, the `room`
         //      frontmatter key carries the substrate room verbatim, so re-imports
         //      of VaultKit-exported notes always land in the correct room.
         //   2. Wing-stripped pathComponents: if the vault path's first component
-        //      matches the `wing` frontmatter key (ADR-016 layout: top-level
+        //      matches the `wing` frontmatter key (wing organization layout: top-level
         //      folder IS the wing), strip it from pathComponents before joining.
         //      This handles human-authored notes placed under a wing folder in the
         //      vault where the frontmatter `room` key is absent. E.g., a note at
@@ -1113,13 +1113,13 @@ public struct DrawerMapping: Sendable {
         //      only originalPath).
         //   5. Hard default "imported" so I-5's non-empty room guard always holds.
         //
-        // Wing resolution (ADR-016): `CaptureFrame.wing` routes the drawer into
+        // Wing resolution: `CaptureFrame.wing` routes the drawer into
         // a named wing at capture time. Priority order:
         //   1. Frontmatter `wing` key — always written by VaultKit on export, so
         //      a round-trip import restores the original wing faithfully.
         //   2. The first component of pathComponents when it matches no explicit
         //      frontmatter wing key — for human-authored notes placed in vault
-        //      folders that follow the ADR-016 <wing>/<room>/<file>.md layout.
+        //      folders that follow the wing organization <wing>/<room>/<file>.md layout.
         //   3. nil — falls through to the estate's `defaultWingName` ("Agentic
         //      Memory") at the substrate capture seam. Human notes without any
         //      wing context land in the default wing and are not misassigned.
@@ -1128,7 +1128,7 @@ public struct DrawerMapping: Sendable {
             roomCandidate = explicit
         } else {
             // Determine pathComponents, stripping the wing prefix if the first
-            // component matches the `wing` frontmatter value (ADR-016 vault layout).
+            // component matches the `wing` frontmatter value (wing organization vault layout).
             let components = note.pathComponents
             let wingKey = note.frontmatter["wing"] ?? ""
             let contentComponents: [String]
@@ -1180,7 +1180,7 @@ public struct DrawerMapping: Sendable {
             ?? nonEmpty(note.frontmatter["moot_id"]).flatMap { UUID(uuidString: $0) }
             ?? Self.lineageID(forStableSourceKey: note.stableSourceKey)
 
-        // Wing resolution (ADR-016, see comment above for full priority order).
+        // Wing resolution (wing organization, see comment above for full priority order).
         // Frontmatter `wing` was written by VaultKit on export and is the
         // authoritative source for round-trip import. Human-authored notes with
         // no frontmatter wing are assigned nil → defaultWingName at the seam.
@@ -1197,7 +1197,7 @@ public struct DrawerMapping: Sendable {
             addedBy: addedByValue,
             embeddingModelID: modelValue,
             // Sensitivity preserved from the IR when the adapter supplies it
-            // (ADR-007 Decision 2 — import is ungated, but the tier rides in).
+            // (data-movement privacy tiers — import is ungated, but the tier rides in).
             // Absent or unrecognised labels land at the `.normal` capture
             // default rather than failing the import.
             sensitivity: nonEmpty(note.frontmatter["sensitivity"])
@@ -1231,7 +1231,7 @@ public struct DrawerMapping: Sendable {
             featureFlags: flags
         )
         // Wire the wing into the frame so the capture verb routes the drawer into
-        // the correct wing at write time (ADR-016). nil → defaultWingName at seam.
+        // the correct wing at write time. nil → defaultWingName at seam.
         frame.wing = resolvedWing
         return (frame, classified: classified)
     }

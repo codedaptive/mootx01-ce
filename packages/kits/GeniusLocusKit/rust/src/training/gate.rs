@@ -9,7 +9,7 @@
 // the cells the matrices see.
 //
 // Wall-clock age is intentionally NOT part of the gate per
-// DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21.
+// the training transition threshold.
 
 use crate::audit::{UnifiedAuditLog, UnifiedAuditVerb};
 
@@ -59,7 +59,7 @@ pub struct TrainingThresholdGate {
 }
 
 impl TrainingThresholdGate {
-    /// Provisional default per DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21.
+    /// Provisional default per the training transition threshold.
     pub const PROVISIONAL_DEFAULT: i64 = 500;
 
     pub fn new(transition_threshold: i64) -> Self {
@@ -117,7 +117,7 @@ impl TrainingThresholdGate {
                 // not count toward the training threshold.
                 | UnifiedAuditVerb::GrantIssued
                 | UnifiedAuditVerb::GrantRevoked
-                // ADR-025 sensitivity-unlock verbs: record grant/deny/
+                // sensitivity unlock verbs: record grant/deny/
                 // revoke/read-under-grant events, not drawer state
                 // transitions, so they do not count either.
                 | UnifiedAuditVerb::SensitivityGrantIssued

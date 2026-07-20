@@ -1,6 +1,6 @@
 // WingsSurfaceTests.swift
 //
-// ADR-016 Wings SURFACE lane — AriaMcpKit changes.
+// wing organization Wings SURFACE lane — AriaMcpKit changes.
 //
 // Tests for:
 //   Change 1: `moot_file_memory` accepts an optional `wing` argument that
@@ -20,17 +20,17 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-/// ADR-016 wings surface tests — estate_map hint drawers as normal entries + recall wing scoping.
+/// wing surface tests — estate_map hint drawers as normal entries + recall wing scoping.
 ///
 /// `.serialized`: every case provisions a live in-memory GLK estate; preserve
 /// one-at-a-time execution to avoid shared state between cases.
-@Suite("ADR-016 Wings Surface — estate_map hint-drawer entries + recall wing scoping", .serialized)
+@Suite("wing organization Wings Surface — estate_map hint-drawer entries + recall wing scoping", .serialized)
 struct WingsSurfaceTests {
 
     // MARK: - Shared harness
 
     /// Provision a fresh GLK estate (seeds the seven default wings with their
-    /// hint drawers in AI_Charter_Hint room per ADR-016) and return a wired ToolDispatcher.
+    /// hint drawers in AI_Charter_Hint room) and return a wired ToolDispatcher.
     private func makeProvisionedDispatcher() async throws -> (ToolDispatcher, GeniusLocusKit, EstateHandle) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "wings-surface-tests")
@@ -141,7 +141,7 @@ struct WingsSurfaceTests {
               case let .object(props)? = schema["properties"],
               case let .object(wingProp)? = props["wing"]
         else {
-            Issue.record("moot_file_memory schema must expose a `wing` property (ADR-016 §3)")
+            Issue.record("moot_file_memory schema must expose a `wing` property")
             return
         }
         guard case let .string(type)? = wingProp["type"] else {

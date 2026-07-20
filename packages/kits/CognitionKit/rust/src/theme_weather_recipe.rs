@@ -33,7 +33,7 @@ pub fn run_theme_weather(
     let mut raw: BTreeMap<String, f64> = BTreeMap::new();
     let mut weighted: BTreeMap<String, f64> = BTreeMap::new();
     for d in &drawers {
-        // `now`/`filed_at` are epoch-ms (ADR-023); `half_life_seconds` is in
+        // `now`/`filed_at` are epoch-ms; `half_life_seconds` is in
         // seconds (matching Swift's `timeIntervalSince`), so convert elapsed to
         // seconds at the decay boundary.
         let elapsed = (now - d.filed_at).max(0) as f64 / 1000.0;

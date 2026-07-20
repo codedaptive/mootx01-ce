@@ -182,20 +182,20 @@ check-static-assets:
 	@echo "✓ StaticAssets.swift is in sync with DashboardAssets/"
 
 # ── Edition-boundary lint gate ──────────────────────────────────────────────
-# Enforces the core invariant of EDITION_BOUNDARY.md / ADR-009: SHARED code (the
+# Enforces the core invariant of EDITION_BOUNDARY.md / the CE/EE boundary: SHARED code (the
 # tree this edition ships) must not reference an EE-only path, or it cannot
 # build/test/run standalone. Greps SHARED paths for the high-signal EE-internal
-# markers (docs_internal/, .claude/rules/). Excludes ADR-009 (which DEFINES the
+# markers (docs_internal/,.claude/rules). Excludes the CE/EE boundary (which DEFINES the
 # boundary by naming these paths) and apps/moot-agent-skills (which documents the
 # Claude Code .claude/ convention for a user's own project, not this repo).
 check-edition-boundary:
 	@hits=$$(git grep --untracked -nE "docs_internal|\.claude/rules" -- \
 	  'packages/**' 'apps/**' 'examples/**' 'docs/**' \
 	  ':!apps/moot-bridge/**' ':!docs/AGENTS.md' ':!docs/CLAUDE.md' \
-	  ':!docs/decisions/ADR-009-edition-boundary.md' ':!apps/moot-agent-skills/**' \
+	  ':!docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md' ':!apps/moot-agent-skills/**' \
 	  ':!docs/start-here/AI_INSTALL_MANIFEST.json' || true); \
 	if [ -n "$$hits" ]; then \
-	  echo "ERROR: SHARED code references an EE-only path (see EDITION_BOUNDARY.md / ADR-009):"; \
+	  echo "ERROR: SHARED code references an EE-only path (see EDITION_BOUNDARY.md and docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md):"; \
 	  echo "$$hits"; \
 	  echo "Fix: vendor the material into the package, or move it to a public docs/ location."; \
 	  exit 1; \

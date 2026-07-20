@@ -3,7 +3,7 @@ import PersistenceKit
 import Testing
 @testable import LocusKit
 
-/// Tunnel retirement and active-tunnel reads (T13 / ADR-021 Phase 7).
+/// Tunnel retirement and active-tunnel reads.
 ///
 /// Verifies Part A of the T13 mission:
 ///  • `isRetired` / `isDreamed` accessor correctness (unit level)

@@ -5,7 +5,7 @@ author: MOOTx01 maintainers
 date: 2026-06-14
 description: Published cross-language performance measurements for the substrate's federation-critical exact core; the citation gate behind every public performance claim.
 relates_to:
-  - docs/decisions/ADR-001-transcendental-isolation-invariant.md
+  - docs/engineering/HARNESS_REFERENCE.md
 ---
 
 # Substrate Performance Gate
@@ -94,9 +94,9 @@ Reading the table:
 Integer and IEEE correctly-rounded math is bit-identical on every
 platform; transcendentals (`exp`, `ln`, `sin`, `cos`) are **not**
 correctly rounded and legitimately differ across libm
-implementations. ADR-001 (transcendental isolation) therefore keeps
-transcendental-dependent results same-platform-only, while the exact
-core must be byte-identical everywhere.
+implementations. Transcendental-dependent results therefore remain
+same-platform-only, while the exact core must be byte-identical
+everywhere.
 
 The canary makes that visible: each language computes a fixed
 accumulation (k = 1..200 of exp + ln + sin + cos) and emits the f64
@@ -104,14 +104,13 @@ accumulation (k = 1..200 of exp + ln + sin + cos) and emits the f64
 bits (`4652597234704906541`) — one platform, one libm, as expected.
 The cross-architecture `--compare` run is where divergence appears,
 and the canary also distinguishes languages that ship their own math
-(Go, Julia) from those that call the platform libm (C, Rust, Swift) —
-exactly the distinction ADR-001 exists to manage.
+(Go, Julia) from those that call the platform libm (C, Rust, Swift).
 
 ## 5. The Python build's native fast path
 
 The 494× row is the **pure-Python** core. The standalone Python build
-recovers it with `mootlib_core_rs`: a PyO3-over-Rust extension
-(ADR-002, Tier-1b) that is byte-identical to `mootlib._core` and
+recovers it with `mootlib_core_rs`: a PyO3-over-Rust native fast path
+that is byte-identical to `mootlib._core` and
 recovers the ~490× gap on the federation-critical path. It builds
 against the stable limited API (`abi3-py310`), so one wheel covers
 CPython 3.10+. The pure-Python core remains in the package as the
@@ -156,7 +155,44 @@ only; the federation-critical exact core is **never** borrowed —
 that is the provenance standard (`EDITIONS.md`, Language
 implementations).
 
-## 7. Caveats
+## 7. Production kernel selection
+
+On arm64, `SimdKernel` is the production default and the scalar kernel is the
+portable correctness fallback. Runtime selection is fixed by architecture; the
+1.0 dispatcher does not use a learned policy or batch-size threshold table.
+Alternative kernels remain benchmark-only until a current workload,
+conformance result, and measurement clears the same gate.
+
+| Workload | Production path | Bound or disposition |
+|---|---|---|
+| 256-bit and batched OR reduction | SIMD4 accumulator | BNNS path rejected |
+| Pair and batched Hamming | SIMD4 XOR + popcount | NEON wrapper, BNNS, and measured Metal path rejected |
+| Hamming top-K | SIMD branchless ladder for ordinary K | scalar sort/truncate remains the large-K fallback |
+| Batched SimHash, batch at least 4 | packed-family vertical SIMD | BNNS rejected; Metal declined |
+| Per-row SimHash, batch 1 | scalar | SIMD packing overhead loses below crossover |
+
+At K=10 and one million candidates, the selected top-K path measured 604 µs,
+within 13% of the 533 µs bandwidth floor. A kernel-local bit-slice prototype
+cannot materially improve full Hamming at that bound and is not shipped. A
+future substrate-level bit-slice layout must justify itself through the other
+column/filter workloads, its mmap/durability format, and conformance rather than
+through a transient Hamming-only copy.
+
+## 8. Merkle and commitment selection
+
+Apple Swift uses CryptoKit SHA-256 and HMAC-SHA256 for the production path; the
+scalar substrate implementation remains the conformance oracle and the Rust/
+non-Apple path until another candidate is conformance-checked and measured.
+Measured Apple speedups were 3.1–10.4× for SHA-256 and 1.7–5.8× for HMAC across
+the tested payloads.
+
+Normal capture, mutation, and expunge use dirty-chain incremental re-rooting.
+The storage invalidation payload must identify the affected room and wing. Full
+recompute is retained for cold start, snapshot rebuild, migration, and integrity
+sweep. Incremental measured 4.3–37.8× faster for batches of 1–256; the cached
+room/wing hash footprint was 8,704 bytes on the measured 4,096-leaf tree.
+
+## 9. Caveats
 
 - One host (Apple M5 Max, arm64, macOS). x86_64 numbers come from
   running the same tool there and diffing with `--compare`.

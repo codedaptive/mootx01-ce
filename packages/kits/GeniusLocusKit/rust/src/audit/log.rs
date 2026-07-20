@@ -86,7 +86,7 @@ impl UnifiedAuditValue {
 
 // NOTE (RUST-AUDIT-DURABILITY, 2026-07-09): Swift's `UnifiedAuditVerb`
 // also carries `keyDecayed`/`physicalKeyDecayed` — key-custody
-// placeholders (GLK-03, DECISION_FEDERATION_SHARING_MODEL Appendix B)
+// placeholders (GLK-03, federation disclosure controls Appendix B)
 // added ahead of the federation mechanics themselves shipping. Rust
 // still does not carry those 2 cases; bringing Rust to parity with
 // those two placeholders remains out of scope (no writer emits them on
@@ -116,17 +116,17 @@ pub enum UnifiedAuditVerb {
 
     // FUP-C / GLK-03 grant-lifecycle verbs. Federation-reserved — see the
     // Swift `UnifiedAuditLog.swift` doc comment. Deliberately distinct
-    // from the ADR-025 sensitivity-unlock verbs below even though both
+    // from the sensitivity unlock verbs below even though both
     // are "synthetic" (non-drawer-scoped) entries sharing the same
     // encode/decode convention (`SyntheticAuditValueCodec`, hydration.rs).
     GrantIssued,
     GrantRevoked,
 
-    // ADR-025 sensitivity-unlock verbs (2026-07-04, amended 2026-07-04).
+    // sensitivity unlock verbs (2026-07-04, amended 2026-07-04).
     // Deliberately NOT the federation grantIssued/grantRevoked — see the
     // Swift `UnifiedAuditLog.swift` doc comment for why those are a
     // different concern. No expiry verb: expiry is passive (the issued
-    // record's `after_value` carries its own expiry timestamp; ADR-025
+    // record's `after_value` carries its own expiry timestamp; out-of-band sensitivity grants
     // §4).
     SensitivityGrantIssued,
     SensitivityGrantDenied,

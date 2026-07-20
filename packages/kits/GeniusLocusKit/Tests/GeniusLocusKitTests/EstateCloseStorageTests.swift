@@ -194,7 +194,7 @@ struct EstateCloseMapCensusTests {
         // Sanity: before close, core maps are populated.
         let regBefore = await kit.registry[handle]
         #expect(regBefore != nil, "registry must be populated before close")
-        // ADR-026: auditLogs dictionary removed; audit reads go through storage directly.
+        // auditLogs dictionary removed; audit reads go through storage directly.
         let mountBefore = await kit.mountStates[handle]
         #expect(mountBefore == .mounted, "mountStates must be .mounted before close")
         let storBefore = await kit.storages[handle]
@@ -212,7 +212,7 @@ struct EstateCloseMapCensusTests {
         let regAfter = await kit.registry[handle]
         #expect(regAfter == nil, "registry[handle] must be nil after close")
 
-        // ADR-026: auditLogs dictionary removed; no per-estate map to check.
+        // auditLogs dictionary removed; no per-estate map to check.
 
         let mountAfter = await kit.mountStates[handle]
         #expect(mountAfter == nil, "mountStates[handle] must be nil after close")

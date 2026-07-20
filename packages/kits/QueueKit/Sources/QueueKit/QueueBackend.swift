@@ -53,7 +53,7 @@ public protocol QueueBackend: Sendable {
 
     func completed(streamID: StreamID?) async throws -> [Job]
 
-    // MARK: - Stream-scoped drain (ADR-021 Decision 7 / T1)
+    // MARK: - Stream-scoped drain
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///

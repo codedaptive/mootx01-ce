@@ -49,7 +49,7 @@ public struct KeychainEstateIdentityKeyStore: EstateIdentityKeyStore {
 
     // The Keychain service name that scopes all estate identity keys.
     // kSecAttrAccount (the estate UUID string) distinguishes individual estates
-    // within this service. Matching the service name used in ADR-007.
+    // within this service. Matching the service name used in data-movement privacy tiers.
     private static let service = "com.mootx01.estate.identity"
 
     public init() {}

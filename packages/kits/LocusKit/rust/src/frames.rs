@@ -122,7 +122,7 @@ pub struct CaptureFrame {
     /// that is immediately visible to `Filter::Exportable` recall
     /// (DEBT-1 write-side fix). Mirrors Swift `CaptureFrame.exportability`.
     pub exportability: AdjectiveExportability,
-    /// Wing to file the drawer into (ADR-016). `None` falls through to
+    /// Wing to file the drawer into. `None` falls through to
     /// `DEFAULT_WING_NAME` ("Agentic Memory") in `estate_verbs.rs`,
     /// keeping all existing callers byte-identical. Supply `Some(name)`
     /// to route a drawer into a specific wing at capture time.
@@ -164,7 +164,7 @@ impl CaptureFrame {
             // Use AdjectiveExportability::Public to produce a born-public
             // drawer, or correctExportability post-capture.
             exportability: AdjectiveExportability::Private,
-            // ADR-016: default None → estate_verbs falls through to
+            // default None → estate_verbs falls through to
             // DEFAULT_WING_NAME, keeping existing callers byte-identical.
             wing: None,
         }

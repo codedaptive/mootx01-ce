@@ -3,7 +3,7 @@ import AriaMCP   // JSONValue, JSONRPCRequest, JSONRPCResponse
 
 // MARK: - ManagedServerProcess  (the "app-managed daemon" — macOS only)
 //
-// This is the macOS-only "extra" from ADR-005: the app spawns the *real,
+// This is the macOS-only "extra" from the app/engine boundary: the app spawns the *real,
 // untouched* server binary (aria-mcp / mootx01 serve) as a child process and
 // talks to it over stdio JSON-RPC. The server stays the clean, Rust-mirrored
 // binary — we add no code to it; we only launch and supervise it. That keeps
@@ -60,7 +60,7 @@ public actor ManagedServerProcess {
 
     /// Spawn the server. The child owns `databaseURL` (SQLite) if given —
     /// this is where a handed-off estate is "taken over." The parent must
-    /// already have released that estate (ADR-005: one host per estate).
+    /// already have released that estate (the app/engine boundary: one host per estate).
     ///
     /// Trust model: this method spawns an arbitrary binary at a
     /// caller-supplied path and hands it the app's full process environment.

@@ -154,7 +154,7 @@ struct DistillationIntegrationTests {
 
             // Verify a single _distilled_from tunnel wired from factoid to the
             // source item (intra-item provenance: one source = the item itself).
-            // ADR-016: tunnels are filed in LocusKit.defaultWingName ("Agentic Memory").
+            // tunnels are filed in LocusKit.defaultWingName ("Agentic Memory").
             let allTunnels = try await estate.kit.recallTunnels(estate.handle, wing: LocusKit.defaultWingName)
             let distilledFromTunnels = allTunnels.filter {
                 $0.label == "_distilled_from" && $0.sourceDrawerId == estate.factoidID

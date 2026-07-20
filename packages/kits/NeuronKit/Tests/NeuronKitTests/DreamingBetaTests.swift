@@ -1,7 +1,6 @@
 // DreamingBetaTests.swift
 //
-// Conformance tests for the REM-BETA weekly prune/GC cycle (T12,
-// ADR-021 Phase 7, NEURONKIT_SPEC § 12.6 BETA row).
+// Conformance tests for the REM-BETA weekly prune/GC cycle.
 //
 // Covers:
 //   Prune — `consolidated` entries below betaPruneFloor are removed;

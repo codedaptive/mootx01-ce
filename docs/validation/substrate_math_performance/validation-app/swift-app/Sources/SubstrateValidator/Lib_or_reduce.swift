@@ -91,7 +91,7 @@ enum Lib_or_reduce {
             batches.append(cohort)
         }
         // Batched output must equal sequential output byte for byte
-        // (DECISION_KERNEL_LEARNED_DISPATCH_2026-05-17), so the canonical
+        //, so the canonical
         // scalar value is just ORReduce.reduce per batch — no kernel
         // instance needed for the lib-side CRC. (Cross-kernel batched
         // agreement is subsystem 2, handled separately.)

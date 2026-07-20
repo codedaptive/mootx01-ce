@@ -20,7 +20,7 @@ import PersistenceKitInMemory
 @Suite("RecollectTests")
 struct RecollectTests {
 
-    // ADR-016: wing is the fixed constant LocusKit.defaultWingName ("Agentic Memory").
+    // wing is the fixed constant LocusKit.defaultWingName ("Agentic Memory").
     // Tunnels are filed in this wing by Consolidate and captureFactoid.
     private static let ownerID = "recollect-test"
     private static let wing = LocusKit.defaultWingName

@@ -1,6 +1,6 @@
 // KeyedCommitmentAudit.swift
 //
-// Audit entry kind for keyed-commitment expunge provenance (ADR-017 §17).
+// Audit entry kind for keyed-commitment expunge provenance.
 //
 // This is a separate entry type from AuditEntry — it records the
 // HMAC commitment made at expunge time, not the state transition.

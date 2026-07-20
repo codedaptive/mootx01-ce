@@ -762,7 +762,7 @@ and kgFact edges are emitted by both legs.
 On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
-## § 19. Sensitivity unlock/lock control endpoints (ADR-025)
+## § 19. Sensitivity unlock/lock control endpoints (the sensitivity-grant contract)
 
 Two loopback-only POST endpoints accept out-of-band sensitivity-tier grants and
 revocations. They share the HTTP transport's CSRF/DNS-rebinding Origin guard. The
@@ -804,7 +804,7 @@ The daemon rejects proofs where `|now_ms - proof.ts| > 10_000` (10-second window
 to prevent replay attacks on the loopback socket. `"tier"` must be one of the two
 legal strings; any other value returns HTTP 400.
 
-**TTL semantics (ADR-025 §1):**
+**TTL semantics (the sensitivity-grant contract §1):**
 
 | Tier | Grant TTL |
 |---|---|
@@ -827,7 +827,7 @@ legal strings; any other value returns HTTP 400.
 ### POST /api/control/lock — revoke all grants
 
 Immediately clears all active sensitivity grants. No identity verification is
-required (ADR-025 §1: "locking reduces the user's own access and is always
+required (the sensitivity-grant contract §1: "locking reduces the user's own access and is always
 permitted").
 
 **Request body:** empty (`{}`)
@@ -921,7 +921,7 @@ default, flagged). Total tool count: 68 (was 66). Permission tier `ask`
 for both new tools. Both Swift and Rust ports at parity.
 
 ### 1.13.0 -- 2026-07-05
-ADR-025 wave 8.2: adds `moot_monitoring_status` to the interface-tool surface.
+the sensitivity-grant contract wave 8.2: adds `moot_monitoring_status` to the interface-tool surface.
 Reifies the ARIA `read` verb on the monitoring object (estate-scoped, daemon
 daemon-global flag). Args: absent `enabled` → read current state; present
 `enabled: bool` → write flag + echo new state with `monitoring_source: user`.
@@ -931,7 +931,7 @@ Permission tier: `ask` in both `mcp__mootx01__` and `mcp__plugin_mootx01_mootx01
 namespaces. Total tool count: 64 (was 63). Both Swift and Rust ports at parity.
 
 ### 1.12.0 -- 2026-07-05
-ADR-025: sensitivity unlock/lock control endpoints (§19). Adds
+the sensitivity-grant contract: sensitivity unlock/lock control endpoints (§19). Adds
 `POST /api/control/unlock` and `POST /api/control/lock` — loopback-only
 endpoints for out-of-band sensitivity-tier grants and revocations. Grant
 TTLs: restricted → next local midnight; secret → 30 minutes. Proof
@@ -961,7 +961,7 @@ added on both. New tests: `MemoryGetTests.swift` (10 tests, AriaMcpKit);
 `memory_get_*` (7 tests) + 1 teachme test in Rust `dispatch_tests.rs`.
 
 ### 1.10.0 -- 2026-07-04
-ADR-024 §5 (MCP connection ownership, plugin transport, and install-moment
+the connection-ownership contract §5 (MCP connection ownership, plugin transport, and install-moment
 dedupe): `moot_estate_ping` / `moot_estate_status` gain an opt-in
 `version_skew:` line when the host has detected a mismatch between an
 installed plugin (currently Claude Code's `mootx01@mootx01`) and this

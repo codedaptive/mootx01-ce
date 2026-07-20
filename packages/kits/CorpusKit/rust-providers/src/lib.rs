@@ -38,20 +38,20 @@ pub mod basis_codec;
 // Owns vocab encounter-order construction, TF counts, and DF counts.
 // Swift port: Sources/CorpusKitProviders/TermDocumentCounts.swift.
 pub mod term_document_counts;
-// ADR-022: shared IDF-reduced vocabulary selection for the dense LSA/NMF
+// shared IDF-reduced vocabulary selection for the dense LSA/NMF
 // factorizations (bit-identical with Swift's CorpusKitProviders/ReducedVocab).
 pub mod reduced_vocab;
-// ADR-010 Decision B signal #1: LSA/SVD distributional-semantics provider.
+// honest semantic fusion signal #1: LSA/SVD distributional-semantics provider.
 // Uses substrate_ml::svd::JacobiSvd (deterministic, bit-identical with Swift).
 pub mod lsa;
-// ADR-010 Decision B: NMF latent-factor provider.
+// NMF latent-factor provider.
 // Reuses substrate_ml::nmf::NMFAlternatingLeastSquares (Gate-2: no reimplementation).
 // tolerance=0 forces fixed iteration count for bit-identical cross-port output.
 pub mod nmf_provider;
 pub mod ppmi;
 pub mod random_indexing;
 pub mod text_providers;
-// ADR-010 Decision B: FDC lattice co-classification provider.
+// FDC lattice co-classification provider.
 // Reuses lattice_lib::Fdc::encode (text→FDC code) and
 // lattice_lib::Fdc::ancestors (the runtime façade over FdcFrame::ancestors).
 // The decimal hierarchy math lives in LatticeLib — not reimplemented here.

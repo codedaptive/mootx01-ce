@@ -1,4 +1,4 @@
-//! Resident Autonomic Governor (see ADR-LOOPBACKHTTP-001 §17).
+//! Resident Autonomic Governor (see bounded loopback HTTP).
 //!
 //! The Rust vertical's parity of the Swift `AutonomicGovernor` actor
 //! (packages/kits/NeuronKit/Sources/NeuronKit/Governor/AutonomicGovernor.swift).
@@ -253,7 +253,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-// ── Signals queue construction helper (T5, ADR-021 Decision 7) ───────────────
+// ── Signals queue construction helper ───────────────
 
 /// Fixed estate identity for the transient in-memory signals-queue backend on
 /// non-SQLite estates. A constant avoids UUID nondeterminism in the engine.
@@ -268,7 +268,7 @@ fn signals_queue_inmemory_id() -> uuid::Uuid {
 ///   - SQLite estate → shared encrypted `queue.sqlite` beside the estate, derived
 ///     via `EstateConfiguration::queue_sibling("queue.sqlite")`. A `DrainLease`
 ///     keyed on `"signals"` ensures exactly one drainer per (estate, stream) across
-///     processes (ADR-021 Decision 7). On open failure, falls back to in-memory
+///     processes. On open failure, falls back to in-memory
 ///     (the signals lane degrades to transient rather than crashing the resident).
 ///   - InMemory / no storage → transient PersistenceKitBackend + `None` lease.
 ///
@@ -347,7 +347,7 @@ fn build_signals_queue(
         }
         _ => {
             // InMemory estate, Postgres estate, or no storage: all get the
-            // transient in-memory backend. Postgres deferred per ADR-021
+            // transient in-memory backend. Postgres deferred per recall-driven dreaming
             // SQLite-first sequencing.
             build_inmemory_signals_queue()
         }
@@ -440,7 +440,7 @@ pub struct GovernorReport {
 pub struct AutonomicGovernor {
     dreaming: DreamingDaemon,
     maintenance: MaintenanceDaemon,
-    /// Manifest-backed policy stores (F6 / ADR-020). The governor saves each
+    /// Manifest-backed policy stores. The governor saves each
     /// daemon's cycle state through these after every fired cycle so a restart
     /// resumes the prior run's idempotency/cycle memory. Held as boxed trait
     /// objects so the in-memory store can still be swapped in by future callers.
@@ -741,7 +741,7 @@ impl AutonomicGovernor {
         pool_dir: PathBuf,
         pool_table_artifact: PathBuf,
     ) -> Self {
-        // Manifest-backed policy stores (F6 / ADR-020): policy and daemon cycle
+        // Manifest-backed policy stores: policy and daemon cycle
         // state persist to the estate manifest through the substrate's public KV
         // surface (DrawerStore::get_meta/set_meta), so a restart resumes the prior
         // run's state instead of re-discovering and re-proposing. The seam
@@ -858,7 +858,7 @@ impl AutonomicGovernor {
     /// state). The scheduler's `EstateHandleID` is the estate UUID string, which
     /// `CoordinatorDispatcher` validates on every dispatch.
     ///
-    /// # Backend selection (T5, ADR-021 Decision 7)
+    /// # Backend selection
     ///
     /// Mirrors Swift `SignalAPI.ensureScheduler` backend selection:
     ///   - SQLite estate → shared encrypted `queue.sqlite` beside the estate +
@@ -1096,12 +1096,12 @@ impl AutonomicGovernor {
         let (dreaming_fired, maintenance_fired) = {
             let coord = self.coord.lock().expect("AutonomicGovernor: coordinator lock poisoned");
 
-            // ── Dreaming — REM dispatch table (ADR-021 Phase 6, T11) ──────────
+            // ── Dreaming — REM dispatch table ──────────
             // Iterate the shared REM dispatch table so all four cadences are driven
             // uniformly. Each entry's due-check self-gates; the governor builds the
             // appropriate reader snapshot only when the cycle is actually due.
             //
-            // ALPHA gate: timer-due AND queue non-empty (ADR-021 Phase 4 §12.2).
+            // ALPHA gate: the timer is due and the dreaming queue is non-empty.
             //   Building the EstateDreamingReader snapshot (recall traces, tunnels,
             //   drain) is expensive — skip it on ticks where the interval has not
             //   elapsed or the queue is empty. This is the Phase 4 goal: idle ticks
@@ -1244,7 +1244,7 @@ impl AutonomicGovernor {
                 self.dreaming.run_beta_cycle(now_epoch_secs);
             }
 
-            // REM-OMEGA: biweekly retire — T13 / ADR-021 Phase 7.
+            // REM-OMEGA: biweekly retire —  / recall-driven dreaming
             // Reader built with the full OMEGA window (14 days) so dreamed-active
             // tunnels and recall-trace traces for reinforcement-checking are
             // snapshotted at the correct window boundary. Pattern mirrors THETA.
@@ -1342,7 +1342,7 @@ impl AutonomicGovernor {
             (dreaming_fired, maintenance_fired)
         };
 
-        // ── Persist daemon cycle state (F6 / ADR-020) ──────────────────────
+        // ── Persist daemon cycle state ──────────────────────
         // After the coordinator lock is released, persist each daemon's
         // idempotency/cycle memory IF any dreaming cycle ran this tick, so a
         // restart resumes from here. "Ran" includes ALPHA proposals emitted

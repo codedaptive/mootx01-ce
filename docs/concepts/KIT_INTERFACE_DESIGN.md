@@ -9,7 +9,9 @@ description: The cross-kit rollup of how each kit's public interface composes in
 
 # Kit Interface Design
 
-**Purpose:** Authoritative rollup of how each Kit's public interface composes with the others, derived from canonical specifications and architectural decisions.
+**Purpose:** Rollup of how each Kit's public interface composes with the others,
+derived from current source, canonical specifications, and the engineering
+masters.
 
 **Use this to:**
 - Verify that a Kit's public API matches its spec
@@ -18,9 +20,10 @@ description: The cross-kit rollup of how each kit's public interface composes in
 - Understand which Kit owns which concern
 
 **Source of truth hierarchy:**
-1. `docs/concepts/TOPOLOGY.md` and `docs/concepts/MOOTX01_AND_ARIA_CANON.md` — Kit role and composition
-2. `docs/decisions/DECISION_*.md` — Architectural decisions that shaped interfaces
-3. Source code public interfaces — actual implementation
+1. Source and conformance tests — shipped implementation
+2. `docs/reference/` — current package specifications and interfaces
+3. `docs/engineering/` — cross-cutting invariants and ownership
+4. `docs/concepts/TOPOLOGY.md` and `docs/concepts/MOOTX01_AND_ARIA_CANON.md` — explanatory role and composition
 
 ---
 
@@ -65,10 +68,10 @@ aggregation families listed below.
 **Spec:** docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md + engineering cookbook
 
 **Architectural decisions:**
-- DECISION_HAMMING_BACKENDS_2026-05-17.md
-- DECISION_KERNEL_LEARNED_DISPATCH_2026-05-17.md
-- DECISION_SIMHASH_BACKENDS_2026-05-18.md
-- DECISION_OR_REDUCE_BACKENDS_2026-05-17.md
+- the measured Hamming selection
+- the kernel-dispatch design
+- the measured SimHash selection
+- the measured OR-reduce selection
 
 **Core Types:**
 - `Fingerprint256` — 256-bit typed vector (four 64-bit blocks)
@@ -98,7 +101,7 @@ aggregation families listed below.
 
 **Canonical Role:** Storage abstraction layer. Backend-agnostic interface for row stores, blob stores, vector indices, audit logs, and observers.
 
-**Spec:** docs/decisions/DECISION_STORAGEKIT_DESIGN_2026-05-19.md
+**Spec:** docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#41-persistencekit-contract
 
 **Core Protocol:**
 - `Storage` — Backend-agnostic interface
@@ -176,7 +179,7 @@ aggregation families listed below.
 
 **Canonical Role:** Sync abstraction layer. Backend-agnostic interface for pushing, pulling, and subscribing to changes.
 
-**Spec:** docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md
+**Spec:** docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
 
 **Core Protocol:**
 - `SyncEngine` — Backend-agnostic sync
@@ -303,8 +306,8 @@ aggregation families listed below.
 **Spec:** docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
 
 **Decisions:**
-- DECISION_LOCUSKIT_BUNDLE_HIERARCHY_2026-05-20.md
-- DECISION_PROVISIONAL_DRAWER_LIFECYCLE_2026-05-24.md
+- the containment-hierarchy contract
+- the provisional-drawer proposal
 
 **Core Types (spatial primitives):**
 - `Drawer` — Verbatim content + metadata
@@ -720,5 +723,5 @@ When reviewing for placement and shape correctness:
 
 **Last Updated:** 2026-06-14  
 **Canonical Source:** docs/concepts/TOPOLOGY.md, docs/concepts/MOOTX01_AND_ARIA_CANON.md  
-**Decisions Source:** docs/decisions/  
+**Engineering Source:** docs/engineering/README.md
 **Code Source:** Actual public interfaces

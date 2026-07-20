@@ -855,7 +855,7 @@ enum TeachmeGuides {
         case "moot_estate_status":       return estateStatusGuide
         case "moot_estate_map":          return estateMapGuide
         case "moot_estate_ping":         return estatePingGuide
-        // Monitoring control (ADR-025 wave 8.2)
+        // Monitoring control
         case "moot_monitoring_status":   return monitoringStatusGuide
         // Federation
         case "moot_federated_search": return federatedSearchGuide

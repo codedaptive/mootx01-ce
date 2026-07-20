@@ -6,7 +6,7 @@
 // provider holds a DeterministicTokenizer stand-in matching
 // the EmbeddingGemma vocab size; the real SentencePiece port
 // lands in the v1.1 model-bundle mission
-// (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
+
 //
 // Conforms to VectorKit.EmbeddingProvider. The stored tokenizer
 // property is public, matching the initializer's public injection seam.

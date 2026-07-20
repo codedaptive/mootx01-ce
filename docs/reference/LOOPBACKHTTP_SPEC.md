@@ -7,7 +7,7 @@ spec_type: kit
 authors: MOOTx01 maintainers
 date: 2026-06-15
 relates_to:
-  - docs/decisions/ADR-LOOPBACKHTTP-001.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#23-loopback-http-boundary
   - docs/reference/MOOT_MGR_SPEC.md
   - docs/reference/ARIA_MCP_SPEC.md
 ---
@@ -30,7 +30,7 @@ primitive for the MOOTx01 resident daemons. It provides:
    `text/event-stream` framing while the consumer owns the stream source and the
    connection lifetime.
 
-It was extracted from moot-mgr (ADR-LOOPBACKHTTP-001) so the moot-mgr monitor
+It was extracted from moot-mgr (the loopback HTTP contract) so the moot-mgr monitor
 daemon (default port 4200) and the resident mootx01 MCP daemon (default port 4242) share ONE
 audited loopback-bind implementation rather than two hand-rolled copies that
 drift. moot-mgr consumes it today; the mootx01 HTTP MCP transport consumes it
@@ -69,7 +69,7 @@ packages.
 ## 5. Response / streaming seam
 
 The response surface is a general value, not a fixed set of consumer-specific
-cases (ADR-LOOPBACKHTTP-001, condition 1):
+cases (the loopback HTTP contract, condition 1):
 
 - `HTTPResponse` is `{ status: Int, headers: [String:String], body: Data }`.
   Convenience constructors (`.json`, `.asset`, `.notFound`) build common shapes
@@ -84,7 +84,7 @@ cases (ADR-LOOPBACKHTTP-001, condition 1):
 ## 6. Edition-neutral, auth-free invariant
 
 No authentication, authorization, token, Origin, or OAuth logic lives in this
-library (ADR-LOOPBACKHTTP-001, condition 3). `HTTPRequest` exposes `bearerToken`
+library (the loopback HTTP contract, condition 3). `HTTPRequest` exposes `bearerToken`
 and `origin` as read-only conveniences for a consumer to inspect; the decision to
 accept or reject is the consumer's, composed above the transport. This keeps the
 same binary shipping unchanged in Community Edition (loopback, no auth) and
@@ -93,7 +93,7 @@ Enterprise Edition (whose v2 remote/OAuth layer composes above this transport).
 ## 7. Request limits
 
 `HTTPRequest.read(fd:maxHeaderBytes:maxBodyBytes:)` takes per-listener size caps
-(ADR-LOOPBACKHTTP-001, condition 2). Defaults are `64 * 1024` for both, matching
+(the loopback HTTP contract, condition 2). Defaults are `64 * 1024` for both, matching
 moot-mgr's prior hardcoded behavior. A body declared larger than `maxBodyBytes`
 is read up to the cap; a consumer that must not truncate (e.g. an MCP
 `tools/call` listener) sets a cap large enough that a valid request cannot be
@@ -109,7 +109,7 @@ that under the no-FFI law hand-rolls its own `std::net` HTTP transport, with
 parity between the aria-mcp verticals enforced at the JSON-RPC wire. moot-mgr has
 no Rust port. **Re-review trigger:** a roadmapped Rust moot-mgr build would
 introduce a Rust consumer without a wire-conformance gate and reopen this
-carve-out (ADR-LOOPBACKHTTP-001).
+carve-out (the loopback HTTP contract).
 
 ## 9. Tests
 

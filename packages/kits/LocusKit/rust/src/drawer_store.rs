@@ -116,7 +116,7 @@ use substrate_types::fingerprint256::Fingerprint256;
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------
-    // Storage access (ADR-017 NT-L2)
+    // Storage access (node-tree integrity NT-L2)
     // -----------------------------------------------------------------
 
     /// The underlying storage backing this store. Used by Estate to
@@ -127,12 +127,12 @@ pub trait DrawerStore: Send + Sync {
     }
 
     // -----------------------------------------------------------------
-    // Node-name resolution (ADR-017)
+    // Node-name resolution
     // -----------------------------------------------------------------
 
     /// Resolve `parent_node_id` values to `(wing_name, room_name)` pairs
     /// by querying the nodes table. Used by the bitmap evaluator and
-    /// estate verbs to resolve display names after ADR-017 removed
+    /// estate verbs to resolve display names after node-tree integrity removed
     /// wing/room from the Drawer struct.
     ///
     /// Mirrors Swift `DrawerStore.resolveNodeNames(parentNodeIds:)`.
@@ -753,7 +753,7 @@ pub trait DrawerStore: Send + Sync {
     }
 
     // -----------------------------------------------------------------
-    // Tunnel retirement (T13 / ADR-021 Phase 7)
+    // Tunnel retirement
     // -----------------------------------------------------------------
 
     /// All confirmed-active, non-retired tunnels estate-wide, ordered by `filed_at`.
@@ -783,7 +783,7 @@ pub trait DrawerStore: Send + Sync {
             .collect())
     }
 
-    /// Flip bit 13 of `operational_bitmap` to retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Flip bit 13 of `operational_bitmap` to retire a tunnel.
     ///
     /// Fetches the current tunnel, sets `IS_RETIRED_BIT`, and persists the updated
     /// bitmap. Returns `TunnelNotFound` if no non-tombstoned tunnel with `tunnel_id`
@@ -809,7 +809,7 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
-    /// Clear bit 13 of `operational_bitmap` to un-retire a tunnel (T13 / ADR-021 Phase 7).
+    /// Clear bit 13 of `operational_bitmap` to un-retire a tunnel.
     ///
     /// Reverses a prior `retire_tunnel`. The tunnel re-enters active reads
     /// (`all_active_tunnels`) and the dreaming suppression set once persisted.
@@ -850,7 +850,7 @@ pub trait DrawerStore: Send + Sync {
     }
 
     // -----------------------------------------------------------------
-    // Outline helpers (ADR-017 §11, NT-L5)
+    // Outline helpers (node-tree integrity, NT-L5)
     // -----------------------------------------------------------------
 
     /// Children of a parent drawer in the outline graph, sorted by
@@ -1345,7 +1345,7 @@ pub trait DrawerStore: Send + Sync {
 
     /// The row's sealed audit events (substrate form), in append order —
     /// the audit-log source of truth that replaces bitmap_audit reads.
-    /// `row_id` is a UUID string per DECISION_ROW_IDENTITY_UUID.
+    /// `row_id` is a UUID string per UUID row identity.
     ///
     /// ## Default impl — fail-loud, never silently empty
     ///

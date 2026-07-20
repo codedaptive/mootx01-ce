@@ -1,6 +1,6 @@
 // NodeStore.swift
 //
-// Storage for the estate's containment tree (ADR-017 §§1–8).
+// Storage for the estate's containment tree.
 //
 // NodeStore is an actor wrapping PersistenceKit's Storage, mirroring
 // DrawerStore's architecture. It owns:

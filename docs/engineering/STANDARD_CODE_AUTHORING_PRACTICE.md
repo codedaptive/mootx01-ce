@@ -7,6 +7,7 @@ date: 2026-06-14
 description: The authoring rhythm for MOOTx01 substrate code — Swift-first, test-driven, both Swift and Rust versions co-authored per file/interface, conformance-gated bit-for-bit on shared vectors.
 relates_to:
   - VERSIONING.md
+  - docs/engineering/README.md
 ---
 
 # STANDARD_CODE_AUTHORING_PRACTICE
@@ -111,6 +112,20 @@ coverage.
 - **No implementation/process language in specs.** Specs describe behavior,
   types, invariants, errors, conformance requirements — never "how we built
   it," never which language led, never port status.
+- **No historical citations in source.** Comments and diagnostics state the
+  current behavior, invariant, ownership boundary, or recovery action in their
+  own words. They do not cite design-record filenames or require archaeology to
+  be understood. Delete a comment that is only a historical pointer; preserve
+  a useful explanation in present tense.
+
+## Dependency manifest rule
+
+An in-repository dependency may be added when the current engineering or
+reference contract requires it. The dependency must point downstream to
+upstream, must be mirrored in the Swift and Rust manifests where both versions
+exist, and must be the only substantive manifest change in that unit. An
+external package dependency needs explicit per-package approval; an existing
+approval does not authorize a different package.
 
 ---
 
@@ -122,5 +137,7 @@ coverage.
 - Do the two versions agree bit-for-bit on shared vectors?
 - Did I iterate per file, not per package?
 - Did I touch only what this unit requires, leaving released source intact?
+- Do comments explain present behavior without historical record citations?
+- Are manifest changes directionally valid, both-port, and explicitly approved?
 
 If any answer is no, the unit is not done.

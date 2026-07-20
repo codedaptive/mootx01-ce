@@ -1,7 +1,7 @@
 // KernelSelector.swift
 //
 // Global kernel selector for the test harness. Per
-// DECISION_OR_REDUCE_BACKENDS_2026-05-17.md Phase 2.α-1, the
+// measured SIMD OR-reduce selection, the
 // harness binaries (gen-vectors, validate-vectors, stress-test)
 // accept a `--kernel <name>` flag. The flag's value lives here
 // as a global, and primitives consult `KernelSelector.current()`

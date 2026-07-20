@@ -4,7 +4,7 @@
 // the EstateCoordinator.capture path threads `CaptureFrame.wing` through
 // to the stored drawer, mirroring the Swift GLK surface behaviour.
 //
-// ADR-016: wing targeting at capture time.
+// wing targeting at capture time.
 
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ fn open_one() -> (EstateCoordinator, EstateHandle) {
 }
 
 /// Resolve (wing_name, room_name) for a drawer via the coordinator's
-/// node-tree lookup (ADR-017: Drawer no longer has wing/room fields).
+/// node-tree lookup (node-tree integrity: Drawer no longer has wing/room fields).
 fn resolve_wing(coord: &EstateCoordinator, handle: &EstateHandle, drawer: &Drawer) -> String {
     let names = coord.resolve_drawer_node_names(handle, &[drawer.parent_node_id.clone()]);
     names.get(&drawer.parent_node_id)

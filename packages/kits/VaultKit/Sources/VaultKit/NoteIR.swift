@@ -86,7 +86,7 @@ public struct WikiLink: Codable, Sendable, Equatable {
 /// A pointer to an external source artifact — a file reference, never
 /// the bytes.
 ///
-/// Per ADR-VAULTKIT-001 (b), VaultKit references attachments by path +
+/// Per Vault import/export (b), VaultKit references attachments by path +
 /// content hash rather than copying blobs into the substrate. Promotion
 /// of `SourceRef` to a substrate primitive is a future Tier-1 mission
 /// (Stream bp); here it is a kit-level value type that rides frontmatter.
@@ -170,7 +170,7 @@ public struct OccurredAt: Codable, Sendable, Equatable {
 ///
 /// `FactIR` is the IR-level representation of a knowledge-graph fact —
 /// a KG fact in our substrate, a graph relation (entity → relationship →
-/// entity) in programmatic external memory tools. Per ADR-007 Decision 1,
+/// entity) in programmatic external memory tools. Per data-movement privacy tiers,
 /// the full-fidelity IR carries facts as first-class data so a
 /// programmatic exporter's graph layer survives the interchange boundary.
 /// Mapping facts to substrate nouns is adapter/bridge territory
@@ -226,7 +226,7 @@ public struct FactIR: Codable, Sendable, Equatable {
 /// substrate `Drawer` (+ `.references` tunnels). Because it is the
 /// shared contract for future adapters and a future non-Swift producer,
 /// its shape is frozen-by-convention: flat, `Codable`, no Swift-only
-/// boundary types. See ADR-VAULTKIT-001 (f).
+/// boundary types. See Vault import/export (f).
 public struct NoteIR: Codable, Sendable, Equatable {
 
     /// The stable identity of this note across re-imports. For the
@@ -281,7 +281,7 @@ public struct NoteIR: Codable, Sendable, Equatable {
     /// Subject / predicate / object assertions carried by this note.
     /// Empty for plain Markdown vaults (Obsidian emits none); populated
     /// by programmatic-tool adapters whose source has a graph layer.
-    /// Full-fidelity field per ADR-007 Decision 1.
+    /// Full-fidelity field per data-movement privacy tiers
     public var facts: [FactIR]
 
     /// The full source hierarchy as ordered components (ancestor →

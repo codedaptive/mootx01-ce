@@ -111,8 +111,8 @@ public extension GeniusLocusKit {
         guard registry[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
-        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): `auditLogs` dict is removed.
-        // Load entries directly from `_storagekit_audit` via the new async
+        // The `auditLogs` dictionary is gone. Load entries directly from
+        // `_storagekit_audit` via the async
         // `auditLog(for:)` which issues a single bounded SQL query.
         // The returned `UnifiedAuditLog.orderedEntries` is sorted HLC-ascending
         // (already ordered by the SQL `ORDER BY hlc ASC`), no re-sort needed.

@@ -502,7 +502,7 @@ public struct FDCMatcher: Sendable {
     /// Calibration (v1.0 frame, 1 071 code signatures):
     ///   • subject-specific text (e.g. "biology / physiology"): ≤ 2 codes tied
     ///     at the top IDF score — the winning code is in the correct domain.
-    ///   • software/technical text (e.g. "wings ADR pipeline"): 10–13 codes
+    ///   • software/technical text (e.g. "wings architecture pipeline"): 10–13 codes
     ///     tied — the "winner" is an arbitrary code in an unrelated domain
     ///     (235 = angels/devotional, 621.2 = hydraulic engineering, etc.).
     ///

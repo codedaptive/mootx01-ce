@@ -1,6 +1,6 @@
 // Node.swift
 //
-// Container node in the estate's containment tree (ADR-017 §1–§2).
+// Container node in the estate's containment tree.
 //
 // The estate is a fixed-depth tree: estate (depth 0), wing (depth 1),
 // room (depth 2). Drawers are leaf nodes and live in the `drawers`
@@ -65,7 +65,7 @@ public struct Node: Sendable, Equatable, Codable, Hashable {
     /// Wall-clock last-update timestamp (ISO8601 TEXT in SQLite).
     public var updatedAt: Date
 
-    /// Forward-compat JSON extension slot (ADR-012). Nil in 1.0.
+    /// Forward-compat JSON extension slot. Nil in 1.0.
     public var ext: String?
 
     public init(

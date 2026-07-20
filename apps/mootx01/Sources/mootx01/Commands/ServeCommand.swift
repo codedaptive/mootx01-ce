@@ -96,7 +96,7 @@ struct ServeCommand: AsyncParsableCommand {
         }
         #endif
         // Single-writer guard (resident only): the estate has exactly one writer —
-        // the resident AutonomicGovernor (see ADR-LOOPBACKHTTP-001). Refuse to start the resident
+        // the resident AutonomicGovernor (see bounded loopback HTTP). Refuse to start the resident
         // daemon if another LIVE process already holds this estate's PID file.
         // stdio is not guarded here: when a resident is live it FORWARDS to it
         // (T4, above) rather than opening a second writer, and when none is live it
@@ -169,7 +169,7 @@ struct ServeCommand: AsyncParsableCommand {
             // a served estate is fully live. Idempotent on reopen; does not
             // re-stamp the manifest (which is why we wire rather than `provision`).
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
-            // Seed the seven ADR-016 default wings if they are not already present.
+            // Seed the seven default wings if they are not already present.
             // `seedDefaultWings` is idempotent: it reads existing charter drawers
             // and skips wings that are already seeded, so calling it on every open
             // is safe for both fresh estates (wings missing) and previously-served
@@ -221,7 +221,7 @@ struct ServeCommand: AsyncParsableCommand {
             name: "mootx01",
             version: "1.0.0"
         )
-        // ADR-024 §5: computed once at startup (not per-call) and threaded
+        // computed once at startup (not per-call) and threaded
         // into every tool response via ToolDispatcher.versionSkewAdvisory.
         // nil whenever no plugin is detected or its version matches this
         // binary — the common case, which leaves ping/status unchanged.
@@ -237,7 +237,7 @@ struct ServeCommand: AsyncParsableCommand {
         // silence. stdio one-shots stay network-free on purpose: ping is
         // documented as returning immediately, and an offline probe timeout
         // there would break that; every plugin-capable host talks to the
-        // resident over HTTP anyway (ADR-024 §2). Repo slug honors the same
+        // resident over HTTP anyway. Repo slug honors the same
         // MOOTX01_REPO override as `mootx01 upgrade`.
         let updateAdvisoryProvider: (@Sendable () async -> String?)?
         if residentPort != nil {
@@ -284,7 +284,7 @@ struct ServeCommand: AsyncParsableCommand {
             }
             Logging.stderr.log("mootx01 serve exiting (HTTP transport stopped)")
         } else {
-            // T10 — on-startup dreaming trigger (ADR-021 Phase 5): if the
+            //  — on-startup dreaming trigger: if the
             // dreaming queue already has pending items from a prior session
             // (jobs in queue.sqlite that were not processed before the last
             // serve exited), fork a detached dreamer immediately so they are
@@ -321,7 +321,7 @@ struct ServeCommand: AsyncParsableCommand {
                 Self.spawnDetachedDrain(estateName: estateName, environment: environment)
             }
 
-            // T10 — on-exit dreaming trigger (ADR-021 Phase 5): if the dreaming
+            //  — on-exit dreaming trigger: if the dreaming
             // queue has pending items at stdio exit (from recall events during this
             // session, or from a prior session not yet processed), fork a detached
             // dreamer to run one REM-ALPHA cycle before the estate closes. Mirrors
@@ -376,14 +376,14 @@ struct ServeCommand: AsyncParsableCommand {
 
     /// Launch a detached `mootx01 dream` to run one REM-ALPHA dreaming cycle
     /// after a direct-open stdio serve exits or starts with pending dreaming
-    /// queue items (T10, ADR-021 Phase 5). The child `setsid`s itself into its
+    /// queue items. The child `setsid`s itself into its
     /// own session so a process-group kill aimed at this serve does not reach it;
     /// we do not wait on it. The estate is passed via `--db` and the inherited
     /// environment (so an `ARIA_MCP_SQLITE_PATH` override targets the same file).
     ///
     /// The dreamer acquires its own `"dreaming"` DrainLease — independent of the
     /// encode drain's `"encode.drain.lease"` — so both can run concurrently
-    /// without blocking each other (ADR-021 Decision 7).
+    /// without blocking each other.
     static func spawnDetachedDream(estateName: String, environment: [String: String]) {
         guard let executableURL = resolvedCurrentExecutableURL() else {
             Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: could not resolve current executable path")

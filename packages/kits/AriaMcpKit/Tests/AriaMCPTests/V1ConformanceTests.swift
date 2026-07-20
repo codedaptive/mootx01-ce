@@ -171,7 +171,7 @@ struct V1ConformanceTests {
         // moot_recollect.
         // 20th core ARIA = moot_memory_get (Tier 1, fetch-drawer-by-ID, build-now
         // per Bob's ruling).
-        // 23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
+        // 23rd lens = moot_lens_node_motion (diffusion node-layer lens, node motion modeling).
         // moot_palace_import (PAR-PB-1): direct palace → substrate import.
         // moot_drain_status: AI-queryable background drain progress.
         // moot_reclassify_fdc: AI-queryable FDC anchor audit/repair/reset.

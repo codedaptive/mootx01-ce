@@ -1,8 +1,7 @@
 // FrameFaithfulRecallDropTests.swift
 //
 // Frame-faithful recall drop, GLK level (both ports must agree).
-// Resolves DECISION_NEEDED_QUEUEKIT_PIPELINE_RECALL_PARITY (Bob's ruling,
-// option 1): corpus-lane candidates honor the recall frame's state filter,
+// Corpus-lane candidates honor the recall frame's state filter,
 // identical on both ports.
 //
 // The RecallDirector builds its drawerIndex via the LocusKit frame-aware by-id

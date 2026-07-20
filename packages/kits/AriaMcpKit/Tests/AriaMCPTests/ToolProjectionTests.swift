@@ -27,7 +27,7 @@ struct ToolProjectionTests {
         }
     }
 
-    /// ADR-025 §3, the structural rule: "There is no moot_unlock tool and
+    /// out-of-band sensitivity grants, the structural rule: "There is no moot_unlock tool and
     /// there never will be" — the sensitivity-unlock approval channel is
     /// physically separate from the MCP surface a prompt-injected model
     /// could reach. This guard fails loudly if any future tool addition
@@ -38,9 +38,9 @@ struct ToolProjectionTests {
         for tool in ToolProjection.tools(environment: [:]) {
             let lower = tool.name.lowercased()
             #expect(!lower.contains("unlock"),
-                    "ADR-025 §3 violation: '\(tool.name)' looks like an unlock verb on the MCP surface")
+                    "out-of-band sensitivity grants violation: '\(tool.name)' looks like an unlock verb on the MCP surface")
             #expect(!(lower.contains("lock") && !lower.contains("block") && !lower.contains("clock")),
-                    "ADR-025 §3 violation: '\(tool.name)' looks like a lock/unlock verb on the MCP surface")
+                    "out-of-band sensitivity grants violation: '\(tool.name)' looks like a lock/unlock verb on the MCP surface")
         }
     }
 
@@ -51,7 +51,7 @@ struct ToolProjectionTests {
     /// drawer by id, in full; closes the fetch-drawer-by-ID gap,
     /// build-now per Bob's ruling).
     /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
-    /// ADR-DIFFUSION-001) added alongside moot_lens_contradiction.
+    /// node motion modeling) added alongside moot_lens_contradiction.
     /// The 11th recipe tool is moot_recollect (DA1 — three distillation tools:
     /// moot_consolidate, moot_recall_distilled, moot_recollect). The three
     /// maintenance tools are moot_reindex (corpus/vector backfill),

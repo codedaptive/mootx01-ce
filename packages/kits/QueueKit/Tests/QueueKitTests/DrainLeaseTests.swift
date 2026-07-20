@@ -1,4 +1,4 @@
-// DrainLeaseTests.swift — QueueKit DrainLease (ADR-021 T2)
+// DrainLeaseTests.swift — QueueKit DrainLease
 //
 // Verifies the stream-keyed heartbeat-TTL lease semantics:
 //  - acquire on a free lease succeeds
@@ -13,7 +13,7 @@ import Testing
 import Foundation
 @testable import QueueKit
 
-@Suite("DrainLease — ADR-021 T2")
+@Suite("DrainLease — recall-driven dreaming")
 struct DrainLeaseTests {
 
     // MARK: - Helpers

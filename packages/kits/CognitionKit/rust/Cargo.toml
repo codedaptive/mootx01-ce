@@ -29,7 +29,7 @@ locus-kit = { path = "../../LocusKit/rust" }
 # IntellectusLib is the zero-dependency telemetry leaf.
 # CognitionKit emits self-report metrics at recipe-run boundaries
 # (cp-cognitionkit-report P2 self-report coverage;
-# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28). When monitoring is
+# in-repository dependency direction). When monitoring is
 # off (the default), every report!() call is a single atomic load +
 # branch — zero allocation. IntellectusLib depends on nothing; layering
 # is safe. Mirrors the Swift CognitionKit Package.swift dependency.
@@ -62,7 +62,7 @@ path = "tests/cognition_conformance.rs"
 
 # CognitionKit P2 self-report telemetry integration tests.
 # Mirrors CognitionKitTelemetryTests.swift §1–§4.
-# cp-cognitionkit-report; DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# cp-cognitionkit-report; in-repository dependency direction.
 [[test]]
 name = "cognitionkit_telemetry_tests"
 path = "tests/cognitionkit_telemetry_tests.rs"

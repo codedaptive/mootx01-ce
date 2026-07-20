@@ -7,9 +7,9 @@ spec_type: kit
 authors: MOOTx01 maintainers
 date: 2026-06-14
 relates_to:
-  - DECISION_LATTICE_CITATION_UDC_WIKIDATA_2026-05-07.md (lattice decision)
-  - DECISION_Q1_PROVENANCE_BITMAP_2026-05-08.md (provenance bitmap decision)
-  - DECISION_Q1_MANIFEST_SCHEMA_2026-05-08.md (manifest schema decision)
+  - the recorded engineering rule-05-07.md (lattice decision)
+  - the provenance-bitmap contract (provenance bitmap decision)
+  - the estate-manifest contract (manifest schema decision)
 ---
 
 # GeniusLocus Architecture Specification
@@ -409,7 +409,7 @@ All eight noun-shapes have operational bitmap layouts at v1.0. None ships with p
 
 ### 5.7 Provenance bitmap layout
 
-Q1-locked. See `DECISION_Q1_PROVENANCE_BITMAP_2026-05-08.md` for the decision record. The layout:
+Q1-locked. See `the provenance-bitmap contract` for the decision record. The layout:
 
 ```
 provenance_bitmap (Int64), low-to-high:
@@ -474,7 +474,7 @@ fed into the wrong layer's field.
 **FDC (Free Decimal Correspondence) is the shipped reference scheme.**
 The shipped classifier is the public-domain FDC encoder (see
 `FDC_ENCODER_CANONICAL.md`); see
-`DECISION_LATTICE_CITATION_UDC_WIKIDATA_2026-05-07.md` for the lattice
+`the recorded engineering rule-05-07.md` for the lattice
 classification decision. FDC shares the depth-coordinate mental model of a
 decimal classification scheme, so the `udc_code` storage field keeps its
 shape while carrying FDC codes.
@@ -485,7 +485,7 @@ compiler-policed against the other.
 
 ### 5.9 Manifest schema
 
-The manifest is a key-value table within the estate's primary database. The schema is locked by `DECISION_Q1_MANIFEST_SCHEMA_2026-05-08.md`. v1 required keys:
+The manifest is a key-value table within the estate's primary database. The schema is locked by `the estate-manifest contract`. v1 required keys:
 
 ```
 manifest_version          string   semantic version of the manifest schema
@@ -1714,11 +1714,11 @@ Applications register additional sources via the `custom_uri` sentinel.
 
 ### C. Manifest-key catalog (v1)
 
-See § 5.9 for the complete v1 catalog. The decision record is `DECISION_Q1_MANIFEST_SCHEMA_2026-05-08.md`.
+See § 5.9 for the complete v1 catalog. The decision record is `the estate-manifest contract`.
 
 ### D. Provenance-bit catalog (v1)
 
-See § 5.7 for the complete v1 layout. The decision record is `DECISION_Q1_PROVENANCE_BITMAP_2026-05-08.md`.
+See § 5.7 for the complete v1 layout. The decision record is `the provenance-bitmap contract`.
 
 ### E. Six rungs of representation
 
@@ -1762,9 +1762,9 @@ Values for the drawer operational bitmap's `content_kind` field:
 
 ### H. Reference documents
 
-- `DECISION_LATTICE_CITATION_UDC_WIKIDATA_2026-05-07.md` — lattice citation decision record
-- `DECISION_Q1_PROVENANCE_BITMAP_2026-05-08.md` — provenance bitmap decision record
-- `DECISION_Q1_MANIFEST_SCHEMA_2026-05-08.md` — manifest schema decision record
+- `the recorded engineering rule-05-07.md` — lattice citation decision record
+- `the provenance-bitmap contract` — provenance bitmap decision record
+- `the estate-manifest contract` — manifest schema decision record
 
 ---
 

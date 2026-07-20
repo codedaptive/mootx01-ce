@@ -74,7 +74,7 @@ public struct DreamingPolicy: Sendable, Equatable, Codable {
 
 /// The dreaming daemon's actor-local cycle state, captured for persistence
 /// so a restart continues from where the prior run left off instead of
-/// re-discovering and re-proposing (NEURONKIT_SPEC § 3; F6 / ADR-020).
+/// re-discovering and re-proposing the same work.
 ///
 /// All six fields are the daemon's mutable idempotency/cycle memory:
 /// - `lastTickAt`: the timer-path cadence baseline.
@@ -101,7 +101,7 @@ public struct DreamingDaemonState: Sendable, Equatable, Codable {
     public var coRecallCounts: [String: Int]
     /// Wall-clock instant of the last REM-THETA (daily consolidation) cycle
     /// run. Nil = never run. Used by the REM dispatch table's THETA due-check
-    /// to gate on the 24 h cadence (D5a). Persisted via F6/ADR-020 so the
+    /// to gate on the 24 h cadence. Persisted via /manifest-backed daemon state so the
     /// due-check survives daemon restarts — a stdio-only estate still consolidates
     /// on its next invocation (D5c). `decodeIfPresent` keeps older persisted
     /// states loading cleanly when this field is absent.
@@ -188,7 +188,7 @@ public protocol DreamingPolicyStore: Sendable {
     /// Load the persisted daemon cycle state, or `nil` if none has been saved
     /// (the daemon then starts from its in-memory defaults). Loaded once on
     /// `loadPersistedPolicy()` so a restart continues from the prior run's
-    /// idempotency/cycle memory (F6 / ADR-020).
+    /// idempotency/cycle memory.
     func loadDaemonState() async throws -> DreamingDaemonState?
 
     /// Persist the daemon cycle state. The daemon calls this after each cycle.
@@ -214,7 +214,7 @@ public extension DreamingPolicyStore {
 ///
 /// Stores policy, bandit state, and daemon cycle state in memory; all are
 /// lost when the actor is deallocated. Production hosts override the protocol
-/// to write to the estate manifest for cross-restart persistence (F6 / ADR-020).
+/// to write to the estate manifest for cross-restart persistence.
 /// This implementation stores daemon state so tests can exercise the full
 /// save/load round-trip without a live estate.
 public actor InMemoryDreamingPolicyStore: DreamingPolicyStore {
@@ -242,7 +242,7 @@ public actor InMemoryDreamingPolicyStore: DreamingPolicyStore {
 
     /// Persist daemon cycle state in memory. The stored state is returned by
     /// subsequent `loadDaemonState()` calls so tests can verify the full
-    /// save/load round-trip (T11 D5c, F6 / ADR-020).
+    /// save/load round-trip (/ manifest-backed daemon state).
     public func saveDaemonState(_ state: DreamingDaemonState) async throws {
         storedDaemonState = state
     }

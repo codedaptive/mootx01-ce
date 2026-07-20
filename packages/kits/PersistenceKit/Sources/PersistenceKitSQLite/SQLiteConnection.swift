@@ -117,7 +117,7 @@ final class SQLiteConnection: @unchecked Sendable {
         try exec("PRAGMA wal_autocheckpoint = 1000;")
         try exec("PRAGMA busy_timeout = \(Int(busyTimeout * 1000));")
         try exec("PRAGMA foreign_keys = ON;")
-        // ADR-026: memory-map the database file so SQLite reads go through
+        // memory-map the database file so SQLite reads go through
         // the OS page cache instead of malloc'd copies. This is the single
         // change that eliminates multi-GB heap allocations for vector BLOBs
         // and BM25 term-frequency reads — the OS manages which pages are

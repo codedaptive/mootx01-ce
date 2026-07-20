@@ -1,7 +1,7 @@
 //! Corpus projection for migration verification. Rust twin of Swift
 //! `CorpusProjection.swift` (VK-ADAPT-01).
 //!
-//! ADR-007 Decision 1 retired GLK's flat import verb but kept the
+//! data-movement privacy tiers retired GLK's flat import verb but kept the
 //! substrate's recall-based migration verification and the in-product
 //! fidelity benchmark, both of which consume the reference-corpus type
 //! `ExternalCorpus`. This projection feeds them from the adapter

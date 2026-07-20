@@ -1,7 +1,7 @@
 // LsaProvider.swift
 //
 // Latent Semantic Analysis (LSA / LSI) distributional-semantics
-// embedding provider. Part 2 of the ADR-010 Decision B honest
+// embedding provider. Part 2 of the honest semantic fusion honest
 // classical-fusion signal set.
 //
 // ## Algorithm
@@ -72,7 +72,7 @@
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/lsa.rs
 //
-// ADR-010 reference: Decision B, signal #1 (LSA/SVD) of the honest
+// honest semantic fusion reference: Decision B, signal #1 (LSA/SVD) of the honest
 // classical-fusion. The SVD kernel (JacobiSVD) lives in SubstrateML;
 // only LSA-specific composition (TF-IDF matrix, folding-in) lives here.
 
@@ -143,7 +143,7 @@ public let lsaDefaultRank: Int = 64
 /// modelID = "lsa-v1", modelVersion = "1.0.0".
 /// Projection seed = `lsaProjectionSeed`.
 ///
-/// ADR-010 Decision B, signal #1 — LSA/SVD provider in the classical-
+/// honest semantic fusion, signal #1 — LSA/SVD provider in the classical-
 /// fusion dense recall lane.
 public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
 
@@ -155,7 +155,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// Requested LSA rank k.
     public let rank: Int
 
-    /// Reduced-vocabulary cap K for the dense factorization (ADR-022). The SVD
+    /// Reduced-vocabulary cap K for the dense factorization. The SVD
     /// factors a `docs × K` matrix over the top-K informative terms instead of
     /// `docs × full-vocab`. Optimizer knob; default `defaultReducedVocabCap`.
     public let reducedVocabCap: Int
@@ -179,11 +179,11 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// SVD result from finalize(). Nil until finalize() is called.
     private var svd: SVDResult?
 
-    /// IDF weights, indexed by REDUCED vocabulary column (ADR-022).
+    /// IDF weights, indexed by REDUCED vocabulary column.
     private var idfWeights: [Float]
 
     /// The frozen reduced vocabulary (term → reduced column) the basis was
-    /// trained on (ADR-022). Query projection and basis serialization key on
+    /// trained on. Query projection and basis serialization key on
     /// THIS, not the full `counts.vocab`. Empty until `finalize()`.
     private var basisVocab: [String: Int]
 
@@ -259,7 +259,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         let N = counts.documentCount
         guard N > 0, counts.vocabularySize > 0 else { return }
 
-        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // factor over a reduced, informative sub-vocabulary so the
         // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
         // (~10^15 ops, infeasible). The reduced vocab is a corpus property
         // shared with NMF; it is frozen here and drives query projection.
@@ -416,7 +416,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         guard !terms.isEmpty else { return nil }
 
         let k = svdResult.rank
-        // Query projection keys on the REDUCED basis vocab (ADR-022), not the
+        // Query projection keys on the REDUCED basis vocab, not the
         // full counts vocab. Reduced-set terms map to their column; OOV terms
         // (outside top-K) contribute nothing and are covered by RI.
         let vocabSize = basisVocab.count
@@ -556,7 +556,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         w.writeU64(projectionSeed)
         w.writeU32(UInt32(counts.documentCount))
         w.writeU32(UInt32(svd?.rank ?? 0))
-        // ADR-022: persist the REDUCED basis vocab (term → reduced column) —
+        // persist the REDUCED basis vocab (term → reduced column) —
         // projection keys on it. The full counts vocab is persisted separately
         // by serializeCounts() as the drift-trigger anchor.
         w.writeStringU32Map(basisVocab)
@@ -597,7 +597,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
                   projectionSeed: projectionSeed)
         // Restore the term-document support (vocab + doc count) without
         // re-tokenizing; raw TF rows are not embed-relevant.
-        // The persisted map IS the reduced basis vocab (ADR-022); projection
+        // The persisted map IS the reduced basis vocab; projection
         // keys on `basisVocab`. counts is restored from the same map so a
         // reconstructed provider reports the basis vocab it embeds against
         // (round-trip). The FULL vocab lives in the counts blob, not here.
@@ -687,7 +687,7 @@ extension LsaProvider: TrainableEmbeddingBasis {
         try LsaProvider(deserializing: basis)
     }
 
-    /// ADR-026: release the in-memory SVD result and weights.
+    /// release the in-memory SVD result and weights.
     public func releaseBasis() {
         svd = nil
         idfWeights.removeAll(keepingCapacity: false)

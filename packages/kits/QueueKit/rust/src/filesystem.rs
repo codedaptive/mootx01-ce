@@ -543,7 +543,7 @@ impl QueueBackend for FilesystemBackend {
         }
     }
 
-    // ── Stream-scoped drain (ADR-021 Decision 7 / T1) ──────────────────────
+    // ── Stream-scoped drain ──────────────────────
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///
@@ -574,7 +574,7 @@ impl QueueBackend for FilesystemBackend {
         // never touched, so concurrent drainers of different streams (encode +
         // dreaming) cannot steal or race on each other's jobs. (The earlier
         // claim-all-then-unclaim form transiently moved every stream's files into
-        // cur/, which collided under concurrent stream drains — ADR-021 D7 requires
+        // cur/, which collided under concurrent stream drains — recall-driven dreaming  requires
         // that one stream's drain never disturbs another's.)
         let mut results: Vec<(Job, SessionId)> = vec![];
         for entry in entries {

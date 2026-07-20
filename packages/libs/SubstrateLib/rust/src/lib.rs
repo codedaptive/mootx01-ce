@@ -1,6 +1,6 @@
 // lib.rs — substrate-lib crate root (orchestration layer).
 //
-// After the four-package split (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR
+// After the four-package split (the four-package substrate layout
 // addendum 2026-05-29), substrate-lib is the narrow orchestration layer
 // over substrate-types / substrate-kernel / substrate-ml: the verb
 // mechanics, the row-state automaton, and the audit write-gate.
@@ -18,10 +18,10 @@
 // bit_field/sha256 and substrate-types hlc) ===
 pub mod audit_gate;
 
-// === ADR-017 §16: Merkle content-integrity hash pipeline ===
+// === node-tree integrity: Merkle content-integrity hash pipeline ===
 pub mod merkle_hash;
 
-// === ADR-017 §17: Keyed-commitment API for expunge provenance ===
+// === node-tree integrity: Keyed-commitment API for expunge provenance ===
 pub mod keyed_commitment;
 
 // === §9 Row-state automaton + §10 Verbs (the orchestration surface) ===

@@ -8,7 +8,7 @@ spec_type: kit | protocol | encoder
 authors: MOOTx01 maintainers
 relates_to:
   - docs/reference/<PACKAGE>_INTERFACE.md   # the API surface this spec contracts
-  - docs/decisions/DECISION_*.md            # ADRs that govern this package
+  - docs/engineering/<MASTER>.md            # cross-cutting rules this package obeys
 superseded_by: docs/reference/<replacement>.md   # only when status: superseded
 ---
 

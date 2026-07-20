@@ -123,7 +123,7 @@ pending a C-1 per-crate exception. That exception is now approved.
 **Surface:** `postgres.rs::Pool::open_connection` (Rust)
 
 **Fix:** `postgres-native-tls = "0.5"` added to `Cargo.toml` (C-1
-exception recorded in `DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md`).
+exception recorded in `the Rust PostgreSQL TLS approval`).
 `Pool::open_connection` now selects the transport via a `match` on
 `PostgresTlsMode`:
 
@@ -252,7 +252,7 @@ completed in stream `secfix/c-pg-tls` — see the entry above.
 
 ---
 
-## 2026-06-28 — SECFIX-QUEUE-ISOLATION: Per-estate queue isolation (ADR-021 D7)
+## 2026-06-28 — SECFIX-QUEUE-ISOLATION: Per-estate queue isolation
 
 **Branch:** `secfix/queue-isolation`
 
@@ -270,7 +270,7 @@ disclosure and corruption.
 **Fix:** The sibling filename is now derived as `<estate-stem>.<filename>`
 (e.g. `<dir>/<uuidA>.sqlite` + `"queue.sqlite"` → `<dir>/<uuidA>.queue.sqlite`).
 Same estate across processes = deterministic same path; different estates in the
-same directory = different paths. The fix implements ADR-021 Decision 7 as written.
+same directory = different paths. The fix restores strict per-estate queue isolation.
 
 **Scope:**
 - `EstateConfiguration.queueSibling(filename:)` — Swift path derivation

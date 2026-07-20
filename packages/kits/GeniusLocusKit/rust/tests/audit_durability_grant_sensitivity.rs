@@ -1,7 +1,7 @@
 // audit_durability_grant_sensitivity.rs — RUST-AUDIT-DURABILITY coverage.
 //
 // `sensitivity_audit_verbs.rs` covers the LIVE (never-reopened) in-memory
-// read path for the four ADR-025 sensitivity-unlock verbs. `grants_parity.rs`
+// read path for the four sensitivity unlock verbs. `grants_parity.rs`
 // covers the grant subsystem's crypto/store mechanics but never asserted an
 // audit entry at all (there was none to assert — `issue_grant`/`revoke_grant`
 // appended nothing). Neither file exercises what happens to either verb
@@ -284,7 +284,7 @@ fn synthetic_verbs_round_trip_as_distinct_cases_not_a_mutate_collapse() {
     let _ = grant.id;
 }
 
-/// ADR-025 §4 requires sensitivity-unlock verbs never reuse the federation-
+/// out-of-band sensitivity grants requires sensitivity-unlock verbs never reuse the federation-
 /// reserved `GrantIssued`/`GrantRevoked` cases. Now that both case FAMILIES
 /// exist on the Rust port (RUST-AUDIT-DURABILITY added `GrantIssued`/
 /// `GrantRevoked`; previously Rust carried neither, so there was nothing to
@@ -303,6 +303,6 @@ fn grant_verbs_never_collide_with_sensitivity_verbs() {
         log.ordered_entries().into_iter().all(|e| {
             e.verb != UnifiedAuditVerb::GrantIssued && e.verb != UnifiedAuditVerb::GrantRevoked
         }),
-        "ADR-025 §4: sensitivity-unlock must never write the federation-reserved GrantIssued/GrantRevoked verbs"
+        "sensitivity-unlock must never write the federation-reserved GrantIssued/GrantRevoked verbs"
     );
 }

@@ -1,6 +1,6 @@
 // PluginDedupeTests.swift
 //
-// ADR-024 §3/§4: MCP connection ownership and install-moment dedupe.
+// MCP connection ownership and install-moment dedupe.
 // Covers PluginDetector.isPluginInstalled/isPluginEnabled/ownsConnection,
 // MCPEntryClassifier.classify (including its positive shape check, Adams
 // #2), and Installer.dedupeDirectEntry/uninstall's ownership-aware removal —
@@ -17,7 +17,7 @@ import Testing
 import Foundation
 @testable import MootInstallerCore
 
-@Suite("Plugin dedupe (ADR-024)")
+@Suite("Plugin dedupe")
 struct PluginDedupeTests {
 
     private let pluginID = "mootx01@mootx01"
@@ -192,7 +192,7 @@ struct PluginDedupeTests {
     /// Wave 6, Defect A regression fixture — the exact state Bob's machine
     /// was found in: plugin installed+enabled (ownsConnection true) AND a
     /// stale stdio-era package already on disk (`.mcp.json` with
-    /// `command: mootx01, args: [serve]`, pre-ADR-024-§2). Before the fix,
+    /// `command: mootx01, args: [serve]`, from the legacy direct-entry design). Before the fix,
     /// `InstallCommand.run()`'s loop skipped the plugin-owned client via
     /// `continue` WITHOUT appending it to `installed`, so the depth pass's
     /// `installed.contains(client.displayName)` filter silently excluded
@@ -217,7 +217,7 @@ struct PluginDedupeTests {
                 "fixture setup: plugin must be connection-owning")
 
         // Seed the stale stdio-era package Bob's machine actually had on
-        // disk — pre-ADR-024-§2, before the package moved to an
+        // disk — from the legacy direct-entry design, before the package moved to an
         // HTTP-shaped .mcp.json.
         let host = try #require(InstallBundle.embedded.host(forClientID: "claude-code"))
         let pluginDir = DepthInstaller.pluginInstallDirectory(host: host, homeDirectory: home)
@@ -253,7 +253,7 @@ struct PluginDedupeTests {
         #expect(server?["command"] == nil,
                 "the stale bare `command: mootx01` placeholder must be gone")
 
-        // The stranded-cache refresh (ADR-024 Wave 3, Defect 1) must have
+        // The stranded-cache refresh must have
         // invoked the CLI-update seam, since the plugin is already installed.
         #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]],
                 "rematerializing an already-installed plugin must invoke `claude plugin update`")
@@ -263,7 +263,7 @@ struct PluginDedupeTests {
                 "a plugin-owned client must never gain a competing direct entry from the depth pass")
     }
 
-    // MARK: - VersionSkewAdvisory (ADR-024 §5)
+    // MARK: - VersionSkewAdvisory
 
     @Test("VersionSkewAdvisory is nil when the plugin is not installed")
     func versionSkewNilWhenNoPlugin() throws {
@@ -593,7 +593,7 @@ struct PluginDedupeTests {
         let configURL = home.appendingPathComponent(client.configPath)
 
         // Hand-write a dev-rig direct entry: our server name, but carrying a
-        // MOOTX01_DATA_DIR override — ADR-024 §4's "not ours or non-default".
+        // MOOTX01_DATA_DIR override — the plugin-ownership rule's "not ours or non-default".
         let devRigEntry: [String: Any] = [
             "mcpServers": [
                 "mootx01": [
@@ -625,7 +625,7 @@ struct PluginDedupeTests {
         #expect(env?["MOOTX01_DATA_DIR"] as? String == "/Users/dev/rig-a/.mootx01-data")
     }
 
-    /// Same guarantee on the uninstall path (ADR-024 §4: uninstall must not
+    /// Same guarantee on the uninstall path (plugin-owned MCP connections: uninstall must not
     /// silently remove non-default/dev entries).
     @Test("uninstall retains a non-default (dev-rig) entry and reports it")
     func uninstallRetainsNonDefaultEntry() throws {

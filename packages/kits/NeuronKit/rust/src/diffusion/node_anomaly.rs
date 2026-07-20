@@ -1,6 +1,6 @@
 // node_anomaly.rs
 //
-// The node-layer WRITE-TIME anomaly read (ADR-DIFFUSION-001 §9, build step §11.2).
+// The node-layer write-time anomaly read.
 // Rust port of NodeAnomaly.swift's pure classifier. Diffusion integrates cold
 // (dreaming) but is read HOT: at/after a write, classify a node's motion into a
 // surfaceable anomaly — churning (rapid re-edits) or reanchored (topic moved).
@@ -11,7 +11,7 @@
 use genius_locus_kit::audit::log::EntryUUID;
 use crate::diffusion::node_motion::NodeMotion;
 
-/// Volatility at/above which a node is "churning". Ablate (ADR §12).
+/// Volatility at/above which a node is "churning". Subject to ablation.
 pub const DEFAULT_CHURN_THRESHOLD: f64 = 3.0;
 
 /// A node-layer anomaly verdict. Mirrors Swift `NodeAnomaly`.

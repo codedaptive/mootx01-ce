@@ -7,7 +7,7 @@
 //! same way the Swift port does. The prior `LOCI_V035_*` migration ladder was
 //! development-time scaffolding for a store that never shipped, collapsed into
 //! the v1 CREATE. v2 adds the nullable `.json` `ext` forward-compat slot to the
-//! `keys` table (ADR-012), completing the one-`ext`-column-per-persistent-entity
+//! `keys` table, completing the one-`ext`-column-per-persistent-entity
 //! convention; 1.0 writes NULL and never reads it.
 //!
 //! ## Bitmap reservation map (low bit = 0)
@@ -29,7 +29,7 @@
 //!   bits 8–15  feature flags                          ASSIGNED
 //!   bits 16–63 FREE (48 bits headroom)
 //!
-//! drawers.provenance (Q1_DECISION_PROVENANCE_BITMAP.md)
+//! drawers.provenance
 //!   bits 0–3   source type                            ASSIGNED
 //!   bits 4–6   confirmation                           ASSIGNED
 //!   bits 7–63  FREE (57 bits headroom)
@@ -61,9 +61,9 @@ pub const KIT_ID: &str = "LocusKit";
 /// BLOB (NT-Q1 — eliminates hex encoding waste). v7 added content_hash
 /// BLOB nullable to drawers (NT-L3) and snapshot_registry +
 /// snapshot_attestations tables (NT-L3 Part 3). v6 added order_key
-/// REAL nullable to tunnels (ADR-017 §11, mission NT-L5). v5 added
+/// REAL nullable to tunnels (node-tree integrity, mission NT-L5). v5 added
 /// erasure_ledger (NT-L4). v4 replaced wing/room with parent_node_id
-/// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext (ADR-012).
+/// (NT-L2). v3 added nodes (NT-L1). v2 added keys.ext.
 /// Matches Swift `LocusKitSchema.version`.
 pub const SCHEMA_VERSION: i32 = 10;
 
@@ -159,7 +159,7 @@ fn drawers_table() -> TableDeclaration {
             ColumnDeclaration::text("id"),
             ColumnDeclaration::text("content"),
             // FK to nodes.id (the room node containing this drawer).
-            // Replaces the stored wing/room text columns (ADR-017 NT-L2).
+            // Replaces the stored wing/room text columns (node-tree integrity NT-L2).
             ColumnDeclaration::text("parent_node_id"),
             ColumnDeclaration::text("sourceFile").nullable(),
             ColumnDeclaration::int("chunkIndex").nullable(),
@@ -189,7 +189,7 @@ fn drawers_table() -> TableDeclaration {
             // axes, experimental fields) with no migration.
             ColumnDeclaration::json("ext").nullable(),
             // At-rest encryption key identifier (Mission ENC-01;
-            // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1).
+            // federation disclosure controls Appendix A.1).
             // NULL = plaintext row. Nullable so plaintext estates write
             // nothing here.
             ColumnDeclaration::text("keyID").nullable(),
@@ -305,7 +305,7 @@ fn tunnels_table() -> TableDeclaration {
             ColumnDeclaration::bitmap("operationalBitmap"),
             ColumnDeclaration::bitmap("provenanceBitmap"),
             // Fractional-index sibling ordering for Parent tunnels
-            // (ADR-017 §11, NT-L5). REAL nullable; None for non-parent kinds.
+            // (node-tree integrity, NT-L5). REAL nullable; None for non-parent kinds.
             ColumnDeclaration::float("order_key").nullable(),
             ColumnDeclaration::json("ext").nullable(),
         ],
@@ -634,8 +634,8 @@ fn source_catalog_table() -> TableDeclaration {
 // ---------------------------------------------------------------------------
 
 /// Per-node count-vector bundles for the bundle algebra
-/// (DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20,
-/// DECISION_LOCUSKIT_BUNDLE_HIERARCHY_2026-05-20). The node is the
+/// (bundle algebra and erasure,
+/// estate node containment). The node is the
 /// wing/room grouping: a room-level row (room non-empty) bundles the
 /// drawers in that room, and a wing-level row (room == "") is the
 /// merge of its rooms. `bundleKind` is "A" for the active centroid
@@ -741,7 +741,7 @@ fn recall_trace_table() -> TableDeclaration {
 // ---------------------------------------------------------------------------
 
 /// At-rest encryption key registry (Mission ENC-01;
-/// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1). Maps a
+/// federation disclosure controls Appendix A.1). Maps a
 /// stable key identifier to the wrapped key bytes. `wrapped` holds the data
 /// key wrapped by the platform keystore (Secure Enclave / TPM); the registry
 /// must never hold a raw unwrapped key.
@@ -759,7 +759,7 @@ fn recall_trace_table() -> TableDeclaration {
 ///   algorithm TEXT NOT NULL               — e.g. "AES-GCM-256"
 ///   wrapped   BLOB NOT NULL               — key bytes from platform keystore
 ///   created_at TIMESTAMP (TEXT ISO8601)   — creation instant
-///   ext       JSON (nullable)             — forward-compat slot (ADR-012, v2)
+///   ext       JSON (nullable)             — forward-compat slot (nullable entity ext slots, v2)
 pub fn keys_table() -> TableDeclaration {
     TableDeclaration {
         name: "keys".to_string(),
@@ -768,7 +768,7 @@ pub fn keys_table() -> TableDeclaration {
             ColumnDeclaration::text("algorithm"),
             ColumnDeclaration::blob("wrapped"),
             ColumnDeclaration::timestamp("created_at"),
-            // Reserve-space forward-compat slot (ADR-012). Nullable `.json`,
+            // Reserve-space forward-compat slot. Nullable `.json`,
             // present from schema v2. Reserves the slot, not a shape: future
             // key-registry metadata (rotation lineage, KMS provider tags)
             // serializes here migration-free. 1.0 writes NULL and never reads it.
@@ -783,7 +783,7 @@ pub fn keys_table() -> TableDeclaration {
 }
 
 // ---------------------------------------------------------------------------
-// nodes (ADR-017 §2)
+// nodes
 // ---------------------------------------------------------------------------
 
 /// Container nodes for the estate's containment tree. Estate
@@ -795,7 +795,7 @@ pub fn keys_table() -> TableDeclaration {
 ///
 /// HLC columns (`created_hlc`, `tombstoned_hlc`) are tagged with
 /// ColumnRole so PersistenceKit's as-of filter operates over nodes
-/// identically to drawers (ADR-017 §15).
+/// identically to drawers.
 fn nodes_table() -> TableDeclaration {
     TableDeclaration {
         name: "nodes".to_string(),
@@ -823,7 +823,7 @@ fn nodes_table() -> TableDeclaration {
 }
 
 // ---------------------------------------------------------------------------
-// erasure_ledger (ADR-017 §17, NT-L4)
+// erasure_ledger (node-tree integrity, NT-L4)
 // ---------------------------------------------------------------------------
 
 /// Append-only ledger recording THAT a drawer was erased. Mirrors
@@ -899,7 +899,7 @@ fn snapshot_attestations_table() -> TableDeclaration {
 /// rather than inline "column & mask" SQL expressions.
 fn indices() -> Vec<IndexDeclaration> {
     vec![
-        // drawers — parent_node_id replaces the wing/room indices (ADR-017 NT-L2)
+        // drawers — parent_node_id replaces the wing/room indices (node-tree integrity NT-L2)
         IndexDeclaration::new(
             "idx_drawers_parent_node_id",
             "drawers",
@@ -958,7 +958,7 @@ fn indices() -> Vec<IndexDeclaration> {
             vec!["targetWing".to_string(), "targetRoom".to_string()],
         ),
         // Parent-edge lookup: find the parent tunnel for a child drawer,
-        // and find all children of a parent drawer (ADR-017 §11, NT-L5).
+        // and find all children of a parent drawer (node-tree integrity, NT-L5).
         IndexDeclaration::new(
             "idx_tunnels_kind_source_drawer",
             "tunnels",
@@ -1060,7 +1060,7 @@ fn indices() -> Vec<IndexDeclaration> {
             "recall_trace",
             vec!["recalledAt".to_string()],
         ),
-        // nodes — ADR-017 §2: parent_id for child queries,
+        // nodes — node-tree integrity: parent_id for child queries,
         // (parent_id, lookup_name) supports I-NT-4 active-uniqueness lookup
         // (app-layer enforcement only — partial unique not DB-enforceable),
         // (depth, lookup_name) for depth-scoped resolution.
@@ -1101,7 +1101,7 @@ mod tests {
     /// drawers (CRITICAL persist-at-write fix). v8 changed
     /// nodes.merkle_root from TEXT to BLOB (NT-Q1). v7 added content_hash
     /// BLOB to drawers and snapshot tables (NT-L3). v6 added order_key to
-    /// tunnels (ADR-017 §11, NT-L5). v5 added erasure_ledger (NT-L4). v4
+    /// tunnels (node-tree integrity, NT-L5). v5 added erasure_ledger (NT-L4). v4
     /// replaced wing/room with parent_node_id (NT-L2).
     #[test]
     fn schema_version_is_ten() {
@@ -1116,7 +1116,7 @@ mod tests {
 
     /// Tables in the declared order, matching the Swift declaration.
     /// `proposals` follows `kg_facts` (both noun tables). `keys` is the
-    /// ENC-01 encryption-key registry. `nodes` is the ADR-017
+    /// ENC-01 encryption-key registry. `nodes` is the node-tree integrity
     /// containment tree. `erasure_ledger` is the NT-L4 append-only
     /// erasure record. `snapshot_registry` and `snapshot_attestations`
     /// are the NT-L3 Part 3 snapshot tables. 17 tables total.
@@ -1311,7 +1311,7 @@ mod tests {
 
     /// Keys table mirrors the Swift ENC-01 declaration column-for-column:
     /// key_id (TEXT PK), algorithm (TEXT), wrapped (BLOB), created_at (TIMESTAMP),
-    /// ext (JSON nullable — ADR-012 forward-compat slot, schema v2).
+    /// ext (JSON nullable — nullable entity ext slots forward-compat slot, schema v2).
     /// No generated columns, no bitmap columns — a plain registry. Dates are
     /// TEXT ISO8601 (Timestamp type, fleet date-storage rule). `wrapped` is BLOB
     /// so raw key bytes survive a round-trip without encoding, matching Swift's
@@ -1332,7 +1332,7 @@ mod tests {
         assert_eq!(k.columns[1].column_type, ColumnType::Text);
         assert_eq!(k.columns[2].column_type, ColumnType::Blob);
         assert_eq!(k.columns[3].column_type, ColumnType::Timestamp);
-        // ext is the nullable JSON forward-compat slot (ADR-012).
+        // ext is the nullable JSON forward-compat slot.
         assert_eq!(k.columns[4].column_type, ColumnType::Json);
         assert!(k.columns[4].nullable, "keys.ext must be nullable");
         // No row-level boolean flags, no bitmaps — the registry is opaque;

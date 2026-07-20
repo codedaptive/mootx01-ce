@@ -8,7 +8,7 @@ import Foundation
 /// `NoteIR` back out. Everything above this seam — `DrawerMapping` and
 /// `VaultBridge` — is format-agnostic and never names a concrete
 /// adapter, so a new format adds one `VaultAdapter` conformer with no
-/// change to the core (ADR-VAULTKIT-001 (c)).
+/// change to the core (Vault import/export (c)).
 ///
 /// Both write methods are `throws` because they touch the filesystem;
 /// both are pure with respect to the substrate (an adapter never

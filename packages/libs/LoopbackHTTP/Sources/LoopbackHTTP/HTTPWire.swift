@@ -8,14 +8,14 @@
 // optional Content-Length body, writes a single buffered response, and frames a
 // Server-Sent-Events stream. It is NOT a general-purpose HTTP server.
 //
-// Generalized in P1a (ADR-LOOPBACKHTTP-001, condition 1): the response is a
+// Generalized in P1a (bounded loopback HTTP, condition 1): the response is a
 // value (status + headers + body) the CALLER composes — not a closed set of
 // consumer-specific cases — and SSE is a consumer-driven `SSEStream` (this type
 // owns the `text/event-stream` framing; the consumer owns the stream source and
 // the connection lifetime). This lets both moot-mgr's dashboard read-API and the
 // resident MCP transport consume one contract.
 //
-// AUTH-FREE INVARIANT (ADR-LOOPBACKHTTP-001, condition 3): nothing here knows
+// AUTH-FREE INVARIANT (bounded loopback HTTP, condition 3): nothing here knows
 // about tokens, Origin, or OAuth. `HTTPRequest` exposes `bearerToken`/`origin`
 // as conveniences for a consumer to read; the decision to accept or reject lives
 // in the consumer, above the transport.
@@ -66,7 +66,7 @@ public struct HTTPRequest: Sendable {
     /// expose sensitive data over SSE MUST validate the `Origin` header
     /// (`request.origin`) and reject connections from unexpected origins before
     /// upgrading to an event stream. The transport does not enforce this (per
-    /// ADR-LOOPBACKHTTP-001 condition 3 — auth/origin decisions belong to the
+    /// bounded loopback HTTP condition 3 — auth/origin decisions belong to the
     /// consumer layer above this library).
     public var wantsEventStream: Bool {
         if let accept = headers["accept"], accept.contains("text/event-stream") { return true }
@@ -86,7 +86,7 @@ public struct HTTPRequest: Sendable {
     /// - Parameters:
     ///   - fd: The connected socket descriptor.
     ///   - maxHeaderBytes: Cap on the header block; a request whose headers
-    ///     exceed this is rejected (nil). Per-listener (ADR-LOOPBACKHTTP-001
+    ///     exceed this is rejected (nil). Per-listener (bounded loopback HTTP
     ///     condition 2): a dashboard control listener wants a small cap; an MCP
     ///     `tools/call` listener wants a large one.
     ///   - maxBodyBytes: Cap on the body. The body is read up to this many bytes.

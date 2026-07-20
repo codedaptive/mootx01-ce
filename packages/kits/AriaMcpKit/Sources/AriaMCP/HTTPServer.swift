@@ -377,7 +377,7 @@ public let globalSSEConcurrencyGate: ConcurrencyGate = {
 /// channel by extending `driveSSEStream` to accept a notification `AsyncStream`.
 ///
 /// SECURITY: the listener binds loopback only (`POSIXSocket.listenLoopbackTCP`
-/// hard-pins `INADDR_LOOPBACK`). Per ADR-LOOPBACKHTTP-001 there is no
+/// hard-pins `INADDR_LOOPBACK`). Per bounded loopback HTTP there is no
 /// authentication on the Community-Edition transport, but `route` enforces a
 /// CSRF/DNS-rebinding guard: a request whose `Origin` is present and non-loopback
 /// is rejected (403) before dispatch (`bearerToken` is read for logging only).
@@ -431,7 +431,7 @@ public struct HTTPServer: Sendable {
     public let port: UInt16
     /// Maximum request body. MCP `tools/call` argument bodies can exceed
     /// LoopbackHTTP's 64 KiB default, which would silently truncate — so the
-    /// transport sets a large cap (ADR-LOOPBACKHTTP-001 condition 2). Default
+    /// transport sets a large cap (bounded loopback HTTP condition 2). Default
     /// 4 MiB; `AriaMCPMain` overrides from `MOOTX01_HTTP_MAX_BODY_BYTES`.
     public let maxBodyBytes: Int
     /// Returns the latest topology snapshot payload for the given estate ID string,
@@ -818,7 +818,7 @@ public struct HTTPServer: Sendable {
         // clients (Claude Code/Desktop, Codex CLI) send no Origin at all. So:
         // accept absent/loopback Origins, reject everything else. This is a CSRF
         // boundary, NOT authentication — it stays in the consumer (here), never
-        // in LoopbackHTTP (ADR-LOOPBACKHTTP-001). Matches moot-mgr's
+        // in LoopbackHTTP. Matches moot-mgr's
         // HTTPReadAPI.isOriginAllowed. The EE OAuth layer composes above this.
         guard Self.isOriginAllowed(request.origin) else {
             return HTTPResponse(
@@ -862,7 +862,7 @@ public struct HTTPServer: Sendable {
                 return await Self.adminEstatesSnapshot(dispatcher: dispatcher)
             case "/api/lattice":
                 return await Self.latticeSnapshot(dispatcher: dispatcher)
-            // ADR-025 §3: sensitivity-grant status, physically outside the
+            // sensitivity-grant status, physically outside the
             // JSON-RPC / MCP surface so prompt-injected models cannot reach it.
             case "/api/control/grants":
                 return await Self.controlGrants(dispatcher: dispatcher)
@@ -883,7 +883,7 @@ public struct HTTPServer: Sendable {
             )
         }
 
-        // ADR-025 §3: sensitivity-grant control routes. Handled BEFORE JSON-RPC
+        // sensitivity-grant control routes. Handled BEFORE JSON-RPC
         // parsing so they are structurally unreachable from the MCP tool surface —
         // a prompt-injected model that calls tools/call cannot route here.
         if request.path == "/api/control/unlock" {
@@ -1177,7 +1177,7 @@ public struct HTTPServer: Sendable {
         }
     }
 
-    // MARK: - ADR-025 sensitivity-grant control endpoints
+    // MARK: - out-of-band sensitivity grants sensitivity-grant control endpoints
 
     /// GET /api/control/grants
     ///
@@ -1219,7 +1219,7 @@ public struct HTTPServer: Sendable {
     /// The daemon validates only that the proof timestamp is fresh (within 10
     /// seconds of its own clock) to guard against replay over a stale socket —
     /// not a cryptographic guarantee, but loopback-only exposure limits the
-    /// practical attack surface (ADR-025 §3 "fail-closed, loopback only").
+    /// practical attack surface (out-of-band sensitivity grants "fail-closed, loopback only").
     ///
     /// Request body (application/json):
     /// ```json
@@ -1263,7 +1263,7 @@ public struct HTTPServer: Sendable {
         // Freshness check: reject if proof timestamp is more than 10 seconds old
         // or more than 5 seconds in the future (clock skew allowance).
         // This is not a cryptographic proof — it is a replay-resistance measure
-        // over the local loopback socket (ADR-025 §3). The real authentication
+        // over the local loopback socket. The real authentication
         // happened on the CLI side (LA assertion on Swift, PBKDF2 on Rust).
         let now = Date()
         let nowMs = Int(now.timeIntervalSince1970 * 1000)
@@ -1291,11 +1291,11 @@ public struct HTTPServer: Sendable {
             let body = Data(
                 #"{"ok":true,"tier":"\#(tier.rawValue)","expiresAt":"\#(expiresStr)"}"#.utf8
             )
-            Logging.stderr.log("ADR-025: \(tier.rawValue) grant issued, expires \(expiresStr)")
+            Logging.stderr.log("\(tier.rawValue) grant issued, expires \(expiresStr)")
             return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: body)
         } else {
             // Should not happen — we just granted. Return ok without expiry.
-            Logging.stderr.log("ADR-025: grant issued but ledger returned nil snapshot immediately after")
+            Logging.stderr.log("grant issued but ledger returned nil snapshot immediately after")
             return HTTPResponse(
                 status: 200,
                 headers: ["Content-Type": "application/json"],
@@ -1313,7 +1313,7 @@ public struct HTTPServer: Sendable {
     /// Response body (application/json): `{"ok":true}`
     private static func controlLock(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
         await dispatcher.tooling.sensitivityUnlockLedger.lock()
-        Logging.stderr.log("ADR-025: all sensitivity grants locked")
+        Logging.stderr.log("all sensitivity grants locked")
         return HTTPResponse(
             status: 200,
             headers: ["Content-Type": "application/json"],

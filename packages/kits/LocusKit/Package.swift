@@ -18,7 +18,7 @@
 // ship in subsequent LOCI-* missions.
 //
 // cp-locuskit-report: added IntellectusLib self-report telemetry.
-// Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4
+// Repository-owned dependencies use local package paths.
 // (P2 self-report coverage). Layering: IntellectusLib has zero repo deps;
 // adding it here is strictly downstream→upstream, no cycle.
 
@@ -46,14 +46,14 @@ let package = Package(
         // path, recall, and KG-fact operation metrics via Intellectus.report(_:),
         // which is a no-op when monitoring is disabled (the default).
         // Off-path cost: one Atomic<Bool> load + branch (~1 ns). No lock on the
-        // off-path. Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+        // off-path. Repository-owned dependencies use local package paths.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
         // LatticeLib supplies QIDClosure: the pinned Q-ID taxonomic-closure
         // surface DrawerFingerprint hashes into the lattice-block
         // `qidClosureHash` slot (mission #7b). LatticeLib is a libs/ library
         // that imports no substrate kit — the edge is strictly downstream→
         // upstream (kit → lib), no cycle. Authority:
-        // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (the #7 feature requires it).
+        // in-repository dependency direction (the #7 feature requires it).
         .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
     ],
     targets: [

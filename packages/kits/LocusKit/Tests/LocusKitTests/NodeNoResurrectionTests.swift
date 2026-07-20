@@ -5,7 +5,7 @@ import PersistenceKitSQLite
 import SubstrateTypes
 @testable import LocusKit
 
-/// No-resurrection guard conformance tests (ADR-017 §5).
+/// No-resurrection guard conformance tests.
 ///
 /// These tests verify that tombstoned nodes are structurally invisible
 /// to create-on-demand resolution:

@@ -40,9 +40,9 @@
 //     attributes without a schema change. No speculative reserved
 //     columns: the json column is the single width-independent
 //     container for the unknown-future case. This `ext` slot is the
-//     governing convention recorded in ADR-012 (ext forward-compat
+//     governing convention recorded in nullable entity ext slots (ext forward-compat
 //     slot); 1.0 writes NULL and never reads it. The `keys` table
-//     gained its `ext` column in schema v2 (ADR-012), completing the
+//     gained its `ext` column in schema v2, completing the
 //     convention across every persistent LocusKit entity table.
 //
 // Bitmap reservation map (low bit = 0). Ranges marked FREE are
@@ -62,7 +62,7 @@
 //     bits 8-15  feature flags                          ASSIGNED
 //     bits 16-63 FREE (48 bits headroom)
 //
-//   drawers.provenance (Q1_DECISION_PROVENANCE_BITMAP.md)
+//   drawers.provenance
 //     bits 0-3   source type                            ASSIGNED
 //     bits 4-6   confirmation                           ASSIGNED
 //     bits 7-63  FREE (57 bits headroom)
@@ -96,7 +96,7 @@ public enum LocusKitSchema {
     /// v6 added order_key REAL nullable to tunnels (NT-L5). v5 added
     /// erasure_ledger (NT-L4). v4 replaced wing/room with
     /// parent_node_id (NT-L2). v3 added nodes (NT-L1). v2 added
-    /// keys.ext (ADR-012). No migration ladder beyond v8→v9 and
+    /// keys.ext. No migration ladder beyond v8→v9 and
     /// v9→v10 — no estate data has shipped.
     public static let version = 10
 
@@ -187,7 +187,7 @@ public enum LocusKitSchema {
             .text("id"),
             .text("content"),
             // FK to nodes.id (the room node containing this drawer).
-            // Replaces the stored wing/room text columns (ADR-017 NT-L2).
+            // Replaces the stored wing/room text columns (node-tree integrity NT-L2).
             .text("parent_node_id"),
             .text("sourceFile", nullable: true),
             .int("chunkIndex", nullable: true),
@@ -225,7 +225,7 @@ public enum LocusKitSchema {
             // (future axes, experimental fields) with no migration.
             .json("ext", nullable: true),
             // At-rest encryption key identifier (Mission ENC-01;
-            // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1).
+            // federation disclosure controls Appendix A.1).
             // NULL = plaintext row (mode 1). Non-null references
             // keys.key_id and means the content column is ciphertext under
             // that key. Nullable so plaintext estates write nothing here.
@@ -311,7 +311,7 @@ public enum LocusKitSchema {
             .bitmap("operationalBitmap"),
             .bitmap("provenanceBitmap"),
             // Fractional-index sibling ordering for .parent tunnels
-            // (ADR-017 §11, NT-L5). REAL nullable; nil for non-parent kinds.
+            // (node-tree integrity, NT-L5). REAL nullable; nil for non-parent kinds.
             .float("order_key", nullable: true),
             .json("ext", nullable: true)
         ],
@@ -401,8 +401,8 @@ public enum LocusKitSchema {
     // MARK: - node bundles (bundle-algebra count-vector aggregates)
 
     /// Per-node count-vector bundles for the bundle algebra
-    /// (DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20,
-    /// DECISION_LOCUSKIT_BUNDLE_HIERARCHY_2026-05-20). The node is the
+    /// (bundle algebra and erasure,
+    /// estate node containment). The node is the
     /// wing/room grouping: a room-level row (room non-empty) bundles
     /// the drawers in that room, and a wing-level row (room == "") is
     /// the merge of its rooms. `bundleKind` is "A" for the active
@@ -667,7 +667,7 @@ public enum LocusKitSchema {
     // MARK: - keys
     //
     // At-rest encryption key registry (Mission ENC-01;
-    // DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1). Maps a
+    // federation disclosure controls Appendix A.1). Maps a
     // stable key identifier to the wrapped key bytes. `wrapped` is intended
     // to hold the data key wrapped by the platform keystore (Secure Enclave
     // / TPM) — the registry must never hold a raw unwrapped key.
@@ -689,7 +689,7 @@ public enum LocusKitSchema {
             .text("algorithm"),     // e.g. "AES-GCM-256"
             .blob("wrapped"),       // key bytes wrapped by platform keystore
             .timestamp("created_at"),
-            // Reserve-space forward-compat slot (ADR-012). Nullable
+            // Reserve-space forward-compat slot. Nullable
             // `.json`, present from schema v2. Reserves the slot, not a
             // shape: future key-registry metadata (rotation lineage,
             // KMS provider tags) serializes here migration-free. 1.0
@@ -699,7 +699,7 @@ public enum LocusKitSchema {
         primaryKey: ["key_id"]
     )
 
-    // MARK: - nodes (ADR-017 §2)
+    // MARK: - nodes
 
     /// Container nodes for the estate's containment tree. Estate
     /// (depth 0), wing (depth 1), room (depth 2). Drawers reference
@@ -710,7 +710,7 @@ public enum LocusKitSchema {
     ///
     /// HLC columns (`created_hlc`, `tombstoned_hlc`) are tagged with
     /// ColumnRole so PersistenceKit's as-of filter operates over nodes
-    /// identically to drawers (ADR-017 §15).
+    /// identically to drawers.
     static let nodesTable = TableDeclaration(
         name: "nodes",
         columns: [
@@ -737,7 +737,7 @@ public enum LocusKitSchema {
     /// bit-range functional indices, which now name generated columns
     /// rather than inline "column & mask" SQL expressions.
     static let indices: [IndexDeclaration] = [
-        // drawers — parent_node_id replaces the wing/room indices (ADR-017 NT-L2)
+        // drawers — parent_node_id replaces the wing/room indices (node-tree integrity NT-L2)
         IndexDeclaration(name: "idx_drawers_parent_node_id", table: "drawers", columns: ["parent_node_id"]),
         IndexDeclaration(name: "idx_drawers_sourceFile", table: "drawers", columns: ["sourceFile"]),
         IndexDeclaration(name: "idx_drawers_tombstoned", table: "drawers", columns: ["tombstonedAt"]),
@@ -752,7 +752,7 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_tunnels_source", table: "tunnels", columns: ["sourceWing", "sourceRoom"]),
         IndexDeclaration(name: "idx_tunnels_target", table: "tunnels", columns: ["targetWing", "targetRoom"]),
         // Parent-edge lookup: find the parent tunnel for a child drawer,
-        // and find all children of a parent drawer (ADR-017 §11, NT-L5).
+        // and find all children of a parent drawer (node-tree integrity, NT-L5).
         IndexDeclaration(name: "idx_tunnels_kind_source_drawer", table: "tunnels", columns: ["kind_id", "sourceDrawerId"]),
         IndexDeclaration(name: "idx_tunnels_kind_target_drawer", table: "tunnels", columns: ["kind_id", "targetDrawerId"]),
         // diary
@@ -787,7 +787,7 @@ public enum LocusKitSchema {
         // recalledAt (chronological reward sweep)
         IndexDeclaration(name: "idx_recall_trace_target", table: "recall_trace", columns: ["target"]),
         IndexDeclaration(name: "idx_recall_trace_recalledAt", table: "recall_trace", columns: ["recalledAt"]),
-        // nodes — ADR-017 §2: parent_id for child queries,
+        // nodes — node-tree integrity: parent_id for child queries,
         // (parent_id, lookup_name) supports I-NT-4 active-uniqueness lookup
         // (app-layer enforcement only — partial unique not DB-enforceable),
         // (depth, lookup_name) for depth-scoped resolution.

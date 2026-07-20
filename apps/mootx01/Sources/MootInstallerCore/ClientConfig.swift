@@ -14,7 +14,7 @@
 // (useProxyBridge: true) where a stdio command entry is required. No client
 // uses bare stdio (isHeadlessStdio) — all clients have full monitoring.
 //
-// Entry transport is PER-CLIENT (see ADR-LOOPBACKHTTP-001): HTTP clients are
+// Entry transport is PER-CLIENT (see bounded loopback HTTP): HTTP clients are
 // wired to the resident daemon's loopback endpoint so concurrent clients share
 // the one running daemon + autonomic governor. Claude Desktop uses the native proxy
 // subcommand (`mootx01 proxy`) so its calls execute inside
@@ -65,7 +65,7 @@ public struct MCPClient: Sendable, Equatable {
     /// running daemon + autonomic governor) instead of a stdio `command` entry.
     /// `false` → stdio command entry (e.g. Claude Desktop, whose config schema
     /// requires a command/args entry — the proxy bridge handles daemon routing).
-    /// See ADR-LOOPBACKHTTP-001.
+    /// See bounded loopback HTTP.
     ///
     /// SECURITY AUDIT DISPOSITION — a `true` here makes the installer write the
     /// fixed unauthenticated `http://127.0.0.1:4242` into the client config
@@ -81,7 +81,7 @@ public struct MCPClient: Sendable, Equatable {
     /// For JSON HTTP clients, whether the entry carries an explicit
     /// `"type": "http"` field. Claude Code and Cline require it; Cursor infers
     /// HTTP from a bare `url`. Ignored for stdio clients and for Continue (YAML,
-    /// handled separately). See ADR-LOOPBACKHTTP-001.
+    /// handled separately). See bounded loopback HTTP.
     public let httpEntryIncludesType: Bool
 
     /// Whether this client should be wired via the native proxy subcommand
@@ -256,7 +256,7 @@ public enum MCPClients {
     ///   Antigravity     → /Applications/Antigravity.app (macOS app bundle)
     ///   Kiro            → /Applications/Kiro.app (macOS app bundle)
     public static let supported: [MCPClient] = [
-        // Transport per client (see ADR-LOOPBACKHTTP-001): clients are wired to the resident
+        // Transport per client (see bounded loopback HTTP): clients are wired to the resident
         // daemon over HTTP where their config schema accepts a local HTTP/url entry, so
         // concurrent clients share the one running daemon + autonomic governor. Claude Desktop
         // uses the native proxy subcommand (`mootx01 proxy`) — its

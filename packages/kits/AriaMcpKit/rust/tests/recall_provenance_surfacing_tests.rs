@@ -26,7 +26,7 @@
 //! These tests mirror the Swift RecallProvenanceSurfacingTests.swift and
 //! confirm parity of the recall provenance surfacing feature across both ports.
 //!
-//! Rationale: DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12 requires the ARIA
+//! Rationale: selectable embedding providers requires the ARIA
 //! surface to let callers distinguish "real semantic space" from
 //! "deterministic/structural fallback". The kit computes dense_lane_status and
 //! degraded_stages but they were silently dropped at the Rust ARIA boundary

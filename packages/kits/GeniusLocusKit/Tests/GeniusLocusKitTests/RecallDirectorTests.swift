@@ -1089,7 +1089,7 @@ struct RecallDirector004Tests {
         let d2 = try await kit.capture(handle, f2)
 
         // Feed audit log then rebuild the matrix tier.
-        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
+        // feedAuditLog removed: auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
 
@@ -1226,8 +1226,7 @@ struct RecallDirectorSafetyTests {
     /// LocusKit row but leaves the BM25 index intact — so BM25 still returns
     /// the expunged drawer's ID, making this test non-vacuous.
     ///
-    /// Frame-faithful drop (DECISION_NEEDED_QUEUEKIT_PIPELINE_RECALL_PARITY,
-    /// Bob's ruling — option 1, both ports): the frame-aware drawerIndex excludes
+    /// Frame-faithful drop: the frame-aware drawerIndex excludes
     /// the tombstoned row, so the BM25-only candidate fails the frame filter and
     /// is DROPPED from result.hits entirely — not emitted as a nil-drawer phantom.
     /// This matches the Rust `.filter(drawer_index.contains_key)` drop. The prior
@@ -2021,7 +2020,7 @@ struct RecallDirectorAdaptiveLambdaTests {
         let d2 = try await kit.capture(handle, f2)
 
         // Build and register a MatrixTier with a strong temporal signal.
-        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
+        // feedAuditLog removed: auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
         let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []
@@ -2106,7 +2105,7 @@ struct RecallDirectorAdaptiveLambdaTests {
         let d2 = try await kit.capture(handle, f2)
 
         // Feed and retrieve the audit log, then rebuild via rebuildTemporal.
-        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
+        // feedAuditLog removed: auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
 
         // rebuildTemporal is the method under test: it uses
@@ -2431,7 +2430,7 @@ struct RecallDirectorMatrixConformanceTests {
         // Read the captured drawers to extract their actual operationalBitmap values.
         // We need the raw Int64 values to seed the MatrixTier with coordinates that
         // the scorer will produce when it walks the candidate buffer.
-        // feedAuditLog removed (ADR-026): auditLog(for:) reads directly from storage.
+        // feedAuditLog removed: auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
         var matrix = MatrixTier.rebuild(from: auditLog)
         let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []

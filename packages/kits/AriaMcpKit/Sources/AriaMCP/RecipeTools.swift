@@ -158,7 +158,7 @@ enum RecipeTools {
                     ]),
                     "limit": integerSchema("Max ranked matches to return. Default 20. Omit to use the default; null is invalid."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid. Composes orthogonally with the preset — the preset ranks, the filter filters."),
-                    "wing": stringSchema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                    "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -222,7 +222,7 @@ enum RecipeTools {
                     "pool": integerSchema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit. Omit to use the default; null is invalid."),
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
                     "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
-                    "wing": stringSchema("Optional wing name to scope recall to a single wing (ADR-016). Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
+                    "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
@@ -608,7 +608,7 @@ enum RecipeTools {
             try optionalInt(args["pool"], argument: "pool"),
             argument: "pool",
             default: CognitionKit.PreciseRecall.defaultPool)
-        // ADR-016 §4: optional `wing` scopes recall to a single wing.
+        // optional `wing` scopes recall to a single wing.
         // When present, compose with the explicit filter via Filter.all so both
         // constraints apply. When absent, the filter arg stands alone.
         let baseFilter = try decodeSingleFilter(args["filter"])
@@ -674,7 +674,7 @@ enum RecipeTools {
         let preciseScores = matches.map { $0.score }
         let preciseDiscrimination = RecallDiscrimination.classify(preciseScores)
 
-        // ADR-017 §3: resolve parentNodeIds to room display names via the
+        // resolve parentNodeIds to room display names via the
         // node tree, matching moot_memory_search's resolution path.
         let estate = try await kit.estate(for: handle)
         let parentNodeIds = matches.map { $0.room }
@@ -720,7 +720,7 @@ enum RecipeTools {
         // Parity: Rust run_shaped_recall_tool uses clamp_limit with same ceiling.
         let limit = try ToolDispatcher.clampLimit(
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
-        // ADR-016 §4: optional `wing` scopes recall to a single wing.
+        // optional `wing` scopes recall to a single wing.
         // When present, compose with the explicit filter via Filter.all.
         let baseFilter = try decodeSingleFilter(args["filter"])
         let filter: LocusKit.Filter
@@ -755,7 +755,7 @@ enum RecipeTools {
         let shapedScores = out.matches.map { $0.score }
         let shapedDiscrimination = RecallDiscrimination.classify(shapedScores)
 
-        // ADR-017 §3: resolve parentNodeIds to room display names via the
+        // resolve parentNodeIds to room display names via the
         // node tree, matching moot_memory_search's resolution path.
         let estate = try await kit.estate(for: handle)
         let parentNodeIds = out.matches.map { $0.room }
@@ -791,7 +791,7 @@ enum RecipeTools {
                 message: "run_migration_benchmark requires at least one plan")
         }
 
-        // ADR-007 Decision 1 (VK-ADAPT-01): VaultKit's adapter pipeline
+        // data-movement privacy tiers (VK-ADAPT-01): VaultKit's adapter pipeline
         // owns the export-decode knowledge. Re-encode the wire entries as
         // an export document and run ExchangeAdapter → CorpusProjection —
         // the same consolidated path file import uses — instead of
@@ -1210,7 +1210,7 @@ enum RecipeTools {
         }
         lines.append(meta)
 
-        // ADR-017 §3 bridge consumer: source.room is a display name for provenance.
+        // node-tree integrity bridge consumer: source.room is a display name for provenance.
         for (idx, source) in out.sources.enumerated() {
             lines.append("")
             lines.append("source [\(idx + 1)] — room: \(source.room) | id: \(source.id)")

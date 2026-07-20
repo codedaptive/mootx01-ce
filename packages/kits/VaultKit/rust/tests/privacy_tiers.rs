@@ -1,4 +1,4 @@
-//! VK-TIER-01 — ADR-007 Decision 2 enforcement on the bulk channels.
+//! VK-TIER-01 — data-movement privacy tiers enforcement on the bulk channels.
 //!
 //! Fixture corpus (shared expectations with the Swift port's
 //! `PrivacyTierAndReceiptTests.swift`): four drawers, one per sensitivity
@@ -119,7 +119,7 @@ fn default_scope_enforces_tiers() {
     assert_eq!(report.scope, VaultExportScope::Believed);
 
     let exported = all_markdown(&vault);
-    // Elevated is Normal tier per ADR-007 — its silent exclusion by the
+    // Elevated is Normal tier per data-movement privacy tiers — its silent exclusion by the
     // evaluator's implicit `Normal` ceiling was the pre-mission defect.
     assert!(exported.contains("normal note"));
     assert!(exported.contains("elevated note"));
@@ -467,7 +467,7 @@ fn receipts_accumulate_per_run() {
     assert_eq!(receipts.len(), 2);
 }
 
-// VK-EXPORT-01 — ADR-007 Decision 2 tier-partition exercised end-to-end
+// VK-EXPORT-01 — data-movement privacy tiers tier-partition exercised end-to-end
 // through the exchange adapter write side (mirrors the Swift bridge tests in
 // ExchangeAdapterTests.swift): the bridge filters tiers and writes the
 // receipt BEFORE the adapter sees notes; the adapter serializes exactly
@@ -490,7 +490,7 @@ fn bridge_export_through_exchange_write_side_enforces_tiers_and_writes_receipt()
         .export(&handle, &out, NOW, VaultExportScope::Believed, None)
         .expect("export");
 
-    // ADR-007 Decision 2 tier partition flowed through unchanged.
+    // data-movement privacy tiers tier partition flowed through unchanged.
     assert_eq!(report.notes_exported, 2);
     assert_eq!(report.excluded_private_tier, 1);
     assert_eq!(report.excluded_secret_tier, 1);
@@ -507,7 +507,7 @@ fn bridge_export_through_exchange_write_side_enforces_tiers_and_writes_receipt()
         .expect("re-read through read side");
     assert_eq!(reread.len(), 2);
 
-    // The audit receipt landed in the estate diary (ADR-007 D2).
+    // The audit receipt landed in the estate diary.
     let receipts = coord
         .diary_entries(&handle, VaultBridge::RECEIPT_AGENT_NAME, 10)
         .expect("read receipts");

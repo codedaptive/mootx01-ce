@@ -5,7 +5,7 @@
 //! manifest; reconcile re-hashes and diffs; import delegates to `VaultBridge`.
 //! `moot_vault_job` polls a completed-job ledger (see below).
 //!
-//! ## SHA-256 sidecar manifest (ADR-VAULTKIT-002 decision b)
+//! ## SHA-256 sidecar manifest (Vault drift and candidate handling decision b)
 //!
 //! VaultKit's bridge writes no per-note content hash. The ARIA layer (this
 //! module) owns the drift stamp. After a successful `VaultBridge::export`,
@@ -25,7 +25,7 @@
 //!   - Dry-run (default, `apply` absent or `false`): re-hashes the vault,
 //!     diffs against the export manifest, and returns the candidate list.
 //!     Writes nothing. Mirrors the original "return-only seam" from
-//!     ADR-VAULTKIT-002 decision c/d, now documented as the dry-run mode.
+//!     Vault drift and candidate handling decision c/d, now documented as the dry-run mode.
 //!   - Apply mode (`apply=true`): actions the added/modified candidates by
 //!     calling `VaultBridge::import_vault` synchronously. Idempotent per
 //!     note's `stable_source_key` — a re-reconcile after a partial run is
@@ -305,7 +305,7 @@ pub fn dispatch_vault(
 /// 1. Resolve the target estate.
 /// 2. Build a `VaultBridge` with `ObsidianAdapter` and `DrawerMapping::default()`.
 /// 3. Call `bridge.export(handle, vault_path, now, scope)` to write the `.md` files.
-///    The returned `ExportReport` (note count + ADR-007 tier-exclusion counts)
+///    The returned `ExportReport` (note count + data-movement privacy tiers tier-exclusion counts)
 ///    is not consumed here — the tool's response shape is unchanged; the same
 ///    counts persist in the audit receipt the bridge writes to the estate diary.
 /// 4. Hash every `.md` under the vault root (excluding hidden dirs) with SHA-256.

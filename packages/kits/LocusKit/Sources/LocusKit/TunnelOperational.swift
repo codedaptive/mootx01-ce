@@ -46,7 +46,7 @@ public enum TunnelKind: Int, Sendable, Codable {
     case covers = 6
     case elaborates = 7
     case respondsTo = 8
-    /// Outline containment edge (ADR-017 §11). Source is the child,
+    /// Outline containment edge. Source is the child,
     /// target is the parent. One parent per child enforced in
     /// `addTunnel` (kit-level constraint, not a DB-level partial
     /// unique index). The companion `orderKey` on the
@@ -111,7 +111,7 @@ public enum TunnelStrength: Int, Sendable, Codable, Comparable {
 //   bits 6–8   TunnelOriginClass  (3 bits, contiguous, 5 cases)
 //   bits 9–11  TunnelStrength     (3 bits, scale-gapped, raws 0/2/4/6)
 //   bit  12    has_inverse        (1 bit, exclusive)
-//   bit  13    is_retired         (1 bit, exclusive — T13/ADR-021 Phase 7)
+//   bit  13    is_retired         (1 bit, exclusive — /recall-driven dreaming)
 //   bits 14–63 reserved
 // Unknown raw values fall back to the zero case of each axis,
 // matching the `Drawer` adjective accessors in `Adjectives.swift`.
@@ -153,7 +153,7 @@ public extension Tunnel {
         BitField.extractFlag(operationalBitmap, bit: 12)
     }
 
-    /// Bit 13 of `operationalBitmap` — retired flag (T13 / ADR-021 Phase 7).
+    /// Bit 13 of `operationalBitmap` — retired flag.
     ///
     /// A retired tunnel is a dreamed tunnel whose two endpoints have not been
     /// co-recalled within the OMEGA reinforcement window (14 days). Retirement
@@ -240,7 +240,7 @@ public extension Tunnel {
 
 // MARK: - Tunnel provenance accessors
 
-// Tunnel provenanceBitmap layout (T13 / ADR-021 Phase 7, low-to-high):
+// Tunnel provenanceBitmap layout (recall-driven dreaming, low-to-high):
 //   bit  0   is_dreamed   (1 bit) — set by dreaming pipeline when the
 //            tunnel was proposed by REM-ALPHA or REM-THETA (emergent channel).
 //            Cleared for declared tunnels (palace tunnels.json, vault wikilinks,
@@ -251,7 +251,7 @@ public extension Tunnel {
 //   bits 1–63 reserved for future provenance axes.
 public extension Tunnel {
 
-    /// Bit 0 of `provenanceBitmap` — dreamed-provenance flag (T13 / ADR-021 Phase 7).
+    /// Bit 0 of `provenanceBitmap` — dreamed-provenance flag.
     ///
     /// Set to 1 when this tunnel entered the substrate through the dreaming
     /// pipeline (REM-ALPHA or REM-THETA co-recall proposal, subsequently

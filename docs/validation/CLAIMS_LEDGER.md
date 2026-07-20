@@ -369,7 +369,7 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-26: Capture writes a sealed genesis event
 
-- Spec: `docs/decisions/DECISION_CAPTURE_GENESIS_EVENT_2026-05-28.md`
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md#53-projection-rules`
 - Type: invariant (2026-05-28; retired the bitmap_audit /
   provenance_audit tables)
 - Status: active in v1.0
@@ -384,7 +384,7 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-27: Single HLC maker (clock triangle)
 
-- Spec: `docs/decisions/DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md`
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md#56-hlc-generator-placement-v10`
 - Type: invariant (2026-05-28)
 - Status: active in v1.0
 - Evidence: pending. Generator semantics (monotonic send, receive
@@ -397,7 +397,7 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-28: Integrity triangle / custody mode
 
-- Spec: `docs/decisions/DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md`
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md#56-hlc-generator-placement-v10`
 - Type: invariant (2026-05-28; rejected the dual-clock model)
 - Status: active in v1.0
 - Evidence: evidenced. The first-open identity regression suite is
@@ -411,7 +411,7 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-29: Row identity is a UUID
 
-- Spec: `docs/decisions/DECISION_ROW_IDENTITY_UUID_2026-05-28.md`
+- Spec: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#31-uuid-identity-and-lineage`
 - Type: invariant (2026-05-28)
 - Status: active in v1.0
 - Evidence: pending. `requireUuid` is implemented on the gated
@@ -422,7 +422,7 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-30: Substrate ships as four packages
 
-- Spec: `docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md`
+- Spec: `docs/engineering/HARNESS_REFERENCE.md#6-the-four-package-substrate-split`
   + the 2026-05-29 addendum (SubstrateLib retained as the
   orchestration package)
 - Type: invariant (2026-05-28, restated 2026-05-29)
@@ -708,12 +708,12 @@ signals (dreaming, maintenance, vector-similarity, decay-sweep,
 byReference-validity, end-of-day-tournament) each emitting via
 `propose` without mutating state.
 
-### Decision-record claims
+### Consolidated engineering claims
 
-The 27 decision records under `docs/decisions/` each carry one
-or more claims about substrate behavior, design constraints, or
-empirical findings. Phase A's final pass walks each record and
-extracts claims into the ledger.
+The retired 1.0 design-record set contained 59 records. Its current behavioral
+claims, constraints, and empirical selections now live in the engineering
+masters linked by this ledger. Historical deliberation is not a live
+specification and is not used as an evidence pointer.
 
 ## Pending evidence (gap list)
 

@@ -44,7 +44,7 @@ import Foundation
 public struct ModelPartitionEntry: Sendable, Equatable {
     /// The model this partition covers.
     public let modelID: String
-    /// Model weights version for this partition (ADR-026: moved from
+    /// Model weights version for this partition (disk-default storage residency: moved from
     /// per-slot VectorRecordKey to partition-level). All slots in a
     /// partition share the same modelVersion.
     public let modelVersion: String

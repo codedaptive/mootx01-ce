@@ -41,7 +41,7 @@ public extension Estate {
     /// call.
     ///
     /// The row's audit history — the sealed audit events in HLC order
-    /// (DECISION_CLOCK_TRIANGLE_TIME_MODEL: the audit log is the source
+    /// (single-maker HLC and event integrity: the audit log is the source
     /// of truth; events are snapshots, not deltas). Empty until the
     /// row's first gated mutation.
     ///
@@ -65,7 +65,7 @@ public extension Estate {
     /// HLC order starting from the genesis capture event, producing
     /// the projected `(adjective, operational, provenance)` snapshot.
     /// State is keyed on HLC, not wall-clock
-    /// (DECISION_CLOCK_TRIANGLE_TIME_MODEL §11: wall-clock is not a
+    /// (single-maker HLC and event integrity: wall-clock is not a
     /// fold axis).
     ///
     /// All three bitmap columns are reconstructed from the same fold
@@ -83,7 +83,7 @@ public extension Estate {
     ///   the log).
     func bitmapState(rowID: RowID, asOf: HLC) async throws -> BitmapState {
         // State is reconstructed by folding the audit log in HLC order
-        // (DECISION_CLOCK_TRIANGLE_TIME_MODEL: state evolves in ingest-HLC
+        // (single-maker HLC and event integrity: state evolves in ingest-HLC
         // order; wall-clock is not a fold axis — §11 rejected dual-clock
         // projection). The old XOR-fold over bitmap_audit deltas is
         // replaced by AuditLogFold.projectStateAt, the substrate primitive.

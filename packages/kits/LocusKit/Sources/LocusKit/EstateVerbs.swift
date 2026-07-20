@@ -154,7 +154,7 @@ public extension Estate {
         )
 
         let now = Date()
-        // ADR-017 §7: resolve wing/room display names to node IDs via
+        // resolve wing/room display names to node IDs via
         // NodeStore's create-on-demand resolution. The root must exist
         // (seeded at provision time); wing and room nodes are created
         // if absent, returned if already present.
@@ -698,7 +698,7 @@ public extension Estate {
                 // Resolve wing/room names for the structured tier when
                 // the filter chain contains .inRoom or .inWing predicates.
                 // Drawer no longer carries wing/room as stored properties
-                // (ADR-017); the evaluator looks them up via nodeNames.
+                //; the evaluator looks them up via nodeNames.
                 // When no structured name filter is present the default
                 // empty dict is correct — the structured tier passes
                 // non-name filters (lineageID, time, lattice) without it.
@@ -1984,33 +1984,33 @@ public extension Estate {
     /// `capture` reads `frame.wing` and falls back to this value when
     /// the caller does not supply an explicit wing.
     ///
-    /// ADR-016: fixed to `defaultWingName` ("Agentic Memory"), replacing the
+    /// fixed to `defaultWingName` ("Agentic Memory"), replacing the
     /// prior dynamic `"wing_<owner>"` derivation. All captures without an
     /// explicit wing are now filed under "Agentic Memory" regardless of estate
     /// owner, giving the AI a stable home wing across every estate.
     ///
     /// Non-throwing: the name is a compile-time constant; no manifest read needed.
     private func defaultWing() -> String {
-        return defaultWingName  // "Agentic Memory" — ADR-016
+        return defaultWingName  // "Agentic Memory"
     }
 
-    // MARK: - seedWing (ADR-016 estate-init seeding primitive)
+    // MARK: - seedWing
 
     /// Seed one wing's hint memory at estate provision time.
     ///
     /// Called by GeniusLocusKit's `provision()` for each of the seven default
-    /// wings (ADR-016 §1 and §2). Files a single drawer at `AI_Charter_Hint` room
+    /// wings. Files a single drawer at `AI_Charter_Hint` room
     /// in `wingName` with the supplied `hintText` as its content.
     ///
     /// The hint memory is a NORMAL drawer: embedded using the caller-supplied
     /// embedding model, recallable like any other drawer, user-deletable.
     ///
     /// Note: `capture(_:)` also supports an explicit wing via `CaptureFrame.wing`
-    /// (ADR-016 follow-up). `seedWing` remains the estate-init path; per-drawer
+    /// (wing organization follow-up). `seedWing` remains the estate-init path; per-drawer
     /// wing targeting at capture time is the caller-opt-in path.
     ///
     /// Design:
-    /// - Wing names are nodes in the estate's containment tree (ADR-017).
+    /// - Wing names are nodes in the estate's containment tree.
     ///   NodeStore's create-on-demand resolution (§7) ensures the wing and
     ///   room nodes exist before the drawer is filed.
     /// - Idempotent: `DrawerStore.addDrawer` inserts a new row unconditionally.
@@ -2036,7 +2036,7 @@ public extension Estate {
         guard !wingName.isEmpty else {
             throw LocusKitError.invalidContent("seedWing: wingName must not be empty")
         }
-        // ADR-017 §7: resolve wing/room to node IDs via NodeStore's
+        // resolve wing/room to node IDs via NodeStore's
         // create-on-demand resolution, same as the capture verb. The
         // root must already exist (the provision caller seeds it).
         guard let root = try await nodeStore.rootNode() else {

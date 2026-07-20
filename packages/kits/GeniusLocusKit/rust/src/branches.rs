@@ -186,7 +186,7 @@ impl EstateBranch {
 
     /// Rebuild a `CaptureFrame` from a stored row, preserving all
     /// security-relevant, placement-relevant, and lifecycle-relevant fields:
-    /// content, capture channel, room, wing (ADR-016 grant/federation
+    /// content, capture channel, room, wing (wing organization grant/federation
     /// boundary), lattice anchor, author, embedding model, adjective
     /// sensitivity, content kind, the full provenance bitmap
     /// (source_type, channel, provenance_sensitivity, confirmation,
@@ -198,7 +198,7 @@ impl EstateBranch {
     /// where the node-tree walk can't resolve the wing).
     /// `room_name` is the resolved display name of the drawer's parent
     /// room node — Drawer no longer stores wing/room strings directly
-    /// (ADR-017 node tree migration). Callers resolve both from the
+    /// (the node-tree migration). Callers resolve both from the
     /// source estate's NodeStore via `resolve_node_names`.
     ///
     /// `lineageID` is intentionally NOT preserved — branch promotion is
@@ -239,7 +239,7 @@ impl EstateBranch {
         // Exportability: born-public drawers must remain public after
         // branch promotion; born-private must remain private.
         frame.exportability = row.exportability();
-        // Wing (ADR-016): the grant/federation boundary. None falls through
+        // Wing: the grant/federation boundary. None falls through
         // to DEFAULT_WING_NAME in estate_verbs so existing default-wing rows
         // are unaffected; non-default-wing rows land in the correct wing.
         frame.wing = wing_name.map(|w| w.to_owned());
@@ -251,7 +251,7 @@ impl EstateBranch {
     /// absent or lookup fails (non-fatal). wing = None means the node tree
     /// could not be walked — CaptureFrame will fall through to defaultWing().
     ///
-    /// Node topology (ADR-017): root → wing (depth 1) → room (depth 2) →
+    /// Node topology: root → wing (depth 1) → room (depth 2) →
     /// drawers. room_node.parent_id → wing_node.display_name.
     ///
     /// The NodeStore comes from the coordinator's `node_stores` registry —
@@ -433,7 +433,7 @@ impl EstateBranch {
         for id in drawer_ids {
             match rows.iter().find(|r| &r.id == id) {
                 Some(row) => {
-                    // Wing integrity (ADR-016): resolve both wing and room so
+                    // Wing integrity: resolve both wing and room so
                     // non-default-wing rows land in the correct wing rather than
                     // silently falling back to defaultWing() on merge.
                     let (wing, room) = Self::resolve_node_names(
@@ -587,8 +587,8 @@ impl EstateCoordinator {
                 .filter(|row| !branch.snapshot_ids.contains(&row.id))
                 .collect();
             // Resolve wing and room names while we still hold the branch
-            // estate reference (Drawer no longer stores either — ADR-017).
-            // Wing integrity (ADR-016): non-default-wing rows must land in
+            // estate reference (Drawer no longer stores either — node-tree integrity).
+            // Wing integrity: non-default-wing rows must land in
             // the correct wing after promotion, not silently in defaultWing().
             let resolved: Vec<(Drawer, Option<String>, String)> = rows
                 .into_iter()
@@ -992,7 +992,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Wing integrity (ADR-016) — Finding A: branch re-capture preserves wing
+    // Wing integrity — Finding A: branch re-capture preserves wing
     //
     // Before this fix `capture_frame_from` built a CaptureFrame without the
     // `wing` field, silently re-filing every derived/promoted/merged row into

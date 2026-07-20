@@ -70,9 +70,9 @@ This specification defines:
   6. Emits one canonical `AuditEvent`.
 
 - The Merkle content-integrity hash pipeline (`MerkleHash`) per
-  ADR-017 §16: domain-separated SHA-256 hashing for leaf content,
+  the node-integrity contract §16: domain-separated SHA-256 hashing for leaf content,
   interior tree nodes, and tombstones.
-- The keyed-commitment API (`KeyedCommitment`) per ADR-017 §17:
+- The keyed-commitment API (`KeyedCommitment`) per the node-integrity contract §17:
   HMAC-SHA256 commitment for expunge provenance, plus the
   `CommitmentAuditLog` G-Set CRDT for audit trail.
 
@@ -246,7 +246,7 @@ encodes a legal substrate state. Consumers that *only* mutate
 through `AuditGate.admit` cannot produce a corrupt substrate row
 no matter what they do.
 
-### § 5.4 MerkleHash pipeline (ADR-017 §16)
+### § 5.4 MerkleHash pipeline (the node-integrity contract §16)
 
 `MerkleHash` computes domain-separated SHA-256 hashes for the Merkle
 content-integrity tree. Three functions:
@@ -284,7 +284,7 @@ Invariants:
 The `canonicalLeafBytes` helper is shared with `KeyedCommitment` (§5.5)
 — one encoding, two uses.
 
-### § 5.5 KeyedCommitment API (ADR-017 §17)
+### § 5.5 KeyedCommitment API (the node-integrity contract §17)
 
 `KeyedCommitment.commit` computes an HMAC-SHA256 over the canonical leaf
 bytes (the same encoding `MerkleHash.leaf` uses) but with the COMMITMENT
@@ -414,8 +414,8 @@ conformance pin added. New invariant: vector identity-bound. Added withdraw
 verb matrix update to §2 invariants (WS2-F5).
 
 ### 1.1.0 -- 2026-06-20
-Added §5.4 MerkleHash pipeline (ADR-017 §16) and §5.5 KeyedCommitment API
-(ADR-017 §17) behavioral contracts. Extended §2 scope and §7 conformance
+Added §5.4 MerkleHash pipeline (the node-integrity contract §16) and §5.5 KeyedCommitment API
+(the node-integrity contract §17) behavioral contracts. Extended §2 scope and §7 conformance
 requirements to cover MerkleHash, KeyedCommitment, and CommitmentAuditLog.
 
 ### 1.0.0 -- 2026-06-14

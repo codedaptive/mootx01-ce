@@ -152,13 +152,13 @@ public enum UnifiedAuditVerb: String, Sendable, Codable, Hashable {
     // chain verifier and projection fold recognise these entry kinds
     // before the federation grant mechanics ship (a later mission); the
     // mechanics themselves are out of GLK-03 scope.
-    // See DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md Appendix B.
+    // See federation disclosure controls Appendix B.
     case grantIssued
     case grantRevoked
     case keyDecayed         // custody mode 3: Lagrange threshold crossed
     case physicalKeyDecayed // custody mode 4: SRAM cells decayed past threshold
 
-    // ADR-025 sensitivity-unlock verbs (2026-07-04, amended 2026-07-04).
+    // sensitivity unlock verbs (2026-07-04, amended 2026-07-04).
     // Deliberately NOT the federation grantIssued/grantRevoked above —
     // those are reserved for the federation sharing feature (Appendix B)
     // and are a different concern (custody/decay, not a human approving
@@ -166,7 +166,7 @@ public enum UnifiedAuditVerb: String, Sendable, Codable, Hashable {
     // grant, denial, and manual revocation gets one of these; there is
     // NO expiry verb — expiry is passive (the issued record carries its
     // own expiry timestamp in `afterValue`, so expiry is derivable from
-    // the log without an expiry-time writer; ADR-025 §4).
+    // the log without an expiry-time writer; out-of-band sensitivity grants).
     case sensitivityGrantIssued
     case sensitivityGrantDenied
     case sensitivityGrantRevoked

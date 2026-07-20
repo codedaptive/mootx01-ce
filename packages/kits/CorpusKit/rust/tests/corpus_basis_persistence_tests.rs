@@ -470,7 +470,7 @@ fn reingest_batch_does_not_inflate_counts() {
     );
 }
 
-// T4 (ADR-021 Decision 7): a file-backed (SQLite) estate persists the Corpus
+// a file-backed (SQLite) estate persists the Corpus
 // ingest queue to a per-estate SQLite file BESIDE the estate — not a plaintext
 // maildir. The sibling filename is `<estate-stem>.queue.sqlite` so two estates
 // in the same directory never share a queue (cross-estate isolation). Proven by:

@@ -1,4 +1,4 @@
-//! Snapshot registry and attestation primitives (ADR-017 §15).
+//! Snapshot registry and attestation primitives.
 //!
 //! A snapshot is a registry row recording WHEN (an HLC), plus
 //! attestation rows recording WHAT the Merkle roots were at that HLC.

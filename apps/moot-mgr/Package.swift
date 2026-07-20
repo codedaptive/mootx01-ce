@@ -31,7 +31,7 @@
 // Dependency hierarchy (no inversion — app depends on lib/kit, never reverse):
 //   IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (lib) → moot-mgr (app)
 //
-// Dependency additions per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28:
+// Dependency additions per in-repository dependency direction:
 //   ObserverSink, IntellectusLib, PersistenceKit/PersistenceKitSQLite are
 //   recorded as required updates in the change-impact analysis, citing
 //   MANAGER_1.0_PLAN.md §1/§4. No external (third-party) Swift dependencies.
@@ -85,19 +85,19 @@ let package = Package(
         // loopback-bind implementation instead of two drifting copies. App→lib
         // (downstream→upstream), no inversion; LoopbackHTTP has zero deps.
         // Permitted per CLAUDE.md "Package.swift / Cargo.toml edits — controlled,
-        // not forbidden"; ADR-LOOPBACKHTTP-001.
+        // not forbidden"; bounded loopback HTTP.
         .package(name: "LoopbackHTTP", path: "../../packages/libs/LoopbackHTTP"),
         // LatticeLib: FDC (Frame-Directed Classification) runtime — surfaces
         // FDC.isAvailable, FDC.dataVersion, LatticeLib.version in the dashboard
-        // Capabilities panel. ADR-006-dashboard-kit-deps.md.
+        // Capabilities panel. dashboard dependency direction.
         .package(name: "LatticeLib", path: "../../packages/libs/LatticeLib"),
         // AriaLexiconLib: the reified ARIA grammar (Noun, Verb, Adjective,
         // Acceptance matrix) — used to serve the /api/lexicon endpoint as static
-        // JSON. Zero runtime cost; compile-time enum iteration. ADR-006.
+        // JSON. Zero runtime cost; compile-time enum iteration. dashboard dependency direction.
         .package(name: "AriaLexiconLib", path: "../../packages/libs/AriaLexiconLib"),
         // CognitionKit: shippedNeuronKitCapabilities — surfaces the set of
         // shipped NeuronKit capabilities in ServerPayload.capabilities, replacing
-        // the hardcoded "pending Phase-2" dashboard row. ADR-006.
+        // the hardcoded "pending Phase-2" dashboard row. dashboard dependency direction.
         .package(name: "CognitionKit", path: "../../packages/kits/CognitionKit"),
     ],
     targets: [

@@ -10,7 +10,7 @@ One script, four modes (argv[1]):
   session     SessionStart      Orientation reminder on startup/resume/clear;
                                 continuity-recovery injection after compaction;
                                 warns (never edits) if a competing direct
-                                `mootx01` MCP entry is also wired (ADR-024 §3).
+                                `mootx01` MCP entry is also wired.
   stop        Stop              If MOOTx01 tools were used this session but no
                                 durable writeback happened, asks Claude (once)
                                 to file memories before finishing.
@@ -23,7 +23,7 @@ Design constraints, on purpose:
     ~/.claude.json to check for a competing direct MCP entry. Writes only a
     small state file in the system temp directory. NEVER writes to
     ~/.claude.json or any client config — detection is read-only, warn-mode
-    only (ADR-024 §3: "the hook never edits config").
+    only. The hook never edits client configuration.
   - Every failure path exits 0 silently. A broken hook must never break a
     session.
 
@@ -225,12 +225,12 @@ def mode_precompact(data):
 
 
 def warn_competing_direct_entry():
-    """ADR-024 §3: warn (never edit) if the user's own ~/.claude.json also
-    carries a direct `mcpServers.mootx01` entry alongside this plugin. That
+    """Warn, but never edit, if the user's own ~/.claude.json also carries a
+    direct `mcpServers.mootx01` entry alongside this plugin. That
     entry is the CLI installer's wiring (a stdio `serve`/`proxy` command, or
     an HTTP entry) written before or after the plugin was installed; either
-    order can leave two live connections to the same estate (ADR-024
-    context). Read-only: this function never writes to the config file.
+    order can leave two live connections to the same estate. Read-only: this
+    function never writes to the config file.
     Every failure path is silent — a broken hook must never break a session.
     """
     path = os.path.expanduser("~/.claude.json")

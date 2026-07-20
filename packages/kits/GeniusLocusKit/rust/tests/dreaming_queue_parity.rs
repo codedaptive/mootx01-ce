@@ -1,5 +1,5 @@
 // dreaming_queue_parity.rs — Rust parity gate for dreaming-queue enqueue-on-recall
-// (ADR-021 Phase 2b, T6).
+
 //
 // Mirrors Swift DreamingQueueTests.swift. Five scenarios:
 //   1. External-origin recall_scored surfacing ≥ 2 drawers enqueues exactly one
@@ -149,7 +149,7 @@ fn t6_r01_external_origin_recall_scored_surfacing_two_or_more_drawers_enqueues_o
 
     // Both recalls succeeded without propagating enqueue errors — the non-fatal
     // side-effect contract is met. The observable: count grew from 1 to 2.
-    // We verify count=2 via the test-seam accessor (ADR-021 §4: test-seam methods
+    // We verify count=2 via the test-seam accessor (recall-driven dreaming: test-seam methods
     // follow the same #[cfg(any(test, ...))] pattern as inject_* seams).
     let pending = coord
         .dreaming_queue_pending_count(&handle)
@@ -321,7 +321,7 @@ fn t6_r05_dreaming_job_payload_contains_surfaced_drawer_ids() {
     let surfaced_ids: std::collections::HashSet<_> = surfaced_drawers.iter().map(|d| &d.id).collect();
 
     // Verify exactly one dreaming job was enqueued, then drain to get the payload.
-    // Uses test-seam accessors (ADR-021 §4) — same pattern as inject_* seams.
+    // Uses test-seam accessors — same pattern as inject_* seams.
     let pending = coord
         .dreaming_queue_pending_count(&handle)
         .expect("dreaming queue must be mounted after external recall");

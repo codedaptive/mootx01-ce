@@ -6,7 +6,7 @@
 //! first adapter, behind a modular `VaultAdapter` seam.
 //!
 //! This crate is the Rust parallel of the Swift `VaultKit` Swift Package.
-//! Per ADR-VAULTKIT-001 (f), `NoteIR` and its companion types are the
+//! Per Vault import/export (f), `NoteIR` and its companion types are the
 //! language-neutral contract; the Rust types here are a mechanical port of
 //! the Swift V1 home. The FNV-1a 128-bit `lineage_id` derivation in
 //! `DrawerMapping` must produce bit-identical output to the Swift
@@ -17,7 +17,7 @@
 //!
 //! - `note_ir` — `NoteIR`, `Block`, `WikiLink`, `SourceRef`, `OccurredAt`,
 //!   `FactIR` (the language-neutral IR boundary contract, full-fidelity
-//!   per ADR-007 Decision 1).
+//!   per data-movement privacy tiers).
 //! - `corpus_document` — `CorpusDocument` (the versioned canonical JSON
 //!   interchange envelope; deterministic encode, strict versioned decode).
 //! - `vault_adapter` — `VaultAdapter` trait (format ⇄ `NoteIR`).
@@ -28,7 +28,7 @@
 //!   write side per VK-EXPORT-01).
 //! - `corpus_projection` — `Vec<NoteIR>` → `ExternalCorpus` so migration
 //!   verification and the fidelity benchmark are fed from the adapter
-//!   pipeline (ADR-007 Decision 1).
+//!   pipeline.
 //! - `drawer_mapping` — `DrawerMapping` + `ImportOutcome` (`NoteIR` ⇄
 //!   substrate `Drawer`/`Tunnel` via the GLK verb surface).
 //! - `vault_bridge` — `VaultBridge` + `ImportReport` (the public facade).

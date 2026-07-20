@@ -49,7 +49,7 @@ let package = Package(
         // lets the five VizGraph algorithms emit community.assignment,
         // centrality.score, nmf.factor, anomaly.flag, and edge.decayed_weight
         // signals when monitoring is enabled.
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // Authority: in-repository dependency direction.
         // Layering: IntellectusLib has zero repo deps (std only);
         // SubstrateML is downstream — no cycle introduced.
         .package(path: "../IntellectusLib"),

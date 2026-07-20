@@ -68,7 +68,7 @@ use crate::error::LocusKitError;
 use crate::filter::{Filter, Ordering, RecallFrame, StateCluster};
 use crate::provenance::Confirmation;
 
-// MARK: - Layout constants (derived from §§ 5.5–5.6 and Q1_DECISION_PROVENANCE_BITMAP.md)
+// MARK: - Packed provenance layout constants
 //
 // Mirrors the accessor decoders on `Drawer` exactly. These constants
 // are deliberately module-private — the evaluator's translation
@@ -178,7 +178,7 @@ impl BitmapEvaluator {
             let projected_for_as_of = if let Some(as_of) = frame.as_of {
                 // Fold the row's audit log up to `as_of` (HLC) — one
                 // projection returns all three column snapshots.
-                // (DECISION_CLOCK_TRIANGLE: state evolves in HLC order;
+                // (single-maker HLC and event integrity: state evolves in HLC order;
                 // wall-clock is not a fold axis.)
                 Self::reconstruct_at(&drawer.id, as_of, store)?
             } else {
@@ -208,7 +208,7 @@ impl BitmapEvaluator {
         }
 
         // 2. Structured-tier filters (room / wing / time / lattice).
-        // ADR-017: wing/room resolved from node_names map keyed by parent_node_id.
+        // wing/room resolved from node_names map keyed by parent_node_id.
         candidates.retain(|d| Self::evaluate_structured_tier(&chain, d, node_names));
 
         // 3. Content-tier filters (substring match).
@@ -253,7 +253,7 @@ impl BitmapEvaluator {
         }
         if !chain.iter().any(Self::is_bitmap_sensitivity_filter) {
             // Sensitivity default — ceiling is `Elevated`, the Normal-tier
-            // ceiling per ADR-007 Decision 2 / VK-TIER-01 mapping (Normal
+            // ceiling per data-movement privacy tiers / VK-TIER-01 mapping (Normal
             // tier = normal + elevated; restricted = Private tier; secret =
             // Secret tier). `Restricted` and `Secret` are excluded from
             // default recall. This is the no-claims posture: § 9.2
@@ -563,7 +563,7 @@ impl BitmapEvaluator {
         drawer: &Drawer,
         node_names: &BTreeMap<String, (String, String)>,
     ) -> bool {
-        // ADR-017: wing/room display names resolved from the node tree via
+        // wing/room display names resolved from the node tree via
         // the caller-supplied node_names map, keyed by drawer.parent_node_id.
         let names = node_names.get(&drawer.parent_node_id);
         let empty = (String::new(), String::new());
@@ -760,7 +760,7 @@ impl BitmapEvaluator {
                 });
             }
             Ordering::ByRoomAsc => {
-                // ADR-017: room display name resolved from node_names map.
+                // room display name resolved from node_names map.
                 let empty = String::new();
                 drawers.sort_by(|a, b| {
                     let r_a = node_names.get(&a.parent_node_id).map(|n| &n.1).unwrap_or(&empty);
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn tier_boundary_default_ceiling_elevated_included_restricted_excluded() {
-        // Per ADR-007 Decision 2 / VK-TIER-01: the Normal-tier ceiling is
+        // Per data-movement privacy tiers / VK-TIER-01: the Normal-tier ceiling is
         // `Elevated`. `Restricted` is Private tier and must be absent from
         // default (no-claims) recall. Mirrors Swift
         // `tierBoundary_defaultCeiling_elevatedIncluded_restrictedExcluded`.
@@ -1182,7 +1182,7 @@ mod tests {
     #[test]
     fn in_room_and_in_wing_filters() {
         let store = make_store();
-        // ADR-017: room/wing resolved from node_names map, not drawer fields.
+        // room/wing resolved from node_names map, not drawer fields.
         // Give each drawer a distinct parent_node_id so they map to different rooms.
         let mut k = base_drawer("k");
         k.parent_node_id = "parent-k".to_string();
@@ -1284,7 +1284,7 @@ mod tests {
         let store = make_store();
         let mut d = base_drawer("d");
         d.content = "pasta recipe".to_string();
-        // ADR-017: room resolved from node_names map via parent_node_id.
+        // room resolved from node_names map via parent_node_id.
         let mut node_names = BTreeMap::new();
         node_names.insert("test-parent".to_string(), ("wing".to_string(), "kitchen".to_string()));
         let frame = make_frame(vec![Filter::All(vec![
@@ -1299,7 +1299,7 @@ mod tests {
     fn any_combinator_short_circuits_on_first_match() {
         let store = make_store();
         let d = base_drawer("d");
-        // ADR-017: room resolved from node_names map via parent_node_id.
+        // room resolved from node_names map via parent_node_id.
         let mut node_names = BTreeMap::new();
         node_names.insert("test-parent".to_string(), ("wing".to_string(), "study".to_string()));
         let frame = make_frame(vec![Filter::Any(vec![
@@ -1428,7 +1428,7 @@ mod tests {
     #[test]
     fn order_by_room_asc() {
         let store = make_store();
-        // ADR-017: room resolved from node_names map, not drawer fields.
+        // room resolved from node_names map, not drawer fields.
         // Give each drawer a distinct parent_node_id so they map to different rooms.
         let mut k = base_drawer("k");
         k.parent_node_id = "parent-k".to_string();
@@ -1519,7 +1519,7 @@ mod tests {
     fn order_by_room_asc_tiebreak_by_id() {
         let store = make_store();
         // Two drawers in the same room — "a-id" < "z-id".
-        // ADR-017: room resolved from node_names map, not drawer.room field.
+        // room resolved from node_names map, not drawer.room field.
         let d_z = base_drawer("z-id");
         let d_a = base_drawer("a-id");
         // Both drawers share the same parent_node_id (from base_drawer),
