@@ -5,6 +5,19 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## v1.0.34 — 2026-07-20
+
+Documentation-authority and packaging-integrity release. No core runtime
+behavior changes.
+
+- **Engineering documentation consolidated.** The durable rules from all 59
+  legacy 1.0 decision records now live in the topic-based engineering masters.
+  The live 1.0 decision directory is retired, and source comments state their
+  behavior and invariants directly instead of depending on historical records.
+- **Embedded plugin bundle synchronized.** The Swift and Rust installer copies
+  now carry the current 10-host plugin package, its per-user update-check cache
+  behavior, and consistent 1.0.34 product/plugin version stamps.
+
 ## v1.0.33 — 2026-07-16
 
 Release-engineering release. No user-facing code changes — Windows release
