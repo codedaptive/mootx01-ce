@@ -23,8 +23,7 @@ At session end, file durable decisions with `moot_file_memory`, stable triples
 with `moot_file_fact`, relationships with `moot_link_memories`, corrections
 with trust/update tools, and continuity with `moot_write_journal`.
 
-Imports and captures index themselves. After a bulk import, poll `moot_drain_status` until encoding settles.
-before relying on association or matrix-aware recall.
+Imports and captures index themselves. After a bulk import, poll `moot_drain_status` until encoding settles before relying on association or matrix-aware recall.
 
 If MOOTx01 is unavailable, say so plainly and answer only from current context.
 Never claim recalled knowledge without querying the substrate.
