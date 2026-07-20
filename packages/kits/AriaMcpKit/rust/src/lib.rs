@@ -37,7 +37,7 @@
 //! Surface: interface (Tier 1–5 + maintenance/admin), 1 federation, recipe, lens, and vault tools.
 //! Vault tools are backed by `vault-kit` (`VaultBridge`, `ObsidianAdapter`,
 //! `DrawerMapping`). The ARIA layer owns the SHA-256 sidecar manifest for drift
-//! detection (ADR-VAULTKIT-002 decision b).
+//! detection (Vault drift and candidate handling decision b).
 //! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
 
 pub mod build_serial;
@@ -45,11 +45,11 @@ pub mod coaching_engine;
 pub mod dataset_tools;
 pub mod dispatch;
 pub mod dispatcher;
-// monitoring_control: injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+// monitoring_control: injection seam for daemon telemetry monitoring state.
 // AriaMcpKit defines the trait; serve host injects the StatsStore-backed impl.
 pub mod monitoring_control;
 // dream_runner: one-shot REM-ALPHA dreaming cycle for `mootx01 dream` (T10,
-// ADR-021 Phase 5). Provides `run_one_dreaming_cycle` so the `dream` subcommand
+// recall-driven dreaming). Provides `run_one_dreaming_cycle` so the `dream` subcommand
 // in `mootx01` can invoke dreaming without a direct dep on neuron-kit.
 pub mod dream_runner;
 pub mod estate_registry;

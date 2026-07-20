@@ -423,7 +423,7 @@ public struct SensitivityFilteredStorage: Storage {
     /// `.elevated` — normal and elevated rows sync freely; restricted and secret rows
     /// are gated by this wrapper.
     ///
-    /// This default preserves the ADR-025 privacy guarantee: content at the two locked
+    /// This default preserves the privacy guarantee: content at the two locked
     /// tiers (restricted / secret) does not cross device boundaries via iCloud sync
     /// unless the operator explicitly raises the ceiling.
     public let syncCeiling: AdjectiveSensitivity

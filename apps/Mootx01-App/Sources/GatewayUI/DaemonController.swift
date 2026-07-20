@@ -4,7 +4,7 @@ import AriaMCP
 
 // MARK: - DaemonController  (macOS only — drives the app-managed daemon)
 //
-// ADR-005's macOS "extra": the app spawns the real, untouched server binary
+// The macOS host: the app spawns the real, untouched server binary
 // and supervises it. This controller wraps `ManagedServerProcess` for the
 // Engine tab — start/stop, a liveness check (tools/list), and the handoff
 // hook. iOS/iPadOS have no analog (no persistent subprocess), so this whole
@@ -24,7 +24,7 @@ public final class DaemonController {
     /// Optional estate to hand the daemon (SQLite). Empty = the daemon runs
     /// its own ephemeral in-memory estate. A real handoff of the *app's* live
     /// estate additionally requires closing it in-app first (one host per
-    /// estate, ADR-005) — that clean close() is an engine follow-up; this
+    /// estate, the app/engine boundary) — that clean close is an engine follow-up; this
     /// panel demonstrates spawning + supervising a daemon on its own estate.
     public var handoffDatabasePath: String = ""
 

@@ -1,5 +1,5 @@
 //! commands/unlock.rs — `mootx01 unlock <private|secret>` and `mootx01 lock`
-//! (Rust/Linux/Windows vertical, ADR-025 §2).
+//! (Rust/Linux/Windows vertical, out-of-band sensitivity grants).
 //!
 //! ## unlock
 //!
@@ -7,13 +7,13 @@
 //! prompts the user for the tier-specific password with echo disabled, verifies
 //! via PBKDF2-HMAC-SHA256, and on success POSTs a grant request to the daemon's
 //! `/api/control/unlock` endpoint. The daemon issues the in-RAM grant with the
-//! TTL defined by ADR-025 §1 (restricted: next local midnight; secret: 30 min).
+//! TTL defined by out-of-band sensitivity grants (restricted: next local midnight; secret: 30 min).
 //!
 //! ## lock
 //!
 //! POSTs to the daemon's `/api/control/lock` endpoint to clear all grants
-//! immediately. No identity verification is required (ADR-025 §1: "locking
-//! reduces the user's own access and is always permitted").
+//! immediately. Locking reduces the user's own access, so it does not require
+//! identity verification.
 //!
 //! ## Platform note
 //!

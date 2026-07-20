@@ -18,7 +18,7 @@
 //   The default ceiling (`.elevated`) means normal and elevated rows sync
 //   freely; restricted and secret rows are gated by SensitivityFilteredStorage.
 //
-//   This satisfies the ADR-025 privacy guarantee at the sync boundary:
+//   This enforces the privacy guarantee at the sync boundary:
 //   restricted and secret content does not cross device boundaries via
 //   iCloud without the operator explicitly raising the ceiling.
 //

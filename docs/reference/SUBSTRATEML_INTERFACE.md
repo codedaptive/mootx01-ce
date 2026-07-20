@@ -2283,7 +2283,7 @@ Internal callers were updated to pass `"", 0.0`.
 ### Dependency change
 
 `Package.swift` — `IntellectusLib` added to SubstrateML target and test
-target dependencies (authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+target dependencies (authority: `the package-dependency rule`).
 
 `Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.
 
@@ -2303,7 +2303,7 @@ as module-level pub const in Rust) to the existing signature block.
 Additive (audit): documented six previously-undocumented Swift source files and
 their Rust counterparts, all present in the shipped package but missing from the
 interface doc. Updated file count (29 → 39) and purpose paragraph. Added § 2
-sections for: `SVDResult`/`JacobiSVD` (ADR-010 Decision B Jacobi SVD for LSA);
+sections for: `SVDResult`/`JacobiSVD` (Jacobi SVD for LSA);
 `DistillationFeatureType`/`TypedDecayWeighting` (Ds2 type-specific decay);
 `DeltaType`/`DeltaAnalysis`/`DeltaFeatureExtractor` (Ds1 Stage 2.5 trajectory
 analysis); `ExtractedFeature`/`DistillationSNR`/`FeatureGraph`/`DistillationScorer`

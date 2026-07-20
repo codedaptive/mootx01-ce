@@ -16,8 +16,8 @@ public extension GeniusLocusKit {
     /// with a current log snapshot (NEURONKIT_SPEC § 3.5 audit-chain integrity
     /// monitor).
     ///
-    /// Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): no longer calls `feedAuditLog`
-    /// (the N+1 per-drawer query pattern, now removed). Delegates to
+    /// This no longer calls `feedAuditLog` (the removed N+1 per-drawer query
+    /// pattern). It delegates to
     /// `auditLog(for:)` which issues a single bounded SQL query against
     /// `_storagekit_audit`. The returned `UnifiedAuditLog` is a value copy
     /// safe to use outside the actor.

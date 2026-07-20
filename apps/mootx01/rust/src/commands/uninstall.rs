@@ -334,7 +334,7 @@ fn remove_from_config(client: &McpClient, config: &Path) -> Result<bool, merge::
             if !config.exists() {
                 return Ok(false);
             }
-            // ADR-024 §4: ownership-aware — a Foreign entry (env override,
+            // ownership-aware — a Foreign entry (env override,
             // e.g. a development rig) is reported and left untouched rather
             // than silently removed.
             match merge::remove_from_json_config_owned(config, client.json_servers_key(), SERVER_NAME)? {
@@ -478,7 +478,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    // ADR-024 §4: uninstall must not silently remove a non-default (dev-rig)
+    // uninstall must not silently remove a non-default (dev-rig)
     // entry — it is reported and left untouched. An ours-default entry is
     // still removed as before (regression guard).
 

@@ -100,7 +100,7 @@ public struct ResourceCostEstimate: Sendable, Equatable, Codable {
 }
 
 /// Concurrency policy from architecture spec §7.8.5. GLK-04 dispatches
-/// a single serial lane per estate (per DECISION_STANDING_SIGNAL_SCHEDULER
+/// a single serial lane per estate (per serialized standing-signal scheduling
 /// _2026-05-21), so the only behavioural difference today is whether
 /// repeated fires of the same signal coalesce. `single` is the
 /// production default; `bounded` is accepted but treated as `single`

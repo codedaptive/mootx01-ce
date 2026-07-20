@@ -9,7 +9,7 @@ import PersistenceKitInMemory
 /// GRT-01 — Grant object and custody modes 1–2 surface.
 ///
 /// Eight tests against the federation grant surface per
-/// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §6 and Appendix B.1/B.2.
+/// federation disclosure controls and Appendix B.1/B.2.
 /// Custody modes 1 (mediated) and 2 (handed-over) are production at
 /// v1.0; mode 3 (decay-derived) is gated behind IP clearance; mode 4
 /// (time-aging) is a shippable software decay policy enforced on the

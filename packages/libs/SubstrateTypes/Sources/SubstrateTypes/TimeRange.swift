@@ -1,6 +1,6 @@
 // TimeRange.swift
 //
-// Phase 6.8 (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.6)
+
 // Moved from SubstrateLib/Sources/SubstrateLib/MomentSummary.swift.
 //
 // Closed HLC interval [start, end]. Pure data; the MomentSummary

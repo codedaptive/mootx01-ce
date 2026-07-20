@@ -1,6 +1,6 @@
 // BlockMask.swift
 //
-// Phase 4.1 (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.4.1)
+
 //
 // Typed bitmask over the four Fingerprint256 blocks. Replaces the
 // `Set<Int>` parameter on Hamming.distance / Hamming.similarity

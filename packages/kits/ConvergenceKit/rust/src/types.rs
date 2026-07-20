@@ -303,7 +303,7 @@ pub enum SyncError {
     // exist in the Rust error enum so error-handling code and tests can
     // reference the vocabulary without depending on CloudKit.
     //
-    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+    // Slot and fence epoch identify the writer across concurrent devices.
 
     /// This device's (slot, epoch) pair has been superseded: the slot was
     /// evicted and its epoch bumped while the device was inactive. Raised

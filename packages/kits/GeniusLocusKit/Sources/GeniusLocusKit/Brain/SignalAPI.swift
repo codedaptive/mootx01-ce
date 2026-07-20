@@ -137,7 +137,7 @@ public extension GeniusLocusKit {
     /// Lazy-mint the per-estate scheduler. The GLK actor isolates
     /// access to `schedulers`, so first-call concurrency is safe.
     ///
-    /// T5 (ADR-021 Decision 7): selects the queue backend based on the
+    /// selects the queue backend based on the
     /// estate's storage configuration:
     ///   - SQLite estate → the shared encrypted `queue.sqlite` sibling,
     ///     derived via `EstateConfiguration.queueSibling("queue.sqlite")`.

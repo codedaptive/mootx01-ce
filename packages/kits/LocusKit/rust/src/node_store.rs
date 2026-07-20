@@ -1,4 +1,4 @@
-//! Storage for the estate's containment tree (ADR-017 §§1–8).
+//! Storage for the estate's containment tree.
 //!
 //! NodeStore is the Rust parallel of the Swift `NodeStore` actor.
 //! It wraps PersistenceKit's `Storage` and provides:
@@ -109,7 +109,7 @@ impl NodeStore {
 
         // No active match — create.
         let id = Uuid::new_v4();
-        let now_ms = now; // `now` is already epoch-ms (ADR-023)
+        let now_ms = now; // `now` is already epoch-ms
         let created_hlc = self.hlc.lock().unwrap().send(now_ms);
 
         // Schema declares id/parent_id as text columns, so store as
@@ -161,7 +161,7 @@ impl NodeStore {
 
         let lookup_name = Node::normalize_lookup_name(display_name);
         let id = Uuid::new_v4();
-        let now_ms = now; // `now` is already epoch-ms (ADR-023)
+        let now_ms = now; // `now` is already epoch-ms
         let created_hlc = self.hlc.lock().unwrap().send(now_ms);
 
         let mut values = BTreeMap::new();
@@ -272,7 +272,7 @@ impl NodeStore {
             return Ok(Some(node));
         }
 
-        let now_ms = now; // `now` is already epoch-ms (ADR-023)
+        let now_ms = now; // `now` is already epoch-ms
         let t_hlc = self.hlc.lock().unwrap().send(now_ms);
 
         let mut values = BTreeMap::new();
@@ -711,7 +711,7 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------
-    // No-resurrection guard (ADR-017 §5)
+    // No-resurrection guard
     // -----------------------------------------------------------------
 
     #[test]

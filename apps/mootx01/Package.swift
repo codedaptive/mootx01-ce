@@ -43,10 +43,10 @@ let package = Package(
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
         // NeuronKit: DreamCommand constructs DreamingDaemon + seam adapters
         // (EstateDreamingReader, EstateDreamingSink, EstateManifestDreamingPolicyStore)
-        // to run one REM-ALPHA dreaming cycle. Required by T10 (ADR-021 Phase 5).
+        // to run one REM-ALPHA dreaming cycle. Required for the dreaming path.
         .package(name: "NeuronKit", path: "../../packages/kits/NeuronKit"),
         // QueueKit: DreamCommand acquires the "dreaming" DrainLease to prevent
-        // concurrent dreamers for the same estate. Required by T10 (ADR-021 Phase 5).
+        // concurrent dreamers for the same estate. Required for the dreaming path.
         .package(name: "QueueKit", path: "../../packages/kits/QueueKit"),
     ],
     targets: [
@@ -67,7 +67,7 @@ let package = Package(
                 // AriaResident: the shared resident-daemon runner (HTTP transport +
                 // autonomic governor + telemetry/monitoring gate). `mootx01 serve` calls it
                 // when resident (MOOTX01_HTTP_PORT/--http) so the product binary and
-                // aria-mcp run identical resident wiring (ADR-LOOPBACKHTTP-001).
+                // aria-mcp run identical resident wiring.
                 .product(name: "AriaResident", package: "AriaMcpKit"),
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),

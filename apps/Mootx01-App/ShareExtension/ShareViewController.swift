@@ -10,7 +10,7 @@ import AppKit
 // MARK: - ShareViewController  (A4b — the Share-Sheet capture target)
 //
 // UI-less by design: harvest the shared text/URL, spool it, complete. The
-// extension process NEVER opens the estate (one estate, one host — ADR-005);
+// The extension process never opens the estate; one estate has one host.
 // it writes one JSON file into the app-group ShareInbox and the host app
 // drains that spool through CaptureSink at launch, foregrounding, and each
 // mining tick. Content shared while the host is not running is simply

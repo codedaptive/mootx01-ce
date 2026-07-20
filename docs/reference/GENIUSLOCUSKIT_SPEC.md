@@ -176,7 +176,7 @@ lane.
 
 **I-5 (single serial lane per estate):** each estate's scheduler drains
 its queue through a single drainer at `.serializable` isolation
-(DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21). Exactly one job is
+(the standing-signal scheduling contract). Exactly one job is
 claimed at a time, FIFO; two signals' emissions against one estate never
 interleave at job grain. There is no per-signal queue and no
 cross-estate lane.
@@ -264,9 +264,9 @@ versions (LocusKit + VectorKit + CorpusKit/BundleStore). It is derived from
 the live component declarations in both ports, so it can never drift from the
 components, and any component bump forces the composite to advance — which the
 replication schema gate relies on (a source/destination version mismatch is
-rejected). After the ADR-012 `ext` pre-provisioning that sum is 7. The `grants`
+rejected). After the the forward-compatible ext-slot contract `ext` pre-provisioning that sum is 7. The `grants`
 table and every persistent entity table across the composed kits carry the
-ADR-012 nullable `.json` `ext` forward-compat slot, inert in 1.0.
+the forward-compatible ext-slot contract nullable `.json` `ext` forward-compat slot, inert in 1.0.
 
 ## § 5 — Behavioral contracts
 
@@ -544,10 +544,10 @@ record, drops any mode-1 vault key (cryptographic clawback), and appends
 a `grantRevoked` entry. Both append HLC-stamped entries that sort cleanly
 and cannot break the chain.
 
-**B-8a (ADR-025 sensitivity-unlock audit seam):** Four public methods on
+**B-8a (sensitivity-unlock audit seam):** Four public methods on
 `GeniusLocusKit` (`SensitivityAuditVerbs.swift`) provide the audit write
 surface that `AriaMcpKit`'s `SensitivityGrantLedger` / `ToolDispatcher`
-calls into for ADR-025 §4 compliance ("every grant, every denial, every
+calls into to satisfy the "every grant, every denial, every
 manual revocation, and every read served under an active grant is written
 to the UnifiedAuditLog with tier, grant id, and timestamps"):
 - `recordSensitivityGrantIssued(_:tier:grantID:expiresAt:now:)` — a
@@ -581,7 +581,7 @@ against `_storagekit_audit`, bridges the rows to `UnifiedAuditEntry`
 values, and folds them into a freshly-built `UnifiedAuditLog` via
 `add(contentsOf:)` (idempotent by content hash, I-11) — replacing the
 former N+1-per-drawer `feedAuditLog(for:)` walk into a persistent
-registry (ADR025-AUDITLOG-GOVERNOR Bug 1 fix / ADR-026); the returned
+registry under the storage-residency rule; the returned
 log is a value-type snapshot, not accumulated state. `AuditProjectionFold.project`
 folds the HLC-ordered log into per-row state; the asOf variant folds only
 entries at or before a cutoff HLC. `AuditRecovery.rebuild` replays the
@@ -633,7 +633,7 @@ recall per corpus entry and returns `.identical` only when every entry
 is recallable, else `.diverged` with the missing entries. `runParallel`
 returns a `ParallelRunHandle` that routes captures per
 `ParallelCaptureMode` until `stop()`. Mass data ingestion is NOT a GLK
-verb: per ADR-007 Decision 1 the flat import verb is
+verb: per the data-movement contract Decision 1 the flat import verb is
 retired, superseded by VaultKit's adapter → bridge path
 (`ExchangeAdapter` → `VaultBridge.importVault`), which provides
 idempotent re-import, link reconstruction, and per-entry provenance
@@ -899,7 +899,7 @@ standing-signal set.
 
 The six v1 standing signals documented in §11.2 of the architecture spec have
 been extended to ten — `TemporalCausalitySignal` (7), `DistillationSignal`
-(8, DG5), `TrainingSignal` (9, ADR-018 F1), and `ContradictionScoutSignal`
+(8, DG5), `TrainingSignal` (9, the brain-layer ownership contract F1), and `ContradictionScoutSignal`
 (10, the contradiction hunter's background half):
 
 | # | Signal name | Cadence | Purpose |
@@ -932,7 +932,7 @@ tunnel including withdrawn ones).
 
 Cookbook §6.4 specified a weekly T-matrix update on the dreaming daemon pass.
 This was superseded with hourly cadence.
-See `docs/decisions/DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md`.
+See `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#54-matrix-t`.
 
 ### MatrixTier additions
 
@@ -954,7 +954,7 @@ function lives in SubstrateML (single source of truth for conformance vectors).
 GeniusLocusKit/Package.swift gained a dependency on SubstrateML to access
 `TemporalCausalityFold`. Layering is correct: GeniusLocusKit (composition) →
 SubstrateML (algorithms). Justified by
-DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+the temporal-matrix cadence.
 
 ## § RAG_WIRING — RAG and vector seams
 
@@ -1629,7 +1629,7 @@ per-signal dense float signals fuse:
   `PreferenceStore`; with a cache registered, steering those keys moves the live
   columns identically cross-port. Absent a cache the columns read 0.0 on both
   ports — the correct fresh-estate behaviour. The cache PRODUCERS remain absent
-  in both ports.) See ADR-011 D-4 for the full cross-port boundary.
+  in both ports.) See the recall-shape contract D-4 for the full cross-port boundary.
 
 A `nil` shape — or an all-1.0 shape — is BYTE-IDENTICAL to the prior uniform
 fusion in EVERY lane including `unionBest` (the back-compat contract, proven by
@@ -1844,8 +1844,8 @@ had made NeuronKit's audit-chain integrity monitor's alerting
 structurally unreachable (a rejected entry never reaches
 `AuditChainVerifier`, so the chain walk always reported vacuously
 valid). I-11 and B-9/B-10 updated to describe the current ingress path
-(`auditLog(for:)` / `currentAuditLog(in:)`, ADR025-AUDITLOG-GOVERNOR /
-ADR-026 — the doc previously named the removed `feedAuditLog(for:)`
+(`auditLog(for:)` / `currentAuditLog(in:)`, under the storage-residency rule —
+the doc previously named the removed `feedAuditLog(for:)`
 per-drawer walk) and the new counter. See NEURONKIT_SPEC.md § 9 C-4/C-12.
 
 ### 1.11.0 -- 2026-06-28
@@ -1923,7 +1923,7 @@ site. Parity: `GeniusLocusKit/Intake/EncodeIntake.swift` (Swift) and
 Additive (FINDING-1b cluster C): `tombstonedLineageIDs(_ handle:)` added to the GLK verb surface (B-1-compliant passthrough for VaultKit). Delegates to `Estate.tombstonedLineageIDs()` → `DrawerStore.tombstonedLineageIDs()`, which issues a storage-tier `.isNotNull(tombstonedAt)` predicate and reads `lineageID` from raw rows without a full decode — deliberately avoiding timestamp-format parsing, which is sensitive to the format difference between `ISO8601DateFormatter()` (no fractional seconds, used by `expungeGated`) and `LKISO8601` (fractional seconds). Returns `Set<UUID>` of cluster C lineage IDs. Parity: `EstateCoordinator::tombstoned_lineage_ids` in the Rust port.
 
 ### 1.7.0 -- 2026-06-17
-Added invariant I-16 (composite schema version = sum of component versions, derived in both ports): after the ADR-012 `ext` pre-provisioning the composite is 7 (LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2). The `grants` table gained the ADR-012 `ext` forward-compat slot. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
+Added invariant I-16 (composite schema version = sum of component versions, derived in both ports): after the the forward-compatible ext-slot contract `ext` pre-provisioning the composite is 7 (LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2). The `grants` table gained the the forward-compatible ext-slot contract `ext` forward-compat slot. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.6.1 -- 2026-06-17
 Clarification (parity-sweep-batch #12): noted that the Rust port now mirrors the
@@ -1948,7 +1948,7 @@ engine already honours. Conformance: `RecallShapePresetTests.swift` /
 
 ### 1.5.0 -- 2026-06-17
 Brought the Rust port to parity on the `GraphCache` / `PreferenceStore` recall-
-consumption surface (mission glk-recall-graphpref-rust, closing ADR-011 D-4). The
+consumption surface (mission glk-recall-graphpref-rust, closing the recall-shape contract D-4). The
 `graph` / `preference` columns are no longer hardcoded `0.0` in Rust: the port now
 defines the two traits (`Send + Sync`, per-drawer score lookup),
 `register_graph_cache` / `register_preference_store`, and per-candidate
@@ -1967,7 +1967,7 @@ adaptive `RecallWeights` budget. The combined matrix term is split so
 `coOccurrence`/`temporal` steer independently; the neutral path preserves the
 exact pre-steer expression so a nil/all-ones shape is byte-identical (proven both
 ports). The matrix keys are a no-op under `.raw`/`.rrf`. The stale "Matrix/graph/
-preference columns are NOT shape-steerable" statement is removed. See ADR-011.
+preference columns are NOT shape-steerable" statement is removed. See the recall-shape contract.
 ADDITIVE (MINOR).
 
 ### 1.3.0 -- 2026-06-17

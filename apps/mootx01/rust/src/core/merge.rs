@@ -188,7 +188,7 @@ pub fn remove_from_json_config(
 }
 
 // ---------------------------------------------------------------------------
-// Ownership-aware JSON removal (ADR-024 §3/§4)
+// Ownership-aware JSON removal
 // ---------------------------------------------------------------------------
 
 /// Outcome of an ownership-aware JSON removal. Rust twin of Swift's
@@ -201,13 +201,13 @@ pub enum JsonOwnershipOutcome {
     NotPresent,
     /// An entry existed and classified `OursDefault`; removed.
     Removed,
-    /// An entry existed but classified `Foreign` (ADR-024 §4) — left
+    /// An entry existed but classified `Foreign` — left
     /// untouched. Carries the reason and the config path for reporting.
     RetainedForeign { reason: String, path: PathBuf },
 }
 
 /// Read-only classification + conditional removal of a JSON
-/// `<servers_key>.<server_name>` entry, per ADR-024 §4. Parse failures are
+/// `<servers_key>.<server_name>` entry. Parse failures are
 /// treated the same as "absent" (`NotPresent`) — mirrors Swift's
 /// `try?`-based forgiving decode, since a malformed config is not something
 /// this installer wrote and should not surface as a hard error from a
@@ -228,7 +228,7 @@ fn classify_existing_json_entry(
     Some(crate::core::mcp_ownership::classify(entry))
 }
 
-/// ADR-024 §3: install-time dedupe when a client's plugin already owns the
+/// install-time dedupe when a client's plugin already owns the
 /// connection. Skips writing a competing direct entry (the caller never
 /// calls `merge_into_json_config` in that case) and cleans up any direct
 /// entry a PRIOR install wrote — but only when `OursDefault`.
@@ -250,7 +250,7 @@ pub fn dedupe_direct_entry(
     }
 }
 
-/// ADR-024 §4: ownership-aware uninstall removal for JSON-format clients. A
+/// ownership-aware uninstall removal for JSON-format clients. A
 /// `Foreign` entry (env override — e.g. a development rig) is reported and
 /// left untouched rather than silently removed; only an `OursDefault` entry
 /// is actually removed from the file.

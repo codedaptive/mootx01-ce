@@ -72,7 +72,7 @@ pub fn run(db: Option<String>) -> ExitCode {
     // The dreaming lease file lives beside queue.sqlite (parent directory of the
     // estate SQLite file), keyed by "dreaming". This is fully independent of the
     // encode drain lease ("encode.drain.lease") — both can be held simultaneously
-    // per ADR-021 Decision 7 (per-(estate, stream) leases).
+    // Drain leases are scoped by estate and stream.
     let estate_path = Path::new(&estate);
     let lease_dir = match estate_path.parent() {
         Some(d) => d.to_path_buf(),

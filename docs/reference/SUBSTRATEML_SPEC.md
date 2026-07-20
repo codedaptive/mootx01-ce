@@ -11,7 +11,7 @@ relates_to:
   - docs/reference/SUBSTRATETYPES_SPEC.md
   - docs/reference/SUBSTRATEKERNEL_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
-  - docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md
+  - docs/engineering/HARNESS_REFERENCE.md#6-the-four-package-substrate-split
   - docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md
 purpose: |
   SubstrateML is Layer 3 of the four-package substrate: the
@@ -187,7 +187,7 @@ This specification defines:
   cyclic Jacobi SVD for real matrices (m × n, m ≥ n). Used by
   CorpusKit's `LsaProvider` for LSA distributional embeddings. Bit-identical
   across ports via fixed sweep count, fixed tournament column-pair order,
-  scalar Float32, and a canonical sign convention. ADR-010 Decision B.
+  scalar Float32, and a canonical sign convention.
 - **Distillation pipeline** (`DistillationFeatureType`, `TypedDecayWeighting`,
   `DeltaType`, `DeltaAnalysis`, `DeltaFeatureExtractor`, `ExtractedFeature`,
   `DistillationSNR`, `FeatureGraph`, `DistillationScorer`, `DistillationInput`,
@@ -734,7 +734,7 @@ Output is deterministic and identical across Swift and Rust.
 Pure fold engine for the T (temporal causality) matrix population pass
 (cookbook §6.4). Invoked by `MatrixTier.rebuildTemporal(from:)` in
 GeniusLocusKit on each hourly TemporalCausalitySignal fire per
-DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+the temporal-matrix cadence.
 
 **Input types** (local to SubstrateML — GeniusLocusKit maps at the kit
 boundary to avoid a circular import):
@@ -1120,7 +1120,7 @@ All other algorithms: one sample unconditionally when monitoring is enabled.
 ### § 8.4 Dependency
 
 IntellectusLib is a declared dependency of SubstrateML
-(authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+(authority: `the package-dependency rule`).
 The VizGraph emit is the only use of IntellectusLib in this package.
 
 ### § 8.5 Conformance

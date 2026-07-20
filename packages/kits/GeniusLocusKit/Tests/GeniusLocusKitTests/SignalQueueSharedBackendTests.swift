@@ -1,6 +1,6 @@
 // SignalQueueSharedBackendTests.swift
 //
-// T5 (ADR-021 Decision 7): tests that the standing-signal scheduler uses the
+// tests that the standing-signal scheduler uses the
 // shared per-estate queue.sqlite under stream_id = "signals".
 //
 // Contract verified here:

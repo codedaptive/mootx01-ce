@@ -1,6 +1,6 @@
 // DreamRunnerTests.swift
 //
-// Integration tests for the DreamCommand / dreaming cycle path (T10, ADR-021 Phase 5).
+// Integration tests for the DreamCommand / dreaming cycle path.
 //
 // Tests drive the REAL dream path — GeniusLocusKit.mountDreamingQueue +
 // dreamingQueuePendingCount + DreamingDaemon.triggerDreamingCycle — with the
@@ -16,7 +16,7 @@
 //
 // Every test that opens a SQLite estate uses its own per-estate subdirectory.
 // The queue sibling is per-estate by name (`<stem>.queue.sqlite`, derived by
-// `queueSibling` — ADR-021 Decision 7), so estates never share a queue even in
+// `queueSibling` — recall-driven dreaming), so estates never share a queue even in
 // a flat directory; the per-estate subdir is belt-and-suspenders isolation that
 // also keeps the estate DB files apart.
 //
@@ -280,7 +280,7 @@ struct DreamRunnerTests {
     /// is a cheap file-existence check: true when the estate's PER-ESTATE queue
     /// sibling (`<stem>.queue.sqlite`, derived by `queueSibling`) exists beside
     /// the estate file, false when it does not. Serve uses this on startup and
-    /// on exit to decide whether to spawn a detached dreamer (T10 / ADR-021
+    /// on exit to decide whether to spawn a detached dreamer (recall-driven dreaming
     /// Phase 5). There is no Swift twin of the helper; this test mirrors the
     /// per-estate derivation directly.
     @Test func serveDreamingQueueHasPendingPredicate() async throws {

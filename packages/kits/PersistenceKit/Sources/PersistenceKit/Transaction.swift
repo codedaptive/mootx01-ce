@@ -1,6 +1,6 @@
 // Transaction.swift
 //
-// Transaction protocol per DECISION_STORAGEKIT_DESIGN §5 (Q3).
+// Transaction protocol per the PersistenceKit storage surface (Q3).
 // Read-committed default. No nested transactions. No savepoints
 // in v1.0.
 

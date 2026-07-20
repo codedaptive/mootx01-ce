@@ -28,7 +28,7 @@ import Foundation
 /// single-sample wall-clock noise crossed the line on ~1 run in 3. 75 ms
 /// keeps a meaningful budget (~1.7× typical) while making the assertion
 /// non-flaky. The Theorem 5 verdict is recorded in
-/// `DECISION_VEC05_THEOREM5_2026-05-18.md`.
+/// the measured capture-path budget.
 ///
 /// All four suites run unconditionally. The end-to-end suite drives a
 /// `FloatSimHashEmbeddingProvider` with a deterministic inference
@@ -38,7 +38,7 @@ import Foundation
 /// CorpusKitProviders and carry their own tokenizers and projection seeds.
 ///
 /// **Methodology.** Per the substrate's measurement protocol
-/// (`docs/decisions/METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md`)
+/// (METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md)
 /// every benchmark captures min / median / P99 over the full sample
 /// and asserts on P99 rather than on average. Timing uses
 /// `ContinuousClock.now` (monotonic, not subject to wall-clock jumps)
@@ -271,7 +271,7 @@ struct CapturePathBenchmarkTests {
 
     /// Asserts the kernel selected by the substrate dispatcher matches
     /// the architecture this binary is running on. Per
-    /// `DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md` the dispatcher
+    /// `the measured production kernel table` the dispatcher
     /// is: aarch64 → `SimdKernel`, else → `ScalarKernel`. Those types
     /// are not reachable from this test target (see suite doc above);
     /// the assertion uses `#if arch(arm64)` plus a behavioural sanity
@@ -299,7 +299,7 @@ struct CapturePathBenchmarkTests {
 
         #if arch(arm64)
         // Production aarch64 dispatch is documented to return
-        // `SimdKernel` (DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md,
+        // `SimdKernel` (the measured production kernel table,
         // "Dispatcher decision logic on aarch64"). The behavioural
         // check above verifies the SIMD popcount path; the comment
         // documents the type identity we cannot reach through the

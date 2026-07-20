@@ -3,7 +3,7 @@
 // Persistence for the bundle-algebra count-vector aggregates, one per
 // node (wing/room) per bundle kind, in the node_bundles table. The
 // per-row drawer fingerprint is never stored; only these aggregates
-// are (DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20 and the storage
+// are (bundle algebra and erasure and the storage
 // discussion of 2026-05-20). The store reads and writes the count-
 // vector; the BundleMaterializer computes it.
 

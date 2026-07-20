@@ -1,11 +1,10 @@
 // DreamingThetaTests.swift
 //
-// Conformance tests for the REM-THETA daily consolidation cycle (T11,
-// ADR-021 Phase 6, NEURONKIT_SPEC § 12.6 THETA row) and the shared
+// Conformance tests for the REM-THETA daily consolidation cycle and the shared
 // REM-cycle dispatch table.
 //
 // Covers:
-//   D5a — THETA fires on a 24 h cadence.
+//   THETA fires on a 24-hour cadence.
 //   D5c — last-run timestamp persists across restarts; stdio estates
 //          do not re-consolidate within the same 24 h window.
 //   §12.5 — decide() math is unchanged for THETA (same EWC++ path as
@@ -110,7 +109,7 @@ struct RemCycleTableTests {
         #expect(remCycleTable[2].name == "REM-BETA")
     }
 
-    @Test("remCycleTable fourth entry is OMEGA (T13 / ADR-021 Phase 7)")
+    @Test("remCycleTable fourth entry is OMEGA")
     func fourthEntryIsOmega() {
         #expect(remCycleTable[3].kind == .omega)
         #expect(remCycleTable[3].name == "REM-OMEGA")
@@ -563,7 +562,7 @@ struct RunCycleForKindTests {
 
 // MARK: - Daemon state persistence round-trip
 
-@Suite("REM-THETA state persistence (F6 / ADR-020 extension, T11)")
+@Suite("REM-THETA state persistence (manifest-backed daemon state extension)")
 struct ThetaStatePersistenceTests {
 
     @Test("DreamingDaemonState round-trips lastThetaRunAt through InMemoryDreamingPolicyStore")

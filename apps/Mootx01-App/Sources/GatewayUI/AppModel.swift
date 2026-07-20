@@ -82,7 +82,7 @@ public final class AppModel {
         guard probe.text.contains("found 0") else { return }
         let samples = [
             ("MOOTx01 projects ARIA onto Apple surfaces — Siri, Spotlight, Shortcuts.", "gateway"),
-            ("The engine is the clean, Rust-mirrored server; the app envelopes it (ADR-005).", "architecture"),
+            ("The engine is the clean, Rust-mirrored server; the app envelopes it.", "architecture"),
             ("One estate, one host: embedded server-in-app, or a handed-off daemon.", "architecture"),
         ]
         for (content, room) in samples {

@@ -4,7 +4,7 @@
 //! Persistence for the bundle-algebra count-vector aggregates: one row
 //! per (wing, room, bundleKind) in the `node_bundles` table. The
 //! per-row drawer fingerprint is never stored; only these aggregates
-//! are (DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20). The store
+//! are. The store
 //! reads and writes the count-vector; the `BundleMaterializer` computes
 //! it from the active drawer set.
 //!

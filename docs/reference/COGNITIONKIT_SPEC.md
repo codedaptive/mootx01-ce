@@ -346,7 +346,7 @@ lens is given in parentheses where it differs from the prose name.
   subject+predicate key. "What explicitly contradicts what."
   Catalog-only registration; the implementing recipe is forthcoming.
 
-### Diffusion node layer (ADR-DIFFUSION-001) — per-memory motion
+### Diffusion node layer — per-memory motion
 
 - **Node motion** (`node_motion`) — read a single memory's recent audit
   history and surface its mutation volatility (decay-weighted recent-churn

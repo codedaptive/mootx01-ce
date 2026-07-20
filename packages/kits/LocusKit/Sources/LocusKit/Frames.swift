@@ -105,7 +105,7 @@ public struct CaptureFrame: Sendable {
     /// that is immediately visible to `filter:exportable` recall
     /// (DEBT-1 write-side fix).
     public var exportability: AdjectiveExportability
-    /// Wing to file the drawer into (ADR-016). When `nil` the capture
+    /// Wing to file the drawer into. When `nil` the capture
     /// verb uses `defaultWing()` — "Agentic Memory" — preserving
     /// byte-identical behaviour for all existing callers. Supply a
     /// non-nil value to route a drawer into a specific wing at capture

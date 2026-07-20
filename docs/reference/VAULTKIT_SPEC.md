@@ -8,11 +8,8 @@ spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
   - docs/reference/VAULTKIT_INTERFACE.md
-  - docs/decisions/ADR-VAULTKIT-001.md
-  - docs/decisions/ADR-VAULTKIT-002.md
-  - docs/decisions/ADR-007-data-movement-trust-and-version-ladder.md
-  - docs/decisions/DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md
-  - docs/decisions/DECISION_PALACE_PUMP_CANONICAL_2026-06-12.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#6-vault-and-data-movement
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#7-federation-cryptography-and-sensitivity
   - docs/reference/GENIUSLOCUSKIT_INTERFACE.md
   - docs/reference/LOCUSKIT_INTERFACE.md
 purpose: |

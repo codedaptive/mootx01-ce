@@ -26,7 +26,7 @@ SyncMeta | Apple-only CloudKit sync-metadata type in CloudKit target
 # framework with no Rust equivalent; the Rust port uses scalar/BLAS/NEON.
 MetalKernel | Apple-only Metal GPU kernel; Rust uses scalar/BLAS/NEON path
 
-# --- ADR-017 architectural idiom differences ---
+# --- node-tree integrity architectural idiom differences ---
 # Swift organizes schema declarations via protocol/enum types (Ops, Schema,
 # Tables); Rust handles the same concern via inline module structure. These
 # are not contract surface — they are language-specific patterns for the same

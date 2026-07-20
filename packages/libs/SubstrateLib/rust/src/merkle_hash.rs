@@ -1,6 +1,6 @@
 // merkle_hash.rs
 //
-// Public hash pipeline for the Merkle content-integrity tree (ADR-017 §16).
+// Public hash pipeline for the Merkle content-integrity tree.
 //
 // Three functions: leaf (drawer content + vectors), interior (subtree of
 // children), tombstone (expunged payload). All three use
@@ -24,7 +24,7 @@ use substrate_types::merkle_root::MerkleRoot;
 ///
 /// substrate-lib cannot depend on vectorkit (dependency inversion), so
 /// this struct captures the fields needed to serialize vectors into the
-/// canonical byte format per ADR-017 §16.
+/// canonical byte format under the node-tree model.
 #[derive(Debug, Clone)]
 pub struct MerkleVectorInput {
     /// The embedding model identifier, used for sort ordering.
@@ -43,7 +43,7 @@ impl MerkleVectorInput {
 
 /// Hash a drawer's content and vectors into a ContentHash.
 ///
-/// Canonical byte format per ADR-017 §16 v2:
+/// Canonical byte format using the canonical node format:
 /// - MerkleDomain::LEAF (0x00)
 /// - drawer id: 16 bytes big-endian UUID
 /// - content: u64 BE length prefix + raw caller-supplied bytes
@@ -119,7 +119,7 @@ pub fn tombstone(drawer_id: &[u8; 16]) -> ContentHash {
     ContentHash::new(sha256::hash(&payload))
 }
 
-/// Build the canonical leaf payload bytes per ADR-017 §16 v2.
+/// Build the canonical leaf payload bytes using the canonical node format.
 ///
 /// Shared between `leaf` (domain tag 0x00) and
 /// `keyed_commitment::commit` (domain tag 0x03) — one encoding,
@@ -169,7 +169,7 @@ pub(crate) fn canonical_leaf_bytes(
         // Float payload: u32 BE float count, then IEEE-754 LE floats.
         bytes.extend_from_slice(&(v.floats.len() as u32).to_be_bytes());
         for &f in &v.floats {
-            // IEEE-754 single-precision, little-endian per ADR-017 §16.
+            // IEEE-754 single-precision, little-endian under the node-tree model.
             bytes.extend_from_slice(&f.to_le_bytes());
         }
     }

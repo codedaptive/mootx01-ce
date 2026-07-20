@@ -54,3 +54,10 @@ EE repo before the sync; everything else is in CE.
 - The plugin version always equals the product version
 - Marketplace *submissions* are one-time per marketplace; publishing the
   plugin repo happens every release
+- EE is the private superset and source of SHARED publication. SHARED paths are
+  byte-identical after sync; EDITION-SURFACE paths are owned independently;
+  EE-ONLY paths never enter CE.
+- A supported CE fix is backported to EE before the next shared publication.
+- Before a stable promotion, adopted branch-local design records are folded
+  into the engineering/reference authority and live code/docs stop citing the
+  record paths. Unshipped proposals stay explicitly non-contractual.

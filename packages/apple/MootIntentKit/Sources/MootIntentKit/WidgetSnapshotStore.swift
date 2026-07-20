@@ -3,7 +3,7 @@ import Foundation
 // MARK: - WidgetSnapshot / WidgetSnapshotStore  (recall widget projection)
 //
 // The recall widget runs in its own process and must never open the estate
-// (one estate, one host — ADR-005). Like Core Spotlight donation, the widget
+// (one estate, one host). Like Core Spotlight donation, the widget
 // renders a DERIVED PROJECTION, never canonical storage: the app writes this
 // snapshot from a publicOnly recall (`filter:exportable` — the same §6.2
 // export gate Spotlight uses), so only explicitly public drawers can appear

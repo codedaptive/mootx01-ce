@@ -273,7 +273,7 @@ public extension Estate {
         )
 
         let now = Date()
-        // Use the caller-supplied wing or the estate default (ADR-016 constant).
+        // Use the caller-supplied wing or the estate default.
         // `defaultWingName` is a module-level public constant in DefaultWings.swift;
         // `defaultWing()` (the same value) is private to EstateVerbs.swift and is
         // not accessible from this extension file.

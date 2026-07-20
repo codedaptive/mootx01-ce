@@ -179,7 +179,7 @@ public struct Vocabulary: Sendable {
         // bits transparently. Sealed (bit 27) is deliberately NOT in
         // this slot — its set-once integrity-triangle lifecycle is
         // owned by the Clock Triangle decision and lands with the
-        // dreaming-pass wiring (see DECISION_CAPTURE_GENESIS_EVENT
+        // dreaming-pass wiring (see gated capture genesis
         // 2026-05-28, line 92).
         FieldSlot(column: .adjective, shift: 24, width: 3, label: "flags"),
     ]

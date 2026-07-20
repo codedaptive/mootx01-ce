@@ -1,9 +1,7 @@
 // SensitivityAuditVerbs.swift
 //
-// ADR-025 sensitivity unlock, §4 (Audit): "Every grant, every denial,
-// every manual revocation (`mootx01 lock`), and every read served under an
-// active grant is written to the UnifiedAuditLog with tier, grant id, and
-// timestamps."
+// Every sensitivity grant, denial, manual revocation, and read served under
+// an active grant is written to UnifiedAuditLog with tier, grant id, and time.
 //
 // Mirrors the FUP-C / GLK-03 grant-lifecycle audit seam in VerbSurface.swift
 // (`issueGrant`/`revokeGrant`/`appendGrantAuditEntry`) — same
@@ -34,7 +32,7 @@
 // rather than one generic "append any entry" method, so the audit log's
 // integrity guarantees are not weakened by an unconstrained append surface.
 //
-// No expiry verb: expiry is passive per ADR-025 §4 — the issued record's
+// No expiry verb: expiry is passive per out-of-band sensitivity grants — the issued record's
 // `afterValue` carries its own expiry timestamp (epoch-ms, `.integer`), so
 // expiry is derivable from the log without a dedicated expiry-time writer.
 
@@ -175,7 +173,7 @@ extension GeniusLocusKit {
     /// fieldPath (tier token) so the entry is self-describing.
     ///
     /// Awaited, not fire-and-forget: this is a security-relevant write
-    /// path (ADR-025 §4 requires every grant, denial, revocation, and
+    /// path (out-of-band sensitivity grants requires every grant, denial, revocation, and
     /// read-under-grant to land in the audit log), so a failed durable
     /// append must surface to the caller as a thrown error rather than
     /// being silently dropped by an unstructured `Task { try? … }`. The

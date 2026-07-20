@@ -362,7 +362,7 @@ public struct MissionContext: Sendable, Codable, Hashable {
 
 ### `DrainLease`
 
-A stream-keyed heartbeat-TTL drain lease (SPEC I-3, ADR-021 Decision 7, T2).
+A stream-keyed heartbeat-TTL drain lease (SPEC I-3, T2).
 Guarantees exactly one drainer per `(estate, stream)` pair. Each stream has an
 independent lease file (`<dir>/<stream>.drain.lease`), so two streams can be
 held concurrently. TTL 15 s; heartbeat cadence 5 s; write-then-re-read race
@@ -525,7 +525,7 @@ extension QueueKit {
     @discardableResult
     public func send(batch jobs: [Job]) async throws -> Int
     public func drain() async throws -> [(job: Job, sessionID: SessionID)]   // SPEC B-2 (all streams)
-    public func drain(stream: StreamID) async throws -> [(job: Job, sessionID: SessionID)]  // ADR-021 D7 — stream-scoped claim
+    public func drain(stream: StreamID) async throws -> [(job: Job, sessionID: SessionID)]  // the recall-driven dreaming contract D7 — stream-scoped claim
     public func watch(handler: @escaping @Sendable (Job, SessionID) async throws -> Void) async throws  // SPEC B-3
     // watch() (FilesystemBackend + PersistenceKitBackend, both ports): drains
     // pre-existing jobs FIRST (before awaiting events), then on each wake drains
@@ -545,13 +545,13 @@ extension QueueKit {
     public func reply(batch completions: [(jobID: JobID, status: ObservationStatus)]) async throws -> Int
     public func inFlight() async throws -> [Job]                    // SPEC B-5
     public func pendingCount() async throws -> Int                  // depth probe (new/ frontier, all streams)
-    public func pendingCount(stream: StreamID) async throws -> Int  // ADR-021 D7 — per-stream depth probe
+    public func pendingCount(stream: StreamID) async throws -> Int  // the recall-driven dreaming contract D7 — per-stream depth probe
     public func completed(streamID: StreamID? = nil) async throws -> [Job]   // SPEC B-5
     public func awaitDrain(pollInterval: Duration = .milliseconds(20),
                            timeout: Duration = .seconds(30)) async throws    // await-empty latch
     public func awaitDrain(stream: StreamID,
                            pollInterval: Duration = .milliseconds(20),
-                           timeout: Duration = .seconds(30)) async throws    // stream-scoped twin (ADR-021 D7)
+                           timeout: Duration = .seconds(30)) async throws    // stream-scoped twin
     /// Reset every stale in-flight ("cur") job for `stream` back to "new" so
     /// the next drain(stream:) re-claims them. Returns the count reclaimed.
     /// Gate: call ONLY immediately after DrainLease.tryAcquire succeeds for
@@ -598,7 +598,7 @@ is observed on the next poll. This is the signal bulk callers (importer,
 gauntlet) use to know a batch of enqueued work has finished.
 
 `awaitDrain(stream:pollInterval:timeout:)` is the stream-scoped twin
-(ADR-021 Decision 7 / T1): on a shared per-estate queue a single drainer
+(the recall-driven dreaming contract Decision 7 / T1): on a shared per-estate queue a single drainer
 processes only its own stream, so the barrier counts
 `pendingCount(stream:)` plus the stream's slice of `inFlight()` and never
 blocks on other streams' jobs (the post-T4/T6 encode-stall). Same
@@ -1106,7 +1106,7 @@ the shared per-estate queue) corrupted its sample array (SIGSEGV in
 always-guarded `Mutex<QueueLatencyWindow>`.
 
 ### 1.3.1 -- 2026-06-25
-Additive `DrainLease` (ADR-021 Decision 7, T2): a stream-keyed heartbeat-TTL
+Additive `DrainLease` (the recall-driven dreaming contract Decision 7, T2): a stream-keyed heartbeat-TTL
 drain lease (Swift `DrainLease` / Rust `drain_lease::DrainLease`) so multiple
 consumers sharing one per-estate queue each hold an independent
 per-(estate, stream) lease (`<dir>/<stream>.drain.lease`) — exactly one drainer
@@ -1116,7 +1116,7 @@ with write-then-re-read race resolution. Filesystem form (SQLite-first); the
 Postgres-estate DB-backed lease is deferred. Consumers rewire onto it in T4/T5.
 
 ### 1.3.0 -- 2026-06-25
-Additive stream-scoped drain (ADR-021 Decision 7, T1). Interface gains
+Additive stream-scoped drain (the recall-driven dreaming contract Decision 7, T1). Interface gains
 `drain(stream:)` and `pendingCount(stream:)`; the `QueueBackend` protocol/trait
 gains `drainAvailable(stream:)`/`pendingCount(stream:)` (Rust:
 `drain_available_for_stream`/`pending_count_for_stream`) with defaults that

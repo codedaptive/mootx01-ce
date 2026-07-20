@@ -33,7 +33,7 @@ pub struct InvertedIndexStore {
 
 struct StoreState {
     conn: Connection,
-    // ADR-026: term_freqs and doc_lengths are NO LONGER held in RAM.
+    // term_freqs and doc_lengths are NO LONGER held in RAM.
     // They are loaded from SQLite on demand inside `top_k`/`build_index`
     // and discarded after the InvertedIndex is built. This eliminates
     // ~500MB of HashMap heap on a 50K-memory estate.
@@ -46,7 +46,7 @@ impl InvertedIndexStore {
     /// Create and open a store backed by the given SQLite connection.
     ///
     /// Creates tables if absent (idempotent) and loads existing state.
-    /// ADR-026: open validates tables are accessible but does NOT load
+    /// open validates tables are accessible but does NOT load
     /// term frequencies or document lengths into RAM. They are loaded
     /// from SQLite on demand inside `top_k` and discarded after the
     /// InvertedIndex is built.
@@ -179,7 +179,7 @@ impl InvertedIndexStore {
         for t in tokens { *tf.entry(t.clone()).or_insert(0) += 1; }
         let doc_len = tokens.len();
 
-        // Persist to SQLite only — no in-memory mirror (ADR-026).
+        // Persist to SQLite only — no in-memory mirror.
         for (term, freq) in &tf {
             state.conn.execute(
                 "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq) VALUES (?1, ?2, ?3)",
@@ -286,7 +286,7 @@ impl InvertedIndexStore {
     /// `(item_id, term→freq, doc_len)`; re-delivered items replace their prior
     /// entries (same semantics as `index`'s delete-then-insert for an item that
     /// was already present). Clears the cached BM25 index once for the batch.
-    /// ADR-026: no in-memory mirror. The durable tables (written by
+    /// no in-memory mirror. The durable tables (written by
     /// merge_shard) are the source of truth; just invalidate the cache.
     pub fn fold_postings(
         &self,
@@ -311,7 +311,7 @@ impl InvertedIndexStore {
         Ok(())
     }
 
-    // ADR-026: delete_mem removed — no in-memory mirror to update.
+    // delete_mem removed — no in-memory mirror to update.
 
     // MARK: — Index building
 
@@ -324,7 +324,7 @@ impl InvertedIndexStore {
     /// calls it: the hot query path is `top_k`, which reads the store's
     /// parameter-keyed cache by reference under the lock instead of
     /// extracting an owned copy.
-    /// ADR-026: loads term_freqs and doc_lengths from SQLite into transient
+    /// loads term_freqs and doc_lengths from SQLite into transient
     /// locals, builds the index, and discards the raw dictionaries.
     pub fn build_index(&self, parameters: BM25Parameters) -> (InvertedIndex, HashMap<String, u32>) {
         let state = self.state.lock().expect("mutex poisoned");
@@ -346,7 +346,7 @@ impl InvertedIndexStore {
     /// called `build_index`, which rebuilt the whole `InvertedIndex` from
     /// the raw term-frequency table on every query — O(vocabulary ×
     /// documents) per query instead of O(query terms × matching postings).
-    /// ADR-026: loads term_freqs and doc_lengths from SQLite when cache
+    /// loads term_freqs and doc_lengths from SQLite when cache
     /// is stale, builds the InvertedIndex, caches THAT, discards the
     /// raw dictionaries. No persistent in-memory mirror.
     pub fn top_k(
@@ -391,7 +391,7 @@ impl InvertedIndexStore {
         Ok(())
     }
 
-    /// Number of indexed documents. Queries the durable table (ADR-026).
+    /// Number of indexed documents. Queries the durable table.
     pub fn document_count(&self) -> usize {
         let state = self.state.lock().expect("mutex poisoned");
         state.conn

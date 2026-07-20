@@ -5,7 +5,7 @@ import SubstrateTypes   // HLCGenerator
 // MARK: - ShareInboxSpool  (A4b — the Share Extension ↔ host handoff)
 //
 // The Share Extension runs in its own process. One estate has one owning
-// host (ADR-005), so the extension must never open the estate — instead it
+// host, so the extension must never open the estate — instead it
 // spools each shared item, and the HOST app drains the spool through
 // CaptureSink using its live bridge (launch, foregrounding, and the mining
 // tick are the drain moments).

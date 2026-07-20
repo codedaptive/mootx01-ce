@@ -1,6 +1,6 @@
 // DreamingQueueTests.swift
 //
-// T6 (ADR-021 Phase 2b): tests that the external-origin scored recall enqueues a
+// tests that the external-origin scored recall enqueues a
 // DreamingItem onto the per-estate "dreaming" stream when ≥ 2 distinct drawers
 // are surfaced. Mirrors the four scenarios from the mission spec.
 //
@@ -159,7 +159,7 @@ private func openDreamingQueue(storage: SQLiteStorage) async throws -> QueueKit 
 
 // MARK: - Suite
 
-@Suite("T6 — dreaming queue enqueue-on-recall (ADR-021 Phase 2b)")
+@Suite(" — dreaming queue enqueue-on-recall")
 struct DreamingQueueTests {
 
     // MARK: - 1. External-origin recall surfacing ≥ 2 drawers enqueues exactly one job
@@ -276,7 +276,7 @@ struct DreamingQueueTests {
 
         // Open the same queue.sqlite and drain only the "encode" stream.
         // The dreaming job must remain pending afterward — encode and dreaming
-        // are discriminated by stream_id per ADR-021 Decision 7.
+        // are discriminated by stream_id.
         let queue = try await openDreamingQueue(storage: storage)
 
         // Draining "encode" must find nothing (no encode jobs were enqueued).

@@ -1,6 +1,6 @@
 // AsOfCoordinate.swift
 //
-// Temporal query parameter for as-of reads per ADR-017 §15–§17.
+// Temporal query parameter for as-of reads under the node-tree model.
 // AsOfCoordinate is a discriminated value — `.present` means
 // "the live state now" and `.asOf(hlc)` means "the state at
 // this HLC." This prevents the class of bug where a caller

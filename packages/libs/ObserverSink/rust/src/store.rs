@@ -1208,7 +1208,7 @@ impl StatsStore {
     ///   blobCount (Int?)             | blob_count: Option<usize>
     ///   capturedAt (Date → epoch)    | captured_at_secs: i64
     ///
-    /// Note: vectorCount / vector_count was removed from StorageStats in ADR-008.
+    /// Note: vectorCount / vector_count was removed from StorageStats in VectorKit-owned vector search.
     /// The field no longer exists on either the Swift or Rust struct.
     ///
     /// Returns `Some(StorageStats)` on success, or `None` if the backend does not

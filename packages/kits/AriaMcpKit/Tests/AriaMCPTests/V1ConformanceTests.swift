@@ -188,7 +188,7 @@ struct V1ConformanceTests {
         //   Dataset (MX-TAB-7): moot_file_dataset, moot_dataset_query, moot_dataset_stats.
         // Prior 66 = interface + federation + recipe + lens + vault + maintenance:
         //   20th interface = moot_memory_get (Tier 1, fetch-drawer-by-ID).
-        //   23rd lens = moot_lens_node_motion (diffusion node-layer lens, ADR-DIFFUSION-001).
+        //   23rd lens = moot_lens_node_motion (diffusion node-layer lens).
         //   11th recipe = moot_recollect (DA1 distillation).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
         #expect(tools.count == 71, "tools/list must return exactly 71 tools; got \(tools.count)")

@@ -74,7 +74,7 @@ impl ReductionCandidate {
             match &hit.drawer {
                 Some(d) => {
                     let state = State::from_raw(d.adjective_bitmap & 0x3F);
-                    // Drawer no longer carries wing/room display names (ADR-017
+                    // Drawer no longer carries wing/room display names (node-tree integrity
                     // node-tree migration). Resolve the room display name from
                     // the node_names map keyed by parent_node_id.
                     let (_wing, room) = node_names

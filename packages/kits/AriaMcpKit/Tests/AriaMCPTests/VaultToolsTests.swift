@@ -92,7 +92,7 @@ struct VaultToolsTests {
         #expect(federation.count == 1)
     }
 
-    // MARK: - Vault gating (ADR-015)
+    // MARK: - Vault gating
 
     /// When MOOTX01_VAULT=0 (installed with --vault-off), all five vault tools
     /// and the filesystem-importing palace import tool are absent from the

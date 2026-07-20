@@ -61,7 +61,7 @@ import SubstrateLib
 ///   `ProposalOperational.swift` for the five enums and the computed
 ///   accessors.
 /// - `provenanceBitmap` — source type, confirmation, confidence,
-///   channel, sensitivity per `Q1_DECISION_PROVENANCE_BITMAP.md`.
+///   channel, sensitivity per `the packed provenance layout`.
 ///
 /// All three bitmaps default to `0` so callers constructing a bare
 /// proposal get the safe baseline (kind `.newTunnel`, target `.drawer`,
@@ -119,7 +119,7 @@ public struct Proposal: Equatable, Codable, Sendable {
     /// generated-by `.dreamingDaemon`, confidence `.null`).
     public let operationalBitmap: Int64
 
-    /// Provenance bitmap per `Q1_DECISION_PROVENANCE_BITMAP.md`.
+    /// Provenance bitmap per `the packed provenance layout`.
     /// Defaults to `0` (all axes unknown / sensitivity normal).
     public let provenanceBitmap: Int64
 

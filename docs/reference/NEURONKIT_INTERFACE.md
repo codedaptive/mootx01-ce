@@ -616,7 +616,7 @@ public protocol DreamingPolicyStore: Sendable {
     func saveDaemonState(_ state: DreamingDaemonState) async throws // default: no-op (F6)
 }
 public actor InMemoryDreamingPolicyStore: DreamingPolicyStore { public init(_ initial: DreamingPolicy? = nil) }
-// Manifest-backed store (F6 / ADR-020): persists policy, bandit, and daemon cycle
+// Manifest-backed store (F6 / the daemon-state persistence contract): persists policy, bandit, and daemon cycle
 // state to the estate manifest through kit.estate(for:) -> Estate.meta/setMeta.
 public struct EstateManifestDreamingPolicyStore: DreamingPolicyStore {
     public init(handle: EstateHandle, kit: GeniusLocusKit)
@@ -732,7 +732,7 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
 }
 ```
 
-### Node-motion / diffusion types (SPEC § 11 diffusion, ADR-DIFFUSION-001)
+### Node-motion / diffusion types (SPEC § 11 diffusion)
 
 The diffusion node-layer lens. `NodeMotion` and `NodeAnomaly` are pure data,
 identical across ports. `NodeMotionLens` owns the fold + classify algorithms
@@ -1041,7 +1041,7 @@ public protocol MaintenancePolicyStore: Sendable {
     func saveDaemonState(_ state: MaintenanceDaemonState) async throws // default: no-op (F6)
 }
 public actor InMemoryMaintenancePolicyStore: MaintenancePolicyStore { public init(_ initial: MaintenancePolicy? = nil) }
-// Manifest-backed store (F6 / ADR-020): persists policy + daemon cycle state to
+// Manifest-backed store (F6 / the daemon-state persistence contract): persists policy + daemon cycle state to
 // the estate manifest through kit.estate(for:) -> Estate.meta/setMeta.
 public struct EstateManifestMaintenancePolicyStore: MaintenancePolicyStore {
     public init(handle: EstateHandle, kit: GeniusLocusKit)
@@ -2029,7 +2029,7 @@ Both ports are now structurally equal: same daemon algorithms, same persisted
 state. (Supersedes the 1.3.0 note about Rust holding no bandit.)
 
 ### 1.3.0 -- 2026-06-25
-F6 / ADR-020 — manifest-backed daemon persistence. `DreamingPolicyStore` and
+F6 / the daemon-state persistence contract — manifest-backed daemon persistence. `DreamingPolicyStore` and
 `MaintenancePolicyStore` gain `loadDaemonState`/`saveDaemonState` seams (default
 no-op) plus the `DreamingDaemonState` / `MaintenanceDaemonState` codable carriers;
 new `EstateManifestDreamingPolicyStore` / `EstateManifestMaintenancePolicyStore`

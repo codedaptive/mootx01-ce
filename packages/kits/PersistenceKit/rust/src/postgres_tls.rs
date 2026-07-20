@@ -3,7 +3,7 @@
 //! # Summary
 //!
 //! The `postgres-native-tls = "0.5"` crate has been approved (C-1 per-crate
-//! exception recorded in `DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md`)
+//! exception recorded in `the Rust PostgreSQL TLS seam`)
 //! and is compiled in. `Pool::open_connection` in `postgres.rs` uses a
 //! `postgres_native_tls::MakeTlsConnector` for `Prefer` and `Require` modes,
 //! providing parity with the Swift `NIOSSL` transport in `PostgreSQLPool.swift`.

@@ -1,15 +1,15 @@
 //! core/sensitivity_crypto.rs — HMAC-SHA256 and PBKDF2-HMAC-SHA256 for
-//! ADR-025 sensitivity-unlock password verification (Rust backend only;
-//! Swift's primary backend is LocalAuthentication — see ADR-025 §2).
+//! sensitivity unlock password verification (Rust backend only;
+//! Swift's primary backend is LocalAuthentication — see out-of-band sensitivity grants).
 //!
 //! HAND-ROLLED, deliberately, per Bob's ruling (2026-07-04): the C-1
-//! per-crate-exception process (`DECISION_RUST_AEAD_CRATE_2026-06-05`)
+//! per-crate-exception process (`the Rust AES-GCM seam`)
 //! approved RustCrypto `aes-gcm` for AEAD and explicitly REJECTED `ring`;
 //! there is no approved pbkdf2/hmac crate in this codebase, and adding
 //! one requires its own per-crate exception. HMAC (RFC 2104) and PBKDF2
 //! (RFC 8018 §5.2) are simple, fully-specified, easily-vectored
 //! constructions built entirely from a hash primitive — unlike an AEAD
-//! cipher (DECISION_RUST_AEAD_CRATE's "never hand-roll an AEAD" applies
+//! cipher (the Rust AES-GCM seam's "never hand-roll an AEAD" applies
 //! to authenticated *encryption*, which has subtle timing/nonce-reuse
 //! failure modes; HMAC/PBKDF2 have no such pitfall class). Built over
 //! `sha2 = "0.10"`, ALREADY linked in this crate's Cargo.toml (used

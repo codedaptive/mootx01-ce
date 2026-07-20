@@ -74,7 +74,7 @@ This specification defines:
   `LocusKitSchema` registration handed to PersistenceKit.
 - The `Estate` consumer metadata surface (`meta`/`setMeta`) — the public,
   durable, lowest-level key-value primitive over the manifest table that upper
-  layers persist their own state through (ADR-020). Consumers MUST namespace
+  layers persist their own state through (the daemon-state persistence contract). Consumers MUST namespace
   keys to avoid collision with the typed v1 `ManifestKey` set; values survive
   restarts (the manifest table is durable).
 - The Swift ⇄ Rust conformance obligation and the documented port gap.
@@ -180,14 +180,14 @@ lifecycle.
 
 **I-11 (cross-port parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and audit-log reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
 
-**I-12 (`ext` forward-compat slot, ADR-012):** every persistent entity table
+**I-12 (`ext` forward-compat slot, the forward-compatible ext-slot contract):** every persistent entity table
 carries exactly one nullable `.json` column named `ext`, reserving migration-free
 space for future per-row typed metadata (federation, encryption, custody). In 1.0
 `ext` is inert — written NULL / omitted on insert and never read; it carries no
 behavior. The slot was provisioned across all persistent entity tables during the
 1.0.0 free-migration window (`keys` gained it at LocusKit schema v2). `ext` is
 excluded from regenerable/cache/bookkeeping tables (manifest, container_fingerprints,
-node_bundles). See ADR-012 for the full inclusion/exclusion list.
+node_bundles). See the forward-compatible ext-slot contract for the full inclusion/exclusion list.
 
 ## § 5 — Behavioral contracts
 
@@ -263,7 +263,7 @@ within the Normal tier.
 **B-4.1 (recall defaults — tier-aligned sensitivity ceiling):** the default
 insertions described in B-4 are the no-claims posture for a caller
 that has not asserted access entitlements. The sensitivity default
-`.sensitivityAtMost(.elevated)` is the Normal-tier ceiling per ADR-007
+`.sensitivityAtMost(.elevated)` is the Normal-tier ceiling per the data-movement contract
 Decision 2 and the normative tier mapping: Normal tier encompasses
 `.normal` and `.elevated`; `.restricted` (Private tier) and `.secret` (Secret
 tier) are excluded from default recall. `restricted` and `secret`
@@ -364,7 +364,7 @@ by forward-folding the row's audit log via `AuditLogFold.projectStateAt`
 (SubstrateML, cookbook § 5.3). The audit log is replayed in HLC order from
 the genesis capture event forward; events at or before `asOf` are included.
 State is keyed on HLC, not wall-clock (§11 clock decision;
-DECISION_CLOCK_TRIANGLE_TIME_MODEL). An `asOf` before the genesis event
+the clock-triangle time model). An `asOf` before the genesis event
 throws `drawerNotFound`. The parameter label is `asOf:` and the type is
 `HLC`, not `Date`. Both legs (`EstateAudit.swift` / `estate_audit.rs`) call
 the substrate primitive; no XOR arithmetic appears in the kit layer.
@@ -617,12 +617,12 @@ which is data so a conformance harness checks both ports agree:
     `DrawerStore.mutateAdjective`, which validate via `AuditGate.admit` and
     append one sealed `AuditEvent` atomically.
 
-**ADR-007 Decision 2 — Privacy-tier mapping on the sensitivity axis:**
-The ADR-007 three-tier model maps onto the existing four-value
+**the data-movement contract Decision 2 — Privacy-tier mapping on the sensitivity axis:**
+The the data-movement contract three-tier model maps onto the existing four-value
 `AdjectiveSensitivity` axis without adding new bits or schema changes.
 The normative mapping is:
 
-| `AdjectiveSensitivity` | Raw | ADR-007 tier | Bulk-channel rule |
+| `AdjectiveSensitivity` | Raw | the data-movement contract tier | Bulk-channel rule |
 |---|---|---|---|
 | `.normal` | 0 | Normal | Free bulk export |
 | `.elevated` | 16 | Normal | Free bulk export |
@@ -633,7 +633,7 @@ Three computed predicates on `AdjectiveSensitivity` encode this mapping
 (Swift: `var isBulkExportable: Bool`, `var requiresOwnerKeyForBulk: Bool`,
 `var isExcludedFromBulk: Bool`; Rust: identical `fn` equivalents). The
 predicates are mutually exclusive and collectively exhaustive: exactly
-one is `true` for every variant. Cite: ADR-007 Decision 2.
+one is `true` for every variant. Cite: the data-movement contract Decision 2.
 - `learn` is legal only on `LearnedReference`: it records a learned reference
   through the LRF noun substrate. `Estate.learn(_:now:)` derives the
   reference's genuine lattice anchor from its `SourceCatalogEntry` (the
@@ -966,7 +966,7 @@ durable, lowest-level key-value primitive over the manifest table that upper
 layers (e.g. NeuronKit's dreaming/maintenance daemons) persist their own state
 through, rather than reaching around the substrate to a host-owned store
 (Interface Rules; resolves the "future verb surface" the manifest accessor
-anticipated). See ADR-020 and `LOCUSKIT_INTERFACE.md` 1.11.0. Additive, both ports.
+anticipated). See the daemon-state persistence contract and `LOCUSKIT_INTERFACE.md` 1.11.0. Additive, both ports.
 
 ### 1.6.0 -- 2026-06-22
 GLK_BATCH1: Added `B-1a (batch capture — single transaction)` behavioral clause.
@@ -1015,7 +1015,7 @@ Documented `KGFact` full adjective-axis parity with `Drawer`: `KGFact` now expos
 Clarified the store-backend posture: `all_drawers` and `room_level_fingerprints` are now compile-required `DrawerStore` reads (no trait default) on the Rust leg, matching the Swift surface; the rest of the read surface retains the fail-loud `DatabaseUnavailable` default. Updated the newtype-forwarding-contract paragraph accordingly. No behaviour change; no new invariant.
 
 ### 1.1.0 -- 2026-06-17
-Added invariant I-12 (the `ext` forward-compat slot, ADR-012): every persistent entity table carries one nullable `.json` `ext` column, inert in 1.0; `keys` gained it at schema v2. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
+Added invariant I-12 (the `ext` forward-compat slot, the forward-compatible ext-slot contract): every persistent entity table carries one nullable `.json` `ext` column, inert in 1.0; `keys` gained it at schema v2. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

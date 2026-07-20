@@ -110,7 +110,7 @@ public protocol MaintenancePolicyStore: Sendable {
     /// Load the persisted daemon cycle state, or `nil` if none has been saved
     /// (the daemon then starts from its in-memory defaults). Loaded once on
     /// `loadPersistedPolicy()` so a restart continues from the prior run's
-    /// idempotency/cycle memory (F6 / ADR-020).
+    /// idempotency/cycle memory.
     func loadDaemonState() async throws -> MaintenanceDaemonState?
 
     /// Persist the daemon cycle state. The daemon calls this after each cycle.
@@ -128,7 +128,7 @@ public extension MaintenancePolicyStore {
 
 /// The maintenance daemon's actor-local cycle state, captured for persistence
 /// so a restart continues from where the prior run left off instead of
-/// repeating suppressed proposals or resetting its counters (F6 / ADR-020).
+/// repeating suppressed proposals or resetting its counters.
 ///
 /// - `lastTickAt`: the timer-path cadence baseline.
 /// - `lastAuditCheckAt`: the last time the audit-integrity check ran.

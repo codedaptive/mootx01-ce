@@ -115,7 +115,7 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![],
         },
-        // Diffusion node layer (ADR-DIFFUSION-001): a single memory's motion over time.
+        // Diffusion node layer: a single memory's motion over time.
         RecipeDescriptor {
             name: "node_motion".into(),
             version: "1.0.0".into(),

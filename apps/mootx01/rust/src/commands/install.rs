@@ -82,7 +82,7 @@ pub fn run(
     let mut wired_ids: Vec<&'static str> = Vec::new();
 
     for client in &selected {
-        // ADR-024 §1/§3: the plugin is the preferred connection owner. Still
+        // the plugin is the preferred connection owner. Still
         // place the binary/daemon (done above, unconditionally) but skip
         // writing a competing direct entry, and clean up any direct entry a
         // PRIOR install wrote — only when confirmed ours-default (§4).
@@ -114,7 +114,7 @@ pub fn run(
                     client.display_name
                 );
                 // Wave 6, Defect A (live 1.0.16 machine finding): the
-                // ADR-024 ownership skip above applies ONLY to the direct
+                // plugin-owned MCP connections ownership skip above applies ONLY to the direct
                 // mcpServers entry. Before this fix, `continue` here left
                 // `client.id` out of `wired_ids` entirely, and the depth
                 // loop below filters on `wired_ids.contains(...)` — so a
@@ -166,7 +166,7 @@ pub fn run(
             // HTTP) inherits the correct env. HTTP-shaped entries are
             // untouched — the resident daemon carries the vault posture in
             // its own service-manager environment (`core::service`),
-            // independent of this call (ADR-024 Wave 3, Defect 2).
+            // independent of this call.
             match depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner) {
                 Ok(DepthOutcome::Server) => {
                     // Claude Desktop's "plugin" is a Desktop extension, not a
@@ -295,7 +295,7 @@ pub fn run(
         let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
             // vault_on baked into the unit's Environment= block so the resident
-            // daemon reads MOOTX01_VAULT without it being set in the shell (ADR-015).
+            // daemon reads MOOTX01_VAULT without it being set in the shell.
             // Fails CLOSED if MOOTX01_DATA_DIR contains characters that would allow
             // systemd directive injection.
             match service::daemon_unit(&binary_path, data_override.as_deref(), vault_on) {
@@ -334,7 +334,7 @@ pub fn run(
         let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
             // vault_on baked into the cmd wrapper as `set MOOTX01_VAULT=...&&`
-            // so the resident daemon reads MOOTX01_VAULT at launch (ADR-015).
+            // so the resident daemon reads MOOTX01_VAULT at launch.
             // Fails CLOSED if MOOTX01_DATA_DIR contains cmd.exe-unsafe characters.
             match service::daemon_task_command(&binary_path, data_override.as_deref(), vault_on) {
                 Ok((exe, arg)) => report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg)),
@@ -384,7 +384,7 @@ pub fn run(
         println!("Done. Restart your clients to pick up the new server.");
     }
 
-    // ADR-015 §1 mandatory disclosure: inform the user of the vault surface
+    // the open 1.0 Vault posture mandatory disclosure: inform the user of the vault surface
     // state so they can make an informed security choice. Always printed.
     println!();
     if vault_on {
@@ -448,7 +448,7 @@ fn install_one(
     }
 }
 
-/// ADR-024 §3: clients the CLI installer knows how to detect a live plugin
+/// clients the CLI installer knows how to detect a live plugin
 /// for, mapped to the plugin registry id (`installed_plugins.json`'s
 /// top-level key). Only Claude Code has a live plugin today; kept as an
 /// explicit small table rather than guessed for hosts with no shipped
@@ -460,7 +460,7 @@ fn plugin_owner(client_id: &str) -> Option<&'static str> {
     }
 }
 
-/// ADR-024 §3/§4: resolve the same config path `install_one` would target
+/// resolve the same config path `install_one` would target
 /// (respecting `--location local` for Claude Code) and run the
 /// ownership-aware dedupe pass against it. Scoped to JSON-format clients —
 /// the only format any currently plugin-owned client uses.
@@ -911,7 +911,7 @@ mod tests {
         assert!(err.contains("Unknown client id 'frobnicator'"));
     }
 
-    // ADR-024 §3/§4: four-state matrix (plugin present/absent × prior direct
+    // four-state matrix (plugin present/absent × prior direct
     // entry present/absent) + the non-default-entry-survives guarantee.
     // Mirrors Swift's PluginDedupeTests.swift. SAFETY: every test uses a
     // temp-dir sandbox home; never the real ~/.claude.
@@ -999,7 +999,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    // ADR-024 §1/§3 gated on installed AND enabled (Adams #5). Mirrors the
+    // plugin-owned MCP connections gated on installed AND enabled (Adams #5). Mirrors the
     // exact conditional install::run() uses: "disabled falls back to direct
     // wiring; enabled skips as shipped."
 
@@ -1044,7 +1044,7 @@ mod tests {
     /// Wave 6, Defect A regression fixture — the exact state Bob's machine
     /// was found in: plugin installed+enabled (own_connection true) AND a
     /// stale stdio-era package already on disk (`.mcp.json` with
-    /// `command: mootx01, args: [serve]`, pre-ADR-024-§2). Before the fix,
+    /// `command: mootx01, args: [serve]`, from the legacy direct-entry design). Before the fix,
     /// `run()`'s loop `continue`d without pushing `client.id` into
     /// `wired_ids`, so the depth pass's `wired_ids.contains(...)` filter
     /// (line ~134) silently excluded claude-code — the plugin package,
@@ -1084,7 +1084,7 @@ mod tests {
         );
 
         // Seed the stale stdio-era package Bob's machine actually had on
-        // disk — pre-ADR-024-§2, before the package moved to an
+        // disk — from the legacy direct-entry design, before the package moved to an
         // HTTP-shaped .mcp.json.
         let bundle = depth::InstallBundle::embedded();
         let host = bundle.host("claude-code").expect("claude-code must be in the embedded install map");
@@ -1119,7 +1119,7 @@ mod tests {
             "the stale bare `command: mootx01` placeholder must be gone; got: {rewritten}"
         );
 
-        // The stranded-cache refresh (ADR-024 Wave 3, Defect 1) must have
+        // The stranded-cache refresh must have
         // invoked the CLI-update seam, since the plugin is already installed.
         assert_eq!(
             fake.invoked.borrow().as_slice(),

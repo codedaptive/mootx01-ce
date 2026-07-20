@@ -453,7 +453,7 @@ struct ServerTests {
                 "estate_ping must echo the injected serial 'ABC123'; got: \(text)")
     }
 
-    // MARK: - Version-skew advisory (ADR-024 §5)
+    // MARK: - Version-skew advisory
 
     /// When the host injects a version-skew advisory, both `moot_estate_ping`
     /// and `moot_estate_status` surface it verbatim under a `version_skew:`

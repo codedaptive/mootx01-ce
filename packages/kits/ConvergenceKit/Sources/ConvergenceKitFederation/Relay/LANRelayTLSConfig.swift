@@ -9,7 +9,7 @@
 //     extension carries the hex-encoded Ed25519 public key fingerprint from
 //     _fed_identity (WC1). Why P-256, not Ed25519: Apple's TLS stack (Network.framework)
 //     does not accept Ed25519 as a TLS certificate signing key. P-256 is consistent
-//     with ADR-013 (ECDSA P-256, FIPS approved-mode). The estate identity key and the
+//     with the ECDSA P-256 approved-mode policy. The estate identity key and the
 //     TLS certificate key are DISTINCT layers: TLS secrecy via P-256 ECDH; identity
 //     binding via Ed25519 fingerprint in the SAN extension.
 //
@@ -48,7 +48,7 @@
 //
 // Spec references:
 //   - docs/analysis/FED_OD_CHARTER.md §V2 (identity-bound TLS mechanism)
-//   - ADR-013 (ECDSA P-256, FIPS approved-mode)
+//   - ECDSA P-256 in FIPS approved mode
 //   - WC1 (estate Ed25519 identity, _fed_identity), WC6 (_fed_peers)
 
 import Foundation

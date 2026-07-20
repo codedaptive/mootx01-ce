@@ -7,7 +7,7 @@ import Network
 // `_mootx01._tcp` and resolves each to an endpoint URL an HTTPTransport can
 // take. This is deliberately ONLY the client half: Bonjour ADVERTISEMENT is
 // a daemon-side feature, and the daemon is the Swift/Rust parity-bound
-// engine (ADR-005) — advertising lands there as its own engine-lane mission,
+// engine — advertising lands there as its own engine-lane mission,
 // mirrored in both languages. Until a daemon advertises, this browser
 // honestly finds nothing; nothing here fabricates an endpoint.
 //

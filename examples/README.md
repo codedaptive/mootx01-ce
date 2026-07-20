@@ -19,5 +19,5 @@ Each folder has:
 All three reach MOOTx01 through the shared `MootGateway` library in `apps/Mootx01-App`, register real
 App Intents (callable from Shortcuts/Siri once installed), and seed sample data on first launch.
 
-See `docs/decisions/ADR-005` for the architecture these sit on. The older `SidecarDemo`
+See `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#22-apple-application-envelope-and-host-ownership` for the architecture these sit on. The older `SidecarDemo`
 remains as the minimal CLI sidecar wiring reference.

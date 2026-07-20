@@ -24,7 +24,7 @@
 // rather than ping-ponging in lockstep.
 //
 // Adjudications: A4 (ghost fast-path already in SlotTable), A5 (CAS retry).
-// Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md §N2
+// Slot claims use CloudKit compare-and-swap so exactly one device wins.
 
 import Foundation
 import CloudKit

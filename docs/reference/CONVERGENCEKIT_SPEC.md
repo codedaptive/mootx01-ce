@@ -12,8 +12,8 @@ relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
-  - docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md
-  - docs/decisions/DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#72-disclosure-model
 purpose: |
   ConvergenceKit is the optional sync layer for the substrate. It
   replicates PersistenceKit row mutations across device or perimeter
@@ -604,7 +604,7 @@ CloudKit has no Rust API, and the no-FFI constraint between Swift and Rust
 legs is immutable. Vocabulary and wire-format changes (including additions
 from B-8) still carry byte-identical Rust twins per C-8. The Rust
 vertical's multi-machine story is Federation
-(`DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md`).
+(the engineering disclosure model in `SYSTEM_ENGINEERING_REFERENCE.md` § 7.2).
 
 ## § 6 — Error model (conceptual)
 

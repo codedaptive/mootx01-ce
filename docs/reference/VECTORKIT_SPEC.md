@@ -12,7 +12,7 @@ relates_to:
   - SUBSTRATELIB_SPEC.md  (the canonical FloatSimHash projection this kit calls)
   - PERSISTENCEKIT_SPEC.md  (the Storage/RowStore backend the vector store wraps)
   - GENIUSLOCUS_ARCHITECTURE_SPEC.md  (rung-3 vectors, invariants I-4 and I-12)
-  - DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md  (storage moved onto PersistenceKit)
+  - the kit-ownership contract  (storage moved onto PersistenceKit)
 purpose: |
   VectorKit is the on-device embedding and approximate-nearest-neighbour
   layer for one estate. It defines the `EmbeddingProvider` abstraction
@@ -190,11 +190,11 @@ routes to the substrate kernel (BNNS / NEON accelerated where
 available). VectorKit therefore inherits EngramLib's and SubstrateLib's
 scalar-reference and cross-port parity guarantees.
 
-**I-8 (`ext` forward-compat slot, ADR-012):** the `vectors` table carries one
+**I-8 (`ext` forward-compat slot, the forward-compatible ext-slot contract):** the `vectors` table carries one
 nullable `.json` column named `ext` (schema v3), reserving migration-free space
 for future per-vector typed metadata. In 1.0 `ext` is inert — written NULL /
 omitted on insert and never read; it carries no behavior. Provisioned during the
-1.0.0 free-migration window. See ADR-012.
+1.0.0 free-migration window. See the forward-compatible ext-slot contract.
 
 ## § 5 — Behavioral contracts
 
@@ -611,7 +611,7 @@ and the deliberate design boundary vs `addPayloads` (live-capture path).
 Additive (MINOR).
 
 ### 1.2.0 -- 2026-06-17
-Added invariant I-8 (the `ext` forward-compat slot, ADR-012): the `vectors` table carries one nullable `.json` `ext` column at schema v3, inert in 1.0. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
+Added invariant I-8 (the `ext` forward-compat slot, the forward-compatible ext-slot contract): the `vectors` table carries one nullable `.json` `ext` column at schema v3, inert in 1.0. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.3.0 -- 2026-06-17
 Added the "Cross-restart persistence (both ports)" conformance requirement

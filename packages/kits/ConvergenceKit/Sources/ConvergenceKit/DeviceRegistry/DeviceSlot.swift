@@ -9,7 +9,7 @@
 // be ambiguous against those historical writes. That leaves slots 1–15 for
 // concurrent live machines.
 //
-// Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md §N2
+// A participating device owns one claimed slot and fence epoch.
 
 import Foundation
 import SubstrateTypes

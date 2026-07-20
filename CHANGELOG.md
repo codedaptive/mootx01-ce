@@ -223,7 +223,7 @@ Sensitivity unlock and monitoring release. Private and secret memories
 become reachable — by human approval only, never by a model — and the
 monitoring dashboard is live out of the box.
 
-- **Sensitivity unlock (ADR-025)** — restricted ("private") rows unlock
+- **Sensitivity unlock** — restricted ("private") rows unlock
   until local start-of-day; secret rows for a fixed 30 minutes. Approval
   is strictly out-of-band: `mootx01 unlock private|secret` and
   `mootx01 lock` in a terminal — macOS verifies with Touch ID / password
@@ -276,7 +276,7 @@ the destructive few, and real fast-path word-class coverage out of the box.
 ## v1.0.15 — 2026-07-04
 
 Installation integrity release. One daemon, one connection per client, no
-accidental duplicates — however you install, in whatever order (ADR-024).
+accidental duplicates — however you install, in whatever order.
 
 - **Plugin now connects over HTTP** — the Claude Code plugin's MCP manifest
   wires the resident daemon (`http://127.0.0.1:4242`) instead of spawning a
@@ -604,8 +604,8 @@ substrate temporal-correctness and performance fixes.
   documented in `VERSIONING.md`; installers validated on `candidate` before
   promotion.
 - **Substrate correctness / performance** — instants migrated to epoch
-  milliseconds (ADR-023); temporal matrix folds keyed on event time with
-  full-precision HLC; shared IDF-reduced vocabulary for LSA/NMF (ADR-022);
+  milliseconds; temporal matrix folds keyed on event time with full-precision
+  HLC; shared IDF-reduced vocabulary for LSA/NMF;
   FDC term interning and SVD/NMF hot-loop tightening.
 
 ## v1.0.5-beta — 2026-06-29
@@ -713,7 +713,7 @@ ports move together.
 
 ### Vault security posture
 
-- **ADR-015 — vault security posture** — vault is open in 1.0.x-beta (trust at
+- **Vault security posture** — vault is open in 1.0.x-beta (trust at
   rest via encryption) with a gated vault-password feature deferred to 1.1.
 - **`mootx01 install --vault-on/--vault-off`** — coarse install switch (default
   on); `--vault-off` hides and refuses the five vault MCP tools. Mandatory
@@ -748,9 +748,8 @@ together.
   implementation in PersistenceKit core.
 - **RAM protection** — the Rust resident daemon `mlock`s its memory out of swap;
   the Apple port relies on macOS's encrypted virtual memory.
-- **Federation signature** — ADR-013 selects ECDSA P-256 (FIPS-validated module
-  boundary). ADR-014 records the Apple SQLCipher at-rest decision and the
-  approved port divergences.
+- **Federation signature** — ECDSA P-256 is used at the FIPS-validated module
+  boundary. Apple uses SQLCipher at rest with the approved port divergences.
 
 ## v1.0.1-beta — 2026-06-17
 
@@ -762,12 +761,11 @@ move together, conformance-gated.
 
 ### Recall — classical-fusion semantic recall
 
-- **Decision recorded** — ADR-010: classical-fusion semantic recall +
-  ARIA recall steering (Decision D); addendum for Decision B (full fusion incl.
-  LSA/SVD) and CoreML-encoder flip-the-switch readiness for 1.1.
+- **Recall architecture** — classical-fusion semantic recall with ARIA recall
+  steering, full fusion including LSA/SVD, and CoreML-encoder readiness for 1.1.
 - **Substrate primitive** — float-vector ops (l2Norm / l2Normalize / dot /
   cosine), Swift+Rust conformance-gated.
-- **Distributional embedding providers** (ADR-010 signals, Swift+Rust):
+- **Distributional embedding providers** (Swift+Rust):
   Random Indexing, PPMI (+ consolidated keyword tokenizer), LSA, NMF-retrieval
   (+ shared term-document builder).
 - **Deterministic one-sided Jacobi SVD**, Swift+Rust bit-identical (backs LSA).
@@ -786,8 +784,8 @@ move together, conformance-gated.
 - **Production default flipped** to the five-signal ensemble.
 - **Capture/import → encode pipeline** wired across all paths + reindex
   backfill.
-- **GLK parity** — GraphCache/PreferenceStore recall surface ported to Rust GLK
-  (closes ADR-011 D-4); matrix/graph/preference recall lanes wired into
+- **GLK parity** — GraphCache/PreferenceStore recall surface ported to Rust GLK;
+  matrix/graph/preference recall lanes wired into
   RecallDirector.
 - **CognitionKit** — `recall_exploratory` recipe consuming
   `RandomWalks.walkWithRestart`.
@@ -817,8 +815,7 @@ move together, conformance-gated.
 - `CaptureFrame` exposes confirmation + confidence provenance to production
   callers (A-13); propose verb wires its three provenance bitmap axes (A-3).
 - `#4` — compile-enforce required trait reads; `#7` Q-ID closure rescoped.
-- Schema `ext` forward-compat slot extended to the 5 remaining entity tables
-  (ADR-012).
+- Schema `ext` forward-compat slot extended to the 5 remaining entity tables.
 - `ext`/forward-compat groundwork; LocusKit interface bumped to 1.6.0.
 
 ### Performance

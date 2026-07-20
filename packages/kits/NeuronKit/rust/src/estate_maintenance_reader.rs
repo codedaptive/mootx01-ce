@@ -49,7 +49,7 @@
 // ── Fingerprint drift (computed from drawer bitmaps) ──────────────────
 // `fingerprint_drift` is computed by OR-aggregating each container node's
 // drawer bitmaps grouped by `parent_node_id` (native node ID scope key
-// per ADR-017). For each container node we compute a v1 drift fraction
+// under the node-tree model). For each container node we compute a v1 drift fraction
 // as the BIT DENSITY of the node's OR aggregate:
 //
 //   drift = popcount(adjectiveOR | operationalOR | provenanceOR over their
@@ -63,7 +63,7 @@
 // against a recorded per-scope baseline, per `FingerprintDriftObservation`'s
 // documented intent) requires a baseline-persistence surface that does not
 // exist yet; bit density is the honest v1 signal that uses the data available
-// today. The key is the `parent_node_id` — native node ID scope key per ADR-017.
+// today. The key is the `parent_node_id` — native node ID scope key under the node-tree model.
 //
 // ── Audit integrity input (real verify) ──────────────────────────────
 // `audit` is populated from `coordinator.verify_audit_chain`, which replays
@@ -209,7 +209,7 @@ fn build_scan(
             // Tombstoned: contribute to the expunge-candidate scan.
             // Age is measured from tombstoned_at (when the soft-delete occurred).
             let tombstone_epoch = drawer.tombstoned_at.unwrap_or(drawer.filed_at);
-            // `now` and the epoch are epoch-ms (ADR-023); age is reported in
+            // `now` and the epoch are epoch-ms; age is reported in
             // seconds (matching Swift's `timeIntervalSince`), so convert here.
             let age_seconds = (now - tombstone_epoch).max(0) as f64 / 1000.0;
             aged_tombstoned.push(AgedRow { id: drawer.id.clone(), age_seconds });
@@ -224,7 +224,7 @@ fn build_scan(
             }
 
             // Cluster A: contribute to the decay scan. `now`/`filed_at` are
-            // epoch-ms (ADR-023); age is reported in seconds, so convert here.
+            // epoch-ms; age is reported in seconds, so convert here.
             let age_seconds = (now - drawer.filed_at).max(0) as f64 / 1000.0;
             aged_active.push(AgedRow { id: drawer.id.clone(), age_seconds });
 
@@ -270,7 +270,7 @@ fn build_scan(
     // ── Fingerprint drift (from drawers, grouped by parent_node_id) ────
     // OR-aggregate each container node's drawer bitmaps (adjective,
     // operational, provenance) grouped by parent_node_id (room-level node
-    // per ADR-017). The key is the parent_node_id — native node ID scope
+    // under the node-tree model). The key is the parent_node_id — native node ID scope
     // key. One DriftRow per container node; the daemon thresholds each
     // against `fingerprint_drift_threshold`.
     let fingerprint_drift = {
@@ -354,11 +354,11 @@ fn build_scan(
             .collect()
     };
 
-    // ADR-017 node invariant rows: extract (drawer_id, parent_node_id,
+    // node-tree invariant rows: extract (drawer_id, parent_node_id,
     // wing, room) from the same active-drawer corpus for I-NT-3 and
     // sibling display-name consistency checks in the daemon. Wing/room
     // display names are resolved from the node tree via the coordinator's
-    // resolve_drawer_node_names (ADR-017 node-tree migration).
+    // resolve_drawer_node_names (node-tree migration).
     let active_node_ids: Vec<String> = drawers
         .iter()
         .filter(|d| {
@@ -496,7 +496,7 @@ mod tests {
         let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
         let scan = reader.scan();
         assert_eq!(scan.aged_active.len(), 1);
-        // age_seconds is seconds; NOW/FILED_AT are epoch-ms (ADR-023).
+        // age_seconds is seconds; NOW/FILED_AT are epoch-ms.
         assert_eq!(scan.aged_active[0].age_seconds, (NOW - FILED_AT) as f64 / 1000.0);
     }
 
@@ -696,7 +696,7 @@ mod tests {
     // ── MR-10: fingerprint_drift computed from drawers by parent_node_id ─
     //
     // The fingerprint-drift signal is computed from the drawer corpus
-    // grouped by parent_node_id (room-level node per ADR-017). Each node's
+    // grouped by parent_node_id (room-level node under the node-tree model). Each node's
     // bitmap lanes are OR-aggregated and the set-bit density over 192 bits
     // is the v1 drift fraction. A captured drawer contributes its bitmaps
     // to its parent node's aggregate.

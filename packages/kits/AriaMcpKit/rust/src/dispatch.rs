@@ -4,7 +4,7 @@
 //!   0. teachme pre-check — intercepts `teachme:true` before any runner fires
 //!   1. Federation tool (moot_federated_search)
 //!   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
-//!   3. Vault tools (backed by vault-kit; ADR-VAULTKIT-002)
+//!   3. Vault tools (backed by vault-kit; drift and candidate handling)
 //!   3.5 Dataset tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats; MX-TAB-7b)
 //!   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 //!   5. Lens tools (moot_lens_keystones … moot_lens_concepts)
@@ -47,7 +47,7 @@ use crate::vault_tools::VaultJobLedger;
 ///   0. teachme interception — returns guide before any runner fires
 ///   1. Federation tool (moot_federated_search)
 ///   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
-///   3. Vault tools (backed by vault-kit; ADR-VAULTKIT-002)
+///   3. Vault tools (backed by vault-kit; Vault drift and candidate handling)
 ///   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 ///   5. Lens tools (moot_lens_keystones … moot_lens_concepts)
 ///   post-dispatch: hint injection via CoachingEngine
@@ -61,7 +61,7 @@ pub fn dispatch_tool(
     dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new(), "", "")
 }
 
-/// ADR-025 §3: dispatch with an explicit, PERSISTENT sensitivity-unlock
+/// dispatch with an explicit, PERSISTENT sensitivity-unlock
 /// grant ledger. This is the entry point `Dispatcher::tools_call` uses in
 /// production — it is the one owned by the `Dispatcher` for the process
 /// lifetime, so a live grant persists across calls within the same
@@ -90,7 +90,7 @@ pub fn dispatch_tool_with_ledgers(
     // Upstream-release advisory provider — evaluated by ping/status only.
     // None when the host wired none (stdio one-shots, tests, aria-mcp dev).
     update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
-    // ADR-025 wave 8.2: monitoring seam, threaded to interface_tools::dispatch.
+    // monitoring seam, threaded to interface_tools::dispatch.
     // None when no stats store is wired (stdio, test harnesses, provision-less contexts).
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
@@ -153,7 +153,7 @@ pub fn dispatch_tool_with_vault_ledger(
 /// want env-var semantics pass `vault_enabled()`; callers that need
 /// deterministic testing pass `true`/`false` directly. `build_serial` is
 /// forwarded to `interface_tools::dispatch` so `moot_estate_ping` can include
-/// it without touching the filesystem. `version_skew` (ADR-024 §5) is an
+/// it without touching the filesystem. `version_skew` is an
 /// empty string when the host detected no plugin/binary version mismatch —
 /// the common case — or the advisory text to surface verbatim in
 /// `moot_estate_ping` / `moot_estate_status`.
@@ -265,17 +265,17 @@ fn route_tool(
 
     // 3. Vault tools — backed by vault-kit (VaultBridge + ObsidianAdapter +
     //    DrawerMapping). The ARIA layer owns the SHA-256 sidecar manifest for
-    //    drift detection (ADR-VAULTKIT-002 decision b). No hint injection on
+    //    drift detection (Vault drift and candidate handling decision b). No hint injection on
     //    vault results — they carry filesystem paths, not coaching triggers.
     //    vault_ledger tracks completed export/import jobs for moot_vault_job.
     //
-    //    Gated by MOOTX01_VAULT env var (ADR-015): when vault is disabled
+    //    Gated by MOOTX01_VAULT env var: when vault is disabled
     //    (MOOTX01_VAULT=0, installed with --vault-off), vault tool names are
     //    absent from tools/list, but if a client hard-codes a name we return a
     //    clear refusal rather than an opaque methodNotFound. Default = vault-on.
     if name.starts_with("moot_vault_") {
         // vault_on is the resolved flag: true = vault surface enabled (the default),
-        // false = vault surface hidden (installed with --vault-off, ADR-015).
+        // false = vault surface hidden (installed with --vault-off, the open 1.0 Vault posture).
         // The tool is absent from tools/list when disabled, but if a client
         // hard-codes the name we return a clear refusal, not a methodNotFound.
         if !vault_on {

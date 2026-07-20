@@ -57,7 +57,7 @@ public extension GeniusLocusKit {
     ///     `LocusKit.Estate.open` unchanged.
     ///   - identityKeyStore: the key store used to persist and retrieve the
     ///     estate's Ed25519 private signing key (secfix/ed25519-keychain,
-    ///     ADR-007). When nil (the default) `LocusKit.Estate.open` resolves
+    ///     data-movement privacy tiers). When nil (the default) `LocusKit.Estate.open` resolves
     ///     it from the storage backend — Keychain for durable backends,
     ///     in-memory for `.inMemory` storage — so ephemeral estates never
     ///     persist identity keys to the login keychain. Pass
@@ -103,7 +103,7 @@ public extension GeniusLocusKit {
         // Mark the estate mounted (GLK_PROVISION_001) so the admin plane
         // can observe mount state without polling the registry directly.
         mountStates[handle] = .mounted
-        // Auto-register substrate-native topology provider (ADR-017 §10,
+        // Auto-register substrate-native topology provider (node-tree integrity,
         // NT-G1). Shares the estate's NodeStore so .nodeTreeNative recall
         // works without a host-supplied provider (NT-Q1).
         let topologyAdapter = SubstrateNodeTopologyProvider(nodeStore: await estate.nodeStore)
@@ -197,7 +197,7 @@ public extension GeniusLocusKit {
             calibrationRegistries[handle] = nil
             matrixPersistenceBackends[handle] = nil
             nodeTopologyProviders[handle] = nil
-            // Drop dreaming queue + HLC (ADR-021 Phase 2b). No drain worker to
+            // Drop dreaming queue + HLC. No drain worker to
             // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
             dreamingQueues[handle] = nil
             dreamingHLCs[handle] = nil
@@ -225,7 +225,7 @@ public extension GeniusLocusKit {
         calibrationRegistries[handle] = nil
         matrixPersistenceBackends[handle] = nil
         nodeTopologyProviders[handle] = nil
-        // Drop dreaming queue + HLC (ADR-021 Phase 2b). No drain worker to
+        // Drop dreaming queue + HLC. No drain worker to
         // cancel — T6 is enqueue-only; the lease is a T9 drainer concern.
         dreamingQueues[handle] = nil
         dreamingHLCs[handle] = nil

@@ -4,7 +4,7 @@
 //! package. Closed-enum predicate algebra, typed values, schema
 //! declaration, Storage + RowStore + BlobStore + AuditLog +
 //! StorageObserver traits. PersistenceKit owns no vector-search
-//! engine — dense-embedding k-NN lives in VectorKit (ADR-008); every
+//! engine — dense-embedding k-NN lives in VectorKit; every
 //! backend instead accommodates vector workloads' storage needs
 //! through the general RowStore / BlobStore surfaces. InMemory,
 //! SQLite, and PostgreSQL backends all ship at v1.0. PostgreSQL

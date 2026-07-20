@@ -2,7 +2,7 @@
 //!
 //! Parallel to Swift `DenseMetric`, `BinaryMetric`, and `FloatMetric`.
 //! Both metric families are owned by VectorKit: dense-embedding distance
-//! is a VectorKit concern (ADR-008 persistencekit-vector-contract-correction).
+//! is a VectorKit concern (VectorKit-owned vector search persistencekit-vector-contract-correction).
 //!
 //! The four-way conformance contract: binary paths (BinaryMetric) must
 //! run integer-only arithmetic and produce bit-identical results across
@@ -20,7 +20,7 @@ pub enum BinaryMetric {
 }
 
 /// Float distance metric for float32 / int8 vector lanes. VectorKit-owned
-/// (ADR-008); persistence-kit carries no vector-distance type.
+///; persistence-kit carries no vector-distance type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FloatMetric {
     /// 1 − dot(a,b) / (‖a‖ ‖b‖).

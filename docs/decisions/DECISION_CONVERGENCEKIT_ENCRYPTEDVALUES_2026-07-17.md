@@ -8,7 +8,7 @@ relates_to:
   - docs/reference/CONVERGENCEKIT_SPEC.md
   - docs/reference/CONVERGENCEKIT_INTERFACE.md
   - docs/decisions/DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md
-  - docs/decisions/ADR-014-apple-sqlcipher-at-rest.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#73-at-rest-encryption
 supersedes: none
 context:
   - Perkins flagged CKRecord.encryptedValues as an advisory (not blocking) follow-up during the CVK-ICLOUD program.
@@ -23,7 +23,7 @@ context:
 
 **Adopt when a specific sensitivity requirement arises that TLS alone cannot satisfy for a named content type (e.g. diary body, high-sensitivity drawer content). Do not adopt in the general case now.**
 
-Rationale compressed: the type compatibility is complete, the zone-feed pull path makes the server-side no-query restriction a nil impact, and the implementation sketch is viable — but ADR-014 SQLCipher already covers at-rest, the migration story for existing records is non-trivial, and the dashboard debuggability cost is high during active development.
+Rationale compressed: the type compatibility is complete, the zone-feed pull path makes the server-side no-query restriction a nil impact, and the implementation sketch is viable — but SQLCipher already covers at-rest, the migration story for existing records is non-trivial, and the dashboard debuggability cost is high during active development.
 
 Bob decides.
 
@@ -88,7 +88,7 @@ The zone-feed architecture means the server-side query restriction is completely
 
 **Slot-registry records** (`SlotRecordMapping`): carry `device_uuid`, `epoch`, `last_active_hlc`, `claimed_at`. These are device coordination metadata, not user content. They are fetched via `fetch(withRecordIDs:)` during sync initialization (before the main pull loop). Encrypting slot records would mean a decryption failure during slot registry bootstrap blocks the entire sync initialization — a disproportionate failure mode for metadata that contains no diary content. Slot records should remain plaintext.
 
-**ConvergenceKit side tables** (`CKSideSchema` — `_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_sync_meta_cols`, `_ck_pending_skew`): these are local SQLite side tables, not CKRecord fields. They are covered by ADR-014 SQLCipher at-rest encryption and are not relevant to the `encryptedValues` question.
+**ConvergenceKit side tables** (`CKSideSchema` — `_ck_sync_meta`, `_ck_outbox`, `_ck_change_token`, `_ck_sync_meta_cols`, `_ck_pending_skew`): these are local SQLite side tables, not CKRecord fields. They are covered by SQLCipher at-rest encryption and are not relevant to the `encryptedValues` question.
 
 ### 4. Migration story for already-synced plaintext records
 
@@ -126,7 +126,7 @@ The escrow model has nuances worth naming:
 
 ## Existing protection layer
 
-ADR-014 (SQLCipher whole-file encryption, CommonCrypto backend, Secure Enclave key) protects all estate data at rest on the device. A physical device theft or forensic copy of the SQLite file yields only ciphertext. The gap `encryptedValues` fills is a narrower one: Apple's CloudKit relay servers see plaintext content values in transit between devices. For most threat models (protecting data from Apple's infrastructure), that gap is real. For the current development phase it is outweighed by the practical costs below.
+SQLCipher whole-file encryption, with the approved platform backend and protected install key, protects all estate data at rest on the device. A physical device theft or forensic copy of the SQLite file yields only ciphertext. The gap `encryptedValues` fills is a narrower one: Apple's CloudKit relay servers see plaintext content values in transit between devices. For most threat models (protecting data from Apple's infrastructure), that gap is real. For the current development phase it is outweighed by the practical costs below.
 
 ---
 
@@ -138,7 +138,7 @@ ADR-014 (SQLCipher whole-file encryption, CommonCrypto backend, Secure Enclave k
 | Query restriction impact | Nil ✓ | — | — |
 | Migration complexity | Non-trivial: old records stay plaintext indefinitely | Manageable with dual-read decode when triggered | — |
 | Dashboard debuggability | Significant cost during development | Recoverable: can add plaintext debug variants later | — |
-| At-rest already covered | ADR-014 SQLCipher | — | — |
+| At-rest already covered | SQLCipher | — | — |
 | Named requirement? | No specific content type mandated yet | Trigger on first named requirement | — |
 | Implementation viable? | Yes | Yes | Yes |
 

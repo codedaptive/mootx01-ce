@@ -1,6 +1,6 @@
 # ConvergenceKit
 
-ConvergenceKit replicates PersistenceKit operations across device or perimeter boundaries. Third foundation kit in the eleven-kit family per `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`. Design settled in `docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md`.
+ConvergenceKit replicates PersistenceKit operations across device or perimeter boundaries. Third foundation kit in the eleven-kit family per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`. Design settled in `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract`.
 
 ConvergenceKit's only consumer is PersistenceKit. Downstream kits (QueueKit, GeniusLocusKit, and app-level entity stores) get sync for free by enabling ConvergenceKit on their PersistenceKit instance. They never call ConvergenceKit directly.
 
@@ -45,7 +45,7 @@ The application never sees sync directly. Writing to PersistenceKit is sufficien
 
 ## Eight settled design decisions
 
-Per DECISION_SYNCKIT_DESIGN_2026-05-19.md:
+Per the ConvergenceKit contract:
 
 1. **Consumer model**: ConvergenceKit consumes PersistenceKit; downstream kits get sync for free.
 2. **Wire format**: SyncRecord with schemaVersion + kitID; mismatch rejects with `SyncError.schemaMismatch`.

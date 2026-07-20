@@ -1,4 +1,3 @@
-import SwiftUI
 import AppIntents
 import GatewayUI
 import MootGateway  // MinerRunLoop + GatewayRuntime (M-ING-2 executor)
@@ -10,7 +9,7 @@ import BackgroundTasks
 
 // MARK: - Mootx01App
 //
-// The MOOTx01 ecosystem app — the Apple presentation layer of ADR-005. One
+// The MOOTx01 ecosystem app — the Apple presentation layer of the app/engine boundary. One
 // codebase, two app targets (macOS + iOS/iPadOS), sharing the GatewayUI
 // surface. Every platform runs the engine "server-in-app" (embedded); macOS
 // adds the app-managed-daemon panel (Engine tab). The clean server binary is

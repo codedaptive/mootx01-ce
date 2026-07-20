@@ -1,7 +1,7 @@
 // ErasureOverlayTests.swift
 //
 // Tests for the two-phase fail-closed global erasure overlay
-// (ADR-017 §17). Part 4 of mission NT-P3.
+//. Part 4 of mission NT-P3.
 
 import Testing
 import Foundation

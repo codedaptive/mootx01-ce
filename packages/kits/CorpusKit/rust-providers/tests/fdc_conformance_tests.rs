@@ -1,4 +1,4 @@
-//! Cross-language bit-identity gate for `FDCProvider` (ADR-010 Decision B, signal #5).
+//! Cross-language bit-identity gate for `FDCProvider` (honest semantic fusion, signal #5).
 //!
 //! Reads the canonical fixture emitted by the Swift leg:
 //!   `Tests/SharedVectors/fdc_canonical_vectors.json`

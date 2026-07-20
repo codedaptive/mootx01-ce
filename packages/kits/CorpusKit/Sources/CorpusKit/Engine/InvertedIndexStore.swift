@@ -87,13 +87,13 @@ public actor InvertedIndexStore {
 
     private let storage: any Storage
 
-    /// ADR-026: when `.ramResident`, term frequencies and document lengths
-    /// are held in RAM between queries (pre-ADR-026 behavior). When
+    /// when `.ramResident`, term frequencies and document lengths
+    /// are held in RAM between queries (pre-disk-default storage residency behavior). When
     /// `.diskBacked` (default), they are loaded from SQLite on demand.
     private var ramTermFreqs: BM25Weighting.TermFreqTable?
     private var ramDocLengths: [String: Int]?
 
-    // MARK: - Cached index (ADR-026: no persistent in-memory dictionaries)
+    // MARK: - Cached index (disk-default storage residency: no persistent in-memory dictionaries)
 
     /// Last-built (index, termMapping), served by `buildIndex(parameters:)`
     /// while `isDirty` is false. Term frequencies and document lengths are
@@ -141,20 +141,20 @@ public actor InvertedIndexStore {
 
     // MARK: - Open (load persisted state)
 
-    /// Validate the schema is accessible. ADR-026: term frequencies and
+    /// Validate the schema is accessible. disk-default storage residency: term frequencies and
     /// document lengths are no longer loaded into RAM at open time. They
     /// are loaded from SQLite on demand inside `buildIndex` and discarded
     /// after the index is built.
     public func open() async throws {
         if storage.configuration.residencyHint == .ramResident {
-            // Pre-ADR-026 behavior: load everything into RAM at open.
+            // Pre-disk-default storage residency behavior: load everything into RAM at open.
             ramTermFreqs = try await loadTermFreqsTransient()
             ramDocLengths = try await loadDocLengthsTransient()
             let docCount = self.ramDocLengths?.count ?? 0
             let termCount = self.ramTermFreqs?.count ?? 0
             logger.info("InvertedIndexStore opened (ramResident): \(docCount) docs, \(termCount) terms")
         } else {
-            // ADR-026: verify tables are readable. Data stays on disk.
+            // verify tables are readable. Data stays on disk.
             let docRows = try await storage.rowStore.query(
                 table: "iix_doclens", where: nil, orderBy: [], limit: 1, offset: nil)
             let termRows = try await storage.rowStore.query(
@@ -165,7 +165,7 @@ public actor InvertedIndexStore {
 
     /// Load term frequencies from SQLite into a transient dictionary.
     /// Called only inside `buildIndex`; the result is discarded after
-    /// the InvertedIndex is built. ADR-026: no persistent in-memory mirror.
+    /// the InvertedIndex is built. disk-default storage residency: no persistent in-memory mirror.
     private func loadTermFreqsTransient() async throws -> BM25Weighting.TermFreqTable {
         var tf: BM25Weighting.TermFreqTable = [:]
         let rows = try await storage.rowStore.query(
@@ -185,7 +185,7 @@ public actor InvertedIndexStore {
 
     /// Load document lengths from SQLite into a transient dictionary.
     /// Called only inside `buildIndex`; the result is discarded after
-    /// the InvertedIndex is built. ADR-026: no persistent in-memory mirror.
+    /// the InvertedIndex is built. disk-default storage residency: no persistent in-memory mirror.
     private func loadDocLengthsTransient() async throws -> [String: Int] {
         var dl: [String: Int] = [:]
         let rows = try await storage.rowStore.query(
@@ -277,7 +277,7 @@ public actor InvertedIndexStore {
     /// the next query rebuilds once, not once per folded item. Rust twin:
     /// `InvertedIndexStore::fold_postings`.
     /// Mark the index dirty after an external shard merge writes to the
-    /// durable iix_* tables. ADR-026: no in-memory mirror — the durable
+    /// durable iix_* tables. disk-default storage residency: no in-memory mirror — the durable
     /// tables are the source of truth, and `buildIndex` reloads from them
     /// on the next query. The `items` parameter is accepted for API
     /// compatibility but the data is NOT copied into RAM dictionaries.
@@ -324,7 +324,7 @@ public actor InvertedIndexStore {
     /// - Returns: (InvertedIndex, term mapping) ready for querying.
     /// Build the BM25-weighted InvertedIndex from the durable iix_* tables.
     ///
-    /// ADR-026: term frequencies and document lengths are loaded from SQLite
+    /// term frequencies and document lengths are loaded from SQLite
     /// into transient locals, used to build the index, then discarded. The
     /// built InvertedIndex is cached; the raw dictionaries are not.
     public func buildIndex(
@@ -338,7 +338,7 @@ public actor InvertedIndexStore {
         // must NOT publish it or clear `isDirty` — otherwise an interleaved
         // remove would be masked and stale postings cached until the next write.
         let builtFromGeneration = dirtyGeneration
-        // ADR-026: use RAM maps when ramResident, else load from SQLite.
+        // use RAM maps when ramResident, else load from SQLite.
         let termFreqs: BM25Weighting.TermFreqTable
         let docLengths: [String: Int]
         if let rt = ramTermFreqs, let rd = ramDocLengths {
@@ -416,7 +416,7 @@ public actor InvertedIndexStore {
     // MARK: - Accessors
 
     /// Number of indexed documents. Queries the durable table
-    /// (ADR-026: no in-memory mirror).
+    /// (disk-default storage residency: no in-memory mirror).
     public func documentCount() async throws -> Int {
         let rows = try await storage.rowStore.query(
             table: "iix_doclens", where: nil)

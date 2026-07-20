@@ -226,7 +226,7 @@ fn add_drawer_then_get_round_trips() {
     store.add_drawer(&d, NOW).unwrap();
     let back = store.get_drawer(&tid("d1")).unwrap().unwrap();
     assert_eq!(back.content, "hello");
-    // ADR-017: wing/room resolved from node tree, not stored on Drawer.
+    // wing/room resolved from node tree, not stored on Drawer.
     let names = store.resolve_node_names(&[back.parent_node_id.clone()]).unwrap();
     let (wing, room) = names.get(&back.parent_node_id).expect("node must resolve");
     assert_eq!(wing, "w");
@@ -483,7 +483,7 @@ fn expunge_gated_tombstones_zeros_content_sets_bit_26() {
     assert_ne!(after.adjective_bitmap & (1 << 26), 0);
 }
 
-/// ADR-017 §17 conformance: create D1, supersede with D2 (same
+/// node-tree integrity conformance: create, supersede with  (same
 /// lineage_id), expunge D2, verify D1 content is empty.
 #[test]
 fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
@@ -549,7 +549,7 @@ fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
     );
     assert_eq!(
         pred_after.content, "",
-        "predecessor content must be empty after lineage-wide expunge (ADR-017 §17)"
+        "predecessor content must be empty after lineage-wide expunge"
     );
 }
 
@@ -996,7 +996,7 @@ fn drawer_survives_drop_and_reopen() {
     let store2 = open_sqlite(db.path());
     let back = store2.get_drawer(&tid("d1")).unwrap().unwrap();
     assert_eq!(back.content, "hello world");
-    // ADR-017: wing/room resolved from node tree, not stored on Drawer.
+    // wing/room resolved from node tree, not stored on Drawer.
     let names = store2.resolve_node_names(&[back.parent_node_id.clone()]).unwrap();
     let (wing, room) = names.get(&back.parent_node_id).expect("node must resolve after reopen");
     assert_eq!(wing, "w");

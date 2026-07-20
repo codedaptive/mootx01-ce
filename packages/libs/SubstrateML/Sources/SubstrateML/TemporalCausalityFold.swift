@@ -45,7 +45,7 @@
 //
 // Design council 2026-06-04 decision: hourly batch cadence (3600 s),
 // superseding the weekly cadence specified in cookbook §6.4.
-// See DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+// See hourly temporal-matrix scheduling.
 
 import Foundation
 import SubstrateTypes
@@ -189,7 +189,7 @@ public enum TemporalCausalityFold {
     /// oldest in the window — the weakest temporal proximity — so the near-lag
     /// causal signal the T matrix exists to capture is preserved. Must mirror
     /// Rust `MAX_WINDOW_OCCUPANCY` exactly for bit-identical conformance.
-    /// See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+    /// See the 512-source temporal-matrix bound.
     public static let maxWindowOccupancy: Int = 512
 
     /// Map a minute delta to the smallest lag bucket >= deltaMinutes.

@@ -1,7 +1,7 @@
 //! core/sensitivity_hashes.rs — sidecar storage for the two per-tier
 //! password hashes used by `mootx01 unlock private|secret` on Linux/Windows.
 //!
-//! ADR-025 §2 specifies that two discrete passwords are set at estate
+//! The sensitivity policy requires that two discrete passwords are set at estate
 //! creation and stored as salted PBKDF2-HMAC-SHA256 hashes. This module
 //! manages the storage file (`<dataDir>/sensitivity_hashes.json`), hash
 //! derivation, and constant-time password verification.

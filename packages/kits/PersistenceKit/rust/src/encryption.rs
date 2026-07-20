@@ -11,7 +11,7 @@
 //!
 //! `AesGcmAeadProvider` is the default concrete provider, backed by
 //! the `aes-gcm` RustCrypto crate (the first approved external crypto
-//! crate; see `DECISION_RUST_AEAD_CRATE_2026-06-05.md` for the C-1
+//! crate; see `the Rust AES-GCM seam` for the C-1
 //! per-crate exception).
 //!
 //! # Ciphertext layout
@@ -518,7 +518,7 @@ pub trait AeadProvider: Send + Sync {
 /// C-1 per-crate exception: `aes-gcm` is the first approved external
 /// crypto crate. Rationale: at-rest AEAD, not conformance-gated (random
 /// nonce makes per-call output non-deterministic); hand-rolling an AEAD
-/// is never acceptable. See `DECISION_RUST_AEAD_CRATE_2026-06-05.md`.
+/// is never acceptable. See `the Rust AES-GCM seam`.
 pub struct AesGcmAeadProvider;
 
 /// Byte counts fixed by AES-GCM-256. These match the Swift layout.

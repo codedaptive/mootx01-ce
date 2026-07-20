@@ -165,7 +165,7 @@ pub enum EmbeddingModelConfig {
     /// (the trained vocabulary) is built externally by the caller before
     /// opening the Corpus.
     ///
-    /// See ADR-010 Decision B for the rationale and `RandomIndexingProvider`
+    /// See honest semantic fusion for the rationale and `RandomIndexingProvider`
     /// in `corpus-kit-providers` for the full training API.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α) rather
@@ -186,7 +186,7 @@ pub enum EmbeddingModelConfig {
     /// `max(0, log(P(t,c)/(P(t)·P(c))))`.  Stopword-like co-occurrences are
     /// down-weighted toward zero; genuinely informative associations dominate.
     ///
-    /// See ADR-010 Decision B and `PpmiProvider` in `corpus-kit-providers`.
+    /// See honest semantic fusion and `PpmiProvider` in `corpus-kit-providers`.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
     Ppmi { provider: Box<dyn TrainableEmbeddingBasis> },
@@ -196,7 +196,7 @@ pub enum EmbeddingModelConfig {
     /// The caller constructs and trains an `LsaProvider` (term-document matrix +
     /// deterministic Jacobi SVD truncated to k dimensions) and passes it here.
     ///
-    /// See ADR-010 Decision B and `LsaProvider` in `corpus-kit-providers`.
+    /// See honest semantic fusion and `LsaProvider` in `corpus-kit-providers`.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
     Lsa { provider: Box<dyn TrainableEmbeddingBasis> },
@@ -208,7 +208,7 @@ pub enum EmbeddingModelConfig {
     /// with tolerance=0 for fixed iteration count / bit-identical output) and
     /// passes it here.
     ///
-    /// See ADR-010 Decision B and `NmfProvider` in `corpus-kit-providers`.
+    /// See honest semantic fusion and `NmfProvider` in `corpus-kit-providers`.
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
     Nmf { provider: Box<dyn TrainableEmbeddingBasis> },
@@ -227,7 +227,7 @@ pub enum EmbeddingModelConfig {
     /// lane is dark (returns `vec![]`) for texts the FDC engine cannot classify
     /// (UNRESOLVED). This is the expected opt-out, not an error.
     ///
-    /// See ADR-010 Decision B (FDC lattice co-classification) and `FDCProvider`
+    /// See honest semantic fusion (FDC lattice co-classification) and `FDCProvider`
     /// in `corpus-kit-providers` for the encoding details.
     Fdc { provider: Box<dyn EmbeddingProvider> },
 
@@ -1287,7 +1287,7 @@ impl Corpus {
     /// same content-addressed idempotency. This is the cross-document parallelism
     /// the per-corpus ingest drain drives (the 1.0 separate-pump fix; the global
     /// cross-estate cap is the 1.1 central drain master,
-    /// DECISION_CENTRAL_DRAIN_MASTER_2026-06-23). Rust mirror of Swift
+    /// the deferred process-global drain master). Rust mirror of Swift
     /// `Corpus.ingestBatch`.
     ///
     /// First-ingest training cannot run concurrently (it mutates a slot's basis),
@@ -2032,8 +2032,8 @@ impl Corpus {
         // by the storage mutex. Running them serially made a large reindex wait
         // ΣT(train) on one core with LSA's SVD + NMF's ALS dominating; concurrent
         // slots wait max(T) instead. Per-slot output is byte-identical to the
-        // serial loop — the fixed-sweep kernels are untouched (ADR-022) and no
-        // slot reads another's state. LSA and NMF each derive the ADR-022 reduced
+        // serial loop — the fixed-sweep kernels are untouched and no
+        // slot reads another's state. LSA and NMF each derive the shared reduced embedding vocabulary reduced
         // vocabulary with the same pure deterministic selection, so concurrent
         // duplicate computation of it is benign (identical artifact). For N=1
         // this spawns one thread — same work, same result as the plain call.
@@ -2086,7 +2086,7 @@ impl Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         self.persist_maintained_counts(filed_at_secs)?;
 
-        // ADR-026 NOTE: release_basis() was here but is REMOVED because the
+        // disk-default storage residency NOTE: release_basis was here but is REMOVED because the
         // serving providers have no on-demand reconstruction path. Calling it
         // clears the live vocab, making subsequent embeds return zero vectors.
         // The ~2GB vocab RAM stays resident until a lazy-load-from-BasisStore

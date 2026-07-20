@@ -325,7 +325,7 @@ impl VectorStore {
 }
 ```
 
-**`vectors` table schema — schema version 4 (Lane F multi-vector + ADR-012 ext slot + `filed_at` index):**
+**`vectors` table schema — schema version 4 (Lane F multi-vector + forward-compatible ext slot + `filed_at` index):**
 declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()`.
 
 | Column | Type | Nullable | Notes |
@@ -340,7 +340,7 @@ declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()
 | `payload` | BLOB | NOT NULL | Vector bytes: 32 bytes (binary); dim×4 (float32); dim (int8). (Renamed from `engram`.) |
 | `scale` | REAL | NULL | Int8 dequantization scale. NULL for binary and float32. |
 | `filed_at` | TIMESTAMP TEXT | NOT NULL | ISO8601 text (TEXT, not REAL). |
-| `ext` | JSON | NULL | ADR-012 forward-compat slot (schema v3). Inert in 1.0 — written NULL / omitted on insert, never read. |
+| `ext` | JSON | NULL | the forward-compatible ext-slot contract forward-compat slot (schema v3). Inert in 1.0 — written NULL / omitted on insert, never read. |
 
 UNIQUE constraint: `(item_id, vector_index, model_id)`.
 Indices: `idx_vectors_item` on `(item_id)`; `idx_vectors_model_item` on `(model_id, item_id)`;
@@ -1123,7 +1123,7 @@ rows of differing dimension without shared-stride corruption. Public surface
 unchanged (`findNearestFloat`/`find_nearest_float` signatures preserved).
 
 ### 1.2.0 -- 2026-06-17
-Schema v2 → v3 (ADR-012): added the nullable `.json` `ext` forward-compat slot to the `vectors` table. Both ports; inert in 1.0 (NULL / omitted on insert, never read). Updated the `vectors`-table schema section.
+Schema v2 → v3 (the forward-compatible ext-slot contract): added the nullable `.json` `ext` forward-compat slot to the `vectors` table. Both ports; inert in 1.0 (NULL / omitted on insert, never read). Updated the `vectors`-table schema section.
 
 ### 1.0.1 -- 2026-06-15
 Added `VectorPayload` row to the Swift/Rust Concordance — engine types table. Type exists in both ports; the audit regex missed it because the Swift declaration does not use a keyword the regex tracks (VectorPayload is a plain `public struct`; the gap was solely a missing concordance row).

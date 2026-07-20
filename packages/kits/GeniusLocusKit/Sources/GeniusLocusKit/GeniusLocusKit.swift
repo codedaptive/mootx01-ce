@@ -30,8 +30,8 @@ import VectorKit
 ///
 /// The per-estate unified audit log is wired (GLK-03): `auditLog(for:)`
 /// issues a single SQL query against the estate's `_storagekit_audit`
-/// table (Bug 1 fix, ADR025-AUDITLOG-GOVERNOR — replaced the former grow-
-/// only in-memory G-Set CRDT fed by an N+1 per-drawer walk). Audit chain
+/// table, replacing the former grow-only in-memory G-Set CRDT fed by an
+/// N+1 per-drawer walk. Audit chain
 /// verification is provided through the `verifyAuditChain` verb. The
 /// Brain layer (standing-signal scheduler, matrix tier,
 /// dreaming/maintenance daemons) is live.
@@ -68,7 +68,7 @@ public actor GeniusLocusKit {
     /// the first `registerStandingSignal` call against a given handle;
     /// the scheduler is minted lazily by `ensureScheduler(for:)` in
     /// `Brain/SignalAPI.swift`. One scheduler per estate so the
-    /// single-serial-lane decision (DECISION_STANDING_SIGNAL_SCHEDULER
+    /// single-serial-lane decision (serialized standing-signal scheduling
     /// _2026-05-21) applies per-estate, never across estates.
     internal var schedulers: [EstateHandle: StandingSignalScheduler] = [:]
 
@@ -206,18 +206,18 @@ public actor GeniusLocusKit {
     /// Dropped in `close`.
     internal var matrixPersistenceBackends: [EstateHandle: MatrixPersistenceBackend] = [:]
 
-    /// Per-estate dreaming QueueKit handles (ADR-021 Phase 2b).
+    /// Per-estate dreaming QueueKit handles.
     ///
     /// Lazy-mounted on the first external recall for each estate by
     /// `ensureDreamingQueue(for:)`. The queue opens the same per-estate
     /// queue.sqlite that the encode and signals streams use (one queue,
-    /// many streams — ADR-021 Decision 7), with stream_id = "dreaming".
+    /// many streams — recall-driven dreaming), with stream_id = "dreaming".
     /// SQLite estates → SQLiteStorage-backed QueueKit (crash-durable).
     /// InMemory estates → transient PersistenceKitBackend (no disk needed).
     /// Dropped in `close` so no handle outlives the estate.
     internal var dreamingQueues: [EstateHandle: QueueKit] = [:]
 
-    /// Per-estate HLC generators for the dreaming queue (ADR-021 Phase 2b).
+    /// Per-estate HLC generators for the dreaming queue.
     ///
     /// One HLC per estate, derived from the estate UUID the same way the signals
     /// scheduler derives its HLC (first four UUID bytes big-endian → Int32 nodeID),
@@ -555,8 +555,8 @@ public extension GeniusLocusKit {
     /// Return a snapshot of the unified audit log for the given handle.
     ///
     /// Paginates `_storagekit_audit` with an HLC cursor. This replaces the
-    /// former in-memory G-Set CRDT pattern (Bug 1 fix, ADR025-AUDITLOG-
-    /// GOVERNOR): the old approach kept a grow-only `auditLogs: [EstateHandle:
+    /// former in-memory G-Set CRDT pattern: the old approach kept a grow-only
+    /// `auditLogs: [EstateHandle:
     /// UnifiedAuditLog]` dictionary and fed it via an N+1 per-drawer walk
     /// (`feedAuditLog`). Both are removed — audit data lives on disk in
     /// `_storagekit_audit` and this method reads it directly.

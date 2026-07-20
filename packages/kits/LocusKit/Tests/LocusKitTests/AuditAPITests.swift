@@ -19,7 +19,7 @@ import SubstrateLib
 
 /// Tests for `Estate.auditTrail(rowID:)` and `Estate.bitmapState(rowID:asOf:)`.
 /// The cross-row wall-clock window form was dropped: state evolves in
-/// ingest-HLC order (DECISION_CLOCK_TRIANGLE_TIME_MODEL §11; wall-clock
+/// ingest-HLC order (single-maker HLC and event integrity; wall-clock
 /// is not a fold/ordering axis). Capture now emits a sealed genesis
 /// event, so a freshly-captured drawer's trail holds the capture event.
 ///

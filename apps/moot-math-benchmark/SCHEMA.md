@@ -152,7 +152,7 @@ cold-path / dreaming-daemon algorithms across realistic input
 sizes. This is the methodology-data-manipulator-gate evidence
 for cold-path algorithms — measured, not calculated — that
 informs the dreaming-daemon schedule and default-backend
-selection (see DECISION_METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md).
+selection (see the performance methodology gate).
 
 ```json
 {

@@ -130,7 +130,7 @@ impl GrantStore {
                 ColumnDeclaration::int("decay_half_life").nullable(),
                 ColumnDeclaration::timestamp("decay_started_at").nullable(),
                 ColumnDeclaration::int("decay_floor").nullable(),
-                // ADR-012 forward-compat slot — the #11 custody-payload slot.
+                // nullable entity ext slots forward-compat slot — the #11 custody-payload slot.
                 // Nullable JSON; reserves space for future custody metadata
                 // (the federation/encryption track — e.g. mode-3 share-policy
                 // descriptors) without a migration. 1.0 omits it on insert and
@@ -157,7 +157,7 @@ impl GrantStore {
     /// Returns `GrantStoreError::StorageFailure` on open failure.
     pub fn new(storage: Arc<dyn Storage>) -> Result<Self, GrantStoreError> {
         // Version tracks LocusKit base + 1, mirroring Swift's
-        // `base.version + 1`, so a LocusKit schema bump (e.g. the ADR-012
+        // `base.version + 1`, so a LocusKit schema bump (e.g. the nullable entity ext slots
         // `ext` slot, v1 → v2) advances the grants version in lockstep across
         // both ports without a hand-edited literal.
         let schema = SchemaDeclaration::new(
@@ -711,7 +711,7 @@ impl GrantStore {
     /// decoded mode-3 grants as authoritative for the associated value fields.
     /// Any future custody metadata the federation/encryption track needs to
     /// retain has a migration-free home in the `ext` forward-compat slot
-    /// (ADR-012) rather than new typed columns. Mirror of the Swift port.
+    /// rather than new typed columns. Mirror of the Swift port.
     ///
     /// Mode 4 (`TimeAging`) round-trips its decay policy through the dedicated
     /// `decay_half_life`, `decay_started_at`, and `decay_floor` columns

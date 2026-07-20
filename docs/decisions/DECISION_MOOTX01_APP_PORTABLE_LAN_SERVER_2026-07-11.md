@@ -4,8 +4,8 @@ question: May the Mootx01-App expose an owner-authenticated, off-loopback person
 authors: MOOTx01 maintainers
 date: 2026-07-11
 relates_to:
-  - docs/decisions/ADR-LOOPBACKHTTP-001.md
-  - docs/decisions/ADR-005-mootx01-app-envelope-and-parity-boundary.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#11-edition-and-application-boundary
+  - docs/reference/LOOPBACKHTTP_SPEC.md
 supersedes: none
 ---
 
@@ -13,7 +13,7 @@ supersedes: none
 
 ## Context
 
-`ADR-LOOPBACKHTTP-001` established `LoopbackHTTP` as the CE HTTP transport
+The LoopbackHTTP contract establishes it as the CE HTTP transport
 for the resident daemons, and `AriaMCP.HTTPServer`'s security disposition
 (`HTTPServer.swift:379`) pins that transport to **loopback only, no
 authentication** in CE, deferring *off-localhost hosting* and an
@@ -28,7 +28,7 @@ passcode) and served only while on power.
 ## Decision
 
 The Mootx01-App MAY host an owner-authenticated, off-loopback personal LAN
-MCP server in CE. This is **not** the EE concern ADR-LOOPBACKHTTP-001 defers:
+MCP server in CE. This is **not** the deferred EE concern:
 
 - The EE deferral is **enterprise OAuth** and **server-identity verification**
   for multi-party off-localhost hosting. This feature is **single-owner,
@@ -41,7 +41,7 @@ MCP server in CE. This is **not** the EE concern ADR-LOOPBACKHTTP-001 defers:
 
 ## Constraints (how it stays consistent)
 
-1. **Apple layer only (ADR-005).** NWListener, Bonjour, Face ID, and battery
+1. **Apple layer only.** NWListener, Bonjour, Face ID, and battery
    state are Apple-only, so the server lives in the app / `MootGateway`, never
    in the parity-bound `AriaMcpKit` (the Rust leg cannot mirror it).
 2. **Reuse the transport-neutral kit pieces.** It drives
@@ -58,5 +58,5 @@ MCP server in CE. This is **not** the EE concern ADR-LOOPBACKHTTP-001 defers:
 ## Consequence
 
 CE now includes a personal device-to-device LAN server as an Apple-layer
-extension of the loopback transport. EE's OAuth / server-identity work
-(ADR-LOOPBACKHTTP-001 → EE v1.1) composes above this and is unaffected.
+extension of the loopback transport. EE's OAuth and server-identity work
+composes above this and is unaffected.

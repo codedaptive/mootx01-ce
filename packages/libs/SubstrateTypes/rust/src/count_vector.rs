@@ -3,7 +3,7 @@
 // Count-vector over the 256-bit fingerprint space, the stored object
 // for the bundle algebra. Mirror of
 // Sources/SubstrateTypes/CountVector256.swift; see
-// DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20.md and the scope in
+// bundle algebra and erasure and the scope in
 // docs/analysis/bundle_algebra/SCOPE_MAJORITY_VOTE_TREE_FOLD_2026-05-20.md.
 //
 // For a set of member fingerprints, the count-vector holds, for each

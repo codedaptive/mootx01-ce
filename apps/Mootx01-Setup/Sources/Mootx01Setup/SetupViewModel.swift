@@ -119,7 +119,7 @@ final class SetupViewModel {
         // console user's ~/.claude directly) — see
         // distribution/macos/scripts/postinstall's "Launch setup assistant"
         // section. Before this fix, converging an EXISTING install (plugin
-        // package rematerialization, ADR-024 Wave 3 Defect 1; permission
+        // package rematerialization, plugin-owned MCP connections; permission
         // tier migration, Bob's 2026-07-04 ruling) only ever happened
         // inside `install()`, which only runs for clients the user
         // explicitly checked — and `detect()` above deliberately

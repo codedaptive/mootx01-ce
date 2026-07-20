@@ -214,7 +214,7 @@ pub trait RowStore: Send + Sync {
     }
 
     // ----------------------------------------------------------------
-    // As-of temporal query (ADR-017 §15)
+    // As-of temporal query
     // ----------------------------------------------------------------
 
     /// Temporal query: returns rows visible at the given `AsOfCoordinate`.

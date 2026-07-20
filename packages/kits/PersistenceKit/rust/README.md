@@ -42,5 +42,5 @@ Requires Rust 1.75+ and a sibling `substrate-kit` crate at `../../SubstrateLib/r
 ## See also
 
 - Swift counterpart: `PersistenceKit/Sources/PersistenceKit/`
-- Design record: `docs/decisions/DECISION_STORAGEKIT_DESIGN_2026-05-19.md`
-- Kit graph ADR: `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`
+- Design record: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#41-persistencekit-contract`
+- Kit graph rule: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`

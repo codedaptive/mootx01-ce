@@ -3,7 +3,7 @@ title: MOOTx01-App — Specification
 version: v0.1
 status: draft
 relates_to:
-  - docs/decisions/ADR-005-mootx01-app-envelope-and-parity-boundary.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#11-edition-and-application-boundary
   - apps/Mootx01-App/LEXICON_TO_APPLE_MAPPING.md
   - docs/decisions/DECISION_MOOTX01_APP_PORTABLE_LAN_SERVER_2026-07-11.md
 ---
@@ -24,7 +24,7 @@ iCloud container — is provided).
 
 ---
 
-## 1. What the app is (architecture of record: ADR-005)
+## 1. What the app is
 
 The clean, Rust-mirrored `mootx01` / `aria-mcp` server is a separate program.
 This app **envelopes** it — it never absorbs it, because absorbing it would
@@ -242,7 +242,7 @@ when the iCloud container `iCloud.com.codedaptive.mootx01` is provisioned.
 ## 8. Capture from anywhere (Share Sheet)
 
 UI-less Share extensions (iOS + macOS) capture shared text and URLs. The
-extension process never opens the estate (ADR-005): it spools the item into an
+extension process never opens the estate: it spools the item into an
 app-group inbox backed by QueueKit's durable maildir (atomic write, crash
 recovery), and the **host app** drains the spool through `CaptureSink` on its
 ambient beats. A capture that fails is retried on the next drain; an undecodable

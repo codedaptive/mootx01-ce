@@ -254,7 +254,7 @@ public enum SyncError: Error, Sendable, Equatable {
     // ── N2 slot-registry errors ─────────────────────────────────────────────
     // CloudKit-only. Vocabulary is mirrored in the Rust SyncError enum for
     // cross-port parity even though the CloudKit backend is Swift-only (N4).
-    // Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16 §N2
+    // Slot and fence epoch identify the writer across concurrent devices.
 
     /// This device's (slot, epoch) pair has been superseded: the slot was
     /// evicted and its epoch bumped while this device was inactive.

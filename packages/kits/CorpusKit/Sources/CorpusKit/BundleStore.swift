@@ -16,7 +16,7 @@
 //     hlc          HLC NOT NULL,
 //     metadata     JSON NOT NULL,
 //     created_at   TIMESTAMP NOT NULL,
-//     ext          JSON,              -- v2: forward-compat slot (ADR-012)
+//     ext          JSON,              -- v2: forward-compat slot
 //     content_hash BLOB               -- v3: SHA-256 via MerkleHash.leaf (NT-C1)
 //   )
 //
@@ -131,9 +131,9 @@ public actor BundleStore {
 
     /// Schema declaration consumed by Storage.open(schema:).
     ///
-    /// v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012).
+    /// v2 adds the nullable `.json` `ext` forward-compat slot.
     /// v3 adds `content_hash` BLOB column and marks the table `hashable`
-    /// for hash-on-write via HashingRowStore (ADR-017 §14, NT-C1).
+    /// for hash-on-write via HashingRowStore (node-tree integrity, NT-C1).
     /// The `content_hash` column is nullable: NULL for rows inserted
     /// before v3 (backward-compatible migration, no backfill required).
     /// v3 also adds the `corpus_metadata` table for per-corpus Merkle roots.
@@ -152,7 +152,7 @@ public actor BundleStore {
                     ColumnDeclaration(name: "hlc", type: .hlc, nullable: false),
                     .json("metadata", nullable: false),
                     .timestamp("created_at", nullable: false),
-                    // ADR-012 forward-compat slot (v2). Nullable JSON; distinct
+                    // nullable entity ext slots forward-compat slot (v2). Nullable JSON; distinct
                     // from `metadata`. 1.0 omits it on insert and never reads it.
                     .json("ext", nullable: true),
                     // NT-C1 (v3): SHA-256 content hash computed by

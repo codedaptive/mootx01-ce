@@ -17,7 +17,7 @@
 //
 // Each tool name takes the MCP prefix form: `mcp__mootx01__<tool_name>`,
 // e.g. `mcp__mootx01__moot_memory_search`. Since the v1.0.15 plugin-owned
-// connection (ADR-024 §2), Claude Code ALSO routes calls made through the
+// connection, Claude Code ALSO routes calls made through the
 // installed plugin under a second, distinct namespace:
 // `mcp__plugin_mootx01_mootx01__<tool_name>` (empirically confirmed against
 // a live `~/.claude/settings.json` carrying both prefixes side by side —
@@ -58,7 +58,7 @@ public enum PermissionsWriter {
     public static let mcpPrefix = "mcp__mootx01__"
 
     /// The MCP tool prefix Claude Code uses for calls routed through the
-    /// installed plugin (ADR-024 §2, v1.0.15). Shape:
+    /// installed plugin (plugin-owned MCP connections, v1.0.15). Shape:
     /// `mcp__plugin_<marketplace>__<plugin>__` — empirically confirmed
     /// against a live settings.json (both this installer's marketplace and
     /// plugin are named `mootx01`, so the concrete prefix is
@@ -130,7 +130,7 @@ public enum PermissionsWriter {
         // Dataset import (MX-TAB-7): creates a backend table and can read a
         // csv_path from the filesystem — same Ask posture as palace/vault import.
         "moot_file_dataset",
-        // Monitoring flag mutation (ADR-025 wave 8.2): sets daemon telemetry state
+        // Monitoring flag mutation: sets daemon telemetry state
         // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
         "moot_monitoring_status",
         // Contradiction hunter: estate-wide sweep that persists PROPOSED

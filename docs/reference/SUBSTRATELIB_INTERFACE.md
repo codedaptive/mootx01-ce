@@ -32,17 +32,17 @@ relates_to:
   - `SubstrateLibTelemetry.swift` — `SubstrateLibMetric` constants
     and `@inline(__always)` emit helpers.
   - `MerkleHash.swift` — `MerkleHash` enum (leaf/interior/tombstone
-    hash pipeline), `MerkleVectorInput` struct. ADR-017 §16.
+    hash pipeline), `MerkleVectorInput` struct. the node-integrity contract §16.
   - `KeyedCommitment.swift` — `KeyedCommitment` enum (HMAC-SHA256
-    commitment), `KeyedCommitmentValue` struct. ADR-017 §17.
+    commitment), `KeyedCommitmentValue` struct. the node-integrity contract §17.
   - `KeyedCommitmentAudit.swift` — `KeyedCommitmentAuditEntry`
-    struct, `CommitmentAuditLog` G-Set CRDT. ADR-017 §17.
+    struct, `CommitmentAuditLog` G-Set CRDT. the node-integrity contract §17.
 - `Tests/SubstrateLibTests/` — unit + conformance + telemetry tests
   (`SubstrateLibTelemetryTests.swift`).
 - `Tests/SubstrateLibConformanceTests/` — bilingual conformance gate.
 - `Package.swift` — depends on `SubstrateTypes`, `SubstrateKernel`,
   `SubstrateML`, `IntellectusLib` (telemetry floor; see
-  `docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md`).
+  `docs/engineering/STANDARD_CODE_AUTHORING_PRACTICE.md#dependency-manifest-rule`).
 
 **Rust:** `packages/libs/SubstrateLib/rust/`
 
@@ -58,15 +58,15 @@ relates_to:
   metric name constants) and `#[inline(always)]` emit helpers.
 - `src/merkle_hash.rs` — `MerkleVectorInput` struct, `leaf()`,
   `interior()`, `tombstone()`, `canonical_leaf_bytes()` functions.
-  ADR-017 §16.
+  the node-integrity contract §16.
 - `src/keyed_commitment.rs` — `KeyedCommitmentValue` struct,
   `commit()` function, `KeyedCommitmentAuditEntry` struct,
-  `CommitmentAuditLog` struct. ADR-017 §17.
+  `CommitmentAuditLog` struct. the node-integrity contract §17.
 - `tests/` — conformance vectors + telemetry integration tests
   (`substrate_lib_telemetry_tests.rs`).
 - `Cargo.toml` — depends on `substrate-types`, `substrate-kernel`,
   `substrate-ml`, `intellectus-lib` (see
-  `docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md`).
+  `docs/engineering/STANDARD_CODE_AUTHORING_PRACTICE.md#dependency-manifest-rule`).
 
 Naming differs by port convention; behavior is bit-identical
 (SPEC § 7).
@@ -403,7 +403,7 @@ no allocation.
 
 ### `MerkleHash`, `MerkleVectorInput` — Merkle content-integrity hash pipeline
 
-Domain-separated SHA-256 hash pipeline per ADR-017 §16.
+Domain-separated SHA-256 hash pipeline per the node-integrity contract §16.
 
 **Swift:**
 
@@ -448,7 +448,7 @@ would invert the dependency graph). `canonical_leaf_bytes` is
 `pub(crate)` / `internal` because `keyed_commitment` reuses it with
 a different domain tag. The v2 canonical leaf encoding writes vector
 identity (model_id + vector_index) into the preimage before the float
-payload — see ADR-017 §16 v2 for the complete per-vector byte layout.
+payload — see the node-integrity contract §16 v2 for the complete per-vector byte layout.
 
 The second `interior` overload (`childRoots:` / `interior_roots`) is
 used at wing and estate levels where children already carry
@@ -458,7 +458,7 @@ over the 32 raw bytes of the `MerkleRoot` regardless of type wrapper.
 
 ### `KeyedCommitment`, `KeyedCommitmentValue` — keyed-commitment API
 
-HMAC-SHA256 commitment over canonical leaf bytes per ADR-017 §17.
+HMAC-SHA256 commitment over canonical leaf bytes per the node-integrity contract §17.
 
 **Swift:**
 
@@ -491,7 +491,7 @@ pub fn commit(key: &[u8], key_version: i64, drawer_id: &[u8; 16],
 
 ### `KeyedCommitmentAuditEntry`, `CommitmentAuditLog` — expunge provenance audit
 
-G-Set CRDT for keyed-commitment audit entries per ADR-017 §17.
+G-Set CRDT for keyed-commitment audit entries per the node-integrity contract §17.
 
 **Swift:**
 
@@ -771,7 +771,7 @@ into the preimage before the float payload (WS2-F4). Cross-port pin added
 to canonical_leaf_bytes description. Parity table vector-input row updated.
 
 ### 1.1.0 -- 2026-06-20
-Added six new public types for ADR-017 §16-17: MerkleHash, MerkleVectorInput,
+Added six new public types for the node-integrity contract §16-17: MerkleHash, MerkleVectorInput,
 KeyedCommitment, KeyedCommitmentValue, KeyedCommitmentAuditEntry,
 CommitmentAuditLog. Updated §1 layout (4→7 files), §2 type docs,
 concordance table (6 new rows), and §5 test entry points.

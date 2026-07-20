@@ -18,7 +18,7 @@
 //!
 //! The families come from `EstateFingerprintFamilies`, which derives
 //! four independent seeds from the estate UUID per
-//! `DECISION_FINGERPRINT_SEEDS_DERIVED_2026-05-20`. Determinism is the
+//! `deterministic fingerprint seed derivation`. Determinism is the
 //! contract: two rows with identical fields, even on independently
 //! started replicas of one estate, produce bit-identical fingerprints.
 //!
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn capture_week_bucket_counts_weeks_from_epoch() {
-        // Inputs are epoch MILLISECONDS (ADR-023); ×1000 the seconds arithmetic.
+        // Inputs are epoch MILLISECONDS; ×1000 the seconds arithmetic.
         // Exactly 1 week after epoch -> bucket 1.
         let one_week = (CAPTURE_WEEK_EPOCH_SECONDS + 7 * 86_400) * 1000;
         assert_eq!(capture_week_bucket(one_week), 1);
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn capture_week_bucket_wraps_at_256() {
-        // Inputs are epoch MILLISECONDS (ADR-023); ×1000 the seconds arithmetic.
+        // Inputs are epoch MILLISECONDS; ×1000 the seconds arithmetic.
         // 256 weeks after epoch -> bucket 0 (wraps).
         let two_fifty_six_weeks = (CAPTURE_WEEK_EPOCH_SECONDS + 256 * 7 * 86_400) * 1000;
         assert_eq!(capture_week_bucket(two_fifty_six_weeks), 0);
@@ -346,7 +346,7 @@ mod tests {
     }
 
     /// Per-block family independence — the landmine guard
-    /// (`DECISION_FINGERPRINT_SEEDS_DERIVED_2026-05-20`): the four
+    /// (`deterministic fingerprint seed derivation`): the four
     /// families must not collapse to a single family or to the same
     /// canonical hash. If `diversified_seed` ever stops mixing, this
     /// test catches the regression.

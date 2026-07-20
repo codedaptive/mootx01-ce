@@ -107,7 +107,7 @@ pub struct BlobChange {
     pub bytes: Option<Vec<u8>>,
 }
 
-// MARK: - Dirty-chain event (ADR-017 §16 / NT-P2)
+// MARK: - Dirty-chain event (node-tree integrity / NT-P2)
 
 /// A dirty-chain notification emitted by the hash-on-write hook.
 ///

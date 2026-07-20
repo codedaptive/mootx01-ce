@@ -51,7 +51,7 @@ struct UninstallCommand: AsyncParsableCommand {
 
         for client in clients {
             do {
-                // ADR-024 §4: ownership-aware for JSON-format clients — a
+                // ownership-aware for JSON-format clients — a
                 // `.foreign` entry (env override, e.g. a development rig) is
                 // reported and left untouched rather than silently removed.
                 let outcome = try Installer.uninstall(

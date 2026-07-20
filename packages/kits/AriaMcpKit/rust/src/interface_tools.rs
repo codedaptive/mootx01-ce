@@ -120,7 +120,7 @@ pub const INTERFACE_TOOLS: &[&str] = &[
     "moot_estate_status",
     "moot_estate_map",
     "moot_estate_ping",
-    // Monitoring control (1) — ADR-025 wave 8.2: read/write daemon telemetry flag.
+    // Monitoring control (1) — out-of-band sensitivity grants: read/write daemon telemetry flag.
     // Injected via MonitoringControl trait; reports "unavailable" when no store wired.
     "moot_monitoring_status",
     // Maintenance (4)
@@ -336,7 +336,7 @@ fn strip_enum_prefix(reason: &str) -> &str {
 ///     drawer id is subsequently acted upon (B-10a trace-reward wiring).
 ///   - `run_estate_status` — to include the trace row count in the status output.
 ///
-/// `sensitivity_ledger` is the process-scoped ADR-025 grant ledger, also
+/// `sensitivity_ledger` is the process-scoped out-of-band sensitivity grants grant ledger, also
 /// owned by the `Dispatcher` (mirrors Swift `ToolDispatcher.runMemorySearch`/
 /// `runMemoryGet`'s `sensitivityUnlockLedger` threading). Passed to
 /// `run_memory_search` and `run_memory_get` so a live restricted/secret
@@ -353,7 +353,7 @@ pub fn dispatch(
     // Upstream-release advisory provider — consumed by ping/status only.
     // None when the host wired none (stdio one-shots, tests, aria-mcp dev).
     update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
-    // ADR-025 wave 8.2: monitoring seam injected from the serve host.
+    // monitoring seam injected from the serve host.
     // None when no stats store wired — moot_monitoring_status reports "unavailable".
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
@@ -379,13 +379,13 @@ pub fn dispatch(
         "moot_fact_timeline" => run_fact_timeline(args, registry),
         "moot_write_journal" => run_write_journal(args, registry),
         "moot_read_journal" => run_read_journal(args, registry),
-        // Pass version_skew so the report includes the ADR-024 §5 advisory
+        // Pass version_skew so the report includes the plugin-owned MCP connections advisory
         // when present (empty string ⇒ no line appended).
         "moot_estate_status" => run_estate_status(args, registry, version_skew, update_advisory),
         "moot_estate_map" => run_estate_map(args, registry),
         // Pass build_serial so the pong includes the build segment.
         "moot_estate_ping" => run_estate_ping(args, registry, build_serial, version_skew, update_advisory),
-        // Monitoring control (ADR-025 wave 8.2) — pass the injected seam.
+        // Monitoring control — pass the injected seam.
         "moot_monitoring_status" => run_monitoring_status(args, monitoring_control),
         // Maintenance
         "moot_reindex" => run_reindex(args, registry),
@@ -406,7 +406,7 @@ pub fn dispatch(
 /// File a memory into the estate. Requires `content` and `location`.
 ///
 /// `location` maps to `room`; optional `wing` routes the drawer into a named
-/// wing (ADR-016 §3). When absent, defaults to DEFAULT_WING_NAME ("Agentic Memory").
+/// wing. When absent, defaults to DEFAULT_WING_NAME ("Agentic Memory").
 /// Server owns infrastructure fields (channel, lattice, added_by, embeddingModelID).
 /// The lattice anchor sentinel is passed to the GeniusLocusKit capture seam
 /// (`capture_with_mode`), which classifies via `Fdc::encode_anchor` when the
@@ -460,7 +460,7 @@ fn run_file_memory(
     // Provenance channel: marks this row as MCP-agent-sourced in the provenance
     // bitmap (§2.5). Mirrors Swift's `provenanceChannel: .mcpAgent`.
     frame.provenance_channel = Channel::McpAgent;
-    // ADR-016 §3: optional `wing` argument routes this memory into a specific wing.
+    // optional `wing` argument routes this memory into a specific wing.
     // When supplied, the drawer files into that wing.
     // When absent, defaults to DEFAULT_WING_NAME ("Agentic Memory") — the AI's
     // working memory wing. Mirrors Swift runFileMemory wing routing.
@@ -470,7 +470,7 @@ fn run_file_memory(
             .unwrap_or_else(|| DEFAULT_WING_NAME.to_string()),
     );
     // Optional back-dated event time. When supplied, the drawer's event_time
-    // is set to the caller's ISO8601 instant (epoch milliseconds, ADR-023)
+    // is set to the caller's ISO8601 instant (epoch milliseconds, epoch-millisecond instants)
     // instead of the ingest wall-clock time. Mirrors Swift ToolDispatch.runFileMemory
     // which parses event_time to Date and passes it as eventTime on the CaptureFrame.
     if let Some(raw) = optional_string(args, "event_time")? {
@@ -533,7 +533,7 @@ fn run_file_memory(
 }
 
 /// `true` if `f` constrains sensitivity anywhere in its structure (directly,
-/// nested under `All`/`Any`, or negated). Used to suppress the ADR-025
+/// nested under `All`/`Any`, or negated). Used to suppress the out-of-band sensitivity grants
 /// grant-ceiling injection when the caller's own `filter` argument already
 /// specifies a sensitivity constraint — an explicit caller constraint
 /// always wins over the grant-lifted default. Mirrors Swift
@@ -637,11 +637,11 @@ fn run_memory_search(
     // render every result as an empty-content preview.
     let mut filter_chain = decode_filter_chain(args)?;
     // Wall-clock time for this request, hoisted here (rather than the later
-    // call site this replaces) so the SAME instant gates both the ADR-025
+    // call site this replaces) so the SAME instant gates both the out-of-band sensitivity grants
     // grant check below and `recall_scored` further down — one request, one
     // `now`. Mirrors Swift `runMemorySearch`'s identical hoist.
     let now = wall_now();
-    // ADR-025 sensitivity unlock: when a restricted/secret grant is live,
+    // sensitivity unlock: when a restricted/secret grant is live,
     // inject the grant-lifted ceiling explicitly. This is the seam
     // `BitmapEvaluator::insert_defaults` documents: conditional on absence
     // so an explicit caller sensitivity constraint suppresses this default
@@ -656,7 +656,7 @@ fn run_memory_search(
             sensitivity_ceiling_lifted = true;
         }
     }
-    // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
+    // optional `wing` argument scopes recall to a single wing.
     // When absent, recall spans all wings (existing default behavior unchanged).
     // Appended to the filter chain so it composes with any explicit filter arg.
     if let Some(wing_name) = optional_string(args, "wing")? {
@@ -676,7 +676,7 @@ fn run_memory_search(
         .with_query_text(query.to_string())
         .external(); // B-10a: ARIA boundary is external origin
 
-    // `mut`: ADR-025 §4 read-under-grant audit recording below needs a
+    // `mut`: out-of-band sensitivity grants read-under-grant audit recording below needs a
     // mutable coordinator borrow (audit append is a coordinator-owned
     // HashMap mutation), in addition to the existing immutable
     // `recall_scored`/`resolve_drawer_node_names` reads later in this
@@ -697,7 +697,7 @@ fn run_memory_search(
         ledger.record_surfaced(&surfaced_ids, now);
     }
 
-    // ADR-025 §4: record a sensitivity_read_under_grant audit entry for each
+    // record a sensitivity_read_under_grant audit entry for each
     // hit admitted PAST the substrate's default ceiling specifically
     // because a grant is live. Only rows whose OWN adjective sensitivity is
     // restricted/secret qualify — an elevated-or-below row would have been
@@ -796,7 +796,7 @@ fn run_memory_search(
     }
     lines.push(crate::recall_discrimination::result_line_with_dense_dark(discrimination, dense_lane_dark));
     // Recall provenance: surface the dense-lane status and any degraded stages
-    // so callers can distinguish retrieval quality (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
+    // so callers can distinguish retrieval quality.
     //
     // dense_lane_status non-None means the dense float vector lane (Lane D) did not
     // contribute hits. Lane D uses the deterministic embedding provider (FNV-1a +
@@ -804,7 +804,7 @@ fn run_memory_search(
     // distributional model); callers use this to detect when ranking came from
     // structural/BM25 lanes only rather than the vector lane. The learned semantic
     // vector (MiniLM/MPNet/Gemma) is an additive v1.1 on-device lane, not wired here.
-    // This is the honest-labeling requirement from the embedding ADR.
+    // The response must label embedding provenance honestly.
     //
     // degraded_stages lists every pipeline stage that was skipped due to a
     // recoverable error. An empty vec means every attempted stage succeeded.
@@ -821,7 +821,7 @@ fn run_memory_search(
         format!("degraded_stages:[{}]", result.degraded_stages.join(","))
     };
     lines.push(format!("recall_provenance: {} {}", dense_part, degraded_part));
-    // ADR-025 §4: redaction advisory stat (Wave 7.4).
+    // redaction advisory stat.
     // When no grant is active, check cheaply whether the estate holds any
     // restricted or secret rows. If so, append an advisory so the AI client
     // knows results may be incomplete and how to request access.
@@ -877,7 +877,7 @@ fn run_memory_get(
     let estate = registry.resolve_direct(args)?;
     let row_id = require_string(args, "id")?;
 
-    // `mut`: ADR-025 §4 read-under-grant audit recording below needs a
+    // `mut`: out-of-band sensitivity grants read-under-grant audit recording below needs a
     // mutable coordinator borrow. `locus_estate`'s immutable borrow (just
     // below) ends at its last use (`get_drawers_matching_frame`), well
     // before the mutable audit call, so this does not conflict — same
@@ -888,7 +888,7 @@ fn run_memory_get(
     })?;
 
     let now = wall_now();
-    // ADR-025 sensitivity unlock: same grant-ceiling injection as
+    // sensitivity unlock: same grant-ceiling injection as
     // run_memory_search — see that function's comment. moot_memory_get
     // deliberately uses the SAME containment gate moot_memory_search does,
     // so the grant must lift it here too, or an unlocked restricted/secret
@@ -935,7 +935,7 @@ fn run_memory_get(
         | locus_kit::provenance::Sensitivity::Elevated => {}
     }
 
-    // ADR-025 §4: same read-under-grant audit recording as
+    // same read-under-grant audit recording as
     // run_memory_search — gated on BOTH the ceiling having been lifted AND
     // the drawer's own sensitivity actually being restricted/secret.
     if sensitivity_ceiling_lifted {
@@ -954,7 +954,7 @@ fn run_memory_get(
         }
     }
 
-    // ADR-017 §3: Drawer no longer carries stored wing/room; resolve via the
+    // Drawer no longer carries stored wing/room; resolve via the
     // node tree, same pattern as every other read tool in this file.
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &[drawer.parent_node_id.clone()]);
     let (wing, room) = node_names.get(&drawer.parent_node_id).cloned().unwrap_or_default();
@@ -1010,7 +1010,7 @@ fn run_memory_get(
     // tool exists to return.
     lines.push("content:".to_string());
     lines.push(drawer.content.clone());
-    // ADR-025 §4: redaction advisory stat (Wave 7.4) — same logic as
+    // redaction advisory stat  — same logic as
     // run_memory_search. When no grant is active, surface an advisory if the
     // estate contains any restricted/secret rows the default gate suppresses.
     // Consistent with search so the AI client receives the same hint from
@@ -1028,7 +1028,7 @@ fn run_memory_get(
 /// Returns `true` if the estate has at least one row tagged restricted or secret.
 ///
 /// Used by `run_memory_search` and `run_memory_get` to decide whether to append a
-/// sensitivity advisory (ADR-025 §4, Wave 7.4). The advisory tells the AI client
+/// sensitivity advisory. The advisory tells the AI client
 /// that results may be incomplete and how to unlock the hidden tier.
 ///
 /// Implementation: two limit-1 `GLKRecallRequest` probes with explicit
@@ -1085,7 +1085,7 @@ fn note_usage(
     if let Some(entry) = ledger.get(id) {
         let now = wall_now();
         // Retention window: 30 days. `surfaced_at_secs` and `now` are epoch-ms
-        // (ADR-023; the `_secs` suffix is legacy naming), so the window is in ms.
+        // (epoch-millisecond instants; the `_secs` suffix is legacy naming), so the window is in ms.
         let since_ms = entry.surfaced_at_secs - 30 * 24 * 60 * 60 * 1000;
         let since = unix_epoch_ms_to_iso8601(since_ms);
         let now_str = unix_epoch_ms_to_iso8601(now);
@@ -1096,7 +1096,7 @@ fn note_usage(
     }
 }
 
-/// Convert Unix epoch MILLISECONDS (ADR-023) to an ISO 8601 string (UTC,
+/// Convert Unix epoch MILLISECONDS to an ISO 8601 string (UTC,
 /// second precision — the reward window spans 30 days, so sub-second precision
 /// is immaterial here). Used for the `since` and `now` parameters of
 /// `mark_recall_used` which expects TEXT ISO8601 dates (fleet date rule).
@@ -1255,7 +1255,7 @@ fn run_move_memory(
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
     let location = require_string(args, "location")?;
-    // ADR-016 §3: optional `wing` triggers a cross-wing move.
+    // optional `wing` triggers a cross-wing move.
     // When absent, only the room changes and the wing stays unchanged.
     let wing = optional_string(args, "wing")?;
 
@@ -1623,7 +1623,7 @@ fn run_file_fact(
 /// lane dark), a `recall_provenance:` hint is appended so the AI caller can
 /// distinguish "no lexical match" from "semantic search was not consulted".
 /// This mirrors the honest-lane-state reporting that `moot_memory_search`
-/// emits (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
+/// emits.
 ///
 /// Mirrors Swift `runFactSearch`.
 fn run_fact_search(
@@ -1770,7 +1770,7 @@ pub(crate) fn epoch_to_iso8601(epoch_secs: i64) -> String {
 /// Minimal ISO8601 UTC parser — handles the subset the ARIA MCP server accepts.
 ///
 /// Accepts "YYYY-MM-DDTHH:MM:SSZ", "YYYY-MM-DDTHH:MM:SS.mmmZ", and
-/// "YYYY-MM-DDTHH:MM:SS+00:00". Returns epoch MILLISECONDS (ADR-023) — the
+/// "YYYY-MM-DDTHH:MM:SS+00:00". Returns epoch MILLISECONDS — the
 /// fractional-seconds field is retained as the millisecond component, matching
 /// Swift's `ISO8601DateFormatter().date(from:)` in `runFileMemory`.
 fn parse_iso8601_to_ms(s: &str) -> Option<i64> {
@@ -2150,7 +2150,7 @@ fn run_estate_status(
 
     // Field order and wording mirror Swift runEstateStatus exactly:
     //   estate / memories / wings / kg facts (space, "active" suffix) / trace_rows / sync
-    //   [/ version_skew — ADR-024 §5, appended only when the host detected one]
+    //   [/ version_skew — plugin-owned MCP connections, appended only when the host detected one]
     let mut body = format!(
         "estate: {estate_name} [{estate_uuid}]\nmemories: {} active ({} total)\nwings: {}\nkg facts: {} active\ntrace_rows: {}\nsync: {}\nfdc_recalculation: {fdc_recalculation_state}\nfdc_recalculation_floor: {}\nfdc_recalculation_current: {current_fdc_recalculation_version}",
         active.len(),
@@ -2346,7 +2346,7 @@ fn run_estate_ping(
         JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("estate_ping: manifest read failed: {e}"))
     })?;
 
-    // ADR-024 §5: append the version-skew advisory when present — same
+    // append the version-skew advisory when present — same
     // opt-in shape as run_estate_status.
     let mut pong = format!(
         "pong: estate {} [{}] is live — build {}",
@@ -2366,7 +2366,7 @@ fn run_estate_ping(
 }
 
 // ===========================================================================
-// Monitoring control (ADR-025 wave 8.2)
+// Monitoring control
 // ===========================================================================
 
 /// Read or write the daemon's telemetry monitoring flag.

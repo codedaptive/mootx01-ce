@@ -1,4 +1,4 @@
-//! sensitivity_grant_ledger.rs — ADR-025 sensitivity unlock: daemon-RAM-only
+//! sensitivity_grant_ledger.rs — sensitivity unlock: daemon-RAM-only
 //! grant state for the restricted/secret sensitivity tiers.
 //!
 //! Rust mirror of Swift `SensitivityGrantLedger.swift` (AriaMcpKit). Same
@@ -20,14 +20,14 @@
 
 use std::sync::Mutex;
 
-/// One of the two lockable sensitivity tiers ADR-025 governs.
+/// One of the two lockable sensitivity tiers out-of-band sensitivity grants governs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SensitivityTier {
     Restricted,
     Secret,
 }
 
-/// Daemon-RAM-only grant ledger for ADR-025. Thread-safe via `Mutex`.
+/// Daemon-RAM-only grant ledger for out-of-band sensitivity grants. Thread-safe via `Mutex`.
 #[derive(Debug, Default)]
 pub struct SensitivityGrantLedger {
     restricted_granted_until_ms: Mutex<Option<i64>>,
@@ -41,7 +41,7 @@ impl SensitivityGrantLedger {
     }
 
     /// Grant the `restricted` tier. Expires at the next LOCAL midnight
-    /// strictly after `now_ms` (ADR-025 §1). `tz_offset_seconds` is the
+    /// strictly after `now_ms`. `tz_offset_seconds` is the
     /// caller's local UTC offset in seconds (e.g. `-18000` for US Eastern
     /// Standard Time) — Rust has no `Calendar`/`TimeZone` in std, so the
     /// offset is an explicit parameter (deterministic, testable) rather

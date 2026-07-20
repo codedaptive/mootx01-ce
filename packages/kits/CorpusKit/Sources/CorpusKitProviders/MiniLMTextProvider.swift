@@ -3,7 +3,7 @@
 // MiniLM-L6 v2 text embedding provider. Pulls tokenization from
 // the DeterministicTokenizer (the BERT WordPiece tokenizer ships
 // in the v1.1 model-bundle mission per
-// DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12). Projection uses
+// selectable embedding providers). Projection uses
 // SubstrateML.FloatSimHash
 // with a stable projection seed owned here in CorpusKitProviders so
 // the two providers produce bit-identical engrams for the same

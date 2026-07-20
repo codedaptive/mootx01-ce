@@ -336,10 +336,10 @@ struct FdcCaptureTests {
         )
     }
 
-    // MARK: - ADR-017: parentNodeId populated on capture
+    // MARK: - node-tree integrity: parentNodeId populated on capture
 
     /// Filing a memory through `moot_file_memory` must produce a drawer whose
-    /// `parentNodeId` is populated (non-empty). ADR-017 §3 requires every drawer
+    /// `parentNodeId` is populated (non-empty). node-tree integrity requires every drawer
     /// to reference its containing room node; the GLK capture seam resolves
     /// wing+room names to node IDs at write time.
     @Test func capturedDrawerHasParentNodeId() async throws {
@@ -348,7 +348,7 @@ struct FdcCaptureTests {
         let result = try await dispatcher.dispatch(
             name: "moot_file_memory",
             arguments: .object([
-                "content":  .string("ADR-017 parentNodeId verification content"),
+                "content":  .string("node-tree integrity parentNodeId verification content"),
                 "location": .string("test-room"),
             ])
         )
@@ -363,11 +363,11 @@ struct FdcCaptureTests {
         #expect(drawers.count == 1, "exactly one drawer must exist")
 
         let drawer = drawers[0]
-        // ADR-017: parentNodeId must be a non-empty UUID string referencing
+        // parentNodeId must be a non-empty UUID string referencing
         // the room node that contains this drawer in the estate's node tree.
         #expect(
             !drawer.parentNodeId.isEmpty,
-            "captured drawer must have a non-empty parentNodeId (ADR-017 §3)"
+            "captured drawer must have a non-empty parentNodeId"
         )
     }
 }

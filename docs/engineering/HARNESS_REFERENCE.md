@@ -15,7 +15,7 @@ purpose: |
   bit-exact-cross-language operation the substrate ships.
 relates_to:
   - docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md (the math contract; this doc indexes its conformance gate)
-  - docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md (the four-package split documented in §6 below)
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md (system ownership and package direction)
   - docs/validation/substrate_math_performance/test-harness/primitive-catalog.md (the operator-facing gate catalog, machine-readable)
   - docs/validation/substrate_math_performance/test-harness/test-vector-format.md (canonical JSON + binary CRC format spec)
   - docs/validation/substrate_math_performance/test-harness/primitive-walkthrough-SimHash.md (worked example for adding a primitive)
@@ -625,8 +625,7 @@ steps are mechanical. The worked example lives at
 
 ## §6. The four-package substrate split
 
-Per `DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md` (as corrected by its
-addendum), the substrate ships as **four
+The substrate ships as **four
 sibling packages** under `packages/libs/`: `SubstrateTypes`,
 `SubstrateKernel`, `SubstrateML`, and the retained `SubstrateLib`
 orchestration layer (nine-verb mechanics + row-state automaton +
@@ -830,11 +829,8 @@ accident.
 ## §10. References
 
 - Cookbook: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md`
-- Decision: pre-ship refactor: `docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md`
-- Decision: Clock Triangle: `docs/decisions/DECISION_CLOCK_TRIANGLE_TIME_MODEL_2026-05-28.md`
-- Decision: Capture Genesis Event: `docs/decisions/DECISION_CAPTURE_GENESIS_EVENT_2026-05-28.md`
-- Decision: Row Identity UUID: `docs/decisions/DECISION_ROW_IDENTITY_UUID_2026-05-28.md`
-- Decision: Phase 2 final selection: `docs/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`
+- System reference: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md`
+- Performance gate: `docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md`
 - Catalog (machine-readable): `docs/validation/substrate_math_performance/test-harness/primitive-catalog.md`
 - Vector format spec + regen log: `docs/validation/substrate_math_performance/test-harness/test-vector-format.md`
 - Worked example: `docs/validation/substrate_math_performance/test-harness/primitive-walkthrough-SimHash.md`

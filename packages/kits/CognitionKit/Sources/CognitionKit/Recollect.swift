@@ -144,7 +144,7 @@ public struct Recollect: Recipe {
         }
 
         // 2. Resolve the estate's default wing.
-        //    ADR-016: the default wing is the fixed constant `LocusKit.defaultWingName`
+        //    the default wing is the fixed constant `LocusKit.defaultWingName`
         //    ("Agentic Memory"). Distilled factoids and their _distilled_from tunnels are
         //    filed in this wing by Consolidate and captureFactoid. No kit.estate(for:) call
         //    is made; the constant is read directly.

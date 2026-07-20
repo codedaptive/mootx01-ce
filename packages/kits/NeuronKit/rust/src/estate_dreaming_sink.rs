@@ -129,7 +129,7 @@ impl<'a> DreamingProposalSink for EstateDreamingSink<'a> {
         }
     }
 
-    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap` (T13 / ADR-021 Phase 7).
+    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap`.
     ///
     /// Called by `run_omega_cycle` for each unreinforced dreamed tunnel. Delegates to
     /// `EstateCoordinator::retire_tunnel`, which delegates to `Estate::retire_tunnel`

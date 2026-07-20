@@ -70,7 +70,7 @@ status: COMPLETE
 ## At-Rest Posture
 
 Private key bytes (32 bytes, Ed25519 `SigningKey` seed) stored in `_fed_identity.secret_key`
-as SQLite BLOB. The estate file is encrypted by SQLCipher per ADR-014. No additional
+as SQLite BLOB. The estate file is encrypted by SQLCipher. No additional
 encryption layer is applied at the federation identity layer — SQLCipher is the at-rest
 boundary. A Keychain option is technically available for Swift (store secret in
 `kSecClassKey`), but was deferred to avoid a divergence between Swift and Rust storage
@@ -96,6 +96,6 @@ postures. Filed as a follow-up for when a Keychain migration mission is scoped.
 
 - **WC3 (Rust skew-queue behavioral parity):** `_fed_pending_skew` table schema is now in
   Rust at v3. WC3 adds the actual queue/drain/replay logic.
-- **Keychain follow-up (Swift only):** ADR-014 SQLCipher is sufficient for now. A dedicated
+- **Keychain follow-up (Swift only):** SQLCipher is sufficient for now. A dedicated
   mission would migrate to Keychain if required by security review.
 - **WC2, WC4, WC5, WC6, WC7:** Unblocked by WC1. See charter dependency tree.

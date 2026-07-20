@@ -112,7 +112,7 @@ struct FederationPairingTests {
 
     /// Pull rejects a valid self-signed envelope from an engine that is NOT
     /// a paired peer. A valid signature alone does not prove pairing
-    /// authorization (ADR-013); the sender must be in the paired peer list.
+    /// authorization; the sender must be in the paired peer list.
     @Test("pull rejects signed envelope from sender that is not a paired peer")
     func pullRejectsSignedEnvelopeFromUnpairedSender() async throws {
         let storageVictim = try await makeStorage()

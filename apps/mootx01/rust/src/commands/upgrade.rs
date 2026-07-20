@@ -96,7 +96,7 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
     match release::place_binary(src, home) {
         Ok(installed) => {
             println!("Installed: {}", installed.display());
-            // ADR-024 Wave 3, Defect 1: an upgrade alone never touches
+            // an upgrade alone never touches
             // ~/.claude/mootx01-plugin or Claude Code's plugin cache —
             // without this, a machine upgraded via `mootx01 upgrade` keeps a
             // stranded plugin package (and Claude Code keeps a stranded
@@ -133,9 +133,9 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
 /// `depth::install_plugin`'s stranded-cache refresh).
 ///
 /// `vault_off: false` is safe regardless of the original install's vault
-/// posture: every plugin-capable host's package is HTTP-shaped today
-/// (ADR-024 §2), so `vault_off` has no effect on rematerialization (Defect
-/// 2) — the vault posture that matters lives in the resident daemon's own
+/// posture: every plugin-capable host's package is HTTP-shaped today, so
+/// `vault_off` has no effect on rematerialization. The vault posture that
+/// matters lives in the resident daemon's own
 /// service-manager environment, which `mootx01 upgrade` does not touch (it
 /// restarts the daemon from its EXISTING unit/task, never rewriting it).
 fn rematerialize_plugin_depth(home: &std::path::Path) {
@@ -238,9 +238,8 @@ mod tests {
         d
     }
 
-    /// Priority Adams wave-3 coverage finding: direct test of
-    /// `rematerialize_plugin_depth`'s gating logic (ADR-024 Wave 3, Defect
-    /// 1). A host that already has a plugin directory on disk (claude-code,
+    /// Direct test of `rematerialize_plugin_depth`'s gating logic. A host that
+    /// already has a plugin directory on disk (claude-code,
     /// seeded here) must be converged — its package is rewritten in place.
     /// A plugin-capable host with NO existing directory (cursor) must be
     /// left alone: an upgrade never CREATES a new plugin-depth install for

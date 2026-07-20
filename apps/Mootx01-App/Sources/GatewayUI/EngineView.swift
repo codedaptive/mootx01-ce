@@ -6,7 +6,7 @@ import AppKit
 
 // MARK: - EngineView  (the host-mode tab)
 //
-// Makes ADR-005's host model visible. Every platform runs the engine
+// Makes the host model visible. Every platform runs the engine
 // "server-in-app" (embedded, in-process, app-lifetime) — the cross-platform
 // analog. macOS adds the "app-managed daemon": spawn and supervise the real
 // server binary over stdio. This tab shows the current mode and, on macOS,
@@ -199,7 +199,7 @@ struct EngineView: View {
     private var daemonPanel: some View {
         GroupBox(String(localized: "App-managed daemon (macOS only)")) {
             VStack(alignment: .leading, spacing: 10) {
-                Text(String(localized: "Spawn the real, untouched server binary as a supervised child and talk to it over stdio. The binary is the clean, Rust-mirrored server — the app adds nothing to it (ADR-005)."))
+                Text(String(localized: "Spawn the real, untouched server binary as a supervised child and talk to it over stdio. The binary is the clean, Rust-mirrored server — the app adds nothing to it."))
                     .font(.caption).foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 4) {

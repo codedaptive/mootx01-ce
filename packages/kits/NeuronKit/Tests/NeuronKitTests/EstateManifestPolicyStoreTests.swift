@@ -1,6 +1,6 @@
 // EstateManifestPolicyStoreTests.swift
 //
-// F6 / ADR-020: the manifest-backed policy stores persist dreaming/maintenance
+//  / manifest-backed daemon state: the manifest-backed policy stores persist dreaming/maintenance
 // policy, bandit, and daemon cycle state THROUGH the public substrate interface
 // (GeniusLocusKit.estate(for:) → Estate.meta/setMeta). These tests prove the
 // round-trip through a live estate. Cross-restart durability of the underlying

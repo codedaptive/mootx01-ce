@@ -16,7 +16,7 @@ use crate::estate_types::{LatticeAnchor, OwnerCredentials};
 use crate::frames::CaptureFrame;
 use std::sync::Arc;
 
-// Epoch MILLISECONDS (ADR-023). NOW ≈ 2023-11-14; HISTORICAL = 2021-01-01.
+// Epoch MILLISECONDS. NOW ≈ 2023-11-14; HISTORICAL = 2021-01-01.
 const NOW: i64 = 1_700_000_000_000;
 // A historical authorship date: 2021-01-01 00:00 UTC.
 const HISTORICAL: i64 = 1_609_459_200_000;

@@ -10,7 +10,7 @@ relates_to:
   - docs/reference/CONVERGENCEKIT_SPEC.md
   - docs/reference/CONVERGENCEKIT_INTERFACE.md
   - docs/decisions/DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md
-  - docs/decisions/DECISION_CONVERGENCEKIT_OPERATIONAL_SYNC_2026-06-09.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
   - docs/analysis/CVK_ICLOUD_KONG_REVIEW.md
 ---
 

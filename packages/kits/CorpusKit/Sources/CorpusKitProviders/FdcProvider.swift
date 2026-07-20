@@ -1,7 +1,7 @@
 // FdcProvider.swift
 //
 // FDC (Frame Decimal Classification) relatedness embedding provider.
-// Part of the ADR-010 Decision B honest-fusion signal set.
+// Part of the honest semantic fusion honest-fusion signal set.
 //
 // ## What this provides
 //
@@ -69,7 +69,7 @@
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/fdc_provider.rs
 //
-// ADR-010 reference: Decision B, "FDC lattice co-classification" signal.
+// honest semantic fusion reference: Decision B, "FDC lattice co-classification" signal.
 
 import Foundation
 import CorpusKit
@@ -238,7 +238,7 @@ func fdcEmbeddingVector(text: String) -> [Float]? {
 /// to skip the float lane row for that chunk (the binary engram lane is
 /// unaffected). Recall on unresolved chunks falls back to the BM25 lane.
 ///
-/// ADR-010 Decision B: FDC lattice co-classification signal.
+/// FDC lattice co-classification signal.
 public final class FDCProvider: EmbeddingProvider, @unchecked Sendable {
 
     // MARK: Properties

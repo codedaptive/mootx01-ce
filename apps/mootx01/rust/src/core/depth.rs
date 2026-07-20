@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// Abstraction over invoking the `claude` CLI (ADR-024 Wave 3, Defect 1:
+/// Abstraction over invoking the `claude` CLI (plugin-owned MCP connections:
 /// "stranded cache"). Rust twin of Swift's `ClaudeCLIRunning` — keep the two
 /// in sync by hand. Real callers use `ProcessClaudeCliRunner`, which shells
 /// out to `claude` (resolved via PATH, cross-platform); tests inject a fake
@@ -246,7 +246,7 @@ impl InstallBundle {
 
     /// Every host that supports plugin depth (`family == "manifestBundle"`).
     /// Exposed so callers (e.g. `mootx01 upgrade`'s rematerialization pass,
-    /// ADR-024 Wave 3 Defect 1) can iterate the plugin-capable hosts without
+    /// plugin-owned MCP connections) can iterate the plugin-capable hosts without
     /// needing to know every client id up front.
     pub fn plugin_capable_hosts(&self) -> impl Iterator<Item = &InstallMapHost> {
         self.hosts.values().filter(|h| h.supports_plugin())
@@ -287,17 +287,17 @@ pub fn expand_tilde(path: &str, home: &Path) -> PathBuf {
 /// `vault_off` — when true, `MOOTX01_VAULT=0` is injected into the `env`
 /// block of any command/stdio-shaped MCP entry written by the plugin
 /// installer (the proxy-bridge fallback for a host whose schema cannot
-/// express HTTP — see `inject_vault_env`'s doc comment, ADR-024 Wave 3
+/// express HTTP — see `inject_vault_env`'s doc comment, plugin-owned MCP connections
 /// Defect 2). HTTP-shaped entries are never touched: the resident daemon
 /// already carries `MOOTX01_VAULT` in its own systemd/Task-Scheduler
 /// environment (wired independently at daemon-registration time in
 /// `core::service`), and client-side env on an HTTP entry is inert. When
 /// false (default / vault-on) the env block is absent, which the server
-/// interprets as vault-on (ADR-015 §1: absent MOOTX01_VAULT means vault
+/// interprets as vault-on (the open 1.0 Vault posture: absent MOOTX01_VAULT means vault
 /// enabled).
 ///
 /// `claude_cli` — injectable seam for the `claude plugin update`
-/// stranded-cache refresh (ADR-024 Wave 3, Defect 1). Pass
+/// stranded-cache refresh. Pass
 /// `&ProcessClaudeCliRunner` in production; tests inject a fake.
 pub fn apply(
     client_id: &str,
@@ -339,7 +339,7 @@ pub fn apply(
 /// `skills/` dir + `mootx01-plugin`), without checking existence. Exposed so
 /// callers (e.g. `mootx01 upgrade`) can check whether a plugin was
 /// previously materialized for this host, to decide whether to
-/// rematerialize it after a binary swap (ADR-024 Wave 3, Defect 1 — an
+/// rematerialize it after a binary swap (plugin-owned MCP connections — an
 /// upgrade alone does not touch this directory or Claude Code's plugin
 /// cache unless something asks it to).
 pub fn plugin_install_directory(host: &InstallMapHost, home: &Path) -> PathBuf {
@@ -374,8 +374,8 @@ fn write_skill(host: &InstallMapHost, home: &Path) -> std::io::Result<DepthOutco
 /// skills files, and plugin-metadata files (plugin.json without an
 /// mcpServers block) are written verbatim.
 ///
-/// ADR-024 Wave 3, Defect 1 ("stranded cache"): for Claude Code specifically,
-/// after materializing the package this also refreshes Claude Code's own
+/// Claude Code loads plugins from a cache snapshot. After materializing the
+/// package, this also refreshes Claude Code's own
 /// plugin cache if it was already installed — see
 /// `refresh_stranded_plugin_cache`.
 fn install_plugin(
@@ -397,7 +397,7 @@ fn install_plugin(
         };
     }
     let dest = plugin_install_directory(host, home);
-    // §4.2: back up an existing plugin dir, then replace it.
+    // Back up an existing plugin directory, then replace it.
     if dest.exists() {
         backup_existing(&dest)?;
         std::fs::remove_dir_all(&dest)?;
@@ -409,7 +409,7 @@ fn install_plugin(
             std::fs::create_dir_all(parent)?;
         }
         // When vault-off, patch any command/stdio-shaped MCP entry — HTTP
-        // entries are skipped (Defect 2): the resident daemon already
+        // entries are skipped: the resident daemon already
         // carries the vault posture in its own service-manager environment,
         // and client-side env on an HTTP entry is inert.
         let out = if vault_off {
@@ -420,7 +420,7 @@ fn install_plugin(
         std::fs::write(&file, out)?;
     }
 
-    // ADR-024 Wave 3, Defect 1: Claude Code's plugin cache
+    // Claude Code's plugin cache
     // (~/.claude/plugins/installed_plugins.json) pins installPath + version
     // at install time and is never refreshed by rewriting this directory —
     // ask the live CLI to refresh it if the plugin was already installed.
@@ -436,8 +436,8 @@ fn install_plugin(
 /// The Claude Code plugin registry id this installer manages.
 const CLAUDE_CODE_PLUGIN_ID: &str = "mootx01@mootx01";
 
-/// ADR-024 Wave 3, Defect 1 ("stranded cache"): Claude Code loads plugins
-/// from a CACHE SNAPSHOT (`~/.claude/plugins/installed_plugins.json`) that
+/// Claude Code loads plugins from a cache snapshot
+/// (`~/.claude/plugins/installed_plugins.json`) that
 /// pins `installPath` + `version` at install time — it does NOT re-read the
 /// marketplace directory on every launch. Rewriting `~/.claude/mootx01-plugin`
 /// (a fresh package, current transport) does nothing to that cache: a user
@@ -484,7 +484,7 @@ fn refresh_stranded_plugin_cache(
     ))
 }
 
-/// ADR-024 Wave 3, Defect 2 ("dead vault env on HTTP entry"): inject
+/// Inject
 /// `"env": {"MOOTX01_VAULT": "0"}` on the `mcpServers.mootx01` entry of an
 /// MCP config JSON file — but ONLY when that entry is command/stdio-shaped
 /// (carries a `command` key: the proxy-bridge fallback for a host whose
@@ -725,8 +725,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// ADR-024 Wave 3, Defect 2: an HTTP-shaped plugin entry (claude-code's
-    /// `.mcp.json`, ADR-024 §2) must NOT get an env block even under
+    /// an HTTP-shaped plugin entry (claude-code's
+    /// `.mcp.json`, plugin-owned MCP connections) must NOT get an env block even under
     /// vault-off — client-side env on an HTTP entry is inert (the resident
     /// daemon is the actual server, and it carries the vault posture in its
     /// own service-manager environment, wired independently at
@@ -786,7 +786,7 @@ mod tests {
     }
 
     /// vault-on (default) must NOT inject an env block — absent MOOTX01_VAULT
-    /// means vault-on per ADR-015 §1.
+    /// means vault-on.
     #[test]
     fn vault_on_does_not_inject_env() {
         let home = tmp_home("vault-on");
@@ -797,7 +797,7 @@ mod tests {
         assert_eq!(
             mcp["mcpServers"]["mootx01"]["env"],
             serde_json::Value::Null,
-            "vault-on must leave env absent (absent = vault-on per ADR-015 §1)"
+            "vault-on must leave env absent (absent = vault-on)"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(inject_vault_env(".claude-plugin/plugin.json", meta), meta);
     }
 
-    // --- stranded cache refresh (ADR-024 Wave 3, Defect 1) ---
+    // --- stranded cache refresh ---
 
     /// Test double for `ClaudeCliRunning`. `RefCell` is fine — every test
     /// using this drives it synchronously, single-threaded.

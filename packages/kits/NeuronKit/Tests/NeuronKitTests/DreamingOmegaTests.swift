@@ -1,10 +1,9 @@
 // DreamingOmegaTests.swift
 //
-// Conformance tests for the REM-OMEGA biweekly retire cycle (T13,
-// ADR-021 Phase 7, NEURONKIT_SPEC § 12.6 OMEGA row + § 12.8).
+// Conformance tests for the REM-OMEGA biweekly retire cycle.
 //
 // Covers:
-//   §12.6 OMEGA row — dreamed tunnels unreinforced in the 14-day window are
+//   Dreamed tunnels unreinforced in the 14-day window are
 //          retired; reinforced ones are left active.
 //   §12.8 — declared tunnels (isDreamed == false) are NEVER retired.
 //   Report shape — candidatesConsidered = dreamed-active count;
@@ -112,7 +111,7 @@ private func recallTrace(_ drawerId: String, used: Bool = true) -> RecallTraceIt
 
 // MARK: - Tests
 
-@Suite("REM-OMEGA cycle (T13 / ADR-021 Phase 7)")
+@Suite("REM-OMEGA cycle")
 struct DreamingOmegaTests {
 
     // ── Anti-inert: non-nil report when dreamed tunnels are present ──────────

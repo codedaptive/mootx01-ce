@@ -52,7 +52,7 @@ public func autonomicGovernorDefaultPoolReduceCadenceMs() -> Int {
     return secs * 1000
 }
 
-/// The resident Autonomic Governor (see ADR-LOOPBACKHTTP-001 §17).
+/// The resident Autonomic Governor (see bounded loopback HTTP).
 ///
 /// mootx01 is the headless resident server that owns the whole vertical, so it
 /// is what triggers the Brain. This loop drives the Brain's cadence work on each
@@ -255,7 +255,7 @@ public actor AutonomicGovernor {
         self.clock = clock
         // Construct the daemons against the live estate via NeuronKit's seam
         // adapters. Production persists policy, bandit, and daemon cycle state to
-        // the estate manifest (F6 / ADR-020) so a restart continues from the prior
+        // the estate manifest so a restart continues from the prior
         // run's state instead of re-discovering and re-proposing — the store reads
         // and writes THROUGH the public substrate interface (kit.estate(for:) →
         // Estate.meta/setMeta), keeping NeuronKit's reach B-1-compliant.
@@ -351,17 +351,17 @@ public actor AutonomicGovernor {
         var maintenanceFired = false
         var signalsTicked = false
 
-        // REM dispatch table (ADR-021 Phase 6, T11): iterate the shared table so
+        // REM dispatch table: iterate the shared table so
         // all four cadences are driven uniformly by the governor. The table is
         // defined in RemCycleTable.swift and consumed identically by the
         // dream_runner, so the cycle roster is declared exactly once.
         //
-        // ALPHA gate: timer-due AND queue non-empty (ADR-021 Phase 4 §12.2).
+        // ALPHA gate: the timer is due and the dreaming queue is non-empty.
         //   nil  = queue not yet mounted — skip (safe direction).
         //   0    = queue mounted but empty — skip (idle ticks cost nothing).
         //   n>0  = items waiting; proceed to pump + drain.
         // THETA/BETA/OMEGA: purely cadence-gated (each carries its own last-run
-        //   timestamp in DreamingDaemonState, persisted via F6/ADR-020).
+        //   timestamp in DreamingDaemonState, persisted via /manifest-backed daemon state).
         // The Swift reader seams are lazy (reads happen inside runCycle), so the
         // timer-due fast-out for ALPHA keeps the tick symmetric with the Rust
         // governor (whose EstateDreamingReader snapshots eagerly and MUST be gated
@@ -725,8 +725,7 @@ public actor AutonomicGovernor {
         handle: EstateHandle,
         now: Date
     ) async throws {
-        // Bug 3 fix (ADR025-AUDITLOG-GOVERNOR) + topology-coverage fix (B3):
-        // skip full-estate load + O(N²) eigenvalue recompute when no topology-
+        // Skip the full-estate load and O(N²) eigenvalue recompute when no topology-
         // affecting change has occurred since the last scan.
         //
         // Strategy: persist computed scores + a COMPOSITE topology-change signature
@@ -858,8 +857,8 @@ public actor AutonomicGovernor {
         handle: EstateHandle,
         now: Date
     ) async throws {
-        // Bug 4 fix (ADR025-AUDITLOG-GOVERNOR): skip full-history trace load +
-        // full Bradley-Terry refit when no new audit events exist since the last scan.
+        // Skip the full-history trace load and Bradley-Terry refit when no new
+        // audit events exist since the last scan.
         //
         // Strategy (mirrors graphCentralityScan): persist fitted scores + audit-event-
         // count watermark to estate.meta. On each cadence, check the watermark first

@@ -49,9 +49,9 @@ import PersistenceKitSQLite
 import PersistenceKitReplication
 @testable import GeniusLocusKit
 
-// MARK: - Composite schema-version conformance (ADR-012 ext-slot coupling)
+// MARK: - Composite schema-version conformance (nullable entity ext slots ext-slot coupling)
 
-@Suite("GLK composite schema version == sum of component versions (ADR-012)")
+@Suite("GLK composite schema version == sum of component versions")
 struct CompositeSchemaVersionTests {
 
     /// The composite version is the sum of component versions.
@@ -488,7 +488,7 @@ struct MatrixSnapshotPersistenceTests {
         // audit log — proving load+fold-forward is exact, not an approximation.
         // The oracle must use the SAME eventTime map the hydration path builds:
         // the temporal (T) matrix keys off eventTime, not the capture HLC
-        // (ADR-004), so a no-map fullRebuild would fold on the wrong clock and
+        //, so a no-map fullRebuild would fold on the wrong clock and
         // diverge by sub-ms eventTime/HLC rounding.
         let registered = await kit.matrixTiers[handle]
         let fullLog = try await kit.auditLog(for: handle)

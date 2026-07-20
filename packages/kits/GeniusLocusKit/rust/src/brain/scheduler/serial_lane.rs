@@ -1,11 +1,11 @@
 // brain/scheduler/serial_lane.rs — single serial-lane executor for the Rust
 // standing-signal scheduler.
 //
-// Architecture spec §11.3 / DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21:
+// Standing signals execute through one serialized lane:
 // one drainer per estate, jobs applied in submission order, no parallel signal
 // execution against one estate.
 //
-// T5 (ADR-021 Decision 7): The Rust scheduler now backs the signals lane with
+// The Rust scheduler now backs the signals lane with
 // the SHARED per-estate `queue.sqlite`, isolated by `stream_id = "signals"`.
 // This mirrors the Swift `StandingSignalScheduler` backend migration and closes
 // the crash-durability parity gap: SQLite-backed estates get durable standing-
@@ -183,7 +183,7 @@ impl Dispatcher for CoordinatorDispatcher {
     /// `propose` verb.
     ///
     /// `now_nanos` is the drain-loop nanosecond timestamp. The coordinator stores
-    /// `filed_at` in epoch-milliseconds (ADR-023), so `now_nanos` is converted to
+    /// `filed_at` in epoch-milliseconds, so `now_nanos` is converted to
     /// milliseconds by dividing by `1_000_000` before the verb call. This matches
     /// the Swift path where `dispatchPropose` calls `kit.propose` without a
     /// timestamp and the Swift actor reads `Date()`.
@@ -204,7 +204,7 @@ impl Dispatcher for CoordinatorDispatcher {
             ));
         }
         // Convert nanoseconds → epoch-milliseconds for the coordinator's
-        // ISO8601-backed `filed_at` column (ADR-023).
+        // ISO8601-backed `filed_at` column.
         let now_ms = now_nanos / 1_000_000;
         let verb_frame = VerbProposeFrame {
             target: frame.target.clone(),
@@ -227,7 +227,7 @@ impl Dispatcher for CoordinatorDispatcher {
     ///
     /// `now_nanos` is converted to epoch-milliseconds before the call for the
     /// same reason as `dispatch_propose` — the coordinator's `filed_at` column is
-    /// epoch-ms (ADR-023).
+    /// epoch-ms.
     fn dispatch_associate(
         &self,
         handle_id: &EstateHandleID,
@@ -480,7 +480,7 @@ impl SignalRecord {
 /// long-running vectors and observe the same truncation.
 pub const RETENTION: usize = 64;
 
-/// The canonical stream identifier for standing-signal jobs (T5, ADR-021
+/// The canonical stream identifier for standing-signal jobs (recall-driven dreaming
 /// Decision 7). Every `Job` sent to the shared `queue.sqlite` carries
 /// `stream_id = SIGNAL_STREAM_ID`; the drain loop uses `drain_for_stream` to
 /// claim only these jobs, leaving encode jobs or dreaming jobs on the same

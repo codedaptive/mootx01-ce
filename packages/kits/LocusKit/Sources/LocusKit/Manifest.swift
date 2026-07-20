@@ -35,13 +35,13 @@ public enum ManifestKey: String, Sendable, CaseIterable {
     /// The estate's Ed25519 (Curve25519 signing) public key, base64 of
     /// the raw 32-byte representation. Generated on first open (see
     /// `Estate.open`) and used as the estate's federation identity for
-    /// grant signing. Per DECISION_SYNCKIT_DESIGN_2026-05-19 §8 and
-    /// ADR-007. Safe to store here — public keys have no confidentiality
+    /// grant signing. Per the ConvergenceKit replication surface and
+    /// data-movement privacy tiers. Safe to store here — public keys have no confidentiality
     /// requirement.
     case ed25519PublicKey            = "ed25519_public_key"
 
     /// Reserved seam retained for backward read-compatibility with estates
-    /// opened before the Keychain migration (secfix/ed25519-keychain, ADR-007).
+    /// opened before the Keychain migration (secfix/ed25519-keychain, data-movement privacy tiers).
     /// On Apple, the private signing key lives in the Keychain
     /// (kSecClassGenericPassword, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
     /// account = estate UUID) and is loaded by `Estate.open` into memory for
@@ -115,7 +115,7 @@ public struct ManifestValues: Sendable {
 
     /// Raw bytes of the deprecated plaintext private key field, decoded from
     /// the manifest if present in an old database opened before the Keychain
-    /// migration (secfix/ed25519-keychain, ADR-007).
+    /// migration (secfix/ed25519-keychain, data-movement privacy tiers).
     ///
     /// This field is never populated by current code and is never used for
     /// signing. The private key now lives in the Keychain and is accessed via

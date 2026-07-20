@@ -52,7 +52,7 @@ struct RecipeToolsTests {
         // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
         // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
         // 34 total: 11 recipe tools + 23 lens tools (moot_lens_node_motion added by
-        // ADR-DIFFUSION-001 diffusion node-layer lens).
+        // node motion modeling diffusion node-layer lens).
         #expect(recipeNames == [
             "moot_confirm_migration",
             "moot_consolidate",

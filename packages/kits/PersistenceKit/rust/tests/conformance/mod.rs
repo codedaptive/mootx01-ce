@@ -9,7 +9,7 @@
 // backend-universal groups (schema, row, predicate, blob, audit,
 // generated-column, append-only, transaction). The ninth — vector — is
 // exposed separately via `vector_fixtures`. PersistenceKit owns no k-NN
-// engine (ADR-008); `vector_fixtures` asserts the storage-ACCOMMODATION
+// engine; `vector_fixtures` asserts the storage-ACCOMMODATION
 // contract — every backend round-trips, bulk-hydrates, counts, and deletes
 // vector-payload rows through the general RowStore surface.
 
@@ -210,7 +210,7 @@ fn vector_accommodation_schema() -> SchemaDeclaration {
     )
 }
 
-/// Vector-storage accommodation guarantee (ADR-008). PersistenceKit owns no
+/// Vector-storage accommodation guarantee. PersistenceKit owns no
 /// k-NN engine; dense-embedding search lives in VectorKit. Every backend MUST
 /// accommodate a vector workload's STORAGE needs through RowStore:
 ///   1. vector-payload row round-trip — 32-byte binary + 384-d float32 survive

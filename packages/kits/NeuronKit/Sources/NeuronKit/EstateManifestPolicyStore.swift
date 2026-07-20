@@ -1,7 +1,7 @@
 // EstateManifestPolicyStore.swift
 //
 // Manifest-backed implementations of the dreaming and maintenance policy
-// stores (F6 / ADR-020). These satisfy the daemon persistence seams by
+// stores. These satisfy the daemon persistence seams by
 // reading and writing the estate manifest THROUGH the public substrate
 // interface (`GeniusLocusKit.estate(for:)` → `LocusKit.Estate.meta/setMeta`),
 // so policy, bandit, and daemon cycle state survive a process restart.
@@ -19,7 +19,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 
-/// Namespaced manifest keys for NeuronKit daemon state (ADR-020). Namespaced
+/// Namespaced manifest keys for NeuronKit daemon state. Namespaced
 /// to avoid collision with the typed v1 `ManifestKey` set.
 enum NeuronKitManifestKey {
     static let dreamingPolicy = "neuronkit.dreaming.policy"
@@ -28,7 +28,7 @@ enum NeuronKitManifestKey {
     static let maintenancePolicy = "neuronkit.maintenance.policy"
     static let maintenanceState = "neuronkit.maintenance.state"
 
-    // Governor compute-cache keys (ADR025-AUDITLOG-GOVERNOR O(N) RAM fix).
+    // Governor compute-cache keys avoid retaining full-estate state in memory.
     // Each duty persists its computed output + a change-detection watermark
     // so that the next cadence invocation can skip an expensive full-estate
     // load when the estate is unchanged.

@@ -112,7 +112,7 @@ struct InstallDepthTests {
         let manifest = root.appendingPathComponent(".claude-plugin/plugin.json")
         #expect(FileManager.default.fileExists(atPath: skill.path))
         #expect(FileManager.default.fileExists(atPath: manifest.path))
-        // ADR-024 §2: Claude Code's embedded package wires the resident
+        // Claude Code's embedded package wires the resident
         // daemon's loopback HTTP endpoint, not a bare `command` placeholder
         // — there is nothing for rewriteBareMootCommand to rewrite, and
         // nothing SHOULD need the placed binary path baked in (HTTP entries
@@ -143,7 +143,7 @@ struct InstallDepthTests {
 
     /// Priority Adams wave-3 coverage finding: direct test of the gating
     /// logic behind `mootx01 upgrade`'s plugin rematerialization pass
-    /// (ADR-024 Wave 3, Defect 1). A host that already has a plugin
+    ///. A host that already has a plugin
     /// directory on disk must be returned (so `UpgradeCommand` reruns
     /// `apply` and converges it); a plugin-capable host with NO existing
     /// directory must NOT be returned — an upgrade never CREATES a new
@@ -180,10 +180,10 @@ struct InstallDepthTests {
         #expect(try DepthInstaller.apply(clientID: "kiro", depth: .skills, homeDirectory: home, binaryPath: "/safe/bin/mootx01") == .server)
     }
 
-    // MARK: - vault posture propagation (sec-fix 6b08d56b; ADR-024 Wave 3 Defect 2)
+    // MARK: - vault posture propagation (sec-fix 6b08d56b; plugin-owned MCP connections)
 
-    /// ADR-024 Wave 3, Defect 2: an HTTP-shaped plugin entry (claude-code's
-    /// `.mcp.json`, ADR-024 §2) must NOT get an env block even under
+    /// an HTTP-shaped plugin entry (claude-code's
+    /// `.mcp.json`, plugin-owned MCP connections) must NOT get an env block even under
     /// vault-off — client-side env on an HTTP entry is inert (the resident
     /// daemon is the actual server, and it carries the vault posture in its
     /// own launchd environment, wired independently at daemon-registration
@@ -302,7 +302,7 @@ struct InstallDepthTests {
     }
 
     /// vault-on (the default) must NOT inject an env block — absent MOOTX01_VAULT
-    /// means vault-on per ADR-015 §1.
+    /// means vault-on.
     @Test("vault-on (default) does not inject env block into plugin MCP configs")
     func vaultOnDoesNotInjectEnv() throws {
         let home = sandbox()
@@ -324,10 +324,10 @@ struct InstallDepthTests {
         let servers = mcp["mcpServers"] as? [String: Any]
         let server = servers?["mootx01"] as? [String: Any]
         #expect(server?["env"] == nil,
-                "vault-on must leave env absent (absent = vault-on per ADR-015 §1)")
+                "vault-on must leave env absent (absent = vault-on)")
     }
 
-    // MARK: - stranded cache refresh (ADR-024 Wave 3, Defect 1)
+    // MARK: - stranded cache refresh
 
     /// Test double for `ClaudeCLIRunning`. `@unchecked Sendable` is safe here:
     /// every test using this drives it synchronously, single-threaded.

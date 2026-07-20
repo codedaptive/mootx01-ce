@@ -22,7 +22,7 @@
 // require @retroactive. CKDatabase is Sendable in the CloudKit framework,
 // satisfying the protocol's Sendable constraint.
 //
-// Reference: DECISION_CONVERGENCEKIT_CONCURRENT_MULTIDEVICE_2026-07-16.md §N2
+// Compare-and-swap support is required for atomic device-slot claims.
 
 import Foundation
 import CloudKit

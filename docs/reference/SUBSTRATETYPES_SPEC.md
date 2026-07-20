@@ -11,7 +11,7 @@ relates_to:
   - SUBSTRATEKERNEL_SPEC.md      (sibling: hot-path bit operations over these types)
   - SUBSTRATEML_SPEC.md          (sibling: cold-path algorithms over these types)
   - SUBSTRATELIB_SPEC.md         (umbrella: orchestration composing this + Kernel + ML)
-  - DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md (the four-package split, this is Layer 1)
+  - the four-package substrate contract (the four-package split, this is Layer 1)
   - GENIUSLOCUS_ENGINEERING_COOKBOOK.md  (§2 rows, §3 fingerprints, §5 audit log, §6 matrices, §17 SimHash family, I-30 four-package invariant)
 purpose: |
   SubstrateTypes is Layer 1 of the four-package substrate: the
@@ -90,19 +90,19 @@ This specification defines:
   live in SubstrateKernel.
 - The content hash (`ContentHash`) — a typed 32-byte SHA-256 digest
   of a leaf payload, semantically distinct from `MerkleRoot`.
-  ADR-017 §16.
+  the node-integrity contract §16.
 - The Merkle root (`MerkleRoot`) — a typed 32-byte hash of an
   interior node's children, semantically distinct from `ContentHash`.
-  ADR-017 §16.
+  the node-integrity contract §16.
 - The snapshot identifier (`SnapshotId`) — a typed UUID wrapper for
-  the snapshot registry. ADR-017 §15.
+  the snapshot registry. the node-integrity contract §15.
 - The temporal query coordinate (`AsOfCoordinate`) — a discriminated
   `.present` / `.asOf(HLC)` value that prevents zero-HLC ambiguity
-  in as-of reads. ADR-017 §15–§17.
+  in as-of reads. the node-integrity contract §15–§17.
 - The Merkle domain-separation tags (`MerkleDomain`) — four frozen
   one-byte constants (`LEAF`, `INTERIOR`, `TOMBSTONE`, `COMMITMENT`)
   prepended before hashing to prevent cross-domain collisions.
-  ADR-017 §16.
+  the node-integrity contract §16.
 
 This specification does NOT define:
 
@@ -371,7 +371,7 @@ shared expectation — fails the conformance gate.
 Corrected § 5.4: `RowVerb` has twelve verbs (capture, observe, mutate, retract, promote, reject, supersede, decay, expire, contest, resolveContest, tombstone), not nine, and the earlier list of verb names (reanchor, withdraw, expunge, recall, propose, associate, learn) did not match the shipped enum. Corrected `RowState` description from "the legal row states" to "the ten legal row states" for consistency with the scale-gapped raw-value layout.
 
 ### 1.1.0 -- 2026-06-20
-Added five new types for ADR-017 content-integrity and snapshots: ContentHash (§5.8), MerkleRoot (§5.9), SnapshotId (§5.10), AsOfCoordinate (§5.11), MerkleDomain (§5.12). Added three new error types to §6: ContentHashError, MerkleRootError, SnapshotIdError.
+Added five new types for the node-integrity contract content-integrity and snapshots: ContentHash (§5.8), MerkleRoot (§5.9), SnapshotId (§5.10), AsOfCoordinate (§5.11), MerkleDomain (§5.12). Added three new error types to §6: ContentHashError, MerkleRootError, SnapshotIdError.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -1,7 +1,7 @@
 // AuditBridgeTests.swift
 //
 // AuditBridge.bridge → [UnifiedAuditEntry]. Focused coverage for the
-// lattice-anchor bridging added for ADR-DIFFUSION-001 §5 (Option 3a): the FDC
+// lattice-anchor bridging added for node motion modeling (Option 3a): the FDC
 // zone time-series the diffusion zone / topic-trajectory motion model folds
 // over. The bitmap columns are exercised elsewhere; these tests pin the anchor.
 

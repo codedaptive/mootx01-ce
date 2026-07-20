@@ -7,7 +7,7 @@
 //!
 //! # No-FFI
 //!
-//! Per ADR-LOOPBACKHTTP-001 the shared `LoopbackHTTP` library is Swift-only.
+//! Per bounded loopback HTTP the shared `LoopbackHTTP` library is Swift-only.
 //! This Rust vertical hand-rolls its own `std::net` listener and a minimal HTTP
 //! parser; parity with the Swift transport is enforced at the JSON-RPC wire, not
 //! the transport implementation. The two servers are independent verticals.
@@ -37,7 +37,7 @@
 //! # Security
 //!
 //! Binds loopback only (`127.0.0.1`), never `0.0.0.0`. No authentication on the
-//! Community-Edition transport (ADR-LOOPBACKHTTP-001); the Enterprise OAuth layer
+//! Community-Edition transport; the Enterprise OAuth layer
 //! composes above the transport in v2.
 //!
 //! SECURITY AUDIT DISPOSITION — fixed-port loopback impersonation (codex
@@ -354,7 +354,7 @@ pub fn run_http_loop(
     let gate = ConcurrencyGate::new(max_concurrent, max_queued);
     let sse_gate = Arc::new(ConcurrencyGate::new(max_sse, 0));
 
-    // ADR-025 wave 8.2: build the monitoring control from the stats store when
+    // build the monitoring control from the stats store when
     // available. The concrete type lives here (AriaResident is the Swift mirror)
     // so AriaMcpKit never imports observer_sink directly.
     // `None` when no stats store is configured (stdio, provision-less contexts).
@@ -911,7 +911,7 @@ fn read_request(stream: &mut TcpStream, max_body_bytes: usize) -> Option<HttpReq
 
     // Body: read up to min(Content-Length, max_body_bytes). A body larger than
     // the cap is bounded; callers set max_body_bytes high enough that a valid
-    // MCP tools/call cannot be truncated (ADR-LOOPBACKHTTP-001 condition 2).
+    // MCP tools/call cannot be truncated (bounded loopback HTTP condition 2).
     let want = content_length.min(max_body_bytes);
     let mut body: Vec<u8> = buf[header_end..].to_vec();
     while body.len() < want {
@@ -972,7 +972,7 @@ fn route(
             "/api/graph" => get_graph_snapshot(&dispatcher.registry, stats_store),
             "/api/lattice" => get_lattice_snapshot(&dispatcher.registry),
             "/api/admin/estates" => get_admin_estates_snapshot(&dispatcher.registry),
-            // ADR-025 §3: sensitivity-grant status, physically outside the
+            // sensitivity-grant status, physically outside the
             // JSON-RPC / MCP surface so prompt-injected models cannot reach it.
             "/api/control/grants" => control_grants(dispatcher),
             _ => (404, br#"{"error":"not_found"}"#.to_vec()),
@@ -983,7 +983,7 @@ fn route(
         return (405, br#"{"error":"method_not_allowed"}"#.to_vec());
     }
 
-    // ADR-025 §3: sensitivity-grant control routes. Handled BEFORE JSON-RPC
+    // sensitivity-grant control routes. Handled BEFORE JSON-RPC
     // parsing so they are structurally unreachable from the MCP tool surface —
     // a prompt-injected model that calls tools/call cannot route here.
     if request.path == "/api/control/unlock" {
@@ -1035,7 +1035,7 @@ fn route(
 }
 
 // ---------------------------------------------------------------------------
-// ADR-025 §3: sensitivity-grant control route handlers
+// sensitivity-grant control route handlers
 // These three functions back the GET /api/control/grants, POST /api/control/unlock,
 // and POST /api/control/lock routes that are structurally outside the MCP/JSON-RPC
 // surface. Mirrors Swift HTTPServer's `controlGrants`, `controlUnlock`, `controlLock`.
@@ -1097,7 +1097,7 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
 
     // Freshness check: reject if timestamp is more than 10 s old or 5 s in the future.
     // This is replay resistance over the loopback socket, not a cryptographic proof
-    // (ADR-025 section 3 "fail-closed, loopback only"). The real authentication happened on
+    // (out-of-band sensitivity grants section 3 "fail-closed, loopback only"). The real authentication happened on
     // the CLI side (PBKDF2 password verification for the Rust port; LA assertion for
     // Swift). Rust credential storage and daemon-side PBKDF2 verification arrive in
     // Wave 7.2 (UnlockAuthority seam).
@@ -1113,7 +1113,7 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
     // Grant the tier.
     match tier_raw.as_str() {
         "restricted" => {
-            // ADR-025 §1: restricted grants expire at LOCAL midnight, not UTC.
+            // restricted grants expire at LOCAL midnight, not UTC.
             // Derive the local UTC offset at grant time via POSIX localtime_r.
             let now_secs = now_ms / 1000;
             let tz_offset = local_utc_offset_seconds(now_secs);
@@ -1137,12 +1137,12 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
         Some((_, expires_at_ms)) => {
             let expires_str = ms_to_iso8601_utc(expires_at_ms);
             let body = format!(r#"{{"ok":true,"tier":"{tier_raw}","expiresAt":"{expires_str}"}}"#);
-            eprintln!("ADR-025: {tier_raw} grant issued, expires {expires_str}");
+            eprintln!("{tier_raw} grant issued, expires {expires_str}");
             (200, body.into_bytes())
         }
         None => {
             // Should not happen — we just granted.
-            eprintln!("ADR-025: grant issued but ledger returned None snapshot immediately after");
+            eprintln!("grant issued but ledger returned None snapshot immediately after");
             let body = format!(r#"{{"ok":true,"tier":"{tier_raw}","expiresAt":null}}"#);
             (200, body.into_bytes())
         }
@@ -1154,7 +1154,7 @@ fn control_unlock(body: &[u8], dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
 /// Idempotent. Response: `{"ok":true}`
 fn control_lock(dispatcher: &Dispatcher) -> (u16, Vec<u8>) {
     dispatcher.sensitivity_ledger.lock();
-    eprintln!("ADR-025: all sensitivity grants locked");
+    eprintln!("all sensitivity grants locked");
     (200, br#"{"ok":true}"#.to_vec())
 }
 
@@ -1202,9 +1202,9 @@ fn wall_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Returns the local UTC offset in whole seconds for ADR-025 §1 grant expiry.
+/// Returns the local UTC offset in whole seconds for out-of-band sensitivity grants grant expiry.
 ///
-/// ADR-025 §1 requires restricted grants to expire at LOCAL midnight, not UTC
+/// out-of-band sensitivity grants requires restricted grants to expire at LOCAL midnight, not UTC
 /// midnight. This offset (seconds east of UTC, tm_gmtoff convention) is passed
 /// to `grant_restricted` so it can compute the correct local-midnight boundary.
 ///
@@ -1619,7 +1619,7 @@ mod tests {
 
     #[test]
     fn local_utc_offset_returns_i32_in_valid_range() {
-        // ADR-025 §1: grant_restricted passes the local UTC offset so grants
+        // grant_restricted passes the local UTC offset so grants
         // expire at LOCAL midnight, not UTC midnight. The offset must be a
         // plausible value: within ±50400 seconds (±14 hours, the widest real
         // IANA timezone offset). On CI/test boxes this is typically 0 (UTC),

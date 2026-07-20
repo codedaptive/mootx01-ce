@@ -84,7 +84,7 @@ the output, and compares the CRC to the committed `output_crc32`.
   token artifacts, not real divergence.
 - **Float / higher-math primitives** (fft, nmf, eigenvalue_centrality, …) are
   byte-exact only on the **generation platform** — the committed vectors store
-  IEEE-754 bit patterns and ADR-001 forbids cross-platform float bit-identity.
+  IEEE-754 bit patterns and the transcendental-isolation contract forbids cross-platform float bit-identity.
   Integer federation-core primitives are portable.
 - **Swift drift uses an explicit `--stamp`** rather than a build-time stamp:
   SwiftPM's build-plugin sandbox cannot hash a sibling package's source at build

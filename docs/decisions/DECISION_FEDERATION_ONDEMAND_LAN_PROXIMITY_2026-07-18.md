@@ -4,8 +4,8 @@ question: How do estates discover each other on a LAN, pair by proximity on iOS,
 authors: MOOTx01 maintainers
 date: 2026-07-18
 relates_to:
-  - docs/decisions/DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md
-  - docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#72-disclosure-model
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
   - docs/reference/FEDERATION_SYNCSERVER_WIRE_PROTOCOL.md
   - docs/reference/CONVERGENCEKIT_SPEC.md
   - docs/analysis/CVK_WAVEC_FEDERATION_CHARTER.md

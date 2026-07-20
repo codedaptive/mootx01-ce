@@ -1,7 +1,7 @@
 // HammingTopKTieBreakTests.swift
 //
 // Phase 3.2 spec-pinned tie-check test
-// (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.3.2).
+
 //
 // The Phase 3.2 algorithm change (full-sort → heap-based) is
 // required to preserve the row-index ascending tie-break. This

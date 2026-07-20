@@ -1,7 +1,7 @@
 //! Wing and room aggregate summary types. Ports `Summaries.swift`.
 //!
 //! `WingSummary` and `RoomSummary` are computed projections built by
-//! counting drawers grouped by `parent_node_id` (ADR-017), mirroring
+//! counting drawers grouped by `parent_node_id`, mirroring
 //! MemPalace's `tool_list_wings` behavior. Their counts reflect
 //! whatever is in the store at query time. Wings and rooms are node
 //! rows in the `nodes` table; drawers reference their parent room via
@@ -11,7 +11,7 @@
 
 /// Aggregate count for a single wing — produced by `list_wings`.
 ///
-/// Wings are node rows in the `nodes` table (ADR-017); drawers
+/// Wings are node rows in the `nodes` table; drawers
 /// reference their room via `parent_node_id`. This summary is a
 /// computed projection over the node tree. Counts reflect
 /// non-tombstoned drawers only.

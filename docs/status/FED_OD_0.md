@@ -13,7 +13,7 @@ output: docs/analysis/FED_OD_CHARTER.md
 
 Kong read and assessed:
 - `DECISION_FEDERATION_ONDEMAND_LAN_PROXIMITY_2026-07-18.md` (accepted 2026-07-18)
-- `DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md` (disclosure doctrine, full appendices)
+- `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#72-disclosure-model` (disclosure doctrine)
 - `CONVERGENCEKIT_INTERFACE.md` (Relay abstraction, HostedRelay/RelayHTTPTransport rows,
   concordance table)
 - `Sources/ConvergenceKitFederation/FederationSyncEngine.swift`, `HyperplaneFamilyExchange.swift`,

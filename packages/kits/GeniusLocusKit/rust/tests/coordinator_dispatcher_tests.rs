@@ -516,7 +516,7 @@ fn f6_diagnostic_emission_bypasses_dispatcher() {
 
 // ── Test 7: SQLite crash-durability and stream isolation ─────────
 
-/// Parity gate for ADR-021 Decision 7 (T5) crash-durability invariant.
+/// Parity gate for recall-driven dreaming  crash-durability invariant.
 ///
 /// Two properties are verified:
 ///
@@ -531,7 +531,7 @@ fn f6_diagnostic_emission_bypasses_dispatcher() {
 /// the encode job remains available in the queue.
 ///
 /// Swift parity: mirrors `StandingSignalScheduler` crash-durability
-/// property described in DECISION_STANDING_SIGNAL_SCHEDULER_2026-05-21:
+/// property described in serialized standing-signal scheduling:
 /// "SQLite estates get durable standing-signal queuing; a process restart
 /// must not lose pending signal jobs."
 #[test]

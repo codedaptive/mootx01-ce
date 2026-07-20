@@ -2,7 +2,7 @@
 //! embedding provider. Rust port of Swift's `NmfProvider` in
 //! `CorpusKitProviders`.
 //!
-//! ADR-010 Decision B — NMF latent-factor provider in the classical-
+//! — NMF latent-factor provider in the classical-
 //! fusion dense recall lane.
 //!
 //! ## Algorithm
@@ -155,11 +155,11 @@ pub struct NmfProvider {
     /// Effective NMF rank after finalize().
     effective_rank: usize,
 
-    /// Reduced-vocabulary cap K for the dense factorization (ADR-022).
+    /// Reduced-vocabulary cap K for the dense factorization.
     reduced_vocab_cap: usize,
 
     /// The frozen reduced vocabulary (term → reduced row) the basis was trained
-    /// on (ADR-022). Projection + serialization key on THIS, not the full
+    /// on. Projection + serialization key on THIS, not the full
     /// `counts.vocab`. Empty until `finalize()`.
     basis_vocab: HashMap<String, usize>,
 }
@@ -231,7 +231,7 @@ impl NmfProvider {
             return;
         }
 
-        // ADR-022: factor over a reduced, informative sub-vocabulary so the
+        // factor over a reduced, informative sub-vocabulary so the
         // dense NMF is `K × numDocs` (feasible) instead of `full-vocab × numDocs`
         // (infeasible). Shared with LSA; frozen here; drives query projection.
         // `vocab_size` below is the REDUCED row count — the factorize + fold-in
@@ -399,7 +399,7 @@ impl NmfProvider {
         w.write_u64(self.projection_seed);
         w.write_u32(self.counts.document_count() as u32);
         w.write_u32(self.effective_rank as u32);
-        // ADR-022: persist the REDUCED basis vocab; projection keys on it. The
+        // persist the REDUCED basis vocab; projection keys on it. The
         // full counts vocab is persisted by serialize_counts as the drift anchor.
         w.write_string_u32_map(&self.basis_vocab);
         w.write_f32_matrix(&self.w);
@@ -474,7 +474,7 @@ impl NmfProvider {
             return None;
         }
 
-        // Projection keys on the REDUCED basis vocab (ADR-022); OOV terms
+        // Projection keys on the REDUCED basis vocab; OOV terms
         // outside top-K contribute nothing (covered by RI).
         let vocab_size = self.basis_vocab.len();
         let k = self.effective_rank;
@@ -844,7 +844,7 @@ mod tests {
 
     /// Regression test for codex e25c03fd — Rust-only parity gap vs Swift.
     ///
-    /// ADR-022 empty-vocabulary reduction (corpus vocab above `reduced_vocab_cap`
+    /// shared reduced embedding vocabulary empty-vocabulary reduction (corpus vocab above `reduced_vocab_cap`
     /// AND all terms are hapax, df < 2) must fully reset finalized state so that
     /// a subsequent `serialize_basis()` + `from_serialized_basis()` round-trip is
     /// self-consistent and OOB-safe.

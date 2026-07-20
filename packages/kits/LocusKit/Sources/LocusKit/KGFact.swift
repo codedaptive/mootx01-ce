@@ -39,7 +39,7 @@ import SubstrateLib
 ///   computed accessors (`extractorClass`, `assertionKind`,
 ///   `specificity`, `confidenceBand`, `isCanonical`).
 /// - `provenanceBitmap` — source type, confirmation, confidence,
-///   channel, sensitivity per `Q1_DECISION_PROVENANCE_BITMAP.md`.
+///   channel, sensitivity per `the packed provenance layout`.
 ///   Carried verbatim from the source drawer's provenance at
 ///   extraction time. Provenance accessors shared with `Drawer`
 ///   live in `Provenance.swift`.
@@ -100,7 +100,7 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
     public let operationalBitmap: Int64
 
     /// Provenance bitmap carried from the source drawer at extraction
-    /// time per `Q1_DECISION_PROVENANCE_BITMAP.md`. Held verbatim so a
+    /// time per `the packed provenance layout`. Held verbatim so a
     /// fact's source-type / confirmation / confidence / channel /
     /// sensitivity remain recoverable without joining back to the
     /// drawer row. Defaults to `0` (all axes unknown / sensitivity

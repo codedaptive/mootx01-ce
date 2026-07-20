@@ -144,7 +144,7 @@ struct TrainingDaemonTests {
 
     @Test
     func provisionalDefaultMatchesDecisionRecord() {
-        // DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21 records the
+        // the training transition threshold records the
         // provisional default at 500 transitions. The gate type
         // exposes that constant so callers can opt into the recommended
         // floor without hard-coding the number themselves.

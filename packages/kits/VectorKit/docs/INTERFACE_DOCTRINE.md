@@ -77,4 +77,6 @@ If you find yourself wanting to:
 - Add a kit dependency from VectorKit on something other than SubstrateLib, EngramLib, or PersistenceKit
 - Cross the kit boundary into CorpusKit-shaped tokenization concerns
 
-Stop. Write a decision record in `docs/decisions/` proposing the change. The kit boundaries are deliberate.
+Stop. Update the owning reference specification and engineering master before
+changing code. The kit boundaries are deliberate, and the new contract must be
+conformance-testable in both versions.

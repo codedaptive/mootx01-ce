@@ -52,7 +52,7 @@ pub struct TunnelLink {
 /// two drawer endpoints (for reinforcement check). Mirrors the Swift path that
 /// reads `Tunnel.sourceDrawerId` / `targetDrawerId` / `id` from the dreamed-
 /// active tunnel list. Only used by `run_omega_cycle` and its test fakes.
-/// T13 / ADR-021 Phase 7.
+///  / recall-driven dreaming
 #[derive(Clone, Debug, PartialEq)]
 pub struct DreamingTunnelItem {
     /// The tunnel's persistent identifier (used to call `retire_tunnel`).
@@ -180,7 +180,7 @@ pub trait DreamingPolicyStore {
     /// Load the persisted daemon cycle state, or `None` if none has been saved
     /// (the daemon then starts from its defaults). Loaded once at governor
     /// construction so a restart continues from the prior run's idempotency/cycle
-    /// memory (F6 / ADR-020). Default: no state persisted.
+    /// memory. Default: no state persisted.
     /// Mirrors Swift `DreamingPolicyStore.loadDaemonState`.
     fn load_daemon_state(&self) -> Option<DreamingDaemonState> {
         None
@@ -193,7 +193,7 @@ pub trait DreamingPolicyStore {
 }
 
 /// The dreaming daemon's across-cycle state, captured for persistence so a
-/// restart continues instead of re-discovering and re-proposing (F6 / ADR-020).
+/// restart continues instead of re-discovering and re-proposing.
 /// `proposed_keys` is a SORTED Vec so the serialized manifest value is byte-stable.
 /// Mirrors Swift `DreamingDaemonState`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -215,7 +215,7 @@ pub struct DreamingDaemonState {
     pub co_recall_counts: BTreeMap<String, u64>,
     /// Epoch-seconds timestamp of the last REM-THETA (daily consolidation) cycle
     /// run. None = never run. Used by the THETA due-check to gate on the 24 h
-    /// cadence (D5a). Persisted via F6/ADR-020 so stdio estates consolidate on
+    /// cadence. Persisted via /manifest-backed daemon state so stdio estates consolidate on
     /// their next invocation even after a restart (D5c). `#[serde(default)]`
     /// keeps older persisted states loading cleanly when this field is absent.
     /// Mirrors Swift `DreamingDaemonState.lastThetaRunAt`.
@@ -239,7 +239,7 @@ pub struct DreamingDaemonState {
 ///
 /// Stores policy, bandit state, and daemon cycle state in memory; all are
 /// lost when the struct is dropped. Production hosts override the trait to
-/// write to the estate manifest for cross-restart persistence (F6 / ADR-020).
+/// write to the estate manifest for cross-restart persistence.
 /// This implementation stores daemon state so tests can exercise the full
 /// save/load round-trip without a live estate (parity with Swift's
 /// `InMemoryDreamingPolicyStore` which was updated in T11 for the same reason).
@@ -267,7 +267,7 @@ impl DreamingPolicyStore for InMemoryDreamingPolicyStore {
 
     /// Persist daemon cycle state in memory. The stored state is returned by
     /// subsequent `load_daemon_state()` calls so tests can verify the full
-    /// save/load round-trip (T11 D5c, F6 / ADR-020). Mirrors Swift
+    /// save/load round-trip (/ manifest-backed daemon state). Mirrors Swift
     /// `InMemoryDreamingPolicyStore.saveDaemonState`.
     fn save_daemon_state(&mut self, state: DreamingDaemonState) {
         self.stored_daemon_state = Some(state);
@@ -308,7 +308,7 @@ pub trait DreamingSubstrateReader {
     /// implement OMEGA leave this returning empty and `run_omega_cycle` exits
     /// early without retiring anything (safe no-op).
     ///
-    /// Mirrors Swift `DreamingSubstrateReader.dreamedActiveTunnels()` (T13 / ADR-021 Phase 7).
+    /// Mirrors Swift `DreamingSubstrateReader.dreamedActiveTunnels`.
     fn dreamed_active_tunnels(&self) -> Vec<DreamingTunnelItem> {
         Vec::new()
     }
@@ -425,7 +425,7 @@ pub trait DreamingProposalSink {
     /// Swift `DreamingProposalSink.pruneRecallTraces(olderThan:)`.
     fn prune_recall_traces(&mut self, cutoff_iso: &str);
 
-    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap` (T13 / ADR-021 Phase 7).
+    /// Retire a tunnel by flipping bit 13 of its `operational_bitmap`.
     ///
     /// Called by `run_omega_cycle` for each unreinforced dreamed tunnel. Infallible
     /// (sync-port convention): production implementations route through the GLK
@@ -437,7 +437,7 @@ pub trait DreamingProposalSink {
     /// `changed_by` is the agent tag ("dreaming-daemon") for audit logs.
     /// `now_epoch_secs` is the deterministic cycle timestamp (i64 for SQLite TEXT storage).
     ///
-    /// Mirrors Swift `DreamingProposalSink.retireTunnel(id:changedBy:now:)` (T13 / ADR-021 Phase 7).
+    /// Mirrors Swift `DreamingProposalSink.retireTunnel(id:changedBy:now:)`.
     fn retire_tunnel(&mut self, _tunnel_id: &str, _changed_by: &str, _now_epoch_secs: i64) {
         // Default: no-op. Production adapters override; test fakes that do not
         // test OMEGA retirement inherit this and compile without changes.
@@ -457,7 +457,7 @@ pub const RECALL_TRACE_RETENTION_DAYS: f64 = 30.0;
 fn prune_cutoff_iso(epoch_secs: i64) -> String {
     // The dreaming daemon works internally in epoch-SECONDS (its cadence and
     // retention windows are tuned in seconds). `topology_analysis::epoch_to_iso8601`
-    // consumes epoch-MILLISECONDS (ADR-023), so convert at this boundary. It emits
+    // consumes epoch-MILLISECONDS, so convert at this boundary. It emits
     // `...SSZ` (no fraction); splice in `.000` before the trailing `Z` to match the
     // recalledAt format (the ~30-day cutoff is days from any trace, so the
     // fractional part never affects the lexicographic comparison).
@@ -607,7 +607,7 @@ pub struct DreamingDaemon {
     reindex_vocab_growth_floor: i64,
     /// Epoch-seconds of the last REM-THETA daily consolidation cycle run.
     /// None = never run (THETA is overdue on the first invocation). Persisted via
-    /// the F6/ADR-020 daemon-state snapshot so the 24 h cadence gate survives
+    /// the /manifest-backed daemon state daemon-state snapshot so the 24 h cadence gate survives
     /// restarts. Mirrors Swift `DreamingDaemon.lastThetaRunAt`.
     last_theta_run_epoch_secs: Option<f64>,
     /// Epoch-seconds of the last REM-BETA weekly prune cycle run. run_beta_cycle
@@ -647,7 +647,7 @@ impl DreamingDaemon {
         }
     }
 
-    /// Export the daemon's across-cycle state for persistence (F6 / ADR-020).
+    /// Export the daemon's across-cycle state for persistence.
     /// `proposed_keys` is emitted sorted (BTreeSet iterates in order) so the
     /// serialized value is byte-stable. Mirrors Swift `currentDaemonState()`.
     pub fn daemon_state(&self) -> DreamingDaemonState {
@@ -677,7 +677,7 @@ impl DreamingDaemon {
         self.bandit = bandit;
     }
 
-    /// Restore the daemon's across-cycle state from persistence (F6 / ADR-020).
+    /// Restore the daemon's across-cycle state from persistence.
     /// Called once at governor construction so a restart resumes the prior run's
     /// idempotency/cycle memory. Mirrors the Swift daemon's `loadPersistedPolicy`
     /// daemon-state restore.
@@ -826,7 +826,7 @@ impl DreamingDaemon {
     /// `DreamingDaemon.omegaCadenceSecs`.
     pub const OMEGA_CADENCE_SECS: f64 = 1_209_600.0;
 
-    // ─── REM dispatch table — due-checks (T11, ADR-021 Phase 6) ────────────────
+    // ─── REM dispatch table — due-checks ────────────────
 
     /// True iff the REM-THETA daily-consolidation cycle is due at `now_epoch_secs`.
     ///
@@ -863,7 +863,7 @@ impl DreamingDaemon {
         }
     }
 
-    // ─── REM-THETA cycle (T11, ADR-021 Phase 6) ─────────────────────────────────
+    // ─── REM-THETA cycle ─────────────────────────────────
 
     /// Daily bounded consolidation sweep (NEURONKIT_SPEC § 12.6 THETA row).
     ///
@@ -1040,7 +1040,7 @@ impl DreamingDaemon {
         })
     }
 
-    // ─── REM-BETA cycle (T12, ADR-021 Phase 7) ──────────────────────────────────
+    // ─── REM-BETA cycle ──────────────────────────────────
 
     /// Confidence floor below which a `consolidated` entry is pruned by
     /// REM-BETA. An entry strictly below this value has decayed to the point
@@ -1053,7 +1053,7 @@ impl DreamingDaemon {
     /// `DreamingDaemon.betaPruneFloor`.
     pub const BETA_PRUNE_FLOOR: f32 = 0.01;
 
-    /// REM-BETA (weekly prune/GC) — ADR-021 Phase 7.
+    /// REM-BETA (weekly prune/GC) — recall-driven dreaming
     ///
     /// Memory-only GC that keeps the two in-memory dreaming stores bounded by
     /// recall activity. Mutates only `consolidated` and `co_recall_counts` (the
@@ -1116,16 +1116,16 @@ impl DreamingDaemon {
         // ── Advance last-run timestamp ────────────────────────────────────────
         // The caller persists daemon_state() after this returns, which
         // snapshots the shrunken consolidated + co_recall_counts maps so the
-        // GC is durable across restarts (F6 / ADR-020).
+        // GC is durable across restarts.
         self.last_beta_run_epoch_secs = Some(now_epoch_secs);
 
         // BETA returns None: no proposals, no diary entry, no tunnel writes.
         None
     }
 
-    // ─── REM-OMEGA cycle (T13 / ADR-021 Phase 7) ───────────────────────────────
+    // ─── REM-OMEGA cycle ───────────────────────────────
 
-    /// REM-OMEGA (biweekly retire) — ADR-021 Phase 7.
+    /// REM-OMEGA (biweekly retire) — recall-driven dreaming
     ///
     /// Retires dreamed tunnels that have not been reinforced by co-recall
     /// within the 14-day OMEGA window. The retire predicate is:
@@ -1232,7 +1232,7 @@ impl DreamingDaemon {
         // ── Step 6: advance last-run timestamp ───────────────────────────────
         // The caller (autonomic_governor) persists daemon_state() after this
         // returns, snapshotting the updated last_omega_run_epoch_secs for
-        // cross-restart persistence (F6 / ADR-020).
+        // cross-restart persistence.
         self.last_omega_run_epoch_secs = Some(now_epoch_secs);
 
         // ── Step 7: build report ──────────────────────────────────────────────

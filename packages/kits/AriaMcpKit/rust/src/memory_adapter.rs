@@ -71,7 +71,7 @@ fn vpath(room: &str) -> String { format!("{MEMORIES_ROOT}/{room}") }
 /// (adjective sensitivity Normal / Elevated) are visible. `memory` is a
 /// bulk, path-addressed read/write surface with no grant ceremony, so it
 /// matches BitmapEvaluator's default no-claims recall posture
-/// (`sensitivityAtMost(.elevated)`, ADR-007 Decision 2): Restricted and
+/// (`sensitivityAtMost(.elevated)`, data-movement privacy tiers): Restricted and
 /// Secret drawers neither list nor resolve here. The adjective axis is the
 /// access-gate-relevant tier (spec § 7.9.2) — the provenance sensitivity
 /// axis is deliberately NOT consulted. Mirrors `isMemoryAdapterVisible` in

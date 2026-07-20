@@ -299,7 +299,7 @@ impl ContainerFingerprintStore {
     /// existing estate's aggregate complete and therefore sound.
     ///
     /// `node_names` maps each drawer's `parent_node_id` to its resolved
-    /// `(wing_name, room_name)` pair from the node tree (ADR-017 §3).
+    /// `(wing_name, room_name)` pair from the node tree.
     /// Drawers whose `parent_node_id` is absent from the map are skipped
     /// — the caller is responsible for resolving all active node IDs
     /// before invoking this method.

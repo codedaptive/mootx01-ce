@@ -1,6 +1,6 @@
 // merkle_domain.rs
 //
-// Domain-separation byte constants from ADR-017 §16. These are
+// Domain-separation byte constants from node-tree integrity. These are
 // the one-byte prefixes prepended before hashing to prevent
 // cross-domain collisions in the Merkle content-integrity tree.
 //

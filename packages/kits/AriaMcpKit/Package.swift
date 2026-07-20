@@ -38,7 +38,7 @@ let package = Package(
         // AriaResident: the resident-daemon composition layer (telemetry + Brain
         // pump + monitoring gate + HTTP transport), shared by both the product
         // binary (mootx01 serve) and aria-mcp so the resident wiring exists once.
-        // Sits ABOVE the telemetry-free AriaMCP core (ADR-LOOPBACKHTTP-001).
+        // Sits ABOVE the telemetry-free AriaMCP core.
         .library(name: "AriaResident", targets: ["AriaResident"]),
     ],
     dependencies: [
@@ -57,18 +57,18 @@ let package = Package(
         // composition EstateLifecycle.provision wires for a .glk estate. Without
         // this, the BM25 + vector recall lanes stay dark on a bare open. App →
         // kit layering (downstream→upstream), no inversion. Permitted per
-        // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // in-repository dependency direction.
         .package(name: "CorpusKit", path: "../CorpusKit"),
         .package(name: "VectorKit", path: "../VectorKit"),
         // SubstrateTypes provides RowVerb, consumed by HTTPServer.swift's
         // tombstone-instant resolution (audit-trail fallback) after the
         // topology-analysis relocation to NeuronKit. App → lib layering, no
-        // inversion. Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // inversion. Permitted per in-repository dependency direction.
         .package(name: "SubstrateTypes", path: "../../libs/SubstrateTypes"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
         // VaultKit: the moot_vault_* tool family consumes VaultBridge.
-        // In-repo dependency, permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28
-        // and recorded in ADR-VAULTKIT-002. Layering is downstream→upstream
+        // In-repo dependency, permitted per in-repository dependency direction
+        // and recorded in Vault drift and candidate handling. Layering is downstream→upstream
         // (ARIA_MCP app → VaultKit kit); no inversion.
         .package(name: "VaultKit", path: "../VaultKit"),
         // ObserverSink + IntellectusLib: the manager-telemetry pipeline. The
@@ -84,14 +84,14 @@ let package = Package(
         // backs the resident HTTP MCP transport (HTTPServer.swift). App→lib
         // (downstream→upstream), no inversion; LoopbackHTTP has zero deps.
         // Permitted per CLAUDE.md "Package.swift / Cargo.toml edits — controlled,
-        // not forbidden"; ADR-LOOPBACKHTTP-001.
+        // not forbidden"; bounded loopback HTTP.
         .package(name: "LoopbackHTTP", path: "../../libs/LoopbackHTTP"),
         // LatticeLib: the resident Autonomic Governor drives PoolReducer.reduce on
         // a low cadence (novel-token merge-back — the second dormant learning
         // loop). App→lib layering (downstream→upstream), no inversion; LatticeLib
         // is a packages/libs package. Permitted per CLAUDE.md "Package.swift /
         // Cargo.toml edits — controlled, not forbidden"
-        // (DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
+
         .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
         // EideticLib: maintenance FDC reclassification uses the same deterministic
         // text->anchor seam as GeniusLocusKit capture. Declared explicitly so
@@ -101,13 +101,13 @@ let package = Package(
         // to force-test the OP-1 honest sync vocabulary. The AriaMCP library reaches
         // sync state through GeniusLocusKit.syncStateToken — ConvergenceKit is a test-only
         // dep here. App → kit layering (downstream→upstream), no inversion.
-        // Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // Per in-repository dependency direction.
         .package(name: "ConvergenceKit", path: "../ConvergenceKit"),
         // QueueKit: DreamRunnerTests import DrainLease directly to test the stampede-
         // prevention lease predicate (test 4). QueueKit is a transitive dep via
         // GeniusLocusKit, but SPM requires explicit product declarations for test
         // targets that import a product directly. Test-only dep; no layering inversion.
-        // Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // Per in-repository dependency direction.
         .package(name: "QueueKit", path: "../QueueKit"),
     ],
     targets: [
@@ -199,7 +199,7 @@ let package = Package(
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 // QueueKit: DreamRunnerTests import DrainLease to test the stampede-
                 // prevention predicate (test 4 — second dreamer must stand down while
-                // first holds a fresh lease). T10 / ADR-021 Phase 5 dream path.
+                // first holds a fresh lease).  / recall-driven dreaming dream path.
                 .product(name: "QueueKit", package: "QueueKit"),
             ],
             path: "Tests/AriaMCPTests"

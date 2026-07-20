@@ -1,6 +1,6 @@
 // ConformanceRunner.swift
 //
-// Backend-agnostic conformance fixture runner per ADR §10 / Q8.
+// Backend-agnostic conformance fixture runner.
 // Every backend produces identical observable results for the
 // same fixture sequence under a deterministic seed.
 
@@ -414,7 +414,7 @@ public struct ConformanceRunner {
     /// e.g. a 32-byte packed Engram/fingerprint) and a float32 payload
     /// (`payload_float32`, e.g. a 384-d MiniLM embedding serialized to bytes).
     /// PersistenceKit owns no vector engine — these are plain BLOB columns.
-    /// The fixtures below assert the ACCOMMODATION contract (ADR-008): every
+    /// The fixtures below assert the ACCOMMODATION contract: every
     /// backend round-trips, bulk-hydrates, counts, and deletes vector-payload
     /// rows through the general RowStore surface.
     static let vectorAccommodationSchema = SchemaDeclaration(
@@ -437,7 +437,7 @@ public struct ConformanceRunner {
 
     // MARK: - Vector accommodation fixtures
 
-    /// The vector-storage accommodation guarantee (ADR-008 / PERSISTENCEKIT_SPEC
+    /// The vector-storage accommodation guarantee (VectorKit-owned vector search / PERSISTENCEKIT_SPEC
     /// "Vector accommodation contract"). PersistenceKit does NOT own a k-NN
     /// engine; dense-embedding search lives in VectorKit. What every backend
     /// MUST guarantee is that it accommodates a vector workload's STORAGE needs:

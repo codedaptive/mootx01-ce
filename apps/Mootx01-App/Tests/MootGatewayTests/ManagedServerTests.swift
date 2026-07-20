@@ -4,7 +4,7 @@ import Foundation
 
 // Proves the macOS-only "app-managed daemon" path end-to-end: the app spawns
 // the REAL, untouched aria-mcp binary as a child process and talks to it over
-// stdio JSON-RPC (ADR-005). If the release binary hasn't been built, the test
+// stdio JSON-RPC. If the release binary hasn't been built, the test
 // skips rather than failing — build it with:
 //   swift build --package-path apps/aria-mcp-server -c release --product aria-mcp
 

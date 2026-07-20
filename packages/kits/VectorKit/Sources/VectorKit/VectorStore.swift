@@ -15,7 +15,7 @@
 //   payload        BLOB NOT NULL,               -- 32 bytes for binary; dim*4 for float32
 //   scale          REAL,                        -- int8 dequant scale; NULL otherwise
 //   filed_at       TIMESTAMP NOT NULL,
-//   ext            TEXT                         -- ADR-012 JSON extension slot
+//   ext            TEXT                         -- nullable entity ext slots JSON extension slot
 // )
 // UNIQUE(item_id, vector_index, model_id)
 // INDEX(model_id, item_id)
@@ -23,9 +23,9 @@
 // ```
 //
 // Refactored 2026-05-19 (mission 6) per
-// DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md section 4.6: replaced
+// current kit ownership section 4.6: replaced
 // direct SQLite I/O with PersistenceKit's RowStore + BlobStore
-// protocols. Dense-embedding k-NN is VectorKit's own concern (ADR-008
+// protocols. Dense-embedding k-NN is VectorKit's own concern (VectorKit-owned vector search
 // persistencekit-vector-contract-correction); PersistenceKit backends
 // (SQLite, PostgreSQL, InMemory) only accommodate vector storage.
 // Backends are selected at the application layer via EstateConfiguration.
@@ -114,7 +114,7 @@ struct VKLogicalPos: Hashable {
 /// Schema version 3: current production schema. Version 2 added
 /// multi-vector support, `item_id`, `vector_index`, `kind`, `dim`,
 /// `scale`, and `payload`; version 3 added the `ext` JSON slot per
-/// ADR-012.
+/// nullable entity ext slots.
 ///
 /// Hot-path: findNearest dispatches through a DenseIndex seam. Below
 /// `mihThreshold` binary vectors the active index is BruteForceIndex
@@ -326,7 +326,7 @@ public actor VectorStore {
     ///   (drawer_id, model_id).
     ///
     /// Column changes from v2 → v3:
-    ///   - Added: `ext` JSON nullable — the ADR-012 forward-compat slot.
+    ///   - Added: `ext` JSON nullable — the nullable entity ext slots forward-compat slot.
     ///     Reserves the slot, not a shape; 1.0 writes NULL and never reads it.
     ///
     /// Index changes v3 → v4:
@@ -354,7 +354,7 @@ public actor VectorStore {
                     .blob("payload", nullable: false),
                     .float("scale", nullable: true),
                     .timestamp("filed_at", nullable: false),
-                    // Reserve-space forward-compat slot (ADR-012). Nullable
+                    // Reserve-space forward-compat slot. Nullable
                     // `.json`, present from schema v3. Future per-vector typed
                     // metadata (quantisation provenance, embedding-run tags)
                     // serializes here migration-free. 1.0 writes NULL and never
@@ -887,7 +887,7 @@ public actor VectorStore {
         //    policy. Dropping the map entry is the invalidation (its presence is
         //    the built flag); other models' indices are untouched.
         for input in batch where input.payload.kind == .float32 {
-            // ADR-026: diskBacked scans SQLite directly (no cache). ramResident
+            // diskBacked scans SQLite directly (no cache). ramResident
             // still uses floatIndices — invalidate so stale entries don't survive.
             if storage.configuration.residencyHint == .ramResident {
                 floatIndices.removeAll()
@@ -1267,7 +1267,7 @@ public actor VectorStore {
     ///   - limit: maximum number of matches to return.
     /// - Returns: up to `limit` matches, nearest first. Empty if `limit`
     ///   is non-positive, the probe is empty, or no float rows exist.
-    /// ADR-026: float NN search. `.diskBacked` scans SQLite directly
+    /// float NN search. `.diskBacked` scans SQLite directly
     /// (no heap copy). `.ramResident` caches a FloatBruteForceIndex.
     public func findNearestFloat(
         probe: [Float],
@@ -1289,7 +1289,7 @@ public actor VectorStore {
         }
     }
 
-    /// Pre-ADR-026 cached float search path. Used when residencyHint == .ramResident.
+    /// Pre-disk-default storage residency cached float search path. Used when residencyHint ==.ramResident.
     private func _findNearestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
@@ -1336,7 +1336,7 @@ public actor VectorStore {
     /// - Returns: up to `limit` matches, FARTHEST (most dissimilar) first.
     ///   Empty if `limit` is non-positive, the probe is empty, or no float
     ///   rows exist for the model.
-    /// ADR-026: farthest float search. Same residencyHint dispatch as nearest.
+    /// farthest float search. Same residencyHint dispatch as nearest.
     public func findFarthestFloat(
         probe: [Float],
         modelID: String,
@@ -1357,7 +1357,7 @@ public actor VectorStore {
         }
     }
 
-    /// Pre-ADR-026 cached farthest float path. Used when residencyHint == .ramResident.
+    /// Pre-disk-default storage residency cached farthest float path. Used when residencyHint ==.ramResident.
     private func _findFarthestFloatCached(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch] {
         if floatIndices[modelID] == nil {
             let records = try await _fetchFloatRecords(modelID: modelID)
@@ -1789,7 +1789,7 @@ public actor VectorStore {
     /// index requires a single stride, so all float rows for the queried
     /// model share one dimension (spec I-4 keeps models on disjoint
     /// partitions, and one model emits one dimension).
-    /// ADR-026: float NN search scans the SQLite `vectors` table directly
+    /// float NN search scans the SQLite `vectors` table directly
     /// via a cursor, computing distance per row and maintaining a top-k
     /// heap. No ResidentVectorArray, no FloatBruteForceIndex, no 2GB heap
     /// allocation. With PRAGMA mmap_size, each row read is an OS page-cache
@@ -1813,7 +1813,7 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // String interning for model fields (ADR-026).
+        // String interning for model fields.
         var internCache: [String: String] = [:]
         func intern(_ s: String) -> String {
             if let existing = internCache[s] { return existing }
@@ -1912,7 +1912,7 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // ADR-026 string interning: modelID is the same for every row
+        // disk-default storage residency string interning: modelID is the same for every row
         // (we're fetching a single modelID partition). Intern to avoid
         // N identical String heap allocations.
         var internCache: [String: String] = [:]
@@ -2035,7 +2035,7 @@ public actor VectorStore {
             limit: nil,
             offset: nil
         )
-        // ADR-026 string interning: modelID and modelVersion repeat for
+        // disk-default storage residency string interning: modelID and modelVersion repeat for
         // every row in a partition. Interning collapses 200K+ identical
         // String heap allocations to one shared instance per unique value.
         var internCache: [String: String] = [:]

@@ -9,7 +9,7 @@ import Foundation
 /// what was filed.
 ///
 /// Every drawer belongs to a room node in the estate's containment
-/// tree (ADR-017). The `parentNodeId` field is the UUID of the room
+/// tree. The `parentNodeId` field is the UUID of the room
 /// node that contains this drawer. Display names (wing, room) are
 /// resolved via `DrawerStore.resolveNodeNames(parentNodeIds:)` when
 /// needed — they are not stored on the Drawer struct.
@@ -48,7 +48,7 @@ public struct Drawer: Equatable, Hashable, Sendable {
     /// The content as filed. Verbatim, no transformation.
     public let content: String
 
-    /// UUID of the room node that contains this drawer (ADR-017 §3).
+    /// UUID of the room node that contains this drawer.
     /// Foreign key to nodes.id; the referenced node has depth=2
     /// (room level) in the estate containment tree.
     public let parentNodeId: String
@@ -101,7 +101,7 @@ public struct Drawer: Equatable, Hashable, Sendable {
 
     /// Provenance bitmap encoding source_type, confirmation state,
     /// confidence, channel, and sensitivity per
-    /// Q1_DECISION_PROVENANCE_BITMAP.md. See computed accessors in
+    /// the packed provenance layout. See computed accessors in
     /// the extension below for type-safe access to each axis.
     /// Defaults to `0` (all axes unknown / sensitivity normal) when
     /// the caller does not declare provenance at capture time. The

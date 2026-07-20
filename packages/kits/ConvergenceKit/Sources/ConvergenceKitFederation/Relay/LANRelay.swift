@@ -60,7 +60,7 @@
 // Spec references:
 //   - docs/analysis/FED_OD_CHARTER.md §V1, §V2 (Kong review, 2026-07-18)
 //   - docs/reference/CONVERGENCEKIT_INTERFACE.md §4 Relay abstraction
-//   - DECISION_FEDERATION_ONDEMAND_LAN_PROXIMITY_2026-07-18.md
+// Pairing and synchronization remain on-demand and explicitly authorized.
 
 import Foundation
 import ConvergenceKit

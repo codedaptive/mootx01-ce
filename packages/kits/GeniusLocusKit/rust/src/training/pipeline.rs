@@ -133,7 +133,7 @@ impl EnrichmentPipeline {
                 // issue/revoke events, not drawer state transitions.
                 | UnifiedAuditVerb::GrantIssued
                 | UnifiedAuditVerb::GrantRevoked
-                // ADR-025 sensitivity-unlock verbs: record grant/deny/
+                // sensitivity unlock verbs: record grant/deny/
                 // revoke/read-under-grant events, not drawer state
                 // transitions.
                 | UnifiedAuditVerb::SensitivityGrantIssued

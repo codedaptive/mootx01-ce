@@ -8,7 +8,7 @@
 //
 // METHODOLOGY GATE
 //
-//   Per DECISION_METHODOLOGY_DATA_MANIPULATOR_GATE_2026-05-17.md:
+//   Per the measured backend gate:
 //   every cold-path algorithm gets measured on real hardware
 //   before the dreaming-daemon schedule and platform-specific
 //   default-backend selection are locked. No "I calculated that

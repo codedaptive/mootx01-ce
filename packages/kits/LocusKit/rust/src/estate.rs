@@ -61,7 +61,7 @@ pub struct Estate {
     /// `estate_audit.rs` reach the store, external callers do not.
     pub(crate) store: Arc<dyn DrawerStore>,
 
-    /// The estate's containment tree store (ADR-017). Wings and rooms
+    /// The estate's containment tree store. Wings and rooms
     /// are nodes; the capture verb resolves wing/room display names to
     /// node IDs through this store's create-on-demand resolution (§7).
     /// Wrapped in Arc so Estate remains Clone.
@@ -309,7 +309,7 @@ impl Estate {
         self.estate_uuid
     }
 
-    /// Public accessor for the estate's node store (ADR-017).
+    /// Public accessor for the estate's node store.
     /// Consumers outside LocusKit (e.g. GeniusLocusKit, VaultKit) need
     /// to resolve drawer `parent_node_id` values to display names via
     /// `NodeStore::get_node`. Returns `None` for legacy estates opened
@@ -338,7 +338,7 @@ impl Estate {
             })?;
         // Establish the estate's Ed25519 federation identity on first
         // open. The keypair is the signing identity for federation grants
-        // (DECISION_SYNCKIT_DESIGN_2026-05-19 §8); minting it once and
+        //; minting it once and
         // persisting the public half to the manifest makes the public key
         // stable across every subsequent open. Key generation is
         // intrinsically random — like the estate UUID minted at create —
@@ -367,11 +367,11 @@ impl Estate {
         store
             .rebuild_container_fingerprints(manifest.last_modified)
             .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
-        // ADR-017 NT-L2: construct NodeStore from the same storage that
+        // node-tree integrity NT-L2: construct NodeStore from the same storage that
         // backs the DrawerStore. The `storage()` trait method returns the
         // underlying Storage so NodeStore shares the same connection.
         let node_store = store.storage().map(|s| Arc::new(NodeStore::new(s, None)));
-        // ADR-017: seed root node. create_root is idempotent — returns
+        // seed root node. create_root is idempotent — returns
         // existing root if already seeded.
         if let Some(ref ns) = node_store {
             ns.create_root("Estate", manifest.last_modified)

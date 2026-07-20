@@ -39,7 +39,7 @@ code runs.
 ## Client wiring
 
 `mootx01 install` writes per-client config
-(see `Sources/MootInstallerCore/ClientConfig.swift` and ADR-LOOPBACKHTTP-001):
+(see `Sources/MootInstallerCore/ClientConfig.swift` and the loopback HTTP contract):
 
 | Client | How it's wired |
 |---|---|

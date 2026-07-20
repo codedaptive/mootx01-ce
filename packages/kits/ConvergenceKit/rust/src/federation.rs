@@ -1739,7 +1739,7 @@ const FED_SKEW_QUEUE_CAP: usize = 512;
 /// One row per estate: key_id TEXT PK (fixed "local"), secret_key BLOB
 /// (32 bytes, Ed25519 private key), public_key BLOB (32 bytes),
 /// created_at TEXT (ISO8601 per schema invariants — never REAL).
-/// At-rest posture: covered by SQLCipher per ADR-014 on the estate file.
+/// At-rest posture: SQLCipher covers the estate file.
 const FED_IDENTITY_TABLE: &str = "_fed_identity";
 
 /// Side table name for the Federation durable outbox (WC2).
@@ -2017,7 +2017,7 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
     );
     // v4 (WC1): persistent Ed25519 estate identity (I-8).
     // One row per estate (key_id = "local"). At-rest posture: SQLCipher
-    // per ADR-014 covers the estate file. No custom crypto invented.
+    // SQLCipher covers the estate file. No custom crypto is added here.
     let identity_table = TableDeclaration::new(
         FED_IDENTITY_TABLE,
         vec![
@@ -2155,7 +2155,7 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
 /// Called by the host at startup — mirrors Swift `FederationStateActor.loadOrMintIdentity`.
 /// Runs `ensure_fed_sync_meta_table` first so callers need not pre-warm the schema.
 ///
-/// At-rest posture: the estate file is covered by SQLCipher (ADR-014); no custom
+/// At-rest posture: the estate file is covered by SQLCipher; no custom
 /// crypto is applied to the key bytes at this layer.
 ///
 /// Returns `Err(String)` on storage failure; callers should surface the error.

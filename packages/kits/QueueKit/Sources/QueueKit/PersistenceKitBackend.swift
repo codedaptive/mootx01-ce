@@ -178,7 +178,7 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
             where: .eq(Self.col("status"), .text("new")))
     }
 
-    // MARK: - Stream-scoped drain (ADR-021 Decision 7 / T1)
+    // MARK: - Stream-scoped drain
 
     /// Claim and return only the pending jobs that belong to `stream`.
     ///
