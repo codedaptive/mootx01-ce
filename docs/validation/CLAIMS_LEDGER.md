@@ -282,7 +282,7 @@ by I-16 and I-15 respectively; they are listed below as
   the cross-language byte-equality test for all 28 conformant
   primitives.
 - Evidence pointer: the four-way conformance
-  matrix; current as of develop tip `7da4413`.
+  matrix.
 
 ### I-20: Audit log is a Grow-Only Set CRDT
 
@@ -501,7 +501,7 @@ defers to a focused later pass.
   `DrawerStateValidator` suite and the theorem demonstrations.
 - Evidence pointer: LocusKit DrawerStateValidator;
   `GeniusLocusKit/Tests/GeniusLocusKitTests/TheoremsTests.swift`
-  at commit `fa27ca2`.
+ .
 
 ### T5: Performance budget (paper Theorem 5)
 
@@ -514,7 +514,7 @@ defers to a focused later pass.
   hour on the Mac profile.
 - Evidence pointer:
   `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
-  at commit `fa27ca2`; the perf gate reports P99 capture
+ ; the perf gate reports P99 capture
   0.262 ms (well under the 100 ms budget) and enrichment far above
   the 60 drawers per hour floor.
 
@@ -554,7 +554,7 @@ substrate must meet. Three are pinned as load-bearing.
   profile.
 - Evidence pointer:
   `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
-  at commit `fa27ca2`.
+ .
 
 ### HP2: Enrichment rate at least 60 drawers per hour on Mac
 
@@ -565,7 +565,7 @@ substrate must meet. Three are pinned as load-bearing.
   the 60 drawers per hour floor on Mac profile.
 - Evidence pointer:
   `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
-  at commit `fa27ca2`.
+ .
 
 ### HP3: Hamming top-K (K=10 over 1M rows) under 100 microseconds
 
@@ -579,7 +579,7 @@ substrate must meet. Three are pinned as load-bearing.
   Rust SimdKernel at 631 microseconds (18% above floor); see
   the baseline in
   `docs/validation/substrate_math_performance/README.md`
-  at commit `7da4413`. The 100 microsecond budget is unmet by
+ . The 100 microsecond budget is unmet by
   any kernel measured; section 17.5 analysis suggests the
   memory bandwidth floor is the binding constraint, not the
   algorithm. Future work would require either reducing bytes
@@ -591,7 +591,7 @@ substrate must meet. Three are pinned as load-bearing.
 
 Invariant I-7 fixes the verb count at nine. The verbs are
 defined in the cookbook section 10 and implemented at commit
-`3c34a9a`. Each verb has signature, preconditions,
+the interface specs. Each verb has signature, preconditions,
 and postconditions that conformance tests must verify.
 
 ### V1: capture
@@ -602,7 +602,7 @@ and postconditions that conformance tests must verify.
 - Evidence: evidenced by the verb-surface tests.
 - Evidence pointer:
   `GeniusLocusKit/Sources/GeniusLocusKit/Verbs/VerbSurface.swift`
-  and verb tests at commit `3c34a9a`; specific test path to
+ ; specific test path to
   confirm.
 
 ### V2: recall
@@ -666,8 +666,7 @@ and postconditions that conformance tests must verify.
 - Status: active in v1.0
 - Evidence: evidenced by the verb-surface tests; propose is
   the emission path for the six standing signals.
-- Evidence pointer: same as V1; the standing-signals tests at
-  commit `1809eda`.
+- Evidence pointer: same as V1; the standing-signals tests at.
 
 ### V9: associate
 
@@ -706,7 +705,7 @@ declared contract becomes one ledger row.
 ### Standing-signals scheduler contracts
 
 The scheduler runs all six standing signals under a single
-serial dispatch (commit `aae7d5d`). The contracts:
+serial dispatch. The contracts:
 exactly-once dispatch, ordering preservation under the configured
 policy, register / status / subscribe API surface, and the six
 signals (dreaming, maintenance, vector-similarity, decay-sweep,
