@@ -122,3 +122,8 @@ coverage.html
 !apps/moot-agent-skills/**/CLAUDE.md
 # ...but never Python bytecode inside the adapter kit
 apps/moot-agent-skills/**/__pycache__/
+
+# Internal work products — never ship in CE (leak remediation 2026-07-20)
+docs/findings/
+docs/blast_radius/
+docs/analysis/blast_radius/
