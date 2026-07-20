@@ -338,3 +338,108 @@ fn tombstone_wins_when_delete_hlc_ge_all_columns() {
         "tombstone (T=200) must hard-delete row whose column was last written at T=100"
     );
 }
+
+// ----- gap 6: full-width column HLC ordering at REAL magnitude --------------
+//
+// Every test above uses small synthetic physicalTime values (100-300ms).
+// That is exactly why the gap 6 truncation defect
+// (ColumnHLCStore/`_fed_sync_meta_cols` persisting `col_hlc` via the lossy
+// 40-bit `HLC::packed()`/`HLC::from_packed()` round-trip, while the wire
+// `PackedHLC` carries `physical_time` losslessly) survived undetected: none
+// of these vectors ever crossed the 40-bit truncation ceiling
+// (`0xFF_FFFF_FFFF`, ~1.0995e12). The two tests below use the SAME
+// real-magnitude physicalTime vectors as the Swift gap-6 money test
+// (`FieldLevelLWWFullWidthOrderingMoneyTests.swift`) — 1_784_477_500_577 vs
+// 1_784_477_440_577, a 60-second gap, both above the truncation ceiling —
+// for direct Swift/Rust parity (group (c) of the gap-6 regression suite).
+
+/// Real-magnitude analog of `same_column_newer_inbound_wins`: same test
+/// shape, but with physicalTime values a real 2026 `HLCGenerator` would
+/// actually produce (well above the 40-bit truncation ceiling), instead of
+/// the synthetic T=100/T=200 used above.
+#[test]
+fn same_column_real_magnitude_newer_inbound_wins() {
+    const TRUNCATION_CEILING: i64 = 0xFF_FFFF_FFFF; // 2^40 - 1, ~1.0995e12
+    const OLDER: i64 = 1_784_477_440_577;
+    const NEWER: i64 = 1_784_477_500_577;
+    assert!(OLDER > TRUNCATION_CEILING, "test precondition: real magnitude");
+    assert!(NEWER > TRUNCATION_CEILING, "test precondition: real magnitude");
+
+    let storage_a = make_storage();
+    let storage_b = make_storage();
+    let (mut eng_a, mut eng_b) = make_pair(storage_a.clone(), storage_b.clone());
+
+    let row_id = Uuid::new_v4();
+
+    // A sends title at the OLDER real-magnitude time; B receives.
+    eng_a.enqueue(make_flww_record(row_id, &[
+        ("title", TypedValue::Text("Old title".to_string())),
+    ], OLDER, OLDER)).unwrap();
+    eng_a.push().unwrap();
+    eng_b.pull().unwrap();
+
+    // B sends a NEWER real-magnitude title; A receives.
+    eng_b.enqueue(make_flww_record(row_id, &[
+        ("title", TypedValue::Text("New title from B".to_string())),
+    ], NEWER, NEWER)).unwrap();
+    eng_b.push().unwrap();
+    let r_a = eng_a.pull().unwrap();
+    assert_eq!(r_a.pulled, 1, "A must accept B's newer title");
+
+    assert_eq!(
+        read_col(&storage_a, row_id, "title").as_deref(),
+        Some("New title from B"),
+        "A must adopt B's newer title at real magnitude (gap 6 parity vector)"
+    );
+}
+
+/// THE MONEY TEST (Rust leg) — direct parity vector with the Swift gap-6
+/// money test. Reproduces the exact defect scenario: B's OLDER real-
+/// magnitude column edit is delivered to A's pull queue AFTER A already has
+/// the NEWER value — pull-order reversed from HLC-order. Pre-fix, B's stale
+/// edit would have won unconditionally (see the gap-6 completion report's
+/// red-before proof for this exact test, obtained via `git stash` on
+/// `read_fed_column_hlcs`/`write_fed_column_hlcs`/the `_fed_sync_meta_cols`
+/// schema). Post-fix, A must retain the newer value.
+#[test]
+fn same_column_real_magnitude_stale_inbound_does_not_overwrite_newer_local() {
+    const TRUNCATION_CEILING: i64 = 0xFF_FFFF_FFFF; // 2^40 - 1, ~1.0995e12
+    const OLDER: i64 = 1_784_477_440_577;
+    const NEWER: i64 = 1_784_477_500_577;
+    assert!(OLDER > TRUNCATION_CEILING, "test precondition: real magnitude");
+    assert!(NEWER > TRUNCATION_CEILING, "test precondition: real magnitude");
+
+    let storage_a = make_storage();
+    let storage_b = make_storage();
+    let (mut eng_a, mut eng_b) = make_pair(storage_a.clone(), storage_b.clone());
+
+    let row_id = Uuid::new_v4();
+
+    // Establish A's value at the NEWER real-magnitude time.
+    eng_b.enqueue(make_flww_record(row_id, &[
+        ("title", TypedValue::Text("Newer value".to_string())),
+    ], NEWER, NEWER)).unwrap();
+    eng_b.push().unwrap();
+    eng_a.pull().unwrap();
+    assert_eq!(
+        read_col(&storage_a, row_id, "title").as_deref(),
+        Some("Newer value"),
+        "A must have the NEWER real-magnitude value"
+    );
+
+    // Now B sends a STALE version of "title" at the OLDER real-magnitude
+    // time, arriving at A LAST (pull-order reversed from HLC-order).
+    eng_b.enqueue(make_flww_record(row_id, &[
+        ("title", TypedValue::Text("Stale value".to_string())),
+    ], OLDER, OLDER)).unwrap();
+    eng_b.push().unwrap();
+    eng_a.pull().unwrap();
+
+    // A must retain the NEWER value; the OLDER edit arriving last must be
+    // rejected by the HLC gate — HLC-order, not pull-order.
+    assert_eq!(
+        read_col(&storage_a, row_id, "title").as_deref(),
+        Some("Newer value"),
+        "gap 6 money test (Rust leg): older-HLC column edit arriving last must be rejected at real magnitude (HLC-order, not pull-order)"
+    );
+}

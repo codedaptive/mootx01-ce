@@ -1472,8 +1472,20 @@ fn fetch_matching_rows_with_values(
     result
 }
 
-/// Resolve the row's primary key: a single-column UUID primary key reads
-/// the UUID from the row; anything else gets a fresh v4.
+/// Derive the outbound `RowKey` for a just-written row from its column
+/// values, using the schema-declared primary key for `table`.
+///
+/// Single-column PK only (composite/multi-column PKs fall through to the
+/// random-mint default below — unchanged, out of gap-5's scope — Kong's
+/// guard). For a `.uuid`-typed PK, the value itself IS the key (unchanged
+/// fast path). For a `.text`-typed PK: parses as a UUID string when
+/// possible (unchanged from before gap 5); otherwise, gap 5: derive the key
+/// DETERMINISTICALLY from the PK's content via
+/// `row_key_derivation::deterministic_row_key` instead of falling through
+/// to a fresh random UUID. Before this fix, a genuinely non-UUID-shaped
+/// `.text` PK value (LocusKit's documented, not-yet-exercised deterministic-
+/// id capability) still forked row identity between spokes even on the
+/// SQLite backend — see `row_key_derivation.rs` for the full rationale.
 fn extract_row_key(
     schema: Option<&SchemaDeclaration>,
     table: &str,
@@ -1481,8 +1493,13 @@ fn extract_row_key(
 ) -> RowKey {
     if let Some(decl) = schema.and_then(|s| s.tables.iter().find(|t| t.name == table)) {
         if decl.primary_key.len() == 1 {
-            if let Some(TypedValue::Uuid(u)) = values.get(&decl.primary_key[0]) {
-                return *u;
+            match values.get(&decl.primary_key[0]) {
+                Some(TypedValue::Uuid(u)) => return *u,
+                // deterministic_row_key parses a UUID-shaped string directly
+                // (unchanged behavior from before gap 5) and only falls to
+                // the SHA-256 derivation for a genuinely non-UUID string.
+                Some(TypedValue::Text(s)) => return crate::row_key_derivation::deterministic_row_key(s),
+                _ => {}
             }
         }
     }
@@ -3171,6 +3188,93 @@ mod hlc_roundtrip_tests {
             }
             other => panic!("expected TypedValue::Hlc, got {:?}", other),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// extract_row_key schema-PK tests (Gap 1 parity check — the Swift
+// `SQLiteBackend.extractRowKey` sibling was hardcoded to a literal
+// "row_id" column and fell back to a random UUID for any table whose
+// primary key was declared under a different name. `extract_row_key`
+// here (src/sqlite.rs, above) already reads `decl.primary_key[0]` from
+// the schema declaration rather than a hardcoded literal, so it never
+// had the defect — these tests lock that correct behavior in as a
+// regression guard, matching the Swift-side coverage added for the
+// same gap (SQLiteObserverTests.swift:
+// insertReturnsRealSchemaPKNotRandomUUID /
+// insertNotificationCarriesRealSchemaPK /
+// upsertReturnsRealSchemaPKNotRandomUUID).
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod extract_row_key_schema_pk_tests {
+    use super::*;
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
+        Storage, TableDeclaration, TypedValue,
+    };
+    use uuid::Uuid;
+
+    /// Schema whose primary key column is named "id", not "row_id" — the
+    /// exact shape that exposed the Swift-side bug.
+    fn make_storage_with_non_row_id_pk() -> SqliteStorage {
+        let path = std::env::temp_dir()
+            .join(format!("extract_row_key_pk_{}.sqlite", Uuid::new_v4()));
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("open sqlite");
+        let schema = SchemaDeclaration::new(
+            "extract-row-key-test",
+            1,
+            vec![TableDeclaration::new(
+                "docs",
+                vec![ColumnDeclaration::uuid("id"), ColumnDeclaration::text("label")],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open schema");
+        storage
+    }
+
+    #[test]
+    fn insert_returns_real_schema_pk_not_random_uuid() {
+        let storage = make_storage_with_non_row_id_pk();
+        let rs = Storage::row_store(&storage);
+
+        let real_id = Uuid::new_v4();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(real_id));
+        values.insert("label".into(), TypedValue::Text("a".into()));
+
+        let handle = rs.insert("docs", values).expect("insert");
+        assert_eq!(
+            handle.key, real_id,
+            "insert must return the schema-declared PK value, not a random UUID"
+        );
+    }
+
+    #[test]
+    fn upsert_returns_real_schema_pk_not_random_uuid() {
+        let storage = make_storage_with_non_row_id_pk();
+        let rs = Storage::row_store(&storage);
+
+        let real_id = Uuid::new_v4();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(real_id));
+        values.insert("label".into(), TypedValue::Text("b".into()));
+
+        let handle = rs
+            .upsert("docs", values, &["id".to_string()])
+            .expect("upsert");
+        assert_eq!(
+            handle.key, real_id,
+            "upsert must return the schema-declared PK value, not a random UUID"
+        );
     }
 }
 

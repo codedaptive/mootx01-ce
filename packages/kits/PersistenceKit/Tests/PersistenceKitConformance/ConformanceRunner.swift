@@ -265,7 +265,20 @@ public struct ConformanceRunner {
         }
 
         for item in items {
-            _ = try await storage.rowStore.insert(table: "items", values: item)
+            let handle = try await storage.rowStore.insert(table: "items", values: item)
+            // `testSchema`'s primary key column is "id" (not the "row_id"
+            // fallback name) — this table shape is exactly what exposed
+            // Gap 1 (the SQLite backend's extractRowKey/extract_row_key
+            // hardcoded a literal "row_id" lookup and minted a random UUID
+            // for any other PK column name). Asserting the returned handle
+            // carries the real "id" value, across every backend this runner
+            // exercises, is the cross-backend conformance regression guard
+            // for that fix.
+            guard case .uuid(let realID) = item["id"] else {
+                Issue.record("\(backendName): fixture row missing .uuid id value")
+                continue
+            }
+            #expect(handle.key == realID, "\(backendName): insert must return the schema-declared PK value, not a random UUID")
         }
 
         let total = try await storage.rowStore.count(table: "items", where: nil)

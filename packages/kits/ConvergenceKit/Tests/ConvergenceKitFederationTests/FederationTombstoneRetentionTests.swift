@@ -118,7 +118,7 @@ struct FederationTombstoneRetentionTests {
             rowKey: rowKey.uuidString,
             event: .update,
             valuesData: nil,
-            packedHLC: Int64(bitPattern: rawHLC.packed),
+            hlcWireBytes: Data(rawHLC.wireBytes),
             enqueuedAt: ISO8601DateFormatter().string(from: Date()),
             retryCount: 3,
             isParked: true

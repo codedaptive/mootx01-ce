@@ -171,11 +171,14 @@ struct FederationLWWTests {
             ])
         )
         #expect(metaRows.count == 1, "_fed_sync_meta must have an entry after apply")
-        guard case .int(let packed) = metaRows[0]["sync_hlc"] else {
-            Issue.record("sync_hlc not persisted in _fed_sync_meta — LWW cannot guard on next inbound")
+        // Gap 6 (D38.1): sync_hlc_wire is the authoritative full-width column;
+        // the legacy sync_hlc INT column is dead (retained, always 0).
+        guard case .blob(let wire) = metaRows[0]["sync_hlc_wire"] else {
+            Issue.record("sync_hlc_wire not persisted in _fed_sync_meta — LWW cannot guard on next inbound")
             return
         }
-        #expect(packed != 0, "sync_hlc in _fed_sync_meta must be non-zero")
+        let decoded = try HLC(wireBytes: [UInt8](wire))
+        #expect(decoded.physicalTime != 0, "sync_hlc_wire in _fed_sync_meta must be non-zero")
 
         // Stale second inbound at T=1500 — must be rejected because the persisted
         // side-table HLC (T=2000) is newer.

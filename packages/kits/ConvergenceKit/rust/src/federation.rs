@@ -28,7 +28,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use persistence_kit::{Column, OrderClause, RowStore, Storage, StorageEvent, StoragePredicate, TableChange, TypedValue};
+use persistence_kit::{
+    Column, IsolationLevel, OrderClause, RowStore, Storage, StorageError, StorageEvent,
+    StoragePredicate, TableChange, TypedValue,
+};
 
 // ----- identity -----
 
@@ -403,7 +406,7 @@ impl FederationSyncEngine {
             id: Uuid::new_v4(),
             table_name: record.table.clone(),
             row_key: record.row_key.to_string(),
-            packed_hlc: record.hlc.physical_time,
+            hlc_wire: HLC::from(record.hlc).wire_bytes().to_vec(),
             payload,
             enqueued_at: iso8601_utc_now(),
         };
@@ -630,8 +633,8 @@ impl FederationSyncEngine {
                             let Some(change) = change else { continue };
                             // WC2: encode the SyncRecord at observe time (not push time)
                             // and append to the durable _fed_outbox side table.
-                            // Coalescing by (table_name, row_key) newest-packed_hlc
-                            // bounds hot-row growth in high-write workloads.
+                            // Coalescing by (table_name, row_key) newest-HLC (hlc_wire,
+                            // gap 6) bounds hot-row growth in high-write workloads.
                             if let Some(record) =
                                 change_to_record(change, schema_version, &kit_id, &hlc_generator, conflict_policy)
                             {
@@ -640,14 +643,49 @@ impl FederationSyncEngine {
                                         id: Uuid::new_v4(),
                                         table_name: record.table.clone(),
                                         row_key: record.row_key.to_string(),
-                                        packed_hlc: record.hlc.physical_time,
+                                        hlc_wire: HLC::from(record.hlc).wire_bytes().to_vec(),
                                         payload,
                                         enqueued_at: iso8601_utc_now(),
                                     };
+                                    // Gap 3 fix: `record.column_hlcs` is the SAME
+                                    // map that was just JSON-encoded into
+                                    // `entry.payload` for the wire — for
+                                    // fieldLevelLWW tables this map must ALSO be
+                                    // persisted locally into `_fed_sync_meta_cols`,
+                                    // committed atomically with the outbox append
+                                    // (same transaction overloads used by the
+                                    // gap-4 fix). Without this, a device's own
+                                    // local write never gains a local column-HLC
+                                    // baseline: `apply_record`'s fieldLevelLWW gate
+                                    // then has nothing to compare a later stale
+                                    // remote edit against, and `field_lww_merge`'s
+                                    // "no local HLC recorded" fallback lets the
+                                    // stale remote value win unconditionally.
+                                    let result: Result<(), String> =
+                                        match record.column_hlcs.as_ref().filter(|m| !m.is_empty()) {
+                                            Some(column_hlcs) => worker_storage
+                                                .transaction(IsolationLevel::Serializable, &mut |txn| {
+                                                    let txn_row_store = txn.row_store();
+                                                    write_fed_column_hlcs(
+                                                        &txn_row_store,
+                                                        &record.table,
+                                                        &record.row_key,
+                                                        column_hlcs,
+                                                    )
+                                                    .map_err(box_err_to_storage_err)?;
+                                                    fed_outbox_append(&*txn_row_store, &entry, FED_OUTBOX_TABLE)
+                                                        .map_err(|e| StorageError::BackendError { underlying: e })?;
+                                                    Ok(())
+                                                })
+                                                .map_err(|e| e.to_string()),
+                                            None => {
+                                                let row_store = worker_storage.row_store();
+                                                fed_outbox_append(&*row_store, &entry, FED_OUTBOX_TABLE)
+                                            }
+                                        };
                                     // Best-effort: log failure, continue — a missed outbox
                                     // write is recoverable on the next push cycle.
-                                    let row_store = worker_storage.row_store();
-                                    if let Err(e) = fed_outbox_append(&*row_store, &entry, FED_OUTBOX_TABLE) {
+                                    if let Err(e) = result {
                                         eprintln!("[federation] observer: outbox append failed for {}/{}: {}", record.table, record.row_key, e);
                                     }
                                 }
@@ -1142,6 +1180,15 @@ impl SyncEngine for FederationSyncEngine {
     }
 }
 
+/// Wrap an arbitrary boxed error — the return type of the `write_fed_*`
+/// side-table helpers (`write_fed_sync_hlc`, `write_fed_tombstone_hlc`,
+/// `write_fed_column_hlcs`) — as a `StorageError` so it can propagate through
+/// a `Storage::transaction` closure, whose signature is constrained to
+/// `FnMut(&dyn StorageTransaction) -> StorageResult<()>` (N1 fix).
+fn box_err_to_storage_err(e: Box<dyn std::error::Error + Send + Sync>) -> StorageError {
+    StorageError::BackendError { underlying: e.to_string() }
+}
+
 /// Apply one inbound SyncRecord to local storage per event kind and conflict policy.
 ///
 /// A6 UNIFICATION: the sync HLC is now stored in `_fed_sync_meta` (a per-engine
@@ -1194,22 +1241,41 @@ fn apply_record(
                         return Ok(()); // stale delete — local row is newer
                     }
                 }
-                let _ = row_store.delete(&record.table, &predicate);
-                // A6: persist tombstone HLC in side table after hard-delete.
-                // WHY: without this a stale insert arriving later would find
-                // local_hlc = None and be accepted, resurrecting the deleted row.
-                write_fed_tombstone_hlc(
-                    &row_store,
-                    &record.table,
-                    &record.row_key,
-                    record.hlc.into(),
-                )
-                .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                // N1 fix: the hard-delete and the tombstone-HLC bookkeeping write
+                // commit as ONE transaction. Previously these were two separate
+                // top-level calls; a crash/kill between them could leave the row
+                // deleted with no tombstone HLC recorded, defeating the A6
+                // stale-resurrect guard (a later stale insert would find
+                // `local_hlc == None` and resurrect the row). Mirrors the Swift
+                // CloudKit ApplyInbound.swift N1 fix.
+                //
+                // The delete keeps its pre-existing best-effort (`let _ =`)
+                // semantics inside the transaction — a delete failure here is
+                // swallowed the same way it always was.
+                storage
+                    .transaction(IsolationLevel::Serializable, &mut |txn| {
+                        let txn_row_store = txn.row_store();
+                        let _ = txn_row_store.delete(&record.table, &predicate);
+                        // A6: persist tombstone HLC in side table after hard-delete.
+                        // WHY: without this a stale insert arriving later would find
+                        // local_hlc = None and be accepted, resurrecting the deleted row.
+                        write_fed_tombstone_hlc(
+                            &txn_row_store,
+                            &record.table,
+                            &record.row_key,
+                            record.hlc.into(),
+                        )
+                        .map_err(box_err_to_storage_err)?;
+                        Ok(())
+                    })
+                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
                 // The tombstone won the LWW gate; older-HLC skew entries are already
                 // superseded (they would be rejected on replay by the same gate).
                 // Mirrors Swift FederationStateActor.applyInbound lastWriterWinsByHLC
                 // tombstone arm (PendingSkewQueue.deleteMatchingOlderThan call).
+                // Remains outside the transaction — a separate, already best-effort
+                // storage-reclaim concern, not part of the value+HLC correctness gate.
                 let _ = fed_skew_delete_older_than(
                     &row_store, &record.table, &record.row_key, record.hlc);
             }
@@ -1222,23 +1288,42 @@ fn apply_record(
                 // tombstone wins unconditionally (row never written under fieldLevelLWW).
                 let local_col_hlcs = read_fed_column_hlcs(&row_store, &record.table, &record.row_key);
                 if tombstone_wins(record.hlc, &local_col_hlcs) {
-                    let _ = row_store.delete(&record.table, &predicate);
-                    // Clear column HLC side-table entries: the row is gone, and stale
-                    // column entries would confuse a future re-insert under fieldLevelLWW.
-                    clear_fed_column_hlcs(&row_store, &record.table, &record.row_key);
-                    // A6: persist tombstone HLC in _fed_sync_meta to block stale
-                    // resurrections from older records arriving later.
-                    write_fed_tombstone_hlc(
-                        &row_store,
-                        &record.table,
-                        &record.row_key,
-                        record.hlc.into(),
-                    )
-                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    // N1 fix: the hard-delete, the column-HLC side-table clear, and
+                    // the row-grain tombstone-HLC write commit as ONE transaction.
+                    // Previously these were three separate top-level calls; a
+                    // crash/kill between any two of them could leave a deleted row
+                    // with stale column-HLC entries still on record, or with no
+                    // tombstone HLC in `_fed_sync_meta` (defeating the A6
+                    // stale-resurrect guard). Mirrors the Swift CloudKit
+                    // ApplyInbound.swift N1 fix.
+                    //
+                    // The delete and the column-HLC clear keep their pre-existing
+                    // best-effort semantics inside the transaction.
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |txn| {
+                            let txn_row_store = txn.row_store();
+                            let _ = txn_row_store.delete(&record.table, &predicate);
+                            // Clear column HLC side-table entries: the row is gone, and stale
+                            // column entries would confuse a future re-insert under fieldLevelLWW.
+                            clear_fed_column_hlcs(&txn_row_store, &record.table, &record.row_key);
+                            // A6: persist tombstone HLC in _fed_sync_meta to block stale
+                            // resurrections from older records arriving later.
+                            write_fed_tombstone_hlc(
+                                &txn_row_store,
+                                &record.table,
+                                &record.row_key,
+                                record.hlc.into(),
+                            )
+                            .map_err(box_err_to_storage_err)?;
+                            Ok(())
+                        })
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                     // P5-M1b: purge skew-queue entries whose HLC predates this tombstone.
                     // The tombstone won the edit-beats-delete gate; older-HLC skew entries
                     // are already superseded and would lose again on replay. Mirrors
                     // Swift FederationStateActor.applyInbound fieldLevelLWW tombstone arm.
+                    // Remains outside the transaction — see the identical note in the
+                    // LastWriterWinsByHLC tombstone arm above.
                     let _ = fed_skew_delete_older_than(
                         &row_store, &record.table, &record.row_key, record.hlc);
                 }
@@ -1306,19 +1391,36 @@ fn apply_record(
                             return Ok(()); // stale inbound — local (or tombstone) is newer
                         }
                     }
+                    // N1 fix: the value upsert and the sync-HLC bookkeeping write
+                    // commit as ONE transaction. Previously these were two separate
+                    // top-level calls; a crash/kill between them could leave a
+                    // committed value row with a stale (or missing) `_fed_sync_meta`
+                    // HLC, letting a later stale edit silently overwrite the newer
+                    // value (the N1 failure mode). Mirrors the Swift CloudKit
+                    // ApplyInbound.swift N1 fix.
+                    //
                     // Apply WITHOUT embedding _syncHLC in the row. A6: HLC lives
                     // in _fed_sync_meta, not in the application row column.
-                    row_store
-                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                    let values_for_write = values.clone();
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |txn| {
+                            let txn_row_store = txn.row_store();
+                            txn_row_store.upsert(
+                                &record.table,
+                                values_for_write.clone(),
+                                &[synced_table.primary_key_column.clone()],
+                            )?;
+                            // Persist HLC in side table (is_deleted = 0, live row).
+                            write_fed_sync_hlc(
+                                &txn_row_store,
+                                &record.table,
+                                &record.row_key,
+                                record.hlc.into(),
+                            )
+                            .map_err(box_err_to_storage_err)?;
+                            Ok(())
+                        })
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                    // Persist HLC in side table (is_deleted = 0, live row).
-                    write_fed_sync_hlc(
-                        &row_store,
-                        &record.table,
-                        &record.row_key,
-                        record.hlc.into(),
-                    )
-                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
                 ConflictPolicy::RemoteWins => {
                     row_store
@@ -1336,6 +1438,19 @@ fn apply_record(
                     }
                 }
                 ConflictPolicy::FieldLevelLWW => {
+                    // Gap 2 fix: reject a stale edit that predates a recorded
+                    // row-grain tombstone — see read_fed_tombstone_hlc's doc
+                    // comment for the full rationale. Mirrors the Swift
+                    // CloudKit ApplyInbound.swift / Federation applyInbound
+                    // gap-2 fix. Strict `<` matches the existing
+                    // LastWriterWinsByHLC gates elsewhere in this function.
+                    let incoming_hlc: HLC = record.hlc.into();
+                    if let Some(tombstone_hlc) = read_fed_tombstone_hlc(&row_store, &record.table, &record.row_key) {
+                        if incoming_hlc < tombstone_hlc {
+                            return Ok(()); // stale-before-tombstone edit — row stays deleted, no resurrection
+                        }
+                    }
+
                     // True column-grain fieldLevelLWW apply using wire-carried column
                     // HLCs and the persistent _fed_sync_meta_cols side table.
                     //
@@ -1353,31 +1468,45 @@ fn apply_record(
                         record.hlc,
                         &local_col_hlcs,
                     );
-                    if !columns_to_apply.is_empty() {
-                        row_store
-                            .upsert(
+                    // N1 fix: the winning-column value upsert, the column-HLC
+                    // bookkeeping write, and the row-grain HLC bookkeeping write all
+                    // commit as ONE transaction. Previously these were up to three
+                    // separate top-level calls; a crash/kill between any two of them
+                    // could leave a committed value row with stale (or missing) HLC
+                    // bookkeeping in either side table, letting a later stale edit
+                    // silently overwrite the newer value (the N1 failure mode).
+                    // Mirrors the Swift CloudKit ApplyInbound.swift N1 fix.
+                    let columns_to_apply_is_empty = columns_to_apply.is_empty();
+                    let columns_to_apply_for_write = columns_to_apply.clone();
+                    storage
+                        .transaction(IsolationLevel::Serializable, &mut |txn| {
+                            let txn_row_store = txn.row_store();
+                            if !columns_to_apply_is_empty {
+                                txn_row_store.upsert(
+                                    &record.table,
+                                    columns_to_apply_for_write.clone(),
+                                    &[synced_table.primary_key_column.clone()],
+                                )?;
+                                // Persist updated column HLCs to side table so the next
+                                // inbound apply can read them for its own column-grain gate.
+                                write_fed_column_hlcs(&txn_row_store, &record.table, &record.row_key, &updated_col_hlcs)
+                                    .map_err(box_err_to_storage_err)?;
+                            }
+                            // Update the row-grain sync HLC in _fed_sync_meta with the
+                            // incoming row HLC. The tombstone path uses the column-grain
+                            // side table (not this value) for its own gate; this update
+                            // keeps _fed_sync_meta current for any code that may query it
+                            // independently (e.g. observability, GC).
+                            write_fed_sync_hlc(
+                                &txn_row_store,
                                 &record.table,
-                                columns_to_apply,
-                                &[synced_table.primary_key_column.clone()],
+                                &record.row_key,
+                                record.hlc.into(),
                             )
-                            .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                        // Persist updated column HLCs to side table so the next
-                        // inbound apply can read them for its own column-grain gate.
-                        write_fed_column_hlcs(&row_store, &record.table, &record.row_key, &updated_col_hlcs)
-                            .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
-                    }
-                    // Update the row-grain sync HLC in _fed_sync_meta with the
-                    // incoming row HLC. The tombstone path uses the column-grain
-                    // side table (not this value) for its own gate; this update
-                    // keeps _fed_sync_meta current for any code that may query it
-                    // independently (e.g. observability, GC).
-                    write_fed_sync_hlc(
-                        &row_store,
-                        &record.table,
-                        &record.row_key,
-                        record.hlc.into(),
-                    )
-                    .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                            .map_err(box_err_to_storage_err)?;
+                            Ok(())
+                        })
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
                 }
             }
         }
@@ -1515,16 +1644,26 @@ const FED_SYNC_META_TABLE: &str = "_fed_sync_meta";
 
 /// Side table name for Federation per-column HLC storage (fieldLevelLWW, B-8).
 ///
-/// Schema: (table_name TEXT, primary_key TEXT, column_name TEXT, col_hlc INT);
+/// Schema: (table_name TEXT, primary_key TEXT, column_name TEXT,
+///          col_hlc_wire BLOB, col_hlc INT [legacy, dead]);
 /// PRIMARY KEY (table_name, primary_key, column_name).
 ///
 /// One row per (table, row, column) triple. Populated by `write_fed_column_hlcs`
 /// after every winning fieldLevelLWW column apply. Consulted by the inbound apply
 /// path to determine which columns from the incoming record win over local state.
 ///
-/// Mirrors Swift's `_fed_sync_meta_cols` declared in `FederationStateActor v2`
-/// (referenced in ColumnHLCStore.swift). Naming parity: column layout, INT
-/// col_hlc encoding, and PK structure are byte-identical to the Swift side.
+/// Mirrors Swift's `_fed_sync_meta_cols` declared in `FederationStateActor v7`
+/// (referenced in ColumnHLCStore.swift). Naming parity: column layout, PK
+/// structure, and the col_hlc_wire (`HLC.wire_bytes()`) encoding are
+/// byte-identical to the Swift side.
+///
+/// GAP 6 (2026-07, D38.1): `col_hlc` stored a 40-bit-truncated `HLC::packed()`
+/// value (see `HLC::packed`), while the wire `PackedHLC` (record.rs) carries
+/// `physical_time` losslessly. Comparing truncated-persisted-local against
+/// lossless-incoming in `field_lww_merge` made the last-arriving column edit
+/// always win regardless of true HLC order — see `read_fed_column_hlcs`/
+/// `write_fed_column_hlcs` below for the fix. `col_hlc` is retained (additive-
+/// only migration policy) but is dead — no longer read, always 0 on new writes.
 const FED_SYNC_META_COLS_TABLE: &str = "_fed_sync_meta_cols";
 
 // ─── tombstone GC constants ────────────────────────────────────────────────────
@@ -1605,7 +1744,8 @@ const FED_IDENTITY_TABLE: &str = "_fed_identity";
 
 /// Side table name for the Federation durable outbox (WC2).
 /// Stores post-encoded SyncRecord payloads pending relay delivery.
-/// Columns: id UUID PK, table_name TEXT, row_key TEXT, packed_hlc INT,
+/// Columns: id UUID PK, table_name TEXT, row_key TEXT, hlc_wire BLOB
+/// (gap 6, D38.1 — HLC.wireBytes, full-width; packed_hlc retained legacy/dead),
 /// payload BLOB (JSON SyncRecord), enqueued_at TEXT (ISO8601).
 /// Entries are written at observe time and confirmed (deleted) after
 /// successful relay.send_to; retained on transport failure for retry.
@@ -1620,10 +1760,14 @@ struct FedOutboxEntry {
     id: Uuid,
     table_name: String,
     row_key: String,
-    /// Int64 bit-pattern of `PackedHLC.as_i64()`. Used for coalescing:
-    /// the entry with the lower packed_hlc is discarded when two entries
-    /// share the same (table_name, row_key). MSB-node layout per SPEC §4.
-    packed_hlc: i64,
+    /// Full-width `HLC.wire_bytes()` (gap 6, D38.1). Used for coalescing:
+    /// the entry decoding to the lower HLC is discarded when two entries
+    /// share the same (table_name, row_key). Replaces the legacy
+    /// `packed_hlc: i64` (which, unlike Swift's `OutboxEntry.packedHLC`,
+    /// stored only `physical_time` directly — not truncated, but lost
+    /// logicalCount/nodeID tie-breaking precision; wire_bytes carries all
+    /// three losslessly, matching every other gap-6 carrier).
+    hlc_wire: Vec<u8>,
     /// JSON-encoded SyncRecord — pre-encoded at observe time.
     payload: Vec<u8>,
     /// ISO8601 wall-clock TEXT (schema invariant: never REAL). Observability only.
@@ -1632,10 +1776,10 @@ struct FedOutboxEntry {
 
 /// Append `entry` to the `_fed_outbox` table with coalescing.
 ///
-/// Coalescing rule (newest-wins by packed_hlc): if an entry already exists for
-/// the same (table_name, row_key) and its packed_hlc is strictly less than
-/// `entry.packed_hlc`, the existing entry is deleted and `entry` is inserted.
-/// If the existing entry's packed_hlc is >= entry's, the append is a no-op
+/// Coalescing rule (newest-wins by HLC): if an entry already exists for
+/// the same (table_name, row_key) and its decoded HLC is strictly less than
+/// `entry`'s, the existing entry is deleted and `entry` is inserted.
+/// If the existing entry's HLC is >= entry's, the append is a no-op
 /// (stale write, preserve the newer existing entry).
 ///
 /// Mirrors Swift `FedOutboxStore.append(entry:to:table:)`.
@@ -1656,10 +1800,14 @@ fn fed_outbox_append(
     ]);
     let existing = row_store.query(table, Some(&pred), &[], None, None).map_err(|e| e.to_string())?;
     if let Some(row) = existing.into_iter().next() {
-        if let Some(TypedValue::Int(existing_hlc)) = row.get("packed_hlc") {
-            if *existing_hlc >= entry.packed_hlc {
-                // Existing entry is already newer-or-equal — skip (stale write).
-                return Ok(());
+        if let Some(TypedValue::Blob(existing_wire)) = row.get("hlc_wire") {
+            if let (Ok(existing_hlc), Ok(incoming_hlc)) =
+                (HLC::from_wire_bytes(existing_wire), HLC::from_wire_bytes(&entry.hlc_wire))
+            {
+                if existing_hlc >= incoming_hlc {
+                    // Existing entry is already newer-or-equal — skip (stale write).
+                    return Ok(());
+                }
             }
         }
         // Incoming is newer: delete the stale entry and insert the new one.
@@ -1676,39 +1824,47 @@ fn fed_outbox_append(
     values.insert("id".to_string(), TypedValue::Uuid(entry.id));
     values.insert("table_name".to_string(), TypedValue::Text(entry.table_name.clone()));
     values.insert("row_key".to_string(), TypedValue::Text(entry.row_key.clone()));
-    values.insert("packed_hlc".to_string(), TypedValue::Int(entry.packed_hlc));
+    values.insert("hlc_wire".to_string(), TypedValue::Blob(entry.hlc_wire.clone()));
     values.insert("payload".to_string(), TypedValue::Blob(entry.payload.clone()));
     values.insert("enqueued_at".to_string(), TypedValue::Text(entry.enqueued_at.clone()));
     row_store.insert(table, values).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Read all pending outbox entries ordered by packed_hlc ascending
-/// (oldest first for chronological delivery ordering).
+/// Read all pending outbox entries ordered by HLC ascending (oldest first
+/// for chronological delivery ordering).
 ///
 /// Does NOT delete the entries — they remain until `fed_outbox_confirm` is
 /// called after successful relay delivery (retain-on-failure contract).
+///
+/// GAP 6 (D38.1): ordering is done IN RUST after decode, not via SQL
+/// `ORDER BY` — `hlc_wire` is little-endian-first-8-bytes-physicalTime, and
+/// raw byte-lexicographic BLOB comparison does not preserve numeric order
+/// for little-endian multi-byte integers (mirrors Swift's
+/// `OutboxStore.readBatch` gap-6 doc comment).
+///
 /// Mirrors Swift `FedOutboxStore.readBatch(from:table:)`.
 fn fed_outbox_read_batch(
     row_store: &dyn RowStore,
     table: &str,
 ) -> Result<Vec<FedOutboxEntry>, String> {
-    use persistence_kit::OrderDirection;
-    let order = [OrderClause {
-        column: Column::new(table.to_string(), "packed_hlc".to_string()),
-        direction: OrderDirection::Ascending,
-    }];
-    let rows = row_store.query(table, None, &order, None, None).map_err(|e| e.to_string())?;
+    let rows = row_store.query(table, None, &[], None, None).map_err(|e| e.to_string())?;
     let mut entries = Vec::with_capacity(rows.len());
     for row in rows {
         let id = match row.get("id") { Some(TypedValue::Uuid(u)) => *u, _ => continue };
         let table_name = match row.get("table_name") { Some(TypedValue::Text(s)) => s.clone(), _ => continue };
         let row_key = match row.get("row_key") { Some(TypedValue::Text(s)) => s.clone(), _ => continue };
-        let packed_hlc = match row.get("packed_hlc") { Some(TypedValue::Int(i)) => *i, _ => continue };
+        let hlc_wire = match row.get("hlc_wire") { Some(TypedValue::Blob(b)) => b.clone(), _ => continue };
         let payload = match row.get("payload") { Some(TypedValue::Blob(b)) => b.clone(), _ => continue };
         let enqueued_at = match row.get("enqueued_at") { Some(TypedValue::Text(s)) => s.clone(), _ => continue };
-        entries.push(FedOutboxEntry { id, table_name, row_key, packed_hlc, payload, enqueued_at });
+        entries.push(FedOutboxEntry { id, table_name, row_key, hlc_wire, payload, enqueued_at });
     }
+    let zero = HLC { physical_time: 0, logical_count: 0, node_id: 0 };
+    entries.sort_by(|a, b| {
+        let ha = HLC::from_wire_bytes(&a.hlc_wire).unwrap_or(zero);
+        let hb = HLC::from_wire_bytes(&b.hlc_wire).unwrap_or(zero);
+        ha.cmp(&hb)
+    });
     Ok(entries)
 }
 
@@ -1766,40 +1922,69 @@ const FED_PEERS_TABLE: &str = "_fed_peers";
 ///   v4 — `_fed_identity`       persistent estate Ed25519 identity (I-8, WC1)
 ///   v5 — `_fed_outbox`         durable outbound SyncRecord queue (WC2)
 ///   v6 — `_fed_peers`          persistent paired-peer registry (WC6)
+///   v7 — FULL-WIDTH HLC PERSISTENCE, EVERY FEDERATION CARRIER (gap 6,
+///        2026-07, D38.1). `_fed_sync_meta` gains `sync_hlc_wire`;
+///        `_fed_sync_meta_cols` gains `col_hlc_wire`; `_fed_outbox` gains
+///        `hlc_wire`. All use `HLC.wire_bytes()` — the already Swift/Rust
+///        lockstep-audited 16-byte lossless format — uniformly. All three
+///        tables are develop/1.1.x-only (confirmed absent from the shipped
+///        v1.0.33 tag) — CLEAN REGENERATE, no backfill needed (contrast
+///        CloudKit's `_ck_sync_meta`, which DOES carry shipped data and
+///        needs a BACKFILL migration — Swift-only, see SideSchema.swift).
+///        Fixes the truncation defect where the legacy `*_hlc`/`col_hlc`/
+///        `packed_hlc` columns' 40-bit-masked (or, for `_fed_outbox`,
+///        physical_time-only) encoding was compared against a lossless
+///        counterpart elsewhere in the chain, making a last-arriving stale
+///        write win regardless of true HLC order — see
+///        `read_fed_column_hlcs`/`write_fed_column_hlcs`'s doc comments for
+///        the full defect writeup.
 ///
 /// Fresh installs use the tables array directly (all tables created at schema
-/// version 6); the migration chain (v1→…→v6) only runs for estates upgrading
+/// version 7); the migration chain (v1→…→v7) only runs for estates upgrading
 /// from an earlier schema version.
 ///
 /// Mirrors Swift `FederationStateActor.ensureFedSyncMetaTable`. Returns an error
 /// string on failure (caller converts to SyncError).
 fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
     use persistence_kit::{ColumnDeclaration, Migration, SchemaDeclaration, SchemaOperation, TableDeclaration};
+    // sync_hlc_wire: full-width HLC.wire_bytes() (gap 6). _fed_sync_meta is
+    // develop/1.1.x-only — clean regenerate; a NULL/absent value on an
+    // existing row is treated as "not yet observed under full-width
+    // tracking" everywhere it's read (self-healing).
+    let sync_hlc_wire_decl = ColumnDeclaration::blob("sync_hlc_wire").nullable();
     let meta_table = TableDeclaration::new(
         FED_SYNC_META_TABLE,
         vec![
             ColumnDeclaration::text("table_name"),
             ColumnDeclaration::text("primary_key"),
-            // sync_hlc: Int64-packed HLC for LWW gate; 0 means no entry yet.
+            // LEGACY, dead since gap 6 (40-bit-truncated packed HLC).
+            // Retained for additive-migration safety; sync_hlc_wire is
+            // authoritative.
             ColumnDeclaration::int("sync_hlc").with_default(TypedValue::Int(0)),
             ColumnDeclaration::int("schema_version").with_default(TypedValue::Int(0)),
             ColumnDeclaration::text("kit_id").with_default(TypedValue::Text(String::new())),
             // is_deleted: 1 for tombstone entries (delete HLC that outlives the row).
             ColumnDeclaration::int("is_deleted").with_default(TypedValue::Int(0)),
+            sync_hlc_wire_decl.clone(),
         ],
         vec!["table_name".to_string(), "primary_key".to_string()],
     );
+    // col_hlc_wire: full-width (unpacked) column HLC storage via
+    // HLC.wire_bytes() (gap 6, D38.1) — no bit-packing, so no truncation is
+    // possible, matching Swift's col_hlc_wire convention in CKSideSchema v10 /
+    // FederationStateActor v7.
+    let col_hlc_wire_decl = ColumnDeclaration::blob("col_hlc_wire").nullable();
     let cols_table = TableDeclaration::new(
         FED_SYNC_META_COLS_TABLE,
         vec![
             ColumnDeclaration::text("table_name"),
             ColumnDeclaration::text("primary_key"),
             ColumnDeclaration::text("column_name"),
-            // col_hlc: Int64-packed HLC, same encoding as _fed_sync_meta.sync_hlc.
-            // Stored as signed Int64 (TypedValue::Int); recovered via u64 bit-cast.
-            // WHY Int and not a dedicated HLC column: matches Swift's col_hlc INT
-            // convention in CKSideSchema v6 and ColumnHLCStore.writeAll.
+            // col_hlc: LEGACY, dead since gap 6 (40-bit-truncated packed HLC).
+            // Retained only because migrations are additive-only (never drop a
+            // column) — see FED_SYNC_META_COLS_TABLE's doc comment above.
             ColumnDeclaration::int("col_hlc").with_default(TypedValue::Int(0)),
+            col_hlc_wire_decl.clone(),
         ],
         vec![
             "table_name".to_string(),
@@ -1848,10 +2033,13 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
     );
     // v5 (WC2): durable outbound SyncRecord queue.
     // Replaces the in-memory `outbox: Arc<Mutex<Vec<SyncRecord>>>` field.
-    // packed_hlc: signed Int64 bit-cast of PackedHLC.as_i64() (MSB-node layout
-    //   per SPEC §4). Used for coalescing: same (table_name, row_key) keeps
-    //   the entry with the higher packed_hlc.
+    // packed_hlc: LEGACY, dead since gap 6. Retained for additive-migration
+    //   safety; hlc_wire is authoritative for the newest-wins coalescing
+    //   comparison (fed_outbox_append).
+    // hlc_wire: HLC.wire_bytes(), full-width lossless BLOB (gap 6, D38.1).
+    //   develop/1.1.x-only — clean regenerate, no backfill needed.
     // enqueued_at: ISO8601 TEXT per schema invariants (never REAL).
+    let hlc_wire_decl = ColumnDeclaration::blob("hlc_wire").nullable();
     let outbox_table = TableDeclaration::new(
         FED_OUTBOX_TABLE,
         vec![
@@ -1861,6 +2049,7 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             ColumnDeclaration::int("packed_hlc").with_default(TypedValue::Int(0)),
             ColumnDeclaration::blob("payload"),
             ColumnDeclaration::text("enqueued_at"),
+            hlc_wire_decl.clone(),
         ],
         vec!["id".to_string()],
     );
@@ -1886,7 +2075,7 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
     );
     let schema = SchemaDeclaration::new(
         "ConvergenceKitFederation",
-        6,
+        7,
         vec![
             meta_table,
             cols_table.clone(),
@@ -1935,6 +2124,26 @@ fn ensure_fed_sync_meta_table(storage: &dyn Storage) -> Result<(), String> {
             from_version: 5,
             to_version: 6,
             operations: vec![SchemaOperation::CreateTable(peers_table)],
+        },
+        // v6 → v7: FULL-WIDTH HLC PERSISTENCE, EVERY FEDERATION CARRIER
+        // (gap 6, 2026-07, D38.1). Adds sync_hlc_wire to _fed_sync_meta,
+        // col_hlc_wire to _fed_sync_meta_cols, and hlc_wire to _fed_outbox.
+        // All three tables are develop/1.1.x-only (confirmed absent from
+        // the shipped v1.0.33 tag) — clean regenerate. AddColumn leaves
+        // existing rows' new column NULL; a NULL/absent wire value is
+        // treated as "not yet observed under full-width tracking"
+        // everywhere it's read (self-healing — see read_fed_sync_hlc/
+        // read_fed_tombstone_hlc and read_fed_column_hlcs), so the next
+        // incoming edit for that row/column always wins and repopulates
+        // the full-width value. Mirrors Swift FederationStateActor v6→v7.
+        Migration {
+            from_version: 6,
+            to_version: 7,
+            operations: vec![
+                SchemaOperation::AddColumn { table: FED_SYNC_META_TABLE.to_string(), column: sync_hlc_wire_decl },
+                SchemaOperation::AddColumn { table: FED_SYNC_META_COLS_TABLE.to_string(), column: col_hlc_wire_decl },
+                SchemaOperation::AddColumn { table: FED_OUTBOX_TABLE.to_string(), column: hlc_wire_decl },
+            ],
         },
     ]);
     storage.migrate(&schema).map_err(|e| e.to_string())
@@ -2098,11 +2307,12 @@ fn reload_peers(
 
 /// Compact stale tombstone entries from `_fed_sync_meta`.
 ///
-/// Queries all rows where `is_deleted = 1` (tombstone entries), unpacks the
-/// `sync_hlc` physical time, and deletes entries whose physical time is older
-/// than `TOMBSTONE_GC_RETENTION_SECS` ago. The retention window ensures
-/// in-flight stale resurrects from peers that have not recently synced are
-/// still gated by a live tombstone HLC entry (A6 stale-resurrect guard).
+/// Queries all rows where `is_deleted = 1` (tombstone entries), decodes the
+/// full-width `sync_hlc_wire` physical time, and deletes entries whose
+/// physical time is older than `TOMBSTONE_GC_RETENTION_SECS` ago. The
+/// retention window ensures in-flight stale resurrects from peers that have
+/// not recently synced are still gated by a live tombstone HLC entry (A6
+/// stale-resurrect guard).
 ///
 /// Returns the count of compacted entries.
 ///
@@ -2110,21 +2320,19 @@ fn reload_peers(
 fn tombstone_compact(row_store: &Arc<dyn RowStore>, now_ms: i64) -> usize {
     let retention_ms = TOMBSTONE_GC_RETENTION_SECS * 1_000;
 
-    // CRITICAL: the stored sync_hlc physical field is 40-bit-truncated
-    // (HLC.packed() masks phys with 0xFF_FFFF_FFFF), while now_ms is full-width
-    // Unix ms (~1.75e12 in 2026 > 2^40 ≈ 1.10e12). Comparing an unmasked
-    // cutoff against truncated stored values would make EVERY tombstone look
-    // ~35 years old and compact them all instantly, silently destroying the
-    // A6 stale-resurrect guard (same failure class as the SlotTable eviction
-    // bug — Perkins P4-M4 finding). Mask the cutoff into the same 40-bit
-    // space so both sides of the comparison wrap identically.
-    let cutoff_ms: i64 = ((now_ms - retention_ms) as u64 & 0xFF_FFFF_FFFF) as i64;
+    // GAP 6 (2026-07, D38.1): `sync_hlc_wire` is now full-width (HLC.wire_bytes(),
+    // no bit-packing — see read_fed_sync_hlc/write_fed_sync_hlc's doc comments),
+    // so `now_ms` is compared directly against the decoded physical time with
+    // NO masking. The 40-bit mask compensation this function used to apply
+    // (`& 0xFF_FFFF_FFFF` on the cutoff) is REMOVED: it existed only to keep
+    // both sides of the comparison wrapped into the same lossy 40-bit space as
+    // the legacy `sync_hlc` packed column. Re-applying it here now would
+    // itself reintroduce truncation on data that is no longer truncated.
+    let cutoff_ms: i64 = now_ms - retention_ms;
 
     // Query all tombstone entries for this side table.
-    // WHY query-then-delete rather than a single DELETE WHERE: the packed HLC
-    // stores physical time in the lowest 40 bits with node/logical in the upper
-    // bits. A direct SQL comparison on the packed int64 would not correctly
-    // isolate physical time; we unpack in Rust instead. Mirrors Swift TombstoneGC.compact.
+    // WHY query-then-delete rather than a single DELETE WHERE: the wire BLOB
+    // is opaque to SQL; we decode in Rust instead.
     let predicate = StoragePredicate::Eq(
         Column::new(FED_SYNC_META_TABLE.to_string(), "is_deleted".to_string()),
         TypedValue::Int(1),
@@ -2136,15 +2344,13 @@ fn tombstone_compact(row_store: &Arc<dyn RowStore>, now_ms: i64) -> usize {
 
     let mut compacted = 0;
     for row in tombstones {
-        let packed_i64 = match row.get("sync_hlc") {
-            Some(TypedValue::Int(i)) => *i,
+        let physical_ms: i64 = match row.get("sync_hlc_wire") {
+            Some(TypedValue::Blob(wire)) => match HLC::from_wire_bytes(wire) {
+                Ok(hlc) => hlc.physical_time,
+                Err(_) => continue,
+            },
             _ => continue,
         };
-
-        // Extract the low 40 bits as the physical time in milliseconds.
-        // Packed layout (cookbook §12.3): (node 8 bits << 56) |
-        //   (logicalCount 16 bits << 40) | (physicalTime 40 bits).
-        let physical_ms: i64 = (packed_i64 as u64 & 0xFF_FFFF_FFFF) as i64;
 
         if physical_ms > cutoff_ms {
             // Tombstone is within the retention window — keep it.
@@ -2199,8 +2405,19 @@ fn read_gc_sentinel_ms(row_store: &Arc<dyn RowStore>) -> i64 {
     let Some(row) = rows.into_iter().next() else {
         return 0;
     };
-    match row.get("sync_hlc") {
-        Some(TypedValue::Int(ms)) => *ms,
+    // GAP 6 RECONCILIATION (2026-07, D38.1): the sentinel's wall-clock ms
+    // value is NOT a real HLC (no node/logical identity), but `_fed_sync_meta`
+    // now has exactly one wire-format column (`sync_hlc_wire`) shared by
+    // every row, sentinel or not. Rather than a separate column just for
+    // this one sentinel row, it wraps its raw ms value as a synthetic
+    // `HLC { physical_time: ms, logical_count: 0, node_id: 0 }` and
+    // encodes/decodes through the SAME wire_bytes() codec every other row
+    // uses. `node_id: 0` is safe and unambiguous: real HLCs are
+    // `precondition`-enforced to nodeID `1...15` (SlotRecordMapping.swift:
+    // 66-69 on the Swift leg), so `node_id == 0` can never collide with a
+    // genuine per-device HLC. Mirrors Swift `readLastGCMs(from:)`.
+    match row.get("sync_hlc_wire") {
+        Some(TypedValue::Blob(wire)) => HLC::from_wire_bytes(wire).map(|h| h.physical_time).unwrap_or(0),
         _ => 0,
     }
 }
@@ -2208,9 +2425,9 @@ fn read_gc_sentinel_ms(row_store: &Arc<dyn RowStore>) -> i64 {
 /// Write the last-GC wall-clock ms to the GC sentinel row.
 ///
 /// The sentinel occupies `(table_name='_gc_state', primary_key='_tombstone_sweep')`
-/// in `_fed_sync_meta`. The `sync_hlc` field stores wall-clock ms directly —
-/// NOT a packed HLC. This sentinel row is never read as a tombstone gate;
-/// only `read_gc_sentinel_ms` reads it.
+/// in `_fed_sync_meta`. See `read_gc_sentinel_ms`'s doc comment for the gap-6
+/// wire-shape reconciliation (synthetic HLC, node_id: 0). This sentinel row
+/// is never read as a tombstone gate; only `read_gc_sentinel_ms` reads it.
 ///
 /// `is_deleted = 0` ensures the sentinel row is never swept by
 /// `tombstone_compact`, which only queries `is_deleted = 1` rows.
@@ -2220,9 +2437,8 @@ fn write_gc_sentinel_ms(row_store: &Arc<dyn RowStore>, ms: i64) {
     let mut values = BTreeMap::new();
     values.insert("table_name".to_string(), TypedValue::Text(GC_SENTINEL_TABLE_NAME.to_string()));
     values.insert("primary_key".to_string(), TypedValue::Text(GC_SENTINEL_PRIMARY_KEY.to_string()));
-    // sync_hlc: wall-clock ms of last GC run. NOT a packed HLC — this field
-    // is read only by read_gc_sentinel_ms; it never participates in the LWW gate.
-    values.insert("sync_hlc".to_string(), TypedValue::Int(ms));
+    let sentinel_hlc = HLC { physical_time: ms, logical_count: 0, node_id: 0 };
+    values.insert("sync_hlc_wire".to_string(), TypedValue::Blob(sentinel_hlc.wire_bytes().to_vec()));
     values.insert("schema_version".to_string(), TypedValue::Int(0));
     values.insert("kit_id".to_string(), TypedValue::Text(String::new()));
     // is_deleted = 0: sentinel row MUST NOT be swept by tombstone_compact.
@@ -2254,6 +2470,61 @@ fn gc_if_due(row_store: &Arc<dyn RowStore>, now_ms: i64) {
     write_gc_sentinel_ms(row_store, now_ms);
 }
 
+/// Read the row-grain tombstone HLC for a (table, row_key) — ONLY if that row
+/// is currently tombstoned (`is_deleted == 1`). Returns `None` when there is no
+/// `_fed_sync_meta` entry at all, OR when an entry exists but the row is live
+/// (`is_deleted == 0`) — in both cases there is no active tombstone to gate
+/// against.
+///
+/// Gap 2 fix: `apply_record`'s `ConflictPolicy::FieldLevelLWW` normal-apply arm
+/// has no visibility, from `read_fed_column_hlcs` alone, into whether a
+/// column's absence means "never written" or "history cleared by a tombstone"
+/// (`clear_fed_column_hlcs` wipes ALL column entries when a tombstone wins —
+/// see the tombstone dispatch above). Without this row-grain check, a stale
+/// edit that predates a delete is indistinguishable from a first-ever write
+/// and gets applied, resurrecting a correctly-deleted row. The row-grain
+/// tombstone HLC survives the delete specifically for this purpose (A6) and
+/// is untouched by the gap-3 fix — it remains the reliable signal. Mirrors the
+/// Swift CloudKit `readTombstoneHLC` / Federation `readFedTombstoneHLC` gap-2 fix.
+///
+/// Distinct from `read_fed_sync_hlc` below, which returns the row-grain HLC
+/// unconditionally (correct for `ConflictPolicy::LastWriterWinsByHLC`'s single
+/// whole-row comparison). Gating `FieldLevelLWW`'s column merge on the
+/// UNCONDITIONAL row-grain HLC instead of ONLY the tombstone case would reject
+/// a legitimate concurrent edit to a DIFFERENT column merely because some
+/// other column in the same row was touched more recently — defeating
+/// fieldLevelLWW's whole purpose (independent per-column resolution).
+fn read_fed_tombstone_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    row_key: &uuid::Uuid,
+) -> Option<HLC> {
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "table_name".to_string()),
+            TypedValue::Text(table.to_string()),
+        ),
+        StoragePredicate::Eq(
+            Column::new(FED_SYNC_META_TABLE.to_string(), "primary_key".to_string()),
+            TypedValue::Text(row_key.to_string()),
+        ),
+    ]);
+    let rows = row_store
+        .query(FED_SYNC_META_TABLE, Some(&predicate), &[], None, None)
+        .ok()?;
+    let first = rows.into_iter().next()?;
+    match first.get("is_deleted") {
+        Some(TypedValue::Int(1)) => {}
+        _ => return None,
+    }
+    // Gap 6 (D38.1): full-width sync_hlc_wire, not the legacy 40-bit-
+    // truncated sync_hlc packed column.
+    match first.get("sync_hlc_wire") {
+        Some(TypedValue::Blob(wire)) => HLC::from_wire_bytes(wire).ok(),
+        _ => None,
+    }
+}
+
 /// Read the persisted sync HLC from `_fed_sync_meta` for a given (table, row_key).
 ///
 /// A6: HLC lives in the side table, not in the application row. Returns the HLC
@@ -2277,9 +2548,10 @@ fn read_fed_sync_hlc(
         .query(FED_SYNC_META_TABLE, Some(&predicate), &[], None, None)
         .ok()?;
     let first = rows.into_iter().next()?;
-    match first.get("sync_hlc") {
-        Some(TypedValue::Hlc(h)) => Some(*h),
-        Some(TypedValue::Int(i)) => Some(HLC::from_packed((*i) as u64)),
+    // Gap 6 (D38.1): full-width sync_hlc_wire, not the legacy 40-bit-
+    // truncated sync_hlc packed column.
+    match first.get("sync_hlc_wire") {
+        Some(TypedValue::Blob(wire)) => HLC::from_wire_bytes(wire).ok(),
         _ => None,
     }
 }
@@ -2294,8 +2566,8 @@ fn write_fed_sync_hlc(
     let mut values = BTreeMap::new();
     values.insert("table_name".to_string(), TypedValue::Text(table.to_string()));
     values.insert("primary_key".to_string(), TypedValue::Text(row_key.to_string()));
-    // hlc.packed() → u64 bit layout per cookbook §12.3; stored as Int64 for TypedValue parity.
-    values.insert("sync_hlc".to_string(), TypedValue::Int(hlc.packed() as i64));
+    // Gap 6 (D38.1): full-width wire encoding, not the legacy packed layout.
+    values.insert("sync_hlc_wire".to_string(), TypedValue::Blob(hlc.wire_bytes().to_vec()));
     values.insert("schema_version".to_string(), TypedValue::Int(0));
     values.insert("kit_id".to_string(), TypedValue::Text(String::new()));
     values.insert("is_deleted".to_string(), TypedValue::Int(0));
@@ -2320,8 +2592,8 @@ fn write_fed_tombstone_hlc(
     let mut values = BTreeMap::new();
     values.insert("table_name".to_string(), TypedValue::Text(table.to_string()));
     values.insert("primary_key".to_string(), TypedValue::Text(row_key.to_string()));
-    // hlc.packed() → u64 bit layout per cookbook §12.3; stored as Int64 for TypedValue parity.
-    values.insert("sync_hlc".to_string(), TypedValue::Int(hlc.packed() as i64));
+    // Gap 6 (D38.1): full-width wire encoding, not the legacy packed layout.
+    values.insert("sync_hlc_wire".to_string(), TypedValue::Blob(hlc.wire_bytes().to_vec()));
     values.insert("schema_version".to_string(), TypedValue::Int(0));
     values.insert("kit_id".to_string(), TypedValue::Text(String::new()));
     values.insert("is_deleted".to_string(), TypedValue::Int(1));
@@ -2337,9 +2609,18 @@ fn write_fed_tombstone_hlc(
 
 /// Read the ColumnHLCMap for a given (table, row_key) from `_fed_sync_meta_cols`.
 ///
-/// Returns all (column_name, col_hlc) rows for the pair, decoded into a
-/// ColumnHLCMap. Returns an empty map when no entries exist — first write for
-/// this row under fieldLevelLWW (any incoming HLC wins).
+/// Returns all (column_name, col_hlc_wire) rows for the pair, decoded into a
+/// ColumnHLCMap. Returns an empty map when no entries exist — first write
+/// for this row under fieldLevelLWW (any incoming HLC wins).
+///
+/// Gap 6 (D38.1): reads the full-width `col_hlc_wire` BLOB (`HLC.wire_bytes()`)
+/// directly — NOT the legacy `col_hlc` packed column, which truncates
+/// `physical_time` to 40 bits (see FED_SYNC_META_COLS_TABLE's doc comment for
+/// the full defect writeup). A row written before the v7 migration has
+/// `col_hlc_wire` absent (this is a develop/1.1.x-only table — clean
+/// regenerate, no pre-existing data), so it is skipped by the `Blob` match
+/// guard below exactly like a row that has never been written under
+/// fieldLevelLWW — intentional and self-healing.
 ///
 /// Mirrors Swift's `ColumnHLCStore.readAll(from:sideTable:tableName:primaryKey:)`.
 fn read_fed_column_hlcs(
@@ -2364,12 +2645,8 @@ fn read_fed_column_hlcs(
     let mut entries = BTreeMap::new();
     for row in rows {
         let Some(TypedValue::Text(col_name)) = row.get("column_name") else { continue };
-        let col_hlc_i64 = match row.get("col_hlc") {
-            Some(TypedValue::Int(i)) => *i,
-            _ => continue,
-        };
-        // col_hlc stored as Int64 bit-cast from u64 (same as sync_hlc in _fed_sync_meta).
-        let hlc = HLC::from_packed(col_hlc_i64 as u64);
+        let Some(TypedValue::Blob(wire)) = row.get("col_hlc_wire") else { continue };
+        let Ok(hlc) = HLC::from_wire_bytes(wire) else { continue };
         entries.insert(col_name.clone(), PackedHLC::from(hlc));
     }
     ColumnHLCMap { entries }
@@ -2380,6 +2657,15 @@ fn read_fed_column_hlcs(
 /// Upserts one row per column using the three-column PK (table_name, primary_key,
 /// column_name) on conflict. Existing entries for columns not in `map` are left
 /// unchanged. Empty map is a no-op.
+///
+/// Gap 6 (D38.1): writes the full-width `col_hlc_wire` BLOB
+/// (`HLC.wire_bytes()`) directly — NOT `hlc.packed()` (which truncates
+/// `physical_time` to 40 bits; see FED_SYNC_META_COLS_TABLE's doc comment).
+/// The legacy `col_hlc` column is deliberately omitted from `values`: it is
+/// NOT NULL with a SQL DEFAULT of 0, so the backend fills it in on INSERT;
+/// on UPDATE (conflict) the existing `col_hlc` value, if any, is simply left
+/// untouched (upsert only SETs the columns present in `values`, mirroring
+/// `RowStore::upsert`'s Swift equivalent).
 ///
 /// Mirrors Swift's `ColumnHLCStore.writeAll(map:to:sideTable:tableName:primaryKey:)`.
 fn write_fed_column_hlcs(
@@ -2393,13 +2679,11 @@ fn write_fed_column_hlcs(
     }
     for (col_name, &packed_hlc) in &map.entries {
         let hlc: HLC = packed_hlc.into();
-        // Encode as Int64 bit-cast from u64 — same convention as write_fed_sync_hlc.
-        let col_hlc_val = hlc.packed() as i64;
         let mut values = BTreeMap::new();
         values.insert("table_name".to_string(),  TypedValue::Text(table.to_string()));
         values.insert("primary_key".to_string(), TypedValue::Text(row_key.to_string()));
         values.insert("column_name".to_string(), TypedValue::Text(col_name.clone()));
-        values.insert("col_hlc".to_string(),     TypedValue::Int(col_hlc_val));
+        values.insert("col_hlc_wire".to_string(), TypedValue::Blob(hlc.wire_bytes().to_vec()));
         row_store.upsert(
             FED_SYNC_META_COLS_TABLE,
             values,
@@ -2728,6 +3012,18 @@ fn is_leap_year(year: u32) -> bool {
 /// produces the same per-column result because ties (`>=` on equal HLCs)
 /// resolve identically in both orderings.
 ///
+/// GAP 6 VERIFICATION: the `>=` comparison below relies on `PackedHLC`'s
+/// derived `PartialOrd`/`Ord` (record.rs), which compares the raw
+/// `physical_time`/`logical_count`/`node_id` fields in declaration order —
+/// already full-width, lossless, with no bit-packing. This function required
+/// NO CHANGE for gap 6: the defect was entirely in `local_column_hlcs`'
+/// PROVENANCE (read from `_fed_sync_meta_cols` via the formerly-truncating
+/// `read_fed_column_hlcs`) being compared against a lossless
+/// `incoming_col_hlc` — a width MISMATCH, not a comparison-logic bug. Once
+/// `read_fed_column_hlcs`/`write_fed_column_hlcs` (below) both use the
+/// full-width columns, `local_hlc` and `incoming_col_hlc` are both
+/// full-width `PackedHLC` values and this existing `>=` is already correct.
+///
 /// Returns `(columns_to_apply, updated_column_hlcs)`. The caller must:
 ///   1. Apply `columns_to_apply` to the application row (upsert).
 ///   2. Persist `updated_column_hlcs` to `_fed_sync_meta_cols`.
@@ -2801,6 +3097,8 @@ fn tombstone_wins(tombstone_hlc: PackedHLC, local_column_hlcs: &ColumnHLCMap) ->
 mod tests {
     use super::*;
     use persistence_kit::inmemory::InMemoryStorage;
+    use persistence_kit::StorageResult;
+    use persistence_kit::{ColumnDeclaration, ColumnType, SchemaDeclaration, TableDeclaration};
     use std::collections::BTreeMap;
 
     // ── tombstone GC test helpers ────────────────────────────────────────────
@@ -2940,48 +3238,59 @@ mod tests {
         );
     }
 
-    /// 2026-scale packed-HLC regression: a tombstone from 1 day ago must NOT be
-    /// compacted when now_ms exceeds 2^40 and both sides of the cutoff comparison
-    /// are correctly masked to 40 bits.
+    /// 2026-scale full-width-HLC regression (gap 6, D38.1): a tombstone from
+    /// 1 day ago must NOT be compacted when now_ms exceeds the OLD 40-bit
+    /// truncation ceiling (2^40 ≈ 1.0995e12 ms) — i.e. at any real 2026-era
+    /// wall-clock magnitude.
     ///
-    /// Without the 40-bit mask on the cutoff, any packed physical time (which IS
-    /// already masked to 40 bits) would appear older than the unmasked cutoff
-    /// (~1.76e12), causing every tombstone to be silently compacted — destroying
-    /// the A6 stale-resurrect guard. This is the same failure class as the
-    /// SlotTable eviction bug (Perkins P4-M4 finding). The mask on both sides
-    /// wraps the comparison into the same 40-bit space so tombstones within the
-    /// retention window are correctly identified.
+    /// GAP 6 HISTORY: this test predates gap 6 and originally proved the
+    /// opposite mechanism — that BOTH sides of `tombstone_compact`'s cutoff
+    /// comparison had to be masked to the same lossy 40-bit space (matching
+    /// the then-truncating `sync_hlc` packed column) or every 2026-scale
+    /// tombstone would look ~35 years old and get compacted instantly,
+    /// destroying the A6 stale-resurrect guard (same failure class as the
+    /// SlotTable eviction bug, Perkins P4-M4 finding). Gap 6 removed that
+    /// masking entirely: `write_fed_tombstone_hlc` now persists the
+    /// full-width `sync_hlc_wire` (`HLC::wire_bytes()`, no truncation) and
+    /// `tombstone_compact`'s cutoff is a plain, unmasked
+    /// `physical_time <= cutoff_ms` comparison — see both functions' current
+    /// doc comments. This test's BODY still genuinely exercises that
+    /// unmasked path end-to-end (write via `write_fed_tombstone_hlc`, sweep
+    /// via `gc_if_due`/`tombstone_compact`) at real 2026-era magnitude; only
+    /// this comment previously described the removed (masked) approach as
+    /// if it were still required.
     ///
-    /// Approximate 2026-07-17 wall-clock: 1_766_779_200_000 ms > 2^40 (1_099_511_627_776).
-    /// Physical time in the stored packed HLC is masked to 40 bits:
-    ///   stored_physical = tombstone_physical_time & 0xFF_FFFF_FFFF
-    ///   Without mask: cutoff ≈ 1.76e12 > any 40-bit stored value → all compacted (BUG).
-    ///   With mask:    cutoff & 0xFF_FFFF_FFFF < stored_physical → tombstone kept (CORRECT).
+    /// Approximate 2026-07-17 wall-clock: 1_766_779_200_000 ms, comfortably
+    /// above the old 2^40 (1_099_511_627_776) truncation ceiling — exactly
+    /// the magnitude range every pre-gap-6 unit test's small synthetic
+    /// values (0-300) never reached, which is why the original truncation
+    /// defect survived undetected until gap 5's money test happened to use
+    /// real magnitudes.
     #[test]
     fn gc_2026_scale_packed_hlc_regression() {
         let storage = make_gc_storage();
         let row_store = storage.row_store();
 
-        // Approximate 2026-07-17 wall-clock ms. Exceeds 2^40 = 1_099_511_627_776.
+        // Approximate 2026-07-17 wall-clock ms. Exceeds the old 2^40 = 1_099_511_627_776
+        // truncation ceiling (gap 6 no longer truncates; this magnitude is just
+        // realistic wall-clock time, not a boundary condition to defeat a mask).
         let now_ms: i64 = 1_766_779_200_000;
 
-        // Tombstone minted 1 day ago — physical_time > 2^40, so the HLC packer
-        // truncates it to 40 bits when storing sync_hlc.
+        // Tombstone minted 1 day ago, at real 2026-era magnitude.
         let tombstone_physical = now_ms - 86_400_000; // 1 day ago, still within 90 d
         let recent_hlc = HLC { physical_time: tombstone_physical, logical_count: 0, node_id: 1 };
         let row_key = Uuid::new_v4();
         write_fed_tombstone_hlc(&row_store, "test_items", &row_key, recent_hlc)
             .expect("write 2026-scale tombstone");
 
-        // Sentinel = 0 → GC runs. If the mask is absent on the cutoff,
-        // the tombstone would be incorrectly compacted here.
+        // Sentinel = 0 → GC runs.
         gc_if_due(&row_store, now_ms);
 
         assert_eq!(
             count_tombstones(&row_store),
             1,
-            "2026-scale tombstone 1 day old must survive (within 90 d retention) — \
-             failure means the 40-bit mask is missing from the cutoff comparison"
+            "2026-scale tombstone 1 day old must survive (within 90 d retention) at \
+             real magnitude — full-width sync_hlc_wire compared unmasked against the cutoff"
         );
 
         // Also verify the invariant directly: retention must strictly exceed the
@@ -3302,5 +3611,603 @@ mod tests {
             encoded, golden,
             "Rust-encoded ColumnHLCMap must be byte-identical to the Swift golden"
         );
+    }
+
+    // ── N1 atomicity: value write + HLC bookkeeping commit as one transaction ──
+    //
+    // Rust twin of ApplyInboundAtomicityTests.swift (ConvergenceKitCloudKitTests).
+    // `apply_record`'s `LastWriterWinsByHLC` and `FieldLevelLWW` arms used to
+    // commit the application-row value write (`row_store.upsert`) and the HLC
+    // bookkeeping write(s) (`write_fed_sync_hlc` / `write_fed_column_hlcs` /
+    // `write_fed_tombstone_hlc`) as separate, non-transactional calls. A
+    // crash/kill between them could leave a committed value with stale or
+    // missing HLC bookkeeping, letting a later stale edit silently overwrite a
+    // newer value (N1). The fix wraps each arm's writes in one
+    // `storage.transaction(IsolationLevel::Serializable, ...)` block.
+    //
+    // FORCED-FAILURE tests below inject an `Err` between the value write and
+    // the HLC-bookkeeping write — the exact statement order `apply_record` now
+    // uses — and prove `InMemoryStorage::transaction` rolls BOTH back together
+    // (see `inmemory.rs::transaction`: on `Err`, the pre-transaction snapshot
+    // is restored wholesale). This closes the N1 crash window: since
+    // `apply_record` now performs both writes inside the SAME transaction
+    // closure, the same rollback guarantee protects it.
+
+    fn make_n1_storage() -> Arc<dyn Storage> {
+        use persistence_kit::{ColumnDeclaration, ColumnType, SchemaDeclaration, TableDeclaration};
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let schema = SchemaDeclaration::new(
+            "n1-test-kit",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::new("id", ColumnType::Uuid),
+                    ColumnDeclaration::new("note", ColumnType::Text),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open items schema");
+        ensure_fed_sync_meta_table(&*storage).expect("ensure_fed_sync_meta_table");
+        storage
+    }
+
+    #[derive(Debug)]
+    struct ForcedFailure;
+    impl std::fmt::Display for ForcedFailure {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "forced failure (N1 atomicity test)")
+        }
+    }
+    impl std::error::Error for ForcedFailure {}
+
+    /// fieldLevelLWW-shaped: value upsert + column-HLC write roll back TOGETHER
+    /// when the transaction fails between them.
+    #[test]
+    fn n1_forced_failure_between_value_and_column_hlc_rolls_back_both() {
+        let storage = make_n1_storage();
+        let row_id = Uuid::new_v4();
+
+        let result: StorageResult<()> = storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let txn_row_store = txn.row_store();
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), TypedValue::Uuid(row_id));
+            values.insert("note".to_string(), TypedValue::Text("would-be-committed".to_string()));
+            txn_row_store.upsert("items", values, &["id".to_string()])?;
+            // Crash/kill simulated HERE — mirrors apply_record's FieldLevelLWW
+            // arm, where write_fed_column_hlcs is the next statement after the
+            // value upsert.
+            Err(box_err_to_storage_err(Box::new(ForcedFailure)))
+        });
+        assert!(result.is_err(), "forced failure must propagate out of the transaction");
+
+        let row_store = storage.row_store();
+        let rows = row_store
+            .query("items", None, &[], None, None)
+            .expect("query items");
+        assert!(
+            rows.is_empty(),
+            "value upsert must roll back when a later statement in the same transaction fails"
+        );
+
+        let col_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        assert!(
+            col_hlcs.is_empty(),
+            "column-HLC bookkeeping must roll back along with the value write"
+        );
+    }
+
+    /// lastWriterWinsByHLC-shaped: value upsert + row-grain HLC write roll back
+    /// TOGETHER when the transaction fails between them.
+    #[test]
+    fn n1_forced_failure_between_value_and_row_hlc_rolls_back_both() {
+        let storage = make_n1_storage();
+        let row_id = Uuid::new_v4();
+
+        let result: StorageResult<()> = storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let txn_row_store = txn.row_store();
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), TypedValue::Uuid(row_id));
+            values.insert("note".to_string(), TypedValue::Text("would-be-committed".to_string()));
+            txn_row_store.upsert("items", values, &["id".to_string()])?;
+            // Crash/kill simulated HERE — mirrors apply_record's LastWriterWinsByHLC
+            // arm, where write_fed_sync_hlc is the next statement after the upsert.
+            Err(box_err_to_storage_err(Box::new(ForcedFailure)))
+        });
+        assert!(result.is_err(), "forced failure must propagate out of the transaction");
+
+        let row_store = storage.row_store();
+        let rows = row_store
+            .query("items", None, &[], None, None)
+            .expect("query items");
+        assert!(
+            rows.is_empty(),
+            "value upsert must roll back when a later statement in the same transaction fails"
+        );
+
+        assert!(
+            read_fed_sync_hlc(&row_store, "items", &row_id).is_none(),
+            "row-grain HLC bookkeeping must roll back along with the value write"
+        );
+    }
+
+    /// Success path: `apply_record`'s FieldLevelLWW arm commits the value row,
+    /// the column-HLC side table, and the row-grain HLC side table together —
+    /// proving the transactional refactor did not change observable behavior
+    /// on the (overwhelmingly common) non-crash commit path.
+    #[test]
+    fn n1_success_path_field_level_lww_value_and_both_hlc_layers_present() {
+        let storage = make_n1_storage();
+        let row_id = Uuid::new_v4();
+        let synced_table = SyncedTable::new("items", "id")
+            .with_direction(SyncDirection::Bidirectional)
+            .with_conflict_policy(ConflictPolicy::FieldLevelLWW);
+
+        let mut raw_values = BTreeMap::new();
+        raw_values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        raw_values.insert("note".to_string(), TypedValue::Text("flww-value".to_string()));
+        let hlc = HLC { physical_time: 500, logical_count: 0, node_id: 1 };
+        let mut record = SyncRecord::new(
+            "items",
+            SyncEventKind::Update,
+            row_id,
+            Some(SyncValueMap::from_typed(raw_values)),
+            hlc,
+            1,
+            "n1-test-kit",
+        );
+        record.column_hlcs = Some(ColumnHLCMap {
+            entries: {
+                let mut m = BTreeMap::new();
+                m.insert("note".to_string(), PackedHLC::from(hlc));
+                m
+            },
+        });
+
+        apply_record(&record, &synced_table, &storage).expect("apply_record must succeed");
+
+        let row_store = storage.row_store();
+        let rows = row_store
+            .query("items", None, &[], None, None)
+            .expect("query items");
+        assert_eq!(rows.len(), 1, "value row must be present after commit");
+
+        let col_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        assert!(!col_hlcs.is_empty(), "column-HLC bookkeeping must be present after commit");
+
+        assert!(
+            read_fed_sync_hlc(&row_store, "items", &row_id).is_some(),
+            "row-grain HLC bookkeeping must be present after commit"
+        );
+    }
+
+    // ── Gap 6: full-width column HLC persist round-trip (no truncation) ────
+    //
+    // Group (b) of the gap-6 regression suite (Rust leg). Direct unit tests
+    // of `write_fed_column_hlcs`/`read_fed_column_hlcs` at real-magnitude
+    // physicalTime, proving the persisted value survives byte-exact — the
+    // Swift-side twin is `ColumnHLCFullWidthRoundTripTests.swift`
+    // (ConvergenceKitCloudKitTests). Wire-format parity (JSON round-trip
+    // through the real-magnitude vector) is already covered by the golden
+    // Swift-JSON conformance test above (`rust_encodes_matching_swift_golden`
+    // -style tests) plus `ColumnHLCMap`'s derived `Serialize`/`Deserialize`,
+    // which never bit-packs `physical_time` — only the SQL persistence layer
+    // (`col_hlc` → `col_hlc_phys`/`col_hlc_logical`/`col_hlc_node`) needed
+    // fixing.
+
+    #[test]
+    fn gap6_column_hlc_survives_real_magnitude_persist_round_trip() {
+        const TRUNCATION_CEILING: i64 = 0xFF_FFFF_FFFF; // 2^40 - 1, ~1.0995e12
+        let storage = make_n1_storage();
+        let row_store = storage.row_store();
+        let row_id = Uuid::new_v4();
+
+        // Same real-magnitude vector as the Swift persist round-trip test
+        // and the Swift/Rust money tests, for direct cross-language parity.
+        let original = HLC { physical_time: 1_784_477_500_577, logical_count: 1, node_id: 3 };
+        assert!(original.physical_time > TRUNCATION_CEILING, "test precondition: real magnitude");
+
+        let mut entries = BTreeMap::new();
+        entries.insert("note".to_string(), PackedHLC::from(original));
+        write_fed_column_hlcs(&row_store, "items", &row_id, &ColumnHLCMap { entries })
+            .expect("write_fed_column_hlcs");
+
+        let read_back = read_fed_column_hlcs(&row_store, "items", &row_id);
+        let entry = read_back.entries.get("note").expect("note column must be present after write");
+        assert_eq!(entry.physical_time, original.physical_time,
+            "physical_time must survive persist->read byte-exact, got {} expected {}",
+            entry.physical_time, original.physical_time);
+        assert_eq!(entry.logical_count, original.logical_count);
+        assert_eq!(entry.node_id, original.node_id);
+    }
+
+    #[test]
+    fn gap6_column_hlc_distinct_from_legacy_wrapped_alias() {
+        const TRUNCATION_CEILING: i64 = 0xFF_FFFF_FFFF; // 2^40 - 1, ~1.0995e12
+        let storage = make_n1_storage();
+        let row_store = storage.row_store();
+        let row_id = Uuid::new_v4();
+
+        // `high` is the real value; `wrapped_alias` is what the OLD
+        // `HLC::packed()` masking would have collapsed it to
+        // (`high.physical_time & 0xFF_FFFF_FFFF`). Pre-fix, writing `high`
+        // and reading it back would have returned `wrapped_alias`'s
+        // magnitude — this test proves that no longer happens.
+        let high = HLC { physical_time: 1_784_477_500_577, logical_count: 1, node_id: 1 };
+        let wrapped_alias = high.physical_time & TRUNCATION_CEILING;
+        assert_ne!(wrapped_alias, high.physical_time, "test precondition: wrapping must actually change the value");
+
+        let mut entries = BTreeMap::new();
+        entries.insert("note".to_string(), PackedHLC::from(high));
+        write_fed_column_hlcs(&row_store, "items", &row_id, &ColumnHLCMap { entries })
+            .expect("write_fed_column_hlcs");
+
+        let read_back = read_fed_column_hlcs(&row_store, "items", &row_id);
+        let entry = read_back.entries.get("note").expect("note column must be present after write");
+        assert_eq!(entry.physical_time, high.physical_time,
+            "must read back the REAL value {}, not the legacy 40-bit-wrapped alias {}",
+            high.physical_time, wrapped_alias);
+        assert_ne!(entry.physical_time, wrapped_alias);
+    }
+
+    // ── Gap 3: local writes are HLC-gated into ColumnHLCStore ───────────────
+    //
+    // Rust twin of LocalWriteColumnHLCGateTests.swift (ConvergenceKitFederationTests).
+    // See that file's header for the full gap-3 writeup. Summary:
+    // `start_observers`'s background-thread worker computed a `ColumnHLCMap`
+    // (via `change_to_record`) for fieldLevelLWW tables and shipped it on the
+    // wire (JSON-encoded into the outbox entry's payload) but never persisted
+    // it locally into `_fed_sync_meta_cols` — so a device's own local write
+    // never gained a local column-HLC baseline, letting a later stale remote
+    // edit clobber it (`field_lww_merge`'s "no local HLC recorded" fallback:
+    // first write wins unconditionally). The fix persists that SAME map
+    // locally, atomically with the outbox append, mirroring gap 4's
+    // transaction pattern.
+    //
+    // These tests exercise the REAL local-write path end-to-end: `enable()`
+    // spawns the observer background thread that calls the fixed code after a
+    // plain (non-echo-suppressed) row write — exactly how a host app's local
+    // edit reaches the Rust engine in production.
+
+    fn gap3_make_storage() -> Arc<dyn Storage> {
+        let s = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let schema = SchemaDeclaration::new(
+            "gap3-test-kit",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::new("id", ColumnType::Uuid),
+                    ColumnDeclaration::new("note", ColumnType::Text),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        s.open(&schema).expect("open items schema");
+        s
+    }
+
+    fn gap3_manifest() -> SyncManifest {
+        SyncManifest::new(
+            "gap3-test-kit",
+            1,
+            "gap3-zone",
+            vec![SyncedTable::new("items", "id")
+                .with_direction(SyncDirection::Bidirectional)
+                .with_conflict_policy(ConflictPolicy::FieldLevelLWW)],
+        )
+    }
+
+    fn gap3_write_row(storage: &Arc<dyn Storage>, row_id: Uuid, note: &str) {
+        let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        values.insert("note".to_string(), TypedValue::Text(note.to_string()));
+        storage
+            .row_store()
+            .upsert("items", values, &["id".to_string()])
+            .expect("upsert row");
+    }
+
+    fn gap3_outbox_count(storage: &Arc<dyn Storage>) -> usize {
+        storage
+            .row_store()
+            .query(FED_OUTBOX_TABLE, None, &[], None, None)
+            .map(|r| r.len())
+            .unwrap_or(0)
+    }
+
+    /// Poll (bounded, no busy-spin) until `condition` is true or the deadline
+    /// passes. The observer worker runs on a background thread, so the write
+    /// and the resulting outbox/column-HLC persistence are not synchronous
+    /// with the test's main thread. Mirrors `push_until_nonzero` in
+    /// federation_observer_outbox_tests.rs.
+    fn gap3_poll_until(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if condition() { return true; }
+            if std::time::Instant::now() >= deadline { return false; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn gap3_local_write_records_column_hlc() {
+        let storage = gap3_make_storage();
+        let relay: Arc<dyn Relay> = Arc::new(FederationRelay::new());
+        let identity = Arc::new(LocalIdentity::generate());
+        let mut engine = FederationSyncEngine::new(identity, relay);
+        engine.enable(gap3_manifest(), storage.clone()).unwrap();
+
+        let row_id = Uuid::new_v4();
+        let before = gap3_outbox_count(&storage);
+        gap3_write_row(&storage, row_id, "local-edit");
+
+        let observed = gap3_poll_until(|| gap3_outbox_count(&storage) > before);
+        assert!(observed, "outbox must reflect the local write (observer must have run)");
+
+        let row_store = storage.row_store();
+        let column_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        assert!(
+            !column_hlcs.is_empty(),
+            "local write must record a column-HLC baseline in _fed_sync_meta_cols (gap 3 fix)"
+        );
+        assert!(
+            column_hlcs.entries.get("note").is_some(),
+            "note column's HLC must be recorded"
+        );
+
+        engine.disable().unwrap();
+    }
+
+    #[test]
+    fn gap3_local_write_survives_stale_remote_edit() {
+        let storage = gap3_make_storage();
+        let relay: Arc<dyn Relay> = Arc::new(FederationRelay::new());
+        let identity = Arc::new(LocalIdentity::generate());
+        let mut engine = FederationSyncEngine::new(identity, relay);
+        engine.enable(gap3_manifest(), storage.clone()).unwrap();
+
+        let row_id = Uuid::new_v4();
+
+        // 1. Local write at HLC_local, via the REAL engine (its own observer
+        // thread, hlc_generator, and the fixed outbox-worker code).
+        let before = gap3_outbox_count(&storage);
+        gap3_write_row(&storage, row_id, "local-fresh");
+        let observed = gap3_poll_until(|| gap3_outbox_count(&storage) > before);
+        assert!(observed, "outbox must reflect the local write before the stale remote edit arrives");
+
+        let row_store = storage.row_store();
+        let local_column_hlcs = read_fed_column_hlcs(&row_store, "items", &row_id);
+        let local_packed = *local_column_hlcs.entries.get("note").expect(
+            "local write must have stamped a column HLC for 'note' (gap 3 fix) — \
+             without it this test cannot construct a definitely-older remote HLC",
+        );
+        let local_hlc: HLC = local_packed.into();
+
+        // 2. THEN a stale remote edit at HLC_remote < HLC_local arrives, applied
+        // directly through `apply_record` (mirrors how the N1 tests above and
+        // the FieldLWW conformance tests exercise it) against the SAME storage.
+        let stale_hlc = HLC {
+            physical_time: (local_hlc.physical_time - 1_000).max(0),
+            logical_count: 0,
+            node_id: 999,
+        };
+        assert!(
+            stale_hlc < local_hlc,
+            "test precondition: constructed remote HLC must be strictly older than the local HLC"
+        );
+
+        let synced_table = gap3_manifest().tables[0].clone();
+        let mut stale_values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        stale_values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        stale_values.insert(
+            "note".to_string(),
+            TypedValue::Text("STALE-REMOTE-MUST-NOT-WIN".to_string()),
+        );
+        let mut stale_record = SyncRecord::new(
+            "items",
+            SyncEventKind::Update,
+            row_id,
+            Some(SyncValueMap::from_typed(stale_values)),
+            stale_hlc,
+            1,
+            "gap3-test-kit",
+        );
+        let mut col_entries = BTreeMap::new();
+        col_entries.insert("note".to_string(), PackedHLC::from(stale_hlc));
+        stale_record.column_hlcs = Some(ColumnHLCMap { entries: col_entries });
+
+        apply_record(&stale_record, &synced_table, &storage).expect("apply_record must succeed");
+
+        // 3. THE MONEY ASSERTION: the local value must survive. Before the
+        // gap-3 fix, this failed — the stale remote clobbered the local edit
+        // because `_fed_sync_meta_cols` had no entry for "note" (first-write-
+        // wins fallback in `field_lww_merge` treated the stale remote as the
+        // first-ever write).
+        let pred = StoragePredicate::Eq(
+            Column::new("items".to_string(), "id".to_string()),
+            TypedValue::Uuid(row_id),
+        );
+        let rows = row_store
+            .query("items", Some(&pred), &[], None, None)
+            .expect("query items");
+        let note = rows.into_iter().next().and_then(|r| r.get("note").cloned());
+        assert_eq!(
+            note,
+            Some(TypedValue::Text("local-fresh".to_string())),
+            "local write must survive a stale remote edit that arrives afterward (gap 3 money test)"
+        );
+
+        engine.disable().unwrap();
+    }
+
+    // ── Gap 2: fieldLevelLWW tombstone-resurrection guard ───────────────────
+    //
+    // Rust twin of TombstoneResurrectionGuardTests.swift (both CloudKit and
+    // Federation Swift test targets). See that file's header for the full
+    // gap-2 writeup. Summary: `ConflictPolicy::FieldLevelLWW`'s normal-apply
+    // arm read only `read_fed_column_hlcs` (column-grain), which cannot
+    // distinguish "column never written" from "history cleared by a
+    // tombstone" (`clear_fed_column_hlcs` wipes it on tombstone-wins). A
+    // stale edit predating a delete looked like a first-ever write and got
+    // applied, resurrecting a correctly-deleted row — reproducible via clock
+    // skew or a 3-device race, no crash required. Fixed by gating on the
+    // ROW-GRAIN tombstone HLC (`_fed_sync_meta.is_deleted == 1`, A6,
+    // untouched by gap 3): an edit strictly older than the tombstone is
+    // rejected; an edit at or after the tombstone HLC proceeds to a normal
+    // apply, correctly resurrecting the row.
+    //
+    // These tests call `apply_record` directly (synchronous, no observer
+    // thread) — same technique as the N1 tests above — for fully
+    // deterministic HLC control with no timing dependency.
+
+    fn gap2_make_storage() -> Arc<dyn Storage> {
+        let s = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let schema = SchemaDeclaration::new(
+            "gap2-test-kit",
+            1,
+            vec![TableDeclaration::new(
+                "items",
+                vec![
+                    ColumnDeclaration::new("id", ColumnType::Uuid),
+                    ColumnDeclaration::new("note", ColumnType::Text),
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        s.open(&schema).expect("open items schema");
+        ensure_fed_sync_meta_table(&*s).expect("ensure_fed_sync_meta_table");
+        s
+    }
+
+    fn gap2_synced_table() -> SyncedTable {
+        SyncedTable::new("items", "id")
+            .with_direction(SyncDirection::Bidirectional)
+            .with_conflict_policy(ConflictPolicy::FieldLevelLWW)
+    }
+
+    fn gap2_make_upsert(row_id: Uuid, note: &str, hlc_time: i64) -> SyncRecord {
+        let hlc = HLC { physical_time: hlc_time, logical_count: 0, node_id: 1 };
+        let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+        values.insert("id".to_string(), TypedValue::Uuid(row_id));
+        values.insert("note".to_string(), TypedValue::Text(note.to_string()));
+        let mut record = SyncRecord::new(
+            "items",
+            SyncEventKind::Update,
+            row_id,
+            Some(SyncValueMap::from_typed(values)),
+            hlc,
+            1,
+            "gap2-test-kit",
+        );
+        let mut col_entries = BTreeMap::new();
+        col_entries.insert("note".to_string(), PackedHLC::from(hlc));
+        record.column_hlcs = Some(ColumnHLCMap { entries: col_entries });
+        record
+    }
+
+    fn gap2_make_tombstone(row_id: Uuid, hlc_time: i64) -> SyncRecord {
+        let hlc = HLC { physical_time: hlc_time, logical_count: 0, node_id: 1 };
+        SyncRecord::new_tombstone("items", row_id, hlc, 1, "gap2-test-kit")
+    }
+
+    fn gap2_row_exists(storage: &Arc<dyn Storage>, row_id: Uuid) -> bool {
+        let pred = StoragePredicate::Eq(
+            Column::new("items".to_string(), "id".to_string()),
+            TypedValue::Uuid(row_id),
+        );
+        storage.row_store().count("items", Some(&pred)).unwrap_or(0) > 0
+    }
+
+    fn gap2_row_note(storage: &Arc<dyn Storage>, row_id: Uuid) -> Option<String> {
+        let pred = StoragePredicate::Eq(
+            Column::new("items".to_string(), "id".to_string()),
+            TypedValue::Uuid(row_id),
+        );
+        let rows = storage
+            .row_store()
+            .query("items", Some(&pred), &[], None, None)
+            .ok()?;
+        match rows.into_iter().next()?.get("note")? {
+            TypedValue::Text(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// (a) STALE edit after delete — must NOT resurrect (the money test).
+    #[test]
+    fn gap2_stale_edit_after_tombstone_does_not_resurrect() {
+        let storage = gap2_make_storage();
+        let synced_table = gap2_synced_table();
+        let row_id = Uuid::new_v4();
+
+        apply_record(&gap2_make_upsert(row_id, "original", 100), &synced_table, &storage)
+            .expect("seed upsert must succeed");
+        apply_record(&gap2_make_tombstone(row_id, 200), &synced_table, &storage)
+            .expect("tombstone must succeed");
+        assert!(!gap2_row_exists(&storage, row_id), "row must be deleted after the tombstone");
+
+        // A stale edit at T=150 (< tombstone T=200) arrives late.
+        apply_record(&gap2_make_upsert(row_id, "STALE-MUST-NOT-RESURRECT", 150), &synced_table, &storage)
+            .expect("apply_record must not error even when rejecting");
+
+        assert!(
+            !gap2_row_exists(&storage, row_id),
+            "stale edit predating the tombstone must NOT resurrect the row (gap 2 money test)"
+        );
+    }
+
+    /// (b) LEGITIMATE fresh edit after delete — MUST resurrect (guard against
+    /// over-rejecting).
+    #[test]
+    fn gap2_fresh_edit_after_tombstone_resurrects_correctly() {
+        let storage = gap2_make_storage();
+        let synced_table = gap2_synced_table();
+        let row_id = Uuid::new_v4();
+
+        apply_record(&gap2_make_upsert(row_id, "original", 100), &synced_table, &storage)
+            .expect("seed upsert must succeed");
+        apply_record(&gap2_make_tombstone(row_id, 200), &synced_table, &storage)
+            .expect("tombstone must succeed");
+        assert!(!gap2_row_exists(&storage, row_id), "row must be deleted after the tombstone");
+
+        // A genuinely NEW edit at T=300 (> tombstone T=200) — a legitimate
+        // post-delete revival.
+        apply_record(&gap2_make_upsert(row_id, "LEGITIMATE-REVIVAL", 300), &synced_table, &storage)
+            .expect("resurrection upsert must succeed");
+
+        assert!(gap2_row_exists(&storage, row_id), "edit newer than the tombstone must resurrect the row");
+        assert_eq!(
+            gap2_row_note(&storage, row_id).as_deref(),
+            Some("LEGITIMATE-REVIVAL"),
+            "resurrected row must carry the new edit's value"
+        );
+    }
+
+    /// (c) Trigger-agnostic: order-independence (3-device / clock-skew race
+    /// variant). The same two records, applied in opposite order on two
+    /// independent estates, must converge to the same (deleted) state.
+    #[test]
+    fn gap2_order_independence_converges_to_deleted_state() {
+        let synced_table = gap2_synced_table();
+        let row_id = Uuid::new_v4();
+
+        // Estate A: edit@50 then tombstone@100 (expected order).
+        let storage_a = gap2_make_storage();
+        apply_record(&gap2_make_upsert(row_id, "v1", 50), &synced_table, &storage_a)
+            .expect("estate A upsert must succeed");
+        apply_record(&gap2_make_tombstone(row_id, 100), &synced_table, &storage_a)
+            .expect("estate A tombstone must succeed");
+
+        // Estate B: the SAME two records in the OPPOSITE order.
+        let storage_b = gap2_make_storage();
+        apply_record(&gap2_make_tombstone(row_id, 100), &synced_table, &storage_b)
+            .expect("estate B tombstone must succeed");
+        apply_record(&gap2_make_upsert(row_id, "v1", 50), &synced_table, &storage_b)
+            .expect("estate B stale upsert must not error even when rejected");
+
+        assert!(!gap2_row_exists(&storage_a, row_id), "estate A (edit-then-tombstone order) must converge to deleted");
+        assert!(!gap2_row_exists(&storage_b, row_id), "estate B (tombstone-then-edit order) must converge to deleted");
     }
 }

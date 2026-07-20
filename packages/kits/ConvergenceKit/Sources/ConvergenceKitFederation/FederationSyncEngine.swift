@@ -529,6 +529,16 @@ actor FederationStateActor {
         // Precision path (CVK-WB4): when changedColumns is present, stamp only
         // the columns that were actually written. Columns in the row snapshot but
         // not changed retain their existing remote HLC — they are not displaced.
+        //
+        // Gap 3: `columnHLCs` (the actual map, not just the SyncRecord field it
+        // ends up in) is kept in scope below so the SAME local write's HLC that
+        // gets shipped to peers on the wire is also stamped into the LOCAL
+        // `_fed_sync_meta_cols` side table (ColumnHLCStore.writeAll below) —
+        // closing the "local write never HLC-gated" window. Without this,
+        // applyInbound's fieldLevelLWW gate has no truthful local baseline for
+        // a column this device just wrote, so a later-arriving stale remote
+        // edit for that column wins unconditionally (FieldLWWMerge.merge:
+        // `localColumnHLC == nil` → `shouldApply = true`).
         let columnHLCs: ColumnHLCMap?
         if let raw = effectiveChange.values,
            syncedTable.conflictPolicy == .fieldLevelLWW,
@@ -562,17 +572,45 @@ actor FederationStateActor {
             logger.warning("federation recordOutbound: JSON encode failed for \(change.table)/\(rowKey) — entry dropped")
             return
         }
-        let packedHLC = Int64(bitPattern: hlc.packed)
+        // Gap 6 (D38.1): full-width wire encoding, not the legacy 40-bit-
+        // truncated `HLC.packed`. See FedOutboxStore.swift's file header.
         let entry = FedOutboxEntry(
             id: UUID(),
             tableName: record.table,
             rowKey: rowKey.uuidString,
-            packedHLC: packedHLC,
+            hlcWireBytes: Data(hlc.wireBytes),
             payload: payload,
             enqueuedAt: iso8601Now()
         )
         do {
-            try await FedOutboxStore.append(entry: entry, to: storage, table: Self.fedOutboxTable)
+            // Gap 3: when this local write has a non-empty column-HLC stamp
+            // (fieldLevelLWW table, non-delete event, at least one written
+            // column), the local `_fed_sync_meta_cols` bookkeeping write and
+            // the durable outbox append commit as ONE transaction — the same
+            // atomicity guarantee shipped for the receive side in gap 4. This
+            // does NOT (and cannot) extend to the original application-level
+            // row write itself: that write already committed, via arbitrary
+            // caller code, before the storage observer delivered this
+            // `TableChange` to recordOutbound — recordOutbound is a reactive
+            // notification handler, not the write path. What this transaction
+            // guarantees is that recordOutbound's OWN two writes (column-HLC
+            // bookkeeping + outbox entry) never partially land.
+            if let columnHLCs, !columnHLCs.isEmpty {
+                // `effectiveChange` is a `var` above (mutated by the projection-strip
+                // branch) — snapshot the one field the transaction closure needs into
+                // a `let` so the `@Sendable` closure can capture it (Swift 6 strict
+                // concurrency forbids capturing a `var` directly).
+                let tableName = effectiveChange.table
+                try await storage.transaction(isolation: .serializable) { txn in
+                    try await ColumnHLCStore.writeAll(
+                        map: columnHLCs,
+                        to: txn, sideTable: Self.fedSyncMetaColsTable,
+                        tableName: tableName, primaryKey: rowKey)
+                    try await FedOutboxStore.append(entry: entry, to: txn, table: Self.fedOutboxTable)
+                }
+            } else {
+                try await FedOutboxStore.append(entry: entry, to: storage, table: Self.fedOutboxTable)
+            }
         } catch {
             logger.warning("federation recordOutbound: outbox append failed for \(change.table)/\(rowKey): \(error)")
         }
@@ -1044,18 +1082,35 @@ actor FederationStateActor {
                 if let localHLC, record.hlc.asHLC < localHLC {
                     return // stale delete — local row is newer
                 }
-                _ = try? await storage.rowStore.deleteSync(table: record.table, where: predicate)
-                // A6: persist tombstone HLC in side table after hard-delete.
-                // WHY: without this, a stale insert arriving after the delete would
-                // find localHLC = nil and be accepted, resurrecting the deleted row.
-                try await writeFedTombstoneHLC(
-                    storage: storage, table: record.table,
-                    primaryKey: record.rowKey, hlc: record.hlc.asHLC,
-                    schemaVersion: record.schemaVersion, kitID: record.kitID)
+                // N1 fix: the hard-delete and the tombstone-HLC bookkeeping write
+                // commit as ONE transaction. Previously these were two separate
+                // top-level `await` calls; a crash/kill between them could leave
+                // the row deleted with no tombstone HLC recorded in _fed_sync_meta,
+                // defeating the A6 stale-resurrect guard (a later stale insert
+                // would find `localHLC == nil` and resurrect the row). Mirrors the
+                // Swift CloudKit ApplyInbound.swift N1 fix.
+                //
+                // The delete keeps its pre-existing `try?` (best-effort) semantics
+                // inside the transaction — a delete failure here is swallowed the
+                // same way it always was, it just now happens inside the same
+                // atomic unit as the tombstone-HLC write instead of before it.
+                try await storage.transaction(isolation: .serializable) { txn in
+                    _ = try? await txn.rowStore.deleteSync(table: record.table, where: predicate)
+                    // A6: persist tombstone HLC in side table after hard-delete.
+                    // WHY: without this, a stale insert arriving after the delete would
+                    // find localHLC = nil and be accepted, resurrecting the deleted row.
+                    try await self.writeFedTombstoneHLC(
+                        storage: txn, table: record.table,
+                        primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                        schemaVersion: record.schemaVersion, kitID: record.kitID)
+                }
                 // P5-M1b: purge stale skew-queue entries and parked outbox entries.
                 // The tombstone won the LWW gate; older-HLC skew entries are already
                 // superseded (they would be rejected on replay by the same gate).
                 // Parked outbox entries are indefinite retention after row deletion.
+                // These purges remain outside the transaction: they are a separate,
+                // already best-effort (`try?`) storage-reclaim concern (skew queue /
+                // outbox), not part of the value+HLC correctness gate this fix closes.
                 _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
                     tableName: record.table, rowKey: record.rowKey,
                     tombstoneHLC: record.hlc,
@@ -1074,18 +1129,35 @@ actor FederationStateActor {
                     tombstoneHLC: tombstoneHLC, localColumnHLCs: localColumnHLCs) {
                     return // edit-beats-delete: a local column was written later
                 }
-                _ = try? await storage.rowStore.deleteSync(table: record.table, where: predicate)
-                // Clear per-column side table — row is gone.
-                try? await ColumnHLCStore.clearAll(
-                    from: storage, sideTable: Self.fedSyncMetaColsTable,
-                    tableName: record.table, primaryKey: record.rowKey)
-                // A6: persist tombstone HLC in row-grain side table.
-                try await writeFedTombstoneHLC(
-                    storage: storage, table: record.table,
-                    primaryKey: record.rowKey, hlc: record.hlc.asHLC,
-                    schemaVersion: record.schemaVersion, kitID: record.kitID)
+                // N1 fix: the hard-delete, the column-HLC side-table clear, and the
+                // row-grain tombstone-HLC write commit as ONE transaction. Previously
+                // these were three separate top-level `await` calls; a crash/kill
+                // between any two of them could leave a deleted row with stale
+                // column-HLC entries still on record (confusing a future re-insert
+                // under fieldLevelLWW) or with no tombstone HLC in _fed_sync_meta
+                // (defeating the A6 stale-resurrect guard). Mirrors the Swift
+                // CloudKit ApplyInbound.swift N1 fix.
+                //
+                // The delete and the column-HLC clear keep their pre-existing `try?`
+                // (best-effort) semantics inside the transaction — a failure there
+                // is swallowed exactly as before, just now inside the same atomic
+                // unit as the tombstone-HLC write instead of before it.
+                try await storage.transaction(isolation: .serializable) { txn in
+                    _ = try? await txn.rowStore.deleteSync(table: record.table, where: predicate)
+                    // Clear per-column side table — row is gone.
+                    try? await ColumnHLCStore.clearAll(
+                        from: txn, sideTable: Self.fedSyncMetaColsTable,
+                        tableName: record.table, primaryKey: record.rowKey)
+                    // A6: persist tombstone HLC in row-grain side table.
+                    try await self.writeFedTombstoneHLC(
+                        storage: txn, table: record.table,
+                        primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                        schemaVersion: record.schemaVersion, kitID: record.kitID)
+                }
                 // P5-M1b: purge stale skew-queue entries and parked outbox entries.
                 // tombstoneHLC is already declared above in this arm; reuse it.
+                // These purges remain outside the transaction — see the identical
+                // note in the .lastWriterWinsByHLC tombstone arm above.
                 _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
                     tableName: record.table, rowKey: record.rowKey,
                     tombstoneHLC: tombstoneHLC,
@@ -1132,18 +1204,27 @@ actor FederationStateActor {
             if let localHLC, record.hlc.asHLC < localHLC {
                 return // local is newer (or tombstone is newer) — skip remote
             }
+            // N1 fix: the value upsert and the sync-HLC bookkeeping write commit as
+            // ONE transaction. Previously these were two separate top-level `await`
+            // calls; a crash/kill between them could leave a committed value row
+            // with a stale (or missing) `_fed_sync_meta` HLC, letting a later stale
+            // edit silently overwrite the newer value (the exact N1 failure mode).
+            // Mirrors the Swift CloudKit ApplyInbound.swift N1 fix.
+            //
             // Apply the row WITHOUT embedding _syncHLC in the row values.
             // A6: HLC lives in _fed_sync_meta, not in the application row.
-            _ = try await storage.rowStore.upsertSync(
-                table: record.table,
-                values: values,
-                conflictColumns: [syncedTable.primaryKeyColumn]
-            )
-            // Persist HLC in side table (is_deleted = 0, live row).
-            try await writeFedSyncHLC(
-                storage: storage, table: record.table,
-                primaryKey: record.rowKey, hlc: record.hlc.asHLC,
-                schemaVersion: record.schemaVersion, kitID: record.kitID)
+            try await storage.transaction(isolation: .serializable) { txn in
+                _ = try await txn.rowStore.upsertSync(
+                    table: record.table,
+                    values: values,
+                    conflictColumns: [syncedTable.primaryKeyColumn]
+                )
+                // Persist HLC in side table (is_deleted = 0, live row).
+                try await self.writeFedSyncHLC(
+                    storage: txn, table: record.table,
+                    primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                    schemaVersion: record.schemaVersion, kitID: record.kitID)
+            }
 
         case .remoteWins:
             _ = try await storage.rowStore.upsertSync(
@@ -1162,6 +1243,16 @@ actor FederationStateActor {
             }
 
         case .fieldLevelLWW:
+            // Gap 2 fix: reject a stale edit that predates a recorded row-grain
+            // tombstone — see readFedTombstoneHLC's doc comment for the full
+            // rationale. Mirrors the Swift CloudKit ApplyInbound.swift gap-2 fix.
+            // Strict `<` matches the existing `.lastWriterWinsByHLC` gates above.
+            if let tombstoneHLC = try await readFedTombstoneHLC(
+                storage: storage, table: record.table, primaryKey: record.rowKey),
+               record.hlc.asHLC < tombstoneHLC {
+                return // stale-before-tombstone edit — row stays deleted, no resurrection
+            }
+
             // Per-column LWW apply. Mirrors the CloudKit ApplyInbound arm.
             let localColumnHLCs = try await ColumnHLCStore.readAll(
                 from: storage, sideTable: Self.fedSyncMetaColsTable,
@@ -1177,31 +1268,45 @@ actor FederationStateActor {
                 localColumnHLCs: localColumnHLCs
             )
 
-            if !columnsToApply.isEmpty {
-                var upsertValues = columnsToApply
-                upsertValues[syncedTable.primaryKeyColumn] = .uuid(record.rowKey)
-                _ = try await storage.rowStore.upsertSync(
-                    table: record.table,
-                    values: upsertValues,
-                    conflictColumns: [syncedTable.primaryKeyColumn]
-                )
-            }
-
-            if !updatedColumnHLCs.isEmpty {
-                try await ColumnHLCStore.writeAll(
-                    map: updatedColumnHLCs,
-                    to: storage, sideTable: Self.fedSyncMetaColsTable,
-                    tableName: record.table, primaryKey: record.rowKey)
-            }
-
             // Also update row-grain HLC in _fed_sync_meta for stale-resurrect guard.
+            // Read BEFORE the write transaction below — this decision is independent
+            // of (does not read back) any of the writes the transaction makes.
             let existingRowHLC = try await readFedSyncHLC(
                 storage: storage, table: record.table, primaryKey: record.rowKey)
-            if existingRowHLC == nil || record.hlc.asHLC > (existingRowHLC ?? record.hlc.asHLC) {
-                try await writeFedSyncHLC(
-                    storage: storage, table: record.table,
-                    primaryKey: record.rowKey, hlc: record.hlc.asHLC,
-                    schemaVersion: record.schemaVersion, kitID: record.kitID)
+            let rowHLCIsNewer = existingRowHLC == nil || record.hlc.asHLC > (existingRowHLC ?? record.hlc.asHLC)
+
+            // N1 fix: the winning-column value upsert, the column-HLC bookkeeping
+            // write, and the (conditional) row-grain HLC bookkeeping write all
+            // commit as ONE transaction. Previously these were up to three separate
+            // top-level `await` calls; a crash/kill between any two of them could
+            // leave a committed value row with stale (or missing) HLC bookkeeping
+            // in either side table, letting a later stale edit silently overwrite
+            // the newer value (the exact N1 failure mode). Mirrors the Swift
+            // CloudKit ApplyInbound.swift N1 fix.
+            try await storage.transaction(isolation: .serializable) { txn in
+                if !columnsToApply.isEmpty {
+                    var upsertValues = columnsToApply
+                    upsertValues[syncedTable.primaryKeyColumn] = .uuid(record.rowKey)
+                    _ = try await txn.rowStore.upsertSync(
+                        table: record.table,
+                        values: upsertValues,
+                        conflictColumns: [syncedTable.primaryKeyColumn]
+                    )
+                }
+
+                if !updatedColumnHLCs.isEmpty {
+                    try await ColumnHLCStore.writeAll(
+                        map: updatedColumnHLCs,
+                        to: txn, sideTable: Self.fedSyncMetaColsTable,
+                        tableName: record.table, primaryKey: record.rowKey)
+                }
+
+                if rowHLCIsNewer {
+                    try await self.writeFedSyncHLC(
+                        storage: txn, table: record.table,
+                        primaryKey: record.rowKey, hlc: record.hlc.asHLC,
+                        schemaVersion: record.schemaVersion, kitID: record.kitID)
+                }
             }
         }
     }
@@ -1264,12 +1369,33 @@ actor FederationStateActor {
     /// - v4: `_fed_identity` persistent estate Ed25519 identity (I-8, WC1)
     /// - v5: `_fed_outbox` durable outbound SyncRecord queue (WC2)
     /// - v6: `_fed_peers` persistent paired-peer registry (WC6)
+    /// - v7: FULL-WIDTH HLC PERSISTENCE, EVERY FEDERATION CARRIER (gap 6,
+    ///       2026-07, D38.1). `_fed_sync_meta` gains `sync_hlc_wire`;
+    ///       `_fed_sync_meta_cols` gains `col_hlc_wire`; `_fed_outbox` gains
+    ///       `hlc_wire` (FedOutboxStore.swift). All three tables are
+    ///       develop/1.1.x-only (confirmed absent from the shipped v1.0.33
+    ///       tag) — CLEAN REGENERATE, no backfill needed (contrast CloudKit's
+    ///       `_ck_sync_meta`, which DOES carry shipped data and needs a
+    ///       BACKFILL migration — see SideSchema.swift). Fixes the
+    ///       truncation defect where the legacy `*_hlc`/`col_hlc` packed
+    ///       columns' 40-bit-masked physicalTime was compared against a
+    ///       lossless counterpart elsewhere in the chain, making a last-
+    ///       arriving stale write win regardless of true HLC order — see
+    ///       ColumnHLCStore.swift's file header for the full defect writeup.
     static func ensureFedSyncMetaTable(storage: any Storage) async throws {
+        // sync_hlc_wire: full-width HLC.wireBytes (gap 6). _fed_sync_meta is
+        // develop/1.1.x-only — clean regenerate, existing rows (if any, on a
+        // develop-branch pre-release estate) get NULL until next write,
+        // treated as "not yet observed" (self-healing, see readFedSyncHLC).
+        let syncHLCWireDecl = ColumnDeclaration(name: "sync_hlc_wire", type: .blob, nullable: true)
         let fedSyncMetaDecl = TableDeclaration(
             name: fedSyncMetaTable,
             columns: [
                 ColumnDeclaration(name: "table_name",    type: .text, nullable: false),
                 ColumnDeclaration(name: "primary_key",   type: .text, nullable: false),
+                // LEGACY, dead since gap 6 (40-bit-truncated packed HLC).
+                // Retained for additive-migration safety; sync_hlc_wire is
+                // authoritative.
                 ColumnDeclaration(name: "sync_hlc",      type: .int,  nullable: false,
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "schema_version",type: .int,  nullable: false,
@@ -1281,12 +1407,27 @@ actor FederationStateActor {
                 // after SyncTombstone.gcRetentionSeconds.
                 ColumnDeclaration(name: "is_deleted",    type: .int,  nullable: false,
                                   defaultValue: .int(0)),
+                syncHLCWireDecl,
             ],
             primaryKey: ["table_name", "primary_key"]
         )
 
         // _fed_sync_meta_cols: per-column HLC for fieldLevelLWW (v2, CVK-ICLOUD P2-M1).
-        // Schema mirrors _ck_sync_meta_cols in CKSideSchema v6.
+        // Schema mirrors _ck_sync_meta_cols in CKSideSchema v10.
+        //
+        // Gap 6 (2026-07, D38.1): gained col_hlc_wire at v7 — full-width
+        // (unpacked) column HLC storage via HLC.wireBytes, the already
+        // Swift/Rust lockstep-audited 16-byte lossless format (uniform
+        // encoding across every gap-6 carrier, not a per-carrier shape).
+        // `col_hlc` stored a 40-bit-truncated `HLC.packed` value while the
+        // wire format (SyncRecord's PackedHLC) carries physicalTime
+        // losslessly — comparing truncated-persisted-local against
+        // lossless-incoming in FieldLWWMerge.merge made the last-arriving
+        // column edit always win regardless of true HLC order. See
+        // ColumnHLCStore.swift's file header for the full defect writeup.
+        // `col_hlc` is retained (additive-only migration policy) but is
+        // dead — ColumnHLCStore no longer reads it.
+        let colHLCWireDecl = ColumnDeclaration(name: "col_hlc_wire", type: .blob, nullable: true)
         let fedSyncMetaColsDecl = TableDeclaration(
             name: fedSyncMetaColsTable,
             columns: [
@@ -1295,6 +1436,7 @@ actor FederationStateActor {
                 ColumnDeclaration(name: "column_name", type: .text, nullable: false),
                 ColumnDeclaration(name: "col_hlc",     type: .int,  nullable: false,
                                   defaultValue: .int(0)),
+                colHLCWireDecl,
             ],
             primaryKey: ["table_name", "primary_key", "column_name"]
         )
@@ -1339,12 +1481,14 @@ actor FederationStateActor {
 
         // _fed_outbox: durable outbound SyncRecord queue (WC2).
         // Stores post-encoded SyncRecord payloads (JSON BLOB) pending relay delivery.
-        // packed_hlc: Int64 bit-cast of SubstrateTypes.HLC.packed (UInt64 MSB-node
-        //   layout per SPEC §4). Used for coalescing: same (table_name, row_key) pair
-        //   keeps the entry with the higher packed_hlc; stale entries are deleted on
-        //   append. packed_hlc INT DEFAULT 0 (signed, not UInt — matches PersistenceKit
-        //   .int TypedValue).
+        // packed_hlc: LEGACY, dead since gap 6 (40-bit-truncated packed HLC).
+        //   Retained for additive-migration safety; hlc_wire is authoritative for
+        //   the newest-wins coalescing comparison (FedOutboxStore.append).
+        // hlc_wire: HLC.wireBytes, full-width lossless BLOB (gap 6, D38.1).
+        //   `_fed_outbox` is develop/1.1.x-only (confirmed absent from the shipped
+        //   v1.0.33 tag) — clean regenerate, no backfill needed.
         // enqueued_at: ISO8601 TEXT wall-clock timestamp (schema invariant: never REAL).
+        let hlcWireDecl = ColumnDeclaration(name: "hlc_wire", type: .blob, nullable: true)
         let fedOutboxDecl = TableDeclaration(
             name: fedOutboxTable,
             columns: [
@@ -1355,6 +1499,7 @@ actor FederationStateActor {
                                   defaultValue: .int(0)),
                 ColumnDeclaration(name: "payload",     type: .blob, nullable: false),
                 ColumnDeclaration(name: "enqueued_at", type: .text, nullable: false),
+                hlcWireDecl,
             ],
             primaryKey: ["id"]
         )
@@ -1377,7 +1522,7 @@ actor FederationStateActor {
 
         let schema = SchemaDeclaration(
             kitID: "ConvergenceKitFederation",
-            version: 6,
+            version: 7,
             tables: [fedSyncMetaDecl, fedSyncMetaColsDecl, fedPendingSkewDecl, fedIdentityDecl, fedOutboxDecl, fedPeersDecl],
             migrations: [
                 // v1 → v2: add per-column HLC side table for fieldLevelLWW.
@@ -1409,11 +1554,68 @@ actor FederationStateActor {
                 Migration(fromVersion: 5, toVersion: 6, operations: [
                     .createTable(fedPeersDecl),
                 ]),
+                // v6 → v7: FULL-WIDTH HLC PERSISTENCE, EVERY FEDERATION CARRIER
+                // (gap 6, 2026-07, D38.1). Adds `sync_hlc_wire` to
+                // _fed_sync_meta, `col_hlc_wire` to _fed_sync_meta_cols, and
+                // `hlc_wire` to _fed_outbox. All three tables are develop/1.1.x-
+                // only (confirmed absent from the shipped v1.0.33 tag) — clean
+                // regenerate. addColumn leaves existing rows' new column NULL;
+                // a NULL/absent wire value is treated as "not yet observed
+                // under full-width tracking" everywhere it's read (self-
+                // healing — see readFedSyncHLC/readFedTombstoneHLC and
+                // ColumnHLCStore.readAll), so the next incoming edit for that
+                // row/column always wins and repopulates the full-width value.
+                Migration(fromVersion: 6, toVersion: 7, operations: [
+                    .addColumn(table: fedSyncMetaTable, column: syncHLCWireDecl),
+                    .addColumn(table: fedSyncMetaColsTable, column: colHLCWireDecl),
+                    .addColumn(table: fedOutboxTable, column: hlcWireDecl),
+                ]),
             ]
         )
         // migrate(to:) is ADDITIVE — creates missing tables/columns without clobbering
         // the application schema. This matches the CloudKit engine's pattern.
         try await storage.migrate(to: schema)
+    }
+
+    /// Read the row-grain tombstone HLC for a specific row — ONLY if that row
+    /// is currently tombstoned (`is_deleted == 1`). Returns `nil` when there is
+    /// no `_fed_sync_meta` entry at all, OR when an entry exists but the row is
+    /// live (`is_deleted == 0`) — in both cases there is no active tombstone to
+    /// gate against.
+    ///
+    /// Gap 2 fix: `applyInbound`'s `.fieldLevelLWW` normal-apply arm has no
+    /// visibility, from `ColumnHLCStore` alone, into whether a column's absence
+    /// means "never written" or "history cleared by a tombstone"
+    /// (`ColumnHLCStore.clearAll` wipes ALL column entries when a tombstone
+    /// wins — see the `.fieldLevelLWW` tombstone arm above). Without this
+    /// row-grain check, a stale edit that predates a delete is indistinguishable
+    /// from a first-ever write and gets applied, resurrecting a correctly-deleted
+    /// row. The row-grain tombstone HLC survives the delete specifically for
+    /// this purpose (A6) and is untouched by the gap-3 fix — it remains the
+    /// reliable signal. Mirrors the Swift CloudKit `readTombstoneHLC` gap-2 fix.
+    ///
+    /// Distinct from `readFedSyncHLC` below, which returns the row-grain HLC
+    /// unconditionally (correct for `.lastWriterWinsByHLC`'s single whole-row
+    /// comparison). Gating `.fieldLevelLWW`'s column merge on the UNCONDITIONAL
+    /// row-grain HLC instead of ONLY the tombstone case would reject a
+    /// legitimate concurrent edit to a DIFFERENT column merely because some
+    /// other column in the same row was touched more recently — defeating
+    /// fieldLevelLWW's whole purpose (independent per-column resolution).
+    private func readFedTombstoneHLC(
+        storage: any Storage, table: String, primaryKey: UUID
+    ) async throws -> HLC? {
+        let rows = try await storage.rowStore.query(
+            table: Self.fedSyncMetaTable,
+            where: .and([
+                .eq(Column(table: Self.fedSyncMetaTable, name: "table_name"), .text(table)),
+                .eq(Column(table: Self.fedSyncMetaTable, name: "primary_key"), .text(primaryKey.uuidString))
+            ])
+        )
+        guard let row = rows.first,
+              case .int(let isDeleted) = row["is_deleted"], isDeleted == 1,
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else { return nil }
+        return hlc
     }
 
     /// Read the persisted sync HLC from `_fed_sync_meta` for a given row.
@@ -1430,8 +1632,9 @@ actor FederationStateActor {
             ])
         )
         guard let row = rows.first,
-              case .int(let packed) = row["sync_hlc"] else { return nil }
-        return HLC(packed: UInt64(bitPattern: packed))
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else { return nil }
+        return hlc
     }
 
     /// Persist the sync HLC in `_fed_sync_meta` after a successful upsert.
@@ -1440,12 +1643,39 @@ actor FederationStateActor {
         storage: any Storage, table: String, primaryKey: UUID,
         hlc: HLC, schemaVersion: Int, kitID: String
     ) async throws {
-        _ = try await storage.rowStore.upsertSync(
+        try await writeFedSyncHLC(rowStore: storage.rowStore, table: table, primaryKey: primaryKey,
+                                   hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Transactional variant of `writeFedSyncHLC(storage:table:primaryKey:hlc:schemaVersion:kitID:)`.
+    ///
+    /// N1 fix: `applyInbound`'s `.lastWriterWinsByHLC` and `.fieldLevelLWW` arms
+    /// call this overload from inside an open `storage.transaction { txn in ... }`
+    /// block so the row-grain HLC bookkeeping write commits atomically with the
+    /// application-row value write. Previously these were two separate top-level
+    /// `await` calls; a crash/kill between them could leave a committed value
+    /// row with a stale (or missing) `_fed_sync_meta` HLC, letting a later stale
+    /// edit silently overwrite the newer value. Mirrors the Swift CloudKit
+    /// ApplyInbound.swift / SyncMetaStore.swift N1 fix.
+    private func writeFedSyncHLC(
+        storage transaction: any StorageTransaction, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        try await writeFedSyncHLC(rowStore: transaction.rowStore, table: table, primaryKey: primaryKey,
+                                   hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private func writeFedSyncHLC(
+        rowStore: any RowStore, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await rowStore.upsertSync(
             table: Self.fedSyncMetaTable,
             values: [
                 "table_name": .text(table),
                 "primary_key": .text(primaryKey.uuidString),
-                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "sync_hlc_wire": .blob(Data(hlc.wireBytes)),
                 "schema_version": .int(Int64(schemaVersion)),
                 "kit_id": .text(kitID),
                 "is_deleted": .int(0)
@@ -1460,12 +1690,39 @@ actor FederationStateActor {
         storage: any Storage, table: String, primaryKey: UUID,
         hlc: HLC, schemaVersion: Int, kitID: String
     ) async throws {
-        _ = try await storage.rowStore.upsertSync(
+        try await writeFedTombstoneHLC(rowStore: storage.rowStore, table: table, primaryKey: primaryKey,
+                                        hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Transactional variant of `writeFedTombstoneHLC(storage:table:primaryKey:hlc:schemaVersion:kitID:)`.
+    ///
+    /// N1 fix: `applyInbound`'s `.lastWriterWinsByHLC` and `.fieldLevelLWW`
+    /// tombstone arms call this overload from inside an open
+    /// `storage.transaction { txn in ... }` block so the hard-delete of the
+    /// application row and the persisted tombstone HLC commit atomically.
+    /// Without this, a crash between the delete and this write could leave a
+    /// deleted row with no tombstone HLC recorded, letting a later stale
+    /// insert resurrect it (defeating the A6 stale-resurrect guard). Mirrors
+    /// the Swift CloudKit ApplyInbound.swift / SyncMetaStore.swift N1 fix.
+    private func writeFedTombstoneHLC(
+        storage transaction: any StorageTransaction, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        try await writeFedTombstoneHLC(rowStore: transaction.rowStore, table: table, primaryKey: primaryKey,
+                                        hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private func writeFedTombstoneHLC(
+        rowStore: any RowStore, table: String, primaryKey: UUID,
+        hlc: HLC, schemaVersion: Int, kitID: String
+    ) async throws {
+        _ = try await rowStore.upsertSync(
             table: Self.fedSyncMetaTable,
             values: [
                 "table_name": .text(table),
                 "primary_key": .text(primaryKey.uuidString),
-                "sync_hlc": .int(Int64(bitPattern: hlc.packed)),
+                "sync_hlc_wire": .blob(Data(hlc.wireBytes)),
                 "schema_version": .int(Int64(schemaVersion)),
                 "kit_id": .text(kitID),
                 "is_deleted": .int(1)
@@ -1621,11 +1878,26 @@ actor FederationStateActor {
     // sentinel row with table_name='_gc_state', primary_key='_tombstone_sweep'.
     // Underscore-prefixed names cannot collide with real application table
     // names (application tables come from the SyncManifest and use plain
-    // identifiers). The sync_hlc column stores the last-GC wall time in ms
-    // directly (not as a packed HLC) — this is an internal convention limited
-    // to the sentinel row. Adding a new side table would require a schema
-    // version bump and migration; reusing the existing table is both minimal
-    // and correct for a single sentinel value.
+    // identifiers). Adding a new side table would require a schema version
+    // bump and migration; reusing the existing table is both minimal and
+    // correct for a single sentinel value.
+    //
+    // GAP 6 RECONCILIATION (2026-07, D38.1): the sentinel's wall-clock ms
+    // value is NOT a real HLC (no node/logical identity — it is a bare
+    // timestamp), but `_fed_sync_meta` now has exactly one wire-format
+    // column (`sync_hlc_wire`) shared by every row, sentinel or not. Rather
+    // than adding a SEPARATE column just for this one sentinel row (a schema
+    // exception non-uniform with every other gap-6 carrier), the sentinel
+    // wraps its raw ms value as a synthetic `HLC(physicalTime: ms,
+    // logicalCount: 0, nodeID: 0)` and encodes/decodes through the SAME
+    // `HLC.wireBytes` codec every other row uses. `nodeID: 0` is safe and
+    // unambiguous here: real HLCs from a live HLCGenerator are
+    // `precondition`-enforced to `nodeID` `1...15`
+    // (SlotRecordMapping.swift:66-69), so `nodeID == 0` can never collide
+    // with a genuine per-device HLC — it is a self-marking sentinel value,
+    // not merely a repurposed one. The legacy `sync_hlc` INT column (which
+    // stored the raw ms directly, not a packed HLC) is retained dead, same
+    // as every other row.
     //
     // CRITICAL INVARIANT: SyncTombstone.gcRetentionSeconds (90 d) MUST STRICTLY exceed
     // the slot-eviction long window (P1-M3 DeviceSlotRegistry, not yet shipped).
@@ -1669,23 +1941,25 @@ actor FederationStateActor {
             ])
         )
         guard let row = rows.first,
-              case .int(let ms) = row["sync_hlc"] else {
+              case .blob(let wire) = row["sync_hlc_wire"],
+              let hlc = try? HLC(wireBytes: [UInt8](wire)) else {
             // No prior GC run — return 0 so (nowMs - 0) is always >= gcIntervalMs.
             return 0
         }
-        return ms
+        return hlc.physicalTime
     }
 
     private func writeFedLastGCMs(_ ms: Int64, to storage: any Storage) async throws {
         // upsertSync: marks the write as .syncApply origin so recordOutbound's
         // echo-suppression gate drops it. The sentinel row has no application
         // meaning and must never be pushed to peers.
+        let sentinelHLC = HLC(physicalTime: ms, logicalCount: 0, nodeID: 0)
         _ = try await storage.rowStore.upsertSync(
             table: Self.fedSyncMetaTable,
             values: [
                 "table_name":     .text(Self.gcSentinelTableName),
                 "primary_key":    .text(Self.gcSentinelPrimaryKey),
-                "sync_hlc":       .int(ms),
+                "sync_hlc_wire":  .blob(Data(sentinelHLC.wireBytes)),
                 "schema_version": .int(0),
                 "kit_id":         .text(""),
                 "is_deleted":     .int(0),

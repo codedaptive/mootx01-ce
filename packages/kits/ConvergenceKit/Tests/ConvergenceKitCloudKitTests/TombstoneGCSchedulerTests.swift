@@ -16,8 +16,10 @@
 //
 // INVARIANT verified in test 3: the retention window (30 d) must exceed the
 // slot-eviction long window (P1-M3 constant, not yet shipped). An entry whose
-// physical time is close to the cutoff survives because the 40-bit mask
-// comparison in TombstoneGC.compact respects the full retention window.
+// physical time is close to the cutoff survives because TombstoneGC.compact
+// compares the full-width `sync_hlc_wire` (HLC.wireBytes, gap 6, D38.1)
+// directly against the (unmasked) retention cutoff — see that function's
+// current doc comment and insertTombstone's below for the full writeup.
 //
 // Setup: InMemoryStorage + CKSideSchema.ensure (creates _ck_sync_meta and
 // _ck_change_token). CloudKitStateActor is created without an active CloudKit
@@ -59,29 +61,27 @@ private func makeStorage() async throws -> any Storage {
     return storage
 }
 
-/// Pack a physical-time-only HLC: node=1, logicalCount=0, physicalTime=ms.
-/// Mirrors the HLC layout in TombstoneGC.compact so the GC correctly
-/// identifies the test entry's age.
-private func makePackedHLC(physicalMs: Int64) -> Int64 {
-    let node: Int64    = 1  // 8 bits in the high byte
-    let logical: Int64 = 0  // 16 bits above the physical field
-    return (node << 56) | (logical << 40) | (physicalMs & 0xFF_FFFF_FFFF)
-}
-
 /// Insert a tombstone entry (_ck_sync_meta, is_deleted=1) for a given
 /// table/key with the specified physical time as the HLC.
+///
+/// Gap 6 (D38.1): writes the full-width `sync_hlc_wire` BLOB (HLC.wireBytes)
+/// — the column `TombstoneGC.compact` now reads. No bit-packing, no 40-bit
+/// masking; `TombstoneGC.compact`'s cutoff comparison is now a plain,
+/// unmasked `physicalTime <= cutoffMs` (see that function's gap-6 doc
+/// comment) — test cutoff math below matches.
 private func insertTombstone(
     storage: any Storage,
     table: String,
     key: String,
     physicalMs: Int64
 ) async throws {
+    let hlc = HLC(physicalTime: physicalMs, logicalCount: 0, nodeID: 1)
     _ = try await storage.rowStore.upsert(
         table: "_ck_sync_meta",
         values: [
             "table_name":     .text(table),
             "primary_key":    .text(key),
-            "sync_hlc":       .int(makePackedHLC(physicalMs: physicalMs)),
+            "sync_hlc_wire":  .blob(Data(hlc.wireBytes)),
             "schema_version": .int(1),
             "kit_id":         .text("TestKit"),
             "is_deleted":     .int(1),
@@ -115,10 +115,16 @@ struct TombstoneGCSchedulerTests {
         // Physical time for the tombstone must be old enough to pass the
         // retention cutoff at this nowMs.
         let nowMs      = TombstoneGCSchedule.gcIntervalMs
-        // Retention ms in the same 40-bit space:
         let retentionMs = SyncTombstone.gcRetentionSeconds * 1_000
         // Make the entry old: physical time well below the cutoff.
-        let oldMs      = max(0, nowMs - retentionMs - 1_000)  // 1 s before cutoff
+        // Gap 6 (D38.1): TombstoneGC.compact's cutoff (nowMs - retentionMs) is
+        // no longer 40-bit-masked, so with this test's deliberately-tiny
+        // synthetic `nowMs` (chosen only to satisfy the GC-interval check, not
+        // to be realistic wall-clock time) the cutoff is genuinely negative —
+        // do NOT clamp to 0 (the old mask's wraparound made a 0-clamped value
+        // "work" only by accident; clamping now would put oldMs ABOVE the
+        // negative cutoff and the tombstone would incorrectly survive).
+        let oldMs      = nowMs - retentionMs - 1_000  // 1 s before cutoff
 
         try await insertTombstone(storage: storage, table: "items",
                                   key: UUID().uuidString, physicalMs: oldMs)
@@ -172,13 +178,14 @@ struct TombstoneGCSchedulerTests {
 
         let retentionMs = SyncTombstone.gcRetentionSeconds * 1_000
         // nowMs must be large enough that (nowMs - 0) >= gcIntervalMs AND the
-        // cutoff = (nowMs - retentionMs) & mask is positive so old entries qualify.
+        // cutoff = nowMs - retentionMs is positive so old entries qualify.
         // Use nowMs = gcIntervalMs + retentionMs + 10_000 for clear separation.
         let nowMs   = TombstoneGCSchedule.gcIntervalMs + retentionMs + 10_000
 
         // OLD entry: physical time 1 s before the retention cutoff → gets deleted.
-        // cutoff = (nowMs - retentionMs) & 0xFF_FFFF_FFFF = gcIntervalMs + 10_000
-        let cutoffMs    = (nowMs - retentionMs) & 0xFF_FFFF_FFFF
+        // Gap 6 (D38.1): cutoff = nowMs - retentionMs, NO masking (TombstoneGC.compact
+        // no longer bit-masks — sync_hlc_wire is full-width). = gcIntervalMs + 10_000
+        let cutoffMs    = nowMs - retentionMs
         let oldMs       = max(0, cutoffMs - 1_000)
         let oldKey      = UUID().uuidString
         try await insertTombstone(storage: storage, table: "items",

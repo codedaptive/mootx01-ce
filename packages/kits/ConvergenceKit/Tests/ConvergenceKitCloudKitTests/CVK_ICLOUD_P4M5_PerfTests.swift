@@ -379,7 +379,7 @@ struct Q2CoalescingTests {
                 event: .update,
                 valuesData: valuesData,
                 // Strictly ascending HLCs ensure each write is "newer".
-                packedHLC: Int64(1_000_000 + i),
+                hlcWireBytes: Data(HLC(physicalTime: Int64(1_000_000 + i), logicalCount: 0, nodeID: 1).wireBytes),
                 enqueuedAt: ISO8601DateFormatter().string(from: Date())
             )
             try await OutboxStore.append(entry: entry, to: storage)
@@ -399,7 +399,8 @@ struct Q2CoalescingTests {
         """)
 
         #expect(batch.count == 1, "100 writes to one row must coalesce to exactly 1 outbox entry")
-        #expect(batch.first?.packedHLC == Int64(1_000_000 + N - 1),
+        let survivingOrdinal = batch.first.flatMap { try? HLC(wireBytes: [UInt8]($0.hlcWireBytes)) }?.physicalTime
+        #expect(survivingOrdinal == Int64(1_000_000 + N - 1),
                 "surviving entry must be the newest (highest HLC)")
     }
 
@@ -419,7 +420,7 @@ struct Q2CoalescingTests {
                 rowKey: rowKey,
                 event: .update,
                 valuesData: valuesData,
-                packedHLC: Int64(2_000_000 + i),
+                hlcWireBytes: Data(HLC(physicalTime: Int64(2_000_000 + i), logicalCount: 0, nodeID: 1).wireBytes),
                 enqueuedAt: ISO8601DateFormatter().string(from: Date())
             )
             try await OutboxStore.append(entry: entry, to: storage)
@@ -494,7 +495,7 @@ struct Q3PerWriteOverheadTests {
                 rowKey: UUID().uuidString,  // distinct per write — no coalescing
                 event: .update,
                 valuesData: valuesData,
-                packedHLC: Int64(3_000_000 + i),
+                hlcWireBytes: Data(HLC(physicalTime: Int64(3_000_000 + i), logicalCount: 0, nodeID: 1).wireBytes),
                 enqueuedAt: ISO8601DateFormatter().string(from: Date())
             )
             try await OutboxStore.append(entry: entry, to: storage)
@@ -536,7 +537,7 @@ struct Q3PerWriteOverheadTests {
                 rowKey: rowKey,
                 event: .update,
                 valuesData: valuesData,
-                packedHLC: Int64(4_000_000 + i),
+                hlcWireBytes: Data(HLC(physicalTime: Int64(4_000_000 + i), logicalCount: 0, nodeID: 1).wireBytes),
                 enqueuedAt: ISO8601DateFormatter().string(from: Date())
             )
             try await OutboxStore.append(entry: entry, to: storage)

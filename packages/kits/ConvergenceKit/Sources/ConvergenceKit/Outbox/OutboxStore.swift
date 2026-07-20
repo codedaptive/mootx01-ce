@@ -45,18 +45,37 @@ public enum OutboxStore {
     /// for the same `(tableName, rowKey)`.
     ///
     /// **Coalescing rule (newest-wins by HLC):** if the outbox already holds an
-    /// entry for `(entry.tableName, entry.rowKey)` and that entry's `packedHLC`
-    /// is strictly less than `entry.packedHLC`, the existing entry is deleted and
-    /// `entry` is inserted in its place. If the existing entry's HLC is
-    /// greater-or-equal (stale write — should not happen under normal operation,
-    /// but guards against clock skew), the append is a no-op and the newer
-    /// existing entry is preserved.
+    /// entry for `(entry.tableName, entry.rowKey)` and that entry's HLC
+    /// (decoded from `hlcWireBytes`, gap 6) is strictly less than `entry`'s,
+    /// the existing entry is deleted and `entry` is inserted in its place. If
+    /// the existing entry's HLC is greater-or-equal (stale write — should not
+    /// happen under normal operation, but guards against clock skew), the
+    /// append is a no-op and the newer existing entry is preserved.
     ///
     /// The coalescing key is `(table_name, row_key)`, not the entry's UUID —
     /// each surviving entry carries a fresh UUID minted at its own append time.
     public static func append(entry: OutboxEntry, to storage: any Storage) async throws {
+        try await append(entry: entry, to: storage.rowStore)
+    }
+
+    /// Transactional variant of `append(entry:to:)`.
+    ///
+    /// Gap 3 fix: `recordOutbound`'s local-write path calls this overload from
+    /// inside an open `storage.transaction { txn in ... }` block so the durable
+    /// outbox append commits atomically with the local column-HLC bookkeeping
+    /// write (`ColumnHLCStore.writeAll`) that now runs alongside it — closing
+    /// the window where a device's own local edit could otherwise be recorded
+    /// in the outbox (and shipped to peers) without ever gaining a truthful
+    /// local `_ck_sync_meta_cols` baseline, letting a later stale remote edit
+    /// clobber it (N1-shaped atomicity guarantee, same as the gap-4 fix).
+    public static func append(entry: OutboxEntry, to transaction: any StorageTransaction) async throws {
+        try await append(entry: entry, to: transaction.rowStore)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    private static func append(entry: OutboxEntry, to rowStore: any RowStore) async throws {
         // Check for an existing entry for the same (table, row_key).
-        let existing = try await storage.rowStore.query(
+        let existing = try await rowStore.query(
             table: table,
             where: .and([
                 .eq(Column(table: table, name: "table_name"), .text(entry.tableName)),
@@ -65,21 +84,29 @@ public enum OutboxStore {
         )
 
         if let existingRow = existing.first {
-            // Extract the stored packed HLC.
-            guard case .int(let existingHLC) = existingRow["hlc"] else {
+            // Extract the stored full-width wire HLC (gap 6).
+            guard case .blob(let existingWire) = existingRow["hlc_wire"],
+                  let existingHLC = try? HLC(wireBytes: [UInt8](existingWire)) else {
                 // Corrupt row; delete and replace.
                 if case .uuid(let oldID) = existingRow["id"] {
-                    _ = try await storage.rowStore.delete(
+                    _ = try await rowStore.delete(
                         table: table,
                         where: .eq(Column(table: table, name: "id"), .uuid(oldID))
                     )
                 }
-                try await insertEntry(entry, to: storage)
+                try await insertEntry(entry, to: rowStore)
+                return
+            }
+            guard let incomingHLC = try? HLC(wireBytes: [UInt8](entry.hlcWireBytes)) else {
+                // Malformed incoming entry — should never happen (always minted
+                // via HLC.wireBytes at capture time); fail loud rather than
+                // silently coalescing against an undecodable value.
+                assertionFailure("OutboxStore.append: entry.hlcWireBytes failed to decode")
                 return
             }
 
             // Newest-wins: if the stored entry is already newer (or equal), skip.
-            if existingHLC >= entry.packedHLC {
+            if existingHLC >= incomingHLC {
                 return
             }
 
@@ -118,7 +145,7 @@ public enum OutboxStore {
                             rowKey: entry.rowKey,
                             event: entry.event,
                             valuesData: entry.valuesData,
-                            packedHLC: entry.packedHLC,
+                            hlcWireBytes: entry.hlcWireBytes,
                             enqueuedAt: entry.enqueuedAt,
                             retryCount: entry.retryCount,
                             isParked: entry.isParked,
@@ -129,18 +156,18 @@ public enum OutboxStore {
                 // No merge needed if only one side has column HLC data (or neither does);
                 // the incoming entry's columnHLCsData is used as-is.
 
-                _ = try await storage.rowStore.delete(
+                _ = try await rowStore.delete(
                     table: table,
                     where: .eq(Column(table: table, name: "id"), .uuid(oldID))
                 )
             }
 
-            try await insertEntry(entryToInsert, to: storage)
+            try await insertEntry(entryToInsert, to: rowStore)
             return
         }
 
         // No existing entry for (tableName, rowKey) — insert fresh.
-        try await insertEntry(entry, to: storage)
+        try await insertEntry(entry, to: rowStore)
     }
 
     // MARK: - Read batch
@@ -155,18 +182,32 @@ public enum OutboxStore {
     /// Does NOT delete the entries — they remain in the outbox until the caller
     /// confirms them via `confirm(ids:from:)`. This is the read-without-consume
     /// pattern: the transport failure path is a no-op (entries stay intact).
+    ///
+    /// GAP 6 (D38.1): ordering is done IN SWIFT after decode, not via SQL
+    /// `ORDER BY`. `hlc_wire` stores `HLC.wireBytes` — 8 bytes of
+    /// LITTLE-ENDIAN `physicalTime` first — and raw byte-lexicographic BLOB
+    /// comparison (what SQLite's `ORDER BY` would do) does NOT preserve
+    /// numeric order for little-endian multi-byte integers. `HLC: Comparable`
+    /// (SubstrateTypes) is the only correct ordering; sorting the FULL
+    /// candidate set in Swift (not just the SQL-limited page) is required for
+    /// correctness — `enqueued_at` cannot substitute as a SQL-level proxy
+    /// sort key either, because `remintAll` deliberately preserves the
+    /// ORIGINAL `enqueuedAt` while assigning a NEW HLC on re-enrollment,
+    /// decorrelating the two. The outbox is a bounded pending-delivery queue
+    /// (not a historical log), so fetching the full set here is cheap in the
+    /// normal case; `limit` is applied to the SORTED result below.
     public static func readBatch(from storage: any Storage, limit: Int = 256) async throws -> [OutboxEntry] {
-        let rows = try await storage.rowStore.query(
-            table: table,
-            where: nil,
-            orderBy: [OrderClause(column: Column(table: table, name: "hlc"), direction: .ascending)],
-            limit: limit,
-            offset: nil
-        )
+        let rows = try await storage.rowStore.query(table: table, where: nil)
         // Filter parked entries in Swift. The is_parked column may be absent on
         // rows written before the v3 migration; decodeRow defaults it to false,
         // so pre-migration rows are treated as active (correct behaviour).
-        return rows.compactMap { decodeRow($0) }.filter { !$0.isParked }
+        let entries = rows.compactMap { decodeRow($0) }.filter { !$0.isParked }
+        let sorted = entries.sorted { lhs, rhs in
+            let lhsHLC = (try? HLC(wireBytes: [UInt8](lhs.hlcWireBytes))) ?? .zero
+            let rhsHLC = (try? HLC(wireBytes: [UInt8](rhs.hlcWireBytes))) ?? .zero
+            return lhsHLC < rhsHLC
+        }
+        return Array(sorted.prefix(limit))
     }
 
     // MARK: - Confirm (delete on transport success)
@@ -243,16 +284,16 @@ public enum OutboxStore {
     /// excluded from normal push batches but remain in the table so the host app
     /// can surface a user-visible warning.
     ///
-    /// Ordered by HLC ascending (oldest first).
+    /// Ordered by HLC ascending (oldest first). See `readBatch`'s gap-6 doc
+    /// comment for why ordering is done in Swift, not SQL `ORDER BY`.
     public static func parkedEntries(from storage: any Storage) async throws -> [OutboxEntry] {
-        let rows = try await storage.rowStore.query(
-            table: table,
-            where: nil,
-            orderBy: [OrderClause(column: Column(table: table, name: "hlc"), direction: .ascending)],
-            limit: nil,
-            offset: nil
-        )
-        return rows.compactMap { decodeRow($0) }.filter { $0.isParked }
+        let rows = try await storage.rowStore.query(table: table, where: nil)
+        let entries = rows.compactMap { decodeRow($0) }.filter { $0.isParked }
+        return entries.sorted { lhs, rhs in
+            let lhsHLC = (try? HLC(wireBytes: [UInt8](lhs.hlcWireBytes))) ?? .zero
+            let rhsHLC = (try? HLC(wireBytes: [UInt8](rhs.hlcWireBytes))) ?? .zero
+            return lhsHLC < rhsHLC
+        }
     }
 
     // MARK: - Tombstone purge (P5-M1b)
@@ -375,7 +416,7 @@ public enum OutboxStore {
                 rowKey: entry.rowKey,
                 event: entry.event,
                 valuesData: entry.valuesData,
-                packedHLC: Int64(bitPattern: newHLC.packed),
+                hlcWireBytes: Data(newHLC.wireBytes),
                 // Preserve original enqueue time for observability (not for ordering).
                 enqueuedAt: entry.enqueuedAt,
                 retryCount: 0,
@@ -401,12 +442,28 @@ public enum OutboxStore {
     // callers can share the insert path without duplicating the column map.
 
     static func insertEntry(_ entry: OutboxEntry, to storage: any Storage) async throws {
+        try await insertEntry(entry, to: storage.rowStore)
+    }
+
+    /// Transactional variant of `insertEntry(_:to:)`. See `append(entry:to
+    /// transaction:)` above for why this overload exists (gap 3).
+    static func insertEntry(_ entry: OutboxEntry, to transaction: any StorageTransaction) async throws {
+        try await insertEntry(entry, to: transaction.rowStore)
+    }
+
+    /// Shared implementation — both overloads above only ever touch `.rowStore`.
+    ///
+    /// Gap 6: writes `hlc_wire` (full-width) directly from `entry.hlcWireBytes`.
+    /// The legacy `hlc` column is deliberately OMITTED — it is NOT NULL with a
+    /// SQL DEFAULT of 0, so the backend fills it in without our having to
+    /// write a now-meaningless value.
+    private static func insertEntry(_ entry: OutboxEntry, to rowStore: any RowStore) async throws {
         var values: [String: TypedValue] = [
             "id":           .uuid(entry.id),
             "table_name":   .text(entry.tableName),
             "row_key":      .text(entry.rowKey),
             "event":        .text(entry.event.rawValue),
-            "hlc":          .int(entry.packedHLC),
+            "hlc_wire":     .blob(entry.hlcWireBytes),
             "enqueued_at":  .text(entry.enqueuedAt),
             "retry_count":  .int(Int64(entry.retryCount)),
             "is_parked":    .int(entry.isParked ? 1 : 0),
@@ -421,7 +478,7 @@ public enum OutboxStore {
         // Use insert (not upsert) because coalescing already guarantees no
         // existing entry for this (table_name, row_key) by the time we reach
         // this point. The `id` UUID is fresh per entry.
-        _ = try await storage.rowStore.insert(table: table, values: values)
+        _ = try await rowStore.insert(table: table, values: values)
     }
 
     private static func decodeRow(_ row: StorageRow) -> OutboxEntry? {
@@ -430,7 +487,7 @@ public enum OutboxStore {
             case .text(let tableName)   = row["table_name"],
             case .text(let rowKey)      = row["row_key"],
             case .text(let eventRaw)    = row["event"],
-            case .int(let hlc)          = row["hlc"],
+            case .blob(let hlcWire)     = row["hlc_wire"],
             case .text(let enqueuedAt)  = row["enqueued_at"],
             let event = SyncEventKind(rawValue: eventRaw)
         else { return nil }
@@ -463,7 +520,7 @@ public enum OutboxStore {
             rowKey: rowKey,
             event: event,
             valuesData: valuesData,
-            packedHLC: hlc,
+            hlcWireBytes: hlcWire,
             enqueuedAt: enqueuedAt,
             retryCount: retryCount,
             isParked: isParked,

@@ -82,20 +82,36 @@ extension CloudKitStateActor {
                     Column(table: decoded.table, name: syncedTable.primaryKeyColumn),
                     .uuid(decoded.rowKey)
                 )
-                _ = try? await storage.rowStore.deleteSync(table: decoded.table, where: predicate)
-                // A6: persist tombstone HLC in _ck_sync_meta after hard-delete so
-                // subsequent stale inserts for this (table, rowKey) are still gated.
-                try await writeTombstoneHLC(
-                    storage: storage, table: decoded.table,
-                    primaryKey: decoded.rowKey,
-                    hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
-                    kitID: decoded.syncMeta.kitID)
+                // N1 fix: the hard-delete and the tombstone-HLC bookkeeping write
+                // commit as ONE transaction. Previously these were two separate
+                // top-level `await` calls; a crash/kill between them could leave
+                // the row deleted with no tombstone HLC recorded in _ck_sync_meta,
+                // defeating the A6 stale-resurrect guard (a later stale insert
+                // would find `localHLC == nil` and resurrect the row).
+                //
+                // The delete keeps its pre-existing `try?` (best-effort) semantics
+                // inside the transaction — a delete failure here is swallowed the
+                // same way it always was, it just now happens inside the same
+                // atomic unit as the tombstone-HLC write instead of before it.
+                try await storage.transaction(isolation: .serializable) { txn in
+                    _ = try? await txn.rowStore.deleteSync(table: decoded.table, where: predicate)
+                    // A6: persist tombstone HLC in _ck_sync_meta after hard-delete so
+                    // subsequent stale inserts for this (table, rowKey) are still gated.
+                    try await self.writeTombstoneHLC(
+                        storage: txn, table: decoded.table,
+                        primaryKey: decoded.rowKey,
+                        hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                        kitID: decoded.syncMeta.kitID)
+                }
                 // P5-M1b: purge stale skew-queue entries and parked outbox entries.
                 // The tombstone has won the LWW gate; any pending-skew entries whose
                 // record HLC is older than the tombstone are already superseded and
                 // would be rejected by the same gate on replay. Parked outbox entries
                 // for this row will never be pushed (is_parked = 1) — retaining them
                 // after the row is deleted is indefinite payload retention (Perkins P4-M4).
+                // These purges remain outside the transaction: they are a separate,
+                // already best-effort (`try?`) storage-reclaim concern (skew queue /
+                // outbox), not part of the value+HLC correctness gate this fix closes.
                 let tombstoneHLCLWW = PackedHLC(decoded.syncMeta.hlc)
                 _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
                     tableName: decoded.table, rowKey: decoded.rowKey,
@@ -122,19 +138,35 @@ extension CloudKitStateActor {
                     Column(table: decoded.table, name: syncedTable.primaryKeyColumn),
                     .uuid(decoded.rowKey)
                 )
-                _ = try? await storage.rowStore.deleteSync(table: decoded.table, where: predicate)
-                // Clear column-grain side table entries — row is gone.
-                try? await ColumnHLCStore.clearAll(
-                    from: storage, sideTable: CKSideSchema.syncMetaColsTable,
-                    tableName: decoded.table, primaryKey: decoded.rowKey)
-                // A6: persist tombstone HLC in _ck_sync_meta for stale-resurrect guard.
-                try await writeTombstoneHLC(
-                    storage: storage, table: decoded.table,
-                    primaryKey: decoded.rowKey,
-                    hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
-                    kitID: decoded.syncMeta.kitID)
+                // N1 fix: the hard-delete, the column-HLC side-table clear, and the
+                // row-grain tombstone-HLC write commit as ONE transaction. Previously
+                // these were three separate top-level `await` calls; a crash/kill
+                // between any two of them could leave a deleted row with stale
+                // column-HLC entries still on record (confusing a future re-insert
+                // under fieldLevelLWW) or with no tombstone HLC in _ck_sync_meta
+                // (defeating the A6 stale-resurrect guard).
+                //
+                // The delete and the column-HLC clear keep their pre-existing `try?`
+                // (best-effort) semantics inside the transaction — a failure there
+                // is swallowed exactly as before, just now inside the same atomic
+                // unit as the tombstone-HLC write instead of before it.
+                try await storage.transaction(isolation: .serializable) { txn in
+                    _ = try? await txn.rowStore.deleteSync(table: decoded.table, where: predicate)
+                    // Clear column-grain side table entries — row is gone.
+                    try? await ColumnHLCStore.clearAll(
+                        from: txn, sideTable: CKSideSchema.syncMetaColsTable,
+                        tableName: decoded.table, primaryKey: decoded.rowKey)
+                    // A6: persist tombstone HLC in _ck_sync_meta for stale-resurrect guard.
+                    try await self.writeTombstoneHLC(
+                        storage: txn, table: decoded.table,
+                        primaryKey: decoded.rowKey,
+                        hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                        kitID: decoded.syncMeta.kitID)
+                }
                 // P5-M1b: purge stale skew-queue entries and parked outbox entries.
                 // tombstoneHLC is already declared above in this arm; reuse it.
+                // These purges remain outside the transaction — see the identical
+                // note in the .lastWriterWinsByHLC tombstone arm above.
                 _ = try? await PendingSkewQueue.deleteMatchingOlderThan(
                     tableName: decoded.table, rowKey: decoded.rowKey,
                     tombstoneHLC: tombstoneHLC,
@@ -200,17 +232,29 @@ extension CloudKitStateActor {
             if let localHLC, decoded.hlc < localHLC {
                 return // local is newer — skip remote
             }
-            _ = try await storage.rowStore.upsertSync(
-                table: decoded.table,
-                values: inboundValues,
-                conflictColumns: [syncedTable.primaryKeyColumn]
-            )
-            // Persist the sync HLC in the side table for future comparisons.
-            try await writeSyncHLC(
-                storage: storage, table: decoded.table,
-                primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn,
-                hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
-                kitID: decoded.syncMeta.kitID)
+            // N1 fix: the value upsert and the sync-HLC bookkeeping write commit as
+            // ONE transaction. Previously these were two separate top-level `await`
+            // calls; a crash/kill between them could leave a committed value row
+            // with a stale (or missing) `_ck_sync_meta` HLC, letting a later stale
+            // edit silently overwrite the newer value (the exact N1 failure mode).
+            //
+            // `inboundValues` is snapshotted into a `let` here (rather than captured
+            // directly) because it is a `var` — a `var` cannot be captured by the
+            // `@Sendable` transaction closure below (Swift 6 strict concurrency).
+            let inboundValuesForWrite = inboundValues
+            try await storage.transaction(isolation: .serializable) { txn in
+                _ = try await txn.rowStore.upsertSync(
+                    table: decoded.table,
+                    values: inboundValuesForWrite,
+                    conflictColumns: [syncedTable.primaryKeyColumn]
+                )
+                // Persist the sync HLC in the side table for future comparisons.
+                try await self.writeSyncHLC(
+                    storage: txn, table: decoded.table,
+                    primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn,
+                    hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                    kitID: decoded.syncMeta.kitID)
+            }
 
         case .remoteWins:
             _ = try await storage.rowStore.upsertSync(
@@ -230,6 +274,29 @@ extension CloudKitStateActor {
             }
 
         case .fieldLevelLWW:
+            // Gap 2 fix: reject a stale edit that predates a recorded row-grain
+            // tombstone. Without this, a column's absence from ColumnHLCStore
+            // (either genuinely never-written, OR wiped by the tombstone arm's
+            // ColumnHLCStore.clearAll) is indistinguishable to FieldLWWMerge.merge
+            // — its "no local HLC recorded" fallback treats the stale edit as a
+            // first-ever write and applies it unconditionally, resurrecting a
+            // row that was correctly deleted. Trigger-agnostic: reproducible via
+            // ordinary clock skew or a 3-device race, no crash required (P4.5).
+            //
+            // Strict `<` — matching the existing `.lastWriterWinsByHLC` gates
+            // above (both the tombstone-apply gate and the normal-apply gate):
+            // an edit STRICTLY older than the tombstone is rejected; an edit at
+            // or after the tombstone HLC proceeds to a normal apply below,
+            // correctly resurrecting the row when the edit is a genuine
+            // post-delete revival. Getting this boundary wrong in either
+            // direction is a data-loss bug (over-reject) or a zombie-row bug
+            // (under-reject) — both directions are covered by dedicated tests.
+            if let tombstoneHLC = try await readTombstoneHLC(
+                storage: storage, table: decoded.table, primaryKey: decoded.rowKey),
+               decoded.hlc < tombstoneHLC {
+                return // stale-before-tombstone edit — row stays deleted, no resurrection
+            }
+
             // Per-column LWW apply. Read local column HLCs from the side table,
             // compute which incoming columns win, apply them, and persist the
             // updated column HLC map. See FieldLWWMerge for the commutativity proof.
@@ -249,42 +316,55 @@ extension CloudKitStateActor {
                 localColumnHLCs: localColumnHLCs
             )
 
-            if !columnsToApply.isEmpty {
-                // Apply only the winning columns as an upsert on the primary key.
-                // This writes a partial row update — PersistenceKit's upsert preserves
-                // columns not included in `columnsToApply`.
-                var upsertValues = columnsToApply
-                upsertValues[syncedTable.primaryKeyColumn] = .uuid(decoded.rowKey)
-                _ = try await storage.rowStore.upsertSync(
-                    table: decoded.table,
-                    values: upsertValues,
-                    conflictColumns: [syncedTable.primaryKeyColumn]
-                )
-            }
-
-            // Persist updated column HLCs regardless of whether any columns were
-            // applied. The map may be updated even when no columns win (e.g., the
-            // incoming HLC ties with local, updating the stored HLC to the incoming).
-            if !updatedColumnHLCs.isEmpty {
-                try await ColumnHLCStore.writeAll(
-                    map: updatedColumnHLCs,
-                    to: storage, sideTable: CKSideSchema.syncMetaColsTable,
-                    tableName: decoded.table, primaryKey: decoded.rowKey)
-            }
-
             // Also update the row-grain HLC in _ck_sync_meta when this record's
             // row HLC is newer. This guards against stale-resurrect at the row grain
             // when a peer sends a delete for this row after a fieldLevelLWW write.
+            // Read BEFORE the write transaction below — this decision is independent
+            // of (does not read back) any of the writes the transaction makes.
             let existingRowHLC = try await cachedOrReadSyncHLC(
                 table: decoded.table, rowKey: decoded.rowKey,
                 pkColumn: syncedTable.primaryKeyColumn,
                 storage: storage, preloaded: preloadedSyncHLCs)
-            if existingRowHLC == nil || decoded.hlc > (existingRowHLC ?? decoded.hlc) {
-                try await writeSyncHLC(
-                    storage: storage, table: decoded.table,
-                    primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn,
-                    hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
-                    kitID: decoded.syncMeta.kitID)
+            let rowHLCIsNewer = existingRowHLC == nil || decoded.hlc > (existingRowHLC ?? decoded.hlc)
+
+            // N1 fix: the winning-column value upsert, the column-HLC bookkeeping
+            // write, and the (conditional) row-grain HLC bookkeeping write all
+            // commit as ONE transaction. Previously these were up to three separate
+            // top-level `await` calls; a crash/kill between any two of them could
+            // leave a committed value row with stale (or missing) HLC bookkeeping
+            // in either side table, letting a later stale edit silently overwrite
+            // the newer value (the exact N1 failure mode).
+            try await storage.transaction(isolation: .serializable) { txn in
+                if !columnsToApply.isEmpty {
+                    // Apply only the winning columns as an upsert on the primary key.
+                    // This writes a partial row update — PersistenceKit's upsert preserves
+                    // columns not included in `columnsToApply`.
+                    var upsertValues = columnsToApply
+                    upsertValues[syncedTable.primaryKeyColumn] = .uuid(decoded.rowKey)
+                    _ = try await txn.rowStore.upsertSync(
+                        table: decoded.table,
+                        values: upsertValues,
+                        conflictColumns: [syncedTable.primaryKeyColumn]
+                    )
+                }
+
+                // Persist updated column HLCs regardless of whether any columns were
+                // applied. The map may be updated even when no columns win (e.g., the
+                // incoming HLC ties with local, updating the stored HLC to the incoming).
+                if !updatedColumnHLCs.isEmpty {
+                    try await ColumnHLCStore.writeAll(
+                        map: updatedColumnHLCs,
+                        to: txn, sideTable: CKSideSchema.syncMetaColsTable,
+                        tableName: decoded.table, primaryKey: decoded.rowKey)
+                }
+
+                if rowHLCIsNewer {
+                    try await self.writeSyncHLC(
+                        storage: txn, table: decoded.table,
+                        primaryKey: decoded.rowKey, pkColumn: syncedTable.primaryKeyColumn,
+                        hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
+                        kitID: decoded.syncMeta.kitID)
+                }
             }
         }
     }

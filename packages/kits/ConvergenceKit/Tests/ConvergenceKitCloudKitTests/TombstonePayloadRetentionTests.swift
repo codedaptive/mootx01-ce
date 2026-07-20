@@ -128,8 +128,8 @@ struct TombstonePayloadRetentionTests {
             rowKey: rowKey.uuidString,
             event: .update,
             valuesData: nil,
-            // Use the substrate's canonical packed layout, then reinterpret as Int64.
-            packedHLC: Int64(bitPattern: rawHLC.packed),
+            // Gap 6: full-width wire encoding, not the legacy packed layout.
+            hlcWireBytes: Data(rawHLC.wireBytes),
             enqueuedAt: ISO8601DateFormatter().string(from: Date()),
             retryCount: 3,
             isParked: true

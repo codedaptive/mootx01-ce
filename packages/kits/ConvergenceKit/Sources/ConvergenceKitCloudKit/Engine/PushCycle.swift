@@ -97,7 +97,12 @@ extension CloudKitStateActor {
             // that was minted at observe time (recordOutbound), not a fresh
             // mint — preserving the logical ordering established at capture.
             // After re-enrollment, remintAll replaced these with new nodeID HLCs.
-            let hlc = HLC(packed: UInt64(bitPattern: entry.packedHLC))
+            // Gap 6 (D38.1): decoded from the full-width `hlcWireBytes`, not
+            // the legacy 40-bit-truncated `HLC(packed:)`.
+            guard let hlc = try? HLC(wireBytes: [UInt8](entry.hlcWireBytes)) else {
+                logger.error("push: malformed hlcWireBytes for entry \(entry.id)")
+                continue
+            }
 
             switch entry.event {
             case .insert, .update:

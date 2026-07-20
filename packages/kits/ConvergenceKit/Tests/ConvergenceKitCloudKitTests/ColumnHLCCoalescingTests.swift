@@ -54,13 +54,17 @@ private func makeEntry(
     event: SyncEventKind = .update,
     valuesData: Data? = nil
 ) -> OutboxEntry {
-    OutboxEntry(
+    // Gap 6: `packedHLC` here is a plain logical ordinal (test convenience,
+    // pre-existing param name kept so every call site below is unchanged) —
+    // wrapped into a full-width HLC.wireBytes via HLC.zero-node convenience.
+    let hlc = HLC(physicalTime: packedHLC, logicalCount: 0, nodeID: 1)
+    return OutboxEntry(
         id: UUID(),
         tableName: "items",
         rowKey: rowKey,
         event: event,
         valuesData: valuesData,
-        packedHLC: packedHLC,
+        hlcWireBytes: Data(hlc.wireBytes),
         enqueuedAt: ISO8601DateFormatter().string(from: Date()),
         columnHLCsData: columnHLCsData
     )
