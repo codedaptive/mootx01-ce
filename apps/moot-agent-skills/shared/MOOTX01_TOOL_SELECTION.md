@@ -75,8 +75,8 @@ LLM context tokens.
 ## Distillation And Maintenance
 
 - `moot_consolidate` - run one distillation sweep, producing compact factoids in the distilled tier. Run periodically or after significant memory growth.
-- `moot_reindex` - backfill BM25 and vector indexes for memories captured before encode-on-capture or after a batch import. Semantic recall is dark until reindex completes.
-- `moot_palace_import` - import a MemPalace directly into the estate (drawers, tunnels, KG triples). After import: run `moot_reindex` then `moot_dream`.
+- `moot_reindex` - recovery tool: backfill BM25 and vector indexes after an index loss or for estates created before encode-on-capture. Not needed after imports; they index themselves.
+- `moot_palace_import` - import a MemPalace directly into the estate (drawers, tunnels, KG triples). The import triggers its own indexing and dreaming; poll `moot_drain_status` to watch encoding settle.
 
 ## Synthesis And Dreaming
 
