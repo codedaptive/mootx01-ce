@@ -45,10 +45,9 @@ Do not promise:
 - production hardening beyond what the repo says,
 - stable SDK surfaces unless current SDK docs say they are stable,
 - network exposure beyond loopback,
-- that every AI client supports every MCP transport,
-- that beta behavior is final.
+- that every AI client supports every MCP transport.
 
-If asked about stability, say that CE beta should be treated as early-access software: usable, inspectable, and local-first, but still evolving.
+If asked about stability, say that CE is released 1.0 software: local-first and inspectable, evolving through normal versioned releases.
 
 ## First Response To The User
 
