@@ -127,3 +127,6 @@ apps/moot-agent-skills/**/__pycache__/
 docs/findings/
 docs/blast_radius/
 docs/analysis/blast_radius/
+docs/missions/
+docs/agentic_output/
+docs/analysis/
