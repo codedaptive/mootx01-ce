@@ -34,10 +34,15 @@ pub mod bm25_index;
 pub mod bundle_store;
 pub mod chunk;
 pub mod chunker;
+// Canonical content boundary + operating profiles (GLK shared-content 1.1, P1).
+pub mod content;
 pub mod corpus;
 pub mod corpus_ingest_queue;
 pub mod corpus_provider_counts_store;
+pub mod document_store;
+pub mod index_state_store;
 pub mod removed_source_store;
+pub mod schema_profile;
 pub mod engine;
 pub mod error;
 pub mod hybrid_recall;
@@ -52,6 +57,16 @@ pub mod trainable_embedding_basis;
 pub use basis_store::{BasisStore, PersistedBasis};
 pub use bm25_index::*;
 pub use bundle_store::*;
+pub use content::{
+    content_digest, CorpusContentChange, CorpusContentChangeBatch, CorpusContentId,
+    CorpusContentRecord, CorpusContentSource, CorpusContentStore,
+};
+pub use document_store::CorpusDocumentStore;
+pub use index_state_store::{CorpusIndexState, CorpusIndexStateStore};
+pub use schema_profile::{
+    attached_declaration, attached_excluded_tables, standalone_declaration,
+    CorpusContentConfiguration, CorpusIndexUnitPolicy, CorpusOperatingMode,
+};
 pub use chunk::*;
 pub use chunker::*;
 pub use corpus::Corpus;
