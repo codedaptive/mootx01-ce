@@ -29,8 +29,8 @@ on:
     branches: ["candidate/1.0.x"]
   schedule:
     # Weekly build, Monday 09:00 UTC. Scheduled runs fire from the DEFAULT
-    # branch (develop), so every job pins `ref: candidate/1.0.x` to build the
-    # candidate line regardless of what triggered the run.
+    # branch (develop), so meta resolves `candidate/1.0.x` and every downstream
+    # job builds that exact candidate commit.
     - cron: "0 9 * * 1"
   workflow_dispatch:
 
@@ -48,6 +48,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      candidate_sha: ${{ steps.v.outputs.candidate_sha }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -65,31 +66,21 @@ jobs:
             echo "ERROR: version '$version' is not valid semver — aborting" >&2
             exit 1
           fi
-          # The tag previews the NEXT patch release. The tree's version
-          # constant equals the last SHIPPED release between bumps, so a
-          # candidate built from it contains post-<version> work: stamping it
-          # <version>-prerelease.N reads as if it predates the release it
-          # follows (and sorts that way under semver). <next>-prerelease.N
-          # sorts correctly before the upcoming <next> tag. Known edge: in the
-          # short window after a release bump lands on this branch but before
-          # its tag is cut, candidates stamp one patch high — harmless for
-          # test builds. `version` (unbumped) stays the assertion target for
-          # install-verify: the built binary prints the SOURCE version.
+          # The candidate tag preserves the source product version exactly.
+          # The source tree must be bumped to the intended release version
+          # before it reaches candidate; a 1.0.34 binary must never be labeled
+          # as a 1.0.35 prerelease.
           #
           # Tag carries NO leading v on purpose — a v* tag would trigger
           # release.yml and a signed public release. The `-prerelease` suffix
           # (with the `-`) is what the installers key on to skip their
           # v-normalization, so it installs as-is.
-          # Bump from the bare numeric triple — the guard above also admits
-          # -suffixed semver, where naive last-dot splitting grabs the wrong
-          # field.
-          base="${version%%-*}"
-          patch="${base##*.}"
-          next="${base%.*}.$((patch + 1))"
-          tag="${next}-prerelease.${{ github.run_number }}"
+          tag="${version}-prerelease.${{ github.run_number }}"
+          candidate_sha="$(git rev-parse HEAD)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Candidate build: $tag (source version $version)"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "Candidate build: $tag (source version $version at $candidate_sha)"
 
   # ── macOS builds (arm64 + x86_64) — signed best-effort ───────────────────────
   # Mirrors release.yml's signing pipeline when Apple Developer ID secrets are
@@ -106,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: ${{ needs.meta.outputs.candidate_sha }}
           persist-credentials: false
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
@@ -311,7 +302,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: ${{ needs.meta.outputs.candidate_sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Build
@@ -353,7 +344,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: ${{ needs.meta.outputs.candidate_sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -400,7 +391,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: ${{ needs.meta.outputs.candidate_sha }}
           persist-credentials: false
       - name: Download unsigned binaries
         # Places mootx01.exe + moot-mgr.exe at the workspace root (where the zip
@@ -496,7 +487,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: ${{ needs.meta.outputs.candidate_sha }}
           persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -533,8 +524,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.meta.outputs.tag }}
+          TARGET_SHA: ${{ needs.meta.outputs.candidate_sha }}
         run: |
-          notes="Automated **candidate/test build** from \`candidate/1.0.x\` at \`${{ github.sha }}\`.
+          notes="Automated **candidate/test build** from \`candidate/1.0.x\` at \`${TARGET_SHA}\`.
 
           NOT a release. macOS binaries and .pkg are Apple Developer ID signed and notarized when secrets are available. Linux and Windows binaries are unsigned. For testing only.
 
@@ -544,6 +536,7 @@ jobs:
           \`\`\`"
           gh release create "$TAG" \
             --prerelease \
+            --target "$TARGET_SHA" \
             --title "Candidate ${TAG}" \
             --notes "$notes" \
             flat/*
@@ -580,7 +573,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: ${{ needs.meta.outputs.candidate_sha }}
           persist-credentials: false
       - name: install.sh against the published pre-release (sandbox HOME)
         env:
