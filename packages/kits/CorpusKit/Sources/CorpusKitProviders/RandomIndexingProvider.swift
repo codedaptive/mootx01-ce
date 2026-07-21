@@ -46,7 +46,7 @@
 // ## Projection seed
 //
 //   RI_PROJECTION_SEED = 0x5249_5F56_315F_4D58  ("RI_V1_MX")
-//   Model ID = "random-indexing-v1",  version = "1.0.0"
+//   Model ID = "random-indexing-v1",  version = "1.1.0"
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/random_indexing.rs
 //
@@ -156,7 +156,7 @@ public func riIndexVector(term: String) -> [Float] {
 /// ## Conformance
 ///
 /// Conforms to `VectorKit.EmbeddingProvider`. modelID = "random-indexing-v1",
-/// modelVersion = "1.0.0". Projection seed = `riProjectionSeed`.
+/// modelVersion = "1.1.0". Projection seed = `riProjectionSeed`.
 ///
 /// honest semantic fusion, signal #2 — the first honest distributional
 /// provider in the dense recall lane.
@@ -179,7 +179,7 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
 
     public init(
         modelID: String = "random-indexing-v1",
-        modelVersion: String = "1.0.0",
+        modelVersion: String = "1.1.0",
         projectionSeed: UInt64 = riProjectionSeed
     ) {
         self.modelID = modelID

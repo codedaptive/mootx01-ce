@@ -39,7 +39,7 @@
 //! ## Constants
 //!
 //!   NMF_PROJECTION_SEED = 0x4E4D465F56315F4D  ("NMF_V1_M" in ASCII)
-//!   Model ID = "nmf-v1",  version = "1.0.0"
+//!   Model ID = "nmf-v1",  version = "1.1.0"
 //!   Default rank k = 32
 //!   Default maxIterations = 100
 //!   Factorization seed = 0xDEADBEEFCAFEBABE
@@ -175,7 +175,7 @@ impl NmfProvider {
     pub fn new(rank: usize, max_iterations: usize, seed: u64, projection_seed: u64) -> Self {
         NmfProvider {
             model_id: "nmf-v1".to_string(),
-            model_version: "1.0.0".to_string(),
+            model_version: "1.1.0".to_string(),
             rank: rank.max(1),
             max_iterations: max_iterations.max(1),
             seed,

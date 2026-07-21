@@ -2232,7 +2232,19 @@ impl CorpusContentEngine {
         for id in self.source.active_content_ids()? {
             match self.source.record(&id)? {
                 Some(record) => {
-                    self.index_record(&record, None, true, now_millis, SlotScope::All)?
+                    // Training just rebuilt the maintained counts from this
+                    // same full-corpus snapshot. Re-embedding the generation
+                    // must not fold every record into those counts again.
+                    if let Some(checkpoint) = self.prepare_index_record(
+                        &record,
+                        None,
+                        true,
+                        now_millis,
+                        SlotScope::All,
+                        false,
+                    )? {
+                        self.index_state.advance(&checkpoint)?;
+                    }
                 }
                 None => self.clear_derived_state(&id)?,
             }

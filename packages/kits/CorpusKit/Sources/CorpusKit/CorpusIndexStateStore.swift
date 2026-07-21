@@ -76,7 +76,14 @@ public actor CorpusIndexStateStore {
     /// Upsert the checkpoint for one content ID. Idempotent — writing the
     /// same (revision, digest, indexVersion) again is harmless.
     public func advance(_ state: CorpusIndexState) async throws {
-        _ = try await storage.rowStore.upsert(
+        try await advance(state, into: storage.rowStore)
+    }
+
+    /// Transaction-scoped checkpoint write. Queue batches use this to commit
+    /// maintained provider counts and every corresponding content/cursor
+    /// checkpoint as one last-write transaction.
+    public func advance(_ state: CorpusIndexState, into rowStore: any RowStore) async throws {
+        _ = try await rowStore.upsert(
             table: "corpus_index_state",
             values: [
                 "content_id": .text(state.contentID),

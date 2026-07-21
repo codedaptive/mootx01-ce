@@ -1,8 +1,8 @@
-// DefaultEnsemble.swift — the ONE definition of the 1.0 default recall ensemble.
+// DefaultEnsemble.swift — the ONE definition of the default recall ensemble.
 //
 // Mission 6a-iii-wire: flip the production default from a single deterministic
 // provider to the canonical five honest signals. This factory is the single
-// source of truth for "the 1.0 default recall ensemble" — every production
+// source of truth for the default recall ensemble — every production
 // provision/open site threads THIS list, so the five honest signals
 // (RI / PPMI / LSA / NMF / FDC) are the live default everywhere.
 //
@@ -33,7 +33,7 @@ import CorpusKit
 
 /// Factory namespace for CorpusKit's canonical default embedding ensemble.
 ///
-/// `CorpusEnsemble.defaultEnsemble()` is the single definition of the 1.0
+/// `CorpusEnsemble.defaultEnsemble()` is the single definition of the
 /// default recall ensemble — the five honest distributional / co-classification
 /// signals every production estate is provisioned with.
 public enum CorpusEnsemble {

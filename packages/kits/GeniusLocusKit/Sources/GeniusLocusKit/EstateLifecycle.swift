@@ -79,7 +79,7 @@ public extension GeniusLocusKit {
     ///   - owner: Credentials for the new estate's owner.
     ///   - params: Provisioning parameters (name, kind, zoom window, profile, sync mode).
     ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
-    ///     canonical 1.0 five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`:
+    ///     canonical five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`:
     ///     RI / PPMI / LSA / NMF / FDC), so every provisioned estate gets the
     ///     honest multi-signal default. The Corpus lifecycle trains and persists
     ///     the trainable signals on first ingest / reindex. Pass an explicit
@@ -354,7 +354,7 @@ public extension GeniusLocusKit {
     ///   - backingStorage: The storage the Corpus and VectorStore are built on —
     ///     the estate's own storage for a served estate.
     ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
-    ///     canonical 1.0 five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`).
+    ///     canonical five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`).
     /// - Throws: A storage/schema error if a sub-store cannot be opened.
     func wireSubstores(
         for handle: EstateHandle,
@@ -456,7 +456,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - handle: The open estate handle to wire.
     ///   - backingStorage: The estate's storage (Corpus + VectorStore are built on it).
-    ///   - embeddingModels: The recall ensemble. Defaults to the canonical 1.0
+    ///   - embeddingModels: The recall ensemble. Defaults to the canonical
     ///     five-signal ensemble.
     /// - Throws: A storage/schema error if a sub-store cannot be opened.
     func wireGLKSubstores(

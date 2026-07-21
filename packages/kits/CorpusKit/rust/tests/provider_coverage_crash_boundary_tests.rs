@@ -65,7 +65,7 @@ fn docs(engine: &CorpusContentEngine, count: usize) -> Result<(), corpus_kit::er
 
 fn basis_row(storage: &Arc<dyn Storage>, model_id: &str) -> Option<Vec<u8>> {
     BasisStore::new(Arc::clone(storage))
-        .load(model_id, "1.0.0")
+        .load(model_id, "1.1.0")
         .ok()
         .flatten()
         .map(|b| b.basis)
@@ -107,7 +107,7 @@ fn training_fault_before_commit_retrains_from_zero() {
     assert!(docs(&engine, 3).is_err(), "training fault must surface");
     assert!(basis_row(&storage, "random-indexing-v1").is_none());
     assert!(CorpusProviderCountsStore::new(Arc::clone(&storage))
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("counts load")
         .is_none());
 
@@ -115,7 +115,7 @@ fn training_fault_before_commit_retrains_from_zero() {
     docs(&engine, 3).expect("resume ingest");
     assert!(basis_row(&storage, "random-indexing-v1").is_some());
     assert!(CorpusProviderCountsStore::new(Arc::clone(&storage))
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("counts load")
         .is_some());
     assert_eq!(engine.covered_count("random-indexing-v1").expect("count"), Some(3));
@@ -136,6 +136,21 @@ fn training_fault_after_commit_skips_committed_provider_on_resume() {
     assert!(basis_row(&storage, "ppmi-v1").is_some());
     assert_eq!(engine.covered_count("random-indexing-v1").expect("count"), Some(3));
     assert_eq!(engine.covered_count("ppmi-v1").expect("count"), Some(3));
+}
+
+#[test]
+fn reindex_does_not_double_fold_training_snapshot_into_counts() {
+    let (storage, _tmp) = scratch_storage();
+    let engine =
+        CorpusContentEngine::standalone_on(Arc::clone(&storage), vec![ri()]).expect("engine");
+    docs(&engine, 3).expect("seed documents");
+
+    engine.reindex(NOW).expect("reindex");
+    let counts = CorpusProviderCountsStore::new(Arc::clone(&storage))
+        .load("random-indexing-v1", "1.1.0")
+        .expect("counts load")
+        .expect("counts row");
+    assert_eq!(counts.document_count, 3);
 }
 
 // ── 3. Backfill interruption before/after vector-batch persistence ──────

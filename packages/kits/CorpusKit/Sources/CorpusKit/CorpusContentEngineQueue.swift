@@ -223,10 +223,15 @@ public extension CorpusContentEngine {
         try await beginDeferredVectorIndex()
 
         var encodedIDs: [String] = []
+        var completions: [(jobID: JobID, status: ObservationStatus)] = []
+        var countsUpdates: [(contentID: String, text: String)] = []
+        var checkpoints: [CorpusIndexState] = []
+        var preparedUpserts: Set<String> = []
+        completions.reserveCapacity(batch.count)
         for (job, _) in batch {
             guard let payload = try? JSONDecoder().decode(ContentIndexJob.self, from: job.payload) else {
                 contentEngineLog.error("content job decode failed; replying blocked")
-                try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
+                completions.append((job.id, .blocked))
                 continue
             }
             // The work instant: the job's submission HLC physical time (the
@@ -239,9 +244,27 @@ public extension CorpusContentEngine {
                     // Test seam: a non-nil hook simulates a transient failure
                     // (nil in production — zero overhead).
                     try _ingestFailureHook?(payload.contentID)
-                    try await processJob(payload, now: workNow)
-                    if payload.kind == .upsert { encodedIDs.append(payload.contentID) }
-                    try? await queue.reply(to: job.id, status: .done, artifacts: [])
+                    let upsertKey = payload.digest.map {
+                        "\(payload.contentID)\u{1F}\(payload.revision)\u{1F}\($0)"
+                    }
+                    let prepared = upsertKey.map { preparedUpserts.contains($0) } ?? false
+                    let result = try await prepareQueueJob(
+                        payload, now: workNow, contentAlreadyPrepared: prepared)
+                    if payload.kind == .upsert {
+                        encodedIDs.append(payload.contentID)
+                    } else {
+                        // Preserve queue order inside the deferred checkpoint
+                        // set: a later remove cancels an earlier prepared upsert
+                        // for the same canonical content.
+                        checkpoints.removeAll { $0.contentID == payload.contentID }
+                        countsUpdates.removeAll { $0.contentID == payload.contentID }
+                        let prefix = "\(payload.contentID)\u{1F}"
+                        preparedUpserts = preparedUpserts.filter { !$0.hasPrefix(prefix) }
+                    }
+                    if let update = result.countsUpdate { countsUpdates.append(update) }
+                    checkpoints.append(contentsOf: result.checkpoints)
+                    if let upsertKey { preparedUpserts.insert(upsertKey) }
+                    completions.append((job.id, .done))
                     replied = true
                     break
                 } catch CorpusKitError.staleRevision {
@@ -249,7 +272,7 @@ public extension CorpusContentEngine {
                     // Done, not blocked — retry could never succeed.
                     contentEngineLog.info(
                         "content job for \(payload.contentID, privacy: .public) rev \(payload.revision, privacy: .public) is stale — dropped")
-                    try? await queue.reply(to: job.id, status: .done, artifacts: [])
+                    completions.append((job.id, .done))
                     replied = true
                     break
                 } catch {
@@ -258,18 +281,38 @@ public extension CorpusContentEngine {
                 }
             }
             if !replied {
-                try? await queue.reply(to: job.id, status: .blocked, artifacts: [])
+                completions.append((job.id, .blocked))
             }
         }
 
-        if !encodedIDs.isEmpty {
-            // Batch-boundary counts snapshot: the maintained counts fold in
-            // memory per record; the durable write happens ONCE per burst
-            // (never per record — that was O(N·vocab) write amplification).
-            try? await persistCountsSnapshot(now: Date())
-            if let callback = onEncoded {
-                await callback(encodedIDs)
+        // Batch-boundary last write: maintained counts and the checkpoints
+        // proving those folds commit atomically. It MUST precede terminal queue
+        // completion so any failure leaves recoverable content references.
+        do {
+            try await commitQueueBatch(
+                checkpoints: checkpoints, countsUpdates: countsUpdates, now: Date())
+        } catch {
+            do { try await publishVectorIndex() }
+            catch let publicationError {
+                throw CorpusKitError.storeUnavailable(
+                    "\(error); resident-index publication after queue commit failure: "
+                    + "\(publicationError)")
             }
+            throw error
+        }
+        do {
+            _ = try await queue.reply(batch: completions)
+        } catch {
+            do { try await publishVectorIndex() }
+            catch let publicationError {
+                throw CorpusKitError.storeUnavailable(
+                    "content reply batch failed: \(error); resident-index publication failed: "
+                    + "\(publicationError)")
+            }
+            throw error
+        }
+        if !encodedIDs.isEmpty, let callback = onEncoded {
+            await callback(encodedIDs)
         }
         return batch.count
     }

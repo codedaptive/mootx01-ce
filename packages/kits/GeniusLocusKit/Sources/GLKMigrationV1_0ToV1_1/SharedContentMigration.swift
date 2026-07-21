@@ -826,17 +826,34 @@ public extension GeniusLocusKit {
         try await storage.migrate(to: VectorStore.schemaDeclaration)
         let rows = try await storage.rowStore.query(
             table: "vectors", where: nil, orderBy: [], limit: nil, offset: nil)
-        var combined: UInt64 = 0
-        for row in rows {
-            guard case let .text(itemID)? = row["item_id"],
-                  case let .int(vectorIndex)? = row["vector_index"],
-                  case let .text(modelID)? = row["model_id"] else { continue }
-            let key = "\(itemID)|\(vectorIndex)|\(modelID)"
-            guard !legacyVectorKeys.contains(key) else { continue }
-            let encoded = DatabaseInventory.canonicalRowEncoding(row, excluding: ["id"])
-            var h: UInt64 = 14_695_981_039_346_656_037
-            for byte in encoded.utf8 { h = (h ^ UInt64(byte)) &* 1_099_511_628_211 }
-            combined = combined &+ h
+        guard !rows.isEmpty else { return "0000000000000000" }
+        let workerCount = min(max(1, ProcessInfo.processInfo.activeProcessorCount), rows.count)
+        let rowsPerWorker = max(1, (rows.count + workerCount - 1) / workerCount)
+        let combined = await withTaskGroup(of: UInt64.self, returning: UInt64.self) { group in
+            for start in stride(from: 0, to: rows.count, by: rowsPerWorker) {
+                let end = min(start + rowsPerWorker, rows.count)
+                group.addTask {
+                    var local: UInt64 = 0
+                    for row in rows[start..<end] {
+                        guard case let .text(itemID)? = row["item_id"],
+                              case let .int(vectorIndex)? = row["vector_index"],
+                              case let .text(modelID)? = row["model_id"] else { continue }
+                        let key = "\(itemID)|\(vectorIndex)|\(modelID)"
+                        guard !legacyVectorKeys.contains(key) else { continue }
+                        let encoded = DatabaseInventory.canonicalRowEncoding(
+                            row, excluding: ["id"])
+                        var h: UInt64 = 14_695_981_039_346_656_037
+                        for byte in encoded.utf8 {
+                            h = (h ^ UInt64(byte)) &* 1_099_511_628_211
+                        }
+                        local = local &+ h
+                    }
+                    return local
+                }
+            }
+            var total: UInt64 = 0
+            for await partial in group { total = total &+ partial }
+            return total
         }
         return String(format: "%016llx", combined)
     }

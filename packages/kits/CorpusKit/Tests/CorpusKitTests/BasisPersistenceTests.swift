@@ -81,6 +81,15 @@ struct BasisPersistenceTests {
         try await Corpus(storage: storage, model: .randomIndexing(provider: RandomIndexingProvider()))
     }
 
+    /// The shared alpha fixture pins the historical 1.0 provider envelope.
+    /// Production defaults are 1.1 so persisted pre-correction tokenizer
+    /// generations cannot be mistaken for current ones.
+    private func legacyRICorpus(_ storage: any Storage) async throws -> Corpus {
+        try await Corpus(
+            storage: storage,
+            model: .randomIndexing(provider: RandomIndexingProvider(modelVersion: "1.0.0")))
+    }
+
     // MARK: - §1 BasisStore round-trip
 
     @Test("BasisStore upsert → load round-trips the row")
@@ -92,13 +101,13 @@ struct BasisPersistenceTests {
 
             let row = PersistedBasis(
                 modelID: "random-indexing-v1",
-                modelVersion: "1.0.0",
+                modelVersion: "1.1.0",
                 basis: Data([1, 2, 3, 4, 5]),
                 trainedAt: now,
                 trainedChunkCount: 7
             )
             try await store.upsert(row)
-            let loaded = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
+            let loaded = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0")
             #expect(loaded == row)
             // A different key returns nil.
             let miss = try await store.load(modelID: "corpus-ppmi-v1", modelVersion: "1.0.0")
@@ -155,7 +164,7 @@ struct BasisPersistenceTests {
 
             // The basis row exists for the RI provider key.
             let store = BasisStore(storage: storage)
-            let loaded = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
+            let loaded = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0")
             #expect(loaded != nil)
             #expect(loaded?.trainedChunkCount == riDocs.count)
         }
@@ -171,19 +180,19 @@ struct BasisPersistenceTests {
             let store = BasisStore(storage: storage)
 
             // No basis before the first ingest.
-            #expect(try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0") == nil)
+            #expect(try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0") == nil)
 
             try await corpus.ingest(riDocs[0], sourceID: "doc-0", now: now)
 
             // A basis now exists (auto-trained on the first-ingest snapshot).
-            let afterFirst = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
+            let afterFirst = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0")
             #expect(afterFirst != nil)
             let countAfterFirst = afterFirst?.trainedChunkCount
 
             // A SECOND ingest must NOT retrain: the basis row (chunk count) is
             // unchanged — the fold-in path embeds the new chunk on the frozen basis.
             try await corpus.ingest(riDocs[1], sourceID: "doc-1", now: now.addingTimeInterval(60))
-            let afterSecond = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
+            let afterSecond = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0")
             #expect(afterSecond?.trainedChunkCount == countAfterFirst)
         }
     }
@@ -233,10 +242,10 @@ struct BasisPersistenceTests {
             try await corpus.reindex(now: now)
 
             let store = BasisStore(storage: storage)
-            #expect(try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0") != nil)
+            #expect(try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0") != nil)
 
             try await corpus.destroyRecallIndex()
-            #expect(try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0") == nil)
+            #expect(try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0") == nil)
         }
     }
 
@@ -297,7 +306,7 @@ struct BasisPersistenceTests {
             // corpus (single-sentence docs → one chunk each whose text == the doc),
             // so the trained state — and the blob — is the α canonical one.
             do {
-                let corpus = try await freshRICorpus(try storage(at: url))
+                let corpus = try await legacyRICorpus(try storage(at: url))
                 for (i, doc) in riDocs.enumerated() {
                     try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now)
                 }
@@ -313,7 +322,7 @@ struct BasisPersistenceTests {
             // trained provider from the persisted basis. The reopened corpus's
             // embedding of the fixed probe must equal the α canonical bit patterns.
             // This proves persist → reopen → embed is cross-port deterministic.
-            let reopened = try await freshRICorpus(try storage(at: url))
+            let reopened = try await legacyRICorpus(try storage(at: url))
             let after = try await reopened.embedFloat(probe)
             #expect(after.map(\.bitPattern) == expectedEmbedding.floatBits,
                     "reopened embedding must equal the α canonical 'car engine' bit patterns")
@@ -323,7 +332,7 @@ struct BasisPersistenceTests {
     // MARK: - §7 maintained counts wiring (incremental-counts change set, P3)
 
     private static let riModelID = "random-indexing-v1"
-    private static let riModelVersion = "1.0.0"
+    private static let riModelVersion = "1.1.0"
 
     @Test("ingest persists maintained counts with a growing vocab/doc anchor")
     func ingestPersistsCounts() async throws {

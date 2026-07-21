@@ -226,6 +226,7 @@ struct CorpusContentBoundaryTests {
         let names = Set(CorpusSchemaProfile.attachedDeclaration.tables.map(\.name))
         #expect(names.isDisjoint(with: CorpusSchemaProfile.attachedExcludedTables))
         #expect(names == ["corpus_index_state", "corpus_provider_coverage",
+                          "corpus_provider_configuration",
                           "iix_termfreqs", "iix_doclens",
                           "corpus_provider_basis", "corpus_provider_counts"])
         // No column named "text" anywhere in the attached profile — there

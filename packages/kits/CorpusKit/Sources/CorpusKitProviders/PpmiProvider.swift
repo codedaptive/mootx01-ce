@@ -48,7 +48,7 @@
 // ## Projection seed
 //
 //   PPMI_PROJECTION_SEED = 0x5050_4D49_5F56_314D  ("PPMI_V1M")
-//   Model ID = "ppmi-v1",  version = "1.0.0"
+//   Model ID = "ppmi-v1",  version = "1.1.0"
 //
 // The seed MUST differ from RI's riProjectionSeed (0x5249_5F56_315F_4D58)
 // so PPMI and RI engrams key to different storage buckets when both
@@ -145,7 +145,7 @@ public let ppmiProjectionSeed: UInt64 = 0x5050_4D49_5F56_314D
 /// ## Conformance
 ///
 /// Conforms to `VectorKit.EmbeddingProvider`.
-/// modelID = "ppmi-v1", modelVersion = "1.0.0".
+/// modelID = "ppmi-v1", modelVersion = "1.1.0".
 /// Projection seed = `ppmiProjectionSeed`.
 ///
 /// honest semantic fusion, signal #3 — PPMI co-occurrence provider in the
@@ -193,7 +193,7 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
     public init(
         modelID: String = "ppmi-v1",
-        modelVersion: String = "1.0.0",
+        modelVersion: String = "1.1.0",
         projectionSeed: UInt64 = ppmiProjectionSeed
     ) {
         self.modelID = modelID

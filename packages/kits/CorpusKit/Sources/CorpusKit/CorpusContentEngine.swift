@@ -252,6 +252,10 @@ public actor CorpusContentEngine {
     private let providerConfigurationStore: CorpusProviderConfigurationStore
     private let claims: VectorRepresentationClaims
     private var slots: [Slot]
+    /// Set after an ambiguous counts/checkpoint transaction failure. The next
+    /// queue attempt must rehydrate the in-memory accumulators from durable
+    /// state before it can fold another content reference.
+    private var countsReloadRequired = false
 
     // MARK: - Content-reference ingest queue state (GLK shared-content P3)
     //
@@ -880,6 +884,133 @@ public actor CorpusContentEngine {
         }
     }
 
+    /// Queue-only preparation seam. Derived rows and provider coverage are
+    /// written in their normal order, while final content/cursor checkpoints
+    /// are returned for an atomic batch commit with maintained counts.
+    func prepareQueueJob(
+        _ job: ContentIndexJob, now: Date, contentAlreadyPrepared: Bool
+    ) async throws -> (
+        checkpoints: [CorpusIndexState],
+        countsUpdate: (contentID: String, text: String)?
+    ) {
+        if countsReloadRequired {
+            try await reloadCountsFromStorage()
+            countsReloadRequired = false
+        }
+        try validate(id: job.contentID)
+        var checkpoints: [CorpusIndexState] = []
+        var countsUpdate: (contentID: String, text: String)?
+        switch job.kind {
+        case .upsert:
+            guard let digest = job.digest else {
+                throw CorpusKitError.invalidConfiguration(
+                    "upsert job for \(job.contentID) carries no digest")
+            }
+            guard let record = try await source.record(for: job.contentID) else {
+                throw CorpusKitError.staleRevision(
+                    "upsert for \(job.contentID) rev \(job.revision): the ID no longer resolves — "
+                    + "the remove change will clear it")
+            }
+            guard record.revision == job.revision, record.digest == digest else {
+                throw CorpusKitError.staleRevision(
+                    "upsert for \(job.contentID) rev \(job.revision) does not match the current "
+                    + "record rev \(record.revision) — stale job rejected without checkpoint advance")
+            }
+            if !contentAlreadyPrepared,
+               let checkpoint = try await prepareIndex(
+                    record: record, appliedCursor: job.cursor, force: false, now: now,
+                    slotScope: .all, maintainCounts: false)
+            {
+                checkpoints.append(checkpoint)
+                countsUpdate = (record.id, record.text)
+            }
+        case .remove:
+            try await clearDerivedState(id: job.contentID)
+        }
+        if let cursor = job.cursor {
+            checkpoints.append(CorpusIndexState(
+                contentID: Self.feedCursorRowID, revision: 0, digest: "",
+                indexVersion: Self.indexVersion, appliedCursor: cursor, updatedAt: now))
+        }
+        return (checkpoints, countsUpdate)
+    }
+
+    /// Last-write transaction for a durable queue batch. A crash can observe
+    /// either the old counts/checkpoints (and replay the durable references) or
+    /// the new pair, never a checkpoint that outruns its maintained counts.
+    func commitQueueBatch(
+        checkpoints: [CorpusIndexState],
+        countsUpdates: [(contentID: String, text: String)],
+        now: Date
+    ) async throws {
+        var countsRows: [PersistedCounts] = []
+        if !countsUpdates.isEmpty {
+            for index in slots.indices {
+                guard let accumulator = slots[index].countsAccumulator else { continue }
+                for update in countsUpdates {
+                    accumulator.addToCounts(text: update.text)
+                    slots[index].countsDocumentCount += 1
+                }
+                countsRows.append(PersistedCounts(
+                    modelID: slots[index].provider.modelID,
+                    modelVersion: slots[index].provider.modelVersion,
+                    counts: accumulator.serializeCounts(),
+                    documentCount: slots[index].countsDocumentCount,
+                    vocabSize: accumulator.countsVocabularySize,
+                    updatedAt: now))
+            }
+        }
+
+        let pendingCountsRows = countsRows
+        let countsStore = self.countsStore
+        let indexState = self.indexState
+        do {
+            try await storage.transaction(isolation: .serializable) { txn in
+                for row in pendingCountsRows {
+                    try await countsStore.upsert(row, into: txn.rowStore)
+                }
+                for checkpoint in checkpoints {
+                    try await indexState.advance(checkpoint, into: txn.rowStore)
+                }
+            }
+        } catch {
+            // Treat the storage transaction as authoritative even when the
+            // backend reports an ambiguous commit failure. Rehydrate before
+            // another durable reference can be attempted so replay cannot
+            // double-fold the in-memory counts.
+            countsReloadRequired = true
+            do {
+                try await reloadCountsFromStorage()
+                countsReloadRequired = false
+            } catch let reloadError {
+                throw CorpusKitError.storeUnavailable(
+                    "queue counts/checkpoint transaction failed: \(error); "
+                    + "durable counts reload failed: \(reloadError)")
+            }
+            throw error
+        }
+    }
+
+    private func reloadCountsFromStorage() async throws {
+        for index in slots.indices {
+            guard let blob = slots[index].freshBasisBlob,
+                  let witness = slots[index].countsAccumulator,
+                  let accumulator = try witness.reconstructBasis(from: blob)
+                    as? any TrainableEmbeddingBasis
+            else { continue }
+            let persisted = try await countsStore.load(
+                modelID: slots[index].provider.modelID,
+                modelVersion: slots[index].provider.modelVersion)
+            if let persisted {
+                try accumulator.restoreCounts(from: persisted.counts)
+                slots[index].countsDocumentCount = persisted.documentCount
+            } else {
+                slots[index].countsDocumentCount = 0
+            }
+            slots[index].countsAccumulator = accumulator
+        }
+    }
+
     /// Which slots an indexing pass embeds. `.all` is the ordinary path;
     /// `.statelessOnly` is the migration's structural rebuild — BM25 +
     /// checkpoints + stateless-slot vectors, with trainable slots deferred
@@ -890,6 +1021,21 @@ public actor CorpusContentEngine {
         record: CorpusContentRecord, appliedCursor: String?, force: Bool, now: Date,
         slotScope: SlotScope = .all
     ) async throws {
+        if let checkpoint = try await prepareIndex(
+            record: record, appliedCursor: appliedCursor, force: force, now: now,
+            slotScope: slotScope, maintainCounts: true
+        ) {
+            try await indexState.advance(checkpoint)
+        }
+    }
+
+    /// Produce every derived row and return the final checkpoint without
+    /// committing it. The durable queue uses this seam to publish maintained
+    /// counts and all corresponding checkpoints atomically at batch close.
+    private func prepareIndex(
+        record: CorpusContentRecord, appliedCursor: String?, force: Bool, now: Date,
+        slotScope: SlotScope, maintainCounts: Bool
+    ) async throws -> CorpusIndexState? {
         // Idempotence anchor: when the checkpoint already covers this exact
         // (revision, digest, indexVersion), the derived rows are complete
         // (the checkpoint is advanced LAST) — replaying the change writes
@@ -900,7 +1046,7 @@ public actor CorpusContentEngine {
            existing.revision == record.revision,
            existing.digest == record.digest,
            existing.indexVersion == Self.indexVersion {
-            return
+            return nil
         }
         try await registerClaims(now: now)
         if slotScope == .all {
@@ -974,15 +1120,18 @@ public actor CorpusContentEngine {
         // happens at BATCH boundaries (drain-burst close) and at training
         // commits — never once per record (that was O(N·vocab) write
         // amplification over an import).
-        foldIntoCounts(text: record.text)
+        if maintainCounts {
+            foldIntoCounts(text: record.text)
+        }
 
-        // Checkpoint LAST — derived rows reflect (revision, digest) now.
-        try await indexState.advance(CorpusIndexState(
+        // The caller publishes this checkpoint LAST.
+        let checkpoint = CorpusIndexState(
             contentID: record.id, revision: record.revision, digest: record.digest,
-            indexVersion: Self.indexVersion, appliedCursor: appliedCursor, updatedAt: now))
+            indexVersion: Self.indexVersion, appliedCursor: appliedCursor, updatedAt: now)
         Intellectus.report(.metric(
             name: "corpus.content.indexed", value: 1.0,
             tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+        return checkpoint
     }
 
     /// One index unit: its derived-row key and the text it covers.
@@ -1300,8 +1449,15 @@ public actor CorpusContentEngine {
                 continue
             }
             // Forced: a retrain changes the basis, so vectors must be
-            // rewritten even when the checkpoint already matches.
-            try await index(record: record, appliedCursor: nil, force: true, now: now)
+            // rewritten even when the checkpoint already matches. Counts were
+            // rebuilt from this same full-corpus snapshot by the training pass,
+            // so re-embedding must not fold every record into them a second time.
+            if let checkpoint = try await prepareIndex(
+                record: record, appliedCursor: nil, force: true, now: now,
+                slotScope: .all, maintainCounts: false
+            ) {
+                try await indexState.advance(checkpoint)
+            }
         }
         try await providerConfigurationStore.markCurrent(
             providerGenerationToken(), now: now)

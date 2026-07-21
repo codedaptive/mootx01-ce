@@ -68,6 +68,7 @@ dependencies = [
  "digest 0.10.7",
  "eidetic-lib",
  "genius-locus-kit",
+ "genius-locus-kit-migrations",
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",
@@ -648,6 +649,18 @@ dependencies = [
  "uuid",
  "vectorkit",
  "zeroize",
+]
+
+[[package]]
+name = "genius-locus-kit-migrations"
+version = "0.1.0"
+dependencies = [
+ "corpus-kit",
+ "genius-locus-kit",
+ "persistence-kit",
+ "serde",
+ "serde_json",
+ "vectorkit",
 ]
 
 [[package]]

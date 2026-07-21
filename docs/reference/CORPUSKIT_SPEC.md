@@ -153,7 +153,10 @@ tokenizer concern applied at index/query time, not at storage time.
 **I-7 (cross-port parity):** the Swift and Rust ports produce
 byte-identical canonical results, BM25 rankings, and RRF fusion for every
 shared test vector. The standalone compatibility suite additionally gates chunk
-ids and boundaries. Neither port leads.
+ids and boundaries. Canonical keyword tokens lowercase the whole string and
+fold Greek final sigma U+03C2 to U+03C3 before boundary splitting, preventing
+platform Unicode engines from producing different training bytes. Neither port
+leads.
 
 **I-8 (provider separation):** the core `CorpusKit` target ships only
 the `Tokenizer` protocol; the `EmbeddingProvider` protocol is

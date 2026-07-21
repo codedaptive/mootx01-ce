@@ -41,7 +41,7 @@ struct ProviderCoverageCrashBoundaryTests {
     }
 
     private func basisRow(_ storage: any Storage, _ modelID: String) async throws -> Data? {
-        try await BasisStore(storage: storage).load(modelID: modelID, modelVersion: "1.0.0")?.basis
+        try await BasisStore(storage: storage).load(modelID: modelID, modelVersion: "1.1.0")?.basis
     }
 
     // MARK: 1+2. Training interruption before/after basis publication
@@ -60,7 +60,7 @@ struct ProviderCoverageCrashBoundaryTests {
             }
             #expect(try await basisRow(storage, "random-indexing-v1") == nil)
             #expect(try await CorpusProviderCountsStore(storage: storage)
-                .load(modelID: "random-indexing-v1", modelVersion: "1.0.0") == nil)
+                .load(modelID: "random-indexing-v1", modelVersion: "1.1.0") == nil)
 
             // Resume: retrains from zero, commits once, and the estate
             // reaches full coverage.
@@ -69,7 +69,7 @@ struct ProviderCoverageCrashBoundaryTests {
             #expect(try await engine.coveredCount(modelID: "random-indexing-v1") == 3)
             // The counts row committed atomically with the basis.
             #expect(try await CorpusProviderCountsStore(storage: storage)
-                .load(modelID: "random-indexing-v1", modelVersion: "1.0.0") != nil)
+                .load(modelID: "random-indexing-v1", modelVersion: "1.1.0") != nil)
             _ = blob
         }
     }
@@ -99,6 +99,21 @@ struct ProviderCoverageCrashBoundaryTests {
             #expect(try await basisRow(storage, "ppmi-v1") != nil)
             #expect(try await engine.coveredCount(modelID: "random-indexing-v1") == 3)
             #expect(try await engine.coveredCount(modelID: "ppmi-v1") == 3)
+        }
+    }
+
+    @Test func reindexDoesNotDoubleFoldTheTrainingSnapshotIntoCounts() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try scratchStorage()
+            let engine = try await CorpusContentEngine(
+                standaloneOn: storage,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await docs(engine, 3)
+
+            try await engine.reindex(now: now)
+            let counts = try #require(try await CorpusProviderCountsStore(storage: storage)
+                .load(modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(counts.documentCount == 3)
         }
     }
 

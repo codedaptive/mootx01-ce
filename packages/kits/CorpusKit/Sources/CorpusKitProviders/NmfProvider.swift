@@ -69,7 +69,7 @@
 // ## Constants
 //
 //   NMF_PROJECTION_SEED = 0x4E4D465F56315F4D  ("NMF_V1_M" in ASCII)
-//   Model ID = "nmf-v1",  version = "1.0.0"
+//   Model ID = "nmf-v1",  version = "1.1.0"
 //   Default rank k = 32
 //   Default maxIterations = 100
 //
@@ -151,7 +151,7 @@ public let nmfFactorizationSeed: UInt64 = 0xDEADBEEFCAFEBABE
 /// ## Conformance
 ///
 /// Conforms to `VectorKit.EmbeddingProvider`.
-/// modelID = "nmf-v1", modelVersion = "1.0.0".
+/// modelID = "nmf-v1", modelVersion = "1.1.0".
 /// Projection seed = `nmfProjectionSeed`.
 ///
 /// — NMF latent-factor provider in the classical-
@@ -207,7 +207,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
 
     public init(
         modelID: String = "nmf-v1",
-        modelVersion: String = "1.0.0",
+        modelVersion: String = "1.1.0",
         rank: Int = nmfDefaultRank,
         maxIterations: Int = nmfDefaultIterations,
         seed: UInt64 = nmfFactorizationSeed,

@@ -258,7 +258,7 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
         .expect("enqueue duplicate references");
     engine.await_ingest_drain().expect("drain duplicate batch");
     let counts = CorpusProviderCountsStore::new(Arc::clone(&storage))
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("load counts")
         .expect("counts row");
     assert_eq!(counts.document_count, 2, "duplicate reference folded once");

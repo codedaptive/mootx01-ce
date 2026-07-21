@@ -45,7 +45,7 @@
 //! ## Projection seed
 //!
 //!   RI_PROJECTION_SEED = 0x5249_5F56_315F_4D58  ("RI_V1_MX")
-//!   Model ID = "random-indexing-v1",  version = "1.0.0"
+//!   Model ID = "random-indexing-v1",  version = "1.1.0"
 //!
 //! Swift port: `packages/kits/CorpusKit/Sources/CorpusKitProviders/RandomIndexingProvider.swift`
 //!
@@ -158,7 +158,7 @@ pub fn ri_index_vector(term: &str) -> Vec<f32> {
 /// ## Conformance
 ///
 /// Conforms to `vectorkit::EmbeddingProvider`. `model_id = "random-indexing-v1"`,
-/// `model_version = "1.0.0"`. Projection seed = `RI_PROJECTION_SEED`.
+/// `model_version = "1.1.0"`. Projection seed = `RI_PROJECTION_SEED`.
 ///
 /// honest semantic fusion, signal #2 — the first honest distributional provider
 /// in the dense recall lane.
@@ -175,10 +175,10 @@ pub struct RandomIndexingProvider {
 
 impl RandomIndexingProvider {
     /// Build an untrained provider with the canonical defaults:
-    /// `model_id = "random-indexing-v1"`, `model_version = "1.0.0"`,
+    /// `model_id = "random-indexing-v1"`, `model_version = "1.1.0"`,
     /// projection seed = `RI_PROJECTION_SEED`.
     pub fn new() -> Self {
-        Self::with_parameters("random-indexing-v1", "1.0.0", RI_PROJECTION_SEED)
+        Self::with_parameters("random-indexing-v1", "1.1.0", RI_PROJECTION_SEED)
     }
 
     /// Build with explicit identity and projection seed.

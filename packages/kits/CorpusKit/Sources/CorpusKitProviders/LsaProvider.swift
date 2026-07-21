@@ -68,7 +68,7 @@
 //
 //   LSA_DIMENSION = configured at training time via `rank` (default 64)
 //   LSA_PROJECTION_SEED = 0x4C53415F56315F4D  ("LSA_V1_M" in ASCII)
-//   Model ID = "lsa-v1",  version = "1.0.0"
+//   Model ID = "lsa-v1",  version = "1.1.0"
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/lsa.rs
 //
@@ -140,7 +140,7 @@ public let lsaDefaultRank: Int = 64
 /// ## Conformance
 ///
 /// Conforms to `VectorKit.EmbeddingProvider`.
-/// modelID = "lsa-v1", modelVersion = "1.0.0".
+/// modelID = "lsa-v1", modelVersion = "1.1.0".
 /// Projection seed = `lsaProjectionSeed`.
 ///
 /// honest semantic fusion, signal #1 — LSA/SVD provider in the classical-
@@ -191,7 +191,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
 
     public init(
         modelID: String = "lsa-v1",
-        modelVersion: String = "1.0.0",
+        modelVersion: String = "1.1.0",
         rank: Int = lsaDefaultRank,
         svdSweeps: Int = 30,
         projectionSeed: UInt64 = lsaProjectionSeed,

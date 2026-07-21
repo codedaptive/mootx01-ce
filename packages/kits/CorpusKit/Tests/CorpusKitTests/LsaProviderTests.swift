@@ -208,7 +208,7 @@ struct LsaProviderTests {
     func conformsToEmbeddingProvider() async throws {
         let p: any EmbeddingProvider = trainedProvider()
         #expect(p.modelID == "lsa-v1")
-        #expect(p.modelVersion == "1.0.0")
+        #expect(p.modelVersion == "1.1.0")
         let eng = try await p.embed("car")
         // Should not throw; result may be .zero if "car" alone is too sparse.
         _ = eng

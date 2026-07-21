@@ -162,6 +162,25 @@ use crate::estate_manifest_policy_store::{
     EstateManifestDreamingPolicyStore, EstateManifestMaintenancePolicyStore,
 };
 use crate::governor_topology_sink::GovernorTopologySink;
+use crate::dreaming_cycle::CorpusGrowthProbe;
+
+/// Production vocabulary-growth adapter over the attached GLK Corpus engine.
+/// Closures keep NeuronKit from naming CorpusKit types directly while still
+/// binding the generic growth gate to the live estate registered in GLK.
+struct EstateCorpusGrowthProbe {
+    vocab_anchor: Box<dyn Fn() -> i64 + Send + Sync>,
+    reindex: Box<dyn Fn(f64) -> bool + Send + Sync>,
+}
+
+impl CorpusGrowthProbe for EstateCorpusGrowthProbe {
+    fn vocab_anchor(&self) -> i64 {
+        (self.vocab_anchor)()
+    }
+
+    fn reindex(&mut self, now_epoch_secs: f64) -> bool {
+        (self.reindex)(now_epoch_secs)
+    }
+}
 
 // ── Default constants ─────────────────────────────────────────────────────────
 
@@ -1341,6 +1360,40 @@ impl AutonomicGovernor {
             // Coordinator lock released here (end of block).
             (dreaming_fired, maintenance_fired)
         };
+
+        // AUTO-REINDEX: bind the generic NeuronKit growth gate to the live
+        // attached Corpus engine after releasing the coordinator lock. A full
+        // retrain can take minutes at estate scale and must not block every GLK
+        // verb behind the coordinator mutex while it runs.
+        if dreaming_fired {
+            let corpus = self
+                .coord
+                .lock()
+                .ok()
+                .and_then(|coord| coord.corpus_for(&self.handle));
+            if let Some(corpus) = corpus {
+                let vocab_corpus = Arc::clone(&corpus);
+                let reindex_corpus = Arc::clone(&corpus);
+                let mut probe = EstateCorpusGrowthProbe {
+                    vocab_anchor: Box::new(move || {
+                        vocab_corpus.maintained_vocab_anchor() as i64
+                    }),
+                    reindex: Box::new(move |now_secs| {
+                        match reindex_corpus.reindex((now_secs * 1_000.0).round() as i64) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                eprintln!(
+                                    "AutonomicGovernor: corpus growth retrain failed: {error:?}"
+                                );
+                                false
+                            }
+                        }
+                    }),
+                };
+                self.dreaming
+                    .check_corpus_growth(now_epoch_secs, &mut probe);
+            }
+        }
 
         // ── Persist daemon cycle state ──────────────────────
         // After the coordinator lock is released, persist each daemon's

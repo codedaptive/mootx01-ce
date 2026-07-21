@@ -262,6 +262,47 @@ struct CorpusContentEngineTests {
         }
     }
 
+    @Test func queueBatchCommitsCheckpointBeforeReplayBecomesNoOp() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            let record = try await store.put(
+                "Queue checkpoint content.", id: "drawer-queue", now: now)
+            let engine = try await CorpusContentEngine(
+                storage: storage,
+                configuration: try CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: store,
+                models: [.deterministic])
+            let job = ContentIndexJob(
+                change: .upsert(
+                    id: record.id, revision: record.revision, digest: record.digest),
+                cursor: "41")
+
+            let first = try await engine.prepareQueueJob(
+                job, now: now, contentAlreadyPrepared: false)
+            #expect(first.checkpoints.count == 2)
+            try await engine.commitQueueBatch(
+                checkpoints: first.checkpoints,
+                countsUpdates: first.countsUpdate.map { [$0] } ?? [],
+                now: now)
+            #expect(try await engine.indexedContentIDs() == ["drawer-queue"])
+            #expect(try await engine.appliedFeedCursor() == "41")
+
+            // A terminal queue-reply failure can replay the durable reference.
+            // The committed content checkpoint makes the derived work and counts
+            // fold a no-op; only the idempotent feed-cursor checkpoint remains.
+            let replay = try await engine.prepareQueueJob(
+                job, now: now, contentAlreadyPrepared: false)
+            #expect(replay.countsUpdate == nil)
+            #expect(replay.checkpoints.count == 1)
+            try await engine.commitQueueBatch(
+                checkpoints: replay.checkpoints, countsUpdates: [], now: now)
+            #expect(try await engine.indexedContentIDs() == ["drawer-queue"])
+        }
+    }
+
     // MARK: - Standalone passages
 
     @Test func passageModeIndexesRangesAndAggregatesToContentID() async throws {

@@ -5625,7 +5625,7 @@ impl EstateCoordinator {
     /// - `embedding_models`: The recall ensemble passed to `Corpus::open_many`.
     ///                       Production callers pass
     ///                       `corpus_kit_providers::default_ensemble()` (the
-    ///                       canonical 1.0 five-signal default: RI/PPMI/LSA/NMF/FDC).
+    ///                       canonical five-signal default: RI/PPMI/LSA/NMF/FDC).
     ///                       Rust has no default arguments, so the caller supplies
     ///                       the Vec explicitly; the app layer owns the default. A
     ///                       single-element `vec![EmbeddingModelConfig::Deterministic]`

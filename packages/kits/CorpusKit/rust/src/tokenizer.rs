@@ -31,16 +31,16 @@ pub trait Tokenizer: Send + Sync {
     }
 }
 
-/// Default keyword tokenization: lowercase each Unicode scalar independently
-/// and split on Unicode-alphabetic / ASCII-digit boundaries. Scalar-local
-/// casing is deliberate: whole-string Unicode special casing turns Greek Σ
-/// into context-dependent σ/ς differently across Foundation and Rust.
+/// Default keyword tokenization: lowercase and split on Unicode-alphabetic /
+/// ASCII-digit boundaries. The contextual Greek final-sigma form is folded to
+/// U+03C3 so the canonical token bytes do not depend on the platform Unicode
+/// engine.
 pub fn default_keyword_tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
-    for c in text.chars().flat_map(char::to_lowercase) {
+    for c in text.to_lowercase().chars() {
         if c.is_alphabetic() || c.is_ascii_digit() {
-            current.push(c);
+            current.push(if c == '\u{03C2}' { '\u{03C3}' } else { c });
         } else if !current.is_empty() {
             out.push(std::mem::take(&mut current));
         }

@@ -77,6 +77,23 @@ fn fresh_ri_corpus(storage: Arc<dyn Storage>) -> Corpus {
     .expect("Corpus::open must succeed")
 }
 
+/// The shared alpha fixture pins the historical 1.0 provider envelope. Keep
+/// that fixture useful while production defaults advance to 1.1 to invalidate
+/// bases trained with the pre-correction tokenizer contract.
+fn legacy_ri_corpus(storage: Arc<dyn Storage>) -> Corpus {
+    Corpus::open(
+        storage,
+        EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::with_parameters(
+                "random-indexing-v1",
+                "1.0.0",
+                corpus_kit_providers::RI_PROJECTION_SEED,
+            )),
+        },
+    )
+    .expect("Corpus::open legacy fixture provider must succeed")
+}
+
 // ── §2 reindex persists a basis ──
 
 #[test]
@@ -93,7 +110,7 @@ fn reindex_persists_basis() {
 
     let store = BasisStore::new(storage_at(&path));
     let loaded = store
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("load")
         .expect("basis row must exist after reindex");
     assert_eq!(loaded.trained_chunk_count, RI_DOCS.len());
@@ -109,13 +126,13 @@ fn first_ingest_auto_trains_and_persists() {
     let store = BasisStore::new(storage_at(&path));
 
     assert!(
-        store.load("random-indexing-v1", "1.0.0").expect("load").is_none(),
+        store.load("random-indexing-v1", "1.1.0").expect("load").is_none(),
         "no basis before first ingest"
     );
 
     corpus.ingest(RI_DOCS[0], "doc-0", NOW_MILLIS).expect("ingest 0");
     let after_first = store
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("load")
         .expect("basis after first ingest");
     let count_after_first = after_first.trained_chunk_count;
@@ -123,7 +140,7 @@ fn first_ingest_auto_trains_and_persists() {
     // A SECOND ingest must NOT retrain — the basis row (chunk count) is unchanged.
     corpus.ingest(RI_DOCS[1], "doc-1", NOW_MILLIS).expect("ingest 1");
     let after_second = store
-        .load("random-indexing-v1", "1.0.0")
+        .load("random-indexing-v1", "1.1.0")
         .expect("load")
         .expect("basis after second ingest");
     assert_eq!(after_second.trained_chunk_count, count_after_first);
@@ -142,11 +159,11 @@ fn destroy_recall_index_wipes_basis() {
     corpus.reindex(NOW_MILLIS).expect("reindex");
 
     let store = BasisStore::new(storage_at(&path));
-    assert!(store.load("random-indexing-v1", "1.0.0").expect("load").is_some());
+    assert!(store.load("random-indexing-v1", "1.1.0").expect("load").is_some());
 
     corpus.destroy_recall_index().expect("destroy");
     assert!(
-        store.load("random-indexing-v1", "1.0.0").expect("load").is_none(),
+        store.load("random-indexing-v1", "1.1.0").expect("load").is_none(),
         "destroy must wipe the basis row (no orphans)"
     );
 }
@@ -243,7 +260,7 @@ fn cross_port_persist_reopen_embed() {
     // byte-for-byte. Training fresh (reconstruct from the empty blob) makes the
     // basis the canonical from-scratch one, matching the Swift port.
     {
-        let corpus = fresh_ri_corpus(storage_at(&path));
+        let corpus = legacy_ri_corpus(storage_at(&path));
         for (i, doc) in RI_DOCS.iter().enumerate() {
             corpus.ingest(doc, &format!("doc-{i}"), NOW_MILLIS).expect("ingest");
         }
@@ -264,7 +281,7 @@ fn cross_port_persist_reopen_embed() {
     // provider from the persisted basis. The reopened corpus's embedding of the
     // fixed probe must equal the α canonical bit patterns. This proves
     // persist → reopen → embed is cross-port deterministic.
-    let reopened = fresh_ri_corpus(storage_at(&path));
+    let reopened = legacy_ri_corpus(storage_at(&path));
     let after = reopened.embed_float(probe).expect("embed_float");
     let after_bits: Vec<u32> = after.iter().map(|f| f.to_bits()).collect();
     assert_eq!(
@@ -278,7 +295,7 @@ fn cross_port_persist_reopen_embed() {
 use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
 
 const RI_MODEL_ID: &str = "random-indexing-v1";
-const RI_MODEL_VERSION: &str = "1.0.0";
+const RI_MODEL_VERSION: &str = "1.1.0";
 
 #[test]
 fn ingest_persists_counts_with_growing_anchor() {

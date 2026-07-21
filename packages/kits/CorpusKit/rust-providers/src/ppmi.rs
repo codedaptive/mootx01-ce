@@ -40,7 +40,7 @@
 //! ## Projection seed
 //!
 //!   PPMI_PROJECTION_SEED = 0x5050_4D49_5F56_314D  ("PPMI_V1M")
-//!   Model ID = "ppmi-v1",  version = "1.0.0"
+//!   Model ID = "ppmi-v1",  version = "1.1.0"
 //!
 //! The seed MUST differ from `RI_PROJECTION_SEED` so PPMI and RI engrams
 //! key to different storage buckets when both providers coexist.
@@ -123,7 +123,7 @@ pub const PPMI_COUNTS_MAGIC: &[u8; 4] = b"PPMC";
 /// ## Conformance
 ///
 /// Conforms to `vectorkit::EmbeddingProvider`.
-/// `model_id = "ppmi-v1"`, `model_version = "1.0.0"`.
+/// `model_id = "ppmi-v1"`, `model_version = "1.1.0"`.
 /// Projection seed = `PPMI_PROJECTION_SEED`.
 ///
 /// honest semantic fusion, signal #3 — PPMI co-occurrence provider in the
@@ -157,10 +157,10 @@ pub struct PpmiProvider {
 
 impl PpmiProvider {
     /// Build an untrained provider with the canonical defaults:
-    /// `model_id = "ppmi-v1"`, `model_version = "1.0.0"`,
+    /// `model_id = "ppmi-v1"`, `model_version = "1.1.0"`,
     /// projection seed = `PPMI_PROJECTION_SEED`.
     pub fn new() -> Self {
-        Self::with_parameters("ppmi-v1", "1.0.0", PPMI_PROJECTION_SEED)
+        Self::with_parameters("ppmi-v1", "1.1.0", PPMI_PROJECTION_SEED)
     }
 
     /// Build with explicit identity and projection seed.

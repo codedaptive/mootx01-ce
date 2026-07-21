@@ -528,10 +528,16 @@ public protocol Tokenizer: Sendable {
     func keywordTokens(_ text: String) -> [String]
 }
 public extension Tokenizer {
-    // default: lowercase, split on Unicode word boundaries
+    // default: lowercase, fold final sigma U+03C2 to U+03C3,
+    // then split on Unicode-alphabetic / ASCII-digit boundaries
     func keywordTokens(_ text: String) -> [String]
 }
 ```
+
+The final-sigma fold is part of the cross-port canonical-token contract.
+Because it changes training input for RI, PPMI, LSA, and NMF, their production
+defaults use model version `1.1.0`; persisted `1.0.0` bases are not reused.
+FDC is stateless and remains `1.0.0`.
 
 **Rust:**
 
@@ -713,8 +719,8 @@ public func riIndexVector(term: String) -> [Float]
 
 public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendable {
     public let modelID: String              // default "random-indexing-v1"
-    public let modelVersion: String         // default "1.0.0"
-    public init(modelID: String = "random-indexing-v1", modelVersion: String = "1.0.0",
+    public let modelVersion: String         // default "1.1.0"
+    public init(modelID: String = "random-indexing-v1", modelVersion: String = "1.1.0",
                 dimension: Int = riDimension, nonzeros: Int = riNonzeros,
                 window: Int = riWindow, projectionSeed: UInt64 = riProjectionSeed)
     public func train(terms: [String], window: Int = riWindow)
@@ -741,7 +747,7 @@ public let ppmiProjectionSeed: UInt64       // 0x5050_4D49_5F56_314D ("PPMI_V1M"
 public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     public let modelID: String              // default "ppmi-v1"
     public let modelVersion: String
-    public init(modelID: String = "ppmi-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "ppmi-v1", modelVersion: String = "1.1.0",
                 dimension: Int = ppmiDimension, nonzeros: Int = ppmiNonzeros,
                 window: Int = ppmiWindow, projectionSeed: UInt64 = ppmiProjectionSeed)
     public func train(terms: [String], window: Int = ppmiWindow)
@@ -766,7 +772,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     public let rank: Int                    // SVD rank (default lsaDefaultRank)
     public let reducedVocabCap: Int         // vocabulary cap before SVD
     public let svdSweeps: Int               // Jacobi sweep count
-    public init(modelID: String = "lsa-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "lsa-v1", modelVersion: String = "1.1.0",
                 rank: Int = lsaDefaultRank, reducedVocabCap: Int = 8192,
                 svdSweeps: Int = 30, projectionSeed: UInt64 = lsaProjectionSeed)
     public func train(document: String)     // accumulate one document's TF
@@ -796,7 +802,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     public let reducedVocabCap: Int
     public let maxIterations: Int           // default nmfDefaultIterations
     public let seed: UInt64                 // NMF random init seed (default nmfFactorizationSeed)
-    public init(modelID: String = "nmf-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "nmf-v1", modelVersion: String = "1.1.0",
                 rank: Int = nmfDefaultRank, reducedVocabCap: Int = 8192,
                 maxIterations: Int = nmfDefaultIterations,
                 seed: UInt64 = nmfFactorizationSeed,

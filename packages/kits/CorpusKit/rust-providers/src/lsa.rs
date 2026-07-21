@@ -26,7 +26,7 @@
 //! ## Constants
 //!
 //!   LSA_PROJECTION_SEED = 0x4C53415F56315F4D  ("LSA_V1_M" in ASCII)
-//!   Model ID = "lsa-v1",  version = "1.0.0"
+//!   Model ID = "lsa-v1",  version = "1.1.0"
 //!   Default rank = 64
 //!   SVD sweeps = 30 (pinned for cross-port bit-identity)
 //!
@@ -152,7 +152,7 @@ impl LsaProvider {
     pub fn new(rank: usize, svd_sweeps: usize, projection_seed: u64) -> Self {
         LsaProvider {
             model_id: "lsa-v1".to_string(),
-            model_version: "1.0.0".to_string(),
+            model_version: "1.1.0".to_string(),
             rank: rank.max(1),
             svd_sweeps,
             projection_seed,
