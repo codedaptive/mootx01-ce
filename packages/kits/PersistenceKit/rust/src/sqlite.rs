@@ -905,17 +905,143 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     for index in &schema.indices {
         exec(&create_index_sql(index))?;
     }
-    // Record the schema version (kit-scoped).
-    conn.execute(
-        r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at") VALUES (?, ?, ?)
-           ON CONFLICT("kit_id") DO UPDATE SET "version" = excluded.version, "applied_at" = excluded.applied_at"#,
-        params_from_iter(vec![
-            SqlValue::Text(schema.kit_id.clone()),
-            SqlValue::Integer(schema.version as i64),
-            SqlValue::Text(iso8601(0)),
-        ]),
-    )
-    .map_err(|e| StorageError::BackendError { underlying: format!("record version: {e}") })?;
+
+    // Execute pending DECLARED migration steps (Swift `applyMigrations`
+    // parity — GLK shared-content 1.1 P4 closed the gap where this backend
+    // silently ignored `SchemaDeclaration.migrations`, so declared
+    // dropTable/addColumn retirements never ran on Rust SQLite estates).
+    let record_version = |conn: &rusqlite::Connection, version: i32| -> StorageResult<()> {
+        conn.execute(
+            r#"INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at") VALUES (?, ?, ?)
+               ON CONFLICT("kit_id") DO UPDATE SET "version" = excluded.version, "applied_at" = excluded.applied_at"#,
+            params_from_iter(vec![
+                SqlValue::Text(schema.kit_id.clone()),
+                SqlValue::Integer(version as i64),
+                SqlValue::Text(iso8601(0)),
+            ]),
+        )
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("record version: {e}"),
+        })
+        .map(|_| ())
+    };
+    let current_version = |conn: &rusqlite::Connection| -> i32 {
+        conn.query_row(
+            r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = ?"#,
+            [schema.kit_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v as i32)
+        .unwrap_or(0)
+    };
+
+    let current = current_version(conn);
+    if current < schema.version {
+        let mut pending: Vec<&crate::schema::Migration> = schema
+            .migrations
+            .iter()
+            .filter(|m| m.from_version >= current && m.to_version <= schema.version)
+            .collect();
+        pending.sort_by_key(|m| m.from_version);
+        for migration in pending {
+            for op in &migration.operations {
+                apply_migration_operation(conn, op)?;
+            }
+            record_version(conn, migration.to_version)?;
+        }
+        let final_version = current_version(conn);
+        if final_version < schema.version {
+            record_version(conn, schema.version)?;
+        }
+    }
+
+    // Keep the accumulated schema view coherent with dropped tables.
+    if let Some(existing) = &mut inner.schema {
+        let dropped: Vec<String> = schema
+            .migrations
+            .iter()
+            .flat_map(|m| m.operations.iter())
+            .filter_map(|op| match op {
+                crate::schema::SchemaOperation::DropTable { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        if !dropped.is_empty() {
+            existing.tables.retain(|t| !dropped.contains(&t.name));
+        }
+    }
+    Ok(())
+}
+
+/// Execute one declared migration operation (Swift `applyOperation` parity).
+fn apply_migration_operation(
+    conn: &rusqlite::Connection,
+    op: &crate::schema::SchemaOperation,
+) -> StorageResult<()> {
+    use crate::schema::SchemaOperation as Op;
+    let exec = |sql: &str| {
+        conn.execute_batch(sql)
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("migration ddl: {e}"),
+            })
+    };
+    match op {
+        Op::CreateTable(decl) => {
+            exec(&create_table_sql(decl))?;
+            for trigger in append_only_triggers(decl) {
+                exec(&trigger)?;
+            }
+        }
+        Op::DropTable { name } => exec(&format!("DROP TABLE IF EXISTS \"{name}\""))?,
+        Op::AddColumn { table, column } => {
+            // Idempotent: skip when present (fresh DBs create the latest
+            // layout before replaying migrations).
+            let exists: bool = conn
+                .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                .and_then(|mut stmt| {
+                    let mut rows = stmt.query([])?;
+                    while let Some(row) = rows.next()? {
+                        let name: String = row.get(1)?;
+                        if name == column.name {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .unwrap_or(false);
+            if !exists {
+                let mut sql = format!(
+                    "ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}",
+                    column.name,
+                    native_type(column.column_type)
+                );
+                if !column.nullable {
+                    sql.push_str(" NOT NULL DEFAULT ");
+                    sql.push_str(&default_literal_sql(
+                        column.default_value.as_ref().unwrap_or(&TypedValue::Null),
+                    ));
+                }
+                exec(&sql)?;
+            }
+        }
+        Op::DropColumn { table, column_name } => {
+            exec(&format!(
+                "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
+            ))?
+        }
+        Op::RenameColumn { table, from, to } => {
+            exec(&format!(
+                "ALTER TABLE \"{table}\" RENAME COLUMN \"{from}\" TO \"{to}\""
+            ))?
+        }
+        Op::AddIndex(decl) => exec(&create_index_sql(decl))?,
+        Op::DropIndex { name } => exec(&format!("DROP INDEX IF EXISTS \"{name}\""))?,
+        Op::Custom { sqlite, .. } => {
+            if let Some(sql) = sqlite {
+                exec(sql)?;
+            }
+        }
+    }
     Ok(())
 }
 

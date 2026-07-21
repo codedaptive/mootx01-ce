@@ -752,6 +752,9 @@ pub struct EstateCoordinator {
     ///
     /// Mirrors Swift actor's `storages: [EstateHandle: any Storage]`.
     pub(crate) storages: HashMap<EstateHandle, Arc<dyn Storage>>,
+    /// Shared-content migration fault-injection seam (P4 resume proofs).
+    pub(crate) shared_content_fault_after:
+        Option<crate::shared_content_migration::SharedContentMigrationState>,
 
     /// Per-estate active sync engine entry (ConvergenceKit backend + label).
     ///
@@ -882,6 +885,7 @@ impl EstateCoordinator {
             node_topology_providers: HashMap::new(),
             node_stores: HashMap::new(),
             storages: HashMap::new(),
+            shared_content_fault_after: None,
             sync_engines: HashMap::new(),
             dreaming_queues: RefCell::new(HashMap::new()),
             // Test seams start clear; only `inject_*` methods set them.
@@ -5711,6 +5715,22 @@ impl EstateCoordinator {
         // falls back to the primary `storage` when no separate corpus_storage is supplied.
         let backing_storage = corpus_storage.unwrap_or(storage);
         let wiring_result = match params.kind {
+            EstateKind::Glk if Self::shared_content_lane_must_stay_dark(&backing_storage) => {
+                // Shared-content dark-lane gate (P4): a legacy pre-cutover
+                // estate keeps its Corpus lane DARK until the resumable
+                // migration reaches Verified. LocusKit recall stays
+                // available; the migration verb lights the lane.
+                eprintln!(
+                    "mootx01: estate carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes"
+                );
+                Ok((None, None))
+            }
+            EstateKind::CorpusOnly if Self::shared_content_lane_must_stay_dark(&backing_storage) => {
+                eprintln!(
+                    "mootx01: estate carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes"
+                );
+                Ok((None, None))
+            }
             EstateKind::Glk => {
                 // Full composition: the ATTACHED-mode CorpusContentEngine
                 // (BM25 + internal vectors, Drawer-ID keyed) + standalone

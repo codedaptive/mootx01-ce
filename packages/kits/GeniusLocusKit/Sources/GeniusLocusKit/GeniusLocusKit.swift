@@ -100,6 +100,10 @@ public actor GeniusLocusKit {
     /// `hybrid` BM25/vector lanes. Dropped when the estate is closed.
     internal var corpusKits: [EstateHandle: CorpusContentEngine] = [:]
 
+    /// Shared-content migration fault-injection seam (P4 resume proofs).
+    /// nil in production; the migration runner consumes it single-use.
+    internal var _sharedContentFaultAfterStorage: SharedContentMigrationState? = nil
+
     /// Per-estate `VectorStore` instances for Hamming nearest-neighbour recall.
     ///
     /// Populated via `registerVectorStore(_:for:)`. Expected to be keyed by

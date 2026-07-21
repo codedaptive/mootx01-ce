@@ -371,6 +371,15 @@ public extension GeniusLocusKit {
             // composite open the hydrate launch path performs in
             // open(inMemory:hydrateFrom:).
             try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            // Shared-content dark-lane gate (P4): a legacy pre-cutover
+            // estate keeps its Corpus lane DARK until the resumable
+            // migration reaches `verified`. LocusKit recall stays available;
+            // the admin migration verb lights the lane.
+            if await sharedContentLaneMustStayDark(storage: backingStorage) {
+                Self.lifecycleLog.warning(
+                    "estate \(handle.estateUUID, privacy: .public) carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes")
+                return
+            }
             // Full composition: the attached-mode CorpusContentEngine (BM25 +
             // internal vectors, Drawer-ID keyed) + standalone VectorStore.
             // EVERY GLK Corpus is constructed attached + .wholeContent — the
@@ -410,6 +419,12 @@ public extension GeniusLocusKit {
             )
 
         case .corpusOnly:
+            // Same shared-content dark-lane gate as the .glk arm.
+            if await sharedContentLaneMustStayDark(storage: backingStorage) {
+                Self.lifecycleLog.warning(
+                    "estate \(handle.estateUUID, privacy: .public) carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes")
+                return
+            }
             // LocusKit core + the attached engine. No standalone VectorStore
             // registration. Same attached + .wholeContent construction rule.
             let estateObj = try estate(for: handle)
