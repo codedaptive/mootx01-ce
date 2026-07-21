@@ -70,7 +70,7 @@ pub fn default_standing_signal_names() -> [&'static str; 10] {
 pub fn default_standing_signal_specs(
     vector_store: Arc<VectorStore>,
     model_id: impl Into<String>,
-    corpus: Option<Arc<corpus_kit::corpus::Corpus>>,
+    corpus: Option<Arc<corpus_kit::CorpusContentEngine>>,
 ) -> Vec<SignalSpec> {
     vec![
         // No-op daemon cycle: returns zero proposals. Callers that have a live

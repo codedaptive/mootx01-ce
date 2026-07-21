@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, Corpus, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath};
 use locus_kit::adjectives::State;
@@ -51,10 +51,10 @@ fn cap_frame(content: &str, room: &str) -> CaptureFrame {
     )
 }
 
-fn make_corpus() -> Arc<Corpus> {
+fn make_corpus() -> Arc<CorpusContentEngine> {
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
-    Arc::new(Corpus::open(storage, EmbeddingModelConfig::Deterministic).expect("Corpus::open"))
+    Arc::new(CorpusContentEngine::standalone_on(storage, vec![EmbeddingModelConfig::Deterministic]).expect("Corpus::open"))
 }
 
 /// corpusOnly request with an optional state-axis override appended to the chain.

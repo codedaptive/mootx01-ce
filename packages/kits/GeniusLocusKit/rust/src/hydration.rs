@@ -129,7 +129,13 @@ use uuid::Uuid;
 pub fn composite_schema() -> SchemaDeclaration {
     let lk = locus_kit::schema::schema();
     let vk = vectorkit::VectorStore::schema_declaration();
-    let ck = corpus_kit::BundleStore::schema_declaration();
+    // Shared-content 1.1: the composite carries the CorpusKit ATTACHED
+    // profile (derived state only, Drawer-ID keyed) plus the VectorKit
+    // representation-claims ledger — NO canonical content table. The legacy
+    // BundleStore chunks/corpus_metadata copy lane is gone from fresh
+    // estates and retired by the shared-content migration on existing ones.
+    let ck = corpus_kit::attached_declaration();
+    let claims = vectorkit::VectorRepresentationClaims::schema_declaration();
 
     // Composite version = sum of the three GLK-composed component versions
     // plus two GLK-owned addends:
@@ -145,7 +151,7 @@ pub fn composite_schema() -> SchemaDeclaration {
     // copied number (stale-literal rule, GLK shared-content 1.1 P0).
     let grants_schema_version = 1;
     let matrix_snapshot_schema_version = MatrixSnapshotStore::schema_declaration().version;
-    let composite_version = lk.version + vk.version + ck.version
+    let composite_version = lk.version + vk.version + claims.version + ck.version
         + grants_schema_version
         + matrix_snapshot_schema_version;
 
@@ -154,6 +160,7 @@ pub fn composite_schema() -> SchemaDeclaration {
     let mut tables = Vec::new();
     tables.extend(lk.tables);
     tables.extend(vk.tables);
+    tables.extend(claims.tables);
     tables.extend(ck.tables);
     tables.push(GrantStore::grants_table());
     // matrix_snapshot: must be last so version ordering matches Swift composite.
@@ -162,6 +169,7 @@ pub fn composite_schema() -> SchemaDeclaration {
     let mut indices = Vec::new();
     indices.extend(lk.indices);
     indices.extend(vk.indices);
+    indices.extend(claims.indices);
     indices.extend(ck.indices);
 
     SchemaDeclaration {
@@ -198,11 +206,12 @@ mod composite_version_tests {
     fn composite_version_equals_component_sum() {
         let lk = locus_kit::schema::SCHEMA_VERSION;
         let vk = vectorkit::VectorStore::schema_declaration().version;
-        let ck = corpus_kit::BundleStore::schema_declaration().version;
+        let claims = vectorkit::VectorRepresentationClaims::schema_declaration().version;
+        let ck = corpus_kit::attached_declaration().version;
         let mx = MatrixSnapshotStore::schema_declaration().version;
         let s = composite_schema();
         // Two GLK-owned addends: +1 grants, +matrix_snapshot version.
-        assert_eq!(s.version, lk + vk + ck + 1 + mx);
+        assert_eq!(s.version, lk + vk + claims + ck + 1 + mx);
         assert!(s.tables.iter().any(|t| t.name == "grants"));
         // matrix_snapshot must be in composite for hydration to copy it from durable storage
         assert!(s.tables.iter().any(|t| t.name == "matrix_snapshot"));

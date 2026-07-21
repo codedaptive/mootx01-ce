@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, Corpus, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath, RecallShape,
@@ -58,10 +58,10 @@ fn cap_frame(content: &str) -> CaptureFrame {
     )
 }
 
-fn make_corpus() -> Arc<Corpus> {
+fn make_corpus() -> Arc<CorpusContentEngine> {
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
-    Arc::new(Corpus::open(storage, EmbeddingModelConfig::Deterministic).expect("Corpus::open"))
+    Arc::new(CorpusContentEngine::standalone_on(storage, vec![EmbeddingModelConfig::Deterministic]).expect("Corpus::open"))
 }
 
 fn make_vector_store() -> Arc<VectorStore> {
@@ -89,7 +89,7 @@ fn estate_with_drawers(
         corpus.ingest(&drawer.content, &drawer.id, NOW).expect("ingest");
         let engram = corpus.embed(&drawer.content).expect("embed");
         vector_store
-            .add_vector(&drawer.id, &engram, corpus.model_id(), "1", NOW)
+            .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
             .expect("add_vector");
         ids.push(drawer.id);
     }

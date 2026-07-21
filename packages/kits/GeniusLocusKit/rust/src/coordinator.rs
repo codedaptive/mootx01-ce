@@ -62,7 +62,11 @@ use convergence_kit::types::SyncState;
 use crate::telemetry::metric_names;
 use crate::glk_emit;
 
-use corpus_kit::corpus::{Corpus, EmbeddingModelConfig, EncodeSpeed};
+use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
+use corpus_kit::{
+    CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy, CorpusOperatingMode,
+};
+use crate::intake::LocusDrawerContentSource;
 use engram_lib::Engram;
 use vectorkit::vector_store::{VectorMatch, VectorStore};
 use persistence_kit::storage::{Storage, BackendConfiguration};
@@ -658,7 +662,7 @@ pub struct EstateCoordinator {
     scope_vaults: HashMap<EstateHandle, ScopeKeyVault>,
     /// Per-estate CorpusKit handles. Optional; activates BM25 lane in recall_scored.
     /// Mirrors Swift actor's `corpusKits: [EstateHandle: Corpus]`.
-    corpus_kits: HashMap<EstateHandle, Arc<Corpus>>,
+    corpus_kits: HashMap<EstateHandle, Arc<CorpusContentEngine>>,
     /// Per-estate VectorKit handles. Optional; activates vector lane in recall_scored.
     /// Mirrors Swift actor's `vectorStores: [EstateHandle: VectorStore]`.
     /// `pub(crate)` so `intake.rs` can access it without routing through a public
@@ -1415,7 +1419,7 @@ impl EstateCoordinator {
     /// CorpusOnly, and UnionBest modes. Replaces any previously registered
     /// corpus for this handle (idempotent). Mirrors Swift
     /// `GeniusLocusKit.registerCorpus(_:for:)`.
-    pub fn register_corpus(&mut self, handle: &EstateHandle, corpus: Arc<Corpus>) {
+    pub fn register_corpus(&mut self, handle: &EstateHandle, corpus: Arc<CorpusContentEngine>) {
         self.corpus_kits.insert(*handle, corpus);
     }
 
@@ -1556,7 +1560,7 @@ impl EstateCoordinator {
     /// mine the chunk-keyed corpus lane — the vector-row population
     /// production estates actually hold. Mirrors the Swift actor's
     /// `corpusKits[handle]` lookup.
-    pub fn corpus_for(&self, handle: &EstateHandle) -> Option<Arc<Corpus>> {
+    pub fn corpus_for(&self, handle: &EstateHandle) -> Option<Arc<CorpusContentEngine>> {
         self.corpus_kits.get(handle).map(Arc::clone)
     }
 
@@ -1716,45 +1720,40 @@ impl EstateCoordinator {
             // silently omits corpus attestations on a CorpusKit read failure
             // misrepresents the estate's integrity state (secfix/ws2-coredelete
             // §Cluster E, "fail-open on CorpusKit errors" finding).
-            let source_ids = corpus
-                .indexed_source_ids()
-                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                    reason: format!("create_composed_snapshot: indexed_source_ids failed: {:?}", e),
-                })?;
-            let mut sorted: Vec<_> = source_ids.into_iter().collect();
-            sorted.sort();
-            for source_id in &sorted {
-                let root = corpus
-                    .corpus_merkle_root(source_id)
-                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                        reason: format!(
-                            "create_composed_snapshot: corpus_merkle_root failed for {}: {:?}",
-                            source_id, e
-                        ),
-                    })?;
-                corpus_attestations.push(locus_kit::merkle_rollup::SnapshotAttestation {
-                    snapshot_id: locus_kit::merkle_rollup::SnapshotId::new(""),
-                    subject_kind: "corpus".to_string(),
-                    subject_id: source_id.clone(),
-                    merkle_root: root.hex_string(),
-                    key_version: None,
-                });
-            }
-
-            // Global corpus attestation.
-            let global_root = corpus
-                .global_corpus_merkle_root()
+            // Shared-content 1.1: canonical-content integrity is the LocusKit
+            // Drawer content root — CorpusKit builds NO second content Merkle
+            // hierarchy. The engine attests derived-index COVERAGE instead:
+            // per content ID, the canonical (revision, digest) its derived
+            // rows reflect. Mirrors Swift MerkleComposition.
+            let mut coverage = corpus
+                .index_coverage_attestations()
                 .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                     reason: format!(
-                        "create_composed_snapshot: global_corpus_merkle_root failed: {:?}",
+                        "create_composed_snapshot: index_coverage_attestations failed: {:?}",
                         e
                     ),
                 })?;
+            coverage.sort_by(|a, b| a.0.cmp(&b.0));
+            for (content_id, _revision, digest) in &coverage {
+                corpus_attestations.push(locus_kit::merkle_rollup::SnapshotAttestation {
+                    snapshot_id: locus_kit::merkle_rollup::SnapshotId::new(""),
+                    subject_kind: "corpus_index".to_string(),
+                    subject_id: content_id.clone(),
+                    merkle_root: digest.clone(),
+                    key_version: None,
+                });
+            }
+            // Global coverage attestation: one digest over the sorted rows.
+            let folded = coverage
+                .iter()
+                .map(|(id, revision, digest)| format!("{id}:{revision}:{digest}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             corpus_attestations.push(locus_kit::merkle_rollup::SnapshotAttestation {
                 snapshot_id: locus_kit::merkle_rollup::SnapshotId::new(""),
-                subject_kind: "corpus_global".to_string(),
+                subject_kind: "corpus_index_global".to_string(),
                 subject_id: Uuid::from_bytes(handle.estate_uuid).to_string(),
-                merkle_root: global_root.hex_string(),
+                merkle_root: corpus_kit::content_digest(&folded),
                 key_version: None,
             });
         }
@@ -2812,13 +2811,9 @@ impl EstateCoordinator {
         // returns SOURCE (drawer) IDs directly. `seen_pairs` keys on drawer IDs,
         // so both lanes dedupe together. Mirrors the Swift lane-2 block.
         if let Some(corpus) = self.corpus_kits.get(handle) {
-            // Probe drawers = the owning drawers of the recent probe chunks.
-            let probe_uuids: Vec<uuid::Uuid> = probe_ids
-                .iter()
-                .filter_map(|s| uuid::Uuid::parse_str(s).ok())
-                .collect();
-            let probe_owners = corpus.source_ids_for_chunks(&probe_uuids);
-            let mut probe_drawer_ids: Vec<String> = probe_owners.values().cloned().collect();
+            // Shared-content 1.1: vector item IDs ARE Drawer IDs — the probe
+            // IDs are the probe drawers directly, no chunk→drawer remap.
+            let mut probe_drawer_ids: Vec<String> = probe_ids.to_vec();
             probe_drawer_ids.sort();
             probe_drawer_ids.dedup();
             for pd_id in &probe_drawer_ids {
@@ -3084,10 +3079,11 @@ impl EstateCoordinator {
         if corpus.is_some() || vector_store.is_some() {
             let step2_result: Result<(), VerbDispatchError> = (|| {
                 if let Some(ref c) = corpus {
-                    // Remove BM25 entries and all vector embeddings for this
-                    // drawer. source_id == drawer.id is the ingest convention
-                    // (EncodeIntake G4).
-                    c.remove(row_id).map_err(|e| {
+                    // Shared-content 1.1: clear the engine's derived state for
+                    // this Drawer ID by exact key (BM25 postings + Drawer-keyed
+                    // vectors). The canonical text lives only in the Drawer row
+                    // LocusKit just handled — no second copy to scrub.
+                    c.remove_content(row_id).map_err(|e| {
                         VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
                             row_id: row_id.to_string(),
                             reason: format!("{:?}", e),
@@ -3102,7 +3098,7 @@ impl EstateCoordinator {
                         // separate in-memory live/tombstone bitmap). Derive modelID
                         // from the corpus.
                         let model_id = c.model_id();
-                        vs.delete_all_vectors(row_id, model_id).map_err(|e| {
+                        vs.delete_all_vectors(row_id, &model_id).map_err(|e| {
                             VerbDispatchError::Verb(VerbError::CrossKitVectorDeleteFailed {
                                 row_id: row_id.to_string(),
                                 reason: format!("{:?}", e),
@@ -3323,15 +3319,15 @@ impl EstateCoordinator {
                     return Ok(());
                 }
                 if let Some(ref c) = corpus {
-                    // expunge scrubs chunk text (UPDATE content='') before removing
-                    // BM25 index entries — true erasure, not just recall suppression.
-                    c.expunge(row_id)
-                        .map_err(|e| format!("corpus.expunge failed: {:?}", e))?;
+                    // Shared-content 1.1: clear derived state (no second copy
+                    // exists to scrub — the Drawer row is the only text home).
+                    c.remove_content(row_id)
+                        .map_err(|e| format!("corpus.remove_content failed: {:?}", e))?;
                 }
                 if let Some(ref vs) = vector_store {
                     if let Some(ref c) = corpus {
                         let model_id = c.model_id();
-                        vs.delete_all_vectors(row_id, model_id)
+                        vs.delete_all_vectors(row_id, &model_id)
                             .map_err(|e| format!("VectorStore.delete_all_vectors failed: {:?}", e))?;
                     } else {
                         // Standalone VectorStore without Corpus: model_id unavailable.
@@ -5716,36 +5712,69 @@ impl EstateCoordinator {
         let backing_storage = corpus_storage.unwrap_or(storage);
         let wiring_result = match params.kind {
             EstateKind::Glk => {
-                // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
-                // Both are constructed on backing_storage. Corpus::open_many applies
-                // both BundleStore and VectorStore schema migrations via `migrate`,
-                // matching the Swift path where Corpus.init applies both schemas.
-                // open_many fans every operation across all held signals (the
-                // five-signal ensemble by default); the match arms are mutually
-                // exclusive, so moving `embedding_models` here is sound.
-                Corpus::open_many(Arc::clone(&backing_storage), embedding_models)
+                // Full composition: the ATTACHED-mode CorpusContentEngine
+                // (BM25 + internal vectors, Drawer-ID keyed) + standalone
+                // VectorStore. EVERY GLK Corpus is constructed attached +
+                // WholeContent over the LocusKit-backed adapter
+                // (shared-content 1.1 decision lock); the configuration
+                // constructor rejects standalone/passage registration.
+                self.estate_for(&handle)
                     .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                        reason: format!("Corpus::open_many failed for GLK estate: {:?}", e),
+                        reason: format!("estate lookup for engine wiring failed: {:?}", e),
+                    })
+                    .map(|estate| estate.clone())
+                    .and_then(|estate| {
+                        let config = CorpusContentConfiguration::new(
+                            CorpusOperatingMode::Attached,
+                            CorpusIndexUnitPolicy::WholeContent,
+                        )
+                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                            reason: format!("engine configuration: {:?}", e),
+                        })?;
+                        CorpusContentEngine::open(
+                            Arc::clone(&backing_storage),
+                            config,
+                            Arc::new(LocusDrawerContentSource::new(estate)),
+                            embedding_models,
+                        )
+                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                            reason: format!("engine open failed for GLK estate: {:?}", e),
+                        })
                     })
                     .map(|corpus| {
-                        // BORROW Corpus's single dense VectorStore for GLK's scored-
-                        // recall lane rather than constructing a second VectorStore over
-                        // the same `vectors` table. Both built identical whole-table
-                        // resident arrays (the binary fetch is filtered only by kind, not
-                        // model), so a second store doubled the resident array + cold-start
-                        // scan and made the on-disk sidecar churn. One shared store, one
-                        // resident array, one sidecar kept in sync by every write. Corpus
-                        // owns the dense lane; GLK reaches it through the public accessor.
+                        // BORROW the engine's single dense VectorStore for
+                        // GLK's scored-recall lane — one store, one resident
+                        // array, one sidecar.
                         let corpus = Arc::new(corpus);
                         let vs = corpus.shared_vector_store();
                         (Some(corpus), Some(vs))
                     })
             }
             EstateKind::CorpusOnly => {
-                // LocusKit core + Corpus. No standalone VectorStore registration.
-                Corpus::open_many(Arc::clone(&backing_storage), embedding_models)
+                // LocusKit core + the attached engine. No standalone
+                // VectorStore registration. Same construction rule.
+                self.estate_for(&handle)
                     .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                        reason: format!("Corpus::open_many failed for CorpusOnly estate: {:?}", e),
+                        reason: format!("estate lookup for engine wiring failed: {:?}", e),
+                    })
+                    .map(|estate| estate.clone())
+                    .and_then(|estate| {
+                        let config = CorpusContentConfiguration::new(
+                            CorpusOperatingMode::Attached,
+                            CorpusIndexUnitPolicy::WholeContent,
+                        )
+                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                            reason: format!("engine configuration: {:?}", e),
+                        })?;
+                        CorpusContentEngine::open(
+                            Arc::clone(&backing_storage),
+                            config,
+                            Arc::new(LocusDrawerContentSource::new(estate)),
+                            embedding_models,
+                        )
+                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                            reason: format!("engine open failed for CorpusOnly estate: {:?}", e),
+                        })
                     })
                     .map(|corpus| (Some(Arc::new(corpus)), None))
             }
@@ -5757,7 +5786,7 @@ impl EstateCoordinator {
 
         match wiring_result {
             Ok((corpus_opt, vs_opt)) => {
-                // Register the wired sub-stores. Arc<Corpus> and Arc<VectorStore> are
+                // Register the wired sub-stores. Arc<CorpusContentEngine> and Arc<VectorStore> are
                 // what the registry holds (matching Swift's corpusKits / vectorStores dicts).
                 if let Some(corpus) = corpus_opt {
                     self.corpus_kits.insert(handle, corpus);
@@ -6374,7 +6403,7 @@ impl EstateCoordinator {
         request: GLKRecallRequest,
         plan: RecallPlan,
         now: i64,
-        corpus: Option<Arc<Corpus>>,
+        corpus: Option<Arc<CorpusContentEngine>>,
         vector: Option<Arc<VectorStore>>,
         handle: &EstateHandle,
         // MatrixTier registered for this estate — Some when the dreaming cycle has
@@ -9403,11 +9432,11 @@ mod tests {
         // Fdc is the plain pass-through provider slot (stateless, no
         // training) — the vehicle for injecting the token-bag provider.
         let corpus = Arc::new(
-            Corpus::open(
+            CorpusContentEngine::standalone_on(
                 storage,
-                EmbeddingModelConfig::Fdc { provider: Box::new(provider) },
+                vec![EmbeddingModelConfig::Fdc { provider: Box::new(provider) }],
             )
-            .expect("open corpus"),
+            .expect("open corpus engine"),
         );
         coord.register_vector_store(&h, corpus.shared_vector_store());
         coord.register_corpus(&h, corpus.clone());

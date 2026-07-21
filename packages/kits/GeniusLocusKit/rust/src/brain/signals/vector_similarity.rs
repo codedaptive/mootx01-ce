@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use corpus_kit::corpus::Corpus;
+use corpus_kit::CorpusContentEngine;
 use vectorkit::VectorStore;
 
 use crate::brain::scheduler::api::*;
@@ -85,7 +85,7 @@ impl VectorSimilaritySignal {
         vector_store: Arc<VectorStore>,
         model_id: String,
         proximity_threshold: i32,
-        corpus: Option<Arc<Corpus>>,
+        corpus: Option<Arc<CorpusContentEngine>>,
         edge_checker: Option<AssociationEdgeChecker>,
     ) -> SignalSpec {
         SignalSpec {
@@ -119,7 +119,7 @@ impl VectorSimilaritySignal {
         vector_store: &VectorStore,
         model_id: &str,
         proximity_threshold: i32,
-        corpus: Option<&Corpus>,
+        corpus: Option<&CorpusContentEngine>,
         edge_checker: Option<&(dyn Fn(&str, &str) -> bool + Send + Sync)>,
         context: &SignalContext,
     ) -> Vec<SignalEmission> {
@@ -197,25 +197,13 @@ impl VectorSimilaritySignal {
             }
         }
 
-        // Lane 2 — chunk-keyed corpus rows. On a production estate this is
-        // the ONLY populated lane: the encode drain keys every vector row by
-        // chunk UUID under the corpus provider's model_id, so lane 1 finds
-        // nothing there. Mine the same probe sample on the corpus lane and
-        // map chunk hits back to their owning drawers (chunk → source_id via
-        // the corpus's warm map). Chunk pairs from the SAME drawer collapse.
-        // First hit wins per drawer pair — find_nearest returns matches in
-        // ascending distance, so the first hit for a pair is its closest
-        // chunk evidence. Mirrors the contradiction hunter's lane split and
-        // the Swift lane-2 block in `VectorSimilaritySignal.swift`.
+        // Lane 2 — the corpus provider's rows. Shared-content 1.1: the
+        // engine keys every vector row by the DRAWER ID itself, so a hit's
+        // item_id is the owning drawer directly — no chunk→drawer remap and
+        // no same-drawer chunk collapse. Mirrors the Swift lane-2 block.
         if let Some(corpus) = corpus {
-            let corpus_model_id = corpus.model_id().to_string();
-            let mut chunk_matches: Vec<(String, String, f64)> = Vec::new();
-            let mut involved_chunk_ids: HashSet<uuid::Uuid> = HashSet::new();
+            let corpus_model_id = corpus.model_id();
             for item_id in &drawer_ids {
-                let probe_uuid = match uuid::Uuid::parse_str(item_id) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
                 let probe_engram = match vector_store.get_vector(item_id, &corpus_model_id) {
                     Ok(Some(e)) => e,
                     _ => continue,
@@ -232,42 +220,14 @@ impl VectorSimilaritySignal {
                     if m.item_id == *item_id || m.distance > proximity_threshold {
                         continue;
                     }
-                    let match_uuid = match uuid::Uuid::parse_str(&m.item_id) {
-                        Ok(u) => u,
-                        Err(_) => continue,
-                    };
-                    involved_chunk_ids.insert(probe_uuid);
-                    involved_chunk_ids.insert(match_uuid);
-                    chunk_matches.push((
-                        item_id.clone(),
-                        m.item_id.clone(),
-                        1.0 - (m.distance as f64 / 256.0),
-                    ));
-                }
-            }
-            if !chunk_matches.is_empty() {
-                let ids: Vec<uuid::Uuid> = involved_chunk_ids.into_iter().collect();
-                let owners = corpus.source_ids_for_chunks(&ids);
-                for (chunk_a, chunk_b, weight) in chunk_matches {
-                    let (ua, ub) = match (
-                        uuid::Uuid::parse_str(&chunk_a),
-                        uuid::Uuid::parse_str(&chunk_b),
-                    ) {
-                        (Ok(a), Ok(b)) => (a, b),
-                        _ => continue,
-                    };
-                    let (source_a, source_b) = match (owners.get(&ua), owners.get(&ub)) {
-                        (Some(a), Some(b)) if a != b => (a.clone(), b.clone()),
-                        _ => continue,
-                    };
-                    let (a, b) = if source_a < source_b {
-                        (source_a, source_b)
+                    let (a, b) = if *item_id < m.item_id {
+                        (item_id.clone(), m.item_id.clone())
                     } else {
-                        (source_b, source_a)
+                        (m.item_id.clone(), item_id.clone())
                     };
                     let pair_key = format!("{}||{}", a, b);
                     if seen_pairs.insert(pair_key) {
-                        candidate_pairs.push((a, b, weight));
+                        candidate_pairs.push((a, b, 1.0 - (m.distance as f64 / 256.0)));
                     }
                 }
             }

@@ -17,7 +17,9 @@
 use crate::content::{
     CorpusContentChange, CorpusContentId, CorpusContentRecord, CorpusContentSource,
 };
-use crate::corpus::{Corpus, EmbeddingModelConfig, ProviderSlot};
+use crate::corpus::{Corpus, EmbeddingModelConfig, EncodeSpeed, FloatLaneOutcome, ProviderSlot};
+use intellectus_lib::{report, StatSample};
+use crate::document_store::CorpusDocumentStore;
 use crate::engine::inverted_index_store::InvertedIndexStore;
 use crate::error::{CorpusKitError, CorpusKitResult};
 use crate::index_state_store::{CorpusIndexState, CorpusIndexStateStore};
@@ -31,7 +33,12 @@ use crate::tokenizer::default_keyword_tokens;
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// GLK's room-rollup coordination callback (fired with Drawer IDs).
+pub type ContentOnEncoded = Box<dyn Fn(&[String]) + Send + Sync>;
+/// Test-only drain failure-injection hook (transient failure when Err).
+pub type ContentIngestFailureHook = Box<dyn Fn(&str) -> Result<(), ()> + Send + Sync>;
 use vectorkit::{
     VectorExactKey, VectorPayload, VectorPayloadInput, VectorRepresentationClaims,
     VectorRepresentationKey, VectorStore,
@@ -169,6 +176,25 @@ fn evidence_from_item_key(key: &str) -> Option<CorpusEvidence> {
     })
 }
 
+
+/// Emit one CorpusKit-tagged counter (the same shape corpus.rs uses).
+fn emit_engine_metric(name: &str, value: f64) {
+    report!(StatSample::metric(
+        name.to_string(),
+        value,
+        [("kit".to_string(), "CorpusKit".to_string())]
+            .into_iter()
+            .collect(),
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0)
+        },
+    ));
+}
+
 // ── Engine ───────────────────────────────────────────────────────────────
 
 /// The engine/index layout version stamped into `corpus_index_state`.
@@ -187,12 +213,23 @@ pub struct CorpusContentEngine {
     configuration: CorpusContentConfiguration,
     source: Arc<dyn CorpusContentSource>,
     inverted_index: InvertedIndexStore,
-    vector_store: VectorStore,
+    vector_store: Arc<VectorStore>,
     basis_store: BasisStore,
     counts_store: CorpusProviderCountsStore,
     index_state: CorpusIndexStateStore,
     claims: VectorRepresentationClaims,
     slots: Vec<ProviderSlot>,
+    /// Engine-owned content-reference queue state (P3). See
+    /// content_engine_queue.rs.
+    queue_state: Mutex<Option<crate::content_engine_queue::ContentQueueState>>,
+    /// GLK's room-rollup coordination hook (fired with Drawer IDs).
+    on_encoded: Mutex<Option<ContentOnEncoded>>,
+    /// Declared encode speed (serial drain today; retained surface).
+    encode_speed: Mutex<EncodeSpeed>,
+    /// Test-only drain failure-injection hook.
+    ingest_failure_hook: Mutex<Option<ContentIngestFailureHook>>,
+    /// Test-only single-use forced float store error (default slot).
+    forced_float_error: Mutex<Option<String>>,
 }
 
 impl CorpusContentEngine {
@@ -231,10 +268,10 @@ impl CorpusContentEngine {
 
         let inverted_index = InvertedIndexStore::open_for_storage(&storage)
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        let vector_store = VectorStore::new(
+        let vector_store = Arc::new(VectorStore::new(
             Arc::clone(&storage),
             VectorStore::default_sidecar_path(&storage),
-        );
+        ));
         let basis_store = BasisStore::new(Arc::clone(&storage));
         let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
         let index_state = CorpusIndexStateStore::new(Arc::clone(&storage));
@@ -256,7 +293,358 @@ impl CorpusContentEngine {
             index_state,
             claims,
             slots,
+            queue_state: Mutex::new(None),
+            on_encoded: Mutex::new(None),
+            encode_speed: Mutex::new(EncodeSpeed::Foreground),
+            ingest_failure_hook: Mutex::new(None),
+            forced_float_error: Mutex::new(None),
         })
+    }
+
+    /// STANDALONE convenience: construct a whole-content standalone engine
+    /// that OWNS its canonical documents (a `CorpusDocumentStore` over the
+    /// same storage). Mirrors Swift `init(standaloneOn:models:)`.
+    pub fn standalone_on(
+        storage: Arc<dyn Storage>,
+        models: Vec<EmbeddingModelConfig>,
+    ) -> CorpusKitResult<Self> {
+        storage
+            .migrate(&CorpusDocumentStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        let store = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+        Self::open(
+            storage,
+            CorpusContentConfiguration::new(
+                CorpusOperatingMode::Standalone,
+                CorpusIndexUnitPolicy::WholeContent,
+            )?,
+            store as Arc<dyn CorpusContentSource>,
+            models,
+        )
+    }
+
+    /// STANDALONE convenience: put canonical text and index it in one call.
+    /// Attached mode rejects content mutation through CorpusKit.
+    pub fn ingest(&self, text: &str, content_id: &str, now_millis: i64) -> CorpusKitResult<()> {
+        if !self.configuration.allows_content_mutation() {
+            return Err(CorpusKitError::AttachedModeViolation(
+                "content mutation through CorpusKit is standalone-only — attached \
+                 content changes flow through the canonical store's own verbs"
+                    .into(),
+            ));
+        }
+        Self::validate(content_id)?;
+        if text.is_empty() {
+            return Ok(());
+        }
+        // The standalone source IS a CorpusDocumentStore; route the put
+        // through a fresh handle over the same storage (same tables).
+        let store = CorpusDocumentStore::new(Arc::clone(&self.storage));
+        crate::content::CorpusContentStore::put(&store, text, content_id, now_millis)?;
+        self.index_content(content_id, now_millis)?;
+        Ok(())
+    }
+
+    // ── Queue plumbing accessors (content_engine_queue.rs) ───────────────
+
+    pub(crate) fn queue_state(
+        &self,
+    ) -> &Mutex<Option<crate::content_engine_queue::ContentQueueState>> {
+        &self.queue_state
+    }
+
+    pub(crate) fn storage_ref(&self) -> &Arc<dyn Storage> {
+        &self.storage
+    }
+
+    /// Install (or clear) the `on_encoded` coordination callback.
+    pub fn set_on_encoded<F>(&self, callback: F)
+    where
+        F: Fn(&[String]) + Send + Sync + 'static,
+    {
+        if let Ok(mut guard) = self.on_encoded.lock() {
+            *guard = Some(Box::new(callback));
+        }
+    }
+
+    pub(crate) fn fire_on_encoded(&self, ids: &[String]) {
+        if let Ok(guard) = self.on_encoded.lock() {
+            if let Some(cb) = guard.as_ref() {
+                cb(ids);
+            }
+        }
+    }
+
+    /// Arm (or clear) the drain failure-injection hook (test seam).
+    pub fn arm_ingest_failure_hook(&self, hook: Option<ContentIngestFailureHook>) {
+        if let Ok(mut guard) = self.ingest_failure_hook.lock() {
+            *guard = hook;
+        }
+    }
+
+    pub(crate) fn fire_ingest_failure_hook(&self, id: &str) -> Result<(), ()> {
+        if let Ok(guard) = self.ingest_failure_hook.lock() {
+            if let Some(hook) = guard.as_ref() {
+                return hook(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Test seam: force the next per-signal float call to report a store
+    /// error for the DEFAULT slot (single-use).
+    pub fn test_force_float_store_error(&self, message: impl Into<String>) {
+        if let Ok(mut guard) = self.forced_float_error.lock() {
+            *guard = Some(message.into());
+        }
+    }
+
+    /// The declared encode speed (serial drain today; surface retained).
+    pub fn set_encode_speed(&self, speed: EncodeSpeed) {
+        if let Ok(mut guard) = self.encode_speed.lock() {
+            *guard = speed;
+        }
+    }
+
+    pub(crate) fn begin_deferred_vector_index(&self) -> CorpusKitResult<()> {
+        self.vector_store
+            .begin_deferred_index()
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))
+    }
+
+    pub(crate) fn publish_vector_index(&self) -> CorpusKitResult<()> {
+        self.vector_store
+            .publish_resident_index()
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))
+    }
+
+    // ── GLK orchestration surface (P3 cutover compatibility) ─────────────
+
+    /// BM25-only top-k with the coordinator's historical tuple shape —
+    /// identity is DIRECT (the ID is the Drawer ID).
+    pub fn bm25_top_k_by_source(&self, query: &str, limit: usize) -> Vec<(String, f32)> {
+        self.bm25_top_k(query, limit).unwrap_or_default()
+    }
+
+    /// Live indexed content IDs — the intake backfill's skip set.
+    pub fn indexed_source_ids(&self) -> CorpusKitResult<std::collections::HashSet<String>> {
+        Ok(self.indexed_content_ids()?.into_iter().collect())
+    }
+
+    /// Indexed content-row count (content-unit semantics).
+    pub fn count(&self) -> CorpusKitResult<usize> {
+        Ok(self.indexed_content_ids()?.len())
+    }
+
+    /// The estate's single dense vector store (borrowed by GLK's recall
+    /// vector lane — one store, one resident array).
+    pub fn shared_vector_store(&self) -> Arc<VectorStore> {
+        Arc::clone(&self.vector_store)
+    }
+
+    /// Clear one content ID's derived state directly (expunge/withdraw path).
+    pub fn remove_content(&self, id: &str) -> CorpusKitResult<()> {
+        Self::validate(id)?;
+        self.clear_derived_state(id)
+    }
+
+    /// Embed on the default signal (the recall probe surface).
+    pub fn embed(&self, text: &str) -> CorpusKitResult<engram_lib::Engram> {
+        let handle = self.slots[0].handle.lock().unwrap();
+        handle
+            .provider()
+            .embed(text)
+            .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))
+    }
+
+    /// Per-content derived-index coverage attestations (the engine's ONLY
+    /// integrity surface — no second content Merkle hierarchy).
+    pub fn index_coverage_attestations(
+        &self,
+    ) -> CorpusKitResult<Vec<(String, i64, String)>> {
+        Ok(self
+            .index_state_all_states()?
+            .into_iter()
+            .map(|s| (s.content_id, s.revision, s.digest))
+            .collect())
+    }
+
+    fn index_state_all_states(&self) -> CorpusKitResult<Vec<crate::index_state_store::CorpusIndexState>> {
+        Ok(self
+            .index_state
+            .all_states()?
+            .into_iter()
+            .filter(|s| s.content_id != FEED_CURSOR_ROW_ID)
+            .collect())
+    }
+
+    /// Destroy this engine's recall index — OWNERSHIP-SCOPED: exact-key
+    /// vector deletes (checkpointed IDs × slots × lanes), wholesale clears
+    /// only on corpus-exclusive tables, claim release for the "corpus"
+    /// consumer.
+    pub fn destroy_recall_index(&self) -> CorpusKitResult<()> {
+        let ids = self.indexed_content_ids()?;
+        let mut keys: Vec<VectorExactKey> = Vec::new();
+        for id in &ids {
+            for key in self.unit_keys(id)? {
+                for slot in &self.slots {
+                    keys.push(VectorExactKey::new(key.clone(), 0, slot.model_id.clone()));
+                    keys.push(VectorExactKey::new(key.clone(), 1, slot.model_id.clone()));
+                }
+            }
+        }
+        self.vector_store
+            .delete_vectors(&keys)
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        self.inverted_index
+            .clear_all()
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        self.index_state.clear_all()?;
+        self.basis_store.delete_all()?;
+        self.counts_store.delete_all()?;
+        self.claims
+            .release_all_claims(CLAIMS_CONSUMER)
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        Ok(())
+    }
+
+    /// Per-signal dense float NEAREST recall — content-ID keyed.
+    pub fn float_nearest_per_signal(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(String, FloatLaneOutcome)> {
+        self.float_per_signal(query, limit, true)
+    }
+
+    /// Per-signal dense float FARTHEST (anti-similarity) recall.
+    pub fn float_farthest_per_signal(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(String, FloatLaneOutcome)> {
+        self.float_per_signal(query, limit, false)
+    }
+
+    /// Single-signal convenience: the DEFAULT slot's nearest outcome.
+    pub fn float_nearest(&self, query: &str, limit: usize) -> FloatLaneOutcome {
+        self.float_nearest_per_signal(query, limit)
+            .into_iter()
+            .next()
+            .map(|(_, o)| o)
+            .unwrap_or(FloatLaneOutcome::EmptyQuery)
+    }
+
+    fn float_per_signal(
+        &self,
+        query: &str,
+        limit: usize,
+        nearest: bool,
+    ) -> Vec<(String, FloatLaneOutcome)> {
+        if limit == 0 || query.is_empty() {
+            return self
+                .slots
+                .iter()
+                .map(|s| (s.model_id.clone(), FloatLaneOutcome::EmptyQuery))
+                .collect();
+        }
+        // Consume the forced-error seam for the DEFAULT slot (nearest only).
+        let mut forced_default: Option<FloatLaneOutcome> = None;
+        if nearest {
+            if let Ok(mut guard) = self.forced_float_error.lock() {
+                if let Some(message) = guard.take() {
+                    emit_engine_metric("corpus.float_lane.store_error", 1.0);
+                    forced_default = Some(FloatLaneOutcome::StoreError(message));
+                }
+            }
+        }
+        let mut results = Vec::with_capacity(self.slots.len());
+        for (slot_index, slot) in self.slots.iter().enumerate() {
+            let model_id = slot.model_id.clone();
+            if slot_index == 0 {
+                if let Some(forced) = forced_default.take() {
+                    results.push((model_id, forced));
+                    continue;
+                }
+            }
+            let probe = {
+                let handle = slot.handle.lock().unwrap();
+                match handle.provider().embed_float(query) {
+                    Ok(v) if v.is_empty() => {
+                        emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
+                        results.push((model_id, FloatLaneOutcome::UnavailableProviderOptOut));
+                        continue;
+                    }
+                    Ok(v) => v,
+                    Err(vectorkit::VectorKitError::EmbedFloatVocabMiss(_)) => {
+                        emit_engine_metric("corpus.float_lane.dark_vocab_miss", 1.0);
+                        results.push((model_id, FloatLaneOutcome::UnavailableNoVocabHit));
+                        continue;
+                    }
+                    Err(_) => {
+                        emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
+                        results.push((model_id, FloatLaneOutcome::UnavailableProviderOptOut));
+                        continue;
+                    }
+                }
+            };
+            let matches = if nearest {
+                self.vector_store
+                    .find_nearest_float(&probe, &model_id, limit * 4)
+            } else {
+                self.vector_store
+                    .find_farthest_float(&probe, &model_id, limit * 4)
+            };
+            let matches = match matches {
+                Ok(m) => m,
+                Err(e) => {
+                    emit_engine_metric("corpus.float_lane.store_error", 1.0);
+                    results.push((model_id, FloatLaneOutcome::StoreError(format!("{e:?}"))));
+                    continue;
+                }
+            };
+            if matches.is_empty() {
+                emit_engine_metric("corpus.float_lane.dark_no_rows", 1.0);
+                results.push((model_id, FloatLaneOutcome::UnavailableNoFloatRows));
+                continue;
+            }
+            let mut by_content: BTreeMap<String, f32> = BTreeMap::new();
+            for m in &matches {
+                let id = content_id_from_item_key(&m.item_id).to_string();
+                let similarity = 1.0 - (m.distance as f32) / 10_000.0;
+                let entry = by_content.entry(id).or_insert(if nearest {
+                    f32::MIN
+                } else {
+                    f32::MAX
+                });
+                if nearest {
+                    if similarity > *entry {
+                        *entry = similarity;
+                    }
+                } else if similarity < *entry {
+                    *entry = similarity;
+                }
+            }
+            if by_content.is_empty() {
+                emit_engine_metric("corpus.float_lane.dark_no_rows", 1.0);
+                results.push((model_id, FloatLaneOutcome::UnavailableNoFloatRows));
+                continue;
+            }
+            let mut ranked: Vec<(String, f32)> = by_content.into_iter().collect();
+            ranked.sort_by(|a, b| {
+                let ord = if nearest {
+                    b.1.partial_cmp(&a.1)
+                } else {
+                    a.1.partial_cmp(&b.1)
+                };
+                ord.unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            ranked.truncate(limit);
+            emit_engine_metric("corpus.float_lane.hit", ranked.len() as f64);
+            results.push((model_id, FloatLaneOutcome::Hits(ranked)));
+        }
+        results
     }
 
     /// Register this engine's representation claims (idempotent).

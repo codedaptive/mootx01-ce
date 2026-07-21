@@ -19,7 +19,7 @@ use genius_locus_kit::{SchedulerNoopDispatcher, SerialLaneScheduler};
 use genius_locus_kit::SchedulerSignalRouteOutcome as SignalRouteOutcome;
 use genius_locus_kit::SchedulerSignalTrigger as SignalTrigger;
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, Corpus, EmbeddingModelConfig};
 use persistence_kit::inmemory::InMemoryStorage;
 use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
 use substrate_types::hlc::HLCGenerator;
@@ -78,7 +78,7 @@ fn fire_spec(
 
 #[test]
 fn hybrid_recall_returns_results_for_ingested_content() {
-    let corpus = Corpus::open(make_storage(), EmbeddingModelConfig::Deterministic)
+    let corpus = CorpusContentEngine::standalone_on(make_storage(), vec![EmbeddingModelConfig::Deterministic])
         .expect("Corpus::open");
 
     // Ingest documents matching the corpus entries.
@@ -112,7 +112,7 @@ fn hybrid_recall_returns_results_for_ingested_content() {
 
 #[test]
 fn hybrid_recall_skips_empty_content_entries() {
-    let corpus = Corpus::open(make_storage(), EmbeddingModelConfig::Deterministic)
+    let corpus = CorpusContentEngine::standalone_on(make_storage(), vec![EmbeddingModelConfig::Deterministic])
         .expect("Corpus::open");
 
     let external = ExternalCorpus::new(
@@ -135,7 +135,7 @@ fn hybrid_recall_skips_empty_content_entries() {
 
 #[test]
 fn hybrid_recall_on_empty_corpus_returns_empty_results() {
-    let corpus = Corpus::open(make_storage(), EmbeddingModelConfig::Deterministic)
+    let corpus = CorpusContentEngine::standalone_on(make_storage(), vec![EmbeddingModelConfig::Deterministic])
         .expect("Corpus::open");
     // No documents ingested.
 
