@@ -124,6 +124,11 @@ public struct SharedContentMigrationRecord: Sendable, Codable, Equatable {
     /// Filesystem bytes actually released by the maintenance pass at
     /// completion (nil until `completeSharedContentReclaim` runs).
     public var reclaimedBytes: Int64?
+    /// Inventory counts persisted at completion so the bulky ID lists can be
+    /// TRIMMED from the record (P6: a 1.1M-key inventory held ~60 MB in the
+    /// record row forever; the evidence is consumed at verification).
+    public var legacyChunkCount: Int?
+    public var legacyVectorKeyCount: Int?
 }
 
 /// Store for the migration record. Its table is deliberately OUTSIDE every
@@ -295,7 +300,8 @@ public extension GeniusLocusKit {
                 legacyChunkIDs: [], legacyVectorKeys: [],
                 protectedBaseline: [:],
                 rebuildCursor: nil, rebuiltContentCount: 0,
-                estimatedReclaimableBytes: nil, reclaimedBytes: nil)
+                estimatedReclaimableBytes: nil, reclaimedBytes: nil,
+                legacyChunkCount: nil, legacyVectorKeyCount: nil)
             if layout == nil {
                 // Fresh estate: bypass — nothing legacy exists or ever will.
                 record.state = .complete
@@ -397,6 +403,16 @@ public extension GeniusLocusKit {
                         mode: .attached, indexUnit: .wholeContent),
                     source: source)
             }
+            // Deferred-index window (P6 scale fix): the engine's vector
+            // write path rebuilds the resident binary index from the full
+            // snapshot per call — O(n) per Drawer, quadratic over a
+            // 100k-drawer rebuild. The deferred window makes every write
+            // O(batch) and rebuilds the resident index ONCE at publish.
+            // Crash-safe: the vectors TABLE is the durable source of truth;
+            // a crash inside the window loses only the resident index,
+            // which the next open rebuilds from the table, and the resumed
+            // run opens a fresh window.
+            try await engine.sharedVectorStore.beginDeferredIndex()
             let allIDs = try await source.activeContentIDs()
             var resumeFrom = 0
             if let cursor = record.rebuildCursor,
@@ -419,6 +435,7 @@ public extension GeniusLocusKit {
                     sinceCheckpoint = 0
                 }
             }
+            try await engine.sharedVectorStore.publishResidentIndex()
             record.rebuildCursor = allIDs.last
             record.rebuiltContentCount = processed
             record.state = .drawerIndexRebuilt
@@ -480,6 +497,16 @@ public extension GeniusLocusKit {
             report = try await maintenance.performMaintenance()
         }
         record.reclaimedBytes = report?.reclaimedBytes ?? 0
+        // Trim the consumed evidence (P6): the deletion inventory and the
+        // protected baseline exist to drive and verify the migration; once
+        // physically reclaimed, only the outcome (state, counts, cursor,
+        // reclaimed bytes) stays durable — a 110k-chunk / 1.1M-key estate
+        // otherwise carries ~60 MB of record forever.
+        record.legacyChunkCount = record.legacyChunkIDs.count
+        record.legacyVectorKeyCount = record.legacyVectorKeys.count
+        record.legacyChunkIDs = []
+        record.legacyVectorKeys = []
+        record.protectedBaseline = [:]
         record.state = .complete
         try await store.save(record, now: now)
         return report
@@ -534,8 +561,8 @@ public extension GeniusLocusKit {
     private func report(for record: SharedContentMigrationRecord) -> SharedContentMigrationReport {
         SharedContentMigrationReport(
             state: record.state,
-            legacyChunkCount: record.legacyChunkIDs.count,
-            legacyVectorKeyCount: record.legacyVectorKeys.count,
+            legacyChunkCount: record.legacyChunkCount ?? record.legacyChunkIDs.count,
+            legacyVectorKeyCount: record.legacyVectorKeyCount ?? record.legacyVectorKeys.count,
             rebuiltContentCount: record.rebuiltContentCount,
             estimatedReclaimableBytes: record.estimatedReclaimableBytes)
     }
@@ -606,6 +633,14 @@ public extension GeniusLocusKit {
     private func protectedVectorsFold(
         storage: any Storage, legacyVectorKeys: Set<String>
     ) async throws -> String {
+        // Pin the DECLARED VectorKit schema before reading (P6 scale
+        // finding): row decode forms depend on the connection's accumulated
+        // schema view, and the baseline capture runs BEFORE any engine has
+        // declared the vectors schema while verification runs AFTER — same
+        // bytes decoded through different views fold differently and fail
+        // verification as a false positive. Idempotent migrate makes both
+        // folds read through the same declared view. Mirrors the Rust twin.
+        try await storage.migrate(to: VectorStore.schemaDeclaration)
         let rows = try await storage.rowStore.query(
             table: "vectors", where: nil, orderBy: [], limit: nil, offset: nil)
         var combined: UInt64 = 0

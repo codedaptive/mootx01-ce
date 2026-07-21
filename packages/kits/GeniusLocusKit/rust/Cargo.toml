@@ -126,6 +126,11 @@ test-seams = ["locus-kit/test-seams", "corpus-kit/test-seams"]
 # Per in-repository dependency direction (dev-dep, no layering inversion:
 # engram-lib is a substrate lib below GLK).
 engram-lib = { path = "../../../libs/EngramLib/rust" }
+# P6 scale-qualification driver (tests/scale_qualification.rs, #[ignore],
+# env-gated): raw read-only metrics probe (page/freelist counts, dbstat
+# per-table bytes) on the qualification clone. Dev-dep only; rusqlite is
+# already in the tree via persistence-kit. Version matches persistence-kit's.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # test-seams feature enables Corpus::open_with_provider and
 # Corpus::forced_float_error for gate-2 storeError force-testing (D-6 parity
 # test). The production [dependencies] entry above carries no features so the

@@ -111,6 +111,13 @@ pub struct SharedContentMigrationRecord {
     /// completion (None until `complete_shared_content_reclaim` runs).
     #[serde(rename = "reclaimedBytes", default)]
     pub reclaimed_bytes: Option<i64>,
+    /// Inventory counts persisted at completion so the bulky ID lists can be
+    /// TRIMMED from the record (P6: a 1.1M-key inventory held ~60 MB in the
+    /// record row forever; the evidence is consumed at verification).
+    #[serde(rename = "legacyChunkCount", default)]
+    pub legacy_chunk_count: Option<usize>,
+    #[serde(rename = "legacyVectorKeyCount", default)]
+    pub legacy_vector_key_count: Option<usize>,
 }
 
 const SINGLETON_ID: &str = "shared-content-1.1";
@@ -336,6 +343,16 @@ impl EstateCoordinator {
             }
         })?;
         record.reclaimed_bytes = Some(report.reclaimed_bytes);
+        // Trim the consumed evidence (P6): the deletion inventory and the
+        // protected baseline exist to drive and verify the migration; once
+        // physically reclaimed, only the outcome (state, counts, cursor,
+        // reclaimed bytes) stays durable — a 110k-chunk / 1.1M-key estate
+        // otherwise carries ~60 MB of record forever.
+        record.legacy_chunk_count = Some(record.legacy_chunk_ids.len());
+        record.legacy_vector_key_count = Some(record.legacy_vector_keys.len());
+        record.legacy_chunk_ids = vec![];
+        record.legacy_vector_keys = vec![];
+        record.protected_baseline = BTreeMap::new();
         record.state = SharedContentMigrationState::Complete;
         store.save(&record, now_millis)?;
         Ok(Some(report))
@@ -416,6 +433,8 @@ impl EstateCoordinator {
                     rebuilt_content_count: 0,
                     estimated_reclaimable_bytes: None,
                     reclaimed_bytes: None,
+                    legacy_chunk_count: None,
+                    legacy_vector_key_count: None,
                 };
                 if layout.is_none() {
                     record.state = SharedContentMigrationState::Complete;
@@ -561,6 +580,23 @@ impl EstateCoordinator {
                 Some(cursor) => all_ids.iter().position(|id| id > cursor).unwrap_or(all_ids.len()),
                 None => 0,
             };
+            // Deferred-index window (P6 scale fix): the engine's vector write
+            // path rebuilds the resident binary index from the full snapshot
+            // per call — O(n) per Drawer, quadratic over a 100k-drawer
+            // rebuild (measured: throughput decayed from ~17/s to ~8/s within
+            // the first 3k drawers of a 98k-drawer estate). The deferred
+            // window makes every write O(batch) and rebuilds the resident
+            // index ONCE at publish. Crash-safe: the vectors TABLE is the
+            // durable source of truth; a crash inside the window loses only
+            // the resident index, which the next open rebuilds from the
+            // table, and the resumed run opens a fresh window.
+            let deferred_vs = engine.shared_vector_store();
+            deferred_vs.begin_deferred_index().map_err(|e| {
+                SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::DrawerIndexRebuilt,
+                    reason: format!("begin_deferred_index: {e:?}"),
+                }
+            })?;
             let mut processed = record.rebuilt_content_count;
             let mut since_checkpoint = 0usize;
             for id in &all_ids[resume_from..] {
@@ -579,6 +615,12 @@ impl EstateCoordinator {
                     since_checkpoint = 0;
                 }
             }
+            deferred_vs.publish_resident_index().map_err(|e| {
+                SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::DrawerIndexRebuilt,
+                    reason: format!("publish_resident_index: {e:?}"),
+                }
+            })?;
             record.rebuild_cursor = all_ids.last().cloned();
             record.rebuilt_content_count = processed;
             record.state = SharedContentMigrationState::DrawerIndexRebuilt;
@@ -594,11 +636,11 @@ impl EstateCoordinator {
             self.check_shared_content_fault(record.state)?;
         }
 
-        // 8. reclaimPending. (The reclaimable-bytes estimate requires the
-        // StorageIntrospection capability, which `Arc<dyn Storage>` does not
-        // surface in the Rust port today; the P5 maintenance API reports the
-        // measured outcome instead.)
+        // 8. reclaimPending — capture the live reclaimable estimate through
+        //    the P5 maintenance surface (freelist pages × page size + WAL
+        //    bytes; 0 on backends with nothing client-reclaimable).
         if record.state < SharedContentMigrationState::ReclaimPending {
+            record.estimated_reclaimable_bytes = storage.estimated_reclaimable_bytes().ok();
             record.state = SharedContentMigrationState::ReclaimPending;
             store.save(&record, now_millis)?;
             self.check_shared_content_fault(record.state)?;
@@ -611,8 +653,12 @@ impl EstateCoordinator {
 fn report_for(record: &SharedContentMigrationRecord) -> SharedContentMigrationReport {
     SharedContentMigrationReport {
         state: record.state,
-        legacy_chunk_count: record.legacy_chunk_ids.len(),
-        legacy_vector_key_count: record.legacy_vector_keys.len(),
+        legacy_chunk_count: record
+            .legacy_chunk_count
+            .unwrap_or(record.legacy_chunk_ids.len()),
+        legacy_vector_key_count: record
+            .legacy_vector_key_count
+            .unwrap_or(record.legacy_vector_keys.len()),
         rebuilt_content_count: record.rebuilt_content_count,
         estimated_reclaimable_bytes: record.estimated_reclaimable_bytes,
     }
@@ -711,6 +757,16 @@ fn protected_vectors_fold(
     storage: &Arc<dyn Storage>,
     excluded_keys: &BTreeSet<String>,
 ) -> Result<String, SharedContentMigrationError> {
+    // Pin the DECLARED VectorKit schema before reading (P6 scale finding):
+    // row decode forms depend on the connection's accumulated schema view,
+    // and the baseline capture runs BEFORE any engine has declared the
+    // vectors schema while verification runs AFTER — same bytes decoded
+    // through different views fold differently and fail verification as a
+    // false positive. Idempotent migrate makes both folds read through the
+    // same declared view. Mirrors the Swift twin.
+    storage
+        .migrate(&VectorStore::schema_declaration())
+        .map_err(|e| storage_failure(SharedContentMigrationState::LegacyInventoryCaptured, e))?;
     let rows = storage
         .row_store()
         .query("vectors", None, &[], None, None)

@@ -604,6 +604,7 @@ dependencies = [
  "locus-kit",
  "persistence-kit",
  "queuekit",
+ "rusqlite",
  "serde",
  "serde_json",
  "substrate-kernel",

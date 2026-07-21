@@ -53,7 +53,7 @@ struct PreciseRecallTests {
         // Shared corpus + vector store across all drawers (one lane each).
         let corpusStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
-        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage)
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
@@ -74,7 +74,7 @@ struct PreciseRecallTests {
                 embeddingModelID: "test-model-v1")
             let drawer = try await kit.capture(handle, frame)
             ids.append(drawer.id)
-            try await corpus.ingest(content, sourceID: drawer.id, now: now)
+            try await corpus.ingest(content, contentID: drawer.id, now: now)
             let engram = try await corpus.embed(content)
             try await vectorStore.addVector(
                 itemID: drawer.id, engram: engram,
@@ -283,7 +283,7 @@ struct PreciseRecallTests {
             // BM25 and vector candidates across the 15-drawer estate.
             let corpusStorage = InMemoryStorage(
                 configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
-            let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+            let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage)
             let vsStorage = InMemoryStorage(
                 configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
             try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
@@ -307,7 +307,7 @@ struct PreciseRecallTests {
                     addedBy: "tester",
                     embeddingModelID: "test-model-v1")
                 let drawer = try await kit.capture(handle, frame)
-                try await corpus.ingest(content, sourceID: drawer.id, now: now)
+                try await corpus.ingest(content, contentID: drawer.id, now: now)
                 let engram = try await corpus.embed(content)
                 try await vectorStore.addVector(
                     itemID: drawer.id, engram: engram,
