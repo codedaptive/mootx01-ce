@@ -3,7 +3,7 @@ title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
 date: 2026-07-20
-version: 1.10.0
+version: 1.11.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -1435,7 +1435,76 @@ pub fn canonical_value_encoding(value: &TypedValue) -> String;
 
 *End of PersistenceKit Interface.*
 
+## § 12 — Storage maintenance surface (SPEC § 11)
+
+Swift (`PersistenceKit` core declares the protocol; backends conform):
+
+```swift
+public enum StorageMaintenancePhase: String, Sendable, Codable, CaseIterable {
+    case preflight, walCheckpoint, vacuum, introspection
+}
+public struct StorageMaintenanceProgress: Sendable, Equatable {
+    public let phase: StorageMaintenancePhase
+    public let completedPhases: Int
+    public let totalPhases: Int
+}
+public struct StorageMaintenanceReport: Sendable, Equatable, Codable {
+    public let backend: String          // "sqlite" | "postgresql" | "inmemory"
+    public let performed: Bool
+    public let note: String?
+    public let pageSizeBytes, pageCountBefore, pageCountAfter: Int64
+    public let freelistPagesBefore, freelistPagesAfter: Int64
+    public let fileSizeBytesBefore, fileSizeBytesAfter: Int64
+    public let walBytesBefore, walBytesAfter: Int64
+    public let reclaimedBytes: Int64
+    public let durationSeconds: Double
+}
+public enum StorageMaintenanceError: Error, Equatable, Sendable {
+    case notQuiescent(reason: String)
+    case insufficientDiskCapacity(requiredBytes: Int64, availableBytes: Int64)
+    case cancelled(atPhase: StorageMaintenancePhase)
+    case backendFailure(reason: String)
+}
+public protocol StorageMaintenance: Sendable {
+    func estimatedReclaimableBytes() async throws -> Int64
+    func performMaintenance(
+        progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
+        shouldCancel: (@Sendable () -> Bool)?
+    ) async throws -> StorageMaintenanceReport
+}
+// + zero-argument performMaintenance() convenience.
+// Conformers: SQLiteStorage (real), InMemoryStorage and PostgreSQLStorage
+// (explicit no-op reports). Probe with `storage as? StorageMaintenance`.
+```
+
+Rust (`persistence_kit::maintenance` module; defaulted `Storage` trait
+methods because `dyn Storage` cannot be capability-probed):
+
+```rust
+pub enum MaintenancePhase { Preflight, WalCheckpoint, Vacuum, Introspection }
+pub struct MaintenanceProgress { pub phase: MaintenancePhase,
+    pub completed_phases: usize, pub total_phases: usize }
+pub struct MaintenanceReport { /* field-for-field twin of the Swift report */ }
+pub enum MaintenanceError { NotQuiescent { .. },
+    InsufficientDiskCapacity { .. }, Cancelled { .. }, BackendFailure { .. } }
+
+// On the Storage trait (default = explicit "not implemented" no-op):
+fn estimated_reclaimable_bytes(&self) -> Result<i64, MaintenanceError>;
+fn perform_maintenance(
+    &self,
+    progress: Option<&(dyn Fn(MaintenanceProgress) + Send + Sync)>,
+    should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> Result<MaintenanceReport, MaintenanceError>;
+// Overridden by SqliteStorage (real), InMemoryStorage, PostgresStorage.
+```
+
 ## Changelog
+
+### 1.11.0 -- 2026-07-20
+Shared-content 1.1 P5: added the storage maintenance surface (§ 12) —
+`StorageMaintenance` protocol + phase/progress/report/error types (Swift),
+`persistence_kit::maintenance` module + defaulted `Storage` trait methods
+(Rust). Additive (MINOR).
 
 ### 1.10.0 -- 2026-07-20
 GLK shared-content 1.1 P0: added § 11 — canonical layout signatures

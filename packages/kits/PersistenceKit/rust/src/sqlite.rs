@@ -1185,6 +1185,203 @@ impl Storage for SqliteStorage {
             inner: self.inner.clone(),
         }))
     }
+
+    /// Freelist pages × page size, plus the WAL file's current size — the
+    /// filesystem bytes a checkpoint + VACUUM pass would release. Read-only
+    /// (two PRAGMAs + one file stat); safe for status polling. Mirrors the
+    /// Swift `SQLiteBackend.maintenanceEstimatedReclaimableBytes`.
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        use crate::maintenance::MaintenanceError as ME;
+        let guard = self.inner.lock().unwrap();
+        let pragma = |name: &str| -> Result<i64, ME> {
+            guard
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map_err(|e| ME::BackendFailure {
+                    reason: format!("pragma {name}: {e}"),
+                })
+        };
+        let page_size = pragma("page_size")?;
+        let freelist = pragma("freelist_count")?;
+        let path = match &self.config.backend {
+            BackendConfiguration::Sqlite { path, .. } => path.clone(),
+            _ => String::new(),
+        };
+        Ok(freelist * page_size + maintenance_file_bytes(&format!("{path}-wal")))
+    }
+
+    /// WAL checkpoint (TRUNCATE) + VACUUM with the four-phase contract
+    /// declared in `crate::maintenance`: quiescence check, disk-capacity
+    /// preflight, per-phase progress, phase-boundary cancellation, and
+    /// post-operation introspection.
+    ///
+    /// Runs while holding the inner connection Mutex: no row/blob operation
+    /// can interleave, so the quiescence check (`is_autocommit`) is
+    /// authoritative for this process. Mirrors the Swift
+    /// `SQLiteBackend.performMaintenance`.
+    fn perform_maintenance(
+        &self,
+        progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        use crate::maintenance::{
+            MaintenanceError as ME, MaintenancePhase as MP, MaintenanceProgress,
+            MaintenanceReport,
+        };
+        let started = std::time::Instant::now();
+        let total_phases = 4usize;
+        let enter = |phase: MP, completed: usize| -> Result<(), ME> {
+            if let Some(cancel) = should_cancel {
+                if cancel() {
+                    return Err(ME::Cancelled { at_phase: phase });
+                }
+            }
+            if let Some(report) = progress {
+                report(MaintenanceProgress {
+                    phase,
+                    completed_phases: completed,
+                    total_phases,
+                });
+            }
+            Ok(())
+        };
+        let path = match &self.config.backend {
+            BackendConfiguration::Sqlite { path, .. } => path.clone(),
+            _ => String::new(),
+        };
+        let wal_path = format!("{path}-wal");
+
+        let guard = self.inner.lock().unwrap();
+        let pragma = |name: &str| -> Result<i64, ME> {
+            guard
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                .map_err(|e| ME::BackendFailure {
+                    reason: format!("pragma {name}: {e}"),
+                })
+        };
+
+        // Phase 1 — preflight: quiescence, baselines, disk capacity.
+        enter(MP::Preflight, 0)?;
+        if !guard.conn.is_autocommit() {
+            return Err(ME::NotQuiescent {
+                reason: "a transaction is open on the estate connection".to_string(),
+            });
+        }
+        let page_size = pragma("page_size")?;
+        let page_count_before = pragma("page_count")?;
+        let freelist_before = pragma("freelist_count")?;
+        let file_before = maintenance_file_bytes(&path);
+        let wal_before = maintenance_file_bytes(&wal_path);
+        // VACUUM rewrites the live pages into a temporary database before
+        // swapping it in, so the volume needs at least the live-content size
+        // free. Best-effort: when the volume capacity cannot be read (None),
+        // VACUUM proceeds and its own failure is still surfaced.
+        let required_bytes = (page_count_before - freelist_before) * page_size;
+        if let Some(available) = maintenance_volume_available_bytes(&path) {
+            if available < required_bytes {
+                return Err(ME::InsufficientDiskCapacity {
+                    required_bytes,
+                    available_bytes: available,
+                });
+            }
+        }
+
+        // Phase 2 — WAL checkpoint. TRUNCATE flushes every frame into the
+        // main database file and truncates the WAL to zero bytes, so the
+        // subsequent VACUUM operates on the complete committed state and the
+        // WAL's disk footprint is released along with the freelist pages.
+        enter(MP::WalCheckpoint, 1)?;
+        guard
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("wal_checkpoint failed: {e}"),
+            })?;
+
+        // Phase 3 — VACUUM. Atomic at the SQLite level; never interrupted
+        // mid-flight (cancellation was honoured at the phase boundary).
+        enter(MP::Vacuum, 2)?;
+        guard
+            .conn
+            .execute_batch("VACUUM")
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("VACUUM failed: {e}"),
+            })?;
+
+        // Phase 4 — post-operation introspection. VACUUM itself commits
+        // through the WAL in WAL mode, so a second TRUNCATE checkpoint runs
+        // first — without it the rewritten pages would sit in a fresh WAL
+        // file and the filesystem would not see the reclaim.
+        enter(MP::Introspection, 3)?;
+        guard
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| ME::BackendFailure {
+                reason: format!("post-VACUUM wal_checkpoint failed: {e}"),
+            })?;
+        let page_count_after = pragma("page_count")?;
+        let freelist_after = pragma("freelist_count")?;
+        let file_after = maintenance_file_bytes(&path);
+        let wal_after = maintenance_file_bytes(&wal_path);
+        let reclaimed = ((file_before + wal_before) - (file_after + wal_after)).max(0);
+        Ok(MaintenanceReport {
+            backend: "sqlite".to_string(),
+            performed: true,
+            note: None,
+            page_size_bytes: page_size,
+            page_count_before,
+            page_count_after,
+            freelist_pages_before: freelist_before,
+            freelist_pages_after: freelist_after,
+            file_size_bytes_before: file_before,
+            file_size_bytes_after: file_after,
+            wal_bytes_before: wal_before,
+            wal_bytes_after: wal_after,
+            reclaimed_bytes: reclaimed,
+            duration_seconds: started.elapsed().as_secs_f64(),
+        })
+    }
+}
+
+/// Size on disk of `path`, or 0 when absent / in-memory.
+fn maintenance_file_bytes(path: &str) -> i64 {
+    if path.is_empty() || path.starts_with(":memory:") {
+        return 0;
+    }
+    std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
+}
+
+/// Available bytes on the volume holding `path` (statvfs on the parent
+/// directory). None when the capacity cannot be determined — the caller
+/// treats that as "skip the preflight", matching the Swift best-effort
+/// contract.
+#[cfg(unix)]
+fn maintenance_volume_available_bytes(path: &str) -> Option<i64> {
+    use std::os::unix::ffi::OsStrExt;
+    if path.is_empty() || path.starts_with(":memory:") {
+        return None;
+    }
+    let parent = std::path::Path::new(path).parent()?;
+    let dir = if parent.as_os_str().is_empty() {
+        std::ffi::CString::new(".").ok()?
+    } else {
+        std::ffi::CString::new(parent.as_os_str().as_bytes()).ok()?
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(dir.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    Some((stat.f_bavail as i64).saturating_mul(stat.f_frsize as i64))
+}
+
+#[cfg(not(unix))]
+fn maintenance_volume_available_bytes(_path: &str) -> Option<i64> {
+    None
 }
 
 impl StorageTransaction for SqliteStorage {

@@ -38,6 +38,9 @@ pub mod introspection;
 // (GLK shared-content 1.1, P0). Accessed via module path or the re-exports
 // below.
 pub mod layout_signature;
+// Physical storage maintenance — WAL checkpoint + page reclamation
+// (GLK shared-content 1.1, P5).
+pub mod maintenance;
 pub mod observer;
 pub mod postgres;
 pub mod postgres_tls;

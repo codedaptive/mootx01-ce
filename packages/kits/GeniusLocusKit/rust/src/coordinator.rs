@@ -6012,7 +6012,13 @@ impl EstateCoordinator {
             })?;
         }
 
-        // Step 2: Destroy standalone VectorStore vectors.
+        // Step 2: Destroy standalone VectorStore vectors. WHOLE-ESTATE
+        // PRECONDITION (shared-content 1.1 P5): the broad whole-table vector
+        // teardown is permitted here ONLY because the estate itself is being
+        // destroyed — every row in this estate's vectors table belongs to the
+        // estate, the estate is wiped and closed immediately after, and the
+        // admin plane deletes the backing file. Recall-index lifecycle paths
+        // are ownership-scoped and never call destroy_all_vectors.
         if let Some(vs) = vector_store {
             vs.destroy_all_vectors().map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("VectorStore destroy failed: {:?}", e),

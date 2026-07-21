@@ -65,6 +65,24 @@ public struct SharedContentMigrationReport: Sendable, Equatable {
     public let estimatedReclaimableBytes: Int64?
 }
 
+/// Migration/reclaim status for the estate status/admin surface
+/// (`sharedContentReclaimStatus`). All fields are nil-tolerant so the one
+/// shape serves fresh estates (no record), mid-migration estates, and
+/// completed estates.
+public struct SharedContentReclaimStatus: Sendable, Equatable {
+    /// The persisted migration state; nil when no record exists (a fresh
+    /// estate that never ran detection).
+    public let state: SharedContentMigrationState?
+    /// The estimate captured at `reclaimPending` (freelist pages × page
+    /// size at that moment).
+    public let estimatedReclaimableBytes: Int64?
+    /// Filesystem bytes the completed maintenance pass actually released.
+    public let reclaimedBytes: Int64?
+    /// LIVE estimate from the storage maintenance surface (freelist + WAL
+    /// bytes right now); nil when the backend has no maintenance surface.
+    public let liveReclaimableBytes: Int64?
+}
+
 /// A migration failure that leaves the lane dark, carrying the exact state
 /// and retry action.
 public enum SharedContentMigrationError: Error, Equatable {
@@ -103,6 +121,9 @@ public struct SharedContentMigrationRecord: Sendable, Codable, Equatable {
     public var rebuiltContentCount: Int
     /// Estimated reclaimable bytes recorded at reclaimPending.
     public var estimatedReclaimableBytes: Int64?
+    /// Filesystem bytes actually released by the maintenance pass at
+    /// completion (nil until `completeSharedContentReclaim` runs).
+    public var reclaimedBytes: Int64?
 }
 
 /// Store for the migration record. Its table is deliberately OUTSIDE every
@@ -274,7 +295,7 @@ public extension GeniusLocusKit {
                 legacyChunkIDs: [], legacyVectorKeys: [],
                 protectedBaseline: [:],
                 rebuildCursor: nil, rebuiltContentCount: 0,
-                estimatedReclaimableBytes: nil)
+                estimatedReclaimableBytes: nil, reclaimedBytes: nil)
             if layout == nil {
                 // Fresh estate: bypass — nothing legacy exists or ever will.
                 record.state = .complete
@@ -435,15 +456,33 @@ public extension GeniusLocusKit {
         return report(for: record)
     }
 
-    /// Mark the reclaim outcome after the maintenance operation ran (the
-    /// P5 completion hook). Idempotent.
-    func completeSharedContentReclaim(handle: EstateHandle, now: Date) async throws {
-        guard let storage = storages[handle] else { return }
+    /// Run the physical reclamation and mark the reclaim outcome (the P5
+    /// completion hook). Idempotent: a record not in `reclaimPending`
+    /// returns nil without touching storage.
+    ///
+    /// The reclamation itself is the PersistenceKit maintenance pass (WAL
+    /// checkpoint + VACUUM on SQLite) probed via `StorageMaintenance` —
+    /// call during a maintenance window; the pass requires quiescence and
+    /// enough free disk for the live-page rewrite, and a failure leaves the
+    /// record at `reclaimPending` for retry. Backends without a maintenance
+    /// surface (or with server-managed reclamation) complete with a nil/no-op
+    /// report — the record still flips to `complete`.
+    @discardableResult
+    func completeSharedContentReclaim(
+        handle: EstateHandle, now: Date
+    ) async throws -> StorageMaintenanceReport? {
+        guard let storage = storages[handle] else { return nil }
         let store = SharedContentMigrationStore(storage: storage)
         guard var record = try await store.load(),
-              record.state == .reclaimPending else { return }
+              record.state == .reclaimPending else { return nil }
+        var report: StorageMaintenanceReport?
+        if let maintenance = storage as? any StorageMaintenance {
+            report = try await maintenance.performMaintenance()
+        }
+        record.reclaimedBytes = report?.reclaimedBytes ?? 0
         record.state = .complete
         try await store.save(record, now: now)
+        return report
     }
 
     /// The migration record's current state for the status surface (nil
@@ -455,6 +494,32 @@ public extension GeniusLocusKit {
         // The record table may not exist yet on a never-migrated estate.
         try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
         return try await SharedContentMigrationStore(storage: storage).load()?.state
+    }
+
+    /// Migration/reclaim status for the estate status/admin surface: the
+    /// persisted state and estimates plus the LIVE reclaimable-bytes figure
+    /// from the storage maintenance surface. Read-only; safe to poll.
+    func sharedContentReclaimStatus(
+        handle: EstateHandle
+    ) async throws -> SharedContentReclaimStatus {
+        guard let storage = storages[handle] else {
+            return SharedContentReclaimStatus(
+                state: nil, estimatedReclaimableBytes: nil,
+                reclaimedBytes: nil, liveReclaimableBytes: nil)
+        }
+        try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
+        let record = try await SharedContentMigrationStore(storage: storage).load()
+        let live: Int64?
+        if let maintenance = storage as? any StorageMaintenance {
+            live = try? await maintenance.estimatedReclaimableBytes()
+        } else {
+            live = nil
+        }
+        return SharedContentReclaimStatus(
+            state: record?.state,
+            estimatedReclaimableBytes: record?.estimatedReclaimableBytes,
+            reclaimedBytes: record?.reclaimedBytes,
+            liveReclaimableBytes: live)
     }
 
     // MARK: - Steps

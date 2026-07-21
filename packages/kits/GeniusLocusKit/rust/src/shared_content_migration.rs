@@ -45,6 +45,22 @@ pub enum SharedContentMigrationState {
     Complete,
 }
 
+/// Migration/reclaim status for the estate status/admin surface
+/// (`shared_content_reclaim_status`). Mirrors Swift
+/// `SharedContentReclaimStatus`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedContentReclaimStatus {
+    /// The persisted migration state; None when no record exists.
+    pub state: Option<SharedContentMigrationState>,
+    /// The estimate captured at `reclaimPending`.
+    pub estimated_reclaimable_bytes: Option<i64>,
+    /// Filesystem bytes the completed maintenance pass actually released.
+    pub reclaimed_bytes: Option<i64>,
+    /// LIVE estimate from the storage maintenance surface (freelist + WAL
+    /// bytes right now); None when the backend reports no estimate.
+    pub live_reclaimable_bytes: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SharedContentMigrationReport {
     pub state: SharedContentMigrationState,
@@ -91,6 +107,10 @@ pub struct SharedContentMigrationRecord {
     pub rebuilt_content_count: usize,
     #[serde(rename = "estimatedReclaimableBytes")]
     pub estimated_reclaimable_bytes: Option<i64>,
+    /// Filesystem bytes actually released by the maintenance pass at
+    /// completion (None until `complete_shared_content_reclaim` runs).
+    #[serde(rename = "reclaimedBytes", default)]
+    pub reclaimed_bytes: Option<i64>,
 }
 
 const SINGLETON_ID: &str = "shared-content-1.1";
@@ -281,23 +301,74 @@ impl EstateCoordinator {
             .map(|r| r.state)
     }
 
-    /// Mark the reclaim outcome after the maintenance operation ran.
+    /// Run the physical reclamation and mark the reclaim outcome (the P5
+    /// completion hook). Idempotent: a record not in `ReclaimPending`
+    /// returns Ok(None) without touching storage.
+    ///
+    /// The reclamation itself is the PersistenceKit maintenance pass (WAL
+    /// checkpoint + VACUUM on SQLite) via `Storage::perform_maintenance` —
+    /// call during a maintenance window; the pass requires quiescence and
+    /// enough free disk for the live-page rewrite, and a failure leaves the
+    /// record at `ReclaimPending` for retry. Backends whose maintenance is
+    /// a no-op (in-memory, PostgreSQL) complete with their no-op report —
+    /// the record still flips to `Complete`. Mirrors the Swift
+    /// `completeSharedContentReclaim`.
     pub fn complete_shared_content_reclaim(
         &self,
         handle: &EstateHandle,
         now_millis: i64,
-    ) -> Result<(), SharedContentMigrationError> {
+    ) -> Result<Option<persistence_kit::maintenance::MaintenanceReport>, SharedContentMigrationError>
+    {
         let Some(storage) = self.storages.get(handle) else {
-            return Ok(());
+            return Ok(None);
         };
         let store = SharedContentMigrationStore::new(Arc::clone(storage));
-        if let Some(mut record) = store.load()? {
-            if record.state == SharedContentMigrationState::ReclaimPending {
-                record.state = SharedContentMigrationState::Complete;
-                store.save(&record, now_millis)?;
-            }
+        let Some(mut record) = store.load()? else {
+            return Ok(None);
+        };
+        if record.state != SharedContentMigrationState::ReclaimPending {
+            return Ok(None);
         }
-        Ok(())
+        let report = storage.perform_maintenance(None, None).map_err(|e| {
+            SharedContentMigrationError::StorageFailure {
+                state: SharedContentMigrationState::ReclaimPending,
+                reason: e.to_string(),
+            }
+        })?;
+        record.reclaimed_bytes = Some(report.reclaimed_bytes);
+        record.state = SharedContentMigrationState::Complete;
+        store.save(&record, now_millis)?;
+        Ok(Some(report))
+    }
+
+    /// Migration/reclaim status for the estate status/admin surface: the
+    /// persisted state and estimates plus the LIVE reclaimable-bytes figure
+    /// from the storage maintenance surface. Read-only; safe to poll.
+    /// Mirrors the Swift `sharedContentReclaimStatus`.
+    pub fn shared_content_reclaim_status(
+        &self,
+        handle: &EstateHandle,
+    ) -> SharedContentReclaimStatus {
+        let Some(storage) = self.storages.get(handle) else {
+            return SharedContentReclaimStatus {
+                state: None,
+                estimated_reclaimable_bytes: None,
+                reclaimed_bytes: None,
+                live_reclaimable_bytes: None,
+            };
+        };
+        let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
+        let record = SharedContentMigrationStore::new(Arc::clone(storage))
+            .load()
+            .ok()
+            .flatten();
+        let live = storage.estimated_reclaimable_bytes().ok();
+        SharedContentReclaimStatus {
+            state: record.as_ref().map(|r| r.state),
+            estimated_reclaimable_bytes: record.as_ref().and_then(|r| r.estimated_reclaimable_bytes),
+            reclaimed_bytes: record.as_ref().and_then(|r| r.reclaimed_bytes),
+            live_reclaimable_bytes: live,
+        }
     }
 
     /// Run (or resume) the shared-content migration. Idempotent and
@@ -344,6 +415,7 @@ impl EstateCoordinator {
                     rebuild_cursor: None,
                     rebuilt_content_count: 0,
                     estimated_reclaimable_bytes: None,
+                    reclaimed_bytes: None,
                 };
                 if layout.is_none() {
                     record.state = SharedContentMigrationState::Complete;

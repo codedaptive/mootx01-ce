@@ -2117,8 +2117,10 @@ public actor Corpus {
     /// Destroy the corpus's recall index.
     ///
     /// Clears the durable InvertedIndexStore (SQLite iix_termfreqs + iix_doclens
-    /// rows), the chunk-source map, and all vector rows from the VectorStore so
-    /// this corpus no longer participates in recall.
+    /// rows), the chunk-source map, and THIS CORPUS'S vector rows from the
+    /// VectorStore (ownership-scoped: its own chunk IDs under its held models —
+    /// never rows other lanes wrote to shared storage) so this corpus no longer
+    /// participates in recall.
     ///
     /// Chunk rows are not deleted by this call — they remain in the backing
     /// storage. What is destroyed is the corpus's active recall capability:
@@ -2136,11 +2138,28 @@ public actor Corpus {
         try await invertedIndex.deleteAll()
         chunkSourceMap.removeAll()
 
-        // 2. Delete all vector rows from the VectorStore.
-        //    VectorStore.destroyAllVectors() deletes every row in the vectors
-        //    table regardless of modelID, so it clears ALL held signals' rows
-        //    in one call (no per-slot fan-out needed).
-        try await vectorStore.destroyAllVectors()
+        // 2. Delete THIS CORPUS'S vector rows from the VectorStore —
+        //    OWNERSHIP-SCOPED (shared-content 1.1 P5). The corpus owns
+        //    exactly the rows keyed by its own chunk IDs under its held
+        //    models' modelIDs; on shared storage the vectors table can also
+        //    hold rows written by other lanes (drawer-keyed signals, other
+        //    consumers), and destroying the corpus's recall index must never
+        //    delete those. The chunk inventory comes from the append-only
+        //    chunks table, so it covers every chunk this corpus ever wrote
+        //    vectors for (already-removed sources' deletes are no-ops).
+        //    Whole-table teardown (`destroyAllVectors`) is reserved for the
+        //    whole-estate destruction path in GeniusLocusKit.destroy.
+        let heldModelIDs = slots.map { $0.provider.modelID }
+        for sourceID in try await bundleStore.allSourceIDs() {
+            for chunk in try await bundleStore.chunksForSource(sourceID) {
+                for modelID in heldModelIDs {
+                    try await vectorStore.deleteAllVectors(
+                        itemID: chunk.id.uuidString,
+                        modelID: modelID
+                    )
+                }
+            }
+        }
 
         // 3. Wipe the persisted trained basis (mission 6a-ii-β). A destroyed
         //    corpus must leave no orphaned basis row FOR ANY held modelID: the

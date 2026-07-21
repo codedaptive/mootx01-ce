@@ -956,6 +956,32 @@ fn apply_schema(
 }
 
 impl Storage for PostgresStorage {
+    /// PostgreSQL page reclamation is server-managed (autovacuum); the
+    /// client cannot meaningfully estimate reclaimable bytes without
+    /// superuser-level pgstattuple access, so the estimate is 0 (explicit
+    /// per-backend contract, mirrors the Swift conformance).
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        Ok(0)
+    }
+
+    /// Explicit no-op: dead-tuple reclamation and WAL recycling are the
+    /// server's responsibility (autovacuum / checkpointer). Client-driven
+    /// VACUUM FULL takes an ACCESS EXCLUSIVE lock and is an operator
+    /// decision, not a substrate maintenance primitive.
+    fn perform_maintenance(
+        &self,
+        _progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        _should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        Ok(crate::maintenance::MaintenanceReport::no_op(
+            "postgresql",
+            "physical reclamation is server-managed (autovacuum); no client-side maintenance is performed",
+        ))
+    }
+
     fn configuration(&self) -> &EstateConfiguration {
         &self.config
     }

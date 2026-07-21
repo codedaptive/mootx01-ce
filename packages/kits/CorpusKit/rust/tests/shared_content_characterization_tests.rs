@@ -153,7 +153,7 @@ fn recall_index_keys_are_chunk_uuids_requiring_translation() {
 // ── 4. Broad deletion in the lifecycle path ──────────────────────────────
 
 #[test]
-fn destroy_recall_index_deletes_unrelated_model_rows() {
+fn destroy_recall_index_spares_unrelated_model_rows() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
     let (corpus, storage) = make_corpus_with_storage();
@@ -175,14 +175,14 @@ fn destroy_recall_index_deletes_unrelated_model_rows() {
 
     corpus.destroy_recall_index().expect("destroy");
 
-    // CURRENT-BEHAVIOR: the teardown is unscoped — the unrelated lane's row
-    // is destroyed with the corpus's own rows. P5 makes this
-    // ownership-aware via the representation manifest.
+    // FIXED (shared-content 1.1 P5): the teardown is ownership-scoped —
+    // exactly the corpus's own chunk-keyed rows go; the unrelated lane's
+    // row survives the corpus teardown.
     let survivors = storage
         .row_store()
         .count("vectors", None)
         .expect("count vectors");
-    assert_eq!(survivors, 0);
+    assert_eq!(survivors, 1);
 }
 
 // ── 5. Inventory baseline over a deterministic build ─────────────────────

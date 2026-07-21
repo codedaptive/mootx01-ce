@@ -147,7 +147,7 @@ struct SharedContentCharacterizationTests {
 
     // MARK: - 5. Broad deletion in the lifecycle path
 
-    @Test func destroyRecallIndexDeletesUnrelatedModelRows() async throws {
+    @Test func destroyRecallIndexSparesUnrelatedModelRows() async throws {
         try await GlobalTestLock.shared.withLock {
             let (corpus, storage) = try await makeCorpusWithStorage()
             try await corpus.ingest(
@@ -167,11 +167,11 @@ struct SharedContentCharacterizationTests {
 
             try await corpus.destroyRecallIndex()
 
-            // CURRENT-BEHAVIOR: the teardown is unscoped — the unrelated
-            // lane's row is destroyed with the corpus's own rows. P5 makes
-            // this ownership-aware via the representation manifest.
+            // FIXED (shared-content 1.1 P5): the teardown is ownership-
+            // scoped — exactly the corpus's own chunk-keyed rows go; the
+            // unrelated lane's row survives the corpus teardown.
             let survivors = try await storage.rowStore.count(table: "vectors", where: nil)
-            #expect(survivors == 0)
+            #expect(survivors == 1)
         }
     }
 

@@ -212,9 +212,28 @@ struct SharedContentMigrationTests {
         let rerun = try await kit.runSharedContentMigration(handle: handle, now: now)
         #expect(rerun.state == .reclaimPending)
 
-        // Reclaim completion hook flips the final state.
-        try await kit.completeSharedContentReclaim(handle: handle, now: now)
+        // Reclaim completion runs the PHYSICAL reclamation (WAL checkpoint
+        // + VACUUM): the retired legacy tables' pages must actually leave
+        // the filesystem, and the status surface must report the outcome.
+        let statusBefore = try await kit.sharedContentReclaimStatus(handle: handle)
+        #expect(statusBefore.state == .reclaimPending)
+        let maintenance = try #require(
+            try await kit.completeSharedContentReclaim(handle: handle, now: now))
+        #expect(maintenance.performed)
+        #expect(maintenance.backend == "sqlite")
+        #expect(maintenance.freelistPagesAfter == 0)
+        #expect(maintenance.reclaimedBytes > 0)
+        #expect(maintenance.fileSizeBytesAfter + maintenance.walBytesAfter
+            < maintenance.fileSizeBytesBefore + maintenance.walBytesBefore)
         #expect(try await kit.sharedContentMigrationState(handle: handle) == .complete)
+        let statusAfter = try await kit.sharedContentReclaimStatus(handle: handle)
+        #expect(statusAfter.state == .complete)
+        #expect(statusAfter.reclaimedBytes == maintenance.reclaimedBytes)
+
+        // Recall still works over the vacuumed file: the reclamation freed
+        // pages, never derived state.
+        let postHits = try await engine.bm25TopK(query: "page reclamation", limit: 5)
+        #expect(postHits.first?.id == drawerIDs[2])
     }
 
     // MARK: - Orphan fail-dark

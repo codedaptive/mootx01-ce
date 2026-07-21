@@ -41,7 +41,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::corpus::Corpus;
+use corpus_kit::content_engine::CorpusContentEngine;
+use corpus_kit::schema_profile::{
+    CorpusContentConfiguration, CorpusIndexUnitPolicy, CorpusOperatingMode,
+};
+use genius_locus_kit::intake::LocusDrawerContentSource;
 // The 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Lives in the providers
 // crate because it NEWs the concrete providers; this crate is downstream of it.
 use corpus_kit_providers::default_ensemble;
@@ -686,19 +690,32 @@ fn wire_inmemory_semantic_recall(
     // the DrawerStore path, so the estate_id is a logging hint only.
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
 
-    // Corpus: applies BundleStore + VectorStore schema migrations (idempotent
-    // on InMemory, which always builds from empty). Five-signal honest ensemble
-    // (RI/PPMI/LSA/NMF/FDC via default_ensemble()): the trainable distributional
-    // signals train on-corpus and persist; FDC is stateless. Lane D (dense float
-    // recall) fuses all five and is live from the first capture.
-    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for in-memory semantic recall: {e}"))?;
-
-    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
-    // instead of constructing a second VectorStore over the same `vectors` table.
-    // Corpus already migrated the VectorStore schema; one shared store means one
-    // resident array and one on-disk sidecar kept in sync by every write.
-    let corpus = Arc::new(corpus);
+    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
+    // CorpusContentEngine over the LocusKit-backed adapter — canonical
+    // content lives once in Drawers; the engine keys every derived row by
+    // Drawer ID and resolves content by ID at work time (mirrors the GLK
+    // coordinator's provision wiring arms).
+    let estate = {
+        let guard = coord.lock().unwrap();
+        guard
+            .estate_for(handle)
+            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
+            .clone()
+    };
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    let corpus = Arc::new(
+        CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::new(LocusDrawerContentSource::new(estate)),
+            default_ensemble(),
+        )
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
+    );
     let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator.
@@ -751,17 +768,39 @@ fn wire_postgres_semantic_recall(
             .map_err(|e| format!("PostgresStorage for semantic recall at {conn_str:?}: {e}"))?,
     );
 
-    // Corpus: idempotent schema migration via migrate() — safe on an existing PG schema.
-    // Five-signal honest ensemble (default_ensemble()): trainable signals train
-    // on-corpus and persist; FDC stateless. Lane D fused and live from first capture.
-    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for postgres semantic recall at {conn_str:?}: {e}"))?;
-
-    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
-    // instead of constructing a second VectorStore over the same `vectors` table.
-    // Corpus already migrated the VectorStore schema; one shared store means one
-    // resident array and one on-disk sidecar kept in sync by every write.
-    let corpus = Arc::new(corpus);
+    // Dark-lane gate (shared-content 1.1): a pre-existing estate that still
+    // carries the legacy corpus copy lane keeps its Corpus lane DARK until
+    // the resumable migration completes. LocusKit recall stays available.
+    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(&storage) {
+        eprintln!("aria-mcp: estate carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes");
+        return Ok(());
+    }
+    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
+    // CorpusContentEngine over the LocusKit-backed adapter — canonical
+    // content lives once in Drawers; the engine keys every derived row by
+    // Drawer ID and resolves content by ID at work time (mirrors the GLK
+    // coordinator's provision wiring arms).
+    let estate = {
+        let guard = coord.lock().unwrap();
+        guard
+            .estate_for(handle)
+            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
+            .clone()
+    };
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    let corpus = Arc::new(
+        CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::new(LocusDrawerContentSource::new(estate)),
+            default_ensemble(),
+        )
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
+    );
     let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator.
@@ -807,18 +846,41 @@ fn wire_sqlite_semantic_recall(
     // migrations (BundleStore + VectorStore tables) on the same connection.
     let storage = shared_storage;
 
-    // Corpus: applies its own schema migration (BundleStore + VectorStore tables)
-    // idempotently on construction — safe to call on an existing database.
-    // Five-signal honest ensemble (default_ensemble()): Lane D fused, live from
-    // first capture; trainable signals train on-corpus and persist their bases.
-    let corpus = Corpus::open_many(Arc::clone(&storage), default_ensemble())
-        .map_err(|e| format!("Corpus::open_many for {path:?}: {e}"))?;
-
-    // BORROW Corpus's single dense VectorStore for the scored-recall vector lane
-    // instead of constructing a second VectorStore over the same `vectors` table.
-    // Corpus already migrated the VectorStore schema; one shared store means one
-    // resident array and one on-disk sidecar kept in sync by every write.
-    let corpus = Arc::new(corpus);
+    // Dark-lane gate (shared-content 1.1): a pre-existing estate that still
+    // carries the legacy corpus copy lane keeps its Corpus lane DARK until
+    // the resumable migration completes. LocusKit recall stays available;
+    // the migration verb lights the lane. Mirrors the GLK coordinator's
+    // provision gate arms.
+    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(&storage) {
+        eprintln!("aria-mcp: estate {path:?} carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes");
+        return Ok(());
+    }
+    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
+    // CorpusContentEngine over the LocusKit-backed adapter — canonical
+    // content lives once in Drawers; the engine keys every derived row by
+    // Drawer ID and resolves content by ID at work time (mirrors the GLK
+    // coordinator's provision wiring arms).
+    let estate = {
+        let guard = coord.lock().unwrap();
+        guard
+            .estate_for(handle)
+            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
+            .clone()
+    };
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .map_err(|e| format!("engine configuration: {e:?}"))?;
+    let corpus = Arc::new(
+        CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::new(LocusDrawerContentSource::new(estate)),
+            default_ensemble(),
+        )
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
+    );
     let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator so recall_scored hybrid/corpus-only/

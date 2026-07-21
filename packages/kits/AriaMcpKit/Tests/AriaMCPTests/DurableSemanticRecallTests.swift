@@ -48,14 +48,14 @@ struct DurableSemanticRecallTests {
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
-        // Mirror AriaMCPMain's semantic-recall wiring. .deterministic embedding
-        // model matches the entry point (and provision's default) — no CoreML,
-        // reproducible vectors. Corpus + VectorStore schema migrations are
-        // idempotent, so this re-runs cleanly on an existing on-disk estate.
-        let corpus = try await Corpus(storage: storage, model: .deterministic)
-        await kit.registerCorpus(corpus, for: handle)
-        let vectorStore = VectorStore(storage: storage)
-        await kit.registerVectorStore(vectorStore, for: handle)
+        // Mirror AriaMCPMain's semantic-recall wiring: the shared
+        // `wireGLKSubstores` seam — the single canonical post-open wiring path
+        // `provision` and `mootx01 serve` also use. Shared-content 1.1: it
+        // constructs the ATTACHED-mode CorpusContentEngine over the
+        // LocusKit-backed adapter (Drawer-ID keyed, no copy lane), registers
+        // the engine + its shared VectorStore, and mounts the encode queue.
+        // Idempotent, so this re-runs cleanly on an existing on-disk estate.
+        try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
 
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
         return (dispatcher, kit, handle)

@@ -73,16 +73,12 @@ private func openInMemoryEstateWithSemanticRecall()
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
     let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
-    // Wire Corpus + VectorStore on the same storage instance — the production
-    // path for in-memory. InMemoryStorage holds all table namespaces in one
-    // instance so the Corpus and VectorStore tables coexist with LocusKit tables.
-    // .deterministic: the permanent federation-grade vector (FNV-1a tokenization
-    // + FloatSimHash projection, model-free, byte-identical cross-device).
-    // embedFloat returns a 32-element float vector — Lane D is live from the first capture.
-    let corpus = try await Corpus(storage: storage, model: .deterministic)
-    await kit.registerCorpus(corpus, for: handle)
-    let vectorStore = VectorStore(storage: storage)
-    await kit.registerVectorStore(vectorStore, for: handle)
+    // Shared-content 1.1: the canonical wiring seam constructs the
+    // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter on
+    // the same storage instance (the production path for in-memory —
+    // InMemoryStorage holds all table namespaces in one instance) and
+    // registers engine + shared VectorStore.
+    try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
 
     let dispatcher = ToolDispatcher(kit: kit, handle: handle)
     return (dispatcher, kit, handle)
@@ -210,7 +206,7 @@ struct InMemorySemanticRecallTests {
     /// full capture → search e2e when the env var is set.
     ///
     /// Even when skipped, the proof is: the PG and in-memory wiring call
-    /// `Corpus(storage:model:)` + `kit.registerCorpus` + `VectorStore(storage:)`
+    /// the same `kit.wireGLKSubstores(for:backingStorage:)` seam
     /// + `kit.registerVectorStore` — the same API surface, the same code shape.
     /// The in-memory tests (A, B, C) above cover the shared logic.
     @Test func postgresCaptureThenSearchWhenEnvSet() async throws {
@@ -236,12 +232,9 @@ struct InMemorySemanticRecallTests {
             let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
             defer { Task { try? await kit.close(handle) } }
 
-            // Wire Corpus + VectorStore on the same PG storage handle.
-            // Same pattern as in-memory and SQLite — storage-agnostic wiring.
-            let corpus = try await Corpus(storage: storage, model: .deterministic)
-            await kit.registerCorpus(corpus, for: handle)
-            let vectorStore = VectorStore(storage: storage)
-            await kit.registerVectorStore(vectorStore, for: handle)
+            // Shared-content 1.1: canonical wiring seam on the same PG
+            // storage handle — storage-agnostic, same as in-memory and SQLite.
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
 
             let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 

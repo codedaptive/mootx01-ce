@@ -225,13 +225,40 @@ fn legacy_estate_migrates_selectively_and_verifies() {
         .run_shared_content_migration(&est.handle, NOW)
         .expect("re-run");
     assert_eq!(rerun.state, SharedContentMigrationState::ReclaimPending);
-    est.coord
+    let status_before = est.coord.shared_content_reclaim_status(&est.handle);
+    assert_eq!(
+        status_before.state,
+        Some(SharedContentMigrationState::ReclaimPending)
+    );
+    // Reclaim completion runs the PHYSICAL reclamation (WAL checkpoint +
+    // VACUUM): the retired legacy tables' pages must actually leave the
+    // filesystem, and the status surface must report the outcome.
+    let maintenance = est
+        .coord
         .complete_shared_content_reclaim(&est.handle, NOW)
-        .expect("reclaim complete");
+        .expect("reclaim complete")
+        .expect("maintenance report");
+    assert!(maintenance.performed);
+    assert_eq!(maintenance.backend, "sqlite");
+    assert_eq!(maintenance.freelist_pages_after, 0);
+    assert!(maintenance.reclaimed_bytes > 0);
+    assert!(
+        maintenance.file_size_bytes_after + maintenance.wal_bytes_after
+            < maintenance.file_size_bytes_before + maintenance.wal_bytes_before
+    );
     assert_eq!(
         est.coord.shared_content_migration_state(&est.handle),
         Some(SharedContentMigrationState::Complete)
     );
+    let status_after = est.coord.shared_content_reclaim_status(&est.handle);
+    assert_eq!(status_after.state, Some(SharedContentMigrationState::Complete));
+    assert_eq!(status_after.reclaimed_bytes, Some(maintenance.reclaimed_bytes));
+
+    // Recall still works over the vacuumed file: the reclamation freed
+    // pages, never derived state.
+    let post_hits = engine.bm25_top_k("page reclamation", 5).expect("bm25");
+    assert_eq!(post_hits.first().map(|(id, _)| id.as_str()),
+               Some(est.drawer_ids[2].as_str()));
 }
 
 #[test]

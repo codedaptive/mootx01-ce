@@ -611,6 +611,14 @@ public extension GeniusLocusKit {
     ///      connection open to execute its SQL DELETE operations.
     ///   2. Calls `VectorStore.destroyAllVectors()` on the registered vector store
     ///      (if any), for the same reason — before the storage connection is closed.
+    ///      WHOLE-ESTATE PRECONDITION (shared-content 1.1 P5): this is the ONLY
+    ///      shared-lifecycle path allowed to use the broad whole-table vector
+    ///      teardown, and only because the estate itself is being destroyed —
+    ///      every row in this estate's vectors table belongs to the estate, the
+    ///      estate is closed and deregistered immediately after (step 3), and the
+    ///      admin plane deletes the backing file. Recall-index lifecycle paths
+    ///      (engine destroyRecallIndex, legacy Corpus destroyRecallIndex,
+    ///      migration teardown) are all ownership-scoped and never call it.
     ///   3. Calls `close(_:)` to flush LocusKit, drop all registry entries, and
     ///      release the SQLite connection. If the handle is already closed
     ///      (`.estateNotOpen`), this step is skipped.

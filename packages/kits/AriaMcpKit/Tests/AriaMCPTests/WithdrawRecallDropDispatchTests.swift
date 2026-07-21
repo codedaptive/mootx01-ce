@@ -50,10 +50,11 @@ struct WithdrawRecallDropDispatchTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-        let corpus = try await Corpus(storage: storage, model: .deterministic)
-        await kit.registerCorpus(corpus, for: handle)
-        let vectorStore = VectorStore(storage: storage)
-        await kit.registerVectorStore(vectorStore, for: handle)
+        // Shared-content 1.1: the canonical wiring seam constructs the
+        // ATTACHED-mode CorpusContentEngine over the LocusKit-backed adapter
+        // and registers engine + shared VectorStore (same path AriaMCPMain
+        // and provision use).
+        try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         return ToolDispatcher(kit: kit, handle: handle)
     }
 
