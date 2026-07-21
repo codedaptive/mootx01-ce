@@ -19,3 +19,11 @@ fn default_keyword_tokens_empty_input() {
 fn default_keyword_tokens_punctuation_only_input() {
     assert!(default_keyword_tokens("!!!,,,..").is_empty());
 }
+
+#[test]
+fn default_keyword_tokens_lowercases_greek_sigma_without_context() {
+    assert_eq!(
+        default_keyword_tokens("embeddings from U·Σ"),
+        vec!["embeddings", "from", "u", "σ",]
+    );
+}

@@ -457,6 +457,20 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
     .unwrap();
     reopened.reconcile_configured_providers(NOW).unwrap();
     assert_eq!(reopened.maintained_vocab_anchor(), maintained_anchor);
+    let before_retrain = reopened
+        .provider_generations()
+        .into_iter()
+        .find(|(model_id, _)| model_id == "random-indexing-v1")
+        .map(|(_, digest)| digest)
+        .expect("persisted RI generation");
+    let retrained = reopened
+        .train_trainable_slots(NOW + 1, true)
+        .expect("reopened engine must retain a trainable reconstruction witness");
+    assert_eq!(
+        retrained.get("random-indexing-v1"),
+        Some(&before_retrain),
+        "unchanged reopen + retrain must reproduce the persisted generation"
+    );
 
     let removed = CorpusContentEngine::open(
         Arc::clone(&storage),

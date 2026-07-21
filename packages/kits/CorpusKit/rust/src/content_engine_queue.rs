@@ -16,12 +16,14 @@
 
 use crate::content_engine::{ContentIndexJob, ContentIndexJobKind, CorpusContentEngine};
 use crate::error::{CorpusKitError, CorpusKitResult};
+use crate::index_state_store::CorpusIndexState;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, SqliteStorage};
 use queuekit::{
-    DrainLease, Job, JobId, ObservationStatus, PersistenceKitBackend, QueueBackend, QueueKit,
-    StreamId, DRAIN_LEASE_HEARTBEAT_SECS, wall_now_secs,
+    wall_now_secs, DrainLease, Job, JobId, ObservationStatus, PersistenceKitBackend, QueueBackend,
+    QueueKit, StreamId, DRAIN_LEASE_HEARTBEAT_SECS,
 };
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -271,11 +273,15 @@ impl CorpusContentEngine {
         self.begin_deferred_vector_index()?;
 
         let mut encoded_ids: Vec<String> = Vec::new();
+        let mut completions: Vec<(JobId, ObservationStatus)> = Vec::with_capacity(batch.len());
+        let mut counts_updates: Vec<(String, String)> = Vec::new();
+        let mut checkpoints: Vec<CorpusIndexState> = Vec::new();
+        let mut prepared_upserts: HashSet<(String, i64, String)> = HashSet::new();
         for job in &batch {
             let payload: ContentIndexJob = match serde_json::from_slice(&job.payload) {
                 Ok(p) => p,
                 Err(_) => {
-                    let _ = queue.reply(&job.id, ObservationStatus::Blocked, vec![]);
+                    completions.push((job.id.clone(), ObservationStatus::Blocked));
                     continue;
                 }
             };
@@ -288,18 +294,43 @@ impl CorpusContentEngine {
                 if let Err(_e) = self.fire_ingest_failure_hook(&payload.content_id) {
                     continue;
                 }
-                match self.process_job(&payload, work_now) {
-                    Ok(()) => {
+                let upsert_key = payload
+                    .digest
+                    .as_ref()
+                    .map(|digest| (payload.content_id.clone(), payload.revision, digest.clone()));
+                let content_already_prepared = upsert_key
+                    .as_ref()
+                    .map(|key| prepared_upserts.contains(key))
+                    .unwrap_or(false);
+                match self.prepare_queue_job(&payload, work_now, content_already_prepared) {
+                    Ok((job_checkpoints, job_counts_update)) => {
                         if payload.kind == ContentIndexJobKind::Upsert {
                             encoded_ids.push(payload.content_id.clone());
+                        } else {
+                            // Preserve queue order inside the deferred
+                            // checkpoint set: a later remove cancels an
+                            // earlier prepared upsert for the same content.
+                            checkpoints
+                                .retain(|checkpoint| checkpoint.content_id != payload.content_id);
+                            prepared_upserts
+                                .retain(|(content_id, _, _)| content_id != &payload.content_id);
+                            counts_updates
+                                .retain(|(content_id, _)| content_id != &payload.content_id);
                         }
-                        let _ = queue.reply(&job.id, ObservationStatus::Done, vec![]);
+                        if let Some(update) = job_counts_update {
+                            counts_updates.push(update);
+                        }
+                        checkpoints.extend(job_checkpoints);
+                        if let Some(key) = upsert_key {
+                            prepared_upserts.insert(key);
+                        }
+                        completions.push((job.id.clone(), ObservationStatus::Done));
                         replied = true;
                         break;
                     }
                     Err(CorpusKitError::StaleRevision(_)) => {
                         // Obsolete by design — done, not blocked.
-                        let _ = queue.reply(&job.id, ObservationStatus::Done, vec![]);
+                        completions.push((job.id.clone(), ObservationStatus::Done));
                         replied = true;
                         break;
                     }
@@ -312,15 +343,36 @@ impl CorpusContentEngine {
                 }
             }
             if !replied {
-                let _ = queue.reply(&job.id, ObservationStatus::Blocked, vec![]);
+                completions.push((job.id.clone(), ObservationStatus::Blocked));
             }
         }
 
+        // Batch-boundary last write: maintained counts and the checkpoints
+        // proving those folds are committed atomically (never per record —
+        // that was O(N·vocab) write amplification). It MUST precede terminal
+        // queue completion so any failure leaves recoverable references.
+        if let Err(error) =
+            self.commit_queue_batch(&checkpoints, &counts_updates, drain_now() as i64 * 1000)
+        {
+            return Err(match self.publish_vector_index() {
+                Ok(()) => error,
+                Err(publication_error) => CorpusKitError::StoreUnavailable(format!(
+                    "{error:?}; resident-index publication after queue commit failure: \
+                     {publication_error:?}"
+                )),
+            });
+        }
+        if let Err(error) = queue.reply_batch(&completions) {
+            let error = CorpusKitError::StoreUnavailable(format!("content reply batch: {error:?}"));
+            return Err(match self.publish_vector_index() {
+                Ok(()) => error,
+                Err(publication_error) => CorpusKitError::StoreUnavailable(format!(
+                    "{error:?}; resident-index publication after queue completion failure: \
+                     {publication_error:?}"
+                )),
+            });
+        }
         if !encoded_ids.is_empty() {
-            // Batch-boundary counts snapshot: the maintained counts fold in
-            // memory per record; the durable write happens ONCE per burst
-            // (never per record — that was O(N·vocab) write amplification).
-            let _ = self.persist_counts_snapshot(drain_now() as i64 * 1000);
             self.fire_on_encoded(&encoded_ids);
         }
         Ok(batch.len())
@@ -380,8 +432,15 @@ fn run_content_drain_loop(
             }
             Ok(_) => {
                 if pending_publish {
-                    let _ = engine.publish_vector_index();
-                    pending_publish = false;
+                    match engine.publish_vector_index() {
+                        Ok(()) => pending_publish = false,
+                        Err(e) => {
+                            // Keep the publication pending. The next idle pass
+                            // retries instead of silently declaring the burst
+                            // published after a transient storage failure.
+                            eprintln!("mootx01 content resident-index publish failed: {e:?}");
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -389,5 +448,320 @@ fn run_content_drain_loop(
             }
         }
         std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        content::CorpusContentStore, CorpusContentChange, CorpusContentConfiguration,
+        CorpusDocumentStore, CorpusIndexUnitPolicy, CorpusOperatingMode, EmbeddingModelConfig,
+    };
+    use persistence_kit::Storage;
+    use queuekit::backend::WatchHandler;
+    use queuekit::{ArtifactRef, QueueError, SessionId, StreamId};
+    use std::any::Any;
+
+    struct FailCompleteBackend {
+        inner: PersistenceKitBackend,
+    }
+
+    #[derive(Clone, Default)]
+    struct RetryCountsProvider {
+        documents: u64,
+    }
+
+    impl vectorkit::EmbeddingProvider for RetryCountsProvider {
+        fn model_id(&self) -> &str {
+            "retry-counts-v1"
+        }
+
+        fn model_version(&self) -> &str {
+            "1.0.0"
+        }
+
+        fn embed(&self, _text: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
+            Ok(engram_lib::Engram::ZERO)
+        }
+
+        fn embed_float(&self, _text: &str) -> Result<Vec<f32>, vectorkit::VectorKitError> {
+            Ok(vec![1.0])
+        }
+    }
+
+    impl crate::TrainableEmbeddingBasis for RetryCountsProvider {
+        fn train_on_corpus(&mut self, texts: &[&str]) {
+            self.documents += texts.len() as u64;
+        }
+
+        fn accumulate_training(&mut self, texts: &[&str]) {
+            self.documents += texts.len() as u64;
+        }
+
+        fn finalize_training(&mut self) {}
+
+        fn serialize_basis(&self) -> Vec<u8> {
+            self.documents.to_le_bytes().to_vec()
+        }
+
+        fn reconstruct_basis(
+            &self,
+            basis: &[u8],
+        ) -> Result<Box<dyn vectorkit::EmbeddingProvider>, CorpusKitError> {
+            Ok(Box::new(Self::from_bytes(basis)?))
+        }
+
+        fn release_basis(&mut self) {}
+
+        fn reconstruct_trainable_basis(
+            &self,
+            basis: &[u8],
+        ) -> Result<Box<dyn crate::TrainableEmbeddingBasis>, CorpusKitError> {
+            Ok(Box::new(Self::from_bytes(basis)?))
+        }
+
+        fn add_to_counts(&mut self, _text: &str) {
+            self.documents += 1;
+        }
+
+        fn serialize_counts(&self) -> Vec<u8> {
+            self.documents.to_le_bytes().to_vec()
+        }
+
+        fn restore_counts(&mut self, bytes: &[u8]) -> Result<(), CorpusKitError> {
+            *self = Self::from_bytes(bytes)?;
+            Ok(())
+        }
+
+        fn counts_vocabulary_size(&self) -> usize {
+            self.documents as usize
+        }
+    }
+
+    impl RetryCountsProvider {
+        fn from_bytes(bytes: &[u8]) -> Result<Self, CorpusKitError> {
+            let raw: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_| CorpusKitError::DecodingFailure("retry-counts fixture".to_string()))?;
+            Ok(Self {
+                documents: u64::from_le_bytes(raw),
+            })
+        }
+    }
+
+    impl QueueBackend for FailCompleteBackend {
+        fn write(&self, job: &Job) -> Result<(), QueueError> {
+            self.inner.write(job)
+        }
+
+        fn drain_available(&self) -> Result<Vec<(Job, SessionId)>, QueueError> {
+            self.inner.drain_available()
+        }
+
+        fn complete(
+            &self,
+            _job_id: &JobId,
+            _status: ObservationStatus,
+            _artifacts: Vec<ArtifactRef>,
+        ) -> Result<(), QueueError> {
+            Err(QueueError::BackendUnavailable(
+                "injected terminal completion failure".to_string(),
+            ))
+        }
+
+        fn in_flight(&self) -> Result<Vec<Job>, QueueError> {
+            self.inner.in_flight()
+        }
+
+        fn completed(&self, stream: Option<&StreamId>) -> Result<Vec<Job>, QueueError> {
+            self.inner.completed(stream)
+        }
+
+        fn pending_count(&self) -> Result<usize, QueueError> {
+            self.inner.pending_count()
+        }
+
+        fn drain_available_for_stream(
+            &self,
+            stream: &StreamId,
+        ) -> Result<Vec<(Job, SessionId)>, QueueError> {
+            self.inner.drain_available_for_stream(stream)
+        }
+
+        fn pending_count_for_stream(&self, stream: &StreamId) -> Result<usize, QueueError> {
+            self.inner.pending_count_for_stream(stream)
+        }
+
+        fn watch(&self, handler: WatchHandler) -> Result<(), QueueError> {
+            self.inner.watch(handler)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn terminal_completion_error_propagates_and_leaves_reference_recoverable() {
+        let storage: Arc<dyn Storage> =
+            Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+        storage
+            .migrate(&crate::standalone_declaration(false))
+            .expect("content schema");
+        let source = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+        let record = source
+            .put("completion failure remains durable", "drawer-reply", 10)
+            .expect("put source");
+        let engine = CorpusContentEngine::open(
+            Arc::clone(&storage),
+            CorpusContentConfiguration::new(
+                CorpusOperatingMode::Standalone,
+                CorpusIndexUnitPolicy::WholeContent,
+            )
+            .expect("configuration"),
+            Arc::clone(&source) as Arc<dyn crate::CorpusContentSource>,
+            vec![EmbeddingModelConfig::Deterministic],
+        )
+        .expect("engine");
+
+        let queue_storage: Arc<dyn Storage> =
+            Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+        PersistenceKitBackend::open_schema(queue_storage.as_ref()).expect("queue schema");
+        let backend: Box<dyn QueueBackend> = Box::new(FailCompleteBackend {
+            inner: PersistenceKitBackend::new(queue_storage),
+        });
+        let queue = QueueKit::new(backend);
+        let payload = ContentIndexJob::from_change(
+            &CorpusContentChange::Upsert {
+                id: record.id,
+                revision: record.revision,
+                digest: record.digest,
+            },
+            Some("cursor-1".to_string()),
+        );
+        queue
+            .send(&Job {
+                id: JobId("reply-failure-job".to_string()),
+                stream_id: content_encode_stream_id(),
+                submitted_at: queuekit::HLC {
+                    physical_time: 10,
+                    logical_count: 0,
+                    node_id: 1,
+                },
+                priority: 50,
+                payload: serde_json::to_vec(&payload).expect("payload"),
+                extensions: serde_json::Map::new(),
+            })
+            .expect("enqueue");
+
+        let error = engine
+            .drain_content_with_queue(&queue)
+            .expect_err("terminal completion failure must surface");
+        assert!(format!("{error:?}").contains("content reply batch"));
+        assert_eq!(queue.in_flight().expect("in-flight").len(), 1);
+        assert!(engine
+            .float_nearest_per_signal("completion failure remains durable", 5)
+            .iter()
+            .any(|(model_id, outcome)| {
+                model_id == "corpus-deterministic-v1"
+                    && matches!(outcome, crate::FloatLaneOutcome::Hits(hits) if !hits.is_empty())
+            }));
+    }
+
+    #[test]
+    fn failed_last_write_does_not_double_fold_counts_on_retry() {
+        use crate::corpus_provider_counts_store::CorpusProviderCountsStore;
+        use persistence_kit::{EstateConfiguration, Storage};
+
+        let path = std::env::temp_dir().join(format!(
+            "corpus-content-counts-retry-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let path_string = path.to_string_lossy().into_owned();
+        let storage: Arc<dyn Storage> = Arc::new(
+            SqliteStorage::new(EstateConfiguration::new(
+                uuid::Uuid::new_v4(),
+                BackendConfiguration::Sqlite {
+                    path: path_string.clone(),
+                    busy_timeout_secs: 0.05,
+                },
+            ))
+            .expect("open sqlite"),
+        );
+        storage
+            .migrate(&crate::standalone_declaration(false))
+            .expect("content schema");
+        let source = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+        source
+            .put("initial training vocabulary", "drawer-anchor", 10)
+            .expect("put anchor");
+        let engine = CorpusContentEngine::open(
+            Arc::clone(&storage),
+            CorpusContentConfiguration::new(
+                CorpusOperatingMode::Standalone,
+                CorpusIndexUnitPolicy::WholeContent,
+            )
+            .expect("configuration"),
+            Arc::clone(&source) as Arc<dyn crate::CorpusContentSource>,
+            vec![EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(RetryCountsProvider::default()),
+            }],
+        )
+        .expect("engine");
+        engine
+            .train_trainable_slots(10, false)
+            .expect("train anchor");
+
+        let record = source
+            .put("retry must fold this document once", "drawer-retry", 11)
+            .expect("put retry record");
+        let job = ContentIndexJob::from_change(
+            &CorpusContentChange::Upsert {
+                id: record.id,
+                revision: record.revision,
+                digest: record.digest,
+            },
+            Some("retry-cursor".to_string()),
+        );
+        let (first_checkpoints, first_counts) = engine
+            .prepare_queue_job(&job, 11, false)
+            .expect("prepare first attempt");
+        let first_counts = vec![first_counts.expect("first counts update")];
+
+        // Hold the SQLite writer lock across the last-write transaction. The
+        // derived rows are already present, but neither counts nor checkpoints
+        // can commit; the durable reference would therefore be retried.
+        let blocker = rusqlite::Connection::open(&path_string).expect("open blocker");
+        blocker
+            .execute_batch("BEGIN EXCLUSIVE")
+            .expect("hold writer lock");
+        engine
+            .commit_queue_batch(&first_checkpoints, &first_counts, 11)
+            .expect_err("last-write must surface SQLITE_BUSY");
+        blocker
+            .execute_batch("ROLLBACK")
+            .expect("release writer lock");
+
+        let (retry_checkpoints, retry_counts) = engine
+            .prepare_queue_job(&job, 12, false)
+            .expect("prepare retry");
+        let retry_counts = vec![retry_counts.expect("retry counts update")];
+        engine
+            .commit_queue_batch(&retry_checkpoints, &retry_counts, 12)
+            .expect("commit retry");
+
+        let persisted = CorpusProviderCountsStore::new(Arc::clone(&storage))
+            .load("retry-counts-v1", "1.0.0")
+            .expect("load counts")
+            .expect("counts row");
+        assert_eq!(
+            persisted.document_count, 2,
+            "failed attempt must restore the in-memory accumulator before retry"
+        );
+        drop(engine);
+        drop(source);
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
     }
 }

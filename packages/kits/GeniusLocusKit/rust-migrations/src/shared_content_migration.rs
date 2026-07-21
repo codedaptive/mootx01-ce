@@ -466,7 +466,12 @@ impl SharedContentMigrationExt for EstateCoordinator {
         storage: &Arc<dyn Storage>,
         wired_fingerprint: Option<&str>,
     ) -> bool {
-        let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
+        if storage
+            .migrate(&SharedContentMigrationStore::schema_declaration())
+            .is_err()
+        {
+            return true;
+        }
         match SharedContentMigrationStore::new(Arc::clone(storage)).load() {
             Ok(Some(record)) => {
                 // Any persisted record short of `verified` keeps the lane
@@ -483,16 +488,14 @@ impl SharedContentMigrationExt for EstateCoordinator {
                 }
                 false
             }
-            Ok(None) => {
-                match EstateFormatStore::new(Arc::clone(storage)).read_if_present() {
-                    Ok(Some(EstateFormatVersion::CURRENT)) => false,
-                    Ok(_) => match detect_legacy_layout(storage) {
-                        Ok(layout) => layout.is_some(),
-                        Err(_) => true,
-                    },
+            Ok(None) => match EstateFormatStore::new(Arc::clone(storage)).read_if_present() {
+                Ok(Some(EstateFormatVersion::CURRENT)) => false,
+                Ok(_) => match detect_legacy_layout(storage) {
+                    Ok(layout) => layout.is_some(),
                     Err(_) => true,
-                }
-            }
+                },
+                Err(_) => true,
+            },
             Err(_) => true,
         }
     }
@@ -503,7 +506,6 @@ impl SharedContentMigrationExt for EstateCoordinator {
         handle: &EstateHandle,
     ) -> Option<SharedContentMigrationState> {
         let storage = self.migration_storage(handle)?;
-        let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
         SharedContentMigrationStore::new(Arc::clone(&storage))
             .load()
             .ok()
@@ -539,6 +541,21 @@ impl SharedContentMigrationExt for EstateCoordinator {
         if record.state != SharedContentMigrationState::ReclaimPending {
             return Ok(None);
         }
+        // Remove the row-level inventories BEFORE physical maintenance. Saving
+        // this compact ReclaimPending record first makes the freed audit pages
+        // part of the VACUUM itself; trimming after VACUUM recreated ~60 MB of
+        // freelist in the completed estate. A crash here is safe: verification
+        // is already complete and the next call simply retries maintenance.
+        if record.legacy_chunk_count.is_none() {
+            record.legacy_chunk_count = Some(record.legacy_chunk_ids.len());
+        }
+        if record.legacy_vector_key_count.is_none() {
+            record.legacy_vector_key_count = Some(record.legacy_vector_keys.len());
+        }
+        record.legacy_chunk_ids = vec![];
+        record.legacy_vector_keys = vec![];
+        record.protected_baseline = BTreeMap::new();
+        store.save(&record, now_millis)?;
         let report = storage.perform_maintenance(None, None).map_err(|e| {
             SharedContentMigrationError::StorageFailure {
                 state: SharedContentMigrationState::ReclaimPending,
@@ -546,16 +563,6 @@ impl SharedContentMigrationExt for EstateCoordinator {
             }
         })?;
         record.reclaimed_bytes = Some(report.reclaimed_bytes);
-        // Trim the consumed evidence (P6): the deletion inventory and the
-        // protected baseline exist to drive and verify the migration; once
-        // physically reclaimed, only the outcome (state, counts, cursor,
-        // reclaimed bytes) stays durable — a 110k-chunk / 1.1M-key estate
-        // otherwise carries ~60 MB of record forever.
-        record.legacy_chunk_count = Some(record.legacy_chunk_ids.len());
-        record.legacy_vector_key_count = Some(record.legacy_vector_keys.len());
-        record.legacy_chunk_ids = vec![];
-        record.legacy_vector_keys = vec![];
-        record.protected_baseline = BTreeMap::new();
         record.state = SharedContentMigrationState::Complete;
         store.save(&record, now_millis)?;
         Ok(Some(report))
@@ -574,7 +581,6 @@ impl SharedContentMigrationExt for EstateCoordinator {
                 live_reclaimable_bytes: None,
             };
         };
-        let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
         let record = SharedContentMigrationStore::new(Arc::clone(&storage))
             .load()
             .ok()
@@ -1050,7 +1056,13 @@ impl SharedContentMigrationExt for EstateCoordinator {
         //    the P5 maintenance surface (freelist pages × page size + WAL
         //    bytes; 0 on backends with nothing client-reclaimable).
         if record.state < SharedContentMigrationState::ReclaimPending {
-            record.estimated_reclaimable_bytes = storage.estimated_reclaimable_bytes().ok();
+            record.estimated_reclaimable_bytes =
+                Some(storage.estimated_reclaimable_bytes().map_err(|error| {
+                    SharedContentMigrationError::StorageFailure {
+                        state: SharedContentMigrationState::Verified,
+                        reason: format!("estimate reclaimable bytes: {error:?}"),
+                    }
+                })?);
             record.state = SharedContentMigrationState::ReclaimPending;
             store.save(&record, now_millis)?;
             check_shared_content_fault(self, record.state)?;

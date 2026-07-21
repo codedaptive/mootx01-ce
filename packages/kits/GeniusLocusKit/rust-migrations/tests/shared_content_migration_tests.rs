@@ -14,7 +14,7 @@ use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::EstateCoordinator;
 use genius_locus_kit_migrations::{
     SharedContentMigrationError, SharedContentMigrationExt, SharedContentMigrationState,
-    SharedContentTrainingCapacity,
+    SharedContentMigrationStore, SharedContentTrainingCapacity,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
@@ -79,6 +79,93 @@ fn below_compiled_floor_refuses_before_legacy_deletion() {
         Err(SharedContentMigrationError::BelowCompiledFloor { .. })
     ));
     assert_eq!(est.storage.row_store().count("chunks", None).unwrap(), 1);
+}
+
+#[test]
+fn future_format_refuses_before_migration_schema_or_legacy_deletion() {
+    let mut est = make_legacy_estate(&["future-format estate remains untouched"], false, true);
+    genius_locus_kit::estate_format::EstateFormatStore::new(Arc::clone(&est.storage))
+        .stamp(
+            genius_locus_kit::estate_format::EstateFormatVersion { major: 2, minor: 0 },
+            NOW,
+        )
+        .expect("stamp future-format fixture");
+    let result = est
+        .coord
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble());
+    assert!(matches!(
+        result,
+        Err(SharedContentMigrationError::UnsupportedFuture { .. })
+    ));
+    assert_eq!(est.storage.row_store().count("chunks", None).unwrap(), 1);
+    assert_eq!(
+        est.storage
+            .current_schema_version_for("GLKSharedContentMigration")
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn malformed_registered_format_fails_closed_before_destructive_work() {
+    let mut est = make_legacy_estate(&["malformed-format estate remains untouched"], false, true);
+    genius_locus_kit::estate_format::EstateFormatStore::new(Arc::clone(&est.storage))
+        .stamp(
+            genius_locus_kit::estate_format::EstateFormatVersion::CURRENT,
+            NOW,
+        )
+        .expect("stamp current-format fixture");
+    rusqlite::Connection::open(&est.path)
+        .expect("open raw probe")
+        .execute(
+            "UPDATE glk_estate_format SET major = 'malformed' WHERE id = 'estate-format'",
+            [],
+        )
+        .expect("corrupt registered format row");
+
+    let result = est
+        .coord
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble());
+    assert!(matches!(
+        result,
+        Err(SharedContentMigrationError::StorageFailure {
+            state: SharedContentMigrationState::Discovered,
+            ..
+        })
+    ));
+    assert_eq!(est.storage.row_store().count("chunks", None).unwrap(), 1);
+    assert_eq!(
+        est.storage
+            .current_schema_version_for("GLKSharedContentMigration")
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn current_format_without_migration_record_does_not_dark_attached_corpus() {
+    let backing = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+    backing
+        .migrate(&corpus_kit::attached_declaration())
+        .expect("install current attached schema");
+    genius_locus_kit::estate_format::EstateFormatStore::new(backing.clone())
+        .stamp(
+            genius_locus_kit::estate_format::EstateFormatVersion::CURRENT,
+            NOW,
+        )
+        .expect("stamp current format");
+    let storage: Arc<dyn Storage> = backing;
+
+    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(
+        &storage, None
+    ));
+    assert!(
+        SharedContentMigrationStore::new(storage)
+            .load()
+            .expect("read optional migration record")
+            .is_none(),
+        "current-format estates do not need a historical migration record"
+    );
 }
 
 fn cap_frame(content: &str) -> CaptureFrame {
@@ -382,6 +469,51 @@ fn legacy_estate_migrates_selectively_and_verifies() {
         post_hits.first().map(|(id, _)| id.as_str()),
         Some(est.drawer_ids[2].as_str())
     );
+}
+
+#[test]
+fn reclaim_compacts_large_inventory_before_vacuum() {
+    let mut est = make_legacy_estate(&["inventory compaction fixture"], false, false);
+    est.coord
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble())
+        .expect("migration");
+
+    // Inflate the durable evidence row enough that trimming it after VACUUM
+    // necessarily creates observable freelist pages. This models the 59.7 MB
+    // record seen in the 98k-Drawer qualification estate without making the
+    // fast suite carry a million entries.
+    let store = SharedContentMigrationStore::new(Arc::clone(&est.storage));
+    let mut record = store.load().expect("load record").expect("record");
+    let padding = "x".repeat(120);
+    record.legacy_chunk_ids = (0..25_000)
+        .map(|index| format!("chunk-{index:08}-{padding}"))
+        .collect();
+    record.legacy_vector_keys = (0..25_000)
+        .map(|index| format!("vector-{index:08}-{padding}"))
+        .collect();
+    store.save(&record, NOW).expect("save inflated record");
+
+    let report = est
+        .coord
+        .complete_shared_content_reclaim(&est.handle, NOW)
+        .expect("reclaim")
+        .expect("maintenance report");
+    assert_eq!(report.freelist_pages_after, 0);
+
+    let completed = store.load().expect("load completed").expect("record");
+    assert_eq!(completed.legacy_chunk_count, Some(25_000));
+    assert_eq!(completed.legacy_vector_key_count, Some(25_000));
+    assert!(completed.legacy_chunk_ids.is_empty());
+    assert!(completed.legacy_vector_keys.is_empty());
+
+    // The post-maintenance completion save must not recreate the removed
+    // inventory as freelist. This assertion failed on the pinned RC even
+    // though MaintenanceReport itself claimed freelist_pages_after == 0.
+    let connection = rusqlite::Connection::open(&est.path).expect("open probe");
+    let actual_freelist: i64 = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .expect("freelist probe");
+    assert_eq!(actual_freelist, 0);
 }
 
 #[test]

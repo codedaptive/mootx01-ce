@@ -33,6 +33,7 @@ use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// GLK's room-rollup coordination callback (fired with Drawer IDs).
@@ -244,6 +245,9 @@ pub struct CorpusContentEngine {
     /// Engine-owned content-reference queue state (P3). See
     /// content_engine_queue.rs.
     queue_state: Mutex<Option<crate::content_engine_queue::ContentQueueState>>,
+    /// A failed counts/checkpoint transaction must rehydrate maintained counts
+    /// before any durable queue reference is attempted again.
+    counts_reload_required: AtomicBool,
     /// GLK's room-rollup coordination hook (fired with Drawer IDs).
     on_encoded: Mutex<Option<ContentOnEncoded>>,
     /// Declared encode speed (serial drain today; retained surface).
@@ -329,6 +333,7 @@ impl CorpusContentEngine {
             claims,
             slots,
             queue_state: Mutex::new(None),
+            counts_reload_required: AtomicBool::new(false),
             on_encoded: Mutex::new(None),
             encode_speed: Mutex::new(EncodeSpeed::Foreground),
             ingest_failure_hook: Mutex::new(None),
@@ -1198,6 +1203,184 @@ impl CorpusContentEngine {
         }
     }
 
+    /// Queue-only preparation seam. Derived vectors and coverage are written
+    /// in their normal order, while the final content/cursor checkpoints are
+    /// returned for an atomic batch commit with maintained provider counts.
+    pub(crate) fn prepare_queue_job(
+        &self,
+        job: &ContentIndexJob,
+        now_millis: i64,
+        content_already_prepared: bool,
+    ) -> CorpusKitResult<(Vec<CorpusIndexState>, Option<(String, String)>)> {
+        if self.counts_reload_required.load(Ordering::Acquire) {
+            self.reload_counts_from_storage()?;
+            self.counts_reload_required.store(false, Ordering::Release);
+        }
+        Self::validate(&job.content_id)?;
+        let mut checkpoints = Vec::with_capacity(2);
+        let mut counts_update = None;
+        match job.kind {
+            ContentIndexJobKind::Upsert => {
+                let Some(digest) = &job.digest else {
+                    return Err(CorpusKitError::InvalidConfiguration(format!(
+                        "upsert job for {} carries no digest",
+                        job.content_id
+                    )));
+                };
+                let Some(record) = self.source.record(&job.content_id)? else {
+                    return Err(CorpusKitError::StaleRevision(format!(
+                        "upsert for {} rev {}: the ID no longer resolves — the remove change will clear it",
+                        job.content_id, job.revision
+                    )));
+                };
+                if record.revision != job.revision || record.digest != *digest {
+                    return Err(CorpusKitError::StaleRevision(format!(
+                        "upsert for {} rev {} does not match the current record rev {} — stale job rejected without checkpoint advance",
+                        job.content_id, job.revision, record.revision
+                    )));
+                }
+                if !content_already_prepared {
+                    if let Some(checkpoint) = self.prepare_index_record(
+                        &record,
+                        job.cursor.as_deref(),
+                        false,
+                        now_millis,
+                        SlotScope::All,
+                        false,
+                    )? {
+                        counts_update = Some((record.id.clone(), record.text.clone()));
+                        checkpoints.push(checkpoint);
+                    }
+                }
+            }
+            ContentIndexJobKind::Remove => self.clear_derived_state(&job.content_id)?,
+        }
+        if let Some(cursor) = &job.cursor {
+            checkpoints.push(CorpusIndexState {
+                content_id: FEED_CURSOR_ROW_ID.to_string(),
+                revision: 0,
+                digest: String::new(),
+                index_version: CONTENT_ENGINE_INDEX_VERSION,
+                applied_cursor: Some(cursor.clone()),
+                updated_at_millis: now_millis,
+            });
+        }
+        Ok((checkpoints, counts_update))
+    }
+
+    /// Last-write transaction for a durable queue batch. A crash can observe
+    /// either the old counts/checkpoints (and replay the durable references) or
+    /// the new pair, never a checkpoint that outruns its maintained counts.
+    pub(crate) fn commit_queue_batch(
+        &self,
+        checkpoints: &[CorpusIndexState],
+        counts_updates: &[(String, String)],
+        now_millis: i64,
+    ) -> CorpusKitResult<()> {
+        let mut counts_rows = Vec::new();
+        if !counts_updates.is_empty() {
+            for slot in &self.slots {
+                let (model_id, model_version) = {
+                    let handle = slot.handle.lock().unwrap();
+                    let provider = handle.provider();
+                    (
+                        provider.model_id().to_string(),
+                        provider.model_version().to_string(),
+                    )
+                };
+                let mut counts = slot.counts.lock().unwrap();
+                let Some(state) = counts.as_mut() else {
+                    continue;
+                };
+                for (_, text) in counts_updates {
+                    state.accumulator.add_to_counts(text);
+                    state.document_count += 1;
+                }
+                counts_rows.push(PersistedCounts {
+                    model_id,
+                    model_version,
+                    counts: state.accumulator.serialize_counts(),
+                    document_count: state.document_count,
+                    vocab_size: state.accumulator.counts_vocabulary_size(),
+                    updated_at_secs: now_millis / 1000,
+                });
+            }
+        }
+        let counts_store = &self.counts_store;
+        let index_state = &self.index_state;
+        let result = self
+            .storage
+            .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
+                let rows = txn.row_store();
+                for counts in &counts_rows {
+                    counts_store.upsert_into(counts, &rows).map_err(|error| {
+                        persistence_kit::StorageError::BackendError {
+                            underlying: format!("queue counts: {error:?}"),
+                        }
+                    })?;
+                }
+                for checkpoint in checkpoints {
+                    index_state
+                        .advance_into(checkpoint, &rows)
+                        .map_err(|error| persistence_kit::StorageError::BackendError {
+                            underlying: format!("queue checkpoint: {error:?}"),
+                        })?;
+                }
+                Ok(())
+            })
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")));
+        if let Err(transaction_error) = result {
+            // The storage transaction is the authority even if a backend
+            // reports an ambiguous commit error. Reload only on this rare
+            // path; retaining rollback copies during every successful burst
+            // would duplicate the estate-scale counts blobs in memory.
+            self.counts_reload_required.store(true, Ordering::Release);
+            if let Err(reload_error) = self.reload_counts_from_storage() {
+                return Err(CorpusKitError::StoreUnavailable(format!(
+                    "{transaction_error:?}; reload durable counts: {reload_error:?}"
+                )));
+            }
+            self.counts_reload_required.store(false, Ordering::Release);
+            return Err(transaction_error);
+        }
+        Ok(())
+    }
+
+    fn reload_counts_from_storage(&self) -> CorpusKitResult<()> {
+        for slot in &self.slots {
+            let Some(fresh_blob) = slot.fresh_basis_blob.as_ref() else {
+                continue;
+            };
+            let (model_id, model_version) = {
+                let handle = slot.handle.lock().unwrap();
+                let provider = handle.provider();
+                (
+                    provider.model_id().to_string(),
+                    provider.model_version().to_string(),
+                )
+            };
+            let persisted = self.counts_store.load(&model_id, &model_version)?;
+            let mut counts = slot.counts.lock().unwrap();
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::NotTrainable(format!(
+                    "provider {model_id} has no retained counts accumulator"
+                ))
+            })?;
+            let mut accumulator = state.accumulator.reconstruct_trainable_basis(fresh_blob)?;
+            let document_count = if let Some(row) = persisted {
+                accumulator.restore_counts(&row.counts)?;
+                row.document_count
+            } else {
+                0
+            };
+            *counts = Some(crate::corpus::CountsState {
+                accumulator,
+                document_count,
+            });
+        }
+        Ok(())
+    }
+
     fn index_record(
         &self,
         record: &CorpusContentRecord,
@@ -1206,6 +1389,26 @@ impl CorpusContentEngine {
         now_millis: i64,
         slot_scope: SlotScope,
     ) -> CorpusKitResult<()> {
+        if let Some(checkpoint) =
+            self.prepare_index_record(record, applied_cursor, force, now_millis, slot_scope, true)?
+        {
+            self.index_state.advance(&checkpoint)?;
+        }
+        Ok(())
+    }
+
+    /// Produce every derived row and the final checkpoint, but leave the
+    /// checkpoint uncommitted. The durable queue uses this seam to atomically
+    /// publish batch-maintained counts with all corresponding checkpoints.
+    fn prepare_index_record(
+        &self,
+        record: &CorpusContentRecord,
+        applied_cursor: Option<&str>,
+        force: bool,
+        now_millis: i64,
+        slot_scope: SlotScope,
+        maintain_counts: bool,
+    ) -> CorpusKitResult<Option<CorpusIndexState>> {
         // Idempotence anchor: a checkpoint covering this exact (revision,
         // digest, index_version) means the derived rows are complete —
         // replay writes NOTHING. `force` (reindex) bypasses deliberately.
@@ -1215,7 +1418,7 @@ impl CorpusContentEngine {
                     && existing.digest == record.digest
                     && existing.index_version == CONTENT_ENGINE_INDEX_VERSION
                 {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -1293,18 +1496,19 @@ impl CorpusContentEngine {
         // Maintained counts: fold in memory. Persistence happens at BATCH
         // boundaries (drain-burst close) and at training commits — never
         // once per record.
-        self.fold_into_counts(&record.text);
+        if maintain_counts {
+            self.fold_into_counts(&record.text);
+        }
 
-        // Checkpoint LAST.
-        self.index_state.advance(&CorpusIndexState {
+        // The caller publishes this checkpoint LAST.
+        Ok(Some(CorpusIndexState {
             content_id: record.id.clone(),
             revision: record.revision,
             digest: record.digest.clone(),
             index_version: CONTENT_ENGINE_INDEX_VERSION,
             applied_cursor: applied_cursor.map(str::to_string),
             updated_at_millis: now_millis,
-        })?;
-        Ok(())
+        }))
     }
 
     /// Compute the record's index units under the configured policy,
@@ -1582,15 +1786,27 @@ impl CorpusContentEngine {
             // never compounds on a prior generation. A SEPARATE fresh
             // counts accumulator folds the SAME pages, so the persisted
             // counts are exactly the training corpus's statistics.
-            let (mut fresh, mut counts_accumulator, model_version) = {
+            let model_version = {
                 let handle = slot.handle.lock().unwrap();
-                let Some(trainable) = handle.as_trainable() else {
-                    continue;
-                };
-                let fresh = trainable.reconstruct_trainable_basis(blob)?;
-                let accumulator = trainable.reconstruct_trainable_basis(blob)?;
-                let version = handle.provider().model_version().to_string();
-                (fresh, accumulator, version)
+                handle.provider().model_version().to_string()
+            };
+            // Reconstruct through the maintained-counts accumulator, not the
+            // serving handle. A reopened persisted basis is intentionally held
+            // as `Plain` because Rust cannot cross-cast that trait object back
+            // to trainable; the separately retained accumulator remains the
+            // stable trainable witness across reopen (the standalone Corpus
+            // uses the same pattern in `train_and_persist_basis`).
+            let (mut fresh, mut counts_accumulator) = {
+                let counts = slot.counts.lock().unwrap();
+                let state = counts.as_ref().ok_or_else(|| {
+                    CorpusKitError::NotTrainable(format!(
+                        "provider {model_id} has no retained counts accumulator"
+                    ))
+                })?;
+                (
+                    state.accumulator.reconstruct_trainable_basis(blob)?,
+                    state.accumulator.reconstruct_trainable_basis(blob)?,
+                )
             };
             let mut document_count = 0usize;
             let mut cursor = 0usize;

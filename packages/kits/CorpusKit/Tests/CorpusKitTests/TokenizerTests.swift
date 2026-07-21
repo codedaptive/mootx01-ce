@@ -35,6 +35,11 @@ struct TokenizerTests {
         #expect(tokenizer.keywordTokens("!!! ... ???").isEmpty)
     }
 
+    @Test func lowercasesGreekSigmaWithoutContext() {
+        #expect(tokenizer.keywordTokens("embeddings from U·Σ") ==
+            ["embeddings", "from", "u", "σ"])
+    }
+
     @Test func exposesProtocolVocabularySurface() {
         // The protocol requirements DeterministicTokenizer satisfies.
         #expect(tokenizer.vocabID == "deterministic-v1")

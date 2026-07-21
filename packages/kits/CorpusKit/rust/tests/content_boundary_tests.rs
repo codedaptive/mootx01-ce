@@ -371,6 +371,7 @@ fn attached_profile_contains_no_canonical_content_table() {
         "iix_termfreqs",
         "iix_doclens",
         "corpus_provider_basis",
+        "corpus_provider_configuration",
         "corpus_provider_counts",
     ]
     .into_iter()

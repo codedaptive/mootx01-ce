@@ -45,12 +45,16 @@ public protocol Tokenizer: Sendable {
 public func defaultKeywordTokens(_ text: String) -> [String] {
     var out: [String] = []
     var current = ""
-    for scalar in text.lowercased().unicodeScalars {
-        if scalar.properties.isAlphabetic || scalar.value >= 0x30 && scalar.value <= 0x39 {
-            current.unicodeScalars.append(scalar)
-        } else if !current.isEmpty {
-            out.append(current)
-            current = ""
+    // Lowercase each scalar independently. Whole-string special casing turns
+    // Greek Σ into context-dependent σ/ς differently in Foundation and Rust.
+    for original in text.unicodeScalars {
+        for scalar in String(original).lowercased().unicodeScalars {
+            if scalar.properties.isAlphabetic || scalar.value >= 0x30 && scalar.value <= 0x39 {
+                current.unicodeScalars.append(scalar)
+            } else if !current.isEmpty {
+                out.append(current)
+                current = ""
+            }
         }
     }
     if !current.isEmpty { out.append(current) }

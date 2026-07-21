@@ -31,13 +31,14 @@ pub trait Tokenizer: Send + Sync {
     }
 }
 
-/// Default keyword tokenization: lowercase and split on
-/// Unicode word boundaries. Matches the Swift default in
-/// `Tokenizer.keywordTokens`.
+/// Default keyword tokenization: lowercase each Unicode scalar independently
+/// and split on Unicode-alphabetic / ASCII-digit boundaries. Scalar-local
+/// casing is deliberate: whole-string Unicode special casing turns Greek Σ
+/// into context-dependent σ/ς differently across Foundation and Rust.
 pub fn default_keyword_tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
-    for c in text.to_lowercase().chars() {
+    for c in text.chars().flat_map(char::to_lowercase) {
         if c.is_alphabetic() || c.is_ascii_digit() {
             current.push(c);
         } else if !current.is_empty() {

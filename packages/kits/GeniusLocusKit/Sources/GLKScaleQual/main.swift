@@ -75,7 +75,10 @@ let storage = try SQLiteStorage(configuration: EstateConfiguration(
 let kit = GeniusLocusKit()
 let owner = OwnerCredentials(ownerIdentifier: ownerID)
 let tOpen = Date()
-let handle = try await kit.open(storage: storage, owner: owner)
+let handle = try await kit.open(
+    storage: storage,
+    owner: owner,
+    identityKeyStore: InMemoryEstateIdentityKeyStore())
 q("open_secs", String(format: "%.2f", Date().timeIntervalSince(tOpen)))
 
 // Migration (idempotent + resumable; default five-signal ensemble).

@@ -65,8 +65,22 @@ impl CorpusIndexStateStore {
 
     /// Upsert the checkpoint for one content ID. Idempotent.
     pub fn advance(&self, state: &CorpusIndexState) -> Result<(), CorpusKitError> {
+        self.advance_into(state, &self.storage.row_store())
+    }
+
+    /// Transaction-scoped checkpoint write. Queue batches use this to commit
+    /// their maintained-counts snapshot and every content/cursor checkpoint in
+    /// one last-write transaction.
+    pub fn advance_into(
+        &self,
+        state: &CorpusIndexState,
+        row_store: &Arc<dyn persistence_kit::RowStore>,
+    ) -> Result<(), CorpusKitError> {
         let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
-        values.insert("content_id".into(), TypedValue::Text(state.content_id.clone()));
+        values.insert(
+            "content_id".into(),
+            TypedValue::Text(state.content_id.clone()),
+        );
         values.insert("revision".into(), TypedValue::Int(state.revision));
         values.insert("digest".into(), TypedValue::Text(state.digest.clone()));
         values.insert("index_version".into(), TypedValue::Int(state.index_version));
@@ -77,9 +91,11 @@ impl CorpusIndexStateStore {
                 None => TypedValue::Null,
             },
         );
-        values.insert("updated_at".into(), TypedValue::Timestamp(state.updated_at_millis));
-        self.storage
-            .row_store()
+        values.insert(
+            "updated_at".into(),
+            TypedValue::Timestamp(state.updated_at_millis),
+        );
+        row_store
             .upsert("corpus_index_state", values, &["content_id".to_string()])
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         Ok(())
@@ -148,15 +164,25 @@ impl CorpusIndexStateStore {
             .row_store()
             .delete(
                 "corpus_index_state",
-                &StoragePredicate::Like(Column::new("corpus_index_state", "content_id"), "%".into()),
+                &StoragePredicate::Like(
+                    Column::new("corpus_index_state", "content_id"),
+                    "%".into(),
+                ),
             )
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         Ok(())
     }
 
     fn decode(content_id: &str, row: &StorageRow) -> Option<CorpusIndexState> {
-        let (Some(TypedValue::Int(revision)), Some(TypedValue::Text(digest)), Some(TypedValue::Int(index_version))) =
-            (row.get("revision"), row.get("digest"), row.get("index_version"))
+        let (
+            Some(TypedValue::Int(revision)),
+            Some(TypedValue::Text(digest)),
+            Some(TypedValue::Int(index_version)),
+        ) = (
+            row.get("revision"),
+            row.get("digest"),
+            row.get("index_version"),
+        )
         else {
             return None;
         };
