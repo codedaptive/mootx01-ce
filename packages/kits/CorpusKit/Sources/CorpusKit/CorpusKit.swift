@@ -885,7 +885,10 @@ public actor Corpus {
     /// never names the concrete provider type, so layering (providers → core) is
     /// preserved. A corrupt/version-mismatched blob throws `decodingFailure`
     /// rather than silently serving an untrained provider.
-    private static func resolveProvider(
+    // Internal — not private — so the shared-content `CorpusContentEngine`
+    // resolves providers through the SAME open-time logic (one engine, not
+    // a fork; GLK shared-content 1.1 P2).
+    static func resolveProvider(
         freshProvider: any EmbeddingProvider,
         isTrainable: Bool,
         basisStore: BasisStore,
@@ -2710,9 +2713,12 @@ extension EmbeddingModel {
     private static let deterministicSeed: UInt64 = 0xC05B_D15C_A15D_1B00
 
     /// Construct the concrete EmbeddingProvider for this model selection.
-    /// The returned value is held privately inside the Corpus actor and
-    /// never exposed on the public API.
-    fileprivate func makeProvider() -> any EmbeddingProvider {
+    /// The returned value is held privately inside the Corpus actor (or the
+    /// shared-content `CorpusContentEngine`) and never exposed on the public
+    /// API. Internal — not fileprivate — so the content engine reuses the
+    /// SAME provider construction (one engine, not a fork; GLK
+    /// shared-content 1.1 P2).
+    func makeProvider() -> any EmbeddingProvider {
         switch self {
         case .randomIndexing(let provider):
             // The caller built and trained the provider externally. Pass it

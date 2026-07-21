@@ -376,7 +376,7 @@ fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
 /// `Plain` holds a non-trainable provider. `provider()` upcasts a reference to
 /// `&dyn EmbeddingProvider` for the embed surface (stable trait upcasting),
 /// `trainable_mut()` hands back the trainable box for an in-place retrain.
-enum ProviderHandle {
+pub(crate) enum ProviderHandle {
     /// A trainable distributional provider (RI/PPMI/LSA/NMF). Retains the
     /// `TrainableEmbeddingBasis` capability so the corpus can retrain it.
     Trainable(Box<dyn TrainableEmbeddingBasis>),
@@ -390,7 +390,7 @@ impl ProviderHandle {
     /// `&dyn EmbeddingProvider` (the Rust mirror of Swift's type-erased carried
     /// provider) since `EmbeddingProvider` is a supertrait of
     /// `TrainableEmbeddingBasis`.
-    fn provider(&self) -> &dyn EmbeddingProvider {
+    pub(crate) fn provider(&self) -> &dyn EmbeddingProvider {
         match self {
             ProviderHandle::Trainable(b) => b.as_ref() as &dyn EmbeddingProvider,
             ProviderHandle::Plain(b) => b.as_ref(),
@@ -401,7 +401,7 @@ impl ProviderHandle {
     /// `reconstruct_trainable_basis`), or `None` when the provider is not
     /// trainable. Mirrors Swift's `provider as? any TrainableEmbeddingBasis`
     /// capability probe.
-    fn as_trainable(&self) -> Option<&dyn TrainableEmbeddingBasis> {
+    pub(crate) fn as_trainable(&self) -> Option<&dyn TrainableEmbeddingBasis> {
         match self {
             ProviderHandle::Trainable(b) => Some(b.as_ref()),
             ProviderHandle::Plain(_) => None,
@@ -424,11 +424,11 @@ impl ProviderHandle {
 /// can return `&str` for the DEFAULT slot without locking. For N=1 the corpus
 /// holds exactly one slot and every fan-out loop runs once — byte-identical to
 /// the pre-6a-iii single-provider path.
-struct ProviderSlot {
+pub(crate) struct ProviderSlot {
     /// The serving provider, behind a `Mutex` so a per-slot retrain can swap in
     /// a freshly-trained provider through `&self`. A `ProviderHandle`, not a
     /// bare box, so the trainable capability survives (see `ProviderHandle`).
-    handle: Mutex<ProviderHandle>,
+    pub(crate) handle: Mutex<ProviderHandle>,
     /// The serialized EMPTY (untrained) basis of a trainable provider — the
     /// from-scratch factory. `Some` for EVERY trainable slot, whether built fresh
     /// OR reopened from a persisted basis; `None` only for non-trainable slots.
@@ -437,27 +437,27 @@ struct ProviderSlot {
     /// from-basis slot (rather than dropping it) is the frozen-after-restart fix:
     /// a restarted corpus can retrain on `reindex`. Mirrors Swift's
     /// `ProviderSlot.freshBasisBlob`.
-    fresh_basis_blob: Option<Vec<u8>>,
+    pub(crate) fresh_basis_blob: Option<Vec<u8>>,
     /// The dedicated maintained-counts accumulator for a trainable slot (P3),
     /// held SEPARATELY from `handle` behind its own `Mutex` so it can be folded
     /// through `&self`. `None` for non-trainable slots. It must NOT be the serving
     /// provider: for LSA/NMF, growing the maintained vocabulary would desync the
     /// serving provider's basis-aligned vocab from its frozen factors. Mirrors
     /// Swift's `ProviderSlot.countsAccumulator` + `countsDocumentCount`.
-    counts: Mutex<Option<CountsState>>,
+    pub(crate) counts: Mutex<Option<CountsState>>,
     /// Cached provider modelID. Stable for the corpus's lifetime (training
     /// mutates the basis, not the identity). Lets the corpus key the float lane
     /// and basis rows without locking the handle Mutex.
-    model_id: String,
+    pub(crate) model_id: String,
 }
 
 /// A trainable slot's maintained-counts state: the accumulator plus its
 /// document-count growth anchor. The doc count is tracked here (not read off the
 /// provider) so it is uniform across RI/PPMI/LSA/NMF, whose providers track
 /// document count inconsistently. Mirrors the two Swift slot fields.
-struct CountsState {
-    accumulator: Box<dyn TrainableEmbeddingBasis>,
-    document_count: usize,
+pub(crate) struct CountsState {
+    pub(crate) accumulator: Box<dyn TrainableEmbeddingBasis>,
+    pub(crate) document_count: usize,
 }
 
 // MARK: - Corpus
@@ -739,7 +739,7 @@ impl Corpus {
     /// Build one `ProviderSlot` from a model config, resolving load-on-open and
     /// capturing the fresh-basis blob. Shared by `open_many` per element; the
     /// per-slot logic is exactly the pre-6a-iii single-provider construction.
-    fn build_slot(
+    pub(crate) fn build_slot(
         model: EmbeddingModelConfig,
         basis_store: &BasisStore,
         counts_store: &CorpusProviderCountsStore,

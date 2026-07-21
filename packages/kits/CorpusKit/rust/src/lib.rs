@@ -36,6 +36,7 @@ pub mod chunk;
 pub mod chunker;
 // Canonical content boundary + operating profiles (GLK shared-content 1.1, P1).
 pub mod content;
+pub mod content_engine;
 pub mod corpus;
 pub mod corpus_ingest_queue;
 pub mod corpus_provider_counts_store;
@@ -60,6 +61,11 @@ pub use bundle_store::*;
 pub use content::{
     content_digest, CorpusContentChange, CorpusContentChangeBatch, CorpusContentId,
     CorpusContentRecord, CorpusContentSource, CorpusContentStore,
+};
+pub use content_engine::{
+    content_id_from_item_key, passage_ranges, ContentIndexJob, ContentIndexJobKind,
+    CorpusContentEngine, CorpusContentHit, CorpusEvidence, CLAIMS_CONSUMER,
+    CONTENT_ENGINE_INDEX_VERSION,
 };
 pub use document_store::CorpusDocumentStore;
 pub use index_state_store::{CorpusIndexState, CorpusIndexStateStore};
