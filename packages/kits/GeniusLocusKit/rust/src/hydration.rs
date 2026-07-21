@@ -136,6 +136,7 @@ pub fn composite_schema() -> SchemaDeclaration {
     // estates and retired by the shared-content migration on existing ones.
     let ck = corpus_kit::attached_declaration();
     let claims = vectorkit::VectorRepresentationClaims::schema_declaration();
+    let estate_format = crate::estate_format::EstateFormatStore::schema_declaration();
 
     // Composite version = sum of the three GLK-composed component versions
     // plus two GLK-owned addends:
@@ -152,6 +153,7 @@ pub fn composite_schema() -> SchemaDeclaration {
     let grants_schema_version = 1;
     let matrix_snapshot_schema_version = MatrixSnapshotStore::schema_declaration().version;
     let composite_version = lk.version + vk.version + claims.version + ck.version
+        + estate_format.version
         + grants_schema_version
         + matrix_snapshot_schema_version;
 
@@ -162,6 +164,7 @@ pub fn composite_schema() -> SchemaDeclaration {
     tables.extend(vk.tables);
     tables.extend(claims.tables);
     tables.extend(ck.tables);
+    tables.extend(estate_format.tables);
     tables.push(GrantStore::grants_table());
     // matrix_snapshot: must be last so version ordering matches Swift composite.
     tables.extend(mx_snapshot.tables);
@@ -211,10 +214,12 @@ mod composite_version_tests {
         let mx = MatrixSnapshotStore::schema_declaration().version;
         let s = composite_schema();
         // Two GLK-owned addends: +1 grants, +matrix_snapshot version.
-        assert_eq!(s.version, lk + vk + claims + ck + 1 + mx);
+        let format = crate::estate_format::EstateFormatStore::schema_declaration().version;
+        assert_eq!(s.version, lk + vk + claims + ck + format + 1 + mx);
         assert!(s.tables.iter().any(|t| t.name == "grants"));
         // matrix_snapshot must be in composite for hydration to copy it from durable storage
         assert!(s.tables.iter().any(|t| t.name == "matrix_snapshot"));
+        assert!(s.tables.iter().any(|t| t.name == "glk_estate_format"));
         assert_eq!(s.kit_id, "GeniusLocusKit");
     }
 }

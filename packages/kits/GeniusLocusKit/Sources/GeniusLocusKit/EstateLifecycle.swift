@@ -181,7 +181,11 @@ public extension GeniusLocusKit {
         // seeds. (Seeding does not depend on the wiring; the order is purely so the
         // hint drawers carry the normal model id — wing organization.)
         let backingStorage = corpusStorage ?? storage
+        let formatStorage = params.kind == .locusOnly ? storage : backingStorage
         do {
+            // A fresh GLK provision is born at the current estate format. This
+            // is the only non-migration path allowed to create the format stamp.
+            try await EstateFormatStore(storage: formatStorage).stamp(.current, now: Date())
             // Wire via the shared seam (also called by the serve entry points so a
             // bare-opened served estate gets the same Corpus + VectorStore + encode
             // queue — the semantic recall + distillation lanes — without re-stamping
@@ -360,6 +364,10 @@ public extension GeniusLocusKit {
     ) async throws {
         switch kind {
         case .glk:
+            // Current-only GLK never detects or executes historical layouts.
+            // Upgrade-capable hosts run their optional migration catalog before
+            // calling this seam; an unstamped/older estate fails explicitly.
+            try await EstateFormatStore(storage: backingStorage).requireCurrent()
             // Apply the GLK composite schema so all component kit tables (LocusKit,
             // VectorKit, CorpusKit) are registered on backingStorage under the
             // GeniusLocusKit composite kit ID. The plain `open(storage:owner:)` path
@@ -371,18 +379,6 @@ public extension GeniusLocusKit {
             // composite open the hydrate launch path performs in
             // open(inMemory:hydrateFrom:).
             try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
-            // Shared-content dark-lane gate (P4): a legacy pre-cutover
-            // estate keeps its Corpus lane DARK until the resumable
-            // migration reaches `verified`. LocusKit recall stays available;
-            // the admin migration verb lights the lane.
-            if await sharedContentLaneMustStayDark(
-                storage: backingStorage,
-                wiredFingerprint: CorpusContentEngine.configurationFingerprint(
-                    mode: .attached, models: embeddingModels)) {
-                Self.lifecycleLog.warning(
-                    "estate \(handle.estateUUID, privacy: .public) carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes")
-                return
-            }
             // Full composition: the attached-mode CorpusContentEngine (BM25 +
             // internal vectors, Drawer-ID keyed) + standalone VectorStore.
             // EVERY GLK Corpus is constructed attached + .wholeContent — the
@@ -395,6 +391,7 @@ public extension GeniusLocusKit {
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
                 models: embeddingModels)
+            try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // BORROW Corpus's single dense VectorStore for GLK's scored-recall
             // vector lane rather than constructing a second VectorStore over the
@@ -422,15 +419,7 @@ public extension GeniusLocusKit {
             )
 
         case .corpusOnly:
-            // Same shared-content dark-lane gate as the .glk arm.
-            if await sharedContentLaneMustStayDark(
-                storage: backingStorage,
-                wiredFingerprint: CorpusContentEngine.configurationFingerprint(
-                    mode: .attached, models: embeddingModels)) {
-                Self.lifecycleLog.warning(
-                    "estate \(handle.estateUUID, privacy: .public) carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes")
-                return
-            }
+            try await EstateFormatStore(storage: backingStorage).requireCurrent()
             // LocusKit core + the attached engine. No standalone VectorStore
             // registration. Same attached + .wholeContent construction rule.
             let estateObj = try estate(for: handle)
@@ -440,6 +429,7 @@ public extension GeniusLocusKit {
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
                 models: embeddingModels)
+            try await corpus.reconcileConfiguredProviders(now: Date())
             registerCorpus(corpus, for: handle)
             // A CorpusOnly estate also feeds its Corpus from capture: mount the
             // Corpus-owned ingest queue + drain worker and wire the room rollup.

@@ -44,7 +44,9 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
     /// resolving).
     public func record(for id: CorpusContentID) async throws -> CorpusContentRecord? {
         guard let drawer = try await estate.getDrawers(ids: [id]).first,
-              !drawer.content.isEmpty else {
+              !drawer.content.isEmpty,
+              drawer.contentKind != .dataset,
+              drawer.embeddingModelID != datasetHandleEmbeddingModelID else {
             return nil
         }
         return CorpusContentRecord(
@@ -72,7 +74,10 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
             let page = try await estate.activeDrawersAfter(id: cursor, limit: pageSize)
             if page.isEmpty { break }
             cursor = page.last?.id
-            for drawer in page where !drawer.content.isEmpty {
+            for drawer in page where !drawer.content.isEmpty
+                && drawer.contentKind != .dataset
+                && drawer.embeddingModelID != datasetHandleEmbeddingModelID
+            {
                 ids.append(drawer.id)
             }
             if page.count < pageSize { break }

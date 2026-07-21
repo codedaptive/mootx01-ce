@@ -287,7 +287,12 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
         ppmiVectors = [:]
 
-        for (target, contextCounts) in coCount {
+        // Hash-map iteration order is not a numeric contract. Sort both levels
+        // by UTF-8 bytes so floating accumulation order is byte-identical in
+        // Swift and Rust at representative vocabulary sizes.
+        let targets = coCount.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        for target in targets {
+            guard let contextCounts = coCount[target] else { continue }
             // Marginal probability for the target term.
             // If termCount has no entry (should not happen since train
             // increments both tables, but guard defensively), skip.
@@ -296,7 +301,11 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
 
             var vec = [Float](repeating: 0, count: ppmiDimension)
 
-            for (context, pairCount) in contextCounts {
+            let contexts = contextCounts.keys.sorted {
+                $0.utf8.lexicographicallyPrecedes($1.utf8)
+            }
+            for context in contexts {
+                guard let pairCount = contextCounts[context] else { continue }
                 guard pairCount > 0 else { continue }
                 // Marginal probability for the context term.
                 guard let cc = termCount[context], cc > 0 else { continue }

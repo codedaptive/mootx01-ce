@@ -14,11 +14,53 @@ import CorpusKit
 import CorpusKitProviders
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
 
+#if GLK_MIGRATION_V1_0_TO_V1_1
+
 func q(_ label: String, _ value: Any) { print("QUAL \(label)=\(value)") }
+
+/// Cross-port diagnostic over the exact ordered token stream consumed by the
+/// distributional trainers. Length prefixes make the fold unambiguous. This is
+/// deliberately independent of provider math: if it differs, investigate the
+/// content source/tokenizer before RI/PPMI accumulation.
+func tokenStreamFingerprint(
+    source: any CorpusContentSource
+) async throws -> (digest: String, tokenCount: Int) {
+    var hash: UInt64 = 0xcbf29ce484222325
+    var tokenCount = 0
+    func fold(_ bytes: some Sequence<UInt8>) {
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001b3
+        }
+    }
+    func foldLength(_ value: Int) {
+        var length = UInt64(value).littleEndian
+        withUnsafeBytes(of: &length) { fold($0) }
+    }
+    for id in try await source.activeContentIDs().sorted() {
+        let idBytes = Array(id.utf8)
+        foldLength(idBytes.count)
+        fold(idBytes)
+        guard let record = try await source.record(for: id) else {
+            foldLength(0)
+            continue
+        }
+        let tokens = defaultKeywordTokens(record.text)
+        foldLength(tokens.count)
+        tokenCount += tokens.count
+        for token in tokens {
+            let bytes = Array(token.utf8)
+            foldLength(bytes.count)
+            fold(bytes)
+        }
+    }
+    return (String(format: "%016llx", hash), tokenCount)
+}
 
 guard let path = ProcessInfo.processInfo.environment["MOOT_SCF_QUAL_DB"] else {
     FileHandle.standardError.write(Data("MOOT_SCF_QUAL_DB not set — nothing to do\n".utf8))
@@ -71,21 +113,27 @@ q("status.reclaimed_bytes", status.reclaimedBytes ?? -1)
 
 // Post-migration recall qualification.
 let estate = try await kit.estate(for: handle)
+let contentSource = LocusDrawerCorpusContentSource(estate: estate)
 let engine = try await CorpusContentEngine(
     storage: storage,
     configuration: CorpusContentConfiguration(mode: .attached, indexUnit: .wholeContent),
-    source: LocusDrawerCorpusContentSource(estate: estate),
+    source: contentSource,
     models: CorpusEnsemble.defaultEnsemble())
+let tokenStream = try await tokenStreamFingerprint(source: contentSource)
+q("recall.token_stream_fnv64", tokenStream.digest)
+q("recall.token_count", tokenStream.tokenCount)
 q("recall.indexed_sources", try await engine.indexedContentIDs().count)
 q("recall.coverage_attestations", try await engine.indexCoverageAttestations().count)
 for generation in await engine.providerGenerations() {
     q("recall.coverage.\(generation.modelID)",
       try await engine.coveredCount(modelID: generation.modelID) ?? 0)
-    q("recall.generation.\(generation.modelID)", String(generation.basisDigest.prefix(12)))
+    // Full digest is required for Swift/Rust byte-parity comparison. A short
+    // display prefix can conceal a real large-corpus trainer divergence.
+    q("recall.generation.\(generation.modelID)", generation.basisDigest)
 }
 let queries = ["project planning decisions",
                "release engineering process",
-               "memory palace estate"]
+               "memory estate"]
 for (i, query) in queries.enumerated() {
     let tF = Date()
     let perSignal = await engine.floatNearestPerSignal(query: query, limit: 5)
@@ -111,3 +159,9 @@ for (i, query) in queries.enumerated() {
 }
 try await kit.close(handle)
 q("done", true)
+
+#else
+FileHandle.standardError.write(Data(
+    "glk-scale-qual requires --traits MigrationFloor1_0\n".utf8))
+exit(2)
+#endif

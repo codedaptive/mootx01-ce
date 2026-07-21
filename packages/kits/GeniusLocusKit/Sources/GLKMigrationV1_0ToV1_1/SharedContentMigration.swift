@@ -28,6 +28,8 @@
 import CorpusKit
 import CorpusKitProviders
 import Foundation
+import GeniusLocusKit
+import LocusKit
 import OSLog
 import PersistenceKit
 import VectorKit
@@ -100,6 +102,44 @@ public enum SharedContentMigrationError: Error, Equatable {
     case storageFailure(state: SharedContentMigrationState, reason: String)
     /// Test-seam fault injection fired after the recorded state.
     case injectedFault(after: SharedContentMigrationState)
+    /// Refused before legacy derived state is cleared because the declared
+    /// training working-set budget cannot safely hold this estate.
+    case insufficientTrainingCapacity(
+        contentCount: Int, requiredBytes: UInt64, budgetBytes: UInt64)
+}
+
+/// Conservative five-signal training-capacity contract. The calibrated
+/// 320 KiB/content slope exceeds the measured 26.9 GiB / 98,118-Drawer Rust
+/// peak; the 2 GiB floor covers runtime and fixed provider workspaces. By
+/// default migration may consume at most 80% of physical RAM. Operators may
+/// provide a lower cgroup/job budget with MOOT_MIGRATION_MEMORY_BUDGET_BYTES.
+public enum SharedContentTrainingCapacity {
+    public static let fixedBytes: UInt64 = 2 * 1_024 * 1_024 * 1_024
+    public static let bytesPerContent: UInt64 = 320 * 1_024
+
+    public static func requiredBytes(contentCount: Int) -> UInt64 {
+        fixedBytes + UInt64(max(0, contentCount)) * bytesPerContent
+    }
+
+    public static func budgetBytes(environment: [String: String] = ProcessInfo.processInfo.environment) -> UInt64 {
+        if let raw = environment["MOOT_MIGRATION_MEMORY_BUDGET_BYTES"],
+           let explicit = UInt64(raw), explicit > 0 {
+            return explicit
+        }
+        return ProcessInfo.processInfo.physicalMemory * 4 / 5
+    }
+
+    public static func require(contentCount: Int) throws {
+        try require(contentCount: contentCount, budgetBytes: budgetBytes())
+    }
+
+    public static func require(contentCount: Int, budgetBytes: UInt64) throws {
+        let required = requiredBytes(contentCount: contentCount)
+        guard required <= budgetBytes else {
+            throw SharedContentMigrationError.insufficientTrainingCapacity(
+                contentCount: contentCount, requiredBytes: required, budgetBytes: budgetBytes)
+        }
+    }
 }
 
 // MARK: - Durable record
@@ -184,7 +224,9 @@ public actor SharedContentMigrationStore {
         case .json(let d): data = d
         case .blob(let d): data = d
         case .text(let t): data = Data(t.utf8)
-        default: return nil
+        default:
+            throw SharedContentMigrationError.storageFailure(
+                state: .discovered, reason: "migration record payload is missing or malformed")
         }
         return try JSONDecoder().decode(SharedContentMigrationRecord.self, from: data)
     }
@@ -209,12 +251,25 @@ public enum SharedContentMigrationDetection {
     /// estates never create `chunks`, so a present table IS the legacy
     /// mark; `corpus_metadata` distinguishes the v3-era layout from the
     /// v2/v7 era. Structural probes — never a version literal.
-    public static func detectLegacyLayout(storage: any Storage) async -> String? {
-        let chunksPresent = (try? await storage.rowStore.count(table: "chunks", where: nil)) != nil
-        guard chunksPresent else { return nil }
-        let metadataPresent =
-            (try? await storage.rowStore.count(table: "corpus_metadata", where: nil)) != nil
-        return metadataPresent ? "legacy-chunks+metadata" : "legacy-chunks"
+    public static func detectLegacyLayout(storage: any Storage) async throws -> String? {
+        let legacyVersion = try await storage.currentSchemaVersion(for: "CorpusKit")
+        do { _ = try await storage.rowStore.count(table: "chunks", where: nil) }
+        catch {
+            // No legacy schema registration and no chunks table is the fresh
+            // shape. Once a legacy version is registered, an unreadable/missing
+            // table is corruption and must not be reclassified as fresh.
+            if legacyVersion == 0 { return nil }
+            throw error
+        }
+        do {
+            _ = try await storage.rowStore.count(table: "corpus_metadata", where: nil)
+            return "legacy-chunks+metadata"
+        } catch {
+            // BundleStore v1/v2 legitimately predates corpus_metadata. v3+
+            // declares it, so an error at that version is not absence.
+            if legacyVersion < 3 { return "legacy-chunks" }
+            throw error
+        }
     }
 }
 
@@ -257,14 +312,14 @@ public extension GeniusLocusKit {
 
     /// Test seam: when non-nil, the migration throws `injectedFault` right
     /// AFTER persisting the named state — the resume-proof harness.
-    internal var _sharedContentFaultAfter: SharedContentMigrationState? {
-        get { _sharedContentFaultAfterStorage }
-        set { _sharedContentFaultAfterStorage = newValue }
+    package var _sharedContentFaultAfter: SharedContentMigrationState? {
+        get { migrationFaultToken().flatMap(SharedContentMigrationState.init(rawValue:)) }
+        set { setMigrationFaultToken(newValue?.rawValue) }
     }
 
     /// Install the fault-injection seam (test-only; single-use).
-    internal func _setSharedContentFault(_ state: SharedContentMigrationState?) {
-        _sharedContentFaultAfterStorage = state
+    package func _setSharedContentFault(_ state: SharedContentMigrationState?) {
+        setMigrationFaultToken(state?.rawValue)
     }
 
     /// Whether the estate's Corpus lane must stay DARK:
@@ -278,21 +333,32 @@ public extension GeniusLocusKit {
     func sharedContentLaneMustStayDark(
         storage: any Storage, wiredFingerprint: String? = nil
     ) async -> Bool {
-        let legacy = await SharedContentMigrationDetection.detectLegacyLayout(storage: storage) != nil
         try? await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
-        let record = try? await SharedContentMigrationStore(storage: storage).load()
-        guard let record else { return legacy }
-        // Any persisted record short of `verified` keeps the lane dark —
-        // including post-retirement states where the legacy tables are
-        // already gone and structural detection alone would light a
-        // partially rebuilt lane.
-        if record.state.ordinal < SharedContentMigrationState.verified.ordinal {
-            return true
-        }
-        if let wiredFingerprint, record.ensembleFingerprint != wiredFingerprint {
-            return true
-        }
-        return false
+        do {
+            if let record = try await SharedContentMigrationStore(storage: storage).load() {
+                // A record is authoritative after schema retirement, when
+                // absent legacy tables are no longer a valid detection probe.
+                if record.state.ordinal < SharedContentMigrationState.verified.ordinal {
+                    return true
+                }
+                if let wiredFingerprint, record.ensembleFingerprint != wiredFingerprint {
+                    return true
+                }
+                return false
+            }
+        } catch { return true }
+        do {
+            // Current estates deliberately have no historical record and no
+            // chunks table. Trust the core format stamp before consulting the
+            // legacy structural detector.
+            if try await EstateFormatStore(storage: storage).readIfPresent() == .current {
+                return false
+            }
+        } catch { return true }
+        do {
+            return try await SharedContentMigrationDetection.detectLegacyLayout(
+                storage: storage) != nil
+        } catch { return true }
     }
 
     /// Run (or resume) the shared-content migration for `handle`'s estate.
@@ -306,7 +372,9 @@ public extension GeniusLocusKit {
         handle: EstateHandle, now: Date,
         embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
     ) async throws -> SharedContentMigrationReport {
-        guard let storage = storages[handle] else {
+        let storage: any Storage
+        do { storage = try migrationStorage(for: handle) }
+        catch {
             throw SharedContentMigrationError.storageFailure(
                 state: .discovered, reason: "no storage registered for estate")
         }
@@ -321,9 +389,22 @@ public extension GeniusLocusKit {
         if let existing = try await store.load() {
             record = existing
         } else {
+            if try await EstateFormatStore(storage: storage).readIfPresent() == .current {
+                let complete = SharedContentMigrationRecord(
+                    state: .complete,
+                    detectedLayout: "current",
+                    legacyChunkIDs: [], legacyVectorKeys: [],
+                    protectedBaseline: [:],
+                    rebuildCursor: nil, rebuiltContentCount: 0,
+                    estimatedReclaimableBytes: nil, reclaimedBytes: nil,
+                    legacyChunkCount: nil, legacyVectorKeyCount: nil,
+                    ensembleFingerprint: wiredFingerprint,
+                    providerGenerations: nil)
+                return report(for: complete)
+            }
             // 1. discovered — structural detection, never a version number.
-            let layout = await SharedContentMigrationDetection.detectLegacyLayout(storage: storage)
-            record = SharedContentMigrationRecord(
+            let layout = try await SharedContentMigrationDetection.detectLegacyLayout(storage: storage)
+            let fresh = SharedContentMigrationRecord(
                 state: .discovered,
                 detectedLayout: layout ?? "fresh",
                 legacyChunkIDs: [], legacyVectorKeys: [],
@@ -333,17 +414,22 @@ public extension GeniusLocusKit {
                 legacyChunkCount: nil, legacyVectorKeyCount: nil,
                 ensembleFingerprint: nil, providerGenerations: nil)
             if layout == nil {
-                // Fresh estate: bypass — nothing legacy exists or ever will.
-                // Record the wired configuration so the bypass record is
-                // complete UNDER it (no phantom upgrade on the next run).
-                record.state = .complete
-                record.ensembleFingerprint = wiredFingerprint
+                // Fresh estate: stamp the current format without creating any
+                // historical migration bookkeeping. A fresh SDK consumer that
+                // does not compile this target uses the same core format row.
+                try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+                var complete = fresh
+                complete.state = .complete
+                complete.ensembleFingerprint = wiredFingerprint
+                return report(for: complete)
             }
+            record = fresh
             try await store.save(record, now: now)
             try checkFault(after: record.state)
         }
         if record.state == .complete {
             if record.ensembleFingerprint == wiredFingerprint {
+                try await EstateFormatStore(storage: storage).stamp(.current, now: now)
                 return report(for: record)
             }
             // Follow-on ENSEMBLE UPGRADE: the completed record's recorded
@@ -389,6 +475,15 @@ public extension GeniusLocusKit {
             record.state = .legacyInventoryCaptured
             try await store.save(record, now: now)
             try checkFault(after: record.state)
+        }
+
+        // Capacity refusal is deliberately BEFORE the first destructive
+        // transition. A resumed estate already beyond this point must finish;
+        // it may not strand itself because the host's current free RAM changed.
+        if record.state == .legacyInventoryCaptured,
+           embeddingModels.contains(where: \.isTrainable) {
+            try SharedContentTrainingCapacity.require(
+                contentCount: try await source.activeContentIDs().count)
         }
 
         // 4. legacyDerivedCleared — delete EXACTLY the inventoried keys.
@@ -460,17 +555,20 @@ public extension GeniusLocusKit {
             }
             var processed = record.rebuiltContentCount
             let checkpointStride = 500
-            var sinceCheckpoint = 0
-            for id in allIDs[resumeFrom...] {
-                try await engine.indexContentStructural(id: id, now: now)
-                processed += 1
-                sinceCheckpoint += 1
-                if sinceCheckpoint >= checkpointStride {
-                    record.rebuildCursor = id
-                    record.rebuiltContentCount = processed
-                    try await store.save(record, now: now)
-                    sinceCheckpoint = 0
-                }
+            var batchStart = resumeFrom
+            while batchStart < allIDs.count {
+                let batchEnd = min(batchStart + checkpointStride, allIDs.count)
+                let batch = Array(allIDs[batchStart..<batchEnd])
+                // Pure tokenization/stateless embedding fans out across the
+                // engine's bounded worker cap; durable mutation remains one
+                // deterministic serial writer. The cursor advances only after
+                // the entire batch has committed.
+                _ = try await engine.indexContentStructuralBatch(ids: batch, now: now)
+                processed += batch.count
+                record.rebuildCursor = batch.last
+                record.rebuiltContentCount = processed
+                try await store.save(record, now: now)
+                batchStart = batchEnd
             }
             try await engine.sharedVectorStore.publishResidentIndex()
             record.rebuildCursor = allIDs.last
@@ -547,6 +645,11 @@ public extension GeniusLocusKit {
             try checkFault(after: record.state)
         }
 
+        // The current runtime may open semantic substores as soon as the
+        // rebuilt lane is verified. Physical page reclamation remains a
+        // retryable maintenance step and does not hold the format gate dark.
+        try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+
         // 11. complete — after physical reclamation (P5's maintenance API).
         //    `completeSharedContentReclaim` flips the final state; until
         //    then the record honestly reports reclaimPending.
@@ -568,7 +671,7 @@ public extension GeniusLocusKit {
     func completeSharedContentReclaim(
         handle: EstateHandle, now: Date
     ) async throws -> StorageMaintenanceReport? {
-        guard let storage = storages[handle] else { return nil }
+        guard let storage = try? migrationStorage(for: handle) else { return nil }
         let store = SharedContentMigrationStore(storage: storage)
         guard var record = try await store.load(),
               record.state == .reclaimPending else { return nil }
@@ -597,7 +700,7 @@ public extension GeniusLocusKit {
     func sharedContentMigrationState(
         handle: EstateHandle
     ) async throws -> SharedContentMigrationState? {
-        guard let storage = storages[handle] else { return nil }
+        guard let storage = try? migrationStorage(for: handle) else { return nil }
         // The record table may not exist yet on a never-migrated estate.
         try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
         return try await SharedContentMigrationStore(storage: storage).load()?.state
@@ -609,7 +712,7 @@ public extension GeniusLocusKit {
     func sharedContentReclaimStatus(
         handle: EstateHandle
     ) async throws -> SharedContentReclaimStatus {
-        guard let storage = storages[handle] else {
+        guard let storage = try? migrationStorage(for: handle) else {
             return SharedContentReclaimStatus(
                 state: nil, estimatedReclaimableBytes: nil,
                 reclaimedBytes: nil, liveReclaimableBytes: nil)
@@ -746,7 +849,7 @@ public extension GeniusLocusKit {
         source: LocusDrawerCorpusContentSource,
         models: [EmbeddingModel]
     ) async throws -> CorpusContentEngine {
-        if let registered = corpusKits[handle] { return registered }
+        if let registered = migrationRegisteredCorpus(for: handle) { return registered }
         return try await CorpusContentEngine(
             storage: storage,
             configuration: CorpusContentConfiguration(

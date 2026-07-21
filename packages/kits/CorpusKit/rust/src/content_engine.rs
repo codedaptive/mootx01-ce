@@ -14,22 +14,22 @@
 //! Reuses the SAME provider-slot machinery as `Corpus` (`build_slot`) —
 //! one engine, not a fork.
 
+use crate::basis_store::{BasisStore, PersistedBasis};
 use crate::content::{
     CorpusContentChange, CorpusContentId, CorpusContentRecord, CorpusContentSource,
 };
 use crate::corpus::{Corpus, EmbeddingModelConfig, EncodeSpeed, FloatLaneOutcome, ProviderSlot};
-use intellectus_lib::{report, StatSample};
+use crate::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCounts};
 use crate::document_store::CorpusDocumentStore;
 use crate::engine::inverted_index_store::InvertedIndexStore;
 use crate::error::{CorpusKitError, CorpusKitResult};
 use crate::index_state_store::{CorpusIndexState, CorpusIndexStateStore};
-use crate::basis_store::{BasisStore, PersistedBasis};
-use crate::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCounts};
 use crate::schema_profile::{
     attached_declaration, standalone_declaration, CorpusContentConfiguration,
     CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
 use crate::tokenizer::default_keyword_tokens;
+use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,8 +40,8 @@ pub type ContentOnEncoded = Box<dyn Fn(&[String]) + Send + Sync>;
 /// Test-only drain failure-injection hook (transient failure when Err).
 pub type ContentIngestFailureHook = Box<dyn Fn(&str) -> Result<(), ()> + Send + Sync>;
 use vectorkit::{
-    VectorExactKey, VectorPayload, VectorPayloadInput, VectorRepresentationClaims,
-    VectorRepresentationKey, VectorStore,
+    EmbeddingProvider, VectorExactKey, VectorPayload, VectorPayloadInput,
+    VectorRepresentationClaims, VectorRepresentationKey, VectorStore,
 };
 
 /// Range evidence for a standalone passage hit. Never changes result
@@ -86,7 +86,11 @@ pub enum ContentIndexJobKind {
 impl ContentIndexJob {
     pub fn from_change(change: &CorpusContentChange, cursor: Option<String>) -> Self {
         match change {
-            CorpusContentChange::Upsert { id, revision, digest } => ContentIndexJob {
+            CorpusContentChange::Upsert {
+                id,
+                revision,
+                digest,
+            } => ContentIndexJob {
                 kind: ContentIndexJobKind::Upsert,
                 content_id: id.clone(),
                 revision: *revision,
@@ -176,7 +180,6 @@ fn evidence_from_item_key(key: &str) -> Option<CorpusEvidence> {
     })
 }
 
-
 /// Emit one CorpusKit-tagged counter (the same shape corpus.rs uses).
 fn emit_engine_metric(name: &str, value: f64) {
     report!(StatSample::metric(
@@ -214,8 +217,7 @@ pub enum SlotScope {
 
 /// Backfill crash-boundary test hook: (phase, batch_index) where phase is
 /// "afterVectors" or "afterCoverage"; an Err aborts the backfill there.
-pub type ContentBackfillFaultHook =
-    Box<dyn Fn(&str, usize) -> Result<(), String> + Send + Sync>;
+pub type ContentBackfillFaultHook = Box<dyn Fn(&str, usize) -> Result<(), String> + Send + Sync>;
 
 /// The consumer name this engine claims representations under.
 pub const CLAIMS_CONSUMER: &str = "corpus";
@@ -235,6 +237,8 @@ pub struct CorpusContentEngine {
     counts_store: CorpusProviderCountsStore,
     index_state: CorpusIndexStateStore,
     coverage_store: crate::provider_coverage_store::CorpusProviderCoverageStore,
+    provider_configuration_store:
+        crate::provider_configuration_store::CorpusProviderConfigurationStore,
     claims: VectorRepresentationClaims,
     slots: Vec<ProviderSlot>,
     /// Engine-owned content-reference queue state (P3). See
@@ -300,6 +304,10 @@ impl CorpusContentEngine {
         let index_state = CorpusIndexStateStore::new(Arc::clone(&storage));
         let coverage_store =
             crate::provider_coverage_store::CorpusProviderCoverageStore::new(Arc::clone(&storage));
+        let provider_configuration_store =
+            crate::provider_configuration_store::CorpusProviderConfigurationStore::new(Arc::clone(
+                &storage,
+            ));
         let claims = VectorRepresentationClaims::new(Arc::clone(&storage));
 
         let mut slots = Vec::with_capacity(models.len());
@@ -317,6 +325,7 @@ impl CorpusContentEngine {
             counts_store,
             index_state,
             coverage_store,
+            provider_configuration_store,
             claims,
             slots,
             queue_state: Mutex::new(None),
@@ -435,6 +444,21 @@ impl CorpusContentEngine {
         }
     }
 
+    fn embed_concurrency_cap(&self) -> usize {
+        let cores = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        let speed = self
+            .encode_speed
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or(EncodeSpeed::Foreground);
+        match speed {
+            EncodeSpeed::Foreground => cores.max(1),
+            EncodeSpeed::Background => (cores / 4).max(1),
+        }
+    }
+
     pub(crate) fn begin_deferred_vector_index(&self) -> CorpusKitResult<()> {
         self.vector_store
             .begin_deferred_index()
@@ -488,9 +512,7 @@ impl CorpusContentEngine {
 
     /// Per-content derived-index coverage attestations (the engine's ONLY
     /// integrity surface — no second content Merkle hierarchy).
-    pub fn index_coverage_attestations(
-        &self,
-    ) -> CorpusKitResult<Vec<(String, i64, String)>> {
+    pub fn index_coverage_attestations(&self) -> CorpusKitResult<Vec<(String, i64, String)>> {
         Ok(self
             .index_state_all_states()?
             .into_iter()
@@ -498,7 +520,9 @@ impl CorpusContentEngine {
             .collect())
     }
 
-    fn index_state_all_states(&self) -> CorpusKitResult<Vec<crate::index_state_store::CorpusIndexState>> {
+    fn index_state_all_states(
+        &self,
+    ) -> CorpusKitResult<Vec<crate::index_state_store::CorpusIndexState>> {
         Ok(self
             .index_state
             .all_states()?
@@ -526,7 +550,11 @@ impl CorpusContentEngine {
                         if shared.contains(&format!("{}|{lane}", slot.model_id)) {
                             continue;
                         }
-                        keys.push(VectorExactKey::new(key.clone(), lane, slot.model_id.clone()));
+                        keys.push(VectorExactKey::new(
+                            key.clone(),
+                            lane,
+                            slot.model_id.clone(),
+                        ));
                     }
                 }
             }
@@ -651,11 +679,10 @@ impl CorpusContentEngine {
             for m in &matches {
                 let id = content_id_from_item_key(&m.item_id).to_string();
                 let similarity = 1.0 - (m.distance as f32) / 10_000.0;
-                let entry = by_content.entry(id).or_insert(if nearest {
-                    f32::MIN
-                } else {
-                    f32::MAX
-                });
+                let entry =
+                    by_content
+                        .entry(id)
+                        .or_insert(if nearest { f32::MIN } else { f32::MAX });
                 if nearest {
                     if similarity > *entry {
                         *entry = similarity;
@@ -708,13 +735,177 @@ impl CorpusContentEngine {
                 self.claims
                     .register_claim(
                         CLAIMS_CONSUMER,
-                        &VectorRepresentationKey::new(model_id.clone(), model_version.clone(), lane),
+                        &VectorRepresentationKey::new(
+                            model_id.clone(),
+                            model_version.clone(),
+                            lane,
+                        ),
                         now_millis,
                     )
                     .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
             }
         }
         Ok(())
+    }
+
+    /// Current-format provider reconciliation. Provider additions train and
+    /// coverage-backfill through the ordinary engine; removals release the
+    /// Corpus claim and delete only vectors with no retained claimant plus the
+    /// retired provider's basis/count/coverage residue. This is runtime index
+    /// maintenance, not a historical estate migration.
+    pub fn reconcile_configured_providers(&self, now_millis: i64) -> CorpusKitResult<()> {
+        let mut desired: BTreeSet<VectorRepresentationKey> = BTreeSet::new();
+        for (slot_index, slot) in self.slots.iter().enumerate() {
+            let handle = slot.handle.lock().unwrap();
+            let provider = handle.provider();
+            for lane in [0u32, 1u32] {
+                if lane == 0
+                    && slot_index != 0
+                    && self.configuration.mode() == CorpusOperatingMode::Attached
+                {
+                    continue;
+                }
+                desired.insert(VectorRepresentationKey::new(
+                    provider.model_id(),
+                    provider.model_version(),
+                    lane,
+                ));
+            }
+        }
+        let existing: BTreeSet<_> = self
+            .claims
+            .claims(CLAIMS_CONSUMER)
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?
+            .into_iter()
+            .collect();
+        if existing == desired
+            && self.provider_configuration_store.generation_token()?
+                == Some(self.provider_generation_token())
+        {
+            return Ok(());
+        }
+        self.register_claims(now_millis)?;
+        let stale: Vec<_> = existing
+            .into_iter()
+            .filter(|key| !desired.contains(key))
+            .collect();
+        let mut retired: BTreeSet<(String, String)> = BTreeSet::new();
+        for key in stale {
+            let others: Vec<_> = self
+                .claims
+                .claimants(&key)
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?
+                .into_iter()
+                .filter(|consumer| consumer != CLAIMS_CONSUMER)
+                .collect();
+            self.claims
+                .release_claim(CLAIMS_CONSUMER, &key)
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            if others.is_empty() {
+                let predicate = StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "model_id"),
+                        TypedValue::Text(key.model_id.clone()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "vector_index"),
+                        TypedValue::Int(key.vector_index as i64),
+                    ),
+                ]);
+                let rows = self
+                    .storage
+                    .row_store()
+                    .query("vectors", Some(&predicate), &[], None, None)
+                    .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+                let exact: Vec<_> = rows
+                    .iter()
+                    .filter_map(|row| match (row.get("model_version"), row.get("item_id")) {
+                        (Some(TypedValue::Text(version)), Some(TypedValue::Text(item_id)))
+                            if version == &key.model_version =>
+                        {
+                            Some(VectorExactKey::new(
+                                item_id.clone(),
+                                key.vector_index,
+                                key.model_id.clone(),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                self.vector_store
+                    .delete_vectors(&exact)
+                    .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            }
+            retired.insert((key.model_id, key.model_version));
+        }
+
+        let desired_model_ids: BTreeSet<String> =
+            desired.iter().map(|key| key.model_id.clone()).collect();
+        for (model_id, model_version) in retired {
+            for table in ["corpus_provider_basis", "corpus_provider_counts"] {
+                self.storage
+                    .row_store()
+                    .delete(
+                        table,
+                        &StoragePredicate::all(vec![
+                            StoragePredicate::Eq(
+                                Column::new(table, "model_id"),
+                                TypedValue::Text(model_id.clone()),
+                            ),
+                            StoragePredicate::Eq(
+                                Column::new(table, "model_version"),
+                                TypedValue::Text(model_version.clone()),
+                            ),
+                        ]),
+                    )
+                    .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            }
+            if !desired_model_ids.contains(&model_id) {
+                self.storage
+                    .row_store()
+                    .delete(
+                        "corpus_provider_coverage",
+                        &StoragePredicate::Eq(
+                            Column::new("corpus_provider_coverage", "model_id"),
+                            TypedValue::Text(model_id),
+                        ),
+                    )
+                    .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            }
+        }
+
+        self.train_trainable_slots(now_millis, false)?;
+        self.vector_store
+            .begin_deferred_index()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+        self.backfill_provider_coverage(now_millis, 500)?;
+        self.vector_store
+            .publish_resident_index()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+        // LAST durable write: a crash before this point retries from
+        // per-provider coverage; a matching open avoids an O(corpus) scan.
+        self.provider_configuration_store
+            .mark_current(&self.provider_generation_token(), now_millis)?;
+        Ok(())
+    }
+
+    fn provider_generation_token(&self) -> String {
+        let generations = self
+            .slots
+            .iter()
+            .map(|slot| {
+                let handle = slot.handle.lock().unwrap();
+                let provider = handle.provider();
+                format!(
+                    "{}@{}={}",
+                    provider.model_id(),
+                    provider.model_version(),
+                    slot.basis_digest.lock().unwrap().as_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        format!("{}|{}", self.configuration_fingerprint(), generations)
     }
 
     fn validate(id: &str) -> CorpusKitResult<()> {
@@ -762,6 +953,179 @@ impl CorpusContentEngine {
         }
     }
 
+    /// Migration rebuild kernel: resolve a bounded batch, run pure
+    /// tokenization/stateless embedding on the proven bounded worker shape,
+    /// then publish every durable row through one deterministic serial writer.
+    /// Checkpoints advance only after the batch's BM25, vectors, and coverage
+    /// are durable. Provider math is the same `embed_pair` call used by normal
+    /// ingestion; only scheduling changes.
+    pub fn index_content_structural_batch(
+        &self,
+        ids: &[String],
+        now_millis: i64,
+    ) -> CorpusKitResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        if self.configuration.mode() != CorpusOperatingMode::Attached
+            || !matches!(
+                self.configuration.index_unit(),
+                CorpusIndexUnitPolicy::WholeContent
+            )
+        {
+            return Err(CorpusKitError::InvalidConfiguration(
+                "structural batch rebuild is available only to attached whole-content engines"
+                    .into(),
+            ));
+        }
+        self.register_claims(now_millis)?;
+
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            Self::validate(id)?;
+            let Some(record) = self.source.record(id)? else {
+                self.clear_derived_state(id)?;
+                continue;
+            };
+            if let Some(existing) = self.index_state.state(id)? {
+                if existing.revision == record.revision
+                    && existing.digest == record.digest
+                    && existing.index_version == CONTENT_ENGINE_INDEX_VERSION
+                {
+                    continue;
+                }
+            }
+            records.push(record);
+        }
+        if records.is_empty() {
+            return Ok(0);
+        }
+
+        let selected: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.fresh_basis_blob.is_none().then_some(index))
+            .collect();
+        let guards: Vec<_> = selected
+            .iter()
+            .map(|index| {
+                self.slots[*index]
+                    .handle
+                    .lock()
+                    .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let providers: Vec<&dyn vectorkit::EmbeddingProvider> =
+            guards.iter().map(|guard| guard.provider()).collect();
+        let metadata: Vec<(String, String, String, bool)> = selected
+            .iter()
+            .zip(providers.iter())
+            .map(|(index, provider)| {
+                (
+                    provider.model_id().to_string(),
+                    provider.model_version().to_string(),
+                    self.slots[*index].basis_digest.lock().unwrap().clone(),
+                    *index == 0 || self.configuration.mode() == CorpusOperatingMode::Standalone,
+                )
+            })
+            .collect();
+        let cap = self.embed_concurrency_cap();
+        let slice_len = ((records.len() + cap - 1) / cap).max(1);
+        let providers_ref = &providers;
+        let metadata_ref = &metadata;
+        let prepared: Vec<(
+            CorpusContentRecord,
+            Vec<String>,
+            Vec<VectorPayloadInput>,
+            Vec<(String, String, String)>,
+        )> = std::thread::scope(|scope| -> CorpusKitResult<Vec<_>> {
+            let handles: Vec<_> = records
+                .chunks(slice_len)
+                .map(|slice| {
+                    scope.spawn(move || -> CorpusKitResult<Vec<_>> {
+                        let mut output = Vec::with_capacity(slice.len());
+                        for record in slice {
+                            let mut rows = Vec::with_capacity(providers_ref.len() * 2);
+                            let mut covered = Vec::with_capacity(providers_ref.len());
+                            for (provider, meta) in providers_ref.iter().zip(metadata_ref.iter()) {
+                                let (engram, floats) =
+                                    provider.embed_pair(&record.text).map_err(|error| {
+                                        CorpusKitError::EmbeddingFailed(format!("{error:?}"))
+                                    })?;
+                                if meta.3 {
+                                    rows.push(VectorPayloadInput {
+                                        item_id: record.id.clone(),
+                                        vector_index: 0,
+                                        payload: VectorPayload::from_engram(&engram),
+                                        model_id: meta.0.clone(),
+                                        model_version: meta.1.clone(),
+                                        filed_at_unix_secs: now_millis,
+                                    });
+                                }
+                                if !floats.is_empty() {
+                                    rows.push(VectorPayloadInput {
+                                        item_id: record.id.clone(),
+                                        vector_index: 1,
+                                        payload: VectorPayload::from_f32(&floats),
+                                        model_id: meta.0.clone(),
+                                        model_version: meta.1.clone(),
+                                        filed_at_unix_secs: now_millis,
+                                    });
+                                }
+                                covered.push((record.id.clone(), meta.0.clone(), meta.2.clone()));
+                            }
+                            output.push((
+                                record.clone(),
+                                default_keyword_tokens(&record.text),
+                                rows,
+                                covered,
+                            ));
+                        }
+                        Ok(output)
+                    })
+                })
+                .collect();
+            let mut output = Vec::with_capacity(records.len());
+            for handle in handles {
+                output.extend(handle.join().expect("structural worker panicked")?);
+            }
+            Ok(output)
+        })?;
+        drop(guards);
+
+        for (record, tokens, _, _) in &prepared {
+            self.inverted_index
+                .index(&record.id, tokens, "")
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+        }
+        let rows: Vec<_> = prepared
+            .iter()
+            .flat_map(|item| item.2.iter().cloned())
+            .collect();
+        if !rows.is_empty() {
+            self.vector_store
+                .add_payloads(&rows)
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+        }
+        let covered: Vec<_> = prepared
+            .iter()
+            .flat_map(|item| item.3.iter().cloned())
+            .collect();
+        self.coverage_store.mark_covered(&covered, now_millis)?;
+        for (record, _, _, _) in &prepared {
+            self.index_state.advance(&CorpusIndexState {
+                content_id: record.id.clone(),
+                revision: record.revision,
+                digest: record.digest.clone(),
+                index_version: CONTENT_ENGINE_INDEX_VERSION,
+                applied_cursor: None,
+                updated_at_millis: now_millis,
+            })?;
+        }
+        Ok(prepared.len())
+    }
+
     /// Apply one change. The stale gate: an upsert whose (revision,
     /// digest) mismatches the CURRENT record returns `StaleRevision` and
     /// advances NOTHING.
@@ -773,7 +1137,11 @@ impl CorpusContentEngine {
     ) -> CorpusKitResult<()> {
         Self::validate(change.id())?;
         match change {
-            CorpusContentChange::Upsert { id, revision, digest } => {
+            CorpusContentChange::Upsert {
+                id,
+                revision,
+                digest,
+            } => {
                 let Some(record) = self.source.record(id)? else {
                     return Err(CorpusKitError::StaleRevision(format!(
                         "upsert for {id} rev {revision}: the ID no longer resolves — \
@@ -868,7 +1236,8 @@ impl CorpusContentEngine {
         // slot only: every GLK binary reader probes the default model;
         // non-default binary rows would be unreachable weight. Standalone
         // keeps per-slot binary lanes.
-        let mut rows: Vec<VectorPayloadInput> = Vec::with_capacity(units.len() * self.slots.len() * 2);
+        let mut rows: Vec<VectorPayloadInput> =
+            Vec::with_capacity(units.len() * self.slots.len() * 2);
         let mut covered: Vec<(String, String, String)> = Vec::new();
         for (slot_index, slot) in self.slots.iter().enumerate() {
             if slot_scope == SlotScope::StatelessOnly && slot.fresh_basis_blob.is_some() {
@@ -880,8 +1249,8 @@ impl CorpusContentEngine {
             if slot.fresh_basis_blob.is_some() && digest.is_empty() {
                 continue;
             }
-            let write_binary = slot_index == 0
-                || self.configuration.mode() == CorpusOperatingMode::Standalone;
+            let write_binary =
+                slot_index == 0 || self.configuration.mode() == CorpusOperatingMode::Standalone;
             let handle = slot.handle.lock().unwrap();
             let provider = handle.provider();
             for (key, text) in &units {
@@ -941,7 +1310,10 @@ impl CorpusContentEngine {
     /// Compute the record's index units under the configured policy,
     /// replacing durable passage rows and deleting STALE derived keys by
     /// exact key. Returns (key, text) pairs.
-    fn replace_units(&self, record: &CorpusContentRecord) -> CorpusKitResult<Vec<(String, String)>> {
+    fn replace_units(
+        &self,
+        record: &CorpusContentRecord,
+    ) -> CorpusKitResult<Vec<(String, String)>> {
         let mut stale_keys = self.unit_keys(&record.id)?;
 
         let units: Vec<(String, String)> = match self.configuration.index_unit() {
@@ -1191,7 +1563,9 @@ impl CorpusContentEngine {
     ) -> CorpusKitResult<std::collections::BTreeMap<String, String>> {
         let mut digests = std::collections::BTreeMap::new();
         for slot in &self.slots {
-            let Some(blob) = &slot.fresh_basis_blob else { continue };
+            let Some(blob) = &slot.fresh_basis_blob else {
+                continue;
+            };
             let model_id = slot.model_id.clone();
             {
                 let digest = slot.basis_digest.lock().unwrap().clone();
@@ -1270,23 +1644,20 @@ impl CorpusContentEngine {
             let basis_store = &self.basis_store;
             let counts_store = &self.counts_store;
             self.storage
-                .transaction(
-                    persistence_kit::IsolationLevel::Serializable,
-                    &mut |txn| {
-                        let rows = txn.row_store();
-                        basis_store
-                            .upsert_into(&basis_row, &rows)
-                            .map_err(|e| persistence_kit::StorageError::BackendError {
-                                underlying: format!("{e:?}"),
-                            })?;
-                        counts_store
-                            .upsert_into(&counts_row, &rows)
-                            .map_err(|e| persistence_kit::StorageError::BackendError {
-                                underlying: format!("{e:?}"),
-                            })?;
-                        Ok(())
-                    },
-                )
+                .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
+                    let rows = txn.row_store();
+                    basis_store.upsert_into(&basis_row, &rows).map_err(|e| {
+                        persistence_kit::StorageError::BackendError {
+                            underlying: format!("{e:?}"),
+                        }
+                    })?;
+                    counts_store.upsert_into(&counts_row, &rows).map_err(|e| {
+                        persistence_kit::StorageError::BackendError {
+                            underlying: format!("{e:?}"),
+                        }
+                    })?;
+                    Ok(())
+                })
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
 
             // Serve the new generation.
@@ -1344,7 +1715,10 @@ impl CorpusContentEngine {
         if targets.is_empty() {
             return Ok(0);
         }
-        if !matches!(self.configuration.index_unit(), CorpusIndexUnitPolicy::WholeContent) {
+        if !matches!(
+            self.configuration.index_unit(),
+            CorpusIndexUnitPolicy::WholeContent
+        ) {
             return Err(CorpusKitError::InvalidConfiguration(
                 "backfill_provider_coverage supports the wholeContent index unit                  (the mandatory attached policy); passage engines reindex instead"
                     .into(),
@@ -1354,8 +1728,10 @@ impl CorpusContentEngine {
 
         let indexed: std::collections::HashSet<String> =
             self.indexed_content_ids()?.into_iter().collect();
-        let mut missing_by_slot: std::collections::HashMap<usize, std::collections::HashSet<String>> =
-            std::collections::HashMap::new();
+        let mut missing_by_slot: std::collections::HashMap<
+            usize,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
         for (index, model_id, digest) in &targets {
             let covered = self.coverage_store.covered_content_ids(model_id, digest)?;
             missing_by_slot.insert(*index, indexed.difference(&covered).cloned().collect());
@@ -1368,67 +1744,130 @@ impl CorpusContentEngine {
             .collect();
         affected.sort();
 
+        let guards: Vec<_> = targets
+            .iter()
+            .map(|(index, _, _)| {
+                self.slots[*index]
+                    .handle
+                    .lock()
+                    .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let providers: Vec<&dyn EmbeddingProvider> =
+            guards.iter().map(|guard| guard.provider()).collect();
+        let metadata: Vec<(usize, String, String, String, bool)> = targets
+            .iter()
+            .zip(providers.iter())
+            .map(|((index, model_id, digest), provider)| {
+                (
+                    *index,
+                    model_id.clone(),
+                    provider.model_version().to_string(),
+                    digest.clone(),
+                    *index == 0 || self.configuration.mode() == CorpusOperatingMode::Standalone,
+                )
+            })
+            .collect();
+        let cap = self.embed_concurrency_cap();
         let mut written = 0usize;
         for (batch_index, chunk) in affected.chunks(batch_size.max(1)).enumerate() {
-            let mut rows: Vec<VectorPayloadInput> = Vec::new();
-            let mut covered: Vec<(String, String, String)> = Vec::new();
+            let mut records = Vec::with_capacity(chunk.len());
             for id in chunk {
-                let Some(record) = self.source.record(id)? else { continue };
-                for (index, model_id, digest) in &targets {
-                    if !missing_by_slot
-                        .get(index)
-                        .map(|set| set.contains(id))
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let slot = &self.slots[*index];
-                    let write_binary = *index == 0
-                        || self.configuration.mode() == CorpusOperatingMode::Standalone;
-                    let handle = slot.handle.lock().unwrap();
-                    let provider = handle.provider();
-                    let (engram, floats) = provider
-                        .embed_pair(&record.text)
-                        .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
-                    if write_binary {
-                        rows.push(VectorPayloadInput {
-                            item_id: id.clone(),
-                            vector_index: 0,
-                            payload: VectorPayload::from_engram(&engram),
-                            model_id: provider.model_id().to_string(),
-                            model_version: provider.model_version().to_string(),
-                            filed_at_unix_secs: now_millis,
-                        });
-                    }
-                    if !floats.is_empty() {
-                        rows.push(VectorPayloadInput {
-                            item_id: id.clone(),
-                            vector_index: 1,
-                            payload: VectorPayload::from_f32(&floats),
-                            model_id: provider.model_id().to_string(),
-                            model_version: provider.model_version().to_string(),
-                            filed_at_unix_secs: now_millis,
-                        });
-                    }
-                    covered.push((id.clone(), model_id.clone(), digest.clone()));
+                if let Some(record) = self.source.record(id)? {
+                    records.push(record);
                 }
             }
+            let slice_len = ((records.len() + cap - 1) / cap).max(1);
+            let providers_ref = &providers;
+            let metadata_ref = &metadata;
+            let missing_ref = &missing_by_slot;
+            let prepared: Vec<(Vec<VectorPayloadInput>, Vec<(String, String, String)>)> =
+                std::thread::scope(|scope| -> CorpusKitResult<Vec<_>> {
+                    let handles: Vec<_> = records
+                        .chunks(slice_len)
+                        .map(|slice| {
+                            scope.spawn(move || -> CorpusKitResult<Vec<_>> {
+                                let mut output = Vec::with_capacity(slice.len());
+                                for record in slice {
+                                    let mut rows = Vec::new();
+                                    let mut covered = Vec::new();
+                                    for (provider, meta) in
+                                        providers_ref.iter().zip(metadata_ref.iter())
+                                    {
+                                        if !missing_ref
+                                            .get(&meta.0)
+                                            .map(|set| set.contains(&record.id))
+                                            .unwrap_or(false)
+                                        {
+                                            continue;
+                                        }
+                                        let (engram, floats) =
+                                            provider.embed_pair(&record.text).map_err(|error| {
+                                                CorpusKitError::EmbeddingFailed(format!(
+                                                    "{error:?}"
+                                                ))
+                                            })?;
+                                        if meta.4 {
+                                            rows.push(VectorPayloadInput {
+                                                item_id: record.id.clone(),
+                                                vector_index: 0,
+                                                payload: VectorPayload::from_engram(&engram),
+                                                model_id: meta.1.clone(),
+                                                model_version: meta.2.clone(),
+                                                filed_at_unix_secs: now_millis,
+                                            });
+                                        }
+                                        if !floats.is_empty() {
+                                            rows.push(VectorPayloadInput {
+                                                item_id: record.id.clone(),
+                                                vector_index: 1,
+                                                payload: VectorPayload::from_f32(&floats),
+                                                model_id: meta.1.clone(),
+                                                model_version: meta.2.clone(),
+                                                filed_at_unix_secs: now_millis,
+                                            });
+                                        }
+                                        covered.push((
+                                            record.id.clone(),
+                                            meta.1.clone(),
+                                            meta.3.clone(),
+                                        ));
+                                    }
+                                    output.push((rows, covered));
+                                }
+                                Ok(output)
+                            })
+                        })
+                        .collect();
+                    let mut output = Vec::with_capacity(records.len());
+                    for handle in handles {
+                        output.extend(handle.join().expect("coverage worker panicked")?);
+                    }
+                    Ok(output)
+                })?;
+            let rows: Vec<_> = prepared
+                .iter()
+                .flat_map(|item| item.0.iter().cloned())
+                .collect();
+            let covered: Vec<_> = prepared
+                .iter()
+                .flat_map(|item| item.1.iter().cloned())
+                .collect();
             if !rows.is_empty() {
                 self.vector_store
                     .add_payloads(&rows)
                     .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
             }
             if let Some(hook) = self.backfill_fault_hook.lock().unwrap().as_ref() {
-                hook("afterVectors", batch_index)
-                    .map_err(CorpusKitError::InvalidConfiguration)?;
+                hook("afterVectors", batch_index).map_err(CorpusKitError::InvalidConfiguration)?;
             }
             self.coverage_store.mark_covered(&covered, now_millis)?;
             if let Some(hook) = self.backfill_fault_hook.lock().unwrap().as_ref() {
-                hook("afterCoverage", batch_index)
-                    .map_err(CorpusKitError::InvalidConfiguration)?;
+                hook("afterCoverage", batch_index).map_err(CorpusKitError::InvalidConfiguration)?;
             }
             written += covered.len();
         }
+        drop(guards);
         Ok(written)
     }
 
@@ -1446,7 +1885,12 @@ impl CorpusContentEngine {
     pub fn provider_generations(&self) -> Vec<(String, String)> {
         self.slots
             .iter()
-            .map(|slot| (slot.model_id.clone(), slot.basis_digest.lock().unwrap().clone()))
+            .map(|slot| {
+                (
+                    slot.model_id.clone(),
+                    slot.basis_digest.lock().unwrap().clone(),
+                )
+            })
             .collect()
     }
 
@@ -1465,7 +1909,11 @@ impl CorpusContentEngine {
                     EmbeddingModelConfig::Deterministic => {
                         let p = crate::corpus::make_deterministic_provider();
                         let pref = &p as &dyn vectorkit::EmbeddingProvider;
-                        (pref.model_id().to_string(), pref.model_version().to_string(), false)
+                        (
+                            pref.model_id().to_string(),
+                            pref.model_version().to_string(),
+                            false,
+                        )
                     }
                     EmbeddingModelConfig::RandomIndexing { provider } => (
                         provider.model_id().to_string(),
@@ -1501,17 +1949,26 @@ impl CorpusContentEngine {
                     EmbeddingModelConfig::MPNet { .. } => {
                         ("mpnet-base-v2".to_string(), "1.0.0".to_string(), false)
                     }
-                    EmbeddingModelConfig::EmbeddingGemma { .. } => {
-                        ("embedding-gemma-300m".to_string(), "1.0.0".to_string(), false)
-                    }
+                    EmbeddingModelConfig::EmbeddingGemma { .. } => (
+                        "embedding-gemma-300m".to_string(),
+                        "1.0.0".to_string(),
+                        false,
+                    ),
                 };
-                format!("{model_id}@{model_version}{}", if trainable { ":T" } else { "" })
+                format!(
+                    "{model_id}@{model_version}{}",
+                    if trainable { ":T" } else { "" }
+                )
             })
             .collect();
         format!(
             "iv{}|{}|{}",
             CONTENT_ENGINE_INDEX_VERSION,
-            if mode == CorpusOperatingMode::Attached { "attached" } else { "standalone" },
+            if mode == CorpusOperatingMode::Attached {
+                "attached"
+            } else {
+                "standalone"
+            },
             parts.join("|")
         )
     }
@@ -1531,7 +1988,11 @@ impl CorpusContentEngine {
                     "{}@{}{}",
                     p.model_id(),
                     p.model_version(),
-                    if slot.fresh_basis_blob.is_some() { ":T" } else { "" }
+                    if slot.fresh_basis_blob.is_some() {
+                        ":T"
+                    } else {
+                        ""
+                    }
                 )
             })
             .collect();
@@ -1560,6 +2021,8 @@ impl CorpusContentEngine {
                 None => self.clear_derived_state(&id)?,
             }
         }
+        self.provider_configuration_store
+            .mark_current(&self.provider_generation_token(), now_millis)?;
         Ok(())
     }
 
@@ -1589,7 +2052,9 @@ impl CorpusContentEngine {
                 (p.model_id().to_string(), p.model_version().to_string())
             };
             let counts = slot.counts.lock().unwrap();
-            let Some(state) = counts.as_ref() else { continue };
+            let Some(state) = counts.as_ref() else {
+                continue;
+            };
             self.counts_store.upsert(&PersistedCounts {
                 model_id,
                 model_version,

@@ -12,14 +12,16 @@
 //! Drawers, relationships, unrelated/shared vectors — is never
 //! reconstructed or deleted (baseline folds prove it at verification).
 
-use crate::coordinator::{EstateCoordinator, GeniusLocusKitError};
-use crate::handle::EstateHandle;
-use crate::intake::LocusDrawerContentSource;
 use corpus_kit::content::CorpusContentSource;
 use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
-use corpus_kit::{    BasisStore, CorpusContentConfiguration, CorpusContentEngine, CorpusIndexStateStore,
+use corpus_kit::{
+    BasisStore, CorpusContentConfiguration, CorpusContentEngine, CorpusIndexStateStore,
     CorpusIndexUnitPolicy, CorpusOperatingMode, EmbeddingModelConfig,
 };
+use genius_locus_kit::coordinator::{EstateCoordinator, GeniusLocusKitError};
+use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
+use genius_locus_kit::handle::EstateHandle;
+use genius_locus_kit::intake::LocusDrawerContentSource;
 use persistence_kit::{
     Column, ColumnDeclaration, Migration, SchemaDeclaration, SchemaOperation, Storage,
     StoragePredicate, TableDeclaration, TypedValue,
@@ -88,6 +90,108 @@ pub enum SharedContentMigrationError {
     InjectedFault {
         after: SharedContentMigrationState,
     },
+    InsufficientTrainingCapacity {
+        content_count: usize,
+        required_bytes: u64,
+        budget_bytes: u64,
+    },
+    BelowCompiledFloor {
+        found: EstateFormatVersion,
+        floor: EstateFormatVersion,
+    },
+    UnsupportedFuture {
+        found: EstateFormatVersion,
+        current: EstateFormatVersion,
+    },
+}
+
+/// Conservative five-signal capacity contract. The 320 KiB/content slope is
+/// above the measured 26.9 GiB / 98,118-Drawer Rust peak; 2 GiB covers fixed
+/// runtime/provider workspaces. Default budget is 80% of physical RAM.
+pub struct SharedContentTrainingCapacity;
+
+impl SharedContentTrainingCapacity {
+    pub const FIXED_BYTES: u64 = 2 * 1_024 * 1_024 * 1_024;
+    pub const BYTES_PER_CONTENT: u64 = 320 * 1_024;
+
+    pub fn required_bytes(content_count: usize) -> u64 {
+        Self::FIXED_BYTES
+            .saturating_add((content_count as u64).saturating_mul(Self::BYTES_PER_CONTENT))
+    }
+
+    pub fn budget_bytes() -> u64 {
+        if let Some(explicit) = std::env::var("MOOT_MIGRATION_MEMORY_BUDGET_BYTES")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+        {
+            return explicit;
+        }
+        physical_memory_bytes().unwrap_or(0).saturating_mul(4) / 5
+    }
+
+    pub fn require(content_count: usize) -> Result<(), SharedContentMigrationError> {
+        Self::require_with_budget(content_count, Self::budget_bytes())
+    }
+
+    pub fn require_with_budget(
+        content_count: usize,
+        budget_bytes: u64,
+    ) -> Result<(), SharedContentMigrationError> {
+        let required_bytes = Self::required_bytes(content_count);
+        if required_bytes > budget_bytes {
+            return Err(SharedContentMigrationError::InsufficientTrainingCapacity {
+                content_count,
+                required_bytes,
+                budget_bytes,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn physical_memory_bytes() -> Option<u64> {
+    use std::ffi::{c_char, c_void};
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+    let name = b"hw.memsize\0";
+    let mut value = 0u64;
+    let mut size = std::mem::size_of::<u64>();
+    let result = unsafe {
+        sysctlbyname(
+            name.as_ptr().cast(),
+            (&mut value as *mut u64).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && size == std::mem::size_of::<u64>()).then_some(value)
+}
+
+#[cfg(target_os = "linux")]
+fn physical_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib = meminfo.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next()? == "MemTotal:")
+            .then(|| fields.next()?.parse::<u64>().ok())
+            .flatten()
+    })?;
+    kib.checked_mul(1_024)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn physical_memory_bytes() -> Option<u64> {
+    None
 }
 
 // MARK: - Durable record
@@ -159,7 +263,9 @@ impl SharedContentMigrationStore {
         SharedContentMigrationStore { storage }
     }
 
-    pub fn load(&self) -> Result<Option<SharedContentMigrationRecord>, SharedContentMigrationError> {
+    pub fn load(
+        &self,
+    ) -> Result<Option<SharedContentMigrationRecord>, SharedContentMigrationError> {
         let rows = self
             .storage
             .row_store()
@@ -185,14 +291,19 @@ impl SharedContentMigrationStore {
             Some(TypedValue::Json(d)) => d.clone(),
             Some(TypedValue::Blob(d)) => d.clone(),
             Some(TypedValue::Text(t)) => t.clone().into_bytes(),
-            _ => return Ok(None),
+            _ => {
+                return Err(SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::Discovered,
+                    reason: "migration record payload is missing or malformed".to_string(),
+                })
+            }
         };
-        serde_json::from_slice(&data)
-            .map(Some)
-            .map_err(|e| SharedContentMigrationError::StorageFailure {
+        serde_json::from_slice(&data).map(Some).map_err(|e| {
+            SharedContentMigrationError::StorageFailure {
                 state: SharedContentMigrationState::Discovered,
                 reason: format!("record decode: {e}"),
-            })
+            }
+        })
     }
 
     pub fn save(
@@ -228,15 +339,32 @@ impl SharedContentMigrationStore {
 // MARK: - Detection + retirement
 
 /// Structural legacy detection — never a version literal.
-pub fn detect_legacy_layout(storage: &Arc<dyn Storage>) -> Option<String> {
+pub fn detect_legacy_layout(
+    storage: &Arc<dyn Storage>,
+) -> Result<Option<String>, SharedContentMigrationError> {
     let row_store = storage.row_store();
-    if row_store.count("chunks", None).is_err() {
-        return None;
+    let legacy_version = storage
+        .current_schema_version_for("CorpusKit")
+        .map_err(|error| SharedContentMigrationError::StorageFailure {
+            state: SharedContentMigrationState::Discovered,
+            reason: format!("legacy schema version: {error:?}"),
+        })?;
+    if let Err(error) = row_store.count("chunks", None) {
+        if legacy_version == 0 {
+            return Ok(None);
+        }
+        return Err(SharedContentMigrationError::StorageFailure {
+            state: SharedContentMigrationState::Discovered,
+            reason: format!("registered legacy chunks table is unreadable: {error:?}"),
+        });
     }
-    if row_store.count("corpus_metadata", None).is_ok() {
-        Some("legacy-chunks+metadata".to_string())
-    } else {
-        Some("legacy-chunks".to_string())
+    match row_store.count("corpus_metadata", None) {
+        Ok(_) => Ok(Some("legacy-chunks+metadata".to_string())),
+        Err(_) if legacy_version < 3 => Ok(Some("legacy-chunks".to_string())),
+        Err(error) => Err(SharedContentMigrationError::StorageFailure {
+            state: SharedContentMigrationState::Discovered,
+            reason: format!("registered legacy metadata table is unreadable: {error:?}"),
+        }),
     }
 }
 
@@ -275,30 +403,69 @@ fn retirement_declaration() -> SchemaDeclaration {
 
 // MARK: - Runner
 
-impl EstateCoordinator {
-    /// Install the fault-injection seam (test-only; single-use).
-    pub fn set_shared_content_fault(&mut self, state: Option<SharedContentMigrationState>) {
-        self.shared_content_fault_after = state;
-    }
-
-    fn check_shared_content_fault(
+pub trait SharedContentMigrationExt {
+    fn set_shared_content_fault(&mut self, state: Option<SharedContentMigrationState>);
+    fn shared_content_lane_must_stay_dark(
+        storage: &Arc<dyn Storage>,
+        wired_fingerprint: Option<&str>,
+    ) -> bool;
+    fn shared_content_migration_state(
+        &self,
+        handle: &EstateHandle,
+    ) -> Option<SharedContentMigrationState>;
+    fn complete_shared_content_reclaim(
+        &self,
+        handle: &EstateHandle,
+        now_millis: i64,
+    ) -> Result<Option<persistence_kit::maintenance::MaintenanceReport>, SharedContentMigrationError>;
+    fn shared_content_reclaim_status(&self, handle: &EstateHandle) -> SharedContentReclaimStatus;
+    fn run_shared_content_migration(
         &mut self,
-        after: SharedContentMigrationState,
-    ) -> Result<(), SharedContentMigrationError> {
-        if self.shared_content_fault_after == Some(after) {
-            self.shared_content_fault_after = None;
-            return Err(SharedContentMigrationError::InjectedFault { after });
-        }
-        Ok(())
+        handle: &EstateHandle,
+        now_millis: i64,
+        models: Vec<EmbeddingModelConfig>,
+    ) -> Result<SharedContentMigrationReport, SharedContentMigrationError>;
+}
+
+fn check_shared_content_fault(
+    coordinator: &mut EstateCoordinator,
+    after: SharedContentMigrationState,
+) -> Result<(), SharedContentMigrationError> {
+    if coordinator.migration_fault_token() == Some(state_token(after)) {
+        coordinator.set_migration_fault_token(None);
+        return Err(SharedContentMigrationError::InjectedFault { after });
+    }
+    Ok(())
+}
+
+fn state_token(state: SharedContentMigrationState) -> &'static str {
+    match state {
+        SharedContentMigrationState::Discovered => "discovered",
+        SharedContentMigrationState::CanonicalValidated => "canonicalValidated",
+        SharedContentMigrationState::LegacyInventoryCaptured => "legacyInventoryCaptured",
+        SharedContentMigrationState::LegacyDerivedCleared => "legacyDerivedCleared",
+        SharedContentMigrationState::LegacySchemaRetired => "legacySchemaRetired",
+        SharedContentMigrationState::DrawerIndexRebuilt => "drawerIndexRebuilt",
+        SharedContentMigrationState::BasesTrained => "basesTrained",
+        SharedContentMigrationState::ProvidersCovered => "providersCovered",
+        SharedContentMigrationState::Verified => "verified",
+        SharedContentMigrationState::ReclaimPending => "reclaimPending",
+        SharedContentMigrationState::Complete => "complete",
+    }
+}
+
+impl SharedContentMigrationExt for EstateCoordinator {
+    /// Install the fault-injection seam (test-only; single-use).
+    fn set_shared_content_fault(&mut self, state: Option<SharedContentMigrationState>) {
+        self.set_migration_fault_token(state.map(|value| state_token(value).to_string()));
     }
 
     /// Whether the estate's Corpus lane must stay DARK (legacy lane present
     /// and the migration has not reached `Verified`).
-    pub fn shared_content_lane_must_stay_dark(
+    fn shared_content_lane_must_stay_dark(
         storage: &Arc<dyn Storage>,
         wired_fingerprint: Option<&str>,
     ) -> bool {
-        let legacy = detect_legacy_layout(storage).is_some();
         let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
         match SharedContentMigrationStore::new(Arc::clone(storage)).load() {
             Ok(Some(record)) => {
@@ -316,19 +483,28 @@ impl EstateCoordinator {
                 }
                 false
             }
-            Ok(None) => legacy,
-            Err(_) => legacy,
+            Ok(None) => {
+                match EstateFormatStore::new(Arc::clone(storage)).read_if_present() {
+                    Ok(Some(EstateFormatVersion::CURRENT)) => false,
+                    Ok(_) => match detect_legacy_layout(storage) {
+                        Ok(layout) => layout.is_some(),
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                }
+            }
+            Err(_) => true,
         }
     }
 
     /// The migration record's current state (None when no record exists).
-    pub fn shared_content_migration_state(
+    fn shared_content_migration_state(
         &self,
         handle: &EstateHandle,
     ) -> Option<SharedContentMigrationState> {
-        let storage = self.storages.get(handle)?;
+        let storage = self.migration_storage(handle)?;
         let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
-        SharedContentMigrationStore::new(Arc::clone(storage))
+        SharedContentMigrationStore::new(Arc::clone(&storage))
             .load()
             .ok()
             .flatten()
@@ -347,16 +523,16 @@ impl EstateCoordinator {
     /// a no-op (in-memory, PostgreSQL) complete with their no-op report —
     /// the record still flips to `Complete`. Mirrors the Swift
     /// `completeSharedContentReclaim`.
-    pub fn complete_shared_content_reclaim(
+    fn complete_shared_content_reclaim(
         &self,
         handle: &EstateHandle,
         now_millis: i64,
     ) -> Result<Option<persistence_kit::maintenance::MaintenanceReport>, SharedContentMigrationError>
     {
-        let Some(storage) = self.storages.get(handle) else {
+        let Some(storage) = self.migration_storage(handle) else {
             return Ok(None);
         };
-        let store = SharedContentMigrationStore::new(Arc::clone(storage));
+        let store = SharedContentMigrationStore::new(Arc::clone(&storage));
         let Some(mut record) = store.load()? else {
             return Ok(None);
         };
@@ -389,11 +565,8 @@ impl EstateCoordinator {
     /// persisted state and estimates plus the LIVE reclaimable-bytes figure
     /// from the storage maintenance surface. Read-only; safe to poll.
     /// Mirrors the Swift `sharedContentReclaimStatus`.
-    pub fn shared_content_reclaim_status(
-        &self,
-        handle: &EstateHandle,
-    ) -> SharedContentReclaimStatus {
-        let Some(storage) = self.storages.get(handle) else {
+    fn shared_content_reclaim_status(&self, handle: &EstateHandle) -> SharedContentReclaimStatus {
+        let Some(storage) = self.migration_storage(handle) else {
             return SharedContentReclaimStatus {
                 state: None,
                 estimated_reclaimable_bytes: None,
@@ -402,14 +575,16 @@ impl EstateCoordinator {
             };
         };
         let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
-        let record = SharedContentMigrationStore::new(Arc::clone(storage))
+        let record = SharedContentMigrationStore::new(Arc::clone(&storage))
             .load()
             .ok()
             .flatten();
         let live = storage.estimated_reclaimable_bytes().ok();
         SharedContentReclaimStatus {
             state: record.as_ref().map(|r| r.state),
-            estimated_reclaimable_bytes: record.as_ref().and_then(|r| r.estimated_reclaimable_bytes),
+            estimated_reclaimable_bytes: record
+                .as_ref()
+                .and_then(|r| r.estimated_reclaimable_bytes),
             reclaimed_bytes: record.as_ref().and_then(|r| r.reclaimed_bytes),
             live_reclaimable_bytes: live,
         }
@@ -417,7 +592,7 @@ impl EstateCoordinator {
 
     /// Run (or resume) the shared-content migration. Idempotent and
     /// resumable from the persisted state.
-    pub fn run_shared_content_migration(
+    fn run_shared_content_migration(
         &mut self,
         handle: &EstateHandle,
         now_millis: i64,
@@ -427,21 +602,41 @@ impl EstateCoordinator {
             CorpusOperatingMode::Attached,
             &models,
         );
-        let storage = self
-            .storages
-            .get(handle)
-            .cloned()
-            .ok_or(SharedContentMigrationError::StorageFailure {
-                state: SharedContentMigrationState::Discovered,
-                reason: "no storage registered for estate".to_string(),
-            })?;
+        let storage =
+            self.migration_storage(handle)
+                .ok_or(SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::Discovered,
+                    reason: "no storage registered for estate".to_string(),
+                })?;
         let estate = self
             .estate_for(handle)
-            .map_err(|e: GeniusLocusKitError| SharedContentMigrationError::StorageFailure {
-                state: SharedContentMigrationState::Discovered,
-                reason: format!("{e:?}"),
-            })?
+            .map_err(
+                |e: GeniusLocusKitError| SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::Discovered,
+                    reason: format!("{e:?}"),
+                },
+            )?
             .clone();
+        let found_format = EstateFormatStore::new(Arc::clone(&storage))
+            .read_if_present()
+            .map_err(|error| SharedContentMigrationError::StorageFailure {
+                state: SharedContentMigrationState::Discovered,
+                reason: format!("estate-format read: {error:?}"),
+            })?;
+        if let Some(found) = found_format {
+            if found > EstateFormatVersion::CURRENT {
+                return Err(SharedContentMigrationError::UnsupportedFuture {
+                    found,
+                    current: EstateFormatVersion::CURRENT,
+                });
+            }
+            if found < EstateFormatVersion::V1_0 {
+                return Err(SharedContentMigrationError::BelowCompiledFloor {
+                    found,
+                    floor: EstateFormatVersion::V1_0,
+                });
+            }
+        }
         let source = LocusDrawerContentSource::new(estate);
         storage
             .migrate(&SharedContentMigrationStore::schema_declaration())
@@ -454,8 +649,25 @@ impl EstateCoordinator {
         let mut record = match store.load()? {
             Some(existing) => existing,
             None => {
-                let layout = detect_legacy_layout(&storage);
-                let mut record = SharedContentMigrationRecord {
+                if found_format == Some(EstateFormatVersion::CURRENT) {
+                    return Ok(report_for(&SharedContentMigrationRecord {
+                        state: SharedContentMigrationState::Complete,
+                        detected_layout: "current".to_string(),
+                        legacy_chunk_ids: vec![],
+                        legacy_vector_keys: vec![],
+                        protected_baseline: BTreeMap::new(),
+                        rebuild_cursor: None,
+                        rebuilt_content_count: 0,
+                        estimated_reclaimable_bytes: None,
+                        reclaimed_bytes: None,
+                        legacy_chunk_count: None,
+                        legacy_vector_key_count: None,
+                        ensemble_fingerprint: Some(wired_fingerprint.clone()),
+                        provider_generations: None,
+                    }));
+                }
+                let layout = detect_legacy_layout(&storage)?;
+                let record = SharedContentMigrationRecord {
                     state: SharedContentMigrationState::Discovered,
                     detected_layout: layout.clone().unwrap_or_else(|| "fresh".to_string()),
                     legacy_chunk_ids: vec![],
@@ -471,19 +683,32 @@ impl EstateCoordinator {
                     provider_generations: None,
                 };
                 if layout.is_none() {
-                    // Fresh estate: bypass — record the wired configuration
-                    // so the bypass record is complete UNDER it (no phantom
-                    // upgrade on the next run).
-                    record.state = SharedContentMigrationState::Complete;
-                    record.ensemble_fingerprint = Some(wired_fingerprint.clone());
+                    // Fresh estate: stamp current without creating historical
+                    // migration bookkeeping.
+                    EstateFormatStore::new(Arc::clone(&storage))
+                        .stamp(EstateFormatVersion::CURRENT, now_millis)
+                        .map_err(|error| SharedContentMigrationError::StorageFailure {
+                            state: SharedContentMigrationState::Discovered,
+                            reason: format!("estate-format stamp: {error:?}"),
+                        })?;
+                    let mut complete = record;
+                    complete.state = SharedContentMigrationState::Complete;
+                    complete.ensemble_fingerprint = Some(wired_fingerprint.clone());
+                    return Ok(report_for(&complete));
                 }
                 store.save(&record, now_millis)?;
-                self.check_shared_content_fault(record.state)?;
+                check_shared_content_fault(self, record.state)?;
                 record
             }
         };
         if record.state == SharedContentMigrationState::Complete {
             if record.ensemble_fingerprint.as_deref() == Some(wired_fingerprint.as_str()) {
+                EstateFormatStore::new(Arc::clone(&storage))
+                    .stamp(EstateFormatVersion::CURRENT, now_millis)
+                    .map_err(|error| SharedContentMigrationError::StorageFailure {
+                        state: SharedContentMigrationState::Complete,
+                        reason: format!("estate-format stamp: {error:?}"),
+                    })?;
                 return Ok(report_for(&record));
             }
             // Follow-on ENSEMBLE UPGRADE: the completed record's recorded
@@ -504,12 +729,13 @@ impl EstateCoordinator {
             let source_ids = legacy_source_ids(&storage)?;
             let mut orphans: Vec<String> = Vec::new();
             for id in &source_ids {
-                let resolved = source.record(id).map_err(|e| {
-                    SharedContentMigrationError::StorageFailure {
-                        state: SharedContentMigrationState::CanonicalValidated,
-                        reason: format!("{e:?}"),
-                    }
-                })?;
+                let resolved =
+                    source
+                        .record(id)
+                        .map_err(|e| SharedContentMigrationError::StorageFailure {
+                            state: SharedContentMigrationState::CanonicalValidated,
+                            reason: format!("{e:?}"),
+                        })?;
                 if resolved.is_none() {
                     orphans.push(id.clone());
                 }
@@ -523,7 +749,7 @@ impl EstateCoordinator {
             }
             record.state = SharedContentMigrationState::CanonicalValidated;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
 
         // 3. legacyInventoryCaptured
@@ -538,7 +764,32 @@ impl EstateCoordinator {
             )?;
             record.state = SharedContentMigrationState::LegacyInventoryCaptured;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
+        }
+
+        // Refuse only before the first destructive transition. Once an estate
+        // has crossed that boundary it must be allowed to resume to completion.
+        let has_trainable_provider = models.iter().any(|model| {
+            !matches!(
+                model,
+                EmbeddingModelConfig::Deterministic
+                    | EmbeddingModelConfig::Fdc { .. }
+                    | EmbeddingModelConfig::MiniLM { .. }
+                    | EmbeddingModelConfig::MPNet { .. }
+                    | EmbeddingModelConfig::EmbeddingGemma { .. }
+            )
+        });
+        if record.state == SharedContentMigrationState::LegacyInventoryCaptured
+            && has_trainable_provider
+        {
+            let content_count = source
+                .active_content_ids()
+                .map_err(|error| SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::LegacyInventoryCaptured,
+                    reason: format!("capacity content census: {error:?}"),
+                })?
+                .len();
+            SharedContentTrainingCapacity::require(content_count)?;
         }
 
         // 4. legacyDerivedCleared — exact-key vector deletes + wholesale
@@ -565,34 +816,62 @@ impl EstateCoordinator {
             })?;
             // Rust BM25 sidecar shares the estate file on SQLite; clear via
             // the store handle.
-            if let Ok(iix) = corpus_kit::InvertedIndexStore::open_for_storage(&storage) {
-                let _ = iix.clear_all();
-            }
-            let _ = storage.migrate(&BasisStore::schema_declaration());
-            let _ = BasisStore::new(Arc::clone(&storage)).delete_all();
-            let _ = storage.migrate(&CorpusProviderCountsStore::schema_declaration());
-            let _ = CorpusProviderCountsStore::new(Arc::clone(&storage)).delete_all();
-            let _ = storage.migrate(&CorpusIndexStateStore::schema_declaration());
-            let _ = CorpusIndexStateStore::new(Arc::clone(&storage)).clear_all();
+            let clear_failure =
+                |operation: &str, error: String| SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::LegacyDerivedCleared,
+                    reason: format!("{operation}: {error}"),
+                };
+            let iix = corpus_kit::InvertedIndexStore::open_for_storage(&storage)
+                .map_err(|error| clear_failure("open inverted index", format!("{error:?}")))?;
+            iix.clear_all()
+                .map_err(|error| clear_failure("clear inverted index", format!("{error:?}")))?;
+            storage
+                .migrate(&BasisStore::schema_declaration())
+                .map_err(|error| clear_failure("open basis schema", format!("{error:?}")))?;
+            BasisStore::new(Arc::clone(&storage))
+                .delete_all()
+                .map_err(|error| clear_failure("clear provider bases", format!("{error:?}")))?;
+            storage
+                .migrate(&CorpusProviderCountsStore::schema_declaration())
+                .map_err(|error| clear_failure("open counts schema", format!("{error:?}")))?;
+            CorpusProviderCountsStore::new(Arc::clone(&storage))
+                .delete_all()
+                .map_err(|error| clear_failure("clear provider counts", format!("{error:?}")))?;
+            storage
+                .migrate(&CorpusIndexStateStore::schema_declaration())
+                .map_err(|error| clear_failure("open index-state schema", format!("{error:?}")))?;
+            CorpusIndexStateStore::new(Arc::clone(&storage))
+                .clear_all()
+                .map_err(|error| clear_failure("clear index state", format!("{error:?}")))?;
             record.state = SharedContentMigrationState::LegacyDerivedCleared;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
 
         // 5. legacySchemaRetired — declared dropTable retirement + attached
         //    profile install.
         if record.state < SharedContentMigrationState::LegacySchemaRetired {
-            storage
-                .migrate(&retirement_declaration())
-                .map_err(|e| SharedContentMigrationError::StorageFailure {
+            storage.migrate(&retirement_declaration()).map_err(|e| {
+                SharedContentMigrationError::StorageFailure {
                     state: SharedContentMigrationState::LegacySchemaRetired,
                     reason: format!("{e:?}"),
+                }
+            })?;
+            storage
+                .migrate(&corpus_kit::attached_declaration())
+                .map_err(|error| SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::LegacySchemaRetired,
+                    reason: format!("install attached Corpus schema: {error:?}"),
                 })?;
-            let _ = storage.migrate(&corpus_kit::attached_declaration());
-            let _ = storage.migrate(&VectorRepresentationClaims::schema_declaration());
+            storage
+                .migrate(&VectorRepresentationClaims::schema_declaration())
+                .map_err(|error| SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::LegacySchemaRetired,
+                    reason: format!("install representation-claims schema: {error:?}"),
+                })?;
             record.state = SharedContentMigrationState::LegacySchemaRetired;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
 
         // The migration engine over the WIRED configuration (never a
@@ -602,8 +881,8 @@ impl EstateCoordinator {
         // registered attached engine is reused when present.
         let engine: Option<Arc<CorpusContentEngine>> =
             if record.state < SharedContentMigrationState::Verified {
-                let built = match self.corpus_kits.get(handle) {
-                    Some(registered) => Arc::clone(registered),
+                let built = match self.migration_registered_corpus(handle) {
+                    Some(registered) => registered,
                     None => Arc::new(
                         CorpusContentEngine::open(
                             Arc::clone(&storage),
@@ -611,9 +890,11 @@ impl EstateCoordinator {
                                 CorpusOperatingMode::Attached,
                                 CorpusIndexUnitPolicy::WholeContent,
                             )
-                            .map_err(|e| SharedContentMigrationError::StorageFailure {
-                                state: SharedContentMigrationState::DrawerIndexRebuilt,
-                                reason: format!("{e:?}"),
+                            .map_err(|e| {
+                                SharedContentMigrationError::StorageFailure {
+                                    state: SharedContentMigrationState::DrawerIndexRebuilt,
+                                    reason: format!("{e:?}"),
+                                }
                             })?,
                             Arc::new(LocusDrawerContentSource::new(
                                 self.estate_for(handle)
@@ -625,9 +906,11 @@ impl EstateCoordinator {
                             )),
                             models,
                         )
-                        .map_err(|e| SharedContentMigrationError::StorageFailure {
-                            state: SharedContentMigrationState::DrawerIndexRebuilt,
-                            reason: format!("{e:?}"),
+                        .map_err(|e| {
+                            SharedContentMigrationError::StorageFailure {
+                                state: SharedContentMigrationState::DrawerIndexRebuilt,
+                                reason: format!("{e:?}"),
+                            }
                         })?,
                     ),
                 };
@@ -648,7 +931,10 @@ impl EstateCoordinator {
                 }
             })?;
             let resume_from = match &record.rebuild_cursor {
-                Some(cursor) => all_ids.iter().position(|id| id > cursor).unwrap_or(all_ids.len()),
+                Some(cursor) => all_ids
+                    .iter()
+                    .position(|id| id > cursor)
+                    .unwrap_or(all_ids.len()),
                 None => 0,
             };
             // Deferred-index window (P6 scale fix): the engine's vector write
@@ -669,22 +955,21 @@ impl EstateCoordinator {
                 }
             })?;
             let mut processed = record.rebuilt_content_count;
-            let mut since_checkpoint = 0usize;
-            for id in &all_ids[resume_from..] {
-                engine.index_content_structural(id, now_millis).map_err(|e| {
-                    SharedContentMigrationError::StorageFailure {
+            for batch in all_ids[resume_from..].chunks(500) {
+                // Pure tokenization/stateless embedding is bounded-parallel;
+                // the engine reassembles input order and commits through one
+                // serial writer. Publish the migration cursor only after the
+                // entire durable batch succeeds.
+                engine
+                    .index_content_structural_batch(batch, now_millis)
+                    .map_err(|e| SharedContentMigrationError::StorageFailure {
                         state: SharedContentMigrationState::DrawerIndexRebuilt,
                         reason: format!("{e:?}"),
-                    }
-                })?;
-                processed += 1;
-                since_checkpoint += 1;
-                if since_checkpoint >= 500 {
-                    record.rebuild_cursor = Some(id.clone());
-                    record.rebuilt_content_count = processed;
-                    store.save(&record, now_millis)?;
-                    since_checkpoint = 0;
-                }
+                    })?;
+                processed += batch.len();
+                record.rebuild_cursor = batch.last().cloned();
+                record.rebuilt_content_count = processed;
+                store.save(&record, now_millis)?;
             }
             deferred_vs.publish_resident_index().map_err(|e| {
                 SharedContentMigrationError::StorageFailure {
@@ -696,7 +981,7 @@ impl EstateCoordinator {
             record.rebuilt_content_count = processed;
             record.state = SharedContentMigrationState::DrawerIndexRebuilt;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
 
         // 7. basesTrained — stream-train every trainable provider lacking a
@@ -704,17 +989,16 @@ impl EstateCoordinator {
         //    commit). Restart-idempotent per provider.
         if record.state < SharedContentMigrationState::BasesTrained {
             let engine = engine.as_ref().expect("engine exists below Verified");
-            engine.train_trainable_slots(now_millis, false).map_err(|e| {
-                SharedContentMigrationError::StorageFailure {
+            engine
+                .train_trainable_slots(now_millis, false)
+                .map_err(|e| SharedContentMigrationError::StorageFailure {
                     state: SharedContentMigrationState::BasesTrained,
                     reason: format!("{e:?}"),
-                }
-            })?;
-            record.provider_generations =
-                Some(engine.provider_generations().into_iter().collect());
+                })?;
+            record.provider_generations = Some(engine.provider_generations().into_iter().collect());
             record.state = SharedContentMigrationState::BasesTrained;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
 
         // 8. providersCovered — backfill ONLY the missing (Drawer, provider)
@@ -725,8 +1009,7 @@ impl EstateCoordinator {
             let engine = engine.as_ref().expect("engine exists below Verified");
             // Engine generations are the durable truth (atomic commits);
             // reconcile the record's bookkeeping to them on resume.
-            record.provider_generations =
-                Some(engine.provider_generations().into_iter().collect());
+            record.provider_generations = Some(engine.provider_generations().into_iter().collect());
             let deferred_vs = engine.shared_vector_store();
             deferred_vs.begin_deferred_index().map_err(|e| {
                 SharedContentMigrationError::StorageFailure {
@@ -734,12 +1017,12 @@ impl EstateCoordinator {
                     reason: format!("begin_deferred_index: {e:?}"),
                 }
             })?;
-            engine.backfill_provider_coverage(now_millis, 500).map_err(|e| {
-                SharedContentMigrationError::StorageFailure {
+            engine
+                .backfill_provider_coverage(now_millis, 500)
+                .map_err(|e| SharedContentMigrationError::StorageFailure {
                     state: SharedContentMigrationState::ProvidersCovered,
                     reason: format!("{e:?}"),
-                }
-            })?;
+                })?;
             deferred_vs.publish_resident_index().map_err(|e| {
                 SharedContentMigrationError::StorageFailure {
                     state: SharedContentMigrationState::ProvidersCovered,
@@ -748,7 +1031,7 @@ impl EstateCoordinator {
             })?;
             record.state = SharedContentMigrationState::ProvidersCovered;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
 
         // 9. verified — structural checks PLUS per-provider coverage: every
@@ -760,7 +1043,7 @@ impl EstateCoordinator {
             record.ensemble_fingerprint = Some(engine_ref.configuration_fingerprint());
             record.state = SharedContentMigrationState::Verified;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
 
         // 10. reclaimPending — capture the live reclaimable estimate through
@@ -770,8 +1053,15 @@ impl EstateCoordinator {
             record.estimated_reclaimable_bytes = storage.estimated_reclaimable_bytes().ok();
             record.state = SharedContentMigrationState::ReclaimPending;
             store.save(&record, now_millis)?;
-            self.check_shared_content_fault(record.state)?;
+            check_shared_content_fault(self, record.state)?;
         }
+
+        EstateFormatStore::new(Arc::clone(&storage))
+            .stamp(EstateFormatVersion::CURRENT, now_millis)
+            .map_err(|error| SharedContentMigrationError::StorageFailure {
+                state: record.state,
+                reason: format!("estate-format stamp: {error:?}"),
+            })?;
 
         Ok(report_for(&record))
     }
@@ -846,8 +1136,15 @@ fn legacy_vector_keys(
         .map_err(|e| storage_failure(SharedContentMigrationState::LegacyInventoryCaptured, e))?;
     let mut out: Vec<String> = Vec::new();
     for row in &rows {
-        let (Some(TypedValue::Text(item_id)), Some(TypedValue::Int(vector_index)), Some(TypedValue::Text(model_id))) =
-            (row.get("item_id"), row.get("vector_index"), row.get("model_id"))
+        let (
+            Some(TypedValue::Text(item_id)),
+            Some(TypedValue::Int(vector_index)),
+            Some(TypedValue::Text(model_id)),
+        ) = (
+            row.get("item_id"),
+            row.get("vector_index"),
+            row.get("model_id"),
+        )
         else {
             continue;
         };
@@ -864,12 +1161,11 @@ fn protected_baseline(
     legacy_vector_keys: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, String>, SharedContentMigrationError> {
     let mut baseline: BTreeMap<String, String> = BTreeMap::new();
-    let inventory = persistence_kit::capture_inventory(
-        storage,
-        &["drawers", "associations"],
-        &BTreeMap::new(),
-    )
-    .map_err(|e| storage_failure(SharedContentMigrationState::LegacyInventoryCaptured, e))?;
+    let inventory =
+        persistence_kit::capture_inventory(storage, &["drawers", "associations"], &BTreeMap::new())
+            .map_err(|e| {
+                storage_failure(SharedContentMigrationState::LegacyInventoryCaptured, e)
+            })?;
     for entry in inventory {
         baseline.insert(entry.table, entry.content_fold);
     }
@@ -901,8 +1197,15 @@ fn protected_vectors_fold(
     let mut combined: u64 = 0;
     let excluded_cols: BTreeSet<String> = ["id"].iter().map(|s| s.to_string()).collect();
     for row in &rows {
-        let (Some(TypedValue::Text(item_id)), Some(TypedValue::Int(vector_index)), Some(TypedValue::Text(model_id))) =
-            (row.get("item_id"), row.get("vector_index"), row.get("model_id"))
+        let (
+            Some(TypedValue::Text(item_id)),
+            Some(TypedValue::Int(vector_index)),
+            Some(TypedValue::Text(model_id)),
+        ) = (
+            row.get("item_id"),
+            row.get("vector_index"),
+            row.get("model_id"),
+        )
         else {
             continue;
         };
@@ -910,7 +1213,8 @@ fn protected_vectors_fold(
         if excluded_keys.contains(&key) {
             continue;
         }
-        let encoded = persistence_kit::database_inventory::canonical_row_encoding(row, &excluded_cols);
+        let encoded =
+            persistence_kit::database_inventory::canonical_row_encoding(row, &excluded_cols);
         let hash = persistence_kit::layout_signature::fnv1a64_fold(
             encoded.as_bytes(),
             persistence_kit::layout_signature::FNV1A64_OFFSET_BASIS,
@@ -966,7 +1270,10 @@ fn verify(
     if !active_ids.is_subset(&indexed) {
         let missing: Vec<String> = active_ids.difference(&indexed).take(5).cloned().collect();
         return Err(SharedContentMigrationError::VerificationFailed {
-            reason: format!("rebuild coverage gap — unindexed drawers: {}", missing.join(", ")),
+            reason: format!(
+                "rebuild coverage gap — unindexed drawers: {}",
+                missing.join(", ")
+            ),
         });
     }
     // Per-provider coverage: every wired provider must cover every active
@@ -1018,8 +1325,15 @@ fn verify(
         let rebuilt: BTreeSet<String> = indexed;
         let mut exclusions: BTreeSet<String> = BTreeSet::new();
         for row in &vector_rows {
-            let (Some(TypedValue::Text(item_id)), Some(TypedValue::Int(vector_index)), Some(TypedValue::Text(model_id))) =
-                (row.get("item_id"), row.get("vector_index"), row.get("model_id"))
+            let (
+                Some(TypedValue::Text(item_id)),
+                Some(TypedValue::Int(vector_index)),
+                Some(TypedValue::Text(model_id)),
+            ) = (
+                row.get("item_id"),
+                row.get("vector_index"),
+                row.get("model_id"),
+            )
             else {
                 continue;
             };

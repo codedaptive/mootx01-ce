@@ -48,6 +48,7 @@ use locus_kit::{
 };
 
 use genius_locus_kit::{EncodeSpeed, VerbDispatchError, VerbError, WriteMode};
+use genius_locus_kit_migrations::SharedContentMigrationExt;
 
 use substrate_types::{RowState, RowStateCluster};
 

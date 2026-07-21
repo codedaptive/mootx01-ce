@@ -25,7 +25,11 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
-        .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
+        .package(
+            name: "GeniusLocusKit",
+            path: "../../packages/kits/GeniusLocusKit",
+            traits: ["MigrationFloor1_0"]
+        ),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "CorpusKit", path: "../../packages/kits/CorpusKit"),
@@ -39,6 +43,7 @@ let package = Package(
                 .product(name: "AriaMCP", package: "AriaMcpKit"),
                 .product(name: "AriaResident", package: "AriaMcpKit"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),

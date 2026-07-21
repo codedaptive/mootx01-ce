@@ -43,7 +43,11 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
-        .package(name: "GeniusLocusKit", path: "../GeniusLocusKit"),
+        .package(
+            name: "GeniusLocusKit",
+            path: "../GeniusLocusKit",
+            traits: ["MigrationFloor1_0"]
+        ),
         .package(name: "NeuronKit", path: "../NeuronKit"),
         // SubstrateML provides ARM (MiningThresholds) and FCA (BoundedConceptMiner,
         // FormalAttribute, FormalContext) types consumed by LensTools.swift.
@@ -116,6 +120,7 @@ let package = Package(
             dependencies: [
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 .product(name: "CognitionKit", package: "CognitionKit"),
                 .product(name: "LocusKit", package: "LocusKit"),

@@ -9,7 +9,9 @@ use corpus_kit::{
 };
 use persistence_kit::database_inventory::capture_inventory;
 use persistence_kit::inmemory::InMemoryStorage;
-use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage, TypedValue};
+use persistence_kit::{
+    BackendConfiguration, Column, EstateConfiguration, Storage, StoragePredicate, TypedValue,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -23,7 +25,11 @@ fn in_memory_storage() -> Arc<dyn Storage> {
 
 fn make_standalone(
     index_unit: CorpusIndexUnitPolicy,
-) -> (CorpusContentEngine, Arc<CorpusDocumentStore>, Arc<dyn Storage>) {
+) -> (
+    CorpusContentEngine,
+    Arc<CorpusDocumentStore>,
+    Arc<dyn Storage>,
+) {
     let storage = in_memory_storage();
     let config =
         CorpusContentConfiguration::new(CorpusOperatingMode::Standalone, index_unit).unwrap();
@@ -72,8 +78,10 @@ fn derived_keys_are_canonical_content_ids() {
     // Vector rows are keyed by the content IDs THEMSELVES. (The Rust BM25
     // sidecar lives in a private connection; identity there is proved via
     // recall below.)
-    let expected: BTreeSet<String> =
-        ["drawer-moon", "drawer-rust"].iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = ["drawer-moon", "drawer-rust"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     assert_eq!(item_ids(&storage, "vectors", "item_id"), expected);
 
     // No legacy copy lane exists in this estate.
@@ -84,7 +92,10 @@ fn derived_keys_are_canonical_content_ids() {
     assert_eq!(hits.first().map(|h| h.id.as_str()), Some("drawer-moon"));
     assert!(hits.first().unwrap().evidence.is_none());
     let keyword = engine.bm25_top_k("ownership isolates", 5).unwrap();
-    assert_eq!(keyword.first().map(|(id, _)| id.as_str()), Some("drawer-rust"));
+    assert_eq!(
+        keyword.first().map(|(id, _)| id.as_str()),
+        Some("drawer-rust")
+    );
 
     let indexed: Vec<CorpusContentId> = engine.indexed_content_ids().unwrap();
     assert_eq!(indexed, vec!["drawer-moon", "drawer-rust"]);
@@ -223,9 +234,8 @@ fn job_payload_carries_no_text_and_matches_swift_wire_form() {
 
 #[test]
 fn passage_mode_indexes_ranges_and_aggregates_to_content_id() {
-    let (engine, store, storage) = make_standalone(
-        CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget: 6 },
-    );
+    let (engine, store, storage) =
+        make_standalone(CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget: 6 });
     let text = "alpha beta gamma delta epsilon zeta \
                 eta theta iota kappa lambda mu \
                 nu xi omicron";
@@ -296,10 +306,7 @@ struct StaticContentSource {
 }
 
 impl CorpusContentSource for StaticContentSource {
-    fn record(
-        &self,
-        id: &str,
-    ) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
+    fn record(&self, id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
         Ok(self.records.iter().find(|r| r.id == id).cloned())
     }
 
@@ -354,7 +361,12 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
     engine.index_content("drawer-a", NOW).unwrap();
     engine.index_content("drawer-b", NOW).unwrap();
 
-    for table in ["corpus_documents", "chunks", "corpus_metadata", "corpus_passages"] {
+    for table in [
+        "corpus_documents",
+        "chunks",
+        "corpus_metadata",
+        "corpus_passages",
+    ] {
         assert!(
             storage.row_store().count(table, None).is_err(),
             "attached estate must not contain {table}"
@@ -362,6 +374,130 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
     }
     let hits = engine.recall("llamas", 10).unwrap();
     assert_eq!(hits.first().map(|h| h.id.as_str()), Some("drawer-a"));
+}
+
+#[test]
+fn provider_addition_and_subtraction_reconcile_without_residue() {
+    let storage = in_memory_storage();
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .unwrap();
+    let source: Arc<dyn CorpusContentSource> = Arc::new(StaticContentSource {
+        records: vec![
+            CorpusContentRecord {
+                id: "drawer-a".into(),
+                revision: 1,
+                digest: content_digest("alpha provider coverage"),
+                text: "alpha provider coverage".into(),
+            },
+            CorpusContentRecord {
+                id: "drawer-b".into(),
+                revision: 1,
+                digest: content_digest("beta provider coverage"),
+                text: "beta provider coverage".into(),
+            },
+        ],
+    });
+    let small = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source),
+        vec![EmbeddingModelConfig::Deterministic],
+    )
+    .unwrap();
+    small
+        .index_content_structural_batch(&["drawer-a".into(), "drawer-b".into()], NOW)
+        .unwrap();
+    small.reconcile_configured_providers(NOW).unwrap();
+
+    let big = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source),
+        vec![
+            EmbeddingModelConfig::Deterministic,
+            EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(corpus_kit_providers::RandomIndexingProvider::new()),
+            },
+        ],
+    )
+    .unwrap();
+    big.reconcile_configured_providers(NOW).unwrap();
+    assert_eq!(big.covered_count("random-indexing-v1").unwrap(), Some(2));
+    for table in ["corpus_provider_basis", "corpus_provider_counts"] {
+        assert_eq!(
+            storage
+                .row_store()
+                .count(
+                    table,
+                    Some(&StoragePredicate::Eq(
+                        Column::new(table, "model_id"),
+                        TypedValue::Text("random-indexing-v1".into()),
+                    )),
+                )
+                .unwrap(),
+            1,
+        );
+    }
+    let maintained_anchor = big.maintained_vocab_anchor();
+    assert!(maintained_anchor > 0);
+    let reopened = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source),
+        vec![
+            EmbeddingModelConfig::Deterministic,
+            EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(corpus_kit_providers::RandomIndexingProvider::new()),
+            },
+        ],
+    )
+    .unwrap();
+    reopened.reconcile_configured_providers(NOW).unwrap();
+    assert_eq!(reopened.maintained_vocab_anchor(), maintained_anchor);
+
+    let removed = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        source,
+        vec![EmbeddingModelConfig::Deterministic],
+    )
+    .unwrap();
+    removed.reconcile_configured_providers(NOW).unwrap();
+    for table in [
+        "vectors",
+        "corpus_provider_basis",
+        "corpus_provider_counts",
+        "corpus_provider_coverage",
+    ] {
+        assert_eq!(
+            storage
+                .row_store()
+                .count(
+                    table,
+                    Some(&StoragePredicate::Eq(
+                        Column::new(table, "model_id"),
+                        TypedValue::Text("random-indexing-v1".into()),
+                    )),
+                )
+                .unwrap(),
+            0,
+            "retired provider residue survived in {table}",
+        );
+    }
+    let claims = vectorkit::VectorRepresentationClaims::new(Arc::clone(&storage));
+    assert!(claims
+        .claims(corpus_kit::CLAIMS_CONSUMER)
+        .unwrap()
+        .iter()
+        .all(|key| key.model_id != "random-indexing-v1"));
+    removed.reconcile_configured_providers(NOW).unwrap();
+    assert_eq!(
+        removed.covered_count("corpus-deterministic-v1").unwrap(),
+        Some(2),
+    );
 }
 
 #[test]

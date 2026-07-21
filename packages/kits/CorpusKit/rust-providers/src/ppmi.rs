@@ -62,8 +62,8 @@
 // ─────────────────────────────────────────────────────────────────
 
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
-use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use crate::random_indexing::ri_index_vector;
+use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use engram_lib::Engram;
 use std::collections::HashMap;
 use substrate_kernel::float_vec_ops;
@@ -135,7 +135,6 @@ pub struct PpmiProvider {
     projection_seed: u64,
 
     // ── Count tables (accumulated during training, read during finalize) ──
-
     /// co_count[t][c] = number of times c appeared in t's sliding window
     /// across all training documents.
     co_count: HashMap<String, HashMap<String, usize>>,
@@ -150,7 +149,6 @@ pub struct PpmiProvider {
     total_terms: usize,
 
     // ── PPMI vectors (filled by finalize, read during embed) ──
-
     /// PPMI context vectors, keyed by lowercased term.
     /// Raw (unnormalised) PPMI-weighted sums of context-term index vectors.
     /// Normalisation happens at embed time.
@@ -260,7 +258,8 @@ impl PpmiProvider {
         // Iterate over all (target, context_counts) pairs.
         // We need to read term_count for both target and context terms during
         // iteration, so we collect the co_count keys first to avoid borrow issues.
-        let targets: Vec<String> = self.co_count.keys().cloned().collect();
+        let mut targets: Vec<String> = self.co_count.keys().cloned().collect();
+        targets.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
 
         for target in &targets {
             let tc = match self.term_count.get(target) {
@@ -277,7 +276,10 @@ impl PpmiProvider {
             let mut vec = vec![0.0f32; PPMI_DIMENSION];
             let mut has_nonzero = false;
 
-            for (context, pair_count) in &context_counts {
+            let mut contexts: Vec<&String> = context_counts.keys().collect();
+            contexts.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            for context in contexts {
+                let pair_count = &context_counts[context];
                 if *pair_count == 0 {
                     continue;
                 }
@@ -558,7 +560,9 @@ impl EmbeddingProvider for PpmiProvider {
             return Ok(vec![]);
         }
         // OOV check: throw vocabMiss when basis is trained but no query term hits.
-        let has_in_vocab = terms.iter().any(|t| self.ppmi_vectors.contains_key(t.as_str()));
+        let has_in_vocab = terms
+            .iter()
+            .any(|t| self.ppmi_vectors.contains_key(t.as_str()));
         if !has_in_vocab {
             return Err(VectorKitError::EmbedFloatVocabMiss(format!(
                 "ppmi: vocab size {}, but 0 of {} query token(s) matched",
@@ -817,17 +821,25 @@ mod tests {
     #[test]
     fn ppmi_dimension_matches_ri_dimension() {
         use crate::random_indexing::RI_DIMENSION;
-        assert_eq!(PPMI_DIMENSION, RI_DIMENSION,
-            "PPMI and RI share the same index vector space (D=2048)");
+        assert_eq!(
+            PPMI_DIMENSION, RI_DIMENSION,
+            "PPMI and RI share the same index vector space (D=2048)"
+        );
     }
 
     #[test]
     fn ppmi_vector_is_nonzero_after_training() {
         let provider = build_trained_provider();
         let car_vec = provider.ppmi_vector_for_term("car");
-        assert!(car_vec.is_some(), "car must have a PPMI vector after training");
+        assert!(
+            car_vec.is_some(),
+            "car must have a PPMI vector after training"
+        );
         let has_nonzero = car_vec.unwrap().iter().any(|&x| x != 0.0);
-        assert!(has_nonzero, "car's PPMI vector must have at least one non-zero component");
+        assert!(
+            has_nonzero,
+            "car's PPMI vector must have at least one non-zero component"
+        );
     }
 
     #[test]
@@ -849,9 +861,11 @@ mod tests {
             ri.train(doc, PPMI_WINDOW);
         }
         let ppmi_vec = ppmi.ppmi_vector_for_term("car").unwrap();
-        let ri_vec   = ri.context_vector_for_term("car").unwrap();
-        assert_ne!(*ppmi_vec, *ri_vec,
-            "PPMI and RI context vectors for 'car' must differ (different accumulation weights)");
+        let ri_vec = ri.context_vector_for_term("car").unwrap();
+        assert_ne!(
+            *ppmi_vec, *ri_vec,
+            "PPMI and RI context vectors for 'car' must differ (different accumulation weights)"
+        );
     }
 
     #[test]
@@ -892,7 +906,10 @@ mod tests {
     fn embed_float_returns_unit_length_vector() {
         let provider = build_trained_provider();
         let v = provider.embed_float("car engine").unwrap();
-        assert!(!v.is_empty(), "embed_float must be non-empty after training");
+        assert!(
+            !v.is_empty(),
+            "embed_float must be non-empty after training"
+        );
         let norm: f32 = v.iter().map(|&x| x * x).sum::<f32>().sqrt();
         assert!(
             (norm - 1.0).abs() < 1e-5,
@@ -916,7 +933,7 @@ mod tests {
             ri.train(doc, PPMI_WINDOW);
         }
         let ppmi_engram = ppmi.embed("car engine").unwrap();
-        let ri_engram   = ri.embed("car engine").unwrap();
+        let ri_engram = ri.embed("car engine").unwrap();
         assert_ne!(ppmi_engram, ri_engram,
             "PPMI and RI must produce distinct Engrams (different projection seeds + accumulation weights)");
     }
@@ -924,14 +941,14 @@ mod tests {
     #[test]
     fn semantic_relatedness_holds_after_training() {
         let provider = build_trained_provider();
-        let car     = provider.embed_float("car").unwrap();
+        let car = provider.embed_float("car").unwrap();
         let vehicle = provider.embed_float("vehicle").unwrap();
-        let dog     = provider.embed_float("dog").unwrap();
+        let dog = provider.embed_float("dog").unwrap();
 
         assert!(!car.is_empty() && !vehicle.is_empty() && !dog.is_empty());
 
         let car_vehicle_sim: f32 = car.iter().zip(vehicle.iter()).map(|(&a, &b)| a * b).sum();
-        let car_dog_sim: f32     = car.iter().zip(dog.iter()).map(|(&a, &b)| a * b).sum();
+        let car_dog_sim: f32 = car.iter().zip(dog.iter()).map(|(&a, &b)| a * b).sum();
 
         assert!(
             car_vehicle_sim > car_dog_sim,
@@ -944,20 +961,24 @@ mod tests {
         // Without finalize, ppmi_vectors is empty → embed_float returns empty
         // immediately (no-basis opt-out before OOV detection).
         let mut provider = PpmiProvider::new();
-        let corpus = vec![
-            vec!["car", "engine", "drive"],
-        ];
+        let corpus = vec![vec!["car", "engine", "drive"]];
         for doc in &corpus {
             provider.train(doc, PPMI_WINDOW);
         }
         // NOT finalized: embed_float returns empty because ppmi_vectors is empty
         // (structural no-basis opt-out, not OOV detection).
         let v = provider.embed_float("car engine").unwrap();
-        assert!(v.is_empty(), "embed_float must return empty before finalize() is called");
+        assert!(
+            v.is_empty(),
+            "embed_float must return empty before finalize() is called"
+        );
 
         // After finalize, non-empty.
         provider.finalize();
         let v2 = provider.embed_float("car engine").unwrap();
-        assert!(!v2.is_empty(), "embed_float must be non-empty after finalize()");
+        assert!(
+            !v2.is_empty(),
+            "embed_float must be non-empty after finalize()"
+        );
     }
 }

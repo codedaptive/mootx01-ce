@@ -1,3 +1,5 @@
+#if GLK_MIGRATION_V1_0_TO_V1_1
+
 // ScaleQualificationTests.swift
 //
 // Shared-content 1.1 P6 — large-estate migration qualification driver
@@ -25,6 +27,7 @@ import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
 @testable import GeniusLocusKit
+@testable import GLKMigrationV1_0ToV1_1
 
 @Suite("ScaleQualification", .serialized)
 struct ScaleQualificationTests {
@@ -132,3 +135,5 @@ struct ScaleQualificationTests {
         try await kit.close(handle)
     }
 }
+
+#endif

@@ -34,6 +34,8 @@ use corpus_kit::content::{
 };
 use corpus_kit::{content_digest, ContentIndexJob, ContentIndexJobKind, CorpusContentEngine};
 use corpus_kit::error::CorpusKitError;
+use locus_kit::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID;
+use locus_kit::drawer_operational::ContentKind;
 use locus_kit::estate::Estate;
 
 /// The GLK-owned LocusKit-backed content source (shared-content 1.1, P3).
@@ -63,7 +65,10 @@ impl CorpusContentSource for LocusDrawerContentSource {
         else {
             return Ok(None);
         };
-        if drawer.content.is_empty() {
+        if drawer.content.is_empty()
+            || drawer.content_kind() == ContentKind::Dataset
+            || drawer.embedding_model_id == DATASET_HANDLE_EMBEDDING_MODEL_ID
+        {
             return Ok(None);
         }
         Ok(Some(CorpusContentRecord {
@@ -96,7 +101,10 @@ impl CorpusContentSource for LocusDrawerContentSource {
             }
             cursor = page.last().map(|d| d.id.clone());
             for drawer in &page {
-                if !drawer.content.is_empty() {
+                if !drawer.content.is_empty()
+                    && drawer.content_kind() != ContentKind::Dataset
+                    && drawer.embedding_model_id != DATASET_HANDLE_EMBEDDING_MODEL_ID
+                {
                     ids.push(drawer.id.clone());
                 }
             }

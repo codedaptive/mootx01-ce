@@ -49,6 +49,12 @@ table=corpus_provider_basis
   col=ext type=json null=1 default=- role=-
   pk=model_id,model_version
   appendOnly=0 hashable=0
+table=corpus_provider_configuration
+  col=singleton_id type=int null=0 default=- role=-
+  col=generation_token type=text null=0 default=- role=-
+  col=updated_at type=timestamp null=0 default=- role=-
+  pk=singleton_id
+  appendOnly=0 hashable=0
 table=corpus_provider_counts
   col=model_id type=text null=0 default=- role=-
   col=model_version type=text null=0 default=- role=-
@@ -118,6 +124,13 @@ table=erasure_ledger
   col=erased_hlc type=hlc null=0 default=- role=-
   pk=drawer_id
   appendOnly=1 hashable=0
+table=glk_estate_format
+  col=id type=text null=0 default=- role=-
+  col=major type=int null=0 default=- role=-
+  col=minor type=int null=0 default=- role=-
+  col=updated_at type=timestamp null=0 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
 table=grants
   col=id type=text null=0 default=- role=-
   col=grantee_id type=text null=0 default=- role=-

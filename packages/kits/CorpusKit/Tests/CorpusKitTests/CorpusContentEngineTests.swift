@@ -13,6 +13,7 @@ import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
 import VectorKit
+import CorpusKitProviders
 
 @testable import CorpusKit
 
@@ -146,6 +147,75 @@ struct CorpusContentEngineTests {
     }
 
     // MARK: - Remove
+
+    @Test func providerAdditionAndSubtractionReconcileWithoutResidue() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            _ = try await store.put("alpha provider coverage", id: "drawer-a", now: now)
+            _ = try await store.put("beta provider coverage", id: "drawer-b", now: now)
+            let config = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+
+            let small = try await CorpusContentEngine(
+                storage: storage, configuration: config, source: store,
+                models: [.deterministic])
+            _ = try await small.indexContentStructuralBatch(
+                ids: ["drawer-a", "drawer-b"], now: now, parallelism: 2)
+            try await small.reconcileConfiguredProviders(now: now)
+
+            let big = try await CorpusContentEngine(
+                storage: storage, configuration: config, source: store,
+                models: [
+                    .deterministic,
+                    .randomIndexing(provider: RandomIndexingProvider()),
+                ])
+            try await big.reconcileConfiguredProviders(now: now)
+            #expect(try await big.coveredCount(modelID: "random-indexing-v1") == 2)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_basis",
+                where: .eq(
+                    Column(table: "corpus_provider_basis", name: "model_id"),
+                    .text("random-indexing-v1"))) == 1)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_counts",
+                where: .eq(
+                    Column(table: "corpus_provider_counts", name: "model_id"),
+                    .text("random-indexing-v1"))) == 1)
+
+            let maintainedAnchor = await big.maintainedVocabAnchor()
+            #expect(maintainedAnchor > 0)
+            let reopened = try await CorpusContentEngine(
+                storage: storage, configuration: config, source: store,
+                models: [
+                    .deterministic,
+                    .randomIndexing(provider: RandomIndexingProvider()),
+                ])
+            try await reopened.reconcileConfiguredProviders(now: now)
+            #expect(await reopened.maintainedVocabAnchor() == maintainedAnchor)
+
+            let removed = try await CorpusContentEngine(
+                storage: storage, configuration: config, source: store,
+                models: [.deterministic])
+            try await removed.reconcileConfiguredProviders(now: now)
+            for table in ["vectors", "corpus_provider_basis", "corpus_provider_counts",
+                          "corpus_provider_coverage"] {
+                #expect(try await storage.rowStore.count(
+                    table: table,
+                    where: .eq(Column(table: table, name: "model_id"),
+                               .text("random-indexing-v1"))) == 0,
+                    "retired provider residue survived in \(table)")
+            }
+            let claims = VectorRepresentationClaims(storage: storage)
+            #expect(try await claims.claims(consumer: CorpusContentEngine.claimsConsumer)
+                .allSatisfy { $0.modelID != "random-indexing-v1" })
+
+            // Replay is a no-op and cannot disturb the retained provider.
+            try await removed.reconcileConfiguredProviders(now: now)
+            #expect(try await removed.coveredCount(modelID: "corpus-deterministic-v1") == 2)
+        }
+    }
 
     @Test func removeClearsDerivedStateAndRecordsCursor() async throws {
         try await GlobalTestLock.shared.withLock {

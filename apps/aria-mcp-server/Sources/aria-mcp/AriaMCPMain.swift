@@ -3,6 +3,7 @@ import AriaMCP
 import CorpusKit
 import CorpusKitProviders
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
@@ -285,6 +286,8 @@ struct AriaMCPMain {
             do {
                 // Shared seam: Corpus + VectorStore + encode queue, the same wiring
                 // `provision` and `mootx01 serve` perform. Idempotent on reopen.
+                _ = try await GLKMigrationCatalog.prepare(
+                    kit: kit, handle: handle, now: Date())
                 try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
                 // Rebuild + register the matrix tier from the persisted audit log
                 // so matrix-driven recall (co-occurrence/temporal scoring — the

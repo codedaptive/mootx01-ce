@@ -70,6 +70,7 @@ struct CompositeSchemaVersionTests {
             + VectorStore.schemaDeclaration.version
             + VectorRepresentationClaims.schemaDeclaration.version
             + CorpusSchemaProfile.attachedDeclaration.version
+            + EstateFormatStore.schemaDeclaration.version
             + 1  // grants
             + MatrixSnapshotStore.schemaDeclaration.version
         #expect(GeniusLocusKitSchema.version == componentSum)
@@ -367,6 +368,7 @@ struct VectorSidecarUnificationTests {
         let handle = try await kit.open(
             storage: sqlite, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore())
+        try await EstateFormatStore(storage: sqlite).stamp(.current, now: t0)
         try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
 
         let glkVS = await kit.vectorStores[handle]
@@ -399,6 +401,7 @@ struct VectorSidecarUnificationTests {
         let handle = try await kit.open(
             storage: sqlite, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore())
+        try await EstateFormatStore(storage: sqlite).stamp(.current, now: t0)
         try await kit.wireGLKSubstores(for: handle, backingStorage: sqlite)
 
         let vs = await kit.vectorStores[handle]

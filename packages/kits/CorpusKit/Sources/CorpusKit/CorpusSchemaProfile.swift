@@ -95,6 +95,7 @@ public enum CorpusSchemaProfile {
         var tables = CorpusDocumentStore.schemaDeclaration.tables
             + CorpusIndexStateStore.schemaDeclaration.tables
             + CorpusProviderCoverageStore.schemaDeclaration.tables
+            + CorpusProviderConfigurationStore.schemaDeclaration.tables
             + InvertedIndexStore.schemaDeclaration.tables
             + BasisStore.schemaDeclaration.tables
             + CorpusProviderCountsStore.schemaDeclaration.tables
@@ -114,6 +115,7 @@ public enum CorpusSchemaProfile {
                 CorpusDocumentStore.schemaDeclaration,
                 CorpusIndexStateStore.schemaDeclaration,
                 CorpusProviderCoverageStore.schemaDeclaration,
+                CorpusProviderConfigurationStore.schemaDeclaration,
                 InvertedIndexStore.schemaDeclaration,
                 BasisStore.schemaDeclaration,
                 CorpusProviderCountsStore.schemaDeclaration
@@ -132,12 +134,14 @@ public enum CorpusSchemaProfile {
             version: profileVersion(of: [
                 CorpusIndexStateStore.schemaDeclaration,
                 CorpusProviderCoverageStore.schemaDeclaration,
+                CorpusProviderConfigurationStore.schemaDeclaration,
                 InvertedIndexStore.schemaDeclaration,
                 BasisStore.schemaDeclaration,
                 CorpusProviderCountsStore.schemaDeclaration
             ]),
             tables: CorpusIndexStateStore.schemaDeclaration.tables
                 + CorpusProviderCoverageStore.schemaDeclaration.tables
+                + CorpusProviderConfigurationStore.schemaDeclaration.tables
                 + InvertedIndexStore.schemaDeclaration.tables
                 + BasisStore.schemaDeclaration.tables
                 + CorpusProviderCountsStore.schemaDeclaration.tables,

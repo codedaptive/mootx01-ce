@@ -50,7 +50,9 @@ use genius_locus_kit::intake::LocusDrawerContentSource;
 // crate because it NEWs the concrete providers; this crate is downstream of it.
 use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
+use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
 use genius_locus_kit::EstateCoordinator;
+use genius_locus_kit_migrations::SharedContentMigrationExt;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store_postgres::PostgresDrawerStore;
@@ -689,6 +691,9 @@ fn wire_inmemory_semantic_recall(
     // fresh UUID — this storage holds no LocusKit rows and is never read via
     // the DrawerStore path, so the estate_id is a logging hint only.
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    EstateFormatStore::new(Arc::clone(&storage))
+        .stamp(EstateFormatVersion::CURRENT, INIT_NOW)
+        .map_err(|error| format!("estate-format stamp: {error:?}"))?;
 
     // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
     // CorpusContentEngine over the LocusKit-backed adapter — canonical
@@ -707,15 +712,17 @@ fn wire_inmemory_semantic_recall(
         CorpusIndexUnitPolicy::WholeContent,
     )
     .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = Arc::new(
-        CorpusContentEngine::open(
+    let corpus = CorpusContentEngine::open(
             Arc::clone(&storage),
             config,
             Arc::new(LocusDrawerContentSource::new(estate)),
             default_ensemble(),
         )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
-    );
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
+    corpus
+        .reconcile_configured_providers(INIT_NOW)
+        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
+    let corpus = Arc::new(corpus);
     let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator.
@@ -768,23 +775,14 @@ fn wire_postgres_semantic_recall(
             .map_err(|e| format!("PostgresStorage for semantic recall at {conn_str:?}: {e}"))?,
     );
 
-    // Dark-lane gate (shared-content 1.1): a pre-existing estate that still
-    // carries the legacy corpus copy lane keeps its Corpus lane DARK until
-    // the resumable migration completes — and a completed record whose
-    // ensemble fingerprint differs from this wiring enters a follow-on
-    // upgrade instead of lighting a stale lane. LocusKit recall stays
-    // available either way.
-    let ensemble = default_ensemble();
-    let wired_fingerprint = CorpusContentEngine::configuration_fingerprint_for(
-        CorpusOperatingMode::Attached,
-        &ensemble,
-    );
-    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(
-        &storage,
-        Some(wired_fingerprint.as_str()),
-    ) {
-        eprintln!("aria-mcp: estate carries the legacy corpus copy lane (or an obsolete ensemble) — Corpus lane stays dark until the shared-content migration/upgrade completes");
-        return Ok(());
+    // This binary declares a 1.0 floor, so prepare the estate through the
+    // separately compiled migration capsule before current-runtime wiring.
+    // A crash leaves the persisted phase/cursor resumable on the next start.
+    {
+        let mut guard = coord.lock().unwrap();
+        guard
+            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
+            .map_err(|error| format!("shared-content migration: {error:?}"))?;
     }
     // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
     // CorpusContentEngine over the LocusKit-backed adapter — canonical
@@ -803,15 +801,17 @@ fn wire_postgres_semantic_recall(
         CorpusIndexUnitPolicy::WholeContent,
     )
     .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = Arc::new(
-        CorpusContentEngine::open(
+    let corpus = CorpusContentEngine::open(
             Arc::clone(&storage),
             config,
             Arc::new(LocusDrawerContentSource::new(estate)),
-            ensemble,
+            default_ensemble(),
         )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
-    );
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
+    corpus
+        .reconcile_configured_providers(wall_now_millis())
+        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
+    let corpus = Arc::new(corpus);
     let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator.
@@ -857,23 +857,13 @@ fn wire_sqlite_semantic_recall(
     // migrations (BundleStore + VectorStore tables) on the same connection.
     let storage = shared_storage;
 
-    // Dark-lane gate (shared-content 1.1): a pre-existing estate that still
-    // carries the legacy corpus copy lane keeps its Corpus lane DARK until
-    // the resumable migration completes — and a completed record whose
-    // ensemble fingerprint differs from this wiring enters a follow-on
-    // upgrade instead of lighting a stale lane. Mirrors the GLK
-    // coordinator's provision gate arms.
-    let ensemble = default_ensemble();
-    let wired_fingerprint = CorpusContentEngine::configuration_fingerprint_for(
-        CorpusOperatingMode::Attached,
-        &ensemble,
-    );
-    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(
-        &storage,
-        Some(wired_fingerprint.as_str()),
-    ) {
-        eprintln!("aria-mcp: estate {path:?} carries the legacy corpus copy lane (or an obsolete ensemble) — Corpus lane stays dark until the shared-content migration/upgrade completes");
-        return Ok(());
+    // This binary declares a 1.0 floor, so prepare the estate through the
+    // separately compiled migration capsule before current-runtime wiring.
+    {
+        let mut guard = coord.lock().unwrap();
+        guard
+            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
+            .map_err(|error| format!("shared-content migration for {path:?}: {error:?}"))?;
     }
     // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
     // CorpusContentEngine over the LocusKit-backed adapter — canonical
@@ -892,15 +882,17 @@ fn wire_sqlite_semantic_recall(
         CorpusIndexUnitPolicy::WholeContent,
     )
     .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = Arc::new(
-        CorpusContentEngine::open(
+    let corpus = CorpusContentEngine::open(
             Arc::clone(&storage),
             config,
             Arc::new(LocusDrawerContentSource::new(estate)),
-            ensemble,
+            default_ensemble(),
         )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
-    );
+        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
+    corpus
+        .reconcile_configured_providers(wall_now_millis())
+        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
+    let corpus = Arc::new(corpus);
     let vector_store = corpus.shared_vector_store();
 
     // Register both with the coordinator so recall_scored hybrid/corpus-only/
@@ -923,4 +915,13 @@ fn wire_sqlite_semantic_recall(
     }
 
     Ok(())
+}
+
+fn wall_now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }

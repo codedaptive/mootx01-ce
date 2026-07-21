@@ -269,6 +269,22 @@ dark until verification succeeds. Migration failure never damages canonical
 Drawer content and is resumable through PersistenceKit's ordered migration
 mechanism.
 
+**I-21 (current-runtime provider reconciliation):** provider additions and
+removals are normal CorpusKit lifecycle changes, not historical schema
+migrations. On open, CorpusKit compares the configured `(modelID,
+modelVersion)` generations with a singleton durable attestation. A changed
+configuration selectively releases retired representation claims, deletes only
+their unowned vectors/basis/counts/coverage, trains and backfills added slots,
+then writes the attestation last. An equal attestation is an O(1) open path; a
+crash before the final write safely replays reconciliation.
+
+**I-22 (dataset handles are not prose):** a GLK Drawer whose content kind is
+`.dataset`, including the legacy `dataset-handle` sentinel, is excluded from
+CorpusKit indexing. Its backing MX-TAB table, typed row values, primary and
+secondary indexes, statistics, signatures, and handle remain owned by the
+dataset tier and byte-equivalent across shared-content migration. No dataset
+handle receives a BM25 document or CorpusKit-provider vector.
+
 ## § 5 — Behavioral contracts
 
 **B-1 (standalone 1.0 Chunker compatibility):** the legacy
@@ -630,6 +646,13 @@ auto-reindex trigger (NeuronKit) fires on VOCABULARY growth —
 0.10 — reading that anchor, replacing the prior +25-index-unit gate. The counts codec
 is byte-identical across ports (the provider owns it via the
 `TrainableEmbeddingBasis` counts seam).
+
+The counts table is intentionally retained in attached GLK estates. It is not a
+second content store: it contains provider-specific additive statistics, not
+Drawer text. Removing it would either lose the vocabulary-growth governor's
+restart continuity or require a full corpus tokenization pass on every open.
+Reopen conformance therefore proves that the maintained vocabulary anchor is
+restored before serving.
 
 ### 9.4 Conformance
 

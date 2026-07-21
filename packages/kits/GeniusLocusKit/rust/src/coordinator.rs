@@ -752,9 +752,9 @@ pub struct EstateCoordinator {
     ///
     /// Mirrors Swift actor's `storages: [EstateHandle: any Storage]`.
     pub(crate) storages: HashMap<EstateHandle, Arc<dyn Storage>>,
-    /// Shared-content migration fault-injection seam (P4 resume proofs).
-    pub(crate) shared_content_fault_after:
-        Option<crate::shared_content_migration::SharedContentMigrationState>,
+    /// Opaque fault token used by optional migration crates' resume proofs.
+    /// Core stores no historical migration state-machine type.
+    migration_fault_token: Option<String>,
 
     /// Per-estate active sync engine entry (ConvergenceKit backend + label).
     ///
@@ -885,7 +885,7 @@ impl EstateCoordinator {
             node_topology_providers: HashMap::new(),
             node_stores: HashMap::new(),
             storages: HashMap::new(),
-            shared_content_fault_after: None,
+            migration_fault_token: None,
             sync_engines: HashMap::new(),
             dreaming_queues: RefCell::new(HashMap::new()),
             // Test seams start clear; only `inject_*` methods set them.
@@ -1602,6 +1602,30 @@ impl EstateCoordinator {
             .ok_or(GeniusLocusKitError::EstateNotOpen {
                 estate_uuid: handle.estate_uuid,
             })
+    }
+
+    /// Narrow host seams for separately compiled historical migrations.
+    #[doc(hidden)]
+    pub fn migration_storage(&self, handle: &EstateHandle) -> Option<Arc<dyn Storage>> {
+        self.storages.get(handle).map(Arc::clone)
+    }
+
+    #[doc(hidden)]
+    pub fn migration_registered_corpus(
+        &self,
+        handle: &EstateHandle,
+    ) -> Option<Arc<CorpusContentEngine>> {
+        self.corpus_kits.get(handle).map(Arc::clone)
+    }
+
+    #[doc(hidden)]
+    pub fn migration_fault_token(&self) -> Option<&str> {
+        self.migration_fault_token.as_deref()
+    }
+
+    #[doc(hidden)]
+    pub fn set_migration_fault_token(&mut self, token: Option<String>) {
+        self.migration_fault_token = token;
     }
 
     /// Status of every long-running drain the estate addressed by `handle`
@@ -5714,38 +5738,14 @@ impl EstateCoordinator {
         // backing_storage is the persistence_kit Storage used for Corpus + VectorStore;
         // falls back to the primary `storage` when no separate corpus_storage is supplied.
         let backing_storage = corpus_storage.unwrap_or(storage);
-        // The wiring's configuration fingerprint: the gate compares it with
-        // a completed migration record's — an obsolete ensemble enters a
-        // follow-on upgrade instead of lighting a stale lane.
-        let wired_fingerprint = CorpusContentEngine::configuration_fingerprint_for(
-            CorpusOperatingMode::Attached,
-            &embedding_models,
-        );
+        // Fresh estates are born at the current stable estate format.
+        // Historical detection/conversion lives in an optional migration crate.
+        crate::estate_format::EstateFormatStore::new(Arc::clone(&backing_storage))
+            .stamp(crate::estate_format::EstateFormatVersion::CURRENT, 0)
+            .map_err(|error| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("estate-format stamp failed: {error:?}"),
+            })?;
         let wiring_result = match params.kind {
-            EstateKind::Glk
-                if Self::shared_content_lane_must_stay_dark(
-                    &backing_storage,
-                    Some(wired_fingerprint.as_str()),
-                ) => {
-                // Shared-content dark-lane gate (P4): a legacy pre-cutover
-                // estate keeps its Corpus lane DARK until the resumable
-                // migration reaches Verified. LocusKit recall stays
-                // available; the migration verb lights the lane.
-                eprintln!(
-                    "mootx01: estate carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes"
-                );
-                Ok((None, None))
-            }
-            EstateKind::CorpusOnly
-                if Self::shared_content_lane_must_stay_dark(
-                    &backing_storage,
-                    Some(wired_fingerprint.as_str()),
-                ) => {
-                eprintln!(
-                    "mootx01: estate carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes"
-                );
-                Ok((None, None))
-            }
             EstateKind::Glk => {
                 // Full composition: the ATTACHED-mode CorpusContentEngine
                 // (BM25 + internal vectors, Drawer-ID keyed) + standalone
@@ -5774,6 +5774,14 @@ impl EstateCoordinator {
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                             reason: format!("engine open failed for GLK estate: {:?}", e),
+                        })
+                        .and_then(|corpus| {
+                            corpus.reconcile_configured_providers(0).map_err(|e| {
+                                GeniusLocusKitError::UnderlyingEstateFailure {
+                                    reason: format!("provider reconciliation failed: {e:?}"),
+                                }
+                            })?;
+                            Ok(corpus)
                         })
                     })
                     .map(|corpus| {
@@ -5809,6 +5817,14 @@ impl EstateCoordinator {
                         )
                         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                             reason: format!("engine open failed for CorpusOnly estate: {:?}", e),
+                        })
+                        .and_then(|corpus| {
+                            corpus.reconcile_configured_providers(0).map_err(|e| {
+                                GeniusLocusKitError::UnderlyingEstateFailure {
+                                    reason: format!("provider reconciliation failed: {e:?}"),
+                                }
+                            })?;
+                            Ok(corpus)
                         })
                     })
                     .map(|corpus| (Some(Arc::new(corpus)), None))

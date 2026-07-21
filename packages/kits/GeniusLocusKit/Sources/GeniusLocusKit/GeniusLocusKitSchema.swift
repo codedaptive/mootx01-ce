@@ -79,6 +79,7 @@ public enum GeniusLocusKitSchema {
         + VectorStore.schemaDeclaration.version
         + VectorRepresentationClaims.schemaDeclaration.version
         + CorpusSchemaProfile.attachedDeclaration.version
+        + EstateFormatStore.schemaDeclaration.version
         + grantsSchemaVersion
         + matrixSnapshotSchemaVersion
 
@@ -101,7 +102,7 @@ public enum GeniusLocusKitSchema {
         SchemaDeclaration(
             kitID: kitID,
             version: version,
-            tables: locusKitTables + vectorKitTables + claimsTables + corpusKitTables + grantsTables + matrixSnapshotTables,
+            tables: locusKitTables + vectorKitTables + claimsTables + corpusKitTables + EstateFormatStore.schemaDeclaration.tables + grantsTables + matrixSnapshotTables,
             indices: locusKitIndices + vectorKitIndices + claimsIndices + corpusKitIndices
         )
     }

@@ -16,6 +16,7 @@ import Foundation
 import ArgumentParser
 import AriaMCP
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -163,6 +164,8 @@ struct ServeCommand: AsyncParsableCommand {
                 _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
             }
             handle = try await kit.open(storage: storage, owner: owner)
+            _ = try await GLKMigrationCatalog.prepare(
+                kit: kit, handle: handle, now: Date())
             // `open` admits a BARE estate — it does not register a Corpus or
             // VectorStore, so dense vector recall and distillation are dark. Wire
             // the GLK semantic layer (Corpus + VectorStore + encode queue) here so

@@ -1,6 +1,7 @@
 import Foundation
 import EideticLib
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LatticeLib
 import LocusKit
 import SubstrateML

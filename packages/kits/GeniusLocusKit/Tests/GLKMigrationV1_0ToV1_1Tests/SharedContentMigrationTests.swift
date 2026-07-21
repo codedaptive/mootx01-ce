@@ -1,3 +1,5 @@
+#if GLK_MIGRATION_V1_0_TO_V1_1
+
 // SharedContentMigrationTests.swift
 //
 // Resumable legacy-migration coverage (GLK shared-content 1.1, P4).
@@ -19,11 +21,24 @@ import PersistenceKitSQLite
 import VectorKit
 import EngramLib
 import SubstrateTypes
+import GeniusLocusKitMigrations
 
 @testable import GeniusLocusKit
+@testable import GLKMigrationV1_0ToV1_1
 
 @Suite("SharedContentMigration", .serialized)
 struct SharedContentMigrationTests {
+
+    @Test func trainingCapacityRefusesBeforeDestructiveBudget() throws {
+        let required = SharedContentTrainingCapacity.requiredBytes(contentCount: 98_118)
+        #expect(required > 24 * 1_024 * 1_024 * 1_024)
+        #expect(throws: SharedContentMigrationError.self) {
+            try SharedContentTrainingCapacity.require(
+                contentCount: 98_118, budgetBytes: 24 * 1_024 * 1_024 * 1_024)
+        }
+        try SharedContentTrainingCapacity.require(
+            contentCount: 2_000, budgetBytes: 4 * 1_024 * 1_024 * 1_024)
+    }
 
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -33,6 +48,32 @@ struct SharedContentMigrationTests {
         let storage = try SQLiteStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
         return (storage, url)
+    }
+
+    @Test func estateFormatDistinguishesUnstampedFromRegisteredMissingRow() async throws {
+        let (storage, url) = try scratchStorage()
+        defer { try? FileManager.default.removeItem(at: url) }
+        // Production calls the catalog after LocusKit has opened the estate,
+        // so the per-kit schema registry exists even when the format does not.
+        try await storage.migrate(to: SchemaDeclaration(
+            kitID: "EstateFormatTestFixture", version: 1, tables: []))
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == nil)
+        try await storage.migrate(to: EstateFormatStore.schemaDeclaration)
+        await #expect(throws: EstateFormatError.self) {
+            _ = try await EstateFormatStore(storage: storage).readIfPresent()
+        }
+    }
+
+    @Test func belowCompiledFloorRefusesBeforeLegacyDeletion() async throws {
+        let (kit, handle, storage, _, url) = try await makeLegacyEstate(
+            drawerContents: ["below-floor estate remains untouched"])
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await EstateFormatStore(storage: storage).stamp(
+            EstateFormatVersion(major: 0, minor: 9), now: now)
+        await #expect(throws: GLKMigrationCatalogError.self) {
+            try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        }
+        #expect(try await storage.rowStore.count(table: "chunks", where: nil) == 1)
     }
 
     /// Open a GLK estate (no engine registered — kit.open wires none),
@@ -152,6 +193,13 @@ struct SharedContentMigrationTests {
         let report = try await kit.runSharedContentMigration(handle: handle, now: now)
         #expect(report.state == .complete)
         #expect(report.legacyChunkCount == 0)
+        // A current estate has no historical record. Installing the current
+        // attached schema must not make the missing legacy chunks table look
+        // like corruption on reopen.
+        try await storage.migrate(to: CorpusSchemaProfile.attachedDeclaration)
+        #expect(!(await kit.sharedContentLaneMustStayDark(storage: storage)))
+        let reopened = try await kit.runSharedContentMigration(handle: handle, now: now)
+        #expect(reopened.state == .complete)
         // Bypass creates no legacy tables.
         await #expect(throws: (any Error).self) {
             _ = try await storage.rowStore.count(table: "chunks", where: nil)
@@ -235,6 +283,118 @@ struct SharedContentMigrationTests {
         // pages, never derived state.
         let postHits = try await engine.bm25TopK(query: "page reclamation", limit: 5)
         #expect(postHits.first?.id == drawerIDs[2])
+    }
+
+    @Test func mxTabularBackingTableAndHandleSurviveMigrationReclaimAndReopen() async throws {
+        let (kit, handle, storage, _, url) = try await makeLegacyEstate(
+            drawerContents: ["ordinary drawer beside a protected dataset"])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let datasetID = UUID()
+        let tableName = datasetTableName(datasetID)
+        let datasetStore = try storage.datasetStore
+        let columns = [
+            ColumnDeclaration(name: "id", type: .int, nullable: false),
+            ColumnDeclaration(name: "label", type: .text, nullable: false),
+            ColumnDeclaration(name: "score", type: .float, nullable: true),
+            ColumnDeclaration(name: "note", type: .text, nullable: true),
+        ]
+        try await datasetStore.createDataset(
+            id: datasetID,
+            schema: DatasetSchema(columns: columns, primaryKeyColumn: "id"),
+            indexes: [DatasetIndexDeclaration(column: "label")])
+        try await datasetStore.appendRows(id: datasetID, rows: [
+            ["id": .int(2), "label": .text("beta"), "score": .float(2.5), "note": .null],
+            ["id": .int(1), "label": .text("alpha"), "score": .float(1.25), "note": .text("kept")],
+        ])
+        let estate = try await kit.estate(for: handle)
+        let summaries = [
+            DatasetColumnSummary(name: "id", dataType: "INTEGER"),
+            DatasetColumnSummary(name: "label", dataType: "TEXT"),
+            DatasetColumnSummary(name: "score", dataType: "REAL"),
+            DatasetColumnSummary(name: "note", dataType: "TEXT"),
+        ]
+        let datasetDrawer = try await estate.captureDatasetHandle(
+            datasetId: datasetID, columns: summaries, rowCount: 2,
+            sourceDescription: "migration preservation fixture", room: "datasets",
+            addedBy: "SharedContentMigrationTests",
+            latticeAnchor: LatticeAnchor(udcCode: "004"))
+        let order = [OrderClause(
+            column: Column(table: "", name: "id"), direction: .ascending)]
+        let rowsBefore = try await datasetStore.queryRows(
+            id: datasetID, predicate: nil, orderBy: order,
+            limit: nil, offset: nil, columns: nil)
+        func rowSnapshot(_ rows: [StorageRow]) -> [String] {
+            rows.map { DatabaseInventory.canonicalRowEncoding($0) }
+        }
+        var statsBefore: [String: ColumnStats] = [:]
+        for column in summaries {
+            statsBefore[column.name] = try await datasetStore.columnStats(
+                id: datasetID, column: column.name)
+        }
+        let signedDrawer = try await kit.computeDatasetSignatures(
+            handle: handle, drawerId: datasetDrawer.id,
+            columns: summaries, columnStats: statsBefore,
+            sampledRows: rowsBefore, now: now)
+        let handleJSONBefore = signedDrawer.content
+
+        func schemaRows(_ target: any Storage) async throws -> [StorageRow] {
+            try await target.rowStore.query(
+                table: "sqlite_master",
+                where: .and([
+                    .in(Column(table: "sqlite_master", name: "type"), [.text("table"), .text("index")]),
+                    .or([
+                        .eq(Column(table: "sqlite_master", name: "name"), .text(tableName)),
+                        .eq(
+                            Column(table: "sqlite_master", name: "name"),
+                            .text(datasetIndexName(datasetID, column: "label")))
+                    ])
+                ]),
+                orderBy: [OrderClause(
+                    column: Column(table: "sqlite_master", name: "name"),
+                    direction: .ascending)],
+                limit: nil, offset: nil, columns: ["type", "name", "sql"])
+        }
+        let ddlBefore = try await schemaRows(storage)
+        #expect(ddlBefore.count == 2)
+
+        _ = try await kit.runSharedContentMigration(handle: handle, now: now)
+        _ = try await kit.completeSharedContentReclaim(handle: handle, now: now)
+
+        // Dataset handles are explicitly excluded from CorpusKit: their JSON
+        // is compact schema/provenance metadata, not agentic text to vectorize.
+        let datasetVectors = try await storage.rowStore.query(
+            table: "vectors",
+            where: .eq(
+                Column(table: "vectors", name: "item_id"), .text(datasetDrawer.id)),
+            orderBy: [], limit: nil, offset: nil)
+        #expect(datasetVectors.isEmpty)
+
+        let configuration = storage.configuration
+        try await kit.close(handle)
+        await storage.close()
+        let reopened = try SQLiteStorage(configuration: configuration)
+        let reopenedDataset = reopened.datasetStore
+        let rowsAfter = try await reopenedDataset.queryRows(
+            id: datasetID, predicate: nil, orderBy: order,
+            limit: nil, offset: nil, columns: nil)
+        #expect(rowSnapshot(rowsAfter) == rowSnapshot(rowsBefore))
+        for column in summaries {
+            #expect(try await reopenedDataset.columnStats(
+                id: datasetID, column: column.name) == statsBefore[column.name])
+        }
+        #expect(rowSnapshot(try await schemaRows(reopened)) == rowSnapshot(ddlBefore))
+        let handleRows = try await reopened.rowStore.query(
+            table: "drawers",
+            where: .eq(
+                Column(table: "drawers", name: "id"), .text(datasetDrawer.id)),
+            orderBy: [], limit: 1, offset: nil)
+        #expect(handleRows.count == 1)
+        #expect(handleRows.first?["content"] == .text(handleJSONBefore))
+        let decoded = try DatasetHandleContent.decode(from: handleJSONBefore)
+        #expect(decoded.tableSignature != nil)
+        #expect(decoded.columnSignatures?.count == summaries.count)
+        await reopened.close()
     }
 
     // MARK: - Ensemble upgrade (add a provider to a migrated estate)
@@ -371,3 +531,5 @@ struct SharedContentMigrationTests {
         _ = handle
     }
 }
+
+#endif

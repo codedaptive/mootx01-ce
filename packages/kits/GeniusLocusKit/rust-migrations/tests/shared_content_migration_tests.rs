@@ -1,29 +1,85 @@
 //! Resumable legacy-migration coverage (GLK shared-content 1.1, P4).
 //! Rust twin of the Swift `SharedContentMigrationTests`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use corpus_kit::{Chunk, CorpusContentConfiguration, CorpusContentEngine,
-    CorpusIndexUnitPolicy, CorpusOperatingMode, EmbeddingModelConfig};
-use genius_locus_kit::intake::LocusDrawerContentSource;
-use genius_locus_kit::shared_content_migration::{
-    SharedContentMigrationError, SharedContentMigrationState,
+use corpus_kit::{
+    Chunk, CorpusContentConfiguration, CorpusContentEngine, CorpusIndexUnitPolicy,
+    CorpusOperatingMode, EmbeddingModelConfig,
 };
 use corpus_kit_providers::default_ensemble;
+use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::EstateCoordinator;
+use genius_locus_kit_migrations::{
+    SharedContentMigrationError, SharedContentMigrationExt, SharedContentMigrationState,
+    SharedContentTrainingCapacity,
+};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::frames::CaptureFrame;
-use persistence_kit::database_inventory::capture_inventory;
+use persistence_kit::database_inventory::{canonical_row_encoding, capture_inventory};
+use persistence_kit::dataset_store::{
+    dataset_index_name, dataset_table_name, DatasetIndexDeclaration, DatasetSchema,
+};
 use persistence_kit::inmemory::InMemoryStorage;
-use persistence_kit::{Storage, TypedValue};
+use persistence_kit::predicate::OrderClause;
+use persistence_kit::schema::ColumnDeclaration;
+use persistence_kit::{Column, Storage, TypedValue};
 use substrate_types::hlc::HLC;
 
 const NOW: i64 = 1_700_000_000_000;
+
+#[test]
+fn training_capacity_refuses_before_destructive_budget() {
+    let required = SharedContentTrainingCapacity::required_bytes(98_118);
+    assert!(required > 24 * 1_024 * 1_024 * 1_024);
+    assert!(matches!(
+        SharedContentTrainingCapacity::require_with_budget(98_118, 24 * 1_024 * 1_024 * 1_024,),
+        Err(SharedContentMigrationError::InsufficientTrainingCapacity { .. })
+    ));
+    SharedContentTrainingCapacity::require_with_budget(2_000, 4 * 1_024 * 1_024 * 1_024)
+        .expect("2k fixture fits 4 GiB budget");
+}
+
+#[test]
+fn estate_format_distinguishes_unstamped_from_registered_missing_row() {
+    use genius_locus_kit::estate_format::{EstateFormatError, EstateFormatStore};
+
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+    let store = EstateFormatStore::new(Arc::clone(&storage));
+    assert_eq!(store.read_if_present().unwrap(), None);
+    storage
+        .migrate(&EstateFormatStore::schema_declaration())
+        .expect("register format schema without its singleton");
+    assert!(matches!(
+        store.read_if_present(),
+        Err(EstateFormatError::Storage(_))
+    ));
+}
+
+#[test]
+fn below_compiled_floor_refuses_before_legacy_deletion() {
+    let mut est = make_legacy_estate(&["below-floor estate remains untouched"], false, true);
+    genius_locus_kit::estate_format::EstateFormatStore::new(Arc::clone(&est.storage))
+        .stamp(
+            genius_locus_kit::estate_format::EstateFormatVersion { major: 0, minor: 9 },
+            NOW,
+        )
+        .expect("stamp below-floor fixture");
+    let result = est
+        .coord
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble());
+    assert!(matches!(
+        result,
+        Err(SharedContentMigrationError::BelowCompiledFloor { .. })
+    ));
+    assert_eq!(est.storage.row_store().count("chunks", None).unwrap(), 1);
+}
 
 fn cap_frame(content: &str) -> CaptureFrame {
     CaptureFrame::new(
@@ -41,19 +97,23 @@ struct LegacyEstate {
     handle: genius_locus_kit::handle::EstateHandle,
     storage: Arc<dyn Storage>,
     drawer_ids: Vec<String>,
+    path: PathBuf,
 }
 
-fn make_legacy_estate(contents: &[&str], include_orphan: bool, seed_protected: bool) -> LegacyEstate {
+fn make_legacy_estate(
+    contents: &[&str],
+    include_orphan: bool,
+    seed_protected: bool,
+) -> LegacyEstate {
     // SQLite-backed like the Swift twin: the Rust BM25 sidecar persists in
     // the estate FILE, so a verification engine built after the migration
     // sees the rebuilt postings (an InMemory estate's sidecar is
     // per-connection by design).
     let mut coord = EstateCoordinator::new();
-    let path = std::env::temp_dir()
-        .join(format!("glk-scm-{}.sqlite", uuid::Uuid::new_v4()));
-    let sqlite_store = SqliteDrawerStore::from_path(
-        path.to_string_lossy().as_ref(), NOW, None, 5.0)
-        .expect("SqliteDrawerStore::from_path");
+    let path = std::env::temp_dir().join(format!("glk-scm-{}.sqlite", uuid::Uuid::new_v4()));
+    let sqlite_store =
+        SqliteDrawerStore::from_path(path.to_string_lossy().as_ref(), NOW, None, 5.0)
+            .expect("SqliteDrawerStore::from_path");
     let store: Arc<dyn DrawerStore> = Arc::new(sqlite_store);
     let storage: Arc<dyn Storage> = store.storage().expect("sqlite store exposes storage");
     let handle = coord
@@ -62,7 +122,9 @@ fn make_legacy_estate(contents: &[&str], include_orphan: bool, seed_protected: b
 
     let mut drawer_ids = Vec::new();
     for content in contents {
-        let drawer = coord.capture(&handle, cap_frame(content), NOW).expect("capture");
+        let drawer = coord
+            .capture(&handle, cap_frame(content), NOW)
+            .expect("capture");
         drawer_ids.push(drawer.id);
     }
 
@@ -81,12 +143,21 @@ fn make_legacy_estate(contents: &[&str], include_orphan: bool, seed_protected: b
         let chunk_id = Chunk::derive_id(&drawer_ids[index], 0, content);
         let mut chunk: BTreeMap<String, TypedValue> = BTreeMap::new();
         chunk.insert("id".into(), TypedValue::Uuid(chunk_id));
-        chunk.insert("source_id".into(), TypedValue::Text(drawer_ids[index].clone()));
+        chunk.insert(
+            "source_id".into(),
+            TypedValue::Text(drawer_ids[index].clone()),
+        );
         chunk.insert("start_offset".into(), TypedValue::Int(0));
         chunk.insert("length".into(), TypedValue::Int(content.len() as i64));
         chunk.insert("text".into(), TypedValue::Text(content.to_string()));
-        chunk.insert("hlc".into(), TypedValue::Hlc(HLC {
-            physical_time: (index + 1) as i64, logical_count: 0, node_id: 1 }));
+        chunk.insert(
+            "hlc".into(),
+            TypedValue::Hlc(HLC {
+                physical_time: (index + 1) as i64,
+                logical_count: 0,
+                node_id: 1,
+            }),
+        );
         chunk.insert("metadata".into(), TypedValue::Json(b"{}".to_vec()));
         chunk.insert("created_at".into(), TypedValue::Timestamp(NOW));
         chunk.insert("ext".into(), TypedValue::Null);
@@ -94,14 +165,22 @@ fn make_legacy_estate(contents: &[&str], include_orphan: bool, seed_protected: b
 
         let mut vector: BTreeMap<String, TypedValue> = BTreeMap::new();
         vector.insert("id".into(), TypedValue::Uuid(uuid::Uuid::new_v4()));
-        vector.insert("item_id".into(),
-            TypedValue::Text(chunk_id.to_string().to_uppercase()));
+        vector.insert(
+            "item_id".into(),
+            TypedValue::Text(chunk_id.to_string().to_uppercase()),
+        );
         vector.insert("vector_index".into(), TypedValue::Int(0));
-        vector.insert("model_id".into(), TypedValue::Text("corpus-deterministic-v1".into()));
+        vector.insert(
+            "model_id".into(),
+            TypedValue::Text("corpus-deterministic-v1".into()),
+        );
         vector.insert("model_version".into(), TypedValue::Text("1.0.0".into()));
         vector.insert("kind".into(), TypedValue::Int(0));
         vector.insert("dim".into(), TypedValue::Int(256));
-        vector.insert("payload".into(), TypedValue::Blob(vec![(index + 1) as u8; 32]));
+        vector.insert(
+            "payload".into(),
+            TypedValue::Blob(vec![(index + 1) as u8; 32]),
+        );
         vector.insert("scale".into(), TypedValue::Null);
         vector.insert("filed_at".into(), TypedValue::Timestamp(NOW));
         row_store.insert("vectors", vector).expect("insert vector");
@@ -114,8 +193,14 @@ fn make_legacy_estate(contents: &[&str], include_orphan: bool, seed_protected: b
         chunk.insert("start_offset".into(), TypedValue::Int(0));
         chunk.insert("length".into(), TypedValue::Int(13));
         chunk.insert("text".into(), TypedValue::Text("orphaned text".into()));
-        chunk.insert("hlc".into(), TypedValue::Hlc(HLC {
-            physical_time: 99, logical_count: 0, node_id: 1 }));
+        chunk.insert(
+            "hlc".into(),
+            TypedValue::Hlc(HLC {
+                physical_time: 99,
+                logical_count: 0,
+                node_id: 1,
+            }),
+        );
         chunk.insert("metadata".into(), TypedValue::Json(b"{}".to_vec()));
         chunk.insert("created_at".into(), TypedValue::Timestamp(NOW));
         chunk.insert("ext".into(), TypedValue::Null);
@@ -126,16 +211,27 @@ fn make_legacy_estate(contents: &[&str], include_orphan: bool, seed_protected: b
         vector.insert("id".into(), TypedValue::Uuid(uuid::Uuid::new_v4()));
         vector.insert("item_id".into(), TypedValue::Text(drawer_ids[0].clone()));
         vector.insert("vector_index".into(), TypedValue::Int(0));
-        vector.insert("model_id".into(), TypedValue::Text("unrelated-lane-v1".into()));
+        vector.insert(
+            "model_id".into(),
+            TypedValue::Text("unrelated-lane-v1".into()),
+        );
         vector.insert("model_version".into(), TypedValue::Text("1.0.0".into()));
         vector.insert("kind".into(), TypedValue::Int(0));
         vector.insert("dim".into(), TypedValue::Int(256));
         vector.insert("payload".into(), TypedValue::Blob(vec![0xEE; 32]));
         vector.insert("scale".into(), TypedValue::Null);
         vector.insert("filed_at".into(), TypedValue::Timestamp(NOW));
-        row_store.insert("vectors", vector).expect("insert protected");
+        row_store
+            .insert("vectors", vector)
+            .expect("insert protected");
     }
-    LegacyEstate { coord, handle, storage, drawer_ids }
+    LegacyEstate {
+        coord,
+        handle,
+        storage,
+        drawer_ids,
+        path,
+    }
 }
 
 fn protected_payload(storage: &Arc<dyn Storage>, item_id: &str) -> Option<Vec<u8>> {
@@ -144,8 +240,11 @@ fn protected_payload(storage: &Arc<dyn Storage>, item_id: &str) -> Option<Vec<u8
         .query("vectors", None, &[], None, None)
         .ok()?;
     for row in rows {
-        if let (Some(TypedValue::Text(item)), Some(TypedValue::Text(model)), Some(TypedValue::Blob(payload))) =
-            (row.get("item_id"), row.get("model_id"), row.get("payload"))
+        if let (
+            Some(TypedValue::Text(item)),
+            Some(TypedValue::Text(model)),
+            Some(TypedValue::Blob(payload)),
+        ) = (row.get("item_id"), row.get("model_id"), row.get("payload"))
         {
             if item == item_id && model == "unrelated-lane-v1" {
                 return Some(payload.clone());
@@ -159,9 +258,8 @@ fn protected_payload(storage: &Arc<dyn Storage>, item_id: &str) -> Option<Vec<u8
 fn fresh_estate_bypasses_and_never_creates_legacy_tables() {
     let mut coord = EstateCoordinator::new();
     let backing = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
-    let store: Arc<dyn DrawerStore> = Arc::new(
-        InMemoryDrawerStore::with_storage(Arc::clone(&backing), NOW, None).unwrap(),
-    );
+    let store: Arc<dyn DrawerStore> =
+        Arc::new(InMemoryDrawerStore::with_storage(Arc::clone(&backing), NOW, None).unwrap());
     let handle = coord
         .open(store, OwnerCredentials::new("scm-fresh"), 0, 100)
         .expect("open");
@@ -171,6 +269,16 @@ fn fresh_estate_bypasses_and_never_creates_legacy_tables() {
     assert_eq!(report.state, SharedContentMigrationState::Complete);
     assert_eq!(report.legacy_chunk_count, 0);
     let storage: Arc<dyn Storage> = backing;
+    storage
+        .migrate(&corpus_kit::attached_declaration())
+        .expect("install current attached schema");
+    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(
+        &storage, None
+    ));
+    let reopened = coord
+        .run_shared_content_migration(&handle, NOW, default_ensemble())
+        .expect("current-format reopen");
+    assert_eq!(reopened.state, SharedContentMigrationState::Complete);
     assert!(storage.row_store().count("chunks", None).is_err());
 }
 
@@ -195,7 +303,11 @@ fn legacy_estate_migrates_selectively_and_verifies() {
     assert_eq!(report.rebuilt_content_count, 3);
 
     assert!(est.storage.row_store().count("chunks", None).is_err());
-    assert!(est.storage.row_store().count("corpus_metadata", None).is_err());
+    assert!(est
+        .storage
+        .row_store()
+        .count("corpus_metadata", None)
+        .is_err());
 
     // Drawer-keyed rows exist; protected row survived byte-identically.
     assert_eq!(
@@ -217,8 +329,10 @@ fn legacy_estate_migrates_selectively_and_verifies() {
     )
     .expect("engine");
     let hits = engine.bm25_top_k("page reclamation", 5).expect("bm25");
-    assert_eq!(hits.first().map(|(id, _)| id.as_str()),
-               Some(est.drawer_ids[2].as_str()));
+    assert_eq!(
+        hits.first().map(|(id, _)| id.as_str()),
+        Some(est.drawer_ids[2].as_str())
+    );
 
     // Idempotent re-run, then reclaim completion.
     let rerun = est
@@ -252,31 +366,221 @@ fn legacy_estate_migrates_selectively_and_verifies() {
         Some(SharedContentMigrationState::Complete)
     );
     let status_after = est.coord.shared_content_reclaim_status(&est.handle);
-    assert_eq!(status_after.state, Some(SharedContentMigrationState::Complete));
-    assert_eq!(status_after.reclaimed_bytes, Some(maintenance.reclaimed_bytes));
+    assert_eq!(
+        status_after.state,
+        Some(SharedContentMigrationState::Complete)
+    );
+    assert_eq!(
+        status_after.reclaimed_bytes,
+        Some(maintenance.reclaimed_bytes)
+    );
 
     // Recall still works over the vacuumed file: the reclamation freed
     // pages, never derived state.
     let post_hits = engine.bm25_top_k("page reclamation", 5).expect("bm25");
-    assert_eq!(post_hits.first().map(|(id, _)| id.as_str()),
-               Some(est.drawer_ids[2].as_str()));
+    assert_eq!(
+        post_hits.first().map(|(id, _)| id.as_str()),
+        Some(est.drawer_ids[2].as_str())
+    );
+}
+
+#[test]
+fn mx_tabular_backing_table_and_handle_survive_migration_reclaim_and_reopen() {
+    use genius_locus_kit::dataset_signatures::compute_dataset_signatures;
+    use locus_kit::dataset_handle::{DatasetColumnSummary, DatasetHandleContent};
+
+    let mut est = make_legacy_estate(&["ordinary drawer beside a protected dataset"], false, true);
+    let dataset_id = uuid::Uuid::new_v4();
+    let table_name = dataset_table_name(dataset_id);
+    let index_name = dataset_index_name(dataset_id, "label");
+    let dataset_store = est.storage.dataset_store().expect("dataset store");
+    let schema = DatasetSchema {
+        columns: vec![
+            ColumnDeclaration::int("id"),
+            ColumnDeclaration::text("label"),
+            ColumnDeclaration::float("score").nullable(),
+            ColumnDeclaration::text("note").nullable(),
+        ],
+        primary_key_column: Some("id".into()),
+    };
+    dataset_store
+        .create_dataset(
+            dataset_id,
+            &schema,
+            &[DatasetIndexDeclaration {
+                column: "label".into(),
+                unique: false,
+            }],
+        )
+        .expect("create dataset");
+    let mut row2 = BTreeMap::new();
+    row2.insert("id".into(), TypedValue::Int(2));
+    row2.insert("label".into(), TypedValue::Text("beta".into()));
+    row2.insert("score".into(), TypedValue::Float(2.5));
+    row2.insert("note".into(), TypedValue::Null);
+    let mut row1 = BTreeMap::new();
+    row1.insert("id".into(), TypedValue::Int(1));
+    row1.insert("label".into(), TypedValue::Text("alpha".into()));
+    row1.insert("score".into(), TypedValue::Float(1.25));
+    row1.insert("note".into(), TypedValue::Text("kept".into()));
+    dataset_store
+        .append_rows(dataset_id, &[row2, row1])
+        .expect("append dataset rows");
+
+    let estate = est.coord.estate_for(&est.handle).unwrap().clone();
+    let summaries = vec![
+        DatasetColumnSummary {
+            name: "id".into(),
+            data_type: "INTEGER".into(),
+        },
+        DatasetColumnSummary {
+            name: "label".into(),
+            data_type: "TEXT".into(),
+        },
+        DatasetColumnSummary {
+            name: "score".into(),
+            data_type: "REAL".into(),
+        },
+        DatasetColumnSummary {
+            name: "note".into(),
+            data_type: "TEXT".into(),
+        },
+    ];
+    let handle = estate
+        .capture_dataset_handle(
+            dataset_id,
+            summaries.clone(),
+            2,
+            "migration preservation fixture",
+            None,
+            "datasets",
+            "SharedContentMigrationTests",
+            0,
+            "004",
+            NOW,
+        )
+        .expect("capture dataset handle");
+    let order = [OrderClause::ascending(Column::new("", "id"))];
+    let rows_before = dataset_store
+        .query_rows(dataset_id, None, &order, None, None, None)
+        .expect("rows before");
+    let row_snapshot = |rows: &[persistence_kit::StorageRow]| -> Vec<String> {
+        let excluded = BTreeSet::new();
+        rows.iter()
+            .map(|row| canonical_row_encoding(row, &excluded))
+            .collect()
+    };
+    let rows_before_snapshot = row_snapshot(&rows_before);
+    let mut stats_before = HashMap::new();
+    for column in &summaries {
+        stats_before.insert(
+            column.name.clone(),
+            dataset_store
+                .column_stats(dataset_id, &column.name)
+                .expect("stats before"),
+        );
+    }
+    let signed =
+        compute_dataset_signatures(&estate, &handle.id, &summaries, &stats_before, &rows_before)
+            .expect("dataset signatures");
+    let handle_json_before = signed.content.clone();
+    let decoded = DatasetHandleContent::decode(&handle_json_before).expect("decode handle");
+    assert!(decoded.table_signature.is_some());
+    assert_eq!(decoded.column_signatures.as_ref().map(|m| m.len()), Some(4));
+
+    fn ddl(path: &std::path::Path, table: &str, index: &str) -> Vec<(String, String, String)> {
+        let conn = rusqlite::Connection::open(path).expect("open ddl connection");
+        let mut statement = conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master \
+                 WHERE name = ?1 OR name = ?2 ORDER BY name",
+            )
+            .expect("prepare ddl query");
+        statement
+            .query_map([table, index], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("query ddl")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect ddl")
+    }
+    let ddl_before = ddl(&est.path, &table_name, &index_name);
+    assert_eq!(ddl_before.len(), 2);
+
+    est.coord
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble())
+        .expect("migration");
+    est.coord
+        .complete_shared_content_reclaim(&est.handle, NOW)
+        .expect("reclaim");
+    let dataset_vectors = est
+        .storage
+        .row_store()
+        .query(
+            "vectors",
+            Some(&persistence_kit::StoragePredicate::Eq(
+                Column::new("vectors", "item_id"),
+                TypedValue::Text(handle.id.clone()),
+            )),
+            &[],
+            None,
+            None,
+        )
+        .expect("dataset vectors");
+    assert!(
+        dataset_vectors.is_empty(),
+        "dataset handle JSON must never be vectorized"
+    );
+
+    let reopened_store: Arc<dyn DrawerStore> = Arc::new(
+        SqliteDrawerStore::from_path(est.path.to_string_lossy().as_ref(), NOW, None, 5.0)
+            .expect("reopen drawer store"),
+    );
+    let reopened_storage = reopened_store.storage().expect("reopened storage");
+    let reopened_dataset = reopened_storage
+        .dataset_store()
+        .expect("reopened dataset store");
+    let rows_after = reopened_dataset
+        .query_rows(dataset_id, None, &order, None, None, None)
+        .expect("rows after");
+    assert_eq!(row_snapshot(&rows_after), rows_before_snapshot);
+    for column in &summaries {
+        assert_eq!(
+            reopened_dataset
+                .column_stats(dataset_id, &column.name)
+                .expect("stats after"),
+            stats_before[&column.name],
+        );
+    }
+    assert_eq!(ddl(&est.path, &table_name, &index_name), ddl_before);
+    let mut reopened_coord = EstateCoordinator::new();
+    let reopened_handle = reopened_coord
+        .open(reopened_store, OwnerCredentials::new("scm-owner"), 0, 100)
+        .expect("reopen estate");
+    let reopened_drawer = reopened_coord
+        .estate_for(&reopened_handle)
+        .unwrap()
+        .drawer_by_id(&handle.id)
+        .expect("read handle")
+        .expect("handle exists");
+    assert_eq!(reopened_drawer.content, handle_json_before);
 }
 
 #[test]
 fn ensemble_upgrade_covers_added_provider_and_stays_dark_until_then() {
     let mut est = make_legacy_estate(
-        &["Upgrade fixture drawer one about estates.",
-          "Upgrade fixture drawer two about coverage."],
+        &[
+            "Upgrade fixture drawer one about estates.",
+            "Upgrade fixture drawer two about coverage.",
+        ],
         false,
         true,
     );
 
     // Migrate under a ONE-provider configuration and finish reclaim.
     let small = vec![corpus_kit::corpus::EmbeddingModelConfig::Deterministic];
-    let small_fp = CorpusContentEngine::configuration_fingerprint_for(
-        CorpusOperatingMode::Attached,
-        &small,
-    );
+    let small_fp =
+        CorpusContentEngine::configuration_fingerprint_for(CorpusOperatingMode::Attached, &small);
     let first = est
         .coord
         .run_shared_content_migration(&est.handle, NOW, small)
@@ -300,10 +604,8 @@ fn ensemble_upgrade_covers_added_provider_and_stays_dark_until_then() {
             },
         ]
     };
-    let big_fp = CorpusContentEngine::configuration_fingerprint_for(
-        CorpusOperatingMode::Attached,
-        &big(),
-    );
+    let big_fp =
+        CorpusContentEngine::configuration_fingerprint_for(CorpusOperatingMode::Attached, &big());
     assert!(EstateCoordinator::shared_content_lane_must_stay_dark(
         &est.storage,
         Some(big_fp.as_str())
@@ -338,7 +640,9 @@ fn ensemble_upgrade_covers_added_provider_and_stays_dark_until_then() {
     )
     .expect("engine");
     assert_eq!(
-        engine.covered_count("corpus-deterministic-v1").expect("count"),
+        engine
+            .covered_count("corpus-deterministic-v1")
+            .expect("count"),
         Some(est.drawer_ids.len())
     );
     assert_eq!(
@@ -355,13 +659,18 @@ fn ensemble_upgrade_covers_added_provider_and_stays_dark_until_then() {
 #[test]
 fn orphaned_legacy_source_stops_dark_before_any_deletion() {
     let mut est = make_legacy_estate(&["Content with a valid drawer."], true, true);
-    let result = est.coord.run_shared_content_migration(&est.handle, NOW, default_ensemble());
+    let result = est
+        .coord
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble());
     assert!(matches!(
         result,
         Err(SharedContentMigrationError::OrphanedLegacySources { .. })
     ));
     assert_eq!(est.storage.row_store().count("chunks", None).unwrap(), 2);
-    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage, None));
+    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(
+        &est.storage,
+        None
+    ));
 }
 
 #[test]
@@ -392,7 +701,9 @@ fn fault_after_every_state_resumes_to_the_same_outcome() {
     for fault in fault_states {
         let mut est = make_legacy_estate(&contents, false, true);
         est.coord.set_shared_content_fault(Some(fault));
-        let interrupted = est.coord.run_shared_content_migration(&est.handle, NOW, default_ensemble());
+        let interrupted =
+            est.coord
+                .run_shared_content_migration(&est.handle, NOW, default_ensemble());
         assert!(
             matches!(
                 interrupted,
@@ -404,10 +715,18 @@ fn fault_after_every_state_resumes_to_the_same_outcome() {
             .coord
             .run_shared_content_migration(&est.handle, NOW, default_ensemble())
             .expect("resume");
-        assert_eq!(resumed.state, reference_report.state,
-                   "fault after {fault:?} must resume to the reference state");
-        assert_eq!(resumed.legacy_chunk_count, reference_report.legacy_chunk_count);
-        assert_eq!(resumed.rebuilt_content_count, reference_report.rebuilt_content_count);
+        assert_eq!(
+            resumed.state, reference_report.state,
+            "fault after {fault:?} must resume to the reference state"
+        );
+        assert_eq!(
+            resumed.legacy_chunk_count,
+            reference_report.legacy_chunk_count
+        );
+        assert_eq!(
+            resumed.rebuilt_content_count,
+            reference_report.rebuilt_content_count
+        );
         let inventory = capture_inventory(
             &est.storage,
             &["vectors", "corpus_index_state"],
@@ -417,17 +736,25 @@ fn fault_after_every_state_resumes_to_the_same_outcome() {
         let counts: Vec<usize> = inventory.iter().map(|i| i.row_count).collect();
         let reference_counts: Vec<usize> =
             reference_inventory.iter().map(|i| i.row_count).collect();
-        assert_eq!(counts, reference_counts,
-                   "fault after {fault:?}: row populations must match the uninterrupted run");
+        assert_eq!(
+            counts, reference_counts,
+            "fault after {fault:?}: row populations must match the uninterrupted run"
+        );
     }
 }
 
 #[test]
 fn legacy_estate_keeps_corpus_lane_dark_until_migrated() {
     let mut est = make_legacy_estate(&["Dark lane drawer."], false, false);
-    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage, None));
+    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(
+        &est.storage,
+        None
+    ));
     est.coord
         .run_shared_content_migration(&est.handle, NOW, default_ensemble())
         .expect("migration");
-    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage, None));
+    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(
+        &est.storage,
+        None
+    ));
 }

@@ -26,6 +26,7 @@ digest      = { version = "0.10" }
 # Kit path deps. From packages/kits/AriaMcpKit/rust/, kits are ../../<Kit>/rust.
 cognition-kit    = { path = "../../CognitionKit/rust" }
 genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
+genius-locus-kit-migrations = { path = "../../GeniusLocusKit/rust-migrations", features = ["migration-floor-1-0"] }
 locus-kit        = { path = "../../LocusKit/rust" }
 neuron-kit       = { path = "../../NeuronKit/rust" }
 substrate-ml     = { path = "../../../libs/SubstrateML/rust" }

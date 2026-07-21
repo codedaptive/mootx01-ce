@@ -50,6 +50,7 @@ pub mod brain;
 // schema + sampled content. Byte-identical mirror of
 // GeniusLocusKit/Sources/GeniusLocusKit/Intake/DatasetSignatures.swift.
 pub mod dataset_signatures;
+pub mod estate_format;
 pub mod branches;
 pub mod coordinator;
 // telemetry.rs — per-estate rollup metrics (GLK_ROLLUPS_001). Metric name
@@ -64,7 +65,6 @@ pub mod handle;
 // `composite_schema` declaration. Also adds `open_hydrating` to
 // `EstateCoordinator` via an impl block.
 pub mod hydration;
-pub mod shared_content_migration;
 // intake.rs — Dual-Path Intake (G7): WriteMode and mode-aware capture (D-A),
 // the capture→encode ORCHESTRATION. The encode queue + drain + worker pool +
 // retry + job payload now live in CorpusKit (corpus_ingest_queue.rs); GLK

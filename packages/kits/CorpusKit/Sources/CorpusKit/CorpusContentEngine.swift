@@ -249,6 +249,7 @@ public actor CorpusContentEngine {
     private let countsStore: CorpusProviderCountsStore
     private let indexState: CorpusIndexStateStore
     private let coverageStore: CorpusProviderCoverageStore
+    private let providerConfigurationStore: CorpusProviderConfigurationStore
     private let claims: VectorRepresentationClaims
     private var slots: [Slot]
 
@@ -317,6 +318,7 @@ public actor CorpusContentEngine {
         self.countsStore = CorpusProviderCountsStore(storage: storage)
         self.indexState = CorpusIndexStateStore(storage: storage)
         self.coverageStore = CorpusProviderCoverageStore(storage: storage)
+        self.providerConfigurationStore = CorpusProviderConfigurationStore(storage: storage)
         self.claims = VectorRepresentationClaims(storage: storage)
 
         var built: [Slot] = []
@@ -374,6 +376,94 @@ public actor CorpusContentEngine {
                     now: now)
             }
         }
+    }
+
+    /// Current-runtime provider reconciliation. This is deliberately NOT a
+    /// historical schema migration: every current-format engine runs it after
+    /// open so adding a provider backfills its missing generation and removing
+    /// one releases only CorpusKit's claims and now-unowned artifacts.
+    /// Reopen/replay is idempotent.
+    public func reconcileConfiguredProviders(now: Date) async throws {
+        let desired = Set(slots.enumerated().flatMap { index, slot -> [VectorRepresentationKey] in
+            [0, 1].compactMap { lane in
+                if lane == 0 && index != 0 && configuration.mode == .attached { return nil }
+                return VectorRepresentationKey(
+                    modelID: slot.provider.modelID,
+                    modelVersion: slot.provider.modelVersion,
+                    vectorIndex: lane)
+            }
+        })
+        let existing = Set(try await claims.claims(consumer: Self.claimsConsumer))
+        if existing == desired,
+           try await providerConfigurationStore.generationToken() == providerGenerationToken() {
+            return
+        }
+        try await registerClaims(now: now)
+        let stale = existing.filter { !desired.contains($0) }
+        var retiredProviders: Set<String> = []
+        for key in stale {
+            let otherClaimants = try await claims.claimants(key: key)
+                .filter { $0 != Self.claimsConsumer }
+            try await claims.releaseClaim(consumer: Self.claimsConsumer, key: key)
+            if otherClaimants.isEmpty {
+                let rows = try await storage.rowStore.query(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "model_id"), .text(key.modelID)),
+                        .eq(Column(table: "vectors", name: "vector_index"), .int(Int64(key.vectorIndex)))
+                    ]),
+                    orderBy: [], limit: nil, offset: nil)
+                let exact = rows.compactMap { row -> VectorExactKey? in
+                    guard case let .text(version)? = row["model_version"], version == key.modelVersion,
+                          case let .text(itemID)? = row["item_id"] else { return nil }
+                    return VectorExactKey(
+                        itemID: itemID, vectorIndex: key.vectorIndex, modelID: key.modelID)
+                }
+                try await vectorStore.deleteVectors(keys: exact)
+            }
+            retiredProviders.insert("\(key.modelID)\u{1F}\(key.modelVersion)")
+        }
+
+        let desiredModelIDs = Set(slots.map { $0.provider.modelID })
+        for encoded in retiredProviders {
+            let parts = encoded.split(separator: "\u{1F}", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            let modelID = parts[0]
+            let modelVersion = parts[1]
+            let providerPredicate: StoragePredicate = .and([
+                .eq(Column(table: "corpus_provider_basis", name: "model_id"), .text(modelID)),
+                .eq(Column(table: "corpus_provider_basis", name: "model_version"), .text(modelVersion))
+            ])
+            _ = try await storage.rowStore.delete(
+                table: "corpus_provider_basis", where: providerPredicate)
+            _ = try await storage.rowStore.delete(
+                table: "corpus_provider_counts", where: .and([
+                    .eq(Column(table: "corpus_provider_counts", name: "model_id"), .text(modelID)),
+                    .eq(Column(table: "corpus_provider_counts", name: "model_version"), .text(modelVersion))
+                ]))
+            if !desiredModelIDs.contains(modelID) {
+                _ = try await storage.rowStore.delete(
+                    table: "corpus_provider_coverage",
+                    where: .eq(
+                        Column(table: "corpus_provider_coverage", name: "model_id"),
+                        .text(modelID)))
+            }
+        }
+
+        _ = try await trainTrainableSlots(now: now)
+        try await vectorStore.beginDeferredIndex()
+        _ = try await backfillProviderCoverage(now: now)
+        try await vectorStore.publishResidentIndex()
+        // LAST durable write: equality makes future opens O(1). A crash
+        // before here safely retries from per-provider coverage.
+        try await providerConfigurationStore.markCurrent(
+            providerGenerationToken(), now: now)
+    }
+
+    private func providerGenerationToken() -> String {
+        configurationFingerprint() + "|" + slots.map {
+            "\($0.provider.modelID)@\($0.provider.modelVersion)=\($0.basisDigest)"
+        }.joined(separator: "|")
     }
 
     /// STANDALONE convenience: construct a whole-content standalone engine
@@ -452,6 +542,137 @@ public actor CorpusContentEngine {
         return true
     }
 
+    /// Migration rebuild kernel: resolve a bounded batch, perform the pure
+    /// tokenization/stateless-embedding work concurrently, then publish BM25,
+    /// vectors, coverage, and checkpoints through the engine's serial writer.
+    /// Results are reassembled in input order, and checkpoints advance only
+    /// after every derived row for the batch is durable. This is the attached
+    /// whole-content counterpart of `Corpus.ingestBatch`'s proven
+    /// compute-parallel/write-serial pipeline; it does not alter provider math.
+    @discardableResult
+    public func indexContentStructuralBatch(
+        ids: [CorpusContentID], now: Date, parallelism: Int? = nil
+    ) async throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        guard configuration.mode == .attached,
+              configuration.indexUnit == .wholeContent else {
+            throw CorpusKitError.invalidConfiguration(
+                "structural batch rebuild is available only to attached whole-content engines")
+        }
+        try await registerClaims(now: now)
+
+        var records: [CorpusContentRecord] = []
+        records.reserveCapacity(ids.count)
+        for id in ids {
+            try validate(id: id)
+            guard let record = try await source.record(for: id) else {
+                try await clearDerivedState(id: id)
+                continue
+            }
+            if let existing = try await indexState.state(for: id),
+               existing.revision == record.revision,
+               existing.digest == record.digest,
+               existing.indexVersion == Self.indexVersion {
+                continue
+            }
+            records.append(record)
+        }
+        guard !records.isEmpty else { return 0 }
+
+        let providers = slots.enumerated().compactMap { index, slot -> StructuralProvider? in
+            guard slot.freshBasisBlob == nil else { return nil }
+            return StructuralProvider(
+                provider: slot.provider,
+                modelID: slot.provider.modelID,
+                modelVersion: slot.provider.modelVersion,
+                basisDigest: slot.basisDigest,
+                writeBinary: index == 0 || configuration.mode == .standalone)
+        }
+        let cap = max(1, parallelism ?? ProcessInfo.processInfo.activeProcessorCount)
+        let prepared = try await boundedConcurrentMap(records, cap: cap) { record in
+            var rows: [VectorPayloadInput] = []
+            rows.reserveCapacity(providers.count * 2)
+            var covered: [(CorpusContentID, String, String)] = []
+            covered.reserveCapacity(providers.count)
+            for target in providers {
+                let (engram, floats) = try await target.provider.embedPair(record.text)
+                if target.writeBinary {
+                    rows.append(VectorPayloadInput(
+                        itemID: record.id, vectorIndex: 0,
+                        payload: VectorPayload(engram: engram),
+                        modelID: target.modelID, modelVersion: target.modelVersion,
+                        filedAt: now))
+                }
+                if !floats.isEmpty {
+                    rows.append(VectorPayloadInput(
+                        itemID: record.id, vectorIndex: 1,
+                        payload: VectorPayload(floats: floats),
+                        modelID: target.modelID, modelVersion: target.modelVersion,
+                        filedAt: now))
+                }
+                covered.append((record.id, target.modelID, target.basisDigest))
+            }
+            return PreparedStructuralRecord(
+                record: record,
+                tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
+                vectorRows: rows,
+                covered: covered)
+        }
+
+        for item in prepared {
+            try await invertedIndex.index(itemID: item.record.id, tokens: item.tokens, now: now)
+        }
+        let vectorRows = prepared.flatMap(\.vectorRows)
+        if !vectorRows.isEmpty { try await vectorStore.addPayloads(vectorRows) }
+        try await coverageStore.markCovered(prepared.flatMap(\.covered), now: now)
+        for item in prepared {
+            try await indexState.advance(CorpusIndexState(
+                contentID: item.record.id,
+                revision: item.record.revision,
+                digest: item.record.digest,
+                indexVersion: Self.indexVersion,
+                appliedCursor: nil,
+                updatedAt: now))
+        }
+        return prepared.count
+    }
+
+    private struct StructuralProvider: Sendable {
+        let provider: any EmbeddingProvider
+        let modelID: String
+        let modelVersion: String
+        let basisDigest: String
+        let writeBinary: Bool
+    }
+
+    private struct PreparedStructuralRecord: Sendable {
+        let record: CorpusContentRecord
+        let tokens: [String]
+        let vectorRows: [VectorPayloadInput]
+        let covered: [(CorpusContentID, String, String)]
+    }
+
+    private func boundedConcurrentMap<Input: Sendable, Output: Sendable>(
+        _ inputs: [Input], cap: Int,
+        _ work: @escaping @Sendable (Input) async throws -> Output
+    ) async throws -> [Output] {
+        precondition(cap >= 1)
+        var results = [Output?](repeating: nil, count: inputs.count)
+        var start = 0
+        while start < inputs.count {
+            let end = min(start + cap, inputs.count)
+            try await withThrowingTaskGroup(of: (Int, Output).self) { group in
+                for index in start..<end {
+                    let input = inputs[index]
+                    group.addTask { (index, try await work(input)) }
+                }
+                for try await (index, output) in group { results[index] = output }
+            }
+            start = end
+        }
+        return results.map { $0! }
+    }
+
     /// Test seam for the backfill crash-boundary suites: phase marker the
     /// hook receives per batch.
     public enum BackfillFaultPhase: Sendable { case afterVectors, afterCoverage }
@@ -479,7 +700,7 @@ public actor CorpusContentEngine {
     /// window. Returns the number of (content, provider) pairs covered.
     @discardableResult
     public func backfillProviderCoverage(
-        now: Date, batchSize: Int = 500
+        now: Date, batchSize: Int = 500, parallelism: Int? = nil
     ) async throws -> Int {
         // Every slot with a live generation (stateless digests are
         // constants; an untrained trainable slot has no generation yet).
@@ -510,37 +731,50 @@ public actor CorpusContentEngine {
         }
         var written = 0
         var batchIndex = 0
+        let cap = max(1, parallelism ?? ProcessInfo.processInfo.activeProcessorCount)
+        let computeTargets = targets.map { target in
+            StructuralProvider(
+                provider: slots[target.index].provider,
+                modelID: target.modelID,
+                modelVersion: slots[target.index].provider.modelVersion,
+                basisDigest: target.digest,
+                writeBinary: target.index == 0 || configuration.mode == .standalone)
+        }
+        let targetSlotIndices = targets.map(\.index)
+        let missingSnapshot = missingBySlot
         for chunk in affected.sorted().chunked(into: batchSize) {
-            var rows: [VectorPayloadInput] = []
-            var covered: [(contentID: CorpusContentID, modelID: String, basisDigest: String)] = []
+            var records: [CorpusContentRecord] = []
+            records.reserveCapacity(chunk.count)
             for id in chunk {
-                guard let record = try await source.record(for: id) else { continue }
-                let units = try await unitKeys(for: id).sorted()
-                for target in targets where missingBySlot[target.index]?.contains(id) == true {
-                    let slot = slots[target.index]
-                    let writeBinary = target.index == 0 || configuration.mode == .standalone
-                    for unitKey in units {
-                        let (engram, floats) = try await slot.provider.embedPair(record.text)
-                        if writeBinary {
-                            rows.append(VectorPayloadInput(
-                                itemID: unitKey, vectorIndex: 0,
-                                payload: VectorPayload(engram: engram),
-                                modelID: slot.provider.modelID,
-                                modelVersion: slot.provider.modelVersion,
-                                filedAt: now))
-                        }
-                        if !floats.isEmpty {
-                            rows.append(VectorPayloadInput(
-                                itemID: unitKey, vectorIndex: 1,
-                                payload: VectorPayload(floats: floats),
-                                modelID: slot.provider.modelID,
-                                modelVersion: slot.provider.modelVersion,
-                                filedAt: now))
-                        }
-                    }
-                    covered.append((id, target.modelID, target.digest))
-                }
+                if let record = try await source.record(for: id) { records.append(record) }
             }
+            let prepared = try await boundedConcurrentMap(records, cap: cap) { record in
+                var rows: [VectorPayloadInput] = []
+                var covered: [(CorpusContentID, String, String)] = []
+                for (targetIndex, target) in computeTargets.enumerated()
+                    where missingSnapshot[targetSlotIndices[targetIndex]]?.contains(record.id) == true
+                {
+                    let (engram, floats) = try await target.provider.embedPair(record.text)
+                    if target.writeBinary {
+                        rows.append(VectorPayloadInput(
+                            itemID: record.id, vectorIndex: 0,
+                            payload: VectorPayload(engram: engram),
+                            modelID: target.modelID, modelVersion: target.modelVersion,
+                            filedAt: now))
+                    }
+                    if !floats.isEmpty {
+                        rows.append(VectorPayloadInput(
+                            itemID: record.id, vectorIndex: 1,
+                            payload: VectorPayload(floats: floats),
+                            modelID: target.modelID, modelVersion: target.modelVersion,
+                            filedAt: now))
+                    }
+                    covered.append((record.id, target.modelID, target.basisDigest))
+                }
+                return (rows, covered)
+            }
+            let rows = prepared.flatMap(\.0)
+            let covered = prepared.flatMap(\.1)
             if !rows.isEmpty {
                 try await vectorStore.addPayloads(rows)
             }
@@ -1069,6 +1303,8 @@ public actor CorpusContentEngine {
             // rewritten even when the checkpoint already matches.
             try await index(record: record, appliedCursor: nil, force: true, now: now)
         }
+        try await providerConfigurationStore.markCurrent(
+            providerGenerationToken(), now: now)
     }
 
     // MARK: - Maintained counts

@@ -1,0 +1,34 @@
+[package]
+name = "genius-locus-kit-migrations"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+
+[features]
+default = []
+migration-v1-0-to-v1-1 = []
+migration-floor-1-0 = ["migration-v1-0-to-v1-1"]
+
+[dependencies]
+genius-locus-kit = { path = "../rust" }
+corpus-kit = { path = "../../CorpusKit/rust" }
+persistence-kit = { path = "../../PersistenceKit/rust" }
+vectorkit = { path = "../../VectorKit/rust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
+locus-kit = { path = "../../LocusKit/rust" }
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[[test]]
+name = "shared_content_migration_tests"
+required-features = ["migration-v1-0-to-v1-1"]
+
+[[test]]
+name = "scale_qualification"
+required-features = ["migration-v1-0-to-v1-1"]

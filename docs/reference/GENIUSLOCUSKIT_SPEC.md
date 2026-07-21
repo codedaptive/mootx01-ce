@@ -289,6 +289,14 @@ Drawer-keyed vector lanes are preserved. CorpusKit's derived BM25/vector and
 provider basis/count state is rebuilt from Drawers before the Corpus lane is
 made available.
 
+**I-20 (historical migration is optional build baggage):** current-format GLK
+runtime and attached CorpusKit composition contain no concrete historical
+migration implementation. Each historical step is a separate capsule selected
+at build time by a declared minimum estate-format floor. A consumer that starts
+with fresh/current estates compiles no capsules; a consumer that supports floor
+1.0 compiles the contiguous 1.0-to-1.1 capsule and refuses estates below that
+floor before any destructive transition.
+
 ## § 5 — Behavioral contracts
 
 **B-1 (open composes then registers):** `open(storage:owner:)` opens a
@@ -744,9 +752,28 @@ enters a migration gate before the Corpus lane becomes queryable:
    the schema/checkpoint and make the Corpus lane non-dark. Failure leaves
    LocusKit recall available and Corpus recall explicitly degraded/dark.
 
-The migration may stream and resume, but it must not retain copied passage text
-as a compatibility cache. Selective deletion is mandatory; an unqualified
-`destroyAllVectors` is a migration defect.
+The migration capsule is not called by the current GLK core. MOOTx01 and Aria
+build the floor-1.0 catalog and invoke it before current-runtime CorpusKit wiring;
+fresh SDK consumers omit that dependency/feature. Each subsequent migration
+must declare its source/target versions and join the same contiguous catalog so
+raising the compiled floor removes all lower capsules.
+
+The migration streams in stable Drawer-ID order. Pure tokenization and
+stateless embedding compute run in bounded parallel batches; all durable writes
+remain ordered/serial and the cursor advances only after the batch commit.
+Trainable bases commit atomically before per-model backfill. A crash either
+restarts basis training from zero or resumes deterministic upserts from the last
+durable cursor. Before the first destructive state, the five-signal rebuild
+checks a conservative working-set requirement (`2 GiB + 320 KiB × active
+content`) against 80% of physical RAM, or the lower operator-supplied
+`MOOT_MIGRATION_MEMORY_BUDGET_BYTES`, and refuses when it cannot complete
+safely. It must not retain copied passage text as a compatibility cache.
+Selective deletion is mandatory; an unqualified `destroyAllVectors` is a
+migration defect.
+
+Migration verification also covers MX-TAB: dataset-handle Drawers and their
+backing typed tables are excluded from CorpusKit and must retain canonical rows,
+schema/index declarations, statistics, signatures, and handle identity.
 
 ## § 6 — Error model (conceptual)
 

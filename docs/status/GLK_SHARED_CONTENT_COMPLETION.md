@@ -1,16 +1,26 @@
 ---
 title: GLK Shared-Content 1.1 Completion Report
 mission: GLK_SHARED_CONTENT (P0–P6)
-status: COMPLETE
+status: CONTROLLED SYNTHESIS IMPLEMENTED — ESTATE-SCALE REQUALIFICATION PENDING
 date: 2026-07-21
 ---
 
-# COMPLETION: GLK shared-content 1.1
+# CONTROLLED SYNTHESIS: GLK shared-content 1.1
 
 One content row per Drawer. LocusKit owns canonical content; GLK owns
 composition through the `CorpusContentSource` adapter; CorpusKit owns only
 rebuildable derived state in attached mode. No chunk identity lane, no
-chunk-to-Drawer translation, no copied text. Both ports, per-phase parity.
+chunk-to-Drawer translation, no copied text.
+
+The Fable donor branch completed the Rust estate-scale run recorded below. The
+controlled synthesis subsequently added current-runtime provider
+addition/removal reconciliation, parallel structural/backfill compute,
+compile-time migration floors, MX-TAB preservation, capacity refusal, and
+deterministic PPMI accumulation. Therefore the donor measurement is historical
+evidence, not release qualification for this synthesis. Swift and Rust must run
+the same recoverable clone on the faster review machine, compare the full
+per-provider basis digests, and satisfy the gates in "Synthesis requalification"
+before this document returns to `COMPLETE`.
 
 ## Phase ledger
 
@@ -22,7 +32,7 @@ chunk-to-Drawer translation, no copied text. Both ports, per-phase parity.
 | P3 | GLK attached composition cutover: adapter-wired engine, drawer-ID identity across BM25/vector/signals/Merkle attestations | ✓ |
 | P4 | Resumable fail-dark 9-state migration, structural detection, selective deletion, declared-migration schema retirement, dark-lane gate; Rust SQLite declared-migration execution parity fix | ✓ |
 | P5 | Storage maintenance API (checkpoint+VACUUM with quiescence/capacity/progress/cancellation/introspection contracts), ownership-scoped legacy teardown, reclaim wiring + status surface; P3 consumer cutover completed for AriaMcpKit/VaultKit Rust | ✓ |
-| P6 | Scale qualification on a 7.3 GB production estate clone + three in-cycle corrections (below) | ✓ |
+| P6 | Donor scale qualification on a 7.3 GB production estate clone + three in-cycle corrections (below); controlled-synthesis rerun pending | pending |
 | Corrective pass | Full five-signal ensemble on migrated estates: per-provider coverage checkpoints, bounded crash-safe training with atomic basis+counts commits, coverage-driven backfill, ensemble fingerprint + follow-on upgrade, claim-aware shared-vector deletion, attached binary lanes default-slot-only, counts write-amplification removed | ✓ |
 
 ## Scale qualification (P6)
@@ -37,7 +47,7 @@ Pre-migration table footprint (dbstat): vectors 2.21 GB; provider basis
 1.52 GB; provider counts 0.87 GB; BM25 postings + indexes 1.22 GB;
 drawers 0.115 GB; chunks (copy lane) 0.101 GB.
 
-### Measured outcome — five-signal qualification (corrective pass)
+### Historical donor outcome — five-signal qualification
 
 The binding qualification is the FIVE-SIGNAL result (RI/PPMI/LSA/NMF/FDC —
 the production `defaultEnsemble()`): the migration trains all four
@@ -46,7 +56,7 @@ every provider covers every Drawer. The earlier deterministic-only tables
 remain below for history; they qualified an intermediate that the
 corrective pass retired.
 
-#### Rust leg (single uninterrupted run)
+#### Rust donor leg (single uninterrupted run)
 
 | Metric | Value |
 |--------|-------|
@@ -67,18 +77,11 @@ corrective pass retired.
 | BM25 top scores | 1402 / 1735 / 1563 — byte-equal to every prior run |
 | Direct Drawer hydration | 3/3 queries |
 
-#### Swift leg (single uninterrupted run)
+#### Swift donor leg (not completed)
 
 | Metric | Value |
 |--------|-------|
-| End-to-end migration (all 11 states) | SWIFT5_MIGRATION_MIN |
-| Drawers rebuilt + attested | SWIFT5_REBUILT |
-| Per-provider coverage | SWIFT5_COVERAGE |
-| Per-signal float recall | SWIFT5_FLOAT |
-| BM25 top scores | SWIFT5_SCORES |
-| Physical reclaim | SWIFT5_RECLAIM |
-
-SWIFT5_PARITY_NOTE
+No binding Swift five-signal estate result was recorded on the donor branch.
 
 #### Historical: deterministic-only intermediate (superseded)
 
@@ -148,7 +151,72 @@ remaining seams in both ports.
 | Insufficient-disk reclaim | maintenance preflight contract suites (P5): `insufficientDiskCapacity` refused before any rewrite |
 | Upgrade/reopen | qualification reopens the migrated estate for the recall phase; restart-idempotent wiring suites (AriaMcpKit) |
 
-### Suite state at completion
+### Synthesis requalification
+
+Run both scale drivers against independent clones of the same legacy estate.
+The release gate requires:
+
+1. every active Drawer covered under all five wired provider generations;
+2. full (not 12-character) Swift/Rust basis digests equal for RI, PPMI, LSA,
+   and NMF, with FDC's stateless generation equal;
+3. canonical Drawers, relationships, unrelated vector ownership, and MX-TAB
+   typed rows/schema/indexes/statistics/signatures byte-equivalent before and
+   after;
+4. no `chunks`, `corpus_metadata`, chunk-keyed BM25/vector rows, or copied
+   Drawer text after migration;
+5. bounded parallel compute demonstrated without concurrent durable writers,
+   with throughput no worse than the proven donor path;
+6. forced termination during training and provider backfill resumes to the
+   same final inventories and digests; and
+7. peak RSS stays within the pre-destructive capacity admission contract.
+
+On the limited local machine, the controlled synthesis ran only focused small
+fixtures: both ports' ten migration tests (including every-state crash resume,
+MX-TAB, floor/capacity refusal, and provider upgrade), provider add/remove/reopen
+tests, PPMI byte-conformance tests, and application/package compile checks. No
+full estate migration was run locally.
+
+#### Review-machine commands
+
+Use two independently recoverable clones made from the same legacy snapshot.
+Do not point either command at a live estate. Leave the default memory budget in
+place unless the host/job really has more usable RAM than it reports; an
+override is a safety assertion, not a way to bypass admission.
+
+```bash
+cd /path/to/mootx01-ce/packages/kits/GeniusLocusKit
+MOOT_SCF_QUAL_DB=/path/to/swift-clone.sqlite \
+  /usr/bin/time -l swift run -c release --traits MigrationFloor1_0 glk-scale-qual \
+  2>&1 | tee /tmp/glk-swift.qual
+
+cd /path/to/mootx01-ce/packages/kits/GeniusLocusKit/rust-migrations
+MOOT_SCF_QUAL_DB=/path/to/rust-clone.sqlite \
+  /usr/bin/time -l cargo test --release --features migration-floor-1-0 \
+  --test scale_qualification qualify_large_estate_migration \
+  -- --ignored --nocapture 2>&1 | tee /tmp/glk-rust.qual
+```
+
+Compare full generations and coverage (the drivers intentionally emit complete
+digests, not prefixes):
+
+```bash
+rg '^QUAL recall\.(generation|coverage|token_stream_fnv64|token_count)' \
+  /tmp/glk-swift.qual | sort \
+  > /tmp/glk-swift.generations
+rg '^QUAL recall\.(generation|coverage|token_stream_fnv64|token_count)' \
+  /tmp/glk-rust.qual | sort \
+  > /tmp/glk-rust.generations
+diff -u /tmp/glk-swift.generations /tmp/glk-rust.generations
+```
+
+Capture phase CPU with Instruments, `sample`, or the review host's profiler
+while the drivers run. The required shape is bounded parallel Drawer
+tokenization/embedding followed by one serial durable writer; training remains
+provider-serial, and reclamation remains backend-serial. Report structural
+rebuild, basis training, provider backfill, verification, and reclaim separately
+so a fast total does not conceal a serial regression.
+
+### Donor suite state
 
 Full sweeps green in both ports: PersistenceKit, VectorKit, CorpusKit
 (370 Swift / all Rust suites incl. characterization twins), GeniusLocusKit
@@ -156,12 +224,15 @@ Full sweeps green in both ports: PersistenceKit, VectorKit, CorpusKit
 all Rust), VaultKit, CognitionKit (230); every Swift package and Rust
 crate in the tree builds clean; CE fast unit lane green.
 
-## Release-notes summary
+## Provisional release-notes summary
 
 Shared-content 1.1 stores each memory's canonical text exactly once.
-Estates carrying the legacy copy lane migrate in place through a
-resumable, fail-dark migration during a maintenance window; migration of
-a 7.3 GB estate took ~46 minutes and returned 6.7 GB to the filesystem.
+Estates carrying the legacy copy lane can migrate in place through a
+resumable, fail-dark, floor-selected migration capsule during a maintenance
+window. The historical deterministic-only run took ~46 minutes and reclaimed
+~6.7 GB, while the five-signal Rust donor run took 39.3 minutes and reached a
+larger ~5.78 GB steady estate because the four trainable lanes remain live.
+These figures must be requalified on the controlled synthesis before release.
 Until an estate migrates, its semantic-recall lane stays dark (structural
 recall unaffected); recall lights up immediately after migration with
 identical hit quality and direct Drawer identity across every lane.

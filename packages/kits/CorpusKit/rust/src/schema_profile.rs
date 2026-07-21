@@ -26,9 +26,7 @@ use crate::corpus_provider_counts_store::CorpusProviderCountsStore;
 use crate::document_store::CorpusDocumentStore;
 use crate::error::CorpusKitError;
 use crate::index_state_store::CorpusIndexStateStore;
-use persistence_kit::{
-    ColumnDeclaration, IndexDeclaration, SchemaDeclaration, TableDeclaration,
-};
+use persistence_kit::{ColumnDeclaration, IndexDeclaration, SchemaDeclaration, TableDeclaration};
 use std::collections::BTreeSet;
 
 /// The index-unit policy: what one derived index entry covers.
@@ -63,14 +61,19 @@ impl CorpusContentConfiguration {
         index_unit: CorpusIndexUnitPolicy,
     ) -> Result<Self, CorpusKitError> {
         match (mode, index_unit) {
-            (CorpusOperatingMode::Attached, CorpusIndexUnitPolicy::TokenBudgetedPassages { .. }) => {
+            (
+                CorpusOperatingMode::Attached,
+                CorpusIndexUnitPolicy::TokenBudgetedPassages { .. },
+            ) => {
                 return Err(CorpusKitError::AttachedModeViolation(
                     "attached mode indexes whole Drawers only — passage configuration \
                      is standalone-only and must be rejected before writing"
                         .into(),
                 ));
             }
-            (_, CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget }) if token_budget == 0 => {
+            (_, CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget })
+                if token_budget == 0 =>
+            {
                 return Err(CorpusKitError::InvalidConfiguration(
                     "token-budgeted passages require a positive token budget, got 0".into(),
                 ));
@@ -168,16 +171,28 @@ fn profile_version(components: &[&SchemaDeclaration]) -> i32 {
 pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
     let documents = CorpusDocumentStore::schema_declaration();
     let index_state = CorpusIndexStateStore::schema_declaration();
-    let coverage = crate::provider_coverage_store::CorpusProviderCoverageStore::schema_declaration();
+    let coverage =
+        crate::provider_coverage_store::CorpusProviderCoverageStore::schema_declaration();
+    let configuration =
+        crate::provider_configuration_store::CorpusProviderConfigurationStore::schema_declaration();
     let iix = inverted_index_declaration();
     let basis = BasisStore::schema_declaration();
     let counts = CorpusProviderCountsStore::schema_declaration();
 
-    let version = profile_version(&[&documents, &index_state, &coverage, &iix, &basis, &counts]);
+    let version = profile_version(&[
+        &documents,
+        &index_state,
+        &coverage,
+        &configuration,
+        &iix,
+        &basis,
+        &counts,
+    ]);
     let mut tables = Vec::new();
     tables.extend(documents.tables.clone());
     tables.extend(index_state.tables.clone());
     tables.extend(coverage.tables.clone());
+    tables.extend(configuration.tables.clone());
     tables.extend(iix.tables.clone());
     tables.extend(basis.tables.clone());
     tables.extend(counts.tables.clone());
@@ -206,15 +221,26 @@ pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
 /// by the canonical content ID. No canonical content table of any kind.
 pub fn attached_declaration() -> SchemaDeclaration {
     let index_state = CorpusIndexStateStore::schema_declaration();
-    let coverage = crate::provider_coverage_store::CorpusProviderCoverageStore::schema_declaration();
+    let coverage =
+        crate::provider_coverage_store::CorpusProviderCoverageStore::schema_declaration();
+    let configuration =
+        crate::provider_configuration_store::CorpusProviderConfigurationStore::schema_declaration();
     let iix = inverted_index_declaration();
     let basis = BasisStore::schema_declaration();
     let counts = CorpusProviderCountsStore::schema_declaration();
 
-    let version = profile_version(&[&index_state, &coverage, &iix, &basis, &counts]);
+    let version = profile_version(&[
+        &index_state,
+        &coverage,
+        &configuration,
+        &iix,
+        &basis,
+        &counts,
+    ]);
     let mut tables = Vec::new();
     tables.extend(index_state.tables.clone());
     tables.extend(coverage.tables.clone());
+    tables.extend(configuration.tables.clone());
     tables.extend(iix.tables.clone());
     tables.extend(basis.tables.clone());
     tables.extend(counts.tables.clone());
