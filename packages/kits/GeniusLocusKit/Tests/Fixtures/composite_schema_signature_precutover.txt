@@ -22,6 +22,19 @@ table=associations
   pk=id
   unique=sourceWing,sourceRoom,sourceDrawerId,targetWing,targetRoom,targetDrawerId,label
   appendOnly=0 hashable=0
+table=chunks
+  col=id type=uuid null=0 default=- role=-
+  col=source_id type=text null=0 default=- role=-
+  col=start_offset type=int null=0 default=- role=-
+  col=length type=int null=0 default=- role=-
+  col=text type=text null=0 default=- role=-
+  col=hlc type=hlc null=0 default=- role=-
+  col=metadata type=json null=0 default=- role=-
+  col=created_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  col=content_hash type=blob null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=1
 table=container_fingerprints
   col=wing type=text null=0 default=- role=-
   col=room type=text null=0 default=- role=-
@@ -31,33 +44,10 @@ table=container_fingerprints
   col=updatedAt type=timestamp null=0 default=- role=-
   pk=wing,room
   appendOnly=0 hashable=0
-table=corpus_index_state
-  col=content_id type=text null=0 default=- role=-
-  col=revision type=int null=0 default=- role=-
-  col=digest type=text null=0 default=- role=-
-  col=index_version type=int null=0 default=- role=-
-  col=applied_cursor type=text null=1 default=- role=-
-  col=updated_at type=timestamp null=0 default=- role=-
-  pk=content_id
-  appendOnly=0 hashable=0
-table=corpus_provider_basis
-  col=model_id type=text null=0 default=- role=-
-  col=model_version type=text null=0 default=- role=-
-  col=basis type=blob null=0 default=- role=-
-  col=trained_at type=timestamp null=0 default=- role=-
-  col=trained_chunk_count type=int null=0 default=- role=-
-  col=ext type=json null=1 default=- role=-
-  pk=model_id,model_version
-  appendOnly=0 hashable=0
-table=corpus_provider_counts
-  col=model_id type=text null=0 default=- role=-
-  col=model_version type=text null=0 default=- role=-
-  col=counts type=blob null=0 default=- role=-
-  col=doc_count type=int null=0 default=- role=-
-  col=vocab_size type=int null=0 default=- role=-
-  col=updated_at type=timestamp null=0 default=- role=-
-  col=ext type=json null=1 default=- role=-
-  pk=model_id,model_version
+table=corpus_metadata
+  col=source_id type=text null=0 default=- role=-
+  col=merkle_root type=blob null=1 default=- role=-
+  pk=source_id
   appendOnly=0 hashable=0
 table=diary
   col=id type=text null=0 default=- role=-
@@ -128,17 +118,6 @@ table=grants
   col=decay_floor type=int null=1 default=- role=-
   col=ext type=json null=1 default=- role=-
   pk=id
-  appendOnly=0 hashable=0
-table=iix_doclens
-  col=item_id type=text null=0 default=- role=-
-  col=length type=int null=0 default=- role=-
-  pk=item_id
-  appendOnly=0 hashable=0
-table=iix_termfreqs
-  col=term type=text null=0 default=- role=-
-  col=item_id type=text null=0 default=- role=-
-  col=freq type=int null=0 default=- role=-
-  pk=term,item_id
   appendOnly=0 hashable=0
 table=keys
   col=key_id type=text null=0 default=- role=-
@@ -294,14 +273,6 @@ table=tunnels
   col=ext type=json null=1 default=- role=-
   pk=id
   appendOnly=0 hashable=0
-table=vector_rep_claims
-  col=model_id type=text null=0 default=- role=-
-  col=model_version type=text null=0 default=- role=-
-  col=vector_index type=int null=0 default=- role=-
-  col=consumer type=text null=0 default=- role=-
-  col=claimed_at type=timestamp null=0 default=- role=-
-  pk=model_id,model_version,vector_index,consumer
-  appendOnly=0 hashable=0
 table=vectors
   col=id type=uuid null=0 default=- role=-
   col=item_id type=text null=0 default=- role=-
@@ -320,6 +291,8 @@ table=vectors
 index=idx_associations_source table=associations cols=sourceWing,sourceRoom unique=0
 index=idx_associations_target table=associations cols=targetWing,targetRoom unique=0
 index=idx_associations_udcCode table=associations cols=udcCode unique=0
+index=idx_chunks_hlc table=chunks cols=hlc unique=0
+index=idx_chunks_source table=chunks cols=source_id unique=0
 index=idx_diary_agent table=diary cols=agentName unique=0
 index=idx_diary_filedAt table=diary cols=filedAt unique=0
 index=idx_diary_wing table=diary cols=wing unique=0
@@ -332,7 +305,6 @@ index=idx_drawers_sourceFile table=drawers cols=sourceFile unique=0
 index=idx_drawers_state_cluster table=drawers cols=g_state_cluster unique=0
 index=idx_drawers_tombstoned table=drawers cols=tombstonedAt unique=0
 index=idx_drawers_udcCode table=drawers cols=udcCode unique=0
-index=idx_iix_tf_item table=iix_termfreqs cols=item_id unique=0
 index=idx_kg_facts_sourceDrawer table=kg_facts cols=sourceDrawerID unique=0
 index=idx_kg_facts_state_cluster table=kg_facts cols=g_state_cluster unique=0
 index=idx_kg_facts_subject table=kg_facts cols=subject unique=0
@@ -352,7 +324,6 @@ index=idx_tunnels_kind_source_drawer table=tunnels cols=kind_id,sourceDrawerId u
 index=idx_tunnels_kind_target_drawer table=tunnels cols=kind_id,targetDrawerId unique=0
 index=idx_tunnels_source table=tunnels cols=sourceWing,sourceRoom unique=0
 index=idx_tunnels_target table=tunnels cols=targetWing,targetRoom unique=0
-index=idx_vector_rep_claims_consumer table=vector_rep_claims cols=consumer unique=0
 index=idx_vectors_filed_at_item table=vectors cols=filed_at,item_id unique=0
 index=idx_vectors_item table=vectors cols=item_id unique=0
 index=idx_vectors_model_item table=vectors cols=model_id,item_id unique=0

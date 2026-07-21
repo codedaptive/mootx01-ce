@@ -121,7 +121,7 @@ public enum VectorSimilaritySignal {
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int = defaultProximityThreshold,
-        corpus: Corpus? = nil,
+        corpus: CorpusContentEngine? = nil,
         edgeChecker: AssociationEdgeChecker? = nil
     ) -> SignalSpec {
         SignalSpec(
@@ -150,7 +150,7 @@ public enum VectorSimilaritySignal {
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int,
-        corpus: Corpus?,
+        corpus: CorpusContentEngine?,
         edgeChecker: AssociationEdgeChecker?,
         context: SignalContext
     ) async -> [SignalEmission] {
@@ -217,45 +217,25 @@ public enum VectorSimilaritySignal {
             }
         }
 
-        // Lane 2 — chunk-keyed corpus rows. On a production estate this is
-        // the ONLY populated lane: the encode drain keys every vector row by
-        // chunk UUID under the corpus provider's modelID, so lane 1 finds
-        // nothing there. Mine the same probe sample on the corpus lane and
-        // map chunk hits back to their owning drawers (chunk → source_id via
-        // the corpus's warm map). Chunk pairs from the SAME drawer collapse.
-        // First hit wins per drawer pair — findNearest returns matches in
-        // ascending distance, so the first hit for a pair is its closest
-        // chunk evidence. Mirrors the contradiction hunter's lane split.
+        // Lane 2 — the corpus provider's rows. Shared-content 1.1: the
+        // engine keys every vector row by the DRAWER ID itself, so a hit's
+        // itemID is the owning drawer directly — no chunk→drawer remap and
+        // no same-drawer chunk collapse (one row per drawer per lane).
+        // Mirrors the contradiction hunter's lane split.
         if let corpus {
             let corpusModelID = await corpus.modelID
-            var chunkMatches: [(a: String, b: String, weight: Double)] = []
-            var involvedChunkIDs: Set<UUID> = []
             for itemID in itemIDs {
-                guard let probeUUID = UUID(uuidString: itemID),
-                      let probeEngram = try? await vectorStore.getVector(
-                          itemID: itemID, modelID: corpusModelID) else { continue }
+                guard let probeEngram = try? await vectorStore.getVector(
+                    itemID: itemID, modelID: corpusModelID) else { continue }
                 guard let matches = try? await vectorStore.findNearest(
                     probe: probeEngram,
                     modelID: corpusModelID,
                     limit: neighboursPerProbe) else { continue }
                 for match in matches {
                     guard match.itemID != itemID,
-                          match.distance <= proximityThreshold,
-                          let matchUUID = UUID(uuidString: match.itemID) else { continue }
-                    involvedChunkIDs.insert(probeUUID)
-                    involvedChunkIDs.insert(matchUUID)
-                    chunkMatches.append(
-                        (a: itemID, b: match.itemID,
-                         weight: 1.0 - Double(match.distance) / 256.0))
-                }
-            }
-            if !chunkMatches.isEmpty {
-                let owners = await corpus.sourceIDs(forChunkIDs: Array(involvedChunkIDs))
-                for match in chunkMatches {
-                    guard let ua = UUID(uuidString: match.a),
-                          let ub = UUID(uuidString: match.b),
-                          let sourceA = owners[ua], let sourceB = owners[ub],
-                          sourceA != sourceB else { continue }
+                          match.distance <= proximityThreshold else { continue }
+                    let sourceA = itemID
+                    let sourceB = match.itemID
                     let pairKey = sourceA < sourceB
                         ? "\(sourceA)||\(sourceB)"
                         : "\(sourceB)||\(sourceA)"
@@ -263,7 +243,7 @@ public enum VectorSimilaritySignal {
                     candidatePairs.append(
                         (a: min(sourceA, sourceB),
                          b: max(sourceA, sourceB),
-                         weight: match.weight))
+                         weight: 1.0 - Double(match.distance) / 256.0))
                 }
             }
         }

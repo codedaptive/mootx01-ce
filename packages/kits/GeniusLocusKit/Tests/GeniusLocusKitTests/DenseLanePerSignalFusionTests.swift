@@ -91,14 +91,14 @@ struct DenseLaneSingleProviderTests {
         // content embeds to distinct vectors.
         let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
-        let corpus = try await CorpusKit.Corpus(
-            storage: corpusStorage,
+        let corpus = try await CorpusKit.CorpusContentEngine(
+            standaloneOn: corpusStorage,
             models: [.miniLM(inference: { tokens in
                 let v = Float((tokens.first ?? 0) % 7 + 1) / 7.0
                 return Array(repeating: v, count: 384)
             })]
         )
-        try await corpus.ingest(content, sourceID: drawers[0].id, now: t0)
+        try await corpus.ingest(content, contentID: drawers[0].id, now: t0)
         await kit.registerCorpus(corpus, for: handle)
 
         let result = try await kit.recall(handle, unionBestRRF(queryText: content))
@@ -153,8 +153,8 @@ struct DenseLaneConsensusTests {
         // token so the cosine ordering is deterministic and reproducible.
         let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
-        let corpus = try await CorpusKit.Corpus(
-            storage: corpusStorage,
+        let corpus = try await CorpusKit.CorpusContentEngine(
+            standaloneOn: corpusStorage,
             models: [
                 .miniLM(inference: { tokens in
                     // miniLM dimension 384. Encode along axis chosen by first token
@@ -179,8 +179,8 @@ struct DenseLaneConsensusTests {
                 })
             ]
         )
-        try await corpus.ingest(consensusContent, sourceID: consensusID, now: t0)
-        try await corpus.ingest(singleContent, sourceID: singleID, now: t0)
+        try await corpus.ingest(consensusContent, contentID: consensusID, now: t0)
+        try await corpus.ingest(singleContent, contentID: singleID, now: t0)
         await kit.registerCorpus(corpus, for: handle)
 
         let result = try await kit.recall(handle, unionBestRRF(queryText: queryText, limit: 10))

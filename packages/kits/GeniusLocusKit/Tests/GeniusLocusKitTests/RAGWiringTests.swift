@@ -51,11 +51,9 @@ struct ExternalCorpusHybridRecallTests {
 
         // Ingest documents whose content matches the corpus entries.
         try await corpus.ingest(
-            "The quick brown fox jumps over the lazy dog",
-            sourceID: "entry-0", now: t0)
+            "The quick brown fox jumps over the lazy dog", sourceID: "entry-0", now: t0)
         try await corpus.ingest(
-            "Pack my box with five dozen liquor jugs",
-            sourceID: "entry-1", now: t0)
+            "Pack my box with five dozen liquor jugs", sourceID: "entry-1", now: t0)
 
         let externalCorpus = ExternalCorpus(
             name: "test-corpus",
@@ -141,8 +139,7 @@ struct ExternalCorpusHybridRecallTests {
         // and the vector pass contribute. The DeterministicTokenizer
         // always produces an embedding, so vectorScore is always present.
         try await corpus.ingest(
-            "substrate mathematics bitmap fingerprint",
-            sourceID: "math-doc", now: t0)
+            "substrate mathematics bitmap fingerprint", sourceID: "math-doc", now: t0)
 
         let externalCorpus = ExternalCorpus(
             name: "score-corpus",
@@ -360,8 +357,8 @@ struct VectorSimilaritySignalProximityTests {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "assoc-token-bag-v1", modelVersion: "1.0",
             projectionSeed: 0xC0FF_EE01, inference: tokenBag)
-        let corpus = try await Corpus(
-            storage: storage, model: .randomIndexing(provider: provider))
+        let corpus = try await CorpusContentEngine(
+            standaloneOn: storage, models: [.randomIndexing(provider: provider)])
 
         // Two near-identical drawers + one far filler, ingested the way the
         // encode pipeline does: chunk rows under the corpus's modelID.
@@ -377,7 +374,7 @@ struct VectorSimilaritySignalProximityTests {
         let b = try await kit.capture(handle, frameB)
         let c = try await kit.capture(handle, frameC)
         for drawer in [a, b, c] {
-            try await corpus.ingest(drawer.content, sourceID: drawer.id, now: t0)
+            try await corpus.ingest(drawer.content, contentID: drawer.id, now: t0)
         }
 
         // "test-v1" matches no corpus row — the drawer-keyed lane is empty

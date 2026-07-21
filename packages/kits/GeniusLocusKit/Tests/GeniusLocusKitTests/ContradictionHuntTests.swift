@@ -252,8 +252,8 @@ struct ContradictionHuntTests {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "hunt-token-bag-v1", modelVersion: "1.0",
             projectionSeed: 0xC0FF_EE00, inference: tokenBag)
-        let corpus = try await Corpus(
-            storage: storage, model: .randomIndexing(provider: provider))
+        let corpus = try await CorpusContentEngine(
+            standaloneOn: storage, models: [.randomIndexing(provider: provider)])
         await kit.registerCorpus(corpus, for: handle)
         await kit.registerVectorStore(corpus.sharedVectorStore, for: handle)
 
@@ -264,7 +264,7 @@ struct ContradictionHuntTests {
         let filler = try await kit.capture(
             handle, captureFrame(content: "grocery list apples and oranges", room: "study"))
         for drawer in [a, b, filler] {
-            try await corpus.ingest(drawer.content, sourceID: drawer.id, now: Self.t0)
+            try await corpus.ingest(drawer.content, contentID: drawer.id, now: Self.t0)
         }
 
         let report = try await kit.huntContradictions(in: handle, now: Self.t0)

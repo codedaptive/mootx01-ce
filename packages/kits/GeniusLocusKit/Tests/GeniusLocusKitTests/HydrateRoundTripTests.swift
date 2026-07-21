@@ -68,7 +68,8 @@ struct CompositeSchemaVersionTests {
         let componentSum =
             LocusKitSchema.version
             + VectorStore.schemaDeclaration.version
-            + BundleStore.schemaDeclaration.version
+            + VectorRepresentationClaims.schemaDeclaration.version
+            + CorpusSchemaProfile.attachedDeclaration.version
             + 1  // grants
             + MatrixSnapshotStore.schemaDeclaration.version
         #expect(GeniusLocusKitSchema.version == componentSum)

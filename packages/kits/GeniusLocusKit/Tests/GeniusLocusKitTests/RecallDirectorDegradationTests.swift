@@ -95,14 +95,14 @@ private func openFullyWiredEstate(
         estateID: UUID(), backend: .inMemory))
     // Use a deterministic inference function so tests are bit-identical
     // across runs and do not depend on a CoreML model.
-    let corpus = try await CorpusKit.Corpus(
-        storage: corpusStorage,
-        model: .miniLM(inference: { tokens in
+    let corpus = try await CorpusContentEngine(
+        standaloneOn: corpusStorage,
+        models: [.miniLM(inference: { tokens in
             let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
             return Array(repeating: v, count: 384)
-        })
+        })]
     )
-    try await corpus.ingest(content, sourceID: drawer.id, now: t0)
+    try await corpus.ingest(content, contentID: drawer.id, now: t0)
     await kit.registerCorpus(corpus, for: handle)
 
     // VectorStore: separate InMemory storage, engram keyed by drawer.id directly.

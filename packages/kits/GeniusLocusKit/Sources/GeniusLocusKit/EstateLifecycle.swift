@@ -371,10 +371,18 @@ public extension GeniusLocusKit {
             // composite open the hydrate launch path performs in
             // open(inMemory:hydrateFrom:).
             try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
-            // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
-            // Both are created on backingStorage. The Corpus.init call applies both
-            // BundleStore and VectorStore schema declarations to backingStorage.
-            let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
+            // Full composition: the attached-mode CorpusContentEngine (BM25 +
+            // internal vectors, Drawer-ID keyed) + standalone VectorStore.
+            // EVERY GLK Corpus is constructed attached + .wholeContent — the
+            // configuration initializer rejects standalone or passage-enabled
+            // registration structurally (shared-content 1.1 decision lock).
+            let estateObj = try estate(for: handle)
+            let corpus = try await CorpusContentEngine(
+                storage: backingStorage,
+                configuration: CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                models: embeddingModels)
             registerCorpus(corpus, for: handle)
             // BORROW Corpus's single dense VectorStore for GLK's scored-recall
             // vector lane rather than constructing a second VectorStore over the
@@ -402,8 +410,15 @@ public extension GeniusLocusKit {
             )
 
         case .corpusOnly:
-            // LocusKit core + Corpus. No standalone VectorStore registration.
-            let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
+            // LocusKit core + the attached engine. No standalone VectorStore
+            // registration. Same attached + .wholeContent construction rule.
+            let estateObj = try estate(for: handle)
+            let corpus = try await CorpusContentEngine(
+                storage: backingStorage,
+                configuration: CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: LocusDrawerCorpusContentSource(estate: estateObj),
+                models: embeddingModels)
             registerCorpus(corpus, for: handle)
             // A CorpusOnly estate also feeds its Corpus from capture: mount the
             // Corpus-owned ingest queue + drain worker and wire the room rollup.

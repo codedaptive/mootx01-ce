@@ -35,6 +35,9 @@ import EngramLib
 import Foundation
 import IntellectusLib
 import PersistenceKit
+import PersistenceKitSQLite
+import QueueKit
+import SubstrateTypes
 import VectorKit
 
 // MARK: - Results
@@ -217,9 +220,12 @@ public actor CorpusContentEngine {
         var countsDocumentCount: Int
     }
 
-    private let storage: any Storage
+    // Internal (not private) so the queue extension in
+    // CorpusContentEngineQueue.swift can reach the estate configuration.
+    let storage: any Storage
     private let configuration: CorpusContentConfiguration
-    private let source: any CorpusContentSource
+    // Internal so the queue drain worker resolves records at work time.
+    let source: any CorpusContentSource
     private let invertedIndex: InvertedIndexStore
     private let vectorStore: VectorStore
     private let basisStore: BasisStore
@@ -227,6 +233,35 @@ public actor CorpusContentEngine {
     private let indexState: CorpusIndexStateStore
     private let claims: VectorRepresentationClaims
     private var slots: [Slot]
+
+    // MARK: - Content-reference ingest queue state (GLK shared-content P3)
+    //
+    // The engine owns its encode pipeline exactly as the legacy Corpus did —
+    // QueueKit jobs on the shared per-estate queue.sqlite, one cross-process
+    // drainer per stream — but the JOB PAYLOAD is a `ContentIndexJob`
+    // (id/revision/digest/cursor): Drawer change references, never text.
+    // See CorpusContentEngineQueue.swift for the methods.
+
+    /// The engine-owned ingest queue. nil until `mountIngestQueue()`.
+    var ingestQueue: QueueKit?
+    /// The background drain worker; spawned in `mountIngestQueue`, cancelled
+    /// in `dropIngestQueue`.
+    var ingestDrainWorker: Task<Void, Never>?
+    /// Single-drainer lease for durable estates ("encode" stream).
+    var drainLease: DrainLease?
+    /// Per-engine HLC for stamping queue submissions (deterministic — derived
+    /// from each change's capture instant, no Date() in the engine).
+    var ingestHLC = HLCGenerator(nodeID: 1)
+    /// Invoked AFTER a drained batch indexes, with the affected canonical
+    /// content IDs (Drawer IDs) — GLK's room-rollup coordination hook.
+    public var onEncoded: (@Sendable ([String]) async -> Void)?
+
+    /// Cancel the drain worker and release the lease on teardown (mirror of
+    /// `Corpus.deinit`; the explicit path is `dropIngestQueue()`).
+    deinit {
+        ingestDrainWorker?.cancel()
+        drainLease?.release()
+    }
 
     /// Construct the engine over a validated configuration and content
     /// source. Applies the mode's profile declaration plus the VectorKit
@@ -301,6 +336,40 @@ public actor CorpusContentEngine {
         }
     }
 
+    /// STANDALONE convenience: construct a whole-content standalone engine
+    /// that OWNS its canonical documents (a `CorpusDocumentStore` over the
+    /// same storage). The complete put→index→recall standalone surface in
+    /// one constructor.
+    public init(
+        standaloneOn storage: any Storage,
+        models: [EmbeddingModel] = [.default]
+    ) async throws {
+        try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+        try await self.init(
+            storage: storage,
+            configuration: CorpusContentConfiguration(
+                mode: .standalone, indexUnit: .wholeContent),
+            source: CorpusDocumentStore(storage: storage),
+            models: models)
+    }
+
+    /// STANDALONE convenience: put canonical text and index it in one call.
+    /// Attached mode rejects content mutation through CorpusKit
+    /// (`attachedModeViolation`) — removal/authorship authority there is the
+    /// GLK/LocusKit verb surface.
+    public func ingest(_ text: String, contentID: CorpusContentID, now: Date) async throws {
+        guard configuration.allowsContentMutation,
+              let store = source as? any CorpusContentStore else {
+            throw CorpusKitError.attachedModeViolation(
+                "content mutation through CorpusKit is standalone-only — attached "
+                + "content changes flow through the canonical store's own verbs")
+        }
+        try validate(id: contentID)
+        guard !text.isEmpty else { return }
+        _ = try await store.put(text, id: contentID, now: now)
+        try await indexContent(id: contentID, now: now)
+    }
+
     // MARK: - Content validation
 
     private func validate(id: CorpusContentID) throws {
@@ -319,7 +388,7 @@ public actor CorpusContentEngine {
     public func indexContent(id: CorpusContentID, now: Date) async throws -> Bool {
         try validate(id: id)
         guard let record = try await source.record(for: id) else {
-            try await clearDerivedState(id: id, now: now)
+            try await clearDerivedState(id: id)
             return false
         }
         try await index(record: record, appliedCursor: nil, force: false, now: now)
@@ -350,7 +419,7 @@ public actor CorpusContentEngine {
             }
             try await index(record: record, appliedCursor: cursor, force: false, now: now)
         case .remove(let id, _):
-            try await clearDerivedState(id: id, now: now)
+            try await clearDerivedState(id: id)
             Intellectus.report(.metric(
                 name: "corpus.content.removed", value: 1.0,
                 tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
@@ -537,7 +606,7 @@ public actor CorpusContentEngine {
 
     /// Clear EVERYTHING derived for `id` (the remove path): BM25, vectors,
     /// passage rows, and the checkpoint.
-    private func clearDerivedState(id: CorpusContentID, now: Date) async throws {
+    private func clearDerivedState(id: CorpusContentID) async throws {
         let keys = try await unitKeys(for: id)
         try await deleteDerivedRows(unitKeys: keys)
         if case .tokenBudgetedPassages = configuration.indexUnit {
@@ -620,7 +689,7 @@ public actor CorpusContentEngine {
         }
         for id in try await source.activeContentIDs() {
             guard let record = try await source.record(for: id) else {
-                try await clearDerivedState(id: id, now: now)
+                try await clearDerivedState(id: id)
                 continue
             }
             // Forced: a retrain changes the basis, so vectors must be
@@ -748,6 +817,19 @@ public actor CorpusContentEngine {
         }.prefix(limit).map { (id: $0.key, score: $0.value) }
     }
 
+    /// Enter deferred-index mode on the vector store for a drain burst (one
+    /// resident-index rebuild per burst — O(N), not O(N²)). Internal seam for
+    /// the queue extension; mirrors `Corpus.beginDeferredVectorIndex`.
+    func beginDeferredVectorIndex() async throws {
+        try await vectorStore.beginDeferredIndex()
+    }
+
+    /// Publish the deferred resident vector index at burst end. Internal seam
+    /// for the queue extension; mirrors `Corpus.publishVectorIndex`.
+    func publishVectorIndex() async throws {
+        try await vectorStore.publishResidentIndex()
+    }
+
     /// The default signal's model ID (for callers driving the vector lane
     /// directly).
     public var modelID: String { slots[0].provider.modelID }
@@ -755,5 +837,247 @@ public actor CorpusContentEngine {
     /// Embed on the default signal (the recall probe surface).
     public func embed(_ text: String) async throws -> Engram {
         try await slots[0].provider.embed(text)
+    }
+
+    // MARK: - GLK orchestration surface (P3 cutover compatibility)
+
+    /// BM25-only top-k with the RecallDirector's historical tuple labels.
+    /// Identity is DIRECT: the returned `sourceID` IS the canonical content
+    /// ID (Drawer ID) — no translation happened to produce it.
+    public func bm25TopKBySource(
+        query: String, limit: Int
+    ) async throws -> [(sourceID: String, score: Float)] {
+        try await bm25TopK(query: query, limit: limit)
+            .map { (sourceID: $0.id, score: $0.score) }
+    }
+
+    /// Live indexed content IDs as a Set — the intake backfill's skip set.
+    public func indexedSourceIDs() async throws -> Set<String> {
+        Set(try await indexedContentIDs())
+    }
+
+    /// Per-content derived-index coverage attestations: which canonical
+    /// (revision, digest) each ID's derived rows currently reflect. This is
+    /// the engine's ONLY integrity surface — canonical-content integrity is
+    /// the LocusKit Drawer content root; the engine attests coverage and
+    /// never builds a second content Merkle hierarchy (shared-content 1.1).
+    public func indexCoverageAttestations() async throws
+        -> [(contentID: CorpusContentID, revision: Int64, digest: String)] {
+        try await indexState.allStates()
+            .filter { $0.contentID != Self.feedCursorRowID }
+            .map { ($0.contentID, $0.revision, $0.digest) }
+    }
+
+    /// Indexed content-row count (content-unit semantics — canonical rows,
+    /// not chunks). The estate drain status reports this.
+    public func count() async throws -> Int {
+        try await indexedContentIDs().count
+    }
+
+    /// The estate's single dense vector store, borrowed by the composition
+    /// layer for its scored-recall vector lane (one store, one resident
+    /// array — same seam the legacy Corpus exposed).
+    public var sharedVectorStore: VectorStore { vectorStore }
+
+    /// Clear one content ID's derived state directly (the expunge/withdraw
+    /// verb path — removal authority is the GLK/LocusKit verb; this clears
+    /// the derived rows it owns).
+    public func removeContent(id: CorpusContentID) async throws {
+        try validate(id: id)
+        try await clearDerivedState(id: id)
+    }
+
+    /// The declared encode speed. The content drain currently processes
+    /// serially per job; the setting is retained for the fan-out the scale
+    /// phase may add. Accepting it keeps the estate governor's surface.
+    public func setEncodeSpeed(_ speed: EncodeSpeed) {
+        // Serial drain today — the preference has no effect yet.
+    }
+
+    /// Destroy this engine's recall index — OWNERSHIP-SCOPED, unlike the
+    /// legacy `destroyAllVectors` teardown:
+    ///   - BM25 sidecar + checkpoints + basis/counts are corpus-exclusive
+    ///     tables and are cleared wholesale;
+    ///   - vector rows are deleted by EXACT KEY (every checkpointed content
+    ///     ID × slot model × lane) — rows of other lanes are never touched;
+    ///   - the engine's consumer claims are released; representations still
+    ///     claimed by other lanes survive untouched.
+    public func destroyRecallIndex() async throws {
+        let ids = try await indexedContentIDs()
+        var keys: [VectorExactKey] = []
+        for id in ids {
+            for key in try await unitKeys(for: id) {
+                for slot in slots {
+                    keys.append(VectorExactKey(
+                        itemID: key, vectorIndex: 0, modelID: slot.provider.modelID))
+                    keys.append(VectorExactKey(
+                        itemID: key, vectorIndex: 1, modelID: slot.provider.modelID))
+                }
+            }
+        }
+        try await vectorStore.deleteVectors(keys: keys)
+        try await invertedIndex.deleteAll()
+        try await indexState.clearAll()
+        try await basisStore.deleteAll()
+        try await countsStore.deleteAll()
+        try await claims.releaseAllClaims(consumer: Self.claimsConsumer)
+    }
+
+    // MARK: - Per-signal dense float lanes (the RecallDirector seam)
+
+    /// Per-signal dense float NEAREST recall — content-ID keyed. One
+    /// `(modelID, outcome)` pair per held slot, in slot order. Hit item IDs
+    /// are canonical content IDs (passage keys aggregate to their content
+    /// ID before ranking).
+    public func floatNearestPerSignal(
+        query: String, limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
+        await floatPerSignal(query: query, limit: limit, direction: .nearest)
+    }
+
+    /// Single-signal dense float nearest recall — the DEFAULT slot's
+    /// outcome (compatibility convenience over `floatNearestPerSignal`).
+    public func floatNearest(query: String, limit: Int) async -> FloatLaneOutcome {
+        await floatNearestPerSignal(query: query, limit: limit).first?.outcome ?? .emptyQuery
+    }
+
+    /// Per-signal dense float FARTHEST (anti-similarity) recall.
+    public func floatFarthestPerSignal(
+        query: String, limit: Int
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
+        await floatPerSignal(query: query, limit: limit, direction: .farthest)
+    }
+
+    /// Test-only: when non-nil, the next per-signal float call reports
+    /// `.storeError(this)` for the DEFAULT slot (single-use), mirroring the
+    /// legacy `Corpus._testForceFloatStoreError` seam so GLK's dark-lane
+    /// chain tests exercise the store-error contract. Never set in
+    /// production.
+    var _forcedFloatError: Error? = nil
+
+    /// Install the single-use forced float store error (test seam).
+    public func _testForceFloatStoreError(_ error: Error) {
+        _forcedFloatError = error
+    }
+
+    /// Test-only ingest failure hook: invoked with the content ID BEFORE the
+    /// drain processes a job; a throw simulates a transient index failure so
+    /// the at-least-once retry semantics are exercisable. nil in production.
+    var _ingestFailureHook: (@Sendable (String) throws -> Void)?
+
+    /// Arm (or clear) the drain failure-injection hook (test seam).
+    public func _armIngestFailureHook(_ hook: (@Sendable (String) throws -> Void)?) {
+        _ingestFailureHook = hook
+    }
+
+    private func floatPerSignal(
+        query: String, limit: Int, direction: SearchDirection
+    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
+        guard limit > 0, !query.isEmpty else {
+            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
+        }
+        // Consume the forced-error seam for the DEFAULT slot (nearest path
+        // only — same contract as the legacy engine's seam).
+        var forcedDefault: FloatLaneOutcome? = nil
+        if direction == .nearest, let forced = _forcedFloatError {
+            _forcedFloatError = nil
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.store_error", value: 1.0,
+                tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+            forcedDefault = .storeError(forced)
+        }
+        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
+        results.reserveCapacity(slots.count)
+        for (slotIndex, slot) in slots.enumerated() {
+            if slotIndex == 0, let forced = forcedDefault {
+                results.append((slot.provider.modelID, forced))
+                continue
+            }
+            let provider = slot.provider
+            let probe: [Float]
+            do {
+                let result = try await provider.embedFloat(query)
+                guard !result.isEmpty else {
+                    Intellectus.report(.metric(
+                        name: "corpus.float_lane.dark_provider", value: 1.0,
+                        tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+                    results.append((provider.modelID, .unavailableProviderOptOut))
+                    continue
+                }
+                probe = result
+            } catch VectorKitError.embedFloatVocabMiss {
+                Intellectus.report(.metric(
+                    name: "corpus.float_lane.dark_vocab_miss", value: 1.0,
+                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+                results.append((provider.modelID, .unavailableNoVocabHit))
+                continue
+            } catch {
+                Intellectus.report(.metric(
+                    name: "corpus.float_lane.dark_provider", value: 1.0,
+                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+                results.append((provider.modelID, .unavailableProviderOptOut))
+                continue
+            }
+            let matches: [VectorMatch]
+            do {
+                switch direction {
+                case .nearest:
+                    matches = try await vectorStore.findNearestFloat(
+                        probe: probe, modelID: provider.modelID, limit: limit * 4)
+                case .farthest:
+                    matches = try await vectorStore.findFarthestFloat(
+                        probe: probe, modelID: provider.modelID, limit: limit * 4)
+                }
+            } catch {
+                Intellectus.report(.metric(
+                    name: "corpus.float_lane.store_error", value: 1.0,
+                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+                results.append((provider.modelID, .storeError(error)))
+                continue
+            }
+            guard !matches.isEmpty else {
+                Intellectus.report(.metric(
+                    name: "corpus.float_lane.dark_no_rows", value: 1.0,
+                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+                results.append((provider.modelID, .unavailableNoFloatRows))
+                continue
+            }
+            // Aggregate unit hits to canonical content IDs — DIRECT identity;
+            // a passage key parses to its content ID, a whole-content key IS it.
+            var byContent: [String: Float] = [:]
+            for match in matches {
+                let id = PassageProduction.contentID(fromItemKey: match.itemID)
+                let similarity = 1.0 - Float(match.distance) / 10_000.0
+                switch direction {
+                case .nearest:
+                    byContent[id] = max(byContent[id] ?? -Float.greatestFiniteMagnitude, similarity)
+                case .farthest:
+                    byContent[id] = min(byContent[id] ?? Float.greatestFiniteMagnitude, similarity)
+                }
+            }
+            guard !byContent.isEmpty else {
+                Intellectus.report(.metric(
+                    name: "corpus.float_lane.dark_no_rows", value: 1.0,
+                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+                results.append((provider.modelID, .unavailableNoFloatRows))
+                continue
+            }
+            var ranked = byContent.map { (itemID: $0.key, similarity: $0.value) }
+            ranked.sort { a, b in
+                if a.similarity != b.similarity {
+                    switch direction {
+                    case .nearest: return a.similarity > b.similarity
+                    case .farthest: return a.similarity < b.similarity
+                    }
+                }
+                return a.itemID < b.itemID
+            }
+            let hits = Array(ranked.prefix(limit))
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.hit", value: Double(hits.count),
+                tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+            results.append((provider.modelID, .hits(hits)))
+        }
+        return results
     }
 }

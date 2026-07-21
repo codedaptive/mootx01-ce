@@ -112,9 +112,9 @@ struct RecallShapeAntiSimilarTests {
         // "most dissimilar" UNAMBIGUOUS (no cosine ties), so the dense top-K
         // truncation drops a well-defined tail and the farthest pass keeps a
         // well-defined head. The query's own count is pinned smallest below.
-        let corpus = try await CorpusKit.Corpus(
-            storage: corpusStorage,
-            model: .miniLM(inference: { tokens in
+        let corpus = try await CorpusContentEngine(
+            standaloneOn: corpusStorage,
+            models: [.miniLM(inference: { tokens in
                 // θ scaled so 0…drawerCount tokens sweeps ~0…90°: orthogonal at the
                 // far end, identical at the near end. 0.018 rad/token ≈ 82° at i=80.
                 let theta = Float(tokens.count) * 0.018
@@ -122,7 +122,7 @@ struct RecallShapeAntiSimilarTests {
                 v[0] = Foundation.cos(theta)
                 v[1] = Foundation.sin(theta)
                 return v
-            })
+            })]
         )
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
@@ -148,7 +148,7 @@ struct RecallShapeAntiSimilarTests {
             )
             let drawer = try await kit.capture(handle, frame)
             ids.append(drawer.id)
-            try await corpus.ingest(content, sourceID: drawer.id, now: Self.t0)
+            try await corpus.ingest(content, contentID: drawer.id, now: Self.t0)
             let engram = try await corpus.embed(content)
             try await vectorStore.addVector(
                 itemID: drawer.id, engram: engram, modelID: hammingModelID,

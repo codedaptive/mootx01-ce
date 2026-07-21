@@ -42,28 +42,36 @@ public extension GeniusLocusKit {
         let dummyId = SnapshotId("")
 
         if let corpus = corpusKits[handle] {
-            // Per-corpus attestations: one per source document.
-            let sourceIDs = try await corpus.indexedSourceIDs()
-            for sourceID in sourceIDs.sorted() {
-                let root = try await corpus.corpusMerkleRoot(for: sourceID)
+            // Shared-content 1.1: canonical-content integrity is the LocusKit
+            // Drawer content root — CorpusKit builds NO second content Merkle
+            // hierarchy. The engine attests derived-index COVERAGE instead:
+            // per content ID, the canonical (revision, digest) its derived
+            // rows reflect (the digest IS the drawer content digest, so the
+            // attestation binds derived rows to canonical content without
+            // duplicating the hierarchy).
+            let coverage = try await corpus.indexCoverageAttestations()
+            for entry in coverage.sorted(by: { $0.contentID < $1.contentID }) {
                 corpusAttestations.append(SnapshotAttestation(
                     snapshotId: dummyId,
-                    subjectKind: "corpus",
-                    subjectId: sourceID,
-                    merkleRoot: root.hexString
+                    subjectKind: "corpus_index",
+                    subjectId: entry.contentID,
+                    merkleRoot: entry.digest
                 ))
             }
-
-            // Global corpus attestation: interior hash over all corpus roots.
-            let globalRoot = try await corpus.globalCorpusMerkleRoot()
+            // Global coverage attestation: one digest over the sorted
+            // per-content coverage rows.
+            let folded = coverage
+                .sorted(by: { $0.contentID < $1.contentID })
+                .map { "\($0.contentID):\($0.revision):\($0.digest)" }
+                .joined(separator: "\n")
             corpusAttestations.append(SnapshotAttestation(
                 snapshotId: dummyId,
-                subjectKind: "corpus_global",
+                subjectKind: "corpus_index_global",
                 subjectId: handle.estateUUID.uuidString,
-                merkleRoot: globalRoot.hexString
+                merkleRoot: CorpusContentDigest.digest(folded)
             ))
 
-            compositionLog.info("MerkleComposition: \(corpusAttestations.count) corpus attestations for estate \(handle.estateUUID)")
+            compositionLog.info("MerkleComposition: \(corpusAttestations.count) corpus coverage attestations for estate \(handle.estateUUID)")
         }
 
         return try await estate.createSnapshot(

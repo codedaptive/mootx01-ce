@@ -66,24 +66,34 @@ struct ProvisionDefaultEnsembleTests {
     }
 
     /// Provision a GLK estate with NO explicit embedding argument (the default),
-    /// reach the wired Corpus, ingest a diverse corpus, and reindex (trains the
-    /// trainable signals). Returns the registered Corpus.
-    private func provisionAndTrain(_ kit: GeniusLocusKit) async throws -> Corpus {
+    /// capture a diverse corpus through the ATTACHED production path (Drawer
+    /// rows are canonical; the engine indexes them via the LocusKit adapter),
+    /// and reindex (trains the trainable signals). Returns the registered
+    /// engine plus the drawer-ID → cluster map (attached mode assigns Drawer
+    /// IDs at capture; content mutation through CorpusKit is rejected).
+    private func provisionAndTrain(
+        _ kit: GeniusLocusKit
+    ) async throws -> (corpus: CorpusContentEngine, clusters: [String: String]) {
         let storage = try sqliteStorage()
         let owner = OwnerCredentials(ownerIdentifier: "ensemble-default-test")
         // The production call shape: NO embeddingModels argument → the flipped
         // default (CorpusEnsemble.defaultEnsemble()).
         let handle = try await kit.provision(
             storage: storage, owner: owner, params: glkParams())
-        // Reach the Corpus the provision path wired (internal; @testable).
-        // GeniusLocusKit is an actor, so the registry read is awaited.
+        // Reach the engine the provision path wired (internal; @testable).
         let corpus = try #require(await kit.corpusKits[handle],
-                                  "provision(.glk) must register a Corpus")
+                                  "provision(.glk) must register a Corpus engine")
+        var clusters: [String: String] = [:]
         for doc in docs {
-            try await corpus.ingest(doc.text, sourceID: doc.id, now: now)
+            let frame = CaptureFrame(
+                content: doc.text, channel: .typed, room: "ensemble",
+                latticeAnchor: LatticeAnchor(udcCode: "004"),
+                addedBy: "ensemble-test", embeddingModelID: "ensemble-v1")
+            let drawer = try await kit.capture(handle, frame, mode: .impatient)
+            clusters[drawer.id] = String(doc.id.prefix(while: { $0 != "-" }))
         }
         try await corpus.reindex(now: now)
-        return corpus
+        return (corpus, clusters)
     }
 
     // The provisioned Corpus must hold ALL FIVE default signals — proving the
@@ -91,7 +101,7 @@ struct ProvisionDefaultEnsembleTests {
     @Test("provision default wires all five honest signals")
     func provisionWiresFiveSignals() async throws {
         let kit = GeniusLocusKit()
-        let corpus = try await provisionAndTrain(kit)
+        let (corpus, _) = try await provisionAndTrain(kit)
 
         let perSignal = await corpus.floatNearestPerSignal(
             query: "orbit spacecraft mission", limit: 3)
@@ -105,7 +115,7 @@ struct ProvisionDefaultEnsembleTests {
     @Test("recall un-pins through the provision default")
     func recallUnpinsThroughProvision() async throws {
         let kit = GeniusLocusKit()
-        let corpus = try await provisionAndTrain(kit)
+        let (corpus, clusters) = try await provisionAndTrain(kit)
 
         let queries: [(probe: String, cluster: String)] = [
             ("orbit spacecraft mission", "space"),
@@ -116,7 +126,7 @@ struct ProvisionDefaultEnsembleTests {
         for q in queries {
             let ids = rankedIDs(await corpus.floatNearest(query: q.probe, limit: 3))
             let top = try #require(ids.first, "query '\(q.probe)' must return hits")
-            #expect(top.hasPrefix(q.cluster),
+            #expect(clusters[top] == q.cluster,
                     "query '\(q.probe)' top '\(top)' must be in cluster '\(q.cluster)'")
             topHits.append(top)
         }

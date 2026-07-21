@@ -8,8 +8,15 @@
 //                   associations, learned_references, source_catalog,
 //                   node_bundles, container_fingerprints, recall_trace, keys,
 //                   snapshot_registry, snapshot_attestations
-//   VectorKit     — vectors
-//   CorpusKit     — chunks, corpus_metadata
+//   VectorKit     — vectors (+ the vector_rep_claims consumer ledger)
+//   CorpusKit     — the ATTACHED derived profile only: iix_termfreqs,
+//                   iix_doclens, corpus_provider_basis,
+//                   corpus_provider_counts, corpus_index_state.
+//                   NO canonical content table — LocusKit Drawers are the
+//                   one content home (shared-content 1.1 cutover); the
+//                   legacy chunks/corpus_metadata copy lane is gone from
+//                   fresh estates and retired by the shared-content
+//                   migration on existing ones.
 //   GLK grants    — grants
 //   GLK matrix    — matrix_snapshot
 //
@@ -70,21 +77,20 @@ public enum GeniusLocusKitSchema {
     public static let version =
         LocusKitSchema.version
         + VectorStore.schemaDeclaration.version
-        + BundleStore.schemaDeclaration.version
+        + VectorRepresentationClaims.schemaDeclaration.version
+        + CorpusSchemaProfile.attachedDeclaration.version
         + grantsSchemaVersion
         + matrixSnapshotSchemaVersion
 
-    /// The complete 20-table schema declaration for a GeniusLocus estate.
+    /// The complete composite schema declaration for a GeniusLocus estate.
     ///
     /// Compose the component kit tables and indices into a single declaration
     /// under the "GeniusLocusKit" kit ID and composite version. The caller passes
     /// this to:
-    ///   - `Storage.open(schema:)` — creates all 20 tables, indices, and
+    ///   - `Storage.open(schema:)` — creates every declared table, index, and
     ///     generated-column triggers in the target backend.
-    ///   - `StorageReplicator.flush(from:into:schema:)` — copies all 20
-    ///     tables plus audit events into the durable backend.
-    ///   - `StorageReplicator.hydrate(into:from:schema:)` — copies all 20
-    ///     tables plus audit events from the durable backend into a fresh
+    ///   - `StorageReplicator.flush(from:into:schema:)` —     ///     every declared table plus audit events into the durable backend.
+    ///   - `StorageReplicator.hydrate(into:from:schema:)` —     ///     every declared table plus audit events from the durable backend into a fresh
     ///     in-memory backend before `Estate.open` runs against it.
     ///
     /// The matrix_snapshot table is included here so hydration copies
@@ -95,8 +101,8 @@ public enum GeniusLocusKitSchema {
         SchemaDeclaration(
             kitID: kitID,
             version: version,
-            tables: locusKitTables + vectorKitTables + corpusKitTables + grantsTables + matrixSnapshotTables,
-            indices: locusKitIndices + vectorKitIndices + corpusKitIndices
+            tables: locusKitTables + vectorKitTables + claimsTables + corpusKitTables + grantsTables + matrixSnapshotTables,
+            indices: locusKitIndices + vectorKitIndices + claimsIndices + corpusKitIndices
         )
     }
 
@@ -124,13 +130,29 @@ public enum GeniusLocusKitSchema {
         VectorStore.schemaDeclaration.indices
     }
 
-    /// The 2 CorpusKit tables, extracted from `BundleStore.schemaDeclaration`.
+    /// The CorpusKit ATTACHED-profile tables (derived state only, keyed by
+    /// Drawer ID): iix_termfreqs, iix_doclens, corpus_provider_basis,
+    /// corpus_provider_counts, corpus_index_state. Replaces the legacy
+    /// BundleStore chunks/corpus_metadata copy lane (shared-content 1.1
+    /// cutover). The declaration is live — the profile self-corrects the
+    /// composite.
     private static var corpusKitTables: [TableDeclaration] {
-        BundleStore.schemaDeclaration.tables
+        CorpusSchemaProfile.attachedDeclaration.tables
     }
 
     private static var corpusKitIndices: [IndexDeclaration] {
-        BundleStore.schemaDeclaration.indices
+        CorpusSchemaProfile.attachedDeclaration.indices
+    }
+
+    /// The VectorKit representation-consumer ledger (`vector_rep_claims`) —
+    /// ownership state the scoped lifecycle paths consult; hydrate/flush
+    /// must carry it with the vectors it describes.
+    private static var claimsTables: [TableDeclaration] {
+        VectorRepresentationClaims.schemaDeclaration.tables
+    }
+
+    private static var claimsIndices: [IndexDeclaration] {
+        VectorRepresentationClaims.schemaDeclaration.indices
     }
 
     /// The GLK grant authorization table. Grant issuance and revocation state is

@@ -156,15 +156,20 @@ public extension GeniusLocusKit {
             let estate = try estate(for: handle)
             try await estate.rollupRoomsForDrawers([drawer.id])
         case .regular:
-            // P3: enqueue the drawer onto the Corpus's own ingest queue; the
-            // Corpus drain worker (P4) ingests it and fires onEncoded → room
-            // rollup. Hint drawers (AI_Charter_Hint room) are normal drawers
-            // and flow through the normal encode path. Empty content is
-            // skipped inside enqueueIngest.
-            try await corpus.enqueueIngest(
-                drawer.content,
-                sourceID: drawer.id,
-                now: drawer.filedAt
+            // Shared-content 1.1: enqueue a Drawer CHANGE REFERENCE — id,
+            // revision, digest — never the text. The engine's drain worker
+            // resolves the CURRENT content by ID through the LocusKit-backed
+            // adapter at work time, then fires onEncoded → room rollup. Hint
+            // drawers (AI_Charter_Hint room) are normal drawers and flow
+            // through the same path.
+            guard !drawer.content.isEmpty else { return drawer }
+            try await corpus.enqueueChange(
+                .upsert(
+                    id: drawer.id,
+                    revision: 1,
+                    digest: CorpusContentDigest.digest(drawer.content)),
+                cursor: nil,
+                capturedAt: drawer.filedAt
             )
         }
         return drawer
@@ -437,7 +442,9 @@ public extension GeniusLocusKit {
         // table's declared TEXT primary key, present on every backend), so
         // no single query call ever materializes more than
         // `reindexScanPageSize` full `Drawer` rows.
-        var uncappedBatch: [(text: String, sourceID: String, now: Date)] = []
+        // Shared-content 1.1: collect CHANGE REFERENCES (id/revision/digest),
+        // never text — the drain resolves the current content at work time.
+        var uncappedBatch: [(change: CorpusContentChange, cursor: String?, capturedAt: Date)] = []
         var scannedCount = 0
         var cursor: String?
         while true {
@@ -448,7 +455,13 @@ public extension GeniusLocusKit {
             for drawer in page {
                 guard !drawer.content.isEmpty else { continue }          // nothing to encode
                 guard !indexedIDs.contains(drawer.id) else { continue }  // already indexed (idempotent)
-                uncappedBatch.append((text: drawer.content, sourceID: drawer.id, now: drawer.filedAt))
+                uncappedBatch.append((
+                    change: .upsert(
+                        id: drawer.id,
+                        revision: 1,
+                        digest: CorpusContentDigest.digest(drawer.content)),
+                    cursor: nil,
+                    capturedAt: drawer.filedAt))
             }
             if page.count < Self.reindexScanPageSize { break }  // partial page: table exhausted
         }
@@ -507,11 +520,11 @@ public extension GeniusLocusKit {
             var offset = 0
             while offset < batch.count {
                 let end = min(offset + enqueueChunk, batch.count)
-                if smallDelta {
-                    try await corpus.enqueueIngestBatch(Array(batch[offset..<end]))
-                } else {
-                    try await corpus.enqueueIngestBatchImport(Array(batch[offset..<end]))
-                }
+                // One encode stream for both cases: jobs are references, so
+                // the legacy copied-text import stream no longer exists. The
+                // small-delta decision below only controls whether the
+                // full-corpus retrain tail runs.
+                try await corpus.enqueueChangeBatch(Array(batch[offset..<end]))
                 offset = end
             }
             total += batch.count
@@ -527,9 +540,7 @@ public extension GeniusLocusKit {
             // only observes the read-only depth probe FOR THE STREAM the batch
             // was enqueued on.
             while true {
-                let depth = smallDelta
-                    ? ((try? await corpus.ingestQueueDepth()) ?? (pending: 0, inFlight: 0))
-                    : ((try? await corpus.importQueueDepth()) ?? (pending: 0, inFlight: 0))
+                let depth = (try? await corpus.ingestQueueDepth()) ?? (pending: 0, inFlight: 0)
                 if depth.pending == 0 && depth.inFlight == 0 { break }
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -581,7 +592,7 @@ public extension GeniusLocusKit {
 
     // MARK: - Internals
 
-    /// Wire the estate's Corpus `onEncoded` callback to roll up the touched
+    /// Wire the engine's `onEncoded` callback to roll up the touched
     /// LocusKit rooms for each drained batch.
     ///
     /// CorpusKit owns the encode pipeline and fires this callback with the
@@ -594,7 +605,7 @@ public extension GeniusLocusKit {
     /// Called from `wireSubstores` at provision (for `.glk`/`.corpusOnly`
     /// estates). The closure captures the GLK actor weakly so a torn-down estate
     /// leaves no retain cycle through the Corpus.
-    internal func wireCorpusRoomRollup(_ corpus: Corpus, for handle: EstateHandle) async {
+    internal func wireCorpusRoomRollup(_ corpus: CorpusContentEngine, for handle: EstateHandle) async {
         await corpus.setOnEncoded { [weak self] drawerIDs in
             guard let self else { return }
             guard let estate = try? await self.estate(for: handle) else { return }
@@ -612,11 +623,10 @@ public extension GeniusLocusKit {
     ) async throws {
         guard let corpus = corpusKits[handle] else { return }
         guard !drawer.content.isEmpty else { return }
-        try await corpus.ingest(
-            drawer.content,
-            sourceID: drawer.id,
-            now: drawer.filedAt
-        )
+        // The drawer row is already durably stored; the engine resolves it
+        // through the LocusKit-backed adapter and indexes it under its own
+        // Drawer ID (identity is direct — no chunk lane).
+        try await corpus.indexContent(id: drawer.id, now: drawer.filedAt)
     }
 
     /// The canonical unclassified-content sentinel UDC code. A drawer that

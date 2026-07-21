@@ -172,7 +172,7 @@ struct ExpungeIntegritySweepTests {
             "a .glk estate must have a registered Corpus")
         let chunksAfter = try await corpus.recall(
             "noble gas element", limit: 10, now: sweepNow)
-        let vectorSurvived = chunksAfter.contains { $0.chunk.sourceID == drawer.id }
+        let vectorSurvived = chunksAfter.contains { $0.id == drawer.id }
         #expect(
             !vectorSurvived,
             "corpus must not recall the drawer after the sweep re-attempted the delete"

@@ -231,10 +231,9 @@ public extension GeniusLocusKit {
         // returns SOURCE (drawer) IDs directly, so no chunk→drawer remap.
         // `seenPairs` keys on drawer IDs, so both lanes dedupe together.
         if let corpus = corpusKits[handle] {
-            // Probe drawers = the owning drawers of the recent probe chunks.
-            let probeChunkUUIDs = probeIDs.compactMap { UUID(uuidString: $0) }
-            let probeOwners = await corpus.sourceIDs(forChunkIDs: probeChunkUUIDs)
-            let probeDrawerIDs = Array(Set(probeOwners.values))
+            // Shared-content 1.1: vector item IDs ARE Drawer IDs — the probe
+            // IDs are the probe drawers directly, no chunk→drawer remap.
+            let probeDrawerIDs = Array(Set(probeIDs))
             // Hydrate probe drawers for their content — the BM25 query text.
             var probeDrawers: [Drawer] = []
             if !probeDrawerIDs.isEmpty {

@@ -42,7 +42,8 @@ struct CompositeSchemaSignatureTests {
     @Test func compositeVersionIsSumOfLiveComponentVersions() {
         let expected = LocusKitSchema.version
             + VectorStore.schemaDeclaration.version
-            + BundleStore.schemaDeclaration.version
+            + VectorRepresentationClaims.schemaDeclaration.version
+            + CorpusSchemaProfile.attachedDeclaration.version
             + 1  // grants
             + MatrixSnapshotStore.schemaDeclaration.version
         #expect(GeniusLocusKitSchema.version == expected)
