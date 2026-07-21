@@ -401,12 +401,41 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
 const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_chrono" ON "_storagekit_audit" ("row_id", "physical_time", "logical_count", "node_id")"#;
 const AUDIT_DROP_PACKED_INDEX: &str = r#"DROP INDEX IF EXISTS "_storagekit_audit_row_hlc""#;
 
+/// Render a TypedValue as a SQLite literal for DEFAULT clauses. Mirrors
+/// Swift `SQLiteSchemaEmitter.literalSQL` — only trivial cases; complex
+/// defaults render NULL. (Layout parity, GLK shared-content 1.1 P0: the
+/// Rust emitter previously DROPPED declared defaults, so Rust-created
+/// estates lacked the `DEFAULT 0` Swift-created estates carry on bitmap
+/// columns.)
+fn default_literal_sql(v: &TypedValue) -> String {
+    match v {
+        TypedValue::Null => "NULL".to_string(),
+        TypedValue::Bool(b) => {
+            if *b {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        TypedValue::Int(i) => i.to_string(),
+        TypedValue::Bitmap(i) => i.to_string(),
+        TypedValue::Float(d) => d.to_string(),
+        TypedValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        TypedValue::Uuid(u) => format!("'{}'", u.to_string().to_uppercase()),
+        TypedValue::Hlc(h) => (h.packed() as i64).to_string(),
+        _ => "NULL".to_string(),
+    }
+}
+
 fn create_table_sql(decl: &TableDeclaration) -> String {
     let mut parts: Vec<String> = Vec::new();
     for col in &decl.columns {
         let mut line = format!("\"{}\" {}", col.name, native_type(col.column_type));
         if !col.nullable {
             line.push_str(" NOT NULL");
+        }
+        if let Some(ref dv) = col.default_value {
+            line.push_str(&format!(" DEFAULT {}", default_literal_sql(dv)));
         }
         parts.push(line);
     }

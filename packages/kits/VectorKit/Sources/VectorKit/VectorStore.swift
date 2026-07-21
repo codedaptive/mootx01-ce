@@ -1659,6 +1659,176 @@ public actor VectorStore {
         await _selectIndex()
     }
 
+    // MARK: - Exact-key batch mutation (GLK shared-content 1.1, P0)
+
+    /// Delete exactly the rows named by `keys` — the scoped batch-delete the
+    /// shared-content migration uses instead of model-wide teardowns.
+    ///
+    /// Each key addresses one logical row position (itemID, vectorIndex,
+    /// modelID); every modelVersion stored at that position is removed (a
+    /// version bump must not orphan the stale row). Rows NOT named are never
+    /// touched: one model partition may contain retained/shared keys and
+    /// removed keys side by side without collateral mutation.
+    ///
+    /// Durable writes run in one transaction; the resident binary index is
+    /// updated in one pass and Lane D float indices are invalidated only for
+    /// the modelIDs the keys touch.
+    public func deleteVectors(keys: [VectorExactKey]) async throws {
+        guard !keys.isEmpty else { return }
+        // Publish any in-flight deferred burst first so the resident index
+        // reflects every appended vector before we tombstone against it.
+        if deferredIndexDirty { try await publishResidentIndex() }
+
+        let keySet = Set(keys)
+        try await storage.rowStore.beginTransaction()
+        do {
+            for key in keySet {
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "item_id"), .text(key.itemID)),
+                        .eq(Column(table: "vectors", name: "vector_index"), .int(Int64(key.vectorIndex))),
+                        .eq(Column(table: "vectors", name: "model_id"), .text(key.modelID))
+                    ])
+                )
+            }
+            try await storage.rowStore.commitTransaction()
+        } catch {
+            try? await storage.rowStore.rollbackTransaction()
+            throw error
+        }
+
+        // Lane D coherence: a deleted key may have addressed a float row. Drop
+        // ONLY the touched models' cached float indices so the next
+        // findNearestFloat rebuilds them from the table; other models' float
+        // indices are untouched (scoped invalidation).
+        for modelID in Set(keySet.map(\.modelID)) {
+            floatIndices.removeValue(forKey: modelID)
+        }
+
+        // Binary-lane coherence: tombstone every resident slot whose logical
+        // position matches a deleted key, in ONE snapshot pass. Slots at other
+        // positions — including other keys of the same model — are untouched.
+        if indexBuilt {
+            let snap = await bruteForceIndex.currentSnapshot()
+            var removed: UInt32 = 0
+            for slotIdx in 0..<Int(snap.count) {
+                guard !snap.isTombstoned(slotIdx) else { continue }
+                let k = snap.keys[slotIdx]
+                let pos = VectorExactKey(
+                    itemID: k.itemID, vectorIndex: Int(k.vectorIndex), modelID: k.modelID)
+                guard keySet.contains(pos) else { continue }
+                if let store = arrayStore {
+                    try await store.tombstone(key: k)
+                }
+                try await bruteForceIndex.remove(key: k)
+                try await mihIndex.remove(key: k)
+                removed += 1
+            }
+            if removed > 0 {
+                liveBinaryCount = liveBinaryCount > removed ? liveBinaryCount - removed : 0
+                _selectIndex()
+            }
+        }
+    }
+
+    /// Reconcile ONE model's partition against an explicit expected key set —
+    /// the scoped rebuild the shared-content migration uses instead of
+    /// `replaceModelVectors` (which clears the whole partition) against
+    /// shared storage.
+    ///
+    /// Every row in `expected` is upserted (exact-key idempotent). Every
+    /// existing row of `modelID` whose (itemID, vectorIndex) is NOT named in
+    /// `expected` is deleted. Rows of other models are never read or touched.
+    /// This lets a rebuild retain shared representations in place while
+    /// removing only the keys no lane claims.
+    ///
+    /// - Returns: the count of rows deleted (stale keys) and upserted.
+    /// - Throws: `VectorKitError.int8QuantizationPolicyUndefined` for any int8
+    ///   payload; `VectorKitError.storeError` when an input's modelID differs
+    ///   from `modelID` (a cross-partition write is a caller bug).
+    @discardableResult
+    public func reconcileModelVectors(
+        modelID: String,
+        expected: [VectorPayloadInput]
+    ) async throws -> (removed: Int, upserted: Int) {
+        if let bad = expected.first(where: { $0.payload.kind == .int8 }) {
+            throw VectorKitError.int8QuantizationPolicyUndefined(
+                "int8 writes are rejected: quantization policy is unspecified. " +
+                "reconcileModelVectors received an int8 payload for item \(bad.itemID)")
+        }
+        if let stray = expected.first(where: { $0.modelID != modelID }) {
+            throw VectorKitError.invalidPayload(
+                "reconcileModelVectors(modelID: \(modelID)) received an input for "
+                + "model \(stray.modelID) — cross-partition writes are not permitted")
+        }
+        if deferredIndexDirty { try await publishResidentIndex() }
+
+        // Enumerate the model's existing logical keys from the durable table
+        // (the authoritative source), then compute the stale set.
+        let existingRows = try await storage.rowStore.query(
+            table: "vectors",
+            where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+            orderBy: [], limit: nil, offset: nil)
+        var existingKeys = Set<VectorExactKey>()
+        for row in existingRows {
+            guard case let .text(itemID)? = row["item_id"],
+                  case let .int(vectorIndex)? = row["vector_index"] else { continue }
+            existingKeys.insert(VectorExactKey(
+                itemID: itemID, vectorIndex: Int(vectorIndex), modelID: modelID))
+        }
+        let expectedKeys = Set(expected.map {
+            VectorExactKey(itemID: $0.itemID, vectorIndex: Int($0.vectorIndex), modelID: modelID)
+        })
+        let staleKeys = existingKeys.subtracting(expectedKeys)
+
+        // One transaction: delete exactly the stale keys, upsert the expected
+        // rows. Other models' rows are never addressed.
+        try await storage.rowStore.beginTransaction()
+        do {
+            for key in staleKeys {
+                _ = try await storage.rowStore.delete(
+                    table: "vectors",
+                    where: .and([
+                        .eq(Column(table: "vectors", name: "item_id"), .text(key.itemID)),
+                        .eq(Column(table: "vectors", name: "vector_index"), .int(Int64(key.vectorIndex))),
+                        .eq(Column(table: "vectors", name: "model_id"), .text(key.modelID))
+                    ])
+                )
+            }
+            for input in expected {
+                let values: [String: TypedValue] = [
+                    "id":           .uuid(UUID()),
+                    "item_id":      .text(input.itemID),
+                    "vector_index": .int(Int64(input.vectorIndex)),
+                    "model_id":     .text(input.modelID),
+                    "model_version":.text(input.modelVersion),
+                    "kind":         .int(Int64(input.payload.kind.rawValue)),
+                    "dim":          .int(Int64(input.payload.dim)),
+                    "payload":      .blob(Data(input.payload.bytes)),
+                    "scale":        input.payload.scale.map { TypedValue.float(Double($0)) } ?? TypedValue.null,
+                    "filed_at":     .timestamp(input.filedAt)
+                ]
+                _ = try await storage.rowStore.upsert(
+                    table: "vectors",
+                    values: values,
+                    conflictColumns: ["item_id", "vector_index", "model_id"]
+                )
+            }
+            try await storage.rowStore.commitTransaction()
+        } catch {
+            try? await storage.rowStore.rollbackTransaction()
+            throw error
+        }
+
+        // Coherence: this model's float index lazily rebuilds from the table;
+        // the resident binary index is rebuilt once from the table (the
+        // reconcile may have touched an arbitrary mix of keys).
+        floatIndices.removeValue(forKey: modelID)
+        try await _rebuildBinaryIndexFromTable()
+        return (removed: staleKeys.count, upserted: expected.count)
+    }
+
     // MARK: - Lifecycle (GLK_PROVISION_001)
 
     /// Destroy all vector rows in this store.

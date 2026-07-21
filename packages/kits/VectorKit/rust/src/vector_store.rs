@@ -147,6 +147,28 @@ pub struct VectorPayloadInput {
     pub filed_at_unix_secs: i64,
 }
 
+/// One logical vector row address: (item_id, vector_index, model_id) —
+/// the triple the schema's UNIQUE constraint keys. Deliberately EXCLUDES
+/// model_version: a version bump replaces the row at the same logical
+/// position, so scoped deletion must clear every version stored there.
+/// Mirrors Swift `VectorExactKey` (GLK shared-content 1.1, P0).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VectorExactKey {
+    pub item_id: String,
+    pub vector_index: u32,
+    pub model_id: String,
+}
+
+impl VectorExactKey {
+    pub fn new(item_id: impl Into<String>, vector_index: u32, model_id: impl Into<String>) -> Self {
+        VectorExactKey {
+            item_id: item_id.into(),
+            vector_index,
+            model_id: model_id.into(),
+        }
+    }
+}
+
 // ── Deferred-buffer back-pressure cap ────────────────────────────────────
 
 /// Maximum number of (key, bytes) records that may accumulate in the
@@ -1869,6 +1891,273 @@ impl VectorStore {
         state.index_built = true;
         Self::select_index(state);
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Exact-key batch mutation (GLK shared-content 1.1, P0)
+    // -----------------------------------------------------------------------
+
+    /// Delete exactly the rows named by `keys` — the scoped batch-delete the
+    /// shared-content migration uses instead of model-wide teardowns.
+    /// Mirrors Swift `VectorStore.deleteVectors(keys:)`.
+    ///
+    /// Each key addresses one logical row position (item_id, vector_index,
+    /// model_id); every model_version stored at that position is removed.
+    /// Rows NOT named are never touched: one model partition may contain
+    /// retained/shared keys and removed keys side by side without collateral
+    /// mutation.
+    pub fn delete_vectors(&self, keys: &[VectorExactKey]) -> Result<(), VectorKitError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        // Publish any in-flight deferred burst first so the resident index
+        // reflects every appended vector before we tombstone against it.
+        self.publish_if_deferred_dirty()?;
+
+        let key_set: std::collections::BTreeSet<&VectorExactKey> = keys.iter().collect();
+        let row_store = self.storage.row_store();
+        row_store
+            .begin_transaction()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let db_result = (|| -> Result<(), VectorKitError> {
+            for key in &key_set {
+                let predicate = StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "item_id"),
+                        TypedValue::Text(key.item_id.clone()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "vector_index"),
+                        TypedValue::Int(key.vector_index as i64),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "model_id"),
+                        TypedValue::Text(key.model_id.clone()),
+                    ),
+                ]);
+                row_store
+                    .delete("vectors", &predicate)
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            }
+            Ok(())
+        })();
+        match db_result {
+            Ok(()) => row_store
+                .commit_transaction()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?,
+            Err(e) => {
+                let _ = row_store.rollback_transaction();
+                return Err(e);
+            }
+        }
+
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        // Lane D coherence: drop ONLY the touched models' cached float
+        // indices; other models' float indices are untouched.
+        for model_id in key_set
+            .iter()
+            .map(|k| k.model_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            state.float_indices.remove(model_id);
+        }
+        if !state.index_built {
+            return Ok(()); // table delete already applied; array not yet built
+        }
+
+        // Binary-lane coherence: tombstone every resident slot whose logical
+        // position matches a deleted key, in ONE snapshot pass.
+        let snap = state.brute_force_index.array().clone();
+        let mut removed_count: u32 = 0;
+        for slot_idx in 0..snap.count {
+            if snap.is_tombstoned(slot_idx) {
+                continue;
+            }
+            let k = &snap.keys[slot_idx];
+            let pos = VectorExactKey {
+                item_id: k.item_id.clone(),
+                vector_index: k.vector_index,
+                model_id: k.model_id.clone(),
+            };
+            if key_set.contains(&pos) {
+                let owned_key = k.clone();
+                if let Some(ref mut store) = state.array_store {
+                    store.tombstone(&owned_key)?;
+                }
+                state.brute_force_index.remove(&owned_key)?;
+                state.mih_index.remove(&owned_key)?;
+                removed_count += 1;
+            }
+        }
+        if removed_count > 0 {
+            state.live_binary_count = state.live_binary_count.saturating_sub(removed_count);
+            Self::select_index(&mut state);
+        }
+        Ok(())
+    }
+
+    /// Reconcile ONE model's partition against an explicit expected key set —
+    /// the scoped rebuild the shared-content migration uses instead of
+    /// `replace_model_vectors` against shared storage. Mirrors Swift
+    /// `VectorStore.reconcileModelVectors(modelID:expected:)`.
+    ///
+    /// Every row in `expected` is upserted (exact-key idempotent). Every
+    /// existing row of `model_id` whose (item_id, vector_index) is NOT named
+    /// in `expected` is deleted. Rows of other models are never read or
+    /// touched. Returns `(removed, upserted)` counts.
+    pub fn reconcile_model_vectors(
+        &self,
+        model_id: &str,
+        expected: &[VectorPayloadInput],
+    ) -> Result<(usize, usize), VectorKitError> {
+        if let Some(bad) = expected.iter().find(|i| i.payload.kind == VectorKind::Int8) {
+            return Err(VectorKitError::Int8QuantizationPolicyUndefined(format!(
+                "int8 writes are rejected: quantization policy is unspecified. \
+                 reconcile_model_vectors received an int8 payload for item {}",
+                bad.item_id
+            )));
+        }
+        if let Some(stray) = expected.iter().find(|i| i.model_id != model_id) {
+            return Err(VectorKitError::InvalidPayload(format!(
+                "reconcile_model_vectors(model_id: {model_id}) received an input for \
+                 model {} — cross-partition writes are not permitted",
+                stray.model_id
+            )));
+        }
+        self.publish_if_deferred_dirty()?;
+
+        // Enumerate the model's existing logical keys from the durable table.
+        let row_store = self.storage.row_store();
+        let existing_rows = row_store
+            .query(
+                "vectors",
+                Some(&StoragePredicate::Eq(
+                    Column::new("vectors", "model_id"),
+                    TypedValue::Text(model_id.to_string()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let mut existing_keys: std::collections::BTreeSet<VectorExactKey> =
+            std::collections::BTreeSet::new();
+        for row in &existing_rows {
+            let item_id = match row.get("item_id") {
+                Some(TypedValue::Text(t)) => t.clone(),
+                _ => continue,
+            };
+            let vector_index = match row.get("vector_index") {
+                Some(TypedValue::Int(i)) => *i as u32,
+                _ => continue,
+            };
+            existing_keys.insert(VectorExactKey {
+                item_id,
+                vector_index,
+                model_id: model_id.to_string(),
+            });
+        }
+        let expected_keys: std::collections::BTreeSet<VectorExactKey> = expected
+            .iter()
+            .map(|i| VectorExactKey {
+                item_id: i.item_id.clone(),
+                vector_index: i.vector_index,
+                model_id: model_id.to_string(),
+            })
+            .collect();
+        let stale_keys: Vec<&VectorExactKey> =
+            existing_keys.difference(&expected_keys).collect();
+
+        // One transaction: delete exactly the stale keys, upsert the expected
+        // rows. Other models' rows are never addressed.
+        row_store
+            .begin_transaction()
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        let db_result = (|| -> Result<(), VectorKitError> {
+            for key in &stale_keys {
+                let predicate = StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "item_id"),
+                        TypedValue::Text(key.item_id.clone()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "vector_index"),
+                        TypedValue::Int(key.vector_index as i64),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new("vectors", "model_id"),
+                        TypedValue::Text(key.model_id.clone()),
+                    ),
+                ]);
+                row_store
+                    .delete("vectors", &predicate)
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            }
+            for input in expected {
+                let mut values = BTreeMap::new();
+                values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
+                values.insert("item_id".to_string(), TypedValue::Text(input.item_id.clone()));
+                values.insert(
+                    "vector_index".to_string(),
+                    TypedValue::Int(input.vector_index as i64),
+                );
+                values.insert("model_id".to_string(), TypedValue::Text(input.model_id.clone()));
+                values.insert(
+                    "model_version".to_string(),
+                    TypedValue::Text(input.model_version.clone()),
+                );
+                values.insert("kind".to_string(), TypedValue::Int(input.payload.kind.raw()));
+                values.insert("dim".to_string(), TypedValue::Int(input.payload.dim as i64));
+                values.insert(
+                    "payload".to_string(),
+                    TypedValue::Blob(input.payload.bytes.clone()),
+                );
+                match input.payload.scale {
+                    Some(s) => {
+                        values.insert("scale".to_string(), TypedValue::Float(s as f64));
+                    }
+                    None => {
+                        values.insert("scale".to_string(), TypedValue::Null);
+                    }
+                }
+                values.insert(
+                    "filed_at".to_string(),
+                    TypedValue::Timestamp(input.filed_at_unix_secs),
+                );
+                row_store
+                    .upsert(
+                        "vectors",
+                        values,
+                        &[
+                            "item_id".to_string(),
+                            "vector_index".to_string(),
+                            "model_id".to_string(),
+                        ],
+                    )
+                    .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+            }
+            Ok(())
+        })();
+        match db_result {
+            Ok(()) => row_store
+                .commit_transaction()
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?,
+            Err(e) => {
+                let _ = row_store.rollback_transaction();
+                return Err(e);
+            }
+        }
+
+        // Coherence: this model's float index lazily rebuilds from the table;
+        // the resident binary index is rebuilt once from the table.
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        state.float_indices.remove(model_id);
+        self.rebuild_binary_index_from_table_locked(&mut state)?;
+        Ok((stale_keys.len(), expected.len()))
     }
 
     // -----------------------------------------------------------------------

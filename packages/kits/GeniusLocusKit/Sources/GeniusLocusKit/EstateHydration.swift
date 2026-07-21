@@ -13,9 +13,9 @@
 //                       GeniusLocusKitSchema.estateSchemaDeclaration.
 //                       This registers "GeniusLocusKit" composite version in both backends so
 //                       the replication schema gate (which checks per-kitID version)
-//                       passes. For inMemory this creates all 19 tables blank.
+//                       passes. For inMemory this creates all schema-declared tables blank.
 //                       For durable this is idempotent (CREATE TABLE IF NOT EXISTS).
-//   2. Row snapshot   — StorageReplicator.hydrate copies all 19 schema.tables
+//   2. Row snapshot   — StorageReplicator.hydrate copies all schema.tables
 //                       rows (including tombstones and append-only rows)
 //                       verbatim from durable into in-memory. Generated columns
 //                       are excluded from the write; the destination recomputes.
@@ -67,11 +67,11 @@ public extension GeniusLocusKit {
     ///   1. Schema open: open both `inMemory` and `durable` with the composite
     ///      `GeniusLocusKitSchema.estateSchemaDeclaration`. Both backends must
     ///      recognise the GLK composite kitID so the replication schema gate passes.
-    ///      For `inMemory` this creates all 19 tables (blank, ready for hydration).
+    ///      For `inMemory` this creates all schema-declared tables (blank, ready for hydration).
     ///      For `durable` this is idempotent — CREATE TABLE IF NOT EXISTS and a new
     ///      migration-version record for "GeniusLocusKit" (the data tables already
     ///      exist from prior LocusKit/VectorKit/CorpusKit opens).
-    ///   2. Hydrate: copy all 19 schema-declared tables + audit events from
+    ///   2. Hydrate: copy all schema-declared tables + audit events from
     ///      `durable` into `inMemory` via `StorageReplicator.hydrate`.
     ///   3. Open: run `LocusKit.Estate.open` against the now-populated `inMemory`
     ///      backend. The manifest is already present after step 2.
@@ -115,16 +115,16 @@ public extension GeniusLocusKit {
         // etc.), but the GLK composite kitID "GeniusLocusKit" is never registered
         // unless we explicitly open it. We do that here for both backends:
         //
-        //   - inMemory:  blank destination — creates all 19 tables + registers
+        //   - inMemory:  blank destination — creates all schema-declared tables + registers
         //                "GeniusLocusKit" composite version so the gate sees the composite version on destination.
         //   - durable:   existing source  — CREATE TABLE IF NOT EXISTS is a no-op for
-        //                the 19 tables; records "GeniusLocusKit" composite version in the migrations
+        //                the schema-declared tables; records "GeniusLocusKit" composite version in the migrations
         //                table if not already present. Safe and idempotent.
         try await inMemory.open(schema: schema)
         try await durable.open(schema: schema)
 
         // Step 2 — Row snapshot + audit event copy.
-        // StorageReplicator.hydrate copies all 19 schema-declared tables and the
+        // StorageReplicator.hydrate copies all schema-declared tables and the
         // _storagekit_audit table into `inMemory`. After this call the in-memory
         // backend contains the complete ground-truth state from the durable store.
         let cursor = try await StorageReplicator.hydrate(
