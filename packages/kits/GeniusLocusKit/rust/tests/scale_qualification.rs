@@ -27,6 +27,7 @@ use corpus_kit::{
 };
 use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::shared_content_migration::SharedContentMigrationState;
+use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
@@ -77,12 +78,65 @@ fn probe(path: &str, label: &str) {
             }
         }
     }
+    // Per-provider/lane row census — the five-signal qualification's
+    // headline shape.
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT model_id, vector_index, count(*) FROM vectors GROUP BY 1, 2 ORDER BY 1, 2",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        }) {
+            for row in rows.flatten() {
+                q(&format!("{label}.vectors.{}.lane{}", row.0, row.1), row.2);
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT model_id, count(*) FROM corpus_provider_coverage GROUP BY 1 ORDER BY 1",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        }) {
+            for row in rows.flatten() {
+                q(&format!("{label}.coverage.{}", row.0), row.1);
+            }
+        }
+    }
     let file = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let wal = std::fs::metadata(format!("{path}-wal"))
         .map(|m| m.len())
         .unwrap_or(0);
+    let shm = std::fs::metadata(format!("{path}-shm"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    // Sidecar + queue siblings share the db file's directory.
+    let stem = path.trim_end_matches(".sqlite");
+    let vec_sidecar = std::fs::metadata(format!("{stem}.vectors.vec"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mut dir_total = 0u64;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let mut queue_bytes = 0u64;
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        dir_total += meta.len();
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.contains("queue") {
+                            queue_bytes += meta.len();
+                        }
+                    }
+                }
+            }
+            q(&format!("{label}.queue_bytes"), queue_bytes);
+        }
+    }
     q(&format!("{label}.file_bytes"), file);
     q(&format!("{label}.wal_bytes"), wal);
+    q(&format!("{label}.shm_bytes"), shm);
+    q(&format!("{label}.vec_sidecar_bytes"), vec_sidecar);
+    q(&format!("{label}.estate_dir_bytes"), dir_total);
 }
 
 #[test]
@@ -111,7 +165,7 @@ fn qualify_large_estate_migration() {
     // the persisted state and cursor).
     let t_mig = Instant::now();
     let report = coord
-        .run_shared_content_migration(&handle, NOW)
+        .run_shared_content_migration(&handle, NOW, default_ensemble())
         .expect("migration");
     q("migration_secs", format!("{:.2}", t_mig.elapsed().as_secs_f64()));
     q("migration.state", format!("{:?}", report.state));
@@ -178,7 +232,7 @@ fn qualify_large_estate_migration() {
         )
         .expect("config"),
         Arc::new(LocusDrawerContentSource::new(estate.clone())),
-        vec![EmbeddingModelConfig::Deterministic],
+        default_ensemble(),
     )
     .expect("engine");
     q(
@@ -192,6 +246,14 @@ fn qualify_large_estate_migration() {
             .map(|a| a.len())
             .unwrap_or(0),
     );
+    // Per-provider coverage under the LIVE generations.
+    for (model_id, digest) in engine.provider_generations() {
+        q(
+            &format!("recall.coverage.{model_id}"),
+            engine.covered_count(&model_id).ok().flatten().unwrap_or(0),
+        );
+        q(&format!("recall.generation.{model_id}"), &digest[..digest.len().min(12)]);
+    }
     for (i, query) in [
         "project planning decisions",
         "release engineering process",
@@ -200,6 +262,17 @@ fn qualify_large_estate_migration() {
     .iter()
     .enumerate()
     {
+        // Per-signal dense float lane: every configured signal must serve.
+        let t_f = Instant::now();
+        let per_signal = engine.float_nearest_per_signal(query, 5);
+        q(
+            &format!("recall.q{i}.float_all_signals_ms"),
+            format!("{:.1}", t_f.elapsed().as_secs_f64() * 1000.0),
+        );
+        for (model_id, outcome) in &per_signal {
+            let served = matches!(outcome, corpus_kit::FloatLaneOutcome::Hits(h) if !h.is_empty());
+            q(&format!("recall.q{i}.float.{model_id}.served"), served);
+        }
         let t_q = Instant::now();
         let hits = engine.bm25_top_k(query, 5).unwrap_or_default();
         q(

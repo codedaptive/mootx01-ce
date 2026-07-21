@@ -26,6 +26,7 @@
 // Rust twin: `rust/src/shared_content_migration.rs`.
 
 import CorpusKit
+import CorpusKitProviders
 import Foundation
 import OSLog
 import PersistenceKit
@@ -43,6 +44,8 @@ public enum SharedContentMigrationState: String, Sendable, Codable, CaseIterable
     case legacyDerivedCleared
     case legacySchemaRetired
     case drawerIndexRebuilt
+    case basesTrained
+    case providersCovered
     case verified
     case reclaimPending
     case complete
@@ -129,6 +132,13 @@ public struct SharedContentMigrationRecord: Sendable, Codable, Equatable {
     /// record row forever; the evidence is consumed at verification).
     public var legacyChunkCount: Int?
     public var legacyVectorKeyCount: Int?
+    /// The ensemble/configuration fingerprint the migration completed
+    /// under (corrective pass). Wiring a DIFFERENT configuration over a
+    /// completed record is a follow-on upgrade, never trusted as complete.
+    public var ensembleFingerprint: String?
+    /// Per-provider basis generations (modelID → basis digest) recorded at
+    /// `basesTrained` and re-verified at `verified`.
+    public var providerGenerations: [String: String]?
 }
 
 /// Store for the migration record. Its table is deliberately OUTSIDE every
@@ -257,16 +267,32 @@ public extension GeniusLocusKit {
         _sharedContentFaultAfterStorage = state
     }
 
-    /// Whether the estate's Corpus lane must stay DARK: a legacy copy lane
-    /// is present and the migration record has not reached `verified`.
+    /// Whether the estate's Corpus lane must stay DARK:
+    ///   - a legacy copy lane is present and the migration record has not
+    ///     reached `verified`; or
+    ///   - a migration record EXISTS whose recorded ensemble fingerprint
+    ///     differs from `wiredFingerprint` (an obsolete configuration —
+    ///     the estate enters a follow-on upgrade instead of being trusted
+    ///     as complete).
     /// LocusKit recall is unaffected either way.
-    func sharedContentLaneMustStayDark(storage: any Storage) async -> Bool {
-        guard await SharedContentMigrationDetection.detectLegacyLayout(storage: storage) != nil
-        else { return false }
+    func sharedContentLaneMustStayDark(
+        storage: any Storage, wiredFingerprint: String? = nil
+    ) async -> Bool {
+        let legacy = await SharedContentMigrationDetection.detectLegacyLayout(storage: storage) != nil
         try? await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
-        let state = try? await SharedContentMigrationStore(storage: storage).load()?.state
-        guard let state else { return true }
-        return state.ordinal < SharedContentMigrationState.verified.ordinal
+        let record = try? await SharedContentMigrationStore(storage: storage).load()
+        guard let record else { return legacy }
+        // Any persisted record short of `verified` keeps the lane dark —
+        // including post-retirement states where the legacy tables are
+        // already gone and structural detection alone would light a
+        // partially rebuilt lane.
+        if record.state.ordinal < SharedContentMigrationState.verified.ordinal {
+            return true
+        }
+        if let wiredFingerprint, record.ensembleFingerprint != wiredFingerprint {
+            return true
+        }
+        return false
     }
 
     /// Run (or resume) the shared-content migration for `handle`'s estate.
@@ -277,7 +303,8 @@ public extension GeniusLocusKit {
     /// `SharedContentMigrationError` that leaves the lane dark otherwise.
     @discardableResult
     func runSharedContentMigration(
-        handle: EstateHandle, now: Date
+        handle: EstateHandle, now: Date,
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
     ) async throws -> SharedContentMigrationReport {
         guard let storage = storages[handle] else {
             throw SharedContentMigrationError.storageFailure(
@@ -285,6 +312,8 @@ public extension GeniusLocusKit {
         }
         let estateObj = try estate(for: handle)
         let source = LocusDrawerCorpusContentSource(estate: estateObj)
+        let wiredFingerprint = CorpusContentEngine.configurationFingerprint(
+            mode: .attached, models: embeddingModels)
         try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
         let store = SharedContentMigrationStore(storage: storage)
 
@@ -301,16 +330,32 @@ public extension GeniusLocusKit {
                 protectedBaseline: [:],
                 rebuildCursor: nil, rebuiltContentCount: 0,
                 estimatedReclaimableBytes: nil, reclaimedBytes: nil,
-                legacyChunkCount: nil, legacyVectorKeyCount: nil)
+                legacyChunkCount: nil, legacyVectorKeyCount: nil,
+                ensembleFingerprint: nil, providerGenerations: nil)
             if layout == nil {
                 // Fresh estate: bypass — nothing legacy exists or ever will.
+                // Record the wired configuration so the bypass record is
+                // complete UNDER it (no phantom upgrade on the next run).
                 record.state = .complete
+                record.ensembleFingerprint = wiredFingerprint
             }
             try await store.save(record, now: now)
             try checkFault(after: record.state)
         }
         if record.state == .complete {
-            return report(for: record)
+            if record.ensembleFingerprint == wiredFingerprint {
+                return report(for: record)
+            }
+            // Follow-on ENSEMBLE UPGRADE: the completed record's recorded
+            // configuration differs from the wired one (new provider, new
+            // version, new index layout). The structural rebuild is intact;
+            // re-enter at the provider phases — train what is missing,
+            // backfill only absent coverage, re-verify, and restamp the
+            // fingerprint. Never trusted as complete until then.
+            migrationLog.notice(
+                "shared-content upgrade: recorded ensemble \(record.ensembleFingerprint ?? "<none>", privacy: .public) != wired \(wiredFingerprint, privacy: .public) — entering provider upgrade")
+            record.state = .drawerIndexRebuilt
+            try await store.save(record, now: now)
         }
 
         // 2. canonicalValidated — every active legacy source resolves to a
@@ -393,16 +438,8 @@ public extension GeniusLocusKit {
         //    crash resumes mid-stream. Bounded memory: IDs stream in pages
         //    through the adapter; indexContent embeds one Drawer at a time.
         if record.state.ordinal < SharedContentMigrationState.drawerIndexRebuilt.ordinal {
-            let engine: CorpusContentEngine
-            if let registered = corpusKits[handle] {
-                engine = registered
-            } else {
-                engine = try await CorpusContentEngine(
-                    storage: storage,
-                    configuration: CorpusContentConfiguration(
-                        mode: .attached, indexUnit: .wholeContent),
-                    source: source)
-            }
+            let engine = try await migrationEngine(
+                handle: handle, storage: storage, source: source, models: embeddingModels)
             // Deferred-index window (P6 scale fix): the engine's vector
             // write path rebuilds the resident binary index from the full
             // snapshot per call — O(n) per Drawer, quadratic over a
@@ -425,7 +462,7 @@ public extension GeniusLocusKit {
             let checkpointStride = 500
             var sinceCheckpoint = 0
             for id in allIDs[resumeFrom...] {
-                try await engine.indexContent(id: id, now: now)
+                try await engine.indexContentStructural(id: id, now: now)
                 processed += 1
                 sinceCheckpoint += 1
                 if sinceCheckpoint >= checkpointStride {
@@ -443,17 +480,60 @@ public extension GeniusLocusKit {
             try checkFault(after: record.state)
         }
 
-        // 7. verified — reconcile IDs, prove direct hydration, compare
-        //    protected baselines, prove no chunk artifact survives. A
-        //    mismatch stops BEFORE the inventory/evidence is discarded.
+        // 7. basesTrained — stream-train every trainable provider lacking a
+        //    current basis (bounded pages; per-provider atomic basis+counts
+        //    commit). Restart-idempotent: a crash before a provider's
+        //    commit retrains it from zero; already-committed providers are
+        //    skipped by their persisted generation.
+        if record.state.ordinal < SharedContentMigrationState.basesTrained.ordinal {
+            let engine = try await migrationEngine(
+                handle: handle, storage: storage, source: source, models: embeddingModels)
+            _ = try await engine.trainTrainableSlots(now: now)
+            record.providerGenerations = Dictionary(
+                uniqueKeysWithValues: await engine.providerGenerations()
+                    .map { ($0.modelID, $0.basisDigest) })
+            record.state = .basesTrained
+            try await store.save(record, now: now)
+            try checkFault(after: record.state)
+        }
+
+        // 8. providersCovered — backfill ONLY the missing (Drawer,
+        //    provider) representations under each provider's CURRENT basis
+        //    generation. The durable coverage rows are the resume
+        //    authority: a cursor/progress figure may lag them, never lead.
+        //    No BM25 rewrite, no counts refold, no covered-row rewrites.
+        if record.state.ordinal < SharedContentMigrationState.providersCovered.ordinal {
+            let engine = try await migrationEngine(
+                handle: handle, storage: storage, source: source, models: embeddingModels)
+            // Engine generations are the durable truth (atomic commits);
+            // reconcile the record's bookkeeping to them on resume.
+            record.providerGenerations = Dictionary(
+                uniqueKeysWithValues: await engine.providerGenerations()
+                    .map { ($0.modelID, $0.basisDigest) })
+            try await engine.sharedVectorStore.beginDeferredIndex()
+            _ = try await engine.backfillProviderCoverage(now: now)
+            try await engine.sharedVectorStore.publishResidentIndex()
+            record.state = .providersCovered
+            try await store.save(record, now: now)
+            try checkFault(after: record.state)
+        }
+
+        // 9. verified — reconcile IDs, prove direct hydration, compare
+        //    protected baselines, prove no chunk artifact survives, and
+        //    prove PER-PROVIDER coverage: every wired provider covers every
+        //    active Drawer under its recorded basis generation. A mismatch
+        //    stops BEFORE the inventory/evidence is discarded.
         if record.state.ordinal < SharedContentMigrationState.verified.ordinal {
-            try await verify(record: record, storage: storage, source: source)
+            let engine = try await migrationEngine(
+                handle: handle, storage: storage, source: source, models: embeddingModels)
+            try await verify(record: record, storage: storage, source: source, engine: engine)
+            record.ensembleFingerprint = await engine.configurationFingerprint()
             record.state = .verified
             try await store.save(record, now: now)
             try checkFault(after: record.state)
         }
 
-        // 8. reclaimPending — the lane is available from here; physical
+        // 10. reclaimPending — the lane is available from here; physical
         //    page reclamation runs via the maintenance surface (P5) and is
         //    retryable during a maintenance window.
         if record.state.ordinal < SharedContentMigrationState.reclaimPending.ordinal {
@@ -467,7 +547,7 @@ public extension GeniusLocusKit {
             try checkFault(after: record.state)
         }
 
-        // 9. complete — after physical reclamation (P5's maintenance API).
+        // 11. complete — after physical reclamation (P5's maintenance API).
         //    `completeSharedContentReclaim` flips the final state; until
         //    then the record honestly reports reclaimPending.
         return report(for: record)
@@ -658,10 +738,28 @@ public extension GeniusLocusKit {
         return String(format: "%016llx", combined)
     }
 
+    /// The migration's engine over the estate's wired configuration:
+    /// the registered attached engine when present, else a fresh one.
+    private func migrationEngine(
+        handle: EstateHandle,
+        storage: any Storage,
+        source: LocusDrawerCorpusContentSource,
+        models: [EmbeddingModel]
+    ) async throws -> CorpusContentEngine {
+        if let registered = corpusKits[handle] { return registered }
+        return try await CorpusContentEngine(
+            storage: storage,
+            configuration: CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent),
+            source: source,
+            models: models)
+    }
+
     private func verify(
         record: SharedContentMigrationRecord,
         storage: any Storage,
-        source: LocusDrawerCorpusContentSource
+        source: LocusDrawerCorpusContentSource,
+        engine: CorpusContentEngine
     ) async throws {
         // No chunk-keyed artifact or copied-text table survives.
         if (try? await storage.rowStore.count(table: "chunks", where: nil)) != nil {
@@ -694,6 +792,24 @@ public extension GeniusLocusKit {
             let missing = activeIDs.subtracting(indexedIDs).sorted().prefix(5)
             throw SharedContentMigrationError.verificationFailed(
                 reason: "rebuild coverage gap — unindexed drawers: \(missing.joined(separator: ", "))")
+        }
+        // Per-provider coverage: every wired provider must cover every
+        // active Drawer under its CURRENT basis generation, and every
+        // trainable provider must actually be trained. The migration is
+        // not complete while any configured lane is dark.
+        for generation in await engine.providerGenerations() {
+            // An EMPTY estate has nothing to train on or cover; providers
+            // train at first ingest. Digest emptiness is only a failure
+            // when there was a corpus to train on.
+            if generation.basisDigest.isEmpty && !activeIDs.isEmpty {
+                throw SharedContentMigrationError.verificationFailed(
+                    reason: "provider \(generation.modelID) is untrained after basesTrained")
+            }
+            let covered = try await engine.coveredCount(modelID: generation.modelID) ?? 0
+            if covered < activeIDs.count {
+                throw SharedContentMigrationError.verificationFailed(
+                    reason: "provider \(generation.modelID) covers \(covered)/\(activeIDs.count) drawers")
+            }
         }
         // Protected-state folds must match the pre-destruction baseline.
         let current = try await protectedBaseline(

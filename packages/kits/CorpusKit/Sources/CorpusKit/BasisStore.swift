@@ -151,6 +151,13 @@ public actor BasisStore {
     ///
     /// - Parameter row: the basis row to persist.
     public func upsert(_ row: PersistedBasis) async throws {
+        try await upsert(row, into: storage.rowStore)
+    }
+
+    /// Transaction-scoped variant: write through the CALLER's row store so
+    /// the basis row commits atomically with sibling writes (the corrective
+    /// pass's basis+counts atomic commit).
+    public func upsert(_ row: PersistedBasis, into rowStore: any RowStore) async throws {
         let values: [String: TypedValue] = [
             "model_id": .text(row.modelID),
             "model_version": .text(row.modelVersion),
@@ -162,7 +169,7 @@ public actor BasisStore {
         // non-conflict columns (basis, trained_at, trained_chunk_count) of the
         // existing row for the same provider key, so a retrain overwrites the
         // prior basis in place rather than accumulating rows.
-        _ = try await storage.rowStore.upsert(
+        _ = try await rowStore.upsert(
             table: "corpus_provider_basis",
             values: values,
             conflictColumns: ["model_id", "model_version"]

@@ -12,6 +12,7 @@
 import Testing
 import Foundation
 import CorpusKit
+import CorpusKitProviders
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -234,6 +235,64 @@ struct SharedContentMigrationTests {
         // pages, never derived state.
         let postHits = try await engine.bm25TopK(query: "page reclamation", limit: 5)
         #expect(postHits.first?.id == drawerIDs[2])
+    }
+
+    // MARK: - Ensemble upgrade (add a provider to a migrated estate)
+
+    @Test func ensembleUpgradeCoversAddedProviderAndStaysDarkUntilThen() async throws {
+        let contents = [
+            "Upgrade fixture drawer one about estates.",
+            "Upgrade fixture drawer two about coverage."
+        ]
+        let (kit, handle, storage, drawerIDs, url) =
+            try await makeLegacyEstate(drawerContents: contents)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Migrate under a ONE-provider configuration and finish reclaim.
+        let small: [EmbeddingModel] = [.deterministic]
+        let first = try await kit.runSharedContentMigration(
+            handle: handle, now: now, embeddingModels: small)
+        #expect(first.state == .reclaimPending)
+        _ = try await kit.completeSharedContentReclaim(handle: handle, now: now)
+        let smallFP = CorpusContentEngine.configurationFingerprint(
+            mode: .attached, models: small)
+        #expect(!(await kit.sharedContentLaneMustStayDark(
+            storage: storage, wiredFingerprint: smallFP)))
+
+        // Wire a LARGER ensemble: the completed record is NOT trusted —
+        // the lane goes dark and the estate enters a follow-on upgrade.
+        let big: [EmbeddingModel] = [
+            .deterministic,
+            .randomIndexing(provider: RandomIndexingProvider())
+        ]
+        let bigFP = CorpusContentEngine.configurationFingerprint(
+            mode: .attached, models: big)
+        #expect(await kit.sharedContentLaneMustStayDark(
+            storage: storage, wiredFingerprint: bigFP))
+
+        // The upgrade trains the ADDED provider, backfills ONLY its missing
+        // coverage, re-verifies, and restamps the fingerprint.
+        let upgraded = try await kit.runSharedContentMigration(
+            handle: handle, now: now, embeddingModels: big)
+        #expect(upgraded.state == .reclaimPending)
+        _ = try await kit.completeSharedContentReclaim(handle: handle, now: now)
+        #expect(!(await kit.sharedContentLaneMustStayDark(
+            storage: storage, wiredFingerprint: bigFP)))
+
+        // Every provider covers every drawer, and BM25 still serves.
+        let estateObj = try await kit.estate(for: handle)
+        let engine = try await CorpusContentEngine(
+            storage: storage,
+            configuration: CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent),
+            source: LocusDrawerCorpusContentSource(estate: estateObj),
+            models: big)
+        #expect(try await engine.coveredCount(modelID: "corpus-deterministic-v1")
+            == drawerIDs.count)
+        #expect(try await engine.coveredCount(modelID: "random-indexing-v1")
+            == drawerIDs.count)
+        let hits = try await engine.bm25TopK(query: "coverage", limit: 5)
+        #expect(hits.first?.id == drawerIDs[1])
     }
 
     // MARK: - Orphan fail-dark

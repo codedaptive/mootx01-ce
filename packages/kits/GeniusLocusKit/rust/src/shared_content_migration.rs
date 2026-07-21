@@ -40,6 +40,8 @@ pub enum SharedContentMigrationState {
     LegacyDerivedCleared,
     LegacySchemaRetired,
     DrawerIndexRebuilt,
+    BasesTrained,
+    ProvidersCovered,
     Verified,
     ReclaimPending,
     Complete,
@@ -118,6 +120,15 @@ pub struct SharedContentMigrationRecord {
     pub legacy_chunk_count: Option<usize>,
     #[serde(rename = "legacyVectorKeyCount", default)]
     pub legacy_vector_key_count: Option<usize>,
+    /// The ensemble/configuration fingerprint the migration completed
+    /// under (corrective pass). Wiring a DIFFERENT configuration over a
+    /// completed record is a follow-on upgrade, never trusted as complete.
+    #[serde(rename = "ensembleFingerprint", default)]
+    pub ensemble_fingerprint: Option<String>,
+    /// Per-provider basis generations (model_id → basis digest) recorded
+    /// at `basesTrained` and re-verified at `verified`.
+    #[serde(rename = "providerGenerations", default)]
+    pub provider_generations: Option<BTreeMap<String, String>>,
 }
 
 const SINGLETON_ID: &str = "shared-content-1.1";
@@ -283,14 +294,30 @@ impl EstateCoordinator {
 
     /// Whether the estate's Corpus lane must stay DARK (legacy lane present
     /// and the migration has not reached `Verified`).
-    pub fn shared_content_lane_must_stay_dark(storage: &Arc<dyn Storage>) -> bool {
-        if detect_legacy_layout(storage).is_none() {
-            return false;
-        }
+    pub fn shared_content_lane_must_stay_dark(
+        storage: &Arc<dyn Storage>,
+        wired_fingerprint: Option<&str>,
+    ) -> bool {
+        let legacy = detect_legacy_layout(storage).is_some();
         let _ = storage.migrate(&SharedContentMigrationStore::schema_declaration());
         match SharedContentMigrationStore::new(Arc::clone(storage)).load() {
-            Ok(Some(record)) => record.state < SharedContentMigrationState::Verified,
-            _ => true,
+            Ok(Some(record)) => {
+                // Any persisted record short of `verified` keeps the lane
+                // dark — including post-retirement states where the legacy
+                // tables are already gone and structural detection alone
+                // would light a partially rebuilt lane.
+                if record.state < SharedContentMigrationState::Verified {
+                    return true;
+                }
+                if let Some(wired) = wired_fingerprint {
+                    if record.ensemble_fingerprint.as_deref() != Some(wired) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Ok(None) => legacy,
+            Err(_) => legacy,
         }
     }
 
@@ -394,7 +421,12 @@ impl EstateCoordinator {
         &mut self,
         handle: &EstateHandle,
         now_millis: i64,
+        models: Vec<EmbeddingModelConfig>,
     ) -> Result<SharedContentMigrationReport, SharedContentMigrationError> {
+        let wired_fingerprint = CorpusContentEngine::configuration_fingerprint_for(
+            CorpusOperatingMode::Attached,
+            &models,
+        );
         let storage = self
             .storages
             .get(handle)
@@ -435,9 +467,15 @@ impl EstateCoordinator {
                     reclaimed_bytes: None,
                     legacy_chunk_count: None,
                     legacy_vector_key_count: None,
+                    ensemble_fingerprint: None,
+                    provider_generations: None,
                 };
                 if layout.is_none() {
+                    // Fresh estate: bypass — record the wired configuration
+                    // so the bypass record is complete UNDER it (no phantom
+                    // upgrade on the next run).
                     record.state = SharedContentMigrationState::Complete;
+                    record.ensemble_fingerprint = Some(wired_fingerprint.clone());
                 }
                 store.save(&record, now_millis)?;
                 self.check_shared_content_fault(record.state)?;
@@ -445,7 +483,20 @@ impl EstateCoordinator {
             }
         };
         if record.state == SharedContentMigrationState::Complete {
-            return Ok(report_for(&record));
+            if record.ensemble_fingerprint.as_deref() == Some(wired_fingerprint.as_str()) {
+                return Ok(report_for(&record));
+            }
+            // Follow-on ENSEMBLE UPGRADE: the completed record's recorded
+            // configuration differs from the wired one. The structural
+            // rebuild is intact; re-enter at the provider phases — train
+            // what is missing, backfill only absent coverage, re-verify,
+            // and restamp the fingerprint.
+            eprintln!(
+                "shared-content upgrade: recorded ensemble {:?} != wired {wired_fingerprint} — entering provider upgrade",
+                record.ensemble_fingerprint
+            );
+            record.state = SharedContentMigrationState::DrawerIndexRebuilt;
+            store.save(&record, now_millis)?;
         }
 
         // 2. canonicalValidated
@@ -544,32 +595,52 @@ impl EstateCoordinator {
             self.check_shared_content_fault(record.state)?;
         }
 
-        // 6. drawerIndexRebuilt — streamed, cursor-checkpointed.
-        if record.state < SharedContentMigrationState::DrawerIndexRebuilt {
-            let engine = CorpusContentEngine::open(
-                Arc::clone(&storage),
-                CorpusContentConfiguration::new(
-                    CorpusOperatingMode::Attached,
-                    CorpusIndexUnitPolicy::WholeContent,
-                )
-                .map_err(|e| SharedContentMigrationError::StorageFailure {
-                    state: SharedContentMigrationState::DrawerIndexRebuilt,
-                    reason: format!("{e:?}"),
-                })?,
-                Arc::new(LocusDrawerContentSource::new(
-                    self.estate_for(handle)
+        // The migration engine over the WIRED configuration (never a
+        // hardcoded model set). Constructed AFTER schema retirement — an
+        // earlier construction would load the legacy bases and mask the
+        // untrained state — and reused by every provider phase. The
+        // registered attached engine is reused when present.
+        let engine: Option<Arc<CorpusContentEngine>> =
+            if record.state < SharedContentMigrationState::Verified {
+                let built = match self.corpus_kits.get(handle) {
+                    Some(registered) => Arc::clone(registered),
+                    None => Arc::new(
+                        CorpusContentEngine::open(
+                            Arc::clone(&storage),
+                            CorpusContentConfiguration::new(
+                                CorpusOperatingMode::Attached,
+                                CorpusIndexUnitPolicy::WholeContent,
+                            )
+                            .map_err(|e| SharedContentMigrationError::StorageFailure {
+                                state: SharedContentMigrationState::DrawerIndexRebuilt,
+                                reason: format!("{e:?}"),
+                            })?,
+                            Arc::new(LocusDrawerContentSource::new(
+                                self.estate_for(handle)
+                                    .map_err(|e| SharedContentMigrationError::StorageFailure {
+                                        state: SharedContentMigrationState::DrawerIndexRebuilt,
+                                        reason: format!("{e:?}"),
+                                    })?
+                                    .clone(),
+                            )),
+                            models,
+                        )
                         .map_err(|e| SharedContentMigrationError::StorageFailure {
                             state: SharedContentMigrationState::DrawerIndexRebuilt,
                             reason: format!("{e:?}"),
-                        })?
-                        .clone(),
-                )),
-                vec![EmbeddingModelConfig::Deterministic],
-            )
-            .map_err(|e| SharedContentMigrationError::StorageFailure {
-                state: SharedContentMigrationState::DrawerIndexRebuilt,
-                reason: format!("{e:?}"),
-            })?;
+                        })?,
+                    ),
+                };
+                Some(built)
+            } else {
+                None
+            };
+
+        // 6. drawerIndexRebuilt — streamed, cursor-checkpointed. STRUCTURAL
+        //    only: BM25 + checkpoints + stateless-slot vectors; trainable
+        //    slots are deferred to basesTrained + providersCovered.
+        if record.state < SharedContentMigrationState::DrawerIndexRebuilt {
+            let engine = engine.as_ref().expect("engine exists below Verified");
             let all_ids = source.active_content_ids().map_err(|e| {
                 SharedContentMigrationError::StorageFailure {
                     state: SharedContentMigrationState::DrawerIndexRebuilt,
@@ -600,7 +671,7 @@ impl EstateCoordinator {
             let mut processed = record.rebuilt_content_count;
             let mut since_checkpoint = 0usize;
             for id in &all_ids[resume_from..] {
-                engine.index_content(id, now_millis).map_err(|e| {
+                engine.index_content_structural(id, now_millis).map_err(|e| {
                     SharedContentMigrationError::StorageFailure {
                         state: SharedContentMigrationState::DrawerIndexRebuilt,
                         reason: format!("{e:?}"),
@@ -628,15 +699,71 @@ impl EstateCoordinator {
             self.check_shared_content_fault(record.state)?;
         }
 
-        // 7. verified
+        // 7. basesTrained — stream-train every trainable provider lacking a
+        //    current basis (bounded pages; per-provider atomic basis+counts
+        //    commit). Restart-idempotent per provider.
+        if record.state < SharedContentMigrationState::BasesTrained {
+            let engine = engine.as_ref().expect("engine exists below Verified");
+            engine.train_trainable_slots(now_millis, false).map_err(|e| {
+                SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::BasesTrained,
+                    reason: format!("{e:?}"),
+                }
+            })?;
+            record.provider_generations =
+                Some(engine.provider_generations().into_iter().collect());
+            record.state = SharedContentMigrationState::BasesTrained;
+            store.save(&record, now_millis)?;
+            self.check_shared_content_fault(record.state)?;
+        }
+
+        // 8. providersCovered — backfill ONLY the missing (Drawer, provider)
+        //    representations under each provider's CURRENT basis generation.
+        //    The durable coverage rows are the resume authority: progress
+        //    figures may lag them, never lead.
+        if record.state < SharedContentMigrationState::ProvidersCovered {
+            let engine = engine.as_ref().expect("engine exists below Verified");
+            // Engine generations are the durable truth (atomic commits);
+            // reconcile the record's bookkeeping to them on resume.
+            record.provider_generations =
+                Some(engine.provider_generations().into_iter().collect());
+            let deferred_vs = engine.shared_vector_store();
+            deferred_vs.begin_deferred_index().map_err(|e| {
+                SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::ProvidersCovered,
+                    reason: format!("begin_deferred_index: {e:?}"),
+                }
+            })?;
+            engine.backfill_provider_coverage(now_millis, 500).map_err(|e| {
+                SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::ProvidersCovered,
+                    reason: format!("{e:?}"),
+                }
+            })?;
+            deferred_vs.publish_resident_index().map_err(|e| {
+                SharedContentMigrationError::StorageFailure {
+                    state: SharedContentMigrationState::ProvidersCovered,
+                    reason: format!("publish_resident_index: {e:?}"),
+                }
+            })?;
+            record.state = SharedContentMigrationState::ProvidersCovered;
+            store.save(&record, now_millis)?;
+            self.check_shared_content_fault(record.state)?;
+        }
+
+        // 9. verified — structural checks PLUS per-provider coverage: every
+        //    wired provider covers every active Drawer under its recorded
+        //    basis generation.
         if record.state < SharedContentMigrationState::Verified {
-            verify(&record, &storage, &source)?;
+            let engine_ref = engine.as_ref().expect("engine exists below Verified");
+            verify(&record, &storage, &source, engine_ref)?;
+            record.ensemble_fingerprint = Some(engine_ref.configuration_fingerprint());
             record.state = SharedContentMigrationState::Verified;
             store.save(&record, now_millis)?;
             self.check_shared_content_fault(record.state)?;
         }
 
-        // 8. reclaimPending — capture the live reclaimable estimate through
+        // 10. reclaimPending — capture the live reclaimable estimate through
         //    the P5 maintenance surface (freelist pages × page size + WAL
         //    bytes; 0 on backends with nothing client-reclaimable).
         if record.state < SharedContentMigrationState::ReclaimPending {
@@ -797,6 +924,7 @@ fn verify(
     record: &SharedContentMigrationRecord,
     storage: &Arc<dyn Storage>,
     source: &LocusDrawerContentSource,
+    engine: &CorpusContentEngine,
 ) -> Result<(), SharedContentMigrationError> {
     let row_store = storage.row_store();
     if row_store.count("chunks", None).is_ok() {
@@ -840,6 +968,30 @@ fn verify(
         return Err(SharedContentMigrationError::VerificationFailed {
             reason: format!("rebuild coverage gap — unindexed drawers: {}", missing.join(", ")),
         });
+    }
+    // Per-provider coverage: every wired provider must cover every active
+    // Drawer under its CURRENT basis generation, and every trainable
+    // provider must actually be trained (unless the estate is empty —
+    // providers train at first ingest). The migration is not complete
+    // while any configured lane is dark.
+    for (model_id, basis_digest) in engine.provider_generations() {
+        if basis_digest.is_empty() && !active_ids.is_empty() {
+            return Err(SharedContentMigrationError::VerificationFailed {
+                reason: format!("provider {model_id} is untrained after basesTrained"),
+            });
+        }
+        let covered = engine
+            .covered_count(&model_id)
+            .map_err(|e| storage_failure(SharedContentMigrationState::Verified, e))?
+            .unwrap_or(0);
+        if covered < active_ids.len() {
+            return Err(SharedContentMigrationError::VerificationFailed {
+                reason: format!(
+                    "provider {model_id} covers {covered}/{} drawers",
+                    active_ids.len()
+                ),
+            });
+        }
     }
     // Protected tables refold identically.
     let current = protected_baseline(storage, &BTreeSet::new())?;

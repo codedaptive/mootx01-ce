@@ -154,6 +154,13 @@ public actor CorpusProviderCountsStore {
     /// incremental update replaces the prior counts in place rather than
     /// accumulating rows. `updatedAt` is the caller's `now` (determinism).
     public func upsert(_ row: PersistedCounts) async throws {
+        try await upsert(row, into: storage.rowStore)
+    }
+
+    /// Transaction-scoped variant: write through the CALLER's row store so
+    /// the counts row commits atomically with its basis row (the corrective
+    /// pass's basis+counts atomic commit).
+    public func upsert(_ row: PersistedCounts, into rowStore: any RowStore) async throws {
         let values: [String: TypedValue] = [
             "model_id": .text(row.modelID),
             "model_version": .text(row.modelVersion),
@@ -162,7 +169,7 @@ public actor CorpusProviderCountsStore {
             "vocab_size": .int(Int64(row.vocabSize)),
             "updated_at": .timestamp(row.updatedAt)
         ]
-        _ = try await storage.rowStore.upsert(
+        _ = try await rowStore.upsert(
             table: "corpus_provider_counts",
             values: values,
             conflictColumns: ["model_id", "model_version"]

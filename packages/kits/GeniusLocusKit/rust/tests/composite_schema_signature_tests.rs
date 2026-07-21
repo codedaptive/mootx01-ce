@@ -51,9 +51,15 @@ fn composite_table_names_are_unique() {
 
 #[test]
 fn composite_signature_matches_frozen_cross_port_fixture() {
+    let actual = layout_signature_text(&composite_schema());
+    // Maintainer regen: MOOT_REGEN_COMPOSITE_FIXTURE=1 rewrites the fixture
+    // from THIS port; run the Swift twin the same way and verify the two
+    // runs produce a byte-identical file before committing.
+    if std::env::var("MOOT_REGEN_COMPOSITE_FIXTURE").as_deref() == Ok("1") {
+        std::fs::write(fixture_path(), &actual).expect("write fixture");
+    }
     let expected = std::fs::read_to_string(fixture_path())
         .expect("read Tests/Fixtures/composite_schema_signature.txt");
-    let actual = layout_signature_text(&composite_schema());
     assert_eq!(
         actual, expected,
         "composite layout signature diverged from the frozen fixture — if this \

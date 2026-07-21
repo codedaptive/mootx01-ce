@@ -59,6 +59,13 @@ table=corpus_provider_counts
   col=ext type=json null=1 default=- role=-
   pk=model_id,model_version
   appendOnly=0 hashable=0
+table=corpus_provider_coverage
+  col=content_id type=text null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=basis_digest type=text null=0 default=- role=-
+  col=updated_at type=timestamp null=0 default=- role=-
+  pk=content_id,model_id
+  appendOnly=0 hashable=0
 table=diary
   col=id type=text null=0 default=- role=-
   col=agentName type=text null=0 default=- role=-

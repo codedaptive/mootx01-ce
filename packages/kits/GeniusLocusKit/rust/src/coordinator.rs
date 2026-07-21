@@ -662,7 +662,7 @@ pub struct EstateCoordinator {
     scope_vaults: HashMap<EstateHandle, ScopeKeyVault>,
     /// Per-estate CorpusKit handles. Optional; activates BM25 lane in recall_scored.
     /// Mirrors Swift actor's `corpusKits: [EstateHandle: Corpus]`.
-    corpus_kits: HashMap<EstateHandle, Arc<CorpusContentEngine>>,
+    pub(crate) corpus_kits: HashMap<EstateHandle, Arc<CorpusContentEngine>>,
     /// Per-estate VectorKit handles. Optional; activates vector lane in recall_scored.
     /// Mirrors Swift actor's `vectorStores: [EstateHandle: VectorStore]`.
     /// `pub(crate)` so `intake.rs` can access it without routing through a public
@@ -5714,8 +5714,19 @@ impl EstateCoordinator {
         // backing_storage is the persistence_kit Storage used for Corpus + VectorStore;
         // falls back to the primary `storage` when no separate corpus_storage is supplied.
         let backing_storage = corpus_storage.unwrap_or(storage);
+        // The wiring's configuration fingerprint: the gate compares it with
+        // a completed migration record's — an obsolete ensemble enters a
+        // follow-on upgrade instead of lighting a stale lane.
+        let wired_fingerprint = CorpusContentEngine::configuration_fingerprint_for(
+            CorpusOperatingMode::Attached,
+            &embedding_models,
+        );
         let wiring_result = match params.kind {
-            EstateKind::Glk if Self::shared_content_lane_must_stay_dark(&backing_storage) => {
+            EstateKind::Glk
+                if Self::shared_content_lane_must_stay_dark(
+                    &backing_storage,
+                    Some(wired_fingerprint.as_str()),
+                ) => {
                 // Shared-content dark-lane gate (P4): a legacy pre-cutover
                 // estate keeps its Corpus lane DARK until the resumable
                 // migration reaches Verified. LocusKit recall stays
@@ -5725,7 +5736,11 @@ impl EstateCoordinator {
                 );
                 Ok((None, None))
             }
-            EstateKind::CorpusOnly if Self::shared_content_lane_must_stay_dark(&backing_storage) => {
+            EstateKind::CorpusOnly
+                if Self::shared_content_lane_must_stay_dark(
+                    &backing_storage,
+                    Some(wired_fingerprint.as_str()),
+                ) => {
                 eprintln!(
                     "mootx01: estate carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes"
                 );

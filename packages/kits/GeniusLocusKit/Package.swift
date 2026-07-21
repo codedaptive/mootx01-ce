@@ -40,6 +40,14 @@ let package = Package(
             name: "GeniusLocusKit",
             targets: ["GeniusLocusKit"]
         ),
+        // Maintainer tool: the shared-content scale-qualification driver.
+        // A standalone executable (NOT a test) so large-estate qualification
+        // runs free of the swiftpm test harness; env-gated exactly like the
+        // Rust twin (MOOT_SCF_QUAL_DB names a recoverable clone).
+        .executable(
+            name: "glk-scale-qual",
+            targets: ["GLKScaleQual"]
+        ),
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
@@ -85,6 +93,18 @@ let package = Package(
         .package(name: "ConvergenceKit", path: "../ConvergenceKit"),
     ],
     targets: [
+        .executableTarget(
+            name: "GLKScaleQual",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKScaleQual"
+        ),
         .target(
             name: "GeniusLocusKit",
             dependencies: [

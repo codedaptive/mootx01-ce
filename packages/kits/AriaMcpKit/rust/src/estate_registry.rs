@@ -770,9 +770,20 @@ fn wire_postgres_semantic_recall(
 
     // Dark-lane gate (shared-content 1.1): a pre-existing estate that still
     // carries the legacy corpus copy lane keeps its Corpus lane DARK until
-    // the resumable migration completes. LocusKit recall stays available.
-    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(&storage) {
-        eprintln!("aria-mcp: estate carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes");
+    // the resumable migration completes — and a completed record whose
+    // ensemble fingerprint differs from this wiring enters a follow-on
+    // upgrade instead of lighting a stale lane. LocusKit recall stays
+    // available either way.
+    let ensemble = default_ensemble();
+    let wired_fingerprint = CorpusContentEngine::configuration_fingerprint_for(
+        CorpusOperatingMode::Attached,
+        &ensemble,
+    );
+    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(
+        &storage,
+        Some(wired_fingerprint.as_str()),
+    ) {
+        eprintln!("aria-mcp: estate carries the legacy corpus copy lane (or an obsolete ensemble) — Corpus lane stays dark until the shared-content migration/upgrade completes");
         return Ok(());
     }
     // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
@@ -797,7 +808,7 @@ fn wire_postgres_semantic_recall(
             Arc::clone(&storage),
             config,
             Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
+            ensemble,
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
     );
@@ -848,11 +859,20 @@ fn wire_sqlite_semantic_recall(
 
     // Dark-lane gate (shared-content 1.1): a pre-existing estate that still
     // carries the legacy corpus copy lane keeps its Corpus lane DARK until
-    // the resumable migration completes. LocusKit recall stays available;
-    // the migration verb lights the lane. Mirrors the GLK coordinator's
-    // provision gate arms.
-    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(&storage) {
-        eprintln!("aria-mcp: estate {path:?} carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes");
+    // the resumable migration completes — and a completed record whose
+    // ensemble fingerprint differs from this wiring enters a follow-on
+    // upgrade instead of lighting a stale lane. Mirrors the GLK
+    // coordinator's provision gate arms.
+    let ensemble = default_ensemble();
+    let wired_fingerprint = CorpusContentEngine::configuration_fingerprint_for(
+        CorpusOperatingMode::Attached,
+        &ensemble,
+    );
+    if genius_locus_kit::EstateCoordinator::shared_content_lane_must_stay_dark(
+        &storage,
+        Some(wired_fingerprint.as_str()),
+    ) {
+        eprintln!("aria-mcp: estate {path:?} carries the legacy corpus copy lane (or an obsolete ensemble) — Corpus lane stays dark until the shared-content migration/upgrade completes");
         return Ok(());
     }
     // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
@@ -877,7 +897,7 @@ fn wire_sqlite_semantic_recall(
             Arc::clone(&storage),
             config,
             Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
+            ensemble,
         )
         .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?,
     );

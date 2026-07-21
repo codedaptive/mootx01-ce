@@ -225,7 +225,8 @@ struct CorpusContentBoundaryTests {
     @Test func attachedProfileContainsNoCanonicalContentTable() {
         let names = Set(CorpusSchemaProfile.attachedDeclaration.tables.map(\.name))
         #expect(names.isDisjoint(with: CorpusSchemaProfile.attachedExcludedTables))
-        #expect(names == ["corpus_index_state", "iix_termfreqs", "iix_doclens",
+        #expect(names == ["corpus_index_state", "corpus_provider_coverage",
+                          "iix_termfreqs", "iix_doclens",
                           "corpus_provider_basis", "corpus_provider_counts"])
         // No column named "text" anywhere in the attached profile — there
         // is no place a verbatim copy could land.

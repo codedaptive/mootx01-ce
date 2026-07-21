@@ -198,7 +198,24 @@ fn emit_engine_metric(name: &str, value: f64) {
 // ── Engine ───────────────────────────────────────────────────────────────
 
 /// The engine/index layout version stamped into `corpus_index_state`.
-pub const CONTENT_ENGINE_INDEX_VERSION: i64 = 1;
+/// v2 (corrective pass): per-provider coverage rows; attached-mode binary
+/// rows written for the DEFAULT slot only.
+pub const CONTENT_ENGINE_INDEX_VERSION: i64 = 2;
+
+/// Which slots an indexing pass embeds. `All` is the ordinary path;
+/// `StatelessOnly` is the migration's structural rebuild (BM25 +
+/// checkpoints + stateless-slot vectors; trainable slots deferred to the
+/// train + backfill phases).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotScope {
+    All,
+    StatelessOnly,
+}
+
+/// Backfill crash-boundary test hook: (phase, batch_index) where phase is
+/// "afterVectors" or "afterCoverage"; an Err aborts the backfill there.
+pub type ContentBackfillFaultHook =
+    Box<dyn Fn(&str, usize) -> Result<(), String> + Send + Sync>;
 
 /// The consumer name this engine claims representations under.
 pub const CLAIMS_CONSUMER: &str = "corpus";
@@ -217,6 +234,7 @@ pub struct CorpusContentEngine {
     basis_store: BasisStore,
     counts_store: CorpusProviderCountsStore,
     index_state: CorpusIndexStateStore,
+    coverage_store: crate::provider_coverage_store::CorpusProviderCoverageStore,
     claims: VectorRepresentationClaims,
     slots: Vec<ProviderSlot>,
     /// Engine-owned content-reference queue state (P3). See
@@ -230,6 +248,11 @@ pub struct CorpusContentEngine {
     ingest_failure_hook: Mutex<Option<ContentIngestFailureHook>>,
     /// Test-only single-use forced float store error (default slot).
     forced_float_error: Mutex<Option<String>>,
+    /// Test-only training fault seams (crash-boundary suites).
+    train_fault_after_model: Mutex<Option<String>>,
+    train_fault_before_commit_model: Mutex<Option<String>>,
+    /// Test-only backfill fault hook (crash-boundary suites).
+    backfill_fault_hook: Mutex<Option<ContentBackfillFaultHook>>,
 }
 
 impl CorpusContentEngine {
@@ -275,6 +298,8 @@ impl CorpusContentEngine {
         let basis_store = BasisStore::new(Arc::clone(&storage));
         let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
         let index_state = CorpusIndexStateStore::new(Arc::clone(&storage));
+        let coverage_store =
+            crate::provider_coverage_store::CorpusProviderCoverageStore::new(Arc::clone(&storage));
         let claims = VectorRepresentationClaims::new(Arc::clone(&storage));
 
         let mut slots = Vec::with_capacity(models.len());
@@ -291,6 +316,7 @@ impl CorpusContentEngine {
             basis_store,
             counts_store,
             index_state,
+            coverage_store,
             claims,
             slots,
             queue_state: Mutex::new(None),
@@ -298,6 +324,9 @@ impl CorpusContentEngine {
             encode_speed: Mutex::new(EncodeSpeed::Foreground),
             ingest_failure_hook: Mutex::new(None),
             forced_float_error: Mutex::new(None),
+            train_fault_after_model: Mutex::new(None),
+            train_fault_before_commit_model: Mutex::new(None),
+            backfill_fault_hook: Mutex::new(None),
         })
     }
 
@@ -483,13 +512,22 @@ impl CorpusContentEngine {
     /// only on corpus-exclusive tables, claim release for the "corpus"
     /// consumer.
     pub fn destroy_recall_index(&self) -> CorpusKitResult<()> {
+        // Claim-aware: keys in representation families another retained
+        // consumer also claims are NOT deleted — that claimant may own the
+        // exact same rows. The engine releases its own claims below; the
+        // surviving claimant's rows survive with it.
+        let shared = self.shared_representation_families()?;
         let ids = self.indexed_content_ids()?;
         let mut keys: Vec<VectorExactKey> = Vec::new();
         for id in &ids {
             for key in self.unit_keys(id)? {
                 for slot in &self.slots {
-                    keys.push(VectorExactKey::new(key.clone(), 0, slot.model_id.clone()));
-                    keys.push(VectorExactKey::new(key.clone(), 1, slot.model_id.clone()));
+                    for lane in [0u32, 1u32] {
+                        if shared.contains(&format!("{}|{lane}", slot.model_id)) {
+                            continue;
+                        }
+                        keys.push(VectorExactKey::new(key.clone(), lane, slot.model_id.clone()));
+                    }
                 }
             }
         }
@@ -500,6 +538,7 @@ impl CorpusContentEngine {
             .clear_all()
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         self.index_state.clear_all()?;
+        self.coverage_store.clear_all()?;
         self.basis_store.delete_all()?;
         self.counts_store.delete_all()?;
         self.claims
@@ -649,13 +688,23 @@ impl CorpusContentEngine {
 
     /// Register this engine's representation claims (idempotent).
     pub fn register_claims(&self, now_millis: i64) -> CorpusKitResult<()> {
-        for slot in &self.slots {
+        for (slot_index, slot) in self.slots.iter().enumerate() {
             let (model_id, model_version) = {
                 let handle = slot.handle.lock().unwrap();
                 let p = handle.provider();
                 (p.model_id().to_string(), p.model_version().to_string())
             };
             for lane in [0u32, 1u32] {
+                // Attached mode writes binary (lane 0) rows for the DEFAULT
+                // slot only — GLK's Hamming readers all probe the default
+                // model — so non-default binary claims are not registered
+                // there either. Standalone keeps per-slot binary lanes.
+                if lane == 0
+                    && slot_index != 0
+                    && self.configuration.mode() == CorpusOperatingMode::Attached
+                {
+                    continue;
+                }
                 self.claims
                     .register_claim(
                         CLAIMS_CONSUMER,
@@ -684,7 +733,26 @@ impl CorpusContentEngine {
         Self::validate(id)?;
         match self.source.record(id)? {
             Some(record) => {
-                self.index_record(&record, None, false, now_millis)?;
+                self.index_record(&record, None, false, now_millis, SlotScope::All)?;
+                Ok(true)
+            }
+            None => {
+                self.clear_derived_state(id)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
+    /// checkpoint, and STATELESS-slot vectors + coverage only. Trainable
+    /// slots are deferred to `train_trainable_slots` + the coverage
+    /// backfill so the rebuild never triggers training and never
+    /// double-writes. Mirrors Swift `indexContentStructural`.
+    pub fn index_content_structural(&self, id: &str, now_millis: i64) -> CorpusKitResult<bool> {
+        Self::validate(id)?;
+        match self.source.record(id)? {
+            Some(record) => {
+                self.index_record(&record, None, false, now_millis, SlotScope::StatelessOnly)?;
                 Ok(true)
             }
             None => {
@@ -719,7 +787,7 @@ impl CorpusContentEngine {
                         record.revision
                     )));
                 }
-                self.index_record(&record, cursor, false, now_millis)?;
+                self.index_record(&record, cursor, false, now_millis, SlotScope::All)?;
             }
             CorpusContentChange::Remove { id, .. } => {
                 self.clear_derived_state(id)?;
@@ -768,6 +836,7 @@ impl CorpusContentEngine {
         applied_cursor: Option<&str>,
         force: bool,
         now_millis: i64,
+        slot_scope: SlotScope,
     ) -> CorpusKitResult<()> {
         // Idempotence anchor: a checkpoint covering this exact (revision,
         // digest, index_version) means the derived rows are complete —
@@ -783,7 +852,9 @@ impl CorpusContentEngine {
             }
         }
         self.register_claims(now_millis)?;
-        self.first_ingest_train_if_needed(now_millis)?;
+        if slot_scope == SlotScope::All {
+            self.first_ingest_train_if_needed(now_millis)?;
+        }
 
         let units = self.replace_units(record)?;
 
@@ -793,22 +864,40 @@ impl CorpusContentEngine {
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         }
 
+        // Attached mode writes the binary (Hamming) row for the DEFAULT
+        // slot only: every GLK binary reader probes the default model;
+        // non-default binary rows would be unreachable weight. Standalone
+        // keeps per-slot binary lanes.
         let mut rows: Vec<VectorPayloadInput> = Vec::with_capacity(units.len() * self.slots.len() * 2);
-        for slot in &self.slots {
+        let mut covered: Vec<(String, String, String)> = Vec::new();
+        for (slot_index, slot) in self.slots.iter().enumerate() {
+            if slot_scope == SlotScope::StatelessOnly && slot.fresh_basis_blob.is_some() {
+                continue;
+            }
+            let digest = slot.basis_digest.lock().unwrap().clone();
+            // A trainable slot with no trained basis cannot embed; the
+            // train + backfill phases cover it.
+            if slot.fresh_basis_blob.is_some() && digest.is_empty() {
+                continue;
+            }
+            let write_binary = slot_index == 0
+                || self.configuration.mode() == CorpusOperatingMode::Standalone;
             let handle = slot.handle.lock().unwrap();
             let provider = handle.provider();
             for (key, text) in &units {
                 let (engram, floats) = provider
                     .embed_pair(text)
                     .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
-                rows.push(VectorPayloadInput {
-                    item_id: key.clone(),
-                    vector_index: 0,
-                    payload: VectorPayload::from_engram(&engram),
-                    model_id: provider.model_id().to_string(),
-                    model_version: provider.model_version().to_string(),
-                    filed_at_unix_secs: now_millis,
-                });
+                if write_binary {
+                    rows.push(VectorPayloadInput {
+                        item_id: key.clone(),
+                        vector_index: 0,
+                        payload: VectorPayload::from_engram(&engram),
+                        model_id: provider.model_id().to_string(),
+                        model_version: provider.model_version().to_string(),
+                        filed_at_unix_secs: now_millis,
+                    });
+                }
                 if !floats.is_empty() {
                     rows.push(VectorPayloadInput {
                         item_id: key.clone(),
@@ -820,15 +909,22 @@ impl CorpusContentEngine {
                     });
                 }
             }
+            covered.push((record.id.clone(), provider.model_id().to_string(), digest));
         }
         if !rows.is_empty() {
             self.vector_store
                 .add_payloads(&rows)
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         }
+        // Coverage rows AFTER the vector rows are durable — coverage never
+        // overstates the vectors table (and the checkpoint below never
+        // overstates coverage).
+        self.coverage_store.mark_covered(&covered, now_millis)?;
 
+        // Maintained counts: fold in memory. Persistence happens at BATCH
+        // boundaries (drain-burst close) and at training commits — never
+        // once per record.
         self.fold_into_counts(&record.text);
-        self.persist_counts(now_millis)?;
 
         // Checkpoint LAST.
         self.index_state.advance(&CorpusIndexState {
@@ -933,7 +1029,12 @@ impl CorpusContentEngine {
 
     /// Delete BM25 postings and vector rows for the given unit keys —
     /// exact-key scoped, never model-wide.
+    /// CLAIM-AWARE derived-row delete: a key whose (model, lane)
+    /// representation family is also claimed by another retained consumer
+    /// is NOT deleted — the row may serve that claimant's exact
+    /// representation. The engine only removes what it exclusively owns.
     fn delete_derived_rows(&self, unit_keys: &BTreeSet<String>) -> CorpusKitResult<()> {
+        let shared = self.shared_representation_families()?;
         let model_ids: Vec<String> = self.slots.iter().map(|s| s.model_id.clone()).collect();
         let mut vector_keys: Vec<VectorExactKey> = Vec::new();
         for key in unit_keys {
@@ -941,8 +1042,12 @@ impl CorpusContentEngine {
                 .remove(key)
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
             for model_id in &model_ids {
-                vector_keys.push(VectorExactKey::new(key.clone(), 0, model_id.clone()));
-                vector_keys.push(VectorExactKey::new(key.clone(), 1, model_id.clone()));
+                for lane in [0u32, 1u32] {
+                    if shared.contains(&format!("{model_id}|{lane}")) {
+                        continue;
+                    }
+                    vector_keys.push(VectorExactKey::new(key.clone(), lane, model_id.clone()));
+                }
             }
         }
         self.vector_store
@@ -951,10 +1056,39 @@ impl CorpusContentEngine {
         Ok(())
     }
 
+    /// Representation families (model_id|lane) this engine's slots write
+    /// that at least one OTHER consumer also claims. Rows in these
+    /// families are never deleted by the engine's remove/destroy paths.
+    fn shared_representation_families(&self) -> CorpusKitResult<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        for slot in &self.slots {
+            let (model_id, model_version) = {
+                let handle = slot.handle.lock().unwrap();
+                let p = handle.provider();
+                (p.model_id().to_string(), p.model_version().to_string())
+            };
+            for lane in [0u32, 1u32] {
+                let claimants = self
+                    .claims
+                    .claimants(&VectorRepresentationKey::new(
+                        model_id.clone(),
+                        model_version.clone(),
+                        lane,
+                    ))
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+                if claimants.iter().any(|c| c != CLAIMS_CONSUMER) {
+                    out.insert(format!("{model_id}|{lane}"));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Clear EVERYTHING derived for `id` (the remove path).
     fn clear_derived_state(&self, id: &str) -> CorpusKitResult<()> {
         let keys = self.unit_keys(id)?;
         self.delete_derived_rows(&keys)?;
+        self.coverage_store.clear(id)?;
         if matches!(
             self.configuration.index_unit(),
             CorpusIndexUnitPolicy::TokenBudgetedPassages { .. }
@@ -1006,85 +1140,433 @@ impl CorpusContentEngine {
 
     // ── Training ─────────────────────────────────────────────────────────
 
+    /// First-ingest auto-train (standalone UX): a trainable slot with no
+    /// persisted basis trains ONCE — via the BOUNDED streaming trainer,
+    /// never by materializing the corpus.
     fn first_ingest_train_if_needed(&self, now_millis: i64) -> CorpusKitResult<()> {
+        let any_untrained = self.slots.iter().any(|slot| {
+            slot.fresh_basis_blob.is_some() && slot.basis_digest.lock().unwrap().is_empty()
+        });
+        if any_untrained {
+            self.train_trainable_slots(now_millis, false)?;
+        }
+        Ok(())
+    }
+
+    /// Training page size — bounds transient text memory to one page; the
+    /// accumulator state is vocabulary-scale regardless, and the trained
+    /// basis is byte-identical for every page size.
+    pub const TRAINING_PAGE_SIZE: usize = 2_000;
+
+    /// Test seam: throw AFTER the named provider's atomic commit.
+    pub fn arm_train_fault_after(&self, model_id: Option<&str>) {
+        *self.train_fault_after_model.lock().unwrap() = model_id.map(str::to_string);
+    }
+    /// Test seam: throw BEFORE the named provider's commit.
+    pub fn arm_train_fault_before_commit(&self, model_id: Option<&str>) {
+        *self.train_fault_before_commit_model.lock().unwrap() = model_id.map(str::to_string);
+    }
+    /// Test seam: backfill fault hook.
+    pub fn arm_backfill_fault_hook(&self, hook: Option<ContentBackfillFaultHook>) {
+        *self.backfill_fault_hook.lock().unwrap() = hook;
+    }
+
+    /// Stream-train every trainable slot that lacks a CURRENT basis (or
+    /// every trainable slot when `force`), one provider at a time.
+    ///
+    /// Crash safety per provider: accumulation/finalization are in-memory
+    /// only — a crash loses nothing durable; the resumed run retrains that
+    /// provider from zero. The commit is ONE atomic transaction writing
+    /// the basis AND its training-corpus counts (the metadata pair that
+    /// must agree). Already-trained providers are skipped on resume.
+    ///
+    /// Bounded: texts stream in pages of `TRAINING_PAGE_SIZE`;
+    /// per-provider accumulator state is vocabulary-scale.
+    ///
+    /// Returns model_id → basis digest for every trainable slot.
+    pub fn train_trainable_slots(
+        &self,
+        now_millis: i64,
+        force: bool,
+    ) -> CorpusKitResult<std::collections::BTreeMap<String, String>> {
+        let mut digests = std::collections::BTreeMap::new();
         for slot in &self.slots {
-            if slot.fresh_basis_blob.is_none() {
+            let Some(blob) = &slot.fresh_basis_blob else { continue };
+            let model_id = slot.model_id.clone();
+            {
+                let digest = slot.basis_digest.lock().unwrap().clone();
+                if !force && !digest.is_empty() {
+                    digests.insert(model_id, digest);
+                    continue;
+                }
+            }
+            let all_ids = self.source.active_content_ids()?;
+            if all_ids.is_empty() {
                 continue;
             }
-            let (model_id, model_version) = {
+            // Fresh accumulation state from the pristine blob — a retrain
+            // never compounds on a prior generation. A SEPARATE fresh
+            // counts accumulator folds the SAME pages, so the persisted
+            // counts are exactly the training corpus's statistics.
+            let (mut fresh, mut counts_accumulator, model_version) = {
+                let handle = slot.handle.lock().unwrap();
+                let Some(trainable) = handle.as_trainable() else {
+                    continue;
+                };
+                let fresh = trainable.reconstruct_trainable_basis(blob)?;
+                let accumulator = trainable.reconstruct_trainable_basis(blob)?;
+                let version = handle.provider().model_version().to_string();
+                (fresh, accumulator, version)
+            };
+            let mut document_count = 0usize;
+            let mut cursor = 0usize;
+            while cursor < all_ids.len() {
+                let end = (cursor + Self::TRAINING_PAGE_SIZE).min(all_ids.len());
+                let mut texts: Vec<String> = Vec::with_capacity(end - cursor);
+                for id in &all_ids[cursor..end] {
+                    if let Some(record) = self.source.record(id)? {
+                        texts.push(record.text);
+                    }
+                }
+                let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                fresh.accumulate_training(&refs);
+                for text in &texts {
+                    counts_accumulator.add_to_counts(text);
+                }
+                document_count += texts.len();
+                cursor = end;
+            }
+            fresh.finalize_training();
+
+            {
+                let mut seam = self.train_fault_before_commit_model.lock().unwrap();
+                if seam.as_deref() == Some(model_id.as_str()) {
+                    *seam = None;
+                    return Err(CorpusKitError::InvalidConfiguration(format!(
+                        "injected training fault before commit: {model_id}"
+                    )));
+                }
+            }
+
+            // ATOMIC commit: basis + training-corpus counts in ONE
+            // transaction — the pair can never disagree durably.
+            let basis_blob = fresh.serialize_basis();
+            let digest = crate::content::content_digest_bytes(&basis_blob);
+            let basis_row = PersistedBasis {
+                model_id: model_id.clone(),
+                model_version: model_version.clone(),
+                basis: basis_blob,
+                trained_at_secs: now_millis / 1000,
+                trained_chunk_count: document_count,
+            };
+            let counts_row = PersistedCounts {
+                model_id: model_id.clone(),
+                model_version: model_version.clone(),
+                counts: counts_accumulator.serialize_counts(),
+                document_count,
+                vocab_size: counts_accumulator.counts_vocabulary_size(),
+                updated_at_secs: now_millis / 1000,
+            };
+            let basis_store = &self.basis_store;
+            let counts_store = &self.counts_store;
+            self.storage
+                .transaction(
+                    persistence_kit::IsolationLevel::Serializable,
+                    &mut |txn| {
+                        let rows = txn.row_store();
+                        basis_store
+                            .upsert_into(&basis_row, &rows)
+                            .map_err(|e| persistence_kit::StorageError::BackendError {
+                                underlying: format!("{e:?}"),
+                            })?;
+                        counts_store
+                            .upsert_into(&counts_row, &rows)
+                            .map_err(|e| persistence_kit::StorageError::BackendError {
+                                underlying: format!("{e:?}"),
+                            })?;
+                        Ok(())
+                    },
+                )
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+
+            // Serve the new generation.
+            {
+                let mut handle = slot.handle.lock().unwrap();
+                *handle = crate::corpus::ProviderHandle::Trainable(fresh);
+            }
+            *slot.basis_digest.lock().unwrap() = digest.clone();
+            {
+                let mut counts = slot.counts.lock().unwrap();
+                *counts = Some(crate::corpus::CountsState {
+                    accumulator: counts_accumulator,
+                    document_count,
+                });
+            }
+            digests.insert(model_id.clone(), digest);
+
+            {
+                let mut seam = self.train_fault_after_model.lock().unwrap();
+                if seam.as_deref() == Some(model_id.as_str()) {
+                    *seam = None;
+                    return Err(CorpusKitError::InvalidConfiguration(format!(
+                        "injected training fault after commit: {model_id}"
+                    )));
+                }
+            }
+        }
+        Ok(digests)
+    }
+
+    /// Backfill MISSING provider representations (trainable AND stateless
+    /// slots alike — an upgrade can add either), driven by the coverage
+    /// table — writes ONLY what is absent under each slot's CURRENT basis
+    /// digest. Never touches BM25, never folds counts, never rewrites
+    /// covered providers' rows. Per batch: vector rows first, coverage
+    /// rows second — a crash leaves coverage LAGGING the durable vectors,
+    /// never ahead. Mirrors Swift `backfillProviderCoverage`.
+    pub fn backfill_provider_coverage(
+        &self,
+        now_millis: i64,
+        batch_size: usize,
+    ) -> CorpusKitResult<usize> {
+        let targets: Vec<(usize, String, String)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let digest = slot.basis_digest.lock().unwrap().clone();
+                if digest.is_empty() {
+                    return None;
+                }
+                Some((index, slot.model_id.clone(), digest))
+            })
+            .collect();
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        if !matches!(self.configuration.index_unit(), CorpusIndexUnitPolicy::WholeContent) {
+            return Err(CorpusKitError::InvalidConfiguration(
+                "backfill_provider_coverage supports the wholeContent index unit                  (the mandatory attached policy); passage engines reindex instead"
+                    .into(),
+            ));
+        }
+        self.register_claims(now_millis)?;
+
+        let indexed: std::collections::HashSet<String> =
+            self.indexed_content_ids()?.into_iter().collect();
+        let mut missing_by_slot: std::collections::HashMap<usize, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for (index, model_id, digest) in &targets {
+            let covered = self.coverage_store.covered_content_ids(model_id, digest)?;
+            missing_by_slot.insert(*index, indexed.difference(&covered).cloned().collect());
+        }
+        let mut affected: Vec<String> = missing_by_slot
+            .values()
+            .flat_map(|set| set.iter().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        affected.sort();
+
+        let mut written = 0usize;
+        for (batch_index, chunk) in affected.chunks(batch_size.max(1)).enumerate() {
+            let mut rows: Vec<VectorPayloadInput> = Vec::new();
+            let mut covered: Vec<(String, String, String)> = Vec::new();
+            for id in chunk {
+                let Some(record) = self.source.record(id)? else { continue };
+                for (index, model_id, digest) in &targets {
+                    if !missing_by_slot
+                        .get(index)
+                        .map(|set| set.contains(id))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let slot = &self.slots[*index];
+                    let write_binary = *index == 0
+                        || self.configuration.mode() == CorpusOperatingMode::Standalone;
+                    let handle = slot.handle.lock().unwrap();
+                    let provider = handle.provider();
+                    let (engram, floats) = provider
+                        .embed_pair(&record.text)
+                        .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
+                    if write_binary {
+                        rows.push(VectorPayloadInput {
+                            item_id: id.clone(),
+                            vector_index: 0,
+                            payload: VectorPayload::from_engram(&engram),
+                            model_id: provider.model_id().to_string(),
+                            model_version: provider.model_version().to_string(),
+                            filed_at_unix_secs: now_millis,
+                        });
+                    }
+                    if !floats.is_empty() {
+                        rows.push(VectorPayloadInput {
+                            item_id: id.clone(),
+                            vector_index: 1,
+                            payload: VectorPayload::from_f32(&floats),
+                            model_id: provider.model_id().to_string(),
+                            model_version: provider.model_version().to_string(),
+                            filed_at_unix_secs: now_millis,
+                        });
+                    }
+                    covered.push((id.clone(), model_id.clone(), digest.clone()));
+                }
+            }
+            if !rows.is_empty() {
+                self.vector_store
+                    .add_payloads(&rows)
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            }
+            if let Some(hook) = self.backfill_fault_hook.lock().unwrap().as_ref() {
+                hook("afterVectors", batch_index)
+                    .map_err(CorpusKitError::InvalidConfiguration)?;
+            }
+            self.coverage_store.mark_covered(&covered, now_millis)?;
+            if let Some(hook) = self.backfill_fault_hook.lock().unwrap().as_ref() {
+                hook("afterCoverage", batch_index)
+                    .map_err(CorpusKitError::InvalidConfiguration)?;
+            }
+            written += covered.len();
+        }
+        Ok(written)
+    }
+
+    /// Coverage count for one held slot's model under its CURRENT basis
+    /// digest — the verification-gate read.
+    pub fn covered_count(&self, model_id: &str) -> CorpusKitResult<Option<usize>> {
+        let Some(slot) = self.slots.iter().find(|s| s.model_id == model_id) else {
+            return Ok(None);
+        };
+        let digest = slot.basis_digest.lock().unwrap().clone();
+        Ok(Some(self.coverage_store.covered_count(model_id, &digest)?))
+    }
+
+    /// Every held slot's (model_id, basis_digest) in slot order.
+    pub fn provider_generations(&self) -> Vec<(String, String)> {
+        self.slots
+            .iter()
+            .map(|slot| (slot.model_id.clone(), slot.basis_digest.lock().unwrap().clone()))
+            .collect()
+    }
+
+    /// The configuration fingerprint for a WIRING (mode + model configs)
+    /// WITHOUT constructing an engine — the gate/upgrade comparison input.
+    /// MUST byte-match `configuration_fingerprint()` for the same wiring
+    /// and the Swift twin's static `configurationFingerprint(mode:models:)`.
+    pub fn configuration_fingerprint_for(
+        mode: CorpusOperatingMode,
+        models: &[EmbeddingModelConfig],
+    ) -> String {
+        let parts: Vec<String> = models
+            .iter()
+            .map(|config| {
+                let (model_id, model_version, trainable): (String, String, bool) = match config {
+                    EmbeddingModelConfig::Deterministic => {
+                        let p = crate::corpus::make_deterministic_provider();
+                        let pref = &p as &dyn vectorkit::EmbeddingProvider;
+                        (pref.model_id().to_string(), pref.model_version().to_string(), false)
+                    }
+                    EmbeddingModelConfig::RandomIndexing { provider } => (
+                        provider.model_id().to_string(),
+                        provider.model_version().to_string(),
+                        true,
+                    ),
+                    EmbeddingModelConfig::Ppmi { provider } => (
+                        provider.model_id().to_string(),
+                        provider.model_version().to_string(),
+                        true,
+                    ),
+                    EmbeddingModelConfig::Lsa { provider } => (
+                        provider.model_id().to_string(),
+                        provider.model_version().to_string(),
+                        true,
+                    ),
+                    EmbeddingModelConfig::Nmf { provider } => (
+                        provider.model_id().to_string(),
+                        provider.model_version().to_string(),
+                        true,
+                    ),
+                    EmbeddingModelConfig::Fdc { provider } => (
+                        provider.model_id().to_string(),
+                        provider.model_version().to_string(),
+                        false,
+                    ),
+                    // The named text models are constructed with these fixed
+                    // identities in `Corpus::build_slot`; mirrored here so the
+                    // fingerprint never needs the inference seam.
+                    EmbeddingModelConfig::MiniLM { .. } => {
+                        ("minilm-v6".to_string(), "1.0.0".to_string(), false)
+                    }
+                    EmbeddingModelConfig::MPNet { .. } => {
+                        ("mpnet-base-v2".to_string(), "1.0.0".to_string(), false)
+                    }
+                    EmbeddingModelConfig::EmbeddingGemma { .. } => {
+                        ("embedding-gemma-300m".to_string(), "1.0.0".to_string(), false)
+                    }
+                };
+                format!("{model_id}@{model_version}{}", if trainable { ":T" } else { "" })
+            })
+            .collect();
+        format!(
+            "iv{}|{}|{}",
+            CONTENT_ENGINE_INDEX_VERSION,
+            if mode == CorpusOperatingMode::Attached { "attached" } else { "standalone" },
+            parts.join("|")
+        )
+    }
+
+    /// This engine's configuration fingerprint: mode, index version, and
+    /// every slot's identity+trainability in slot order. Excludes basis
+    /// digests (retraining the same configuration is not a configuration
+    /// change). MUST byte-match the Swift twin for the same wiring.
+    pub fn configuration_fingerprint(&self) -> String {
+        let parts: Vec<String> = self
+            .slots
+            .iter()
+            .map(|slot| {
                 let handle = slot.handle.lock().unwrap();
                 let p = handle.provider();
-                (p.model_id().to_string(), p.model_version().to_string())
-            };
-            let has_basis = self
-                .basis_store
-                .load(&model_id, &model_version)?
-                .is_some();
-            if !has_basis {
-                self.train_slot(slot, now_millis)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn train_slot(&self, slot: &ProviderSlot, now_millis: i64) -> CorpusKitResult<()> {
-        let Some(blob) = &slot.fresh_basis_blob else {
-            return Ok(());
-        };
-        let texts = self.active_texts()?;
-        if texts.is_empty() {
-            return Ok(());
-        }
-        let mut handle = slot.handle.lock().unwrap();
-        let Some(trainable) = handle.as_trainable() else {
-            return Ok(());
-        };
-        let mut fresh = trainable.reconstruct_trainable_basis(blob)?;
-        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        fresh.train_on_corpus(&text_refs);
-        let serialized = fresh.serialize_basis();
-        let (model_id, model_version) = {
-            let p = fresh.as_ref() as &dyn vectorkit::EmbeddingProvider;
-            (p.model_id().to_string(), p.model_version().to_string())
-        };
-        self.basis_store.upsert(&PersistedBasis {
-            model_id,
-            model_version,
-            basis: serialized,
-            // Unix seconds per the store's field contract.
-            trained_at_secs: now_millis / 1000,
-            trained_chunk_count: texts.len(),
-        })?;
-        *handle = crate::corpus::ProviderHandle::Trainable(fresh);
-        Ok(())
-    }
-
-    fn active_texts(&self) -> CorpusKitResult<Vec<String>> {
-        let mut texts = Vec::new();
-        for id in self.source.active_content_ids()? {
-            if let Some(record) = self.source.record(&id)? {
-                texts.push(record.text);
-            }
-        }
-        Ok(texts)
+                format!(
+                    "{}@{}{}",
+                    p.model_id(),
+                    p.model_version(),
+                    if slot.fresh_basis_blob.is_some() { ":T" } else { "" }
+                )
+            })
+            .collect();
+        format!(
+            "iv{}|{}|{}",
+            CONTENT_ENGINE_INDEX_VERSION,
+            if self.configuration.mode() == CorpusOperatingMode::Attached {
+                "attached"
+            } else {
+                "standalone"
+            },
+            parts.join("|")
+        )
     }
 
     /// Retrain every trainable slot from scratch and re-index every active
-    /// content row (forced — a retrain changes the basis).
+    /// content row (forced — a retrain changes the basis). Training is
+    /// streamed (bounded); each provider's basis+counts commit is atomic.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
-        for slot in &self.slots {
-            if slot.fresh_basis_blob.is_some() {
-                self.train_slot(slot, now_millis)?;
-            }
-        }
+        self.train_trainable_slots(now_millis, true)?;
         for id in self.source.active_content_ids()? {
             match self.source.record(&id)? {
-                Some(record) => self.index_record(&record, None, true, now_millis)?,
+                Some(record) => {
+                    self.index_record(&record, None, true, now_millis, SlotScope::All)?
+                }
                 None => self.clear_derived_state(&id)?,
             }
         }
-        self.persist_counts(now_millis)?;
         Ok(())
+    }
+
+    /// Persist the maintained counts snapshot — the BATCH-boundary write.
+    /// Called by the drain worker at burst close; never once per record.
+    pub fn persist_counts_snapshot(&self, now_millis: i64) -> CorpusKitResult<()> {
+        self.persist_counts(now_millis)
     }
 
     // ── Maintained counts ────────────────────────────────────────────────

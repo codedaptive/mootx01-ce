@@ -115,6 +115,17 @@ impl CorpusProviderCountsStore {
     /// composite primary key: an incremental update replaces the prior counts in
     /// place. `updated_at_secs` is the caller's `now` (determinism).
     pub fn upsert(&self, row: &PersistedCounts) -> CorpusKitResult<()> {
+        self.upsert_into(row, &self.storage.row_store())
+    }
+
+    /// Transaction-scoped variant: write through the CALLER's row store so
+    /// the counts row commits atomically with its basis row (the corrective
+    /// pass's basis+counts atomic commit).
+    pub fn upsert_into(
+        &self,
+        row: &PersistedCounts,
+        row_store: &std::sync::Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
         let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
         values.insert("model_id".into(), TypedValue::Text(row.model_id.clone()));
         values.insert(
@@ -125,8 +136,7 @@ impl CorpusProviderCountsStore {
         values.insert("doc_count".into(), TypedValue::Int(row.document_count as i64));
         values.insert("vocab_size".into(), TypedValue::Int(row.vocab_size as i64));
         values.insert("updated_at".into(), TypedValue::Timestamp(row.updated_at_secs));
-        self.storage
-            .row_store()
+        row_store
             .upsert(
                 "corpus_provider_counts",
                 values,

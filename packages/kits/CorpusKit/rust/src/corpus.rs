@@ -333,7 +333,7 @@ const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 const COMMIT_CHUNK_ITEMS: usize = 512;
 const COMMIT_CHUNK_ROWS: usize = 4096;
 
-fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
+pub(crate) fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
     // FNV-1a 64-bit hash of the input text, then LCG for 32 floats in
     // [-1, 1]. Mirrors the Swift EmbeddingModel.deterministic closure
     // exactly (same constants, same LCG, same float mapping).
@@ -449,6 +449,11 @@ pub(crate) struct ProviderSlot {
     /// mutates the basis, not the identity). Lets the corpus key the float lane
     /// and basis rows without locking the handle Mutex.
     pub(crate) model_id: String,
+    /// Basis-generation anchor for coverage rows (corrective pass):
+    /// stateless slots derive it from the model version; trainable slots
+    /// carry the SHA-256 of the persisted basis blob (empty while
+    /// untrained). Swapped alongside the handle on retrain.
+    pub(crate) basis_digest: Mutex<String>,
 }
 
 /// A trainable slot's maintained-counts state: the accumulator plus its
@@ -845,11 +850,24 @@ impl Corpus {
         // Cache the (stable) provider modelID for `model_id()` without locking.
         let model_id = handle.provider().model_id().to_string();
 
+        // Basis-generation digest (corrective pass): stateless slots use a
+        // version-derived constant; trainable slots the digest of the
+        // PERSISTED basis blob (empty string until trained).
+        let basis_digest = if fresh_basis_blob.is_some() {
+            match basis_store.load(&model_id, handle.provider().model_version())? {
+                Some(persisted) => crate::content::content_digest_bytes(&persisted.basis),
+                None => String::new(),
+            }
+        } else {
+            format!("stateless@{}", handle.provider().model_version())
+        };
+
         Ok(ProviderSlot {
             handle: Mutex::new(handle),
             fresh_basis_blob,
             counts: Mutex::new(counts),
             model_id,
+            basis_digest: Mutex::new(basis_digest),
         })
     }
 
@@ -966,6 +984,7 @@ impl Corpus {
                 fresh_basis_blob: None,
                 counts: Mutex::new(None),
                 model_id,
+                basis_digest: Mutex::new("stateless@test".to_string()),
             }],
             ingest_queue: Mutex::new(None),
             encode_speed: Mutex::new(EncodeSpeed::Foreground),

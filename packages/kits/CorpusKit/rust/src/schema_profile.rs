@@ -168,14 +168,16 @@ fn profile_version(components: &[&SchemaDeclaration]) -> i32 {
 pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
     let documents = CorpusDocumentStore::schema_declaration();
     let index_state = CorpusIndexStateStore::schema_declaration();
+    let coverage = crate::provider_coverage_store::CorpusProviderCoverageStore::schema_declaration();
     let iix = inverted_index_declaration();
     let basis = BasisStore::schema_declaration();
     let counts = CorpusProviderCountsStore::schema_declaration();
 
-    let version = profile_version(&[&documents, &index_state, &iix, &basis, &counts]);
+    let version = profile_version(&[&documents, &index_state, &coverage, &iix, &basis, &counts]);
     let mut tables = Vec::new();
     tables.extend(documents.tables.clone());
     tables.extend(index_state.tables.clone());
+    tables.extend(coverage.tables.clone());
     tables.extend(iix.tables.clone());
     tables.extend(basis.tables.clone());
     tables.extend(counts.tables.clone());
@@ -204,13 +206,15 @@ pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
 /// by the canonical content ID. No canonical content table of any kind.
 pub fn attached_declaration() -> SchemaDeclaration {
     let index_state = CorpusIndexStateStore::schema_declaration();
+    let coverage = crate::provider_coverage_store::CorpusProviderCoverageStore::schema_declaration();
     let iix = inverted_index_declaration();
     let basis = BasisStore::schema_declaration();
     let counts = CorpusProviderCountsStore::schema_declaration();
 
-    let version = profile_version(&[&index_state, &iix, &basis, &counts]);
+    let version = profile_version(&[&index_state, &coverage, &iix, &basis, &counts]);
     let mut tables = Vec::new();
     tables.extend(index_state.tables.clone());
+    tables.extend(coverage.tables.clone());
     tables.extend(iix.tables.clone());
     tables.extend(basis.tables.clone());
     tables.extend(counts.tables.clone());

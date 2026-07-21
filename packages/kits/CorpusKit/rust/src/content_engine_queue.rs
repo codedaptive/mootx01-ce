@@ -317,6 +317,10 @@ impl CorpusContentEngine {
         }
 
         if !encoded_ids.is_empty() {
+            // Batch-boundary counts snapshot: the maintained counts fold in
+            // memory per record; the durable write happens ONCE per burst
+            // (never per record — that was O(N·vocab) write amplification).
+            let _ = self.persist_counts_snapshot(drain_now() as i64 * 1000);
             self.fire_on_encoded(&encoded_ids);
         }
         Ok(batch.len())

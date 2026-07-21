@@ -375,7 +375,10 @@ public extension GeniusLocusKit {
             // estate keeps its Corpus lane DARK until the resumable
             // migration reaches `verified`. LocusKit recall stays available;
             // the admin migration verb lights the lane.
-            if await sharedContentLaneMustStayDark(storage: backingStorage) {
+            if await sharedContentLaneMustStayDark(
+                storage: backingStorage,
+                wiredFingerprint: CorpusContentEngine.configurationFingerprint(
+                    mode: .attached, models: embeddingModels)) {
                 Self.lifecycleLog.warning(
                     "estate \(handle.estateUUID, privacy: .public) carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes")
                 return
@@ -420,7 +423,10 @@ public extension GeniusLocusKit {
 
         case .corpusOnly:
             // Same shared-content dark-lane gate as the .glk arm.
-            if await sharedContentLaneMustStayDark(storage: backingStorage) {
+            if await sharedContentLaneMustStayDark(
+                storage: backingStorage,
+                wiredFingerprint: CorpusContentEngine.configurationFingerprint(
+                    mode: .attached, models: embeddingModels)) {
                 Self.lifecycleLog.warning(
                     "estate \(handle.estateUUID, privacy: .public) carries the legacy corpus copy lane — Corpus lane stays dark until the shared-content migration completes")
                 return

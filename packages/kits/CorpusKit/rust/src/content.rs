@@ -23,7 +23,13 @@ pub type CorpusContentId = String;
 /// Deterministic content digest — lowercase SHA-256 hex over UTF-8 text.
 /// Cross-port identical (Swift twin: `CorpusContentDigest.digest`).
 pub fn content_digest(text: &str) -> String {
-    sha256::hash(text.as_bytes())
+    content_digest_bytes(text.as_bytes())
+}
+
+/// Digest of raw bytes — the basis-generation anchor (lowercase SHA-256
+/// hex of a serialized basis blob).
+pub fn content_digest_bytes(bytes: &[u8]) -> String {
+    sha256::hash(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()

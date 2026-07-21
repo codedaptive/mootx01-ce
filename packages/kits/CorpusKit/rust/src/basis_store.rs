@@ -127,6 +127,17 @@ impl BasisStore {
     /// `trained_at_secs` is the caller's `now` (determinism) and
     /// `trained_chunk_count` is the chunk count the basis was trained on.
     pub fn upsert(&self, row: &PersistedBasis) -> CorpusKitResult<()> {
+        self.upsert_into(row, &self.storage.row_store())
+    }
+
+    /// Transaction-scoped variant: write through the CALLER's row store so
+    /// the basis row commits atomically with sibling writes (the corrective
+    /// pass's basis+counts atomic commit).
+    pub fn upsert_into(
+        &self,
+        row: &PersistedBasis,
+        row_store: &std::sync::Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
         let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
         values.insert("model_id".into(), TypedValue::Text(row.model_id.clone()));
         values.insert(
@@ -142,8 +153,7 @@ impl BasisStore {
         // ON CONFLICT (model_id, model_version) DO UPDATE: upsert replaces the
         // non-conflict columns of the existing row for the same provider key,
         // so a retrain overwrites the prior basis in place.
-        self.storage
-            .row_store()
+        row_store
             .upsert(
                 "corpus_provider_basis",
                 values,

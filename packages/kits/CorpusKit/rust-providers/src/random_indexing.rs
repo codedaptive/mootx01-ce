@@ -489,6 +489,20 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
         }
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `train_on_corpus` runs. RI has no finalization pass.
+    fn accumulate_training(&mut self, texts: &[&str]) {
+        for text in texts {
+            let terms = corpus_kit::default_keyword_tokens(text);
+            let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+            self.train(&term_refs, RI_WINDOW);
+        }
+    }
+
+    fn finalize_training(&mut self) {
+        // Random Indexing is finalization-free (mirrors train_on_corpus).
+    }
+
     /// Serialize the trained RI basis (6a-i codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         RandomIndexingProvider::serialize_basis(self)

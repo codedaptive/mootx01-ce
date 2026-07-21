@@ -593,6 +593,18 @@ extension PpmiProvider: TrainableEmbeddingBasis {
         finalize()
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `trainOnCorpus` runs, finalization deferred to `finalizeTraining`.
+    public func accumulateTraining(texts: [String]) {
+        for text in texts {
+            train(terms: defaultKeywordTokens(text), window: ppmiWindow)
+        }
+    }
+
+    public func finalizeTraining() {
+        finalize()
+    }
+
     /// Reconstruct a fresh `PpmiProvider` from a serialized basis, type-erased.
     /// Delegates to `init(deserializing:)` (6a-i).
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {

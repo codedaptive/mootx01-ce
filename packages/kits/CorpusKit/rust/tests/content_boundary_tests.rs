@@ -367,6 +367,7 @@ fn attached_profile_contains_no_canonical_content_table() {
     }
     let expected: std::collections::BTreeSet<&str> = [
         "corpus_index_state",
+        "corpus_provider_coverage",
         "iix_termfreqs",
         "iix_doclens",
         "corpus_provider_basis",

@@ -43,6 +43,7 @@ pub mod corpus_ingest_queue;
 pub mod corpus_provider_counts_store;
 pub mod document_store;
 pub mod index_state_store;
+pub mod provider_coverage_store;
 pub mod removed_source_store;
 pub mod schema_profile;
 pub mod engine;

@@ -10,6 +10,7 @@ use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::shared_content_migration::{
     SharedContentMigrationError, SharedContentMigrationState,
 };
+use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
@@ -165,7 +166,7 @@ fn fresh_estate_bypasses_and_never_creates_legacy_tables() {
         .open(store, OwnerCredentials::new("scm-fresh"), 0, 100)
         .expect("open");
     let report = coord
-        .run_shared_content_migration(&handle, NOW)
+        .run_shared_content_migration(&handle, NOW, default_ensemble())
         .expect("fresh migration");
     assert_eq!(report.state, SharedContentMigrationState::Complete);
     assert_eq!(report.legacy_chunk_count, 0);
@@ -186,7 +187,7 @@ fn legacy_estate_migrates_selectively_and_verifies() {
 
     let report = est
         .coord
-        .run_shared_content_migration(&est.handle, NOW)
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble())
         .expect("migration");
     assert_eq!(report.state, SharedContentMigrationState::ReclaimPending);
     assert_eq!(report.legacy_chunk_count, 3);
@@ -222,7 +223,7 @@ fn legacy_estate_migrates_selectively_and_verifies() {
     // Idempotent re-run, then reclaim completion.
     let rerun = est
         .coord
-        .run_shared_content_migration(&est.handle, NOW)
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble())
         .expect("re-run");
     assert_eq!(rerun.state, SharedContentMigrationState::ReclaimPending);
     let status_before = est.coord.shared_content_reclaim_status(&est.handle);
@@ -262,15 +263,105 @@ fn legacy_estate_migrates_selectively_and_verifies() {
 }
 
 #[test]
+fn ensemble_upgrade_covers_added_provider_and_stays_dark_until_then() {
+    let mut est = make_legacy_estate(
+        &["Upgrade fixture drawer one about estates.",
+          "Upgrade fixture drawer two about coverage."],
+        false,
+        true,
+    );
+
+    // Migrate under a ONE-provider configuration and finish reclaim.
+    let small = vec![corpus_kit::corpus::EmbeddingModelConfig::Deterministic];
+    let small_fp = CorpusContentEngine::configuration_fingerprint_for(
+        CorpusOperatingMode::Attached,
+        &small,
+    );
+    let first = est
+        .coord
+        .run_shared_content_migration(&est.handle, NOW, small)
+        .expect("first migration");
+    assert_eq!(first.state, SharedContentMigrationState::ReclaimPending);
+    est.coord
+        .complete_shared_content_reclaim(&est.handle, NOW)
+        .expect("reclaim");
+    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(
+        &est.storage,
+        Some(small_fp.as_str())
+    ));
+
+    // Wire a LARGER ensemble: the completed record is NOT trusted — the
+    // lane goes dark and the estate enters a follow-on upgrade.
+    let big = || {
+        vec![
+            corpus_kit::corpus::EmbeddingModelConfig::Deterministic,
+            corpus_kit::corpus::EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(corpus_kit_providers::RandomIndexingProvider::new()),
+            },
+        ]
+    };
+    let big_fp = CorpusContentEngine::configuration_fingerprint_for(
+        CorpusOperatingMode::Attached,
+        &big(),
+    );
+    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(
+        &est.storage,
+        Some(big_fp.as_str())
+    ));
+
+    // The upgrade trains the ADDED provider, backfills ONLY its missing
+    // coverage, re-verifies, and restamps the fingerprint.
+    let upgraded = est
+        .coord
+        .run_shared_content_migration(&est.handle, NOW, big())
+        .expect("upgrade");
+    assert_eq!(upgraded.state, SharedContentMigrationState::ReclaimPending);
+    est.coord
+        .complete_shared_content_reclaim(&est.handle, NOW)
+        .expect("reclaim 2");
+    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(
+        &est.storage,
+        Some(big_fp.as_str())
+    ));
+
+    // Every provider covers every drawer, and BM25 still serves.
+    let estate = est.coord.estate_for(&est.handle).unwrap().clone();
+    let engine = CorpusContentEngine::open(
+        Arc::clone(&est.storage),
+        CorpusContentConfiguration::new(
+            CorpusOperatingMode::Attached,
+            CorpusIndexUnitPolicy::WholeContent,
+        )
+        .unwrap(),
+        Arc::new(LocusDrawerContentSource::new(estate)),
+        big(),
+    )
+    .expect("engine");
+    assert_eq!(
+        engine.covered_count("corpus-deterministic-v1").expect("count"),
+        Some(est.drawer_ids.len())
+    );
+    assert_eq!(
+        engine.covered_count("random-indexing-v1").expect("count"),
+        Some(est.drawer_ids.len())
+    );
+    let hits = engine.bm25_top_k("coverage", 5).expect("bm25");
+    assert_eq!(
+        hits.first().map(|(id, _)| id.as_str()),
+        Some(est.drawer_ids[1].as_str())
+    );
+}
+
+#[test]
 fn orphaned_legacy_source_stops_dark_before_any_deletion() {
     let mut est = make_legacy_estate(&["Content with a valid drawer."], true, true);
-    let result = est.coord.run_shared_content_migration(&est.handle, NOW);
+    let result = est.coord.run_shared_content_migration(&est.handle, NOW, default_ensemble());
     assert!(matches!(
         result,
         Err(SharedContentMigrationError::OrphanedLegacySources { .. })
     ));
     assert_eq!(est.storage.row_store().count("chunks", None).unwrap(), 2);
-    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage));
+    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage, None));
 }
 
 #[test]
@@ -280,7 +371,7 @@ fn fault_after_every_state_resumes_to_the_same_outcome() {
     let mut reference = make_legacy_estate(&contents, false, true);
     let reference_report = reference
         .coord
-        .run_shared_content_migration(&reference.handle, NOW)
+        .run_shared_content_migration(&reference.handle, NOW, default_ensemble())
         .expect("reference run");
     let reference_inventory = capture_inventory(
         &reference.storage,
@@ -301,7 +392,7 @@ fn fault_after_every_state_resumes_to_the_same_outcome() {
     for fault in fault_states {
         let mut est = make_legacy_estate(&contents, false, true);
         est.coord.set_shared_content_fault(Some(fault));
-        let interrupted = est.coord.run_shared_content_migration(&est.handle, NOW);
+        let interrupted = est.coord.run_shared_content_migration(&est.handle, NOW, default_ensemble());
         assert!(
             matches!(
                 interrupted,
@@ -311,7 +402,7 @@ fn fault_after_every_state_resumes_to_the_same_outcome() {
         );
         let resumed = est
             .coord
-            .run_shared_content_migration(&est.handle, NOW)
+            .run_shared_content_migration(&est.handle, NOW, default_ensemble())
             .expect("resume");
         assert_eq!(resumed.state, reference_report.state,
                    "fault after {fault:?} must resume to the reference state");
@@ -334,9 +425,9 @@ fn fault_after_every_state_resumes_to_the_same_outcome() {
 #[test]
 fn legacy_estate_keeps_corpus_lane_dark_until_migrated() {
     let mut est = make_legacy_estate(&["Dark lane drawer."], false, false);
-    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage));
+    assert!(EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage, None));
     est.coord
-        .run_shared_content_migration(&est.handle, NOW)
+        .run_shared_content_migration(&est.handle, NOW, default_ensemble())
         .expect("migration");
-    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage));
+    assert!(!EstateCoordinator::shared_content_lane_must_stay_dark(&est.storage, None));
 }

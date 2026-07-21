@@ -20,6 +20,7 @@
 import Testing
 import Foundation
 import CorpusKit
+import CorpusKitProviders
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -89,14 +90,34 @@ struct ScaleQualificationTests {
             storage: storage,
             configuration: CorpusContentConfiguration(
                 mode: .attached, indexUnit: .wholeContent),
-            source: LocusDrawerCorpusContentSource(estate: estate))
+            source: LocusDrawerCorpusContentSource(estate: estate),
+            models: CorpusEnsemble.defaultEnsemble())
         q("recall.indexed_sources", try await engine.indexedContentIDs().count)
         q("recall.coverage_attestations",
           try await engine.indexCoverageAttestations().count)
+        // Per-provider coverage under the LIVE generations.
+        for generation in await engine.providerGenerations() {
+            q("recall.coverage.\(generation.modelID)",
+              try await engine.coveredCount(modelID: generation.modelID) ?? 0)
+            q("recall.generation.\(generation.modelID)",
+              String(generation.basisDigest.prefix(12)))
+        }
         let queries = ["project planning decisions",
                        "release engineering process",
                        "memory palace estate"]
         for (i, query) in queries.enumerated() {
+            // Per-signal dense float lane: every configured signal must serve.
+            let tF = Date()
+            let perSignal = await engine.floatNearestPerSignal(query: query, limit: 5)
+            q("recall.q\(i).float_all_signals_ms",
+              String(format: "%.1f", Date().timeIntervalSince(tF) * 1000))
+            for (modelID, outcome) in perSignal {
+                if case .hits(let hitsList) = outcome {
+                    q("recall.q\(i).float.\(modelID).served", !hitsList.isEmpty)
+                } else {
+                    q("recall.q\(i).float.\(modelID).served", false)
+                }
+            }
             let tQ = Date()
             let hits = try await engine.bm25TopK(query: query, limit: 5)
             q("recall.q\(i).latency_ms",

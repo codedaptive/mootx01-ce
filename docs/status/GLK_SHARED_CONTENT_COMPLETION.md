@@ -23,6 +23,7 @@ chunk-to-Drawer translation, no copied text. Both ports, per-phase parity.
 | P4 | Resumable fail-dark 9-state migration, structural detection, selective deletion, declared-migration schema retirement, dark-lane gate; Rust SQLite declared-migration execution parity fix | ✓ |
 | P5 | Storage maintenance API (checkpoint+VACUUM with quiescence/capacity/progress/cancellation/introspection contracts), ownership-scoped legacy teardown, reclaim wiring + status surface; P3 consumer cutover completed for AriaMcpKit/VaultKit Rust | ✓ |
 | P6 | Scale qualification on a 7.3 GB production estate clone + three in-cycle corrections (below) | ✓ |
+| Corrective pass | Full five-signal ensemble on migrated estates: per-provider coverage checkpoints, bounded crash-safe training with atomic basis+counts commits, coverage-driven backfill, ensemble fingerprint + follow-on upgrade, claim-aware shared-vector deletion, attached binary lanes default-slot-only, counts write-amplification removed | ✓ |
 
 ## Scale qualification (P6)
 
@@ -36,48 +37,57 @@ Pre-migration table footprint (dbstat): vectors 2.21 GB; provider basis
 1.52 GB; provider counts 0.87 GB; BM25 postings + indexes 1.22 GB;
 drawers 0.115 GB; chunks (copy lane) 0.101 GB.
 
-### Measured outcome — Rust leg, single uninterrupted run
+### Measured outcome — five-signal qualification (corrective pass)
+
+The binding qualification is the FIVE-SIGNAL result (RI/PPMI/LSA/NMF/FDC —
+the production `defaultEnsemble()`): the migration trains all four
+trainable providers on the estate's own content and finishes only when
+every provider covers every Drawer. The earlier deterministic-only tables
+remain below for history; they qualified an intermediate that the
+corrective pass retired.
+
+#### Rust leg (single uninterrupted run)
 
 | Metric | Value |
 |--------|-------|
-| End-to-end migration (all 9 states) | 46.3 min |
-| Legacy chunks retired | 110,451 |
-| Exact vector keys deleted | 1,094,459 |
+| End-to-end migration (all 11 states) | 39.3 min |
+| Legacy chunks / exact vector keys retired | 110,451 / 1,094,459 |
 | Drawers rebuilt + attested | 98,118 / 98,118 |
-| Rebuild throughput (incl. all phases) | 35.4 drawers/s |
-| Peak resident memory | 5.82 GB |
-| Physical reclaim duration | 4.4 s |
-| Database file before → after | 7,285,350,400 → 1,261,109,248 B |
-| WAL before → after | 638,657,712 → 0 B |
-| **Filesystem bytes released** | **6,662,898,864 (−83%)** |
-| Freelist pages before → after | 1,449,683 → 0 |
-| Drawer-keyed vector partition after | exactly 2 × 98,118 rows |
-| Unrelated lane rows after | 45,048 / 45,048, byte-identical |
-| BM25 recall latency (warm) | 0.2–0.3 ms top-5 |
-| BM25 first query (in-memory index build) | 2.6 s |
-| Top-hit direct Drawer hydration | 3/3 queries |
+| Structural rebuild throughput | ~72 drawers/s |
+| Whole-run throughput (incl. training + backfill) | 41.6 drawers/s |
+| Peak resident memory (training phase) | 26.9 GB |
+| Physical reclaim | 3.00 GB in 16.2 s (freelist 350,030 → 0, WAL 1.47 GB → 0) |
+| Database file after reclaim | 5,753,581,568 B |
+| Whole estate directory after | 5,780,317,911 B (db + WAL 70 KB + SHM 11.2 MB + `.vectors.vec` 15.4 MB; queue db absent in the driver run) |
+| Per-provider coverage | 98,118/98,118 × 5 providers, digests recorded |
+| Vector rows | 632,840 total — RI lane0 (binary) 98,118 (DEFAULT slot only); float lane1: RI 98,069, PPMI 98,069, LSA 97,709, NMF 97,709, FDC 98,118; `distillation-features-v1` 45,048 preserved byte-count-exact |
+| Float-lane shortfalls | LSA/NMF −409, RI/PPMI −49: drawers whose content embeds to an empty float vector under that provider — covered (processed) but rowless by design |
+| Table bytes after (top) | vectors 1.95 GB; provider basis 1.50 GB; provider counts 0.90 GB; BM25 postings+indexes 0.79 GB; drawers 0.11 GB; coverage 0.069 GB |
+| Per-signal float recall | all 5 signals served hits on 3/3 queries (first-call lane build 1.3–1.5 s; BM25 warm 0.2–0.3 ms; first BM25 call 2.1 s) |
+| BM25 top scores | 1402 / 1735 / 1563 — byte-equal to every prior run |
+| Direct Drawer hydration | 3/3 queries |
 
-### Measured outcome — Swift leg, single uninterrupted run
+#### Swift leg (single uninterrupted run)
 
 | Metric | Value |
 |--------|-------|
-| End-to-end migration (all 9 states) | 46.0 min |
-| Legacy chunks / vector keys retired | 110,451 / 1,094,459 (identical to Rust) |
-| Drawers rebuilt + attested | 98,118 / 98,118 |
-| Rebuild throughput (incl. all phases) | 35.6 drawers/s |
-| Estimate recorded at reclaimPending | 5,937,987,584 B |
-| Physical reclaim duration | 4.9 s |
-| Database file after | 1,261,096,960 B |
-| Filesystem bytes released (file+WAL) | 7,177,536,232 (WAL had grown to 1.15 GB during the run) |
-| Freelist pages after | 0 |
-| BM25 recall latency (warm) | 0.6–0.9 ms top-5 |
-| Top-hit direct Drawer hydration | 3/3 queries |
+| End-to-end migration (all 11 states) | SWIFT5_MIGRATION_MIN |
+| Drawers rebuilt + attested | SWIFT5_REBUILT |
+| Per-provider coverage | SWIFT5_COVERAGE |
+| Per-signal float recall | SWIFT5_FLOAT |
+| BM25 top scores | SWIFT5_SCORES |
+| Physical reclaim | SWIFT5_RECLAIM |
 
-**Cross-port parity at scale:** the two legs migrated independent clones
-of the same estate and produced identical inventory counts, identical
-indexed/attested counts, and BYTE-EQUAL BM25 top scores on all three
-qualification queries (1402 / 1735 / 1563) — direct evidence the two
-ports compute the same recall over 98k drawers.
+SWIFT5_PARITY_NOTE
+
+#### Historical: deterministic-only intermediate (superseded)
+
+Rust 46.3 min / Swift 46.0 min; 6.66–7.18 GB reclaimed (the five-signal
+steady state legitimately retains ~4.5 GB more: the five vector lanes,
+the trained bases, and the training-corpus counts); byte-equal BM25 top
+scores across ports; peak RSS 5.8 GB. Those runs validated retirement,
+resume, reclamation, and identity — but left the four trainable signals
+dark, which the corrective pass fixed.
 
 ### Interruption / resume at scale
 
@@ -100,6 +110,32 @@ remaining seams in both ports.
    inventories (was ~60 MB durable residue), persisting counts; the Rust
    leg now records the reclaim estimate at `reclaimPending` (parity).
 
+### Corrective pass (verified gaps, closed both ports)
+
+1. **Deterministic-only rebuild** — the migration completed with four of
+   five signals dark. Fixed: `basesTrained` + `providersCovered` states;
+   verification asserts per-provider coverage of every Drawer under the
+   recorded basis digest before the lane lights.
+2. **Provider-blind checkpoints** — `corpus_index_state` said "indexed"
+   with no provider/generation dimension. Fixed: `corpus_provider_coverage`
+   rows (content × provider × basis digest), written after the vector
+   rows so bookkeeping can lag durable coverage but never lead it.
+3. **Unsuitable naïve reindex** — corpus materialization for training,
+   per-Drawer counts refolds, full-rewrite semantics. Fixed: streamed
+   bounded training (`accumulateTraining`/`finalizeTraining`, atomic
+   basis+counts commit per provider) and coverage-driven backfill that
+   writes only missing representations; counts persist at batch
+   boundaries only.
+4. **Claims-blind deletion** — remove/destroy deleted exact keys without
+   consulting the ledger. Fixed: a key is deleted only when no other
+   retained claimant claims its representation family; proven by the
+   shared-ownership suites.
+5. Also: attached-mode binary rows/claims are DEFAULT-slot-only (every
+   GLK Hamming reader probes the default model; non-default binary rows
+   were unreachable weight), and a completed record with an obsolete
+   ensemble fingerprint enters a follow-on upgrade (tested by adding a
+   provider to a migrated estate).
+
 ### Flow coverage
 
 | Flow | Evidence |
@@ -107,7 +143,8 @@ remaining seams in both ports.
 | Fresh install | fresh-bypass suites (P4): no record, no legacy tables ever created |
 | Standalone CorpusKit | engine standalone suites (P1/P2): put/index/recall + passage chunking standalone-only |
 | GLK attached | cutover suites (P3) + this qualification's post-migration recall |
-| Interrupted migration | two real kills + resume (above); per-state fault injection both ports |
+| Interrupted migration | two real kills + resume (above); per-state fault injection both ports incl. the training/coverage states; crash-boundary suites for train-before/after-commit, backfill after-vectors/after-coverage, lagging and digest-mismatched coverage |
+| Ensemble upgrade | provider added to a migrated estate: lane dark on fingerprint mismatch → upgrade trains + backfills only the addition → re-verifies (both ports) |
 | Insufficient-disk reclaim | maintenance preflight contract suites (P5): `insufficientDiskCapacity` refused before any rewrite |
 | Upgrade/reopen | qualification reopens the migrated estate for the recall phase; restart-idempotent wiring suites (AriaMcpKit) |
 

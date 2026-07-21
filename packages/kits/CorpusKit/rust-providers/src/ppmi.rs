@@ -613,6 +613,20 @@ impl TrainableEmbeddingBasis for PpmiProvider {
         self.finalize();
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `train_on_corpus` runs, finalization deferred to `finalize_training`.
+    fn accumulate_training(&mut self, texts: &[&str]) {
+        for text in texts {
+            let terms = corpus_kit::default_keyword_tokens(text);
+            let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+            self.train(&term_refs, PPMI_WINDOW);
+        }
+    }
+
+    fn finalize_training(&mut self) {
+        self.finalize();
+    }
+
     /// Serialize the finalized PPMI basis (6a-i codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         PpmiProvider::serialize_basis(self)

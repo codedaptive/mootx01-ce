@@ -426,6 +426,19 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
         }
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `trainOnCorpus` runs. RI has no finalization pass.
+    public func accumulateTraining(texts: [String]) {
+        for text in texts {
+            train(terms: defaultKeywordTokens(text), window: riWindow)
+        }
+    }
+
+    public func finalizeTraining() {
+        // Random Indexing is finalization-free: vectors are the accumulated
+        // state itself (mirrors trainOnCorpus, which runs no finalize).
+    }
+
     /// Reconstruct a fresh `RandomIndexingProvider` from a serialized basis,
     /// type-erased. Delegates to `init(deserializing:)` (6a-i).
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {

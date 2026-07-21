@@ -69,6 +69,29 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// - Parameter texts: raw document texts (NOT pre-tokenized term arrays).
     func trainOnCorpus(texts: [String])
 
+    // MARK: - Streamed training (GLK shared-content 1.1 corrective pass)
+    //
+    // The bounded-memory training seam: callers stream the corpus in pages,
+    // folding each page via `accumulateTraining` and running the method's
+    // finalization pass exactly ONCE via `finalizeTraining`. For every
+    // conformer, `accumulateTraining(pages...) + finalizeTraining()` is
+    // BYTE-IDENTICAL to a single `trainOnCorpus(allTexts)` call — the pair
+    // is the same per-text accumulation split from the same finalize, so
+    // the trained basis (and its digest) does not depend on page size.
+    // Peak memory is bounded by the accumulator (vocabulary-scale), never
+    // by the corpus text.
+
+    /// Fold one page of raw document texts into the SAME accumulation
+    /// `trainOnCorpus` uses, WITHOUT finalizing. Deterministic; additive;
+    /// order-sensitive exactly as `trainOnCorpus` is (callers stream in
+    /// canonical ascending-ID order).
+    func accumulateTraining(texts: [String])
+
+    /// Run the method-specific finalization pass over the accumulated
+    /// state (PPMI/LSA/NMF; RI has none — no-op). Call exactly once,
+    /// after the last `accumulateTraining` page.
+    func finalizeTraining()
+
     /// Serialize the trained basis to a versioned, little-endian blob.
     ///
     /// This is the same blob the concrete provider's `serializeBasis()`

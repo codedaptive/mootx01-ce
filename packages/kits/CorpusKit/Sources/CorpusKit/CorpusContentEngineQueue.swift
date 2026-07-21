@@ -262,8 +262,14 @@ public extension CorpusContentEngine {
             }
         }
 
-        if !encodedIDs.isEmpty, let callback = onEncoded {
-            await callback(encodedIDs)
+        if !encodedIDs.isEmpty {
+            // Batch-boundary counts snapshot: the maintained counts fold in
+            // memory per record; the durable write happens ONCE per burst
+            // (never per record — that was O(N·vocab) write amplification).
+            try? await persistCountsSnapshot(now: Date())
+            if let callback = onEncoded {
+                await callback(encodedIDs)
+            }
         }
         return batch.count
     }

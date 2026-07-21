@@ -202,7 +202,9 @@ public actor CorpusContentEngine {
 
     /// The engine/index layout version stamped into `corpus_index_state`.
     /// Bump when the derived layout changes incompatibly.
-    public static let indexVersion: Int64 = 1
+    /// v2 (corrective pass): per-provider coverage rows; attached-mode
+    /// binary rows written for the DEFAULT slot only.
+    public static let indexVersion: Int64 = 2
 
     /// The consumer name this engine claims representations under.
     public static let claimsConsumer = "corpus"
@@ -218,6 +220,21 @@ public actor CorpusContentEngine {
         let freshBasisBlob: Data?
         var countsAccumulator: (any TrainableEmbeddingBasis)?
         var countsDocumentCount: Int
+        /// The basis-generation anchor stamped into coverage rows: for
+        /// trainable slots the SHA-256 of the persisted basis blob (empty
+        /// string while untrained); for stateless slots a constant derived
+        /// from the model version (their representation never regenerates).
+        var basisDigest: String
+    }
+
+    /// A trainable slot with no trained basis yet carries this digest;
+    /// coverage rows are never written under it.
+    static let untrainedDigest = ""
+
+    /// The stateless-slot digest: the representation is a pure function of
+    /// the model version, so the version IS the generation.
+    static func statelessDigest(modelVersion: String) -> String {
+        "stateless@\(modelVersion)"
     }
 
     // Internal (not private) so the queue extension in
@@ -231,6 +248,7 @@ public actor CorpusContentEngine {
     private let basisStore: BasisStore
     private let countsStore: CorpusProviderCountsStore
     private let indexState: CorpusIndexStateStore
+    private let coverageStore: CorpusProviderCoverageStore
     private let claims: VectorRepresentationClaims
     private var slots: [Slot]
 
@@ -298,6 +316,7 @@ public actor CorpusContentEngine {
         self.basisStore = BasisStore(storage: storage)
         self.countsStore = CorpusProviderCountsStore(storage: storage)
         self.indexState = CorpusIndexStateStore(storage: storage)
+        self.coverageStore = CorpusProviderCoverageStore(storage: storage)
         self.claims = VectorRepresentationClaims(storage: storage)
 
         var built: [Slot] = []
@@ -309,11 +328,27 @@ public actor CorpusContentEngine {
                 isTrainable: model.isTrainable,
                 basisStore: basisStore,
                 countsStore: countsStore)
+            // Basis-generation digest: stateless slots derive it from the
+            // model version; trainable slots from the PERSISTED basis blob
+            // (empty until trained — coverage is never written untrained).
+            let digest: String
+            if model.isTrainable {
+                if let persisted = try await basisStore.load(
+                    modelID: resolved.provider.modelID,
+                    modelVersion: resolved.provider.modelVersion) {
+                    digest = CorpusContentDigest.digest(persisted.basis)
+                } else {
+                    digest = Self.untrainedDigest
+                }
+            } else {
+                digest = Self.statelessDigest(modelVersion: resolved.provider.modelVersion)
+            }
             built.append(Slot(
                 provider: resolved.provider,
                 freshBasisBlob: resolved.freshBasisBlob,
                 countsAccumulator: resolved.countsAccumulator,
-                countsDocumentCount: resolved.countsDocumentCount))
+                countsDocumentCount: resolved.countsDocumentCount,
+                basisDigest: digest))
         }
         self.slots = built
         try await invertedIndex.open()
@@ -323,8 +358,13 @@ public actor CorpusContentEngine {
     /// by the engine's writers before the first vector write; exposed so
     /// lifecycle paths can pre-claim at construction.
     public func registerClaims(now: Date) async throws {
-        for slot in slots {
+        for (index, slot) in slots.enumerated() {
             for lane: Int in [0, 1] {
+                // Attached mode writes binary (lane 0) rows for the DEFAULT
+                // slot only — GLK's Hamming readers all probe the default
+                // model — so non-default binary claims are not registered
+                // there either. Standalone keeps per-slot binary lanes.
+                if lane == 0 && index != 0 && configuration.mode == .attached { continue }
                 try await claims.registerClaim(
                     consumer: Self.claimsConsumer,
                     key: VectorRepresentationKey(
@@ -395,6 +435,165 @@ public actor CorpusContentEngine {
         return true
     }
 
+    /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
+    /// checkpoint, and STATELESS-slot vectors + coverage only. Trainable
+    /// slots are deferred to `trainTrainableSlots` + the coverage backfill
+    /// so the rebuild never triggers training and never double-writes.
+    @discardableResult
+    public func indexContentStructural(id: CorpusContentID, now: Date) async throws -> Bool {
+        try validate(id: id)
+        guard let record = try await source.record(for: id) else {
+            try await clearDerivedState(id: id)
+            return false
+        }
+        try await index(
+            record: record, appliedCursor: nil, force: false, now: now,
+            slotScope: .statelessOnly)
+        return true
+    }
+
+    /// Test seam for the backfill crash-boundary suites: phase marker the
+    /// hook receives per batch.
+    public enum BackfillFaultPhase: Sendable { case afterVectors, afterCoverage }
+    var _backfillFaultHook: (@Sendable (BackfillFaultPhase, Int) throws -> Void)?
+    public func _armBackfillFaultHook(
+        _ hook: (@Sendable (BackfillFaultPhase, Int) throws -> Void)?
+    ) {
+        _backfillFaultHook = hook
+    }
+
+    /// Backfill MISSING provider representations (trainable AND stateless
+    /// slots alike — an upgrade can add either), driven by the coverage
+    /// table — writes ONLY what is absent under each slot's CURRENT basis
+    /// digest:
+    ///   - resolves each missing Drawer's record once and embeds only the
+    ///     slots whose (content, model) coverage is absent or carries a
+    ///     stale digest;
+    ///   - never touches BM25, never folds counts, never rewrites covered
+    ///     providers' rows;
+    ///   - per batch: vector rows first, coverage rows second — a crash
+    ///     leaves coverage lagging the durable vectors (replay embeds the
+    ///     lagging tail idempotently), never ahead of them.
+    ///
+    /// Callers stream large backfills inside a VectorStore deferred-index
+    /// window. Returns the number of (content, provider) pairs covered.
+    @discardableResult
+    public func backfillProviderCoverage(
+        now: Date, batchSize: Int = 500
+    ) async throws -> Int {
+        // Every slot with a live generation (stateless digests are
+        // constants; an untrained trainable slot has no generation yet).
+        let targets: [(index: Int, modelID: String, digest: String)] =
+            slots.enumerated().compactMap { index, slot in
+                guard slot.basisDigest != Self.untrainedDigest else { return nil }
+                return (index, slot.provider.modelID, slot.basisDigest)
+            }
+        guard !targets.isEmpty else { return 0 }
+        guard case .wholeContent = configuration.indexUnit else {
+            throw CorpusKitError.invalidConfiguration(
+                "backfillTrainableCoverage supports the wholeContent index unit "
+                + "(the mandatory attached policy); passage engines reindex instead")
+        }
+        try await registerClaims(now: now)
+
+        // Missing set per slot from the durable coverage rows (the resume
+        // authority — a stale-digest row is missing by definition).
+        var missingBySlot: [Int: Set<CorpusContentID>] = [:]
+        let indexed = Set(try await indexedContentIDs())
+        for target in targets {
+            let covered = try await coverageStore.coveredContentIDs(
+                modelID: target.modelID, basisDigest: target.digest)
+            missingBySlot[target.index] = indexed.subtracting(covered)
+        }
+        let affected = missingBySlot.values.reduce(into: Set<CorpusContentID>()) {
+            $0.formUnion($1)
+        }
+        var written = 0
+        var batchIndex = 0
+        for chunk in affected.sorted().chunked(into: batchSize) {
+            var rows: [VectorPayloadInput] = []
+            var covered: [(contentID: CorpusContentID, modelID: String, basisDigest: String)] = []
+            for id in chunk {
+                guard let record = try await source.record(for: id) else { continue }
+                let units = try await unitKeys(for: id).sorted()
+                for target in targets where missingBySlot[target.index]?.contains(id) == true {
+                    let slot = slots[target.index]
+                    let writeBinary = target.index == 0 || configuration.mode == .standalone
+                    for unitKey in units {
+                        let (engram, floats) = try await slot.provider.embedPair(record.text)
+                        if writeBinary {
+                            rows.append(VectorPayloadInput(
+                                itemID: unitKey, vectorIndex: 0,
+                                payload: VectorPayload(engram: engram),
+                                modelID: slot.provider.modelID,
+                                modelVersion: slot.provider.modelVersion,
+                                filedAt: now))
+                        }
+                        if !floats.isEmpty {
+                            rows.append(VectorPayloadInput(
+                                itemID: unitKey, vectorIndex: 1,
+                                payload: VectorPayload(floats: floats),
+                                modelID: slot.provider.modelID,
+                                modelVersion: slot.provider.modelVersion,
+                                filedAt: now))
+                        }
+                    }
+                    covered.append((id, target.modelID, target.digest))
+                }
+            }
+            if !rows.isEmpty {
+                try await vectorStore.addPayloads(rows)
+            }
+            try _backfillFaultHook?(.afterVectors, batchIndex)
+            try await coverageStore.markCovered(covered, now: now)
+            try _backfillFaultHook?(.afterCoverage, batchIndex)
+            written += covered.count
+            batchIndex += 1
+        }
+        return written
+    }
+
+    /// Coverage count for one held slot's model under its CURRENT basis
+    /// digest — the verification-gate read.
+    public func coveredCount(modelID: String) async throws -> Int? {
+        guard let slot = slots.first(where: { $0.provider.modelID == modelID })
+        else { return nil }
+        return try await coverageStore.coveredCount(
+            modelID: modelID, basisDigest: slot.basisDigest)
+    }
+
+    /// Every held slot's (modelID, basisDigest) in slot order — the
+    /// provider-generation surface the migration records and verifies.
+    public func providerGenerations() -> [(modelID: String, basisDigest: String)] {
+        slots.map { ($0.provider.modelID, $0.basisDigest) }
+    }
+
+    /// The ensemble/configuration fingerprint: mode, index version, and
+    /// every slot's identity+trainability in slot order. A migrated
+    /// estate records this; wiring a DIFFERENT configuration over a
+    /// completed record is detected as an upgrade, never trusted as
+    /// complete. Deliberately excludes basis digests (retraining the same
+    /// configuration is not a configuration change).
+    public nonisolated static func configurationFingerprint(
+        mode: CorpusOperatingMode, models: [EmbeddingModel]
+    ) -> String {
+        let parts = models.map { model -> String in
+            let provider = model.makeProvider()
+            return "\(provider.modelID)@\(provider.modelVersion)\(model.isTrainable ? ":T" : "")"
+        }
+        return "iv\(Self.indexVersion)|\(mode == .attached ? "attached" : "standalone")|"
+            + parts.joined(separator: "|")
+    }
+
+    /// This engine's own configuration fingerprint.
+    public func configurationFingerprint() -> String {
+        let parts = slots.map { slot -> String in
+            "\(slot.provider.modelID)@\(slot.provider.modelVersion)\(slot.freshBasisBlob != nil ? ":T" : "")"
+        }
+        return "iv\(Self.indexVersion)|\(configuration.mode == .attached ? "attached" : "standalone")|"
+            + parts.joined(separator: "|")
+    }
+
     /// Apply one change (typically drained from a queue job). The stale
     /// gate: an upsert whose (revision, digest) mismatches the CURRENT
     /// record throws `staleRevision` and advances NOTHING.
@@ -447,8 +646,15 @@ public actor CorpusContentEngine {
         }
     }
 
+    /// Which slots an indexing pass embeds. `.all` is the ordinary path;
+    /// `.statelessOnly` is the migration's structural rebuild — BM25 +
+    /// checkpoints + stateless-slot vectors, with trainable slots deferred
+    /// to the train + backfill phases.
+    enum SlotScope: Sendable { case all, statelessOnly }
+
     private func index(
-        record: CorpusContentRecord, appliedCursor: String?, force: Bool, now: Date
+        record: CorpusContentRecord, appliedCursor: String?, force: Bool, now: Date,
+        slotScope: SlotScope = .all
     ) async throws {
         // Idempotence anchor: when the checkpoint already covers this exact
         // (revision, digest, indexVersion), the derived rows are complete
@@ -463,7 +669,9 @@ public actor CorpusContentEngine {
             return
         }
         try await registerClaims(now: now)
-        try await firstIngestTrainIfNeeded(now: now)
+        if slotScope == .all {
+            try await firstIngestTrainIfNeeded(now: now)
+        }
 
         // Determine this record's index units.
         let units = try await replaceUnits(for: record, now: now)
@@ -478,17 +686,37 @@ public actor CorpusContentEngine {
 
         // Vectors: exact-key scoped replace per model — delete the
         // record's PRIOR keys (previous units), then upsert fresh rows.
+        // Attached mode writes the binary (Hamming) row for the DEFAULT
+        // slot only: every GLK binary reader probes `corpus.modelID`
+        // (slots[0]); non-default binary rows would be unreachable weight.
+        // Standalone keeps per-slot binary lanes (its recall surface can
+        // probe any slot).
         var rows: [VectorPayloadInput] = []
+        var covered: [(contentID: CorpusContentID, modelID: String, basisDigest: String)] = []
         rows.reserveCapacity(units.count * slots.count * 2)
-        for slot in slots {
+        for (slotIndex, slot) in slots.enumerated() {
+            switch slotScope {
+            case .all: break
+            case .statelessOnly:
+                if slot.freshBasisBlob != nil { continue }
+            }
+            // A trainable slot with no trained basis cannot embed; the
+            // train + backfill phases cover it (never write vectors or
+            // coverage under the untrained digest).
+            if slot.freshBasisBlob != nil && slot.basisDigest == Self.untrainedDigest {
+                continue
+            }
+            let writeBinary = slotIndex == 0 || configuration.mode == .standalone
             for unit in units {
                 let (engram, floats) = try await slot.provider.embedPair(unit.text)
-                rows.append(VectorPayloadInput(
-                    itemID: unit.key, vectorIndex: 0,
-                    payload: VectorPayload(engram: engram),
-                    modelID: slot.provider.modelID,
-                    modelVersion: slot.provider.modelVersion,
-                    filedAt: now))
+                if writeBinary {
+                    rows.append(VectorPayloadInput(
+                        itemID: unit.key, vectorIndex: 0,
+                        payload: VectorPayload(engram: engram),
+                        modelID: slot.provider.modelID,
+                        modelVersion: slot.provider.modelVersion,
+                        filedAt: now))
+                }
                 if !floats.isEmpty {
                     rows.append(VectorPayloadInput(
                         itemID: unit.key, vectorIndex: 1,
@@ -498,14 +726,21 @@ public actor CorpusContentEngine {
                         filedAt: now))
                 }
             }
+            covered.append((record.id, slot.provider.modelID, slot.basisDigest))
         }
         if !rows.isEmpty {
             try await vectorStore.addPayloads(rows)
         }
+        // Coverage rows AFTER the vector rows are durable — coverage never
+        // overstates the vectors table (and the checkpoint below never
+        // overstates coverage).
+        try await coverageStore.markCovered(covered, now: now)
 
-        // Maintained counts: fold the canonical text once per record.
+        // Maintained counts: fold the canonical text in memory. Persistence
+        // happens at BATCH boundaries (drain-burst close) and at training
+        // commits — never once per record (that was O(N·vocab) write
+        // amplification over an import).
         foldIntoCounts(text: record.text)
-        try await persistCounts(now: now)
 
         // Checkpoint LAST — derived rows reflect (revision, digest) now.
         try await indexState.advance(CorpusIndexState(
@@ -589,19 +824,46 @@ public actor CorpusContentEngine {
     }
 
     /// Delete the BM25 postings and vector rows for the given unit keys —
-    /// exact-key scoped, never model-wide.
+    /// exact-key scoped, never model-wide, and CLAIM-AWARE: a key whose
+    /// (model, lane) representation family is also claimed by another
+    /// retained consumer is NOT deleted — the row may serve that claimant's
+    /// exact representation. The engine only removes what it exclusively
+    /// owns; shared families outlive any single consumer's remove/destroy.
     private func deleteDerivedRows(unitKeys: Set<String>) async throws {
+        let shared = try await sharedRepresentationFamilies()
         var vectorKeys: [VectorExactKey] = []
         for key in unitKeys.sorted() {
             try await invertedIndex.remove(itemID: key)
             for slot in slots {
-                vectorKeys.append(VectorExactKey(
-                    itemID: key, vectorIndex: 0, modelID: slot.provider.modelID))
-                vectorKeys.append(VectorExactKey(
-                    itemID: key, vectorIndex: 1, modelID: slot.provider.modelID))
+                for lane: Int in [0, 1] {
+                    if shared.contains("\(slot.provider.modelID)|\(lane)") { continue }
+                    vectorKeys.append(VectorExactKey(
+                        itemID: key, vectorIndex: lane,
+                        modelID: slot.provider.modelID))
+                }
             }
         }
         try await vectorStore.deleteVectors(keys: vectorKeys)
+    }
+
+    /// Representation families (modelID|lane) this engine's slots write
+    /// that at least one OTHER consumer also claims. Rows in these
+    /// families are never deleted by the engine's remove/destroy paths.
+    private func sharedRepresentationFamilies() async throws -> Set<String> {
+        var shared: Set<String> = []
+        for slot in slots {
+            for lane: Int in [0, 1] {
+                let claimants = try await claims.claimants(
+                    key: VectorRepresentationKey(
+                        modelID: slot.provider.modelID,
+                        modelVersion: slot.provider.modelVersion,
+                        vectorIndex: lane))
+                if claimants.contains(where: { $0 != Self.claimsConsumer }) {
+                    shared.insert("\(slot.provider.modelID)|\(lane)")
+                }
+            }
+        }
+        return shared
     }
 
     /// Clear EVERYTHING derived for `id` (the remove path): BM25, vectors,
@@ -609,6 +871,7 @@ public actor CorpusContentEngine {
     private func clearDerivedState(id: CorpusContentID) async throws {
         let keys = try await unitKeys(for: id)
         try await deleteDerivedRows(unitKeys: keys)
+        try await coverageStore.clear(contentID: id)
         if case .tokenBudgetedPassages = configuration.indexUnit {
             _ = try await storage.rowStore.delete(
                 table: "corpus_passages",
@@ -639,54 +902,164 @@ public actor CorpusContentEngine {
 
     // MARK: - Training
 
+    /// First-ingest auto-train (standalone UX): a trainable slot with no
+    /// persisted basis trains ONCE — via the BOUNDED streaming trainer,
+    /// never by materializing the corpus.
     private func firstIngestTrainIfNeeded(now: Date) async throws {
-        for index in slots.indices where slots[index].freshBasisBlob != nil {
-            let provider = slots[index].provider
-            let hasBasis = try await basisStore.load(
-                modelID: provider.modelID, modelVersion: provider.modelVersion) != nil
-            if !hasBasis {
-                try await trainSlot(index, now: now)
-            }
+        let untrained = slots.indices.filter {
+            slots[$0].freshBasisBlob != nil
+                && slots[$0].basisDigest == Self.untrainedDigest
         }
+        guard !untrained.isEmpty else { return }
+        _ = try await trainTrainableSlots(now: now)
     }
 
-    private func trainSlot(_ index: Int, now: Date) async throws {
-        guard let blob = slots[index].freshBasisBlob,
-              let fresh = slots[index].provider as? any TrainableEmbeddingBasis else { return }
-        let texts = try await activeTexts()
-        guard !texts.isEmpty else { return }
-        let provider = try fresh.reconstructBasis(from: blob)
-        guard let trainable = provider as? any TrainableEmbeddingBasis else {
-            throw CorpusKitError.notTrainable(
-                "reconstructed provider is not trainable — basis seam invariant violated")
-        }
-        trainable.trainOnCorpus(texts: texts)
-        slots[index].provider = provider
-        try await basisStore.upsert(PersistedBasis(
-            modelID: provider.modelID,
-            modelVersion: provider.modelVersion,
-            basis: trainable.serializeBasis(),
-            trainedAt: now,
-            trainedChunkCount: texts.count))
+    /// Training page size: how many canonical records stream through the
+    /// accumulators per page. Bounds transient text memory to one page;
+    /// accumulator state is vocabulary-scale regardless of page size, and
+    /// the trained basis is byte-identical for every page size.
+    public static let trainingPageSize = 2_000
+
+    /// Test seam: when set, throws after the named provider's ATOMIC
+    /// basis+counts commit (nil in production). Exercises resume across
+    /// the per-provider training boundary.
+    var _trainFaultAfterModelID: String?
+    public func _armTrainFault(afterModelID: String?) {
+        _trainFaultAfterModelID = afterModelID
+    }
+    /// Test seam: when set, throws BEFORE the named provider's basis
+    /// commit (after accumulation/finalize). Exercises restart-from-zero.
+    var _trainFaultBeforeCommitModelID: String?
+    public func _armTrainFault(beforeCommitModelID: String?) {
+        _trainFaultBeforeCommitModelID = beforeCommitModelID
     }
 
-    private func activeTexts() async throws -> [String] {
-        var texts: [String] = []
-        for id in try await source.activeContentIDs() {
-            if let record = try await source.record(for: id) {
-                texts.append(record.text)
+    /// Stream-train every trainable slot that lacks a CURRENT basis (or
+    /// every trainable slot when `force` is true), one provider at a time.
+    ///
+    /// Crash safety per provider: accumulation and finalization are
+    /// in-memory only — a crash loses nothing durable and the resumed run
+    /// retrains that provider from zero. The commit is ONE atomic
+    /// transaction writing the basis AND its training-corpus counts (the
+    /// metadata pair that must agree), after which the slot serves the new
+    /// generation and its digest is returned. Already-trained providers
+    /// are skipped on resume (their persisted digest is current).
+    ///
+    /// Bounded: texts stream through in pages of `trainingPageSize`;
+    /// per-provider accumulator state is vocabulary-scale.
+    ///
+    /// - Returns: modelID → basis digest for every trainable slot (newly
+    ///   trained and already-current alike).
+    @discardableResult
+    public func trainTrainableSlots(
+        now: Date, force: Bool = false
+    ) async throws -> [String: String] {
+        var digests: [String: String] = [:]
+        for slotIndex in slots.indices {
+            guard let blob = slots[slotIndex].freshBasisBlob,
+                  let fresh = slots[slotIndex].provider as? any TrainableEmbeddingBasis
+            else { continue }
+            let modelID = slots[slotIndex].provider.modelID
+            if !force, slots[slotIndex].basisDigest != Self.untrainedDigest {
+                // Already trained (persisted basis loaded at open or a
+                // prior pass this run) — resume skips it.
+                digests[modelID] = slots[slotIndex].basisDigest
+                continue
+            }
+            // Fresh accumulation state, reconstructed from the pristine blob
+            // so a retrain never compounds on a prior generation.
+            let provider = try fresh.reconstructBasis(from: blob)
+            guard let trainable = provider as? any TrainableEmbeddingBasis else {
+                throw CorpusKitError.notTrainable(
+                    "reconstructed provider is not trainable — basis seam invariant violated")
+            }
+            // Streamed accumulation in canonical ascending-ID order; the
+            // counts accumulator folds the SAME pages so the persisted
+            // counts are exactly the training corpus's statistics — no
+            // second pass, no double count.
+            let allIDs = try await source.activeContentIDs()
+            guard !allIDs.isEmpty else { continue }
+            // A FRESH counts accumulator (reconstructed from the pristine
+            // blob → empty accumulation): the persisted counts blob is
+            // defined as the fold of the training corpus through
+            // `addToCounts`, on its own instance so providers whose
+            // addToCounts shares training state never double-train.
+            let countsAccumulator =
+                try fresh.reconstructBasis(from: blob) as? any TrainableEmbeddingBasis
+            var documentCount = 0
+            var cursor = 0
+            while cursor < allIDs.count {
+                let page = allIDs[cursor..<min(cursor + Self.trainingPageSize, allIDs.count)]
+                var texts: [String] = []
+                texts.reserveCapacity(page.count)
+                for id in page {
+                    if let record = try await source.record(for: id) {
+                        texts.append(record.text)
+                    }
+                }
+                trainable.accumulateTraining(texts: texts)
+                if let accumulator = countsAccumulator {
+                    for text in texts { accumulator.addToCounts(text: text) }
+                }
+                documentCount += texts.count
+                cursor += Self.trainingPageSize
+            }
+            trainable.finalizeTraining()
+
+            if _trainFaultBeforeCommitModelID == modelID {
+                _trainFaultBeforeCommitModelID = nil
+                throw CorpusKitError.invalidConfiguration(
+                    "injected training fault before commit: \(modelID)")
+            }
+
+            // ATOMIC commit: basis + training-corpus counts in ONE
+            // transaction — the pair can never disagree durably.
+            let basisBlob = trainable.serializeBasis()
+            let digest = CorpusContentDigest.digest(basisBlob)
+            let basisRow = PersistedBasis(
+                modelID: provider.modelID,
+                modelVersion: provider.modelVersion,
+                basis: basisBlob,
+                trainedAt: now,
+                trainedChunkCount: documentCount)
+            let countsRow = countsAccumulator.map { accumulator in
+                PersistedCounts(
+                    modelID: provider.modelID,
+                    modelVersion: provider.modelVersion,
+                    counts: accumulator.serializeCounts(),
+                    documentCount: documentCount,
+                    vocabSize: accumulator.countsVocabularySize,
+                    updatedAt: now)
+            }
+            let basisStore = self.basisStore
+            let countsStore = self.countsStore
+            try await storage.transaction(isolation: .serializable) { txn in
+                try await basisStore.upsert(basisRow, into: txn.rowStore)
+                if let countsRow {
+                    try await countsStore.upsert(countsRow, into: txn.rowStore)
+                }
+            }
+            slots[slotIndex].provider = provider
+            slots[slotIndex].basisDigest = digest
+            slots[slotIndex].countsAccumulator = countsAccumulator
+            slots[slotIndex].countsDocumentCount = documentCount
+            digests[modelID] = digest
+
+            if _trainFaultAfterModelID == modelID {
+                _trainFaultAfterModelID = nil
+                throw CorpusKitError.invalidConfiguration(
+                    "injected training fault after commit: \(modelID)")
             }
         }
-        return texts
+        return digests
     }
 
     /// Retrain every trainable slot from scratch on the full active corpus
     /// and re-index every active content row. Deterministic ascending-ID
-    /// streaming order.
+    /// streaming order. Training is streamed (bounded) and each provider's
+    /// basis+counts commit is atomic.
     public func reindex(now: Date) async throws {
-        for index in slots.indices where slots[index].freshBasisBlob != nil {
-            try await trainSlot(index, now: now)
-        }
+        _ = try await trainTrainableSlots(now: now, force: true)
         for id in try await source.activeContentIDs() {
             guard let record = try await source.record(for: id) else {
                 try await clearDerivedState(id: id)
@@ -696,7 +1069,6 @@ public actor CorpusContentEngine {
             // rewritten even when the checkpoint already matches.
             try await index(record: record, appliedCursor: nil, force: true, now: now)
         }
-        try await persistCounts(now: now)
     }
 
     // MARK: - Maintained counts
@@ -719,6 +1091,13 @@ public actor CorpusContentEngine {
                 vocabSize: accumulator.countsVocabularySize,
                 updatedAt: now))
         }
+    }
+
+    /// Persist the maintained counts snapshot — the BATCH-boundary write.
+    /// Called by the drain worker at burst close (and by training commits
+    /// through their own atomic path); never once per record.
+    public func persistCountsSnapshot(now: Date) async throws {
+        try await persistCounts(now: now)
     }
 
     /// The vocab-growth anchor the autonomic governor reads (content-unit
@@ -903,21 +1282,29 @@ public actor CorpusContentEngine {
     ///   - the engine's consumer claims are released; representations still
     ///     claimed by other lanes survive untouched.
     public func destroyRecallIndex() async throws {
+        // Claim-aware: keys in representation families another retained
+        // consumer also claims are NOT deleted — that claimant may own the
+        // exact same rows. The engine releases its own claims below; the
+        // surviving claimant's rows survive with it.
+        let shared = try await sharedRepresentationFamilies()
         let ids = try await indexedContentIDs()
         var keys: [VectorExactKey] = []
         for id in ids {
             for key in try await unitKeys(for: id) {
                 for slot in slots {
-                    keys.append(VectorExactKey(
-                        itemID: key, vectorIndex: 0, modelID: slot.provider.modelID))
-                    keys.append(VectorExactKey(
-                        itemID: key, vectorIndex: 1, modelID: slot.provider.modelID))
+                    for lane: Int in [0, 1] {
+                        if shared.contains("\(slot.provider.modelID)|\(lane)") { continue }
+                        keys.append(VectorExactKey(
+                            itemID: key, vectorIndex: lane,
+                            modelID: slot.provider.modelID))
+                    }
                 }
             }
         }
         try await vectorStore.deleteVectors(keys: keys)
         try await invertedIndex.deleteAll()
         try await indexState.clearAll()
+        try await coverageStore.clearAll()
         try await basisStore.deleteAll()
         try await countsStore.deleteAll()
         try await claims.releaseAllClaims(consumer: Self.claimsConsumer)
@@ -1079,5 +1466,18 @@ public actor CorpusContentEngine {
             results.append((provider.modelID, .hits(hits)))
         }
         return results
+    }
+}
+
+
+// MARK: - Batch slicing
+
+extension Array {
+    /// Fixed-size slices in order; the last slice may be short.
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [self] }
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
+        }
     }
 }

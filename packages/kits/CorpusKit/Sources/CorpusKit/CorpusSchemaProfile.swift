@@ -94,6 +94,7 @@ public enum CorpusSchemaProfile {
     ) -> SchemaDeclaration {
         var tables = CorpusDocumentStore.schemaDeclaration.tables
             + CorpusIndexStateStore.schemaDeclaration.tables
+            + CorpusProviderCoverageStore.schemaDeclaration.tables
             + InvertedIndexStore.schemaDeclaration.tables
             + BasisStore.schemaDeclaration.tables
             + CorpusProviderCountsStore.schemaDeclaration.tables
@@ -112,6 +113,7 @@ public enum CorpusSchemaProfile {
             version: profileVersion(of: [
                 CorpusDocumentStore.schemaDeclaration,
                 CorpusIndexStateStore.schemaDeclaration,
+                CorpusProviderCoverageStore.schemaDeclaration,
                 InvertedIndexStore.schemaDeclaration,
                 BasisStore.schemaDeclaration,
                 CorpusProviderCountsStore.schemaDeclaration
@@ -129,11 +131,13 @@ public enum CorpusSchemaProfile {
             kitID: "CorpusKitAttached",
             version: profileVersion(of: [
                 CorpusIndexStateStore.schemaDeclaration,
+                CorpusProviderCoverageStore.schemaDeclaration,
                 InvertedIndexStore.schemaDeclaration,
                 BasisStore.schemaDeclaration,
                 CorpusProviderCountsStore.schemaDeclaration
             ]),
             tables: CorpusIndexStateStore.schemaDeclaration.tables
+                + CorpusProviderCoverageStore.schemaDeclaration.tables
                 + InvertedIndexStore.schemaDeclaration.tables
                 + BasisStore.schemaDeclaration.tables
                 + CorpusProviderCountsStore.schemaDeclaration.tables,

@@ -36,7 +36,13 @@ public typealias CorpusContentID = String
 /// Cross-port identical (Rust twin: `content::content_digest`).
 public enum CorpusContentDigest {
     public static func digest(_ text: String) -> String {
-        SHA256.hash(data: Data(text.utf8))
+        digest(Data(text.utf8))
+    }
+
+    /// Digest of raw bytes — the basis-generation anchor (lowercase SHA-256
+    /// hex of a serialized basis blob).
+    public static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data)
             .map { String(format: "%02x", $0) }
             .joined()
     }

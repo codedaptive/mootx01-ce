@@ -56,8 +56,14 @@ struct CompositeSchemaSignatureTests {
     }
 
     @Test func compositeSignatureMatchesFrozenCrossPortFixture() throws {
-        let expected = try String(contentsOf: fixtureURL, encoding: .utf8)
         let actual = GeniusLocusKitSchema.estateSchemaDeclaration.layoutSignatureText()
+        // Maintainer regen: MOOT_REGEN_COMPOSITE_FIXTURE=1 rewrites the
+        // fixture from THIS port; run the Rust twin the same way and verify
+        // the two runs produce a byte-identical file before committing.
+        if ProcessInfo.processInfo.environment["MOOT_REGEN_COMPOSITE_FIXTURE"] == "1" {
+            try actual.write(to: fixtureURL, atomically: true, encoding: .utf8)
+        }
+        let expected = try String(contentsOf: fixtureURL, encoding: .utf8)
         #expect(actual == expected,
                 "composite layout signature diverged from the frozen fixture — if this change is deliberate, regenerate the fixture in both ports")
     }
