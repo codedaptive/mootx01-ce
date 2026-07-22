@@ -15,3 +15,8 @@ remain outside the public repository.
 The first reviewed repository editions are being prepared. When they arrive,
 this index and the previous/next links in each article will be generated from
 the approved series order.
+
+## License
+
+Copyright 2026 Codedaptive LLC. Article text in this library is licensed under
+the [Creative Commons Attribution 4.0 International license](LICENSE.md).

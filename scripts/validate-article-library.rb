@@ -26,7 +26,7 @@ end.parse!
 root = File.expand_path(options[:root])
 problems = []
 
-%w[README.md business/README.md technical/README.md].each do |relative|
+%w[README.md LICENSE.md business/README.md technical/README.md].each do |relative|
   problems << "missing #{relative}" unless File.file?(File.join(root, relative))
 end
 
@@ -53,6 +53,8 @@ lanes.each do |lane, paths|
     problems << "#{relative} contains an article wrapper" if markdown.match?(/^## Article\s*$/)
     problems << "#{relative} lacks the series index link" unless markdown.include?("[Series index](../README.md)")
     problems << "#{relative} lacks an original publication link" unless markdown.match?(/Originally published on \[[^\]]+\]\(https:\/\//)
+    problems << "#{relative} lacks the article copyright notice" unless markdown.include?("Copyright 2026 Codedaptive LLC")
+    problems << "#{relative} lacks the CC BY 4.0 license link" unless markdown.include?("https://creativecommons.org/licenses/by/4.0/")
 
     paired_lane = lane == "business" ? "technical" : "business"
     paired_label = lane == "business" ? "Technical edition" : "Business edition"
