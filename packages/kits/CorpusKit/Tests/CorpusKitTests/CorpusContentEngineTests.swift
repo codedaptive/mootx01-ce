@@ -10,12 +10,53 @@
 
 import Testing
 import Foundation
+import EngramLib
 import PersistenceKit
 import PersistenceKitSQLite
 import VectorKit
 import CorpusKitProviders
 
 @testable import CorpusKit
+
+private final class ReindexConcurrencyProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = 0
+    private var peak = 0
+
+    func enter() {
+        lock.lock()
+        active += 1
+        peak = max(peak, active)
+        lock.unlock()
+    }
+
+    func leave() {
+        lock.lock()
+        active -= 1
+        lock.unlock()
+    }
+
+    func peakValue() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return peak
+    }
+}
+
+private struct ReindexConcurrencyProvider: EmbeddingProvider {
+    let modelID = "reindex-concurrency-probe"
+    let modelVersion = "1.0.0"
+    let probe: ReindexConcurrencyProbe
+
+    func embed(_ text: String) async throws -> Engram {
+        probe.enter()
+        defer { probe.leave() }
+        try await Task.sleep(for: .milliseconds(20))
+        return .zero
+    }
+
+    func embedFloat(_ text: String) async throws -> [Float] { [1.0] }
+}
 
 @Suite("CorpusContentEngine", .serialized)
 struct CorpusContentEngineTests {
@@ -558,6 +599,34 @@ struct CorpusContentEngineTests {
                 storage: storage, tables: ["iix_termfreqs", "iix_doclens", "vectors"],
                 excludingColumns: exclusions)
             #expect(before == after)
+        }
+    }
+
+    @Test func wholeContentReindexUsesBoundedParallelEmbeddingPreparation() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            for index in 0..<12 {
+                _ = try await store.put(
+                    "parallel reindex content \(index)", id: "parallel-\(index)", now: now)
+            }
+            let probe = ReindexConcurrencyProbe()
+            let engine = try await CorpusContentEngine(
+                storage: storage,
+                configuration: try CorpusContentConfiguration(
+                    mode: .attached, indexUnit: .wholeContent),
+                source: store,
+                models: [.fdc(provider: ReindexConcurrencyProvider(probe: probe))])
+
+            try await engine.reindex(now: now)
+
+            let bound = max(1, ProcessInfo.processInfo.activeProcessorCount)
+            #expect(probe.peakValue() <= bound)
+            if bound > 1 {
+                #expect(probe.peakValue() > 1)
+            }
+            #expect(try await engine.indexedContentIDs().count == 12)
         }
     }
 }

@@ -625,6 +625,25 @@ public actor CorpusContentEngine {
             throw CorpusKitError.invalidConfiguration(
                 "structural batch rebuild is available only to attached whole-content engines")
         }
+        return try await indexWholeContentBatch(
+            ids: ids, now: now, parallelism: parallelism,
+            slotScope: .statelessOnly, force: false)
+    }
+
+    /// Shared whole-content compute-parallel/write-serial kernel. Migration
+    /// selects only stateless slots without forcing existing checkpoints;
+    /// full reindex selects every published slot and forces representation
+    /// replacement after retraining. Passage replacement deliberately stays
+    /// on the serial `prepareIndex` path because it also mutates range rows.
+    private func indexWholeContentBatch(
+        ids: [CorpusContentID], now: Date, parallelism: Int?,
+        slotScope: SlotScope, force: Bool
+    ) async throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        guard case .wholeContent = configuration.indexUnit else {
+            throw CorpusKitError.invalidConfiguration(
+                "whole-content batch indexing requires the wholeContent index unit")
+        }
         try await registerClaims(now: now)
 
         var records: [CorpusContentRecord] = []
@@ -635,7 +654,8 @@ public actor CorpusContentEngine {
                 try await clearDerivedState(id: id)
                 continue
             }
-            if let existing = try await indexState.state(for: id),
+            if !force,
+               let existing = try await indexState.state(for: id),
                existing.revision == record.revision,
                existing.digest == record.digest,
                existing.indexVersion == Self.indexVersion {
@@ -646,7 +666,8 @@ public actor CorpusContentEngine {
         guard !records.isEmpty else { return 0 }
 
         let providers = slots.enumerated().compactMap { index, slot -> StructuralProvider? in
-            guard slot.freshBasisBlob == nil else { return nil }
+            if slotScope == .statelessOnly, slot.freshBasisBlob != nil { return nil }
+            if slot.freshBasisBlob != nil, slot.basisDigest == Self.untrainedDigest { return nil }
             return StructuralProvider(
                 provider: slot.provider,
                 modelID: slot.provider.modelID,
@@ -699,6 +720,14 @@ public actor CorpusContentEngine {
                 indexVersion: Self.indexVersion,
                 appliedCursor: nil,
                 updatedAt: now))
+            if force {
+                // The former serial reindex path emitted this metric once per
+                // completed record. Preserve that observability while moving
+                // only the embedding preparation onto bounded workers.
+                Intellectus.report(.metric(
+                    name: "corpus.content.indexed", value: 1.0,
+                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
+            }
         }
         return prepared.count
     }
@@ -1546,20 +1575,30 @@ public actor CorpusContentEngine {
         // O(corpus) rewrite and publish ONCE — per-record invalidation makes
         // an estate-scale retrain rebuild the resident index per write.
         try await vectorStore.beginDeferredIndex()
-        for id in try await source.activeContentIDs() {
-            guard let record = try await source.record(for: id) else {
-                try await clearDerivedState(id: id)
-                continue
+        let ids = try await source.activeContentIDs()
+        if case .wholeContent = configuration.indexUnit {
+            // Bound both task admission and prepared-result memory. The batch
+            // kernel preserves input order and advances each checkpoint only
+            // after BM25, vectors, and coverage are durable.
+            for batch in ids.chunked(into: 500) {
+                _ = try await indexWholeContentBatch(
+                    ids: batch, now: now, parallelism: nil,
+                    slotScope: .all, force: true)
             }
-            // Forced: a retrain changes the basis, so vectors must be
-            // rewritten even when the checkpoint already matches. Counts were
-            // rebuilt from this same full-corpus snapshot by the training pass,
-            // so re-embedding must not fold every record into them a second time.
-            if let checkpoint = try await prepareIndex(
-                record: record, appliedCursor: nil, force: true, now: now,
-                slotScope: .all, maintainCounts: false
-            ) {
-                try await indexState.advance(checkpoint)
+        } else {
+            // Standalone passage policies also replace durable range rows;
+            // keep that mutation path serialized and policy-bound.
+            for id in ids {
+                guard let record = try await source.record(for: id) else {
+                    try await clearDerivedState(id: id)
+                    continue
+                }
+                if let checkpoint = try await prepareIndex(
+                    record: record, appliedCursor: nil, force: true, now: now,
+                    slotScope: .all, maintainCounts: false
+                ) {
+                    try await indexState.advance(checkpoint)
+                }
             }
         }
         try await vectorStore.publishResidentIndex()

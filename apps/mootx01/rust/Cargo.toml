@@ -68,3 +68,7 @@ trash = "5.2.3"
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.
 tempfile = "3"
+# Installer reuse integration gate: open the repaired estate through the real
+# LocusKit SQLite store and prove a Drawer capture succeeds. Dev-only; the
+# production installer continues to depend only on PersistenceKit for repair.
+locus-kit = { path = "../../../packages/kits/LocusKit/rust" }

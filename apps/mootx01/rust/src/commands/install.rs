@@ -1470,4 +1470,94 @@ mod tests {
         apply_reuse(&data).expect("canonical reuse must be a no-op");
         let _ = std::fs::remove_dir_all(&data);
     }
+
+    #[test]
+    fn repaired_reuse_accepts_a_locus_capture() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+        use locus_kit::estate::Estate;
+        use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+        use locus_kit::frames::CaptureFrame;
+        use std::sync::Arc;
+
+        let data = std::env::temp_dir().join(format!(
+            "mootx01-reuse-capture-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let estate_path = paths::estate_sqlite_path(&data, "default");
+        std::fs::create_dir_all(estate_path.parent().unwrap()).unwrap();
+        let path = estate_path.to_string_lossy().into_owned();
+
+        // Build a complete current estate, then transpose only the audit
+        // columns to the historical verbose Rust dialect that `reuse` repairs.
+        let store = Arc::new(SqliteDrawerStore::from_path(&path, 1_700_000_000, None, 5.0).unwrap());
+        let locus = Estate::create(
+            store,
+            OwnerCredentials::new("reuse-capture-owner"),
+            None,
+        )
+        .unwrap();
+        let seed = CaptureFrame::new(
+            "before repair",
+            CaptureChannel::Typed,
+            "reuse-room",
+            LatticeAnchor::udc("001"),
+            "reuse-test",
+            "test-model",
+        );
+        locus.capture(seed, 1_700_000_001).unwrap();
+        drop(locus);
+
+        let conn = rusqlite::Connection::open(&estate_path).unwrap();
+        conn.execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_adj" TO "before_adjective";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_op" TO "before_operational";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_pv" TO "before_provenance";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_adj" TO "after_adjective";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_op" TO "after_operational";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_pv" TO "after_provenance";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_udc" TO "before_lattice_anchor";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_udc" TO "after_lattice_anchor";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "before_qid" TO "before_lattice_qid";
+            ALTER TABLE "_storagekit_audit" RENAME COLUMN "after_qid" TO "after_lattice_qid";
+            COMMIT;
+            "#,
+        )
+        .unwrap();
+        let before_count: i64 = conn
+            .query_row(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, [], |row| row.get(0))
+            .unwrap();
+        drop(conn);
+
+        apply_reuse(&data).expect("reuse must repair before publishing the estate");
+        let reopened_store = Arc::new(
+            SqliteDrawerStore::from_path(&path, 1_700_000_002, None, 5.0).unwrap(),
+        );
+        let reopened = Estate::open(
+            reopened_store,
+            OwnerCredentials::new("reuse-capture-owner"),
+        )
+        .unwrap();
+        let frame = CaptureFrame::new(
+            "after repair",
+            CaptureChannel::Typed,
+            "reuse-room",
+            LatticeAnchor::udc("001"),
+            "reuse-test",
+            "test-model",
+        );
+        let drawer = reopened.capture(frame, 1_700_000_003).unwrap();
+        assert_eq!(drawer.content, "after repair");
+        drop(reopened);
+
+        let conn = rusqlite::Connection::open(&estate_path).unwrap();
+        let after_count: i64 = conn
+            .query_row(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, [], |row| row.get(0))
+            .unwrap();
+        assert!(after_count > before_count, "post-repair capture must append audit state");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&data);
+    }
 }

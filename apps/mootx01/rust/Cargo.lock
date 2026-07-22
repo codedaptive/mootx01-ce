@@ -1001,6 +1001,7 @@ version = "1.0.33"
 dependencies = [
  "aria-mcp",
  "libc",
+ "locus-kit",
  "persistence-kit",
  "queuekit",
  "rusqlite",

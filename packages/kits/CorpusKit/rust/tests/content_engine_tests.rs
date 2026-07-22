@@ -13,10 +13,57 @@ use persistence_kit::{
     BackendConfiguration, Column, EstateConfiguration, Storage, StoragePredicate, TypedValue,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 const NOW: i64 = 1_700_000_000_000;
+
+#[derive(Default)]
+struct ReindexConcurrencyProbe {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl ReindexConcurrencyProbe {
+    fn enter(&self) {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+    }
+
+    fn leave(&self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct ReindexConcurrencyProvider {
+    probe: Arc<ReindexConcurrencyProbe>,
+}
+
+impl vectorkit::EmbeddingProvider for ReindexConcurrencyProvider {
+    fn model_id(&self) -> &str {
+        "reindex-concurrency-probe"
+    }
+
+    fn model_version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn embed(&self, _text: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
+        Ok(engram_lib::Engram::ZERO)
+    }
+
+    fn embed_pair(
+        &self,
+        _text: &str,
+    ) -> Result<(engram_lib::Engram, Vec<f32>), vectorkit::VectorKitError> {
+        self.probe.enter();
+        std::thread::sleep(Duration::from_millis(20));
+        self.probe.leave();
+        Ok((engram_lib::Engram::ZERO, vec![1.0]))
+    }
+}
 
 fn in_memory_storage() -> Arc<dyn Storage> {
     let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
@@ -174,6 +221,52 @@ fn replaying_the_same_revision_changes_no_derived_bytes() {
     engine.apply_change(&change, Some("1"), NOW).unwrap();
     let after = capture_inventory(&storage, &tables, &BTreeMap::new()).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn whole_content_reindex_uses_bounded_parallel_embedding_preparation() {
+    let storage = in_memory_storage();
+    storage
+        .migrate(&corpus_kit::standalone_declaration(false))
+        .expect("content schema");
+    let source = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+    for index in 0..12 {
+        source
+            .put(
+                &format!("parallel reindex content {index}"),
+                &format!("parallel-{index}"),
+                NOW,
+            )
+            .expect("put content");
+    }
+    let probe = Arc::new(ReindexConcurrencyProbe::default());
+    let engine = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        CorpusContentConfiguration::new(
+            CorpusOperatingMode::Attached,
+            CorpusIndexUnitPolicy::WholeContent,
+        )
+        .expect("configuration"),
+        source as Arc<dyn CorpusContentSource>,
+        vec![EmbeddingModelConfig::Fdc {
+            provider: Box::new(ReindexConcurrencyProvider {
+                probe: Arc::clone(&probe),
+            }),
+        }],
+    )
+    .expect("engine");
+
+    engine.reindex(NOW).expect("reindex");
+
+    let bound = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let peak = probe.peak.load(Ordering::SeqCst);
+    assert!(peak <= bound, "peak {peak} exceeded worker bound {bound}");
+    if bound > 1 {
+        assert!(peak > 1, "parallel-capable host ran reindex serially");
+    }
+    assert_eq!(engine.indexed_content_ids().expect("indexed IDs").len(), 12);
 }
 
 #[test]

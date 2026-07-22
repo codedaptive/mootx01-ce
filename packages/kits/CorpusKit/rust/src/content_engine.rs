@@ -1074,6 +1074,32 @@ impl CorpusContentEngine {
                     .into(),
             ));
         }
+        self.index_whole_content_batch(ids, now_millis, SlotScope::StatelessOnly, false)
+    }
+
+    /// Shared whole-content compute-parallel/write-serial kernel. Migration
+    /// selects stateless slots and honors existing checkpoints; full reindex
+    /// selects every published slot and forces replacement after retraining.
+    /// Passage-range replacement remains on `prepare_index_record` because it
+    /// also mutates database-bound range rows.
+    fn index_whole_content_batch(
+        &self,
+        ids: &[String],
+        now_millis: i64,
+        slot_scope: SlotScope,
+        force: bool,
+    ) -> CorpusKitResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        if !matches!(
+            self.configuration.index_unit(),
+            CorpusIndexUnitPolicy::WholeContent
+        ) {
+            return Err(CorpusKitError::InvalidConfiguration(
+                "whole-content batch indexing requires the wholeContent index unit".into(),
+            ));
+        }
         self.register_claims(now_millis)?;
 
         let mut records = Vec::with_capacity(ids.len());
@@ -1083,12 +1109,14 @@ impl CorpusContentEngine {
                 self.clear_derived_state(id)?;
                 continue;
             };
-            if let Some(existing) = self.index_state.state(id)? {
-                if existing.revision == record.revision
-                    && existing.digest == record.digest
-                    && existing.index_version == CONTENT_ENGINE_INDEX_VERSION
-                {
-                    continue;
+            if !force {
+                if let Some(existing) = self.index_state.state(id)? {
+                    if existing.revision == record.revision
+                        && existing.digest == record.digest
+                        && existing.index_version == CONTENT_ENGINE_INDEX_VERSION
+                    {
+                        continue;
+                    }
                 }
             }
             records.push(record);
@@ -1101,7 +1129,15 @@ impl CorpusContentEngine {
             .slots
             .iter()
             .enumerate()
-            .filter_map(|(index, slot)| slot.fresh_basis_blob.is_none().then_some(index))
+            .filter_map(|(index, slot)| {
+                if slot_scope == SlotScope::StatelessOnly && slot.fresh_basis_blob.is_some() {
+                    return None;
+                }
+                if slot.fresh_basis_blob.is_some() && slot.basis_digest.lock().unwrap().is_empty() {
+                    return None;
+                }
+                Some(index)
+            })
             .collect();
         let guards: Vec<_> = selected
             .iter()
@@ -2365,24 +2401,37 @@ impl CorpusContentEngine {
         self.vector_store
             .begin_deferred_index()
             .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
-        for id in self.source.active_content_ids()? {
-            match self.source.record(&id)? {
-                Some(record) => {
-                    // Training just rebuilt the maintained counts from this
-                    // same full-corpus snapshot. Re-embedding the generation
-                    // must not fold every record into those counts again.
-                    if let Some(checkpoint) = self.prepare_index_record(
-                        &record,
-                        None,
-                        true,
-                        now_millis,
-                        SlotScope::All,
-                        false,
-                    )? {
-                        self.index_state.advance(&checkpoint)?;
+        let ids = self.source.active_content_ids()?;
+        if matches!(
+            self.configuration.index_unit(),
+            CorpusIndexUnitPolicy::WholeContent
+        ) {
+            // Bound both worker admission and prepared-result memory. Worker
+            // joins preserve slice/input order; all durable writes remain on
+            // this caller thread in BM25 -> vectors -> coverage -> checkpoint
+            // order.
+            for batch in ids.chunks(500) {
+                self.index_whole_content_batch(batch, now_millis, SlotScope::All, true)?;
+            }
+        } else {
+            // Standalone passage policies also replace durable range rows;
+            // keep that mutation path serialized and policy-bound.
+            for id in ids {
+                match self.source.record(&id)? {
+                    Some(record) => {
+                        if let Some(checkpoint) = self.prepare_index_record(
+                            &record,
+                            None,
+                            true,
+                            now_millis,
+                            SlotScope::All,
+                            false,
+                        )? {
+                            self.index_state.advance(&checkpoint)?;
+                        }
                     }
+                    None => self.clear_derived_state(&id)?,
                 }
-                None => self.clear_derived_state(&id)?,
             }
         }
         self.vector_store
