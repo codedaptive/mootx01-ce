@@ -34,7 +34,7 @@ use crate::tokenizer::default_keyword_tokens;
 use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -277,6 +277,9 @@ pub struct CorpusContentEngine {
     /// A failed counts/checkpoint transaction must rehydrate maintained counts
     /// before any durable queue reference is attempted again.
     counts_reload_required: AtomicBool,
+    /// Serializes identity admission, durable reference/checkpoint commit, and
+    /// the corresponding in-memory fold at the queue batch boundary.
+    counts_commit_lock: Mutex<()>,
     /// GLK's room-rollup coordination hook (fired with Drawer IDs).
     on_encoded: Mutex<Option<ContentOnEncoded>>,
     /// Declared encode speed (serial drain today; retained surface).
@@ -380,6 +383,7 @@ impl CorpusContentEngine {
             slots,
             queue_state: Mutex::new(None),
             counts_reload_required: AtomicBool::new(false),
+            counts_commit_lock: Mutex::new(()),
             on_encoded: Mutex::new(None),
             encode_speed: Mutex::new(EncodeSpeed::Foreground),
             ingest_failure_hook: Mutex::new(None),
@@ -1414,9 +1418,12 @@ impl CorpusContentEngine {
         counts_updates: &[(String, i64, String, String)],
         now_millis: i64,
     ) -> CorpusKitResult<()> {
-        let mut references = Vec::new();
+        let _commit_guard = self.counts_commit_lock.lock().map_err(|_| {
+            CorpusKitError::StoreUnavailable("counts commit lock poisoned".into())
+        })?;
+        let mut references: Vec<(PersistedCountsReference, usize, String)> = Vec::new();
         if !counts_updates.is_empty() {
-            for slot in &self.slots {
+            for (slot_index, slot) in self.slots.iter().enumerate() {
                 let (model_id, model_version) = {
                     let handle = slot.handle.lock().unwrap();
                     let provider = handle.provider();
@@ -1425,21 +1432,32 @@ impl CorpusContentEngine {
                         provider.model_version().to_string(),
                     )
                 };
-                let mut counts = slot.counts.lock().unwrap();
-                let Some(state) = counts.as_mut() else {
+                if slot.counts.lock().unwrap().is_none() {
                     continue;
-                };
+                }
+                let mut admitted_ids = HashSet::new();
                 for (content_id, revision, digest, text) in counts_updates {
-                    state.accumulator.add_to_counts(text);
-                    state.document_count += 1;
-                    references.push(PersistedCountsReference {
-                        model_id: model_id.clone(),
-                        model_version: model_version.clone(),
-                        content_id: content_id.clone(),
-                        revision: *revision,
-                        digest: digest.clone(),
-                        updated_at_secs: now_millis / 1000,
-                    });
+                    if !admitted_ids.insert(content_id.clone())
+                        || self.counts_store.has_reference(
+                            &model_id,
+                            &model_version,
+                            content_id,
+                        )?
+                    {
+                        continue;
+                    }
+                    references.push((
+                        PersistedCountsReference {
+                            model_id: model_id.clone(),
+                            model_version: model_version.clone(),
+                            content_id: content_id.clone(),
+                            revision: *revision,
+                            digest: digest.clone(),
+                            updated_at_secs: now_millis / 1000,
+                        },
+                        slot_index,
+                        text.clone(),
+                    ));
                 }
             }
         }
@@ -1449,7 +1467,7 @@ impl CorpusContentEngine {
             .storage
             .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
                 let rows = txn.row_store();
-                for reference in &references {
+                for (reference, _, _) in &references {
                     counts_store
                         .upsert_reference_into(reference, &rows)
                         .map_err(|error| persistence_kit::StorageError::BackendError {
@@ -1479,6 +1497,15 @@ impl CorpusContentEngine {
             }
             self.counts_reload_required.store(false, Ordering::Release);
             return Err(transaction_error);
+        }
+        // The durable primary-key reference is the admission authority. Fold
+        // only after commit; the error path above reconstructs from storage.
+        for (_, slot_index, text) in references {
+            let mut counts = self.slots[slot_index].counts.lock().unwrap();
+            if let Some(state) = counts.as_mut() {
+                state.accumulator.add_to_counts(&text);
+                state.document_count += 1;
+            }
         }
         Ok(())
     }

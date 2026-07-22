@@ -1047,19 +1047,27 @@ public actor CorpusContentEngine {
         now: Date
     ) async throws {
         var references: [PersistedCountsReference] = []
+        var newlyAdmitted: [(slotIndex: Int, text: String)] = []
         if !countsUpdates.isEmpty {
             for index in slots.indices {
-                guard let accumulator = slots[index].countsAccumulator else { continue }
+                guard slots[index].countsAccumulator != nil else { continue }
+                let modelID = slots[index].provider.modelID
+                let modelVersion = slots[index].provider.modelVersion
+                var admittedIDs: Set<String> = []
                 for update in countsUpdates {
-                    accumulator.addToCounts(text: update.text)
-                    slots[index].countsDocumentCount += 1
+                    guard admittedIDs.insert(update.contentID).inserted else { continue }
+                    guard try await !countsStore.hasReference(
+                        modelID: modelID, modelVersion: modelVersion,
+                        contentID: update.contentID)
+                    else { continue }
                     references.append(PersistedCountsReference(
-                        modelID: slots[index].provider.modelID,
-                        modelVersion: slots[index].provider.modelVersion,
+                        modelID: modelID,
+                        modelVersion: modelVersion,
                         contentID: update.contentID,
                         revision: update.revision,
                         digest: update.digest,
                         updatedAt: now))
+                    newlyAdmitted.append((index, update.text))
                 }
             }
         }
@@ -1075,6 +1083,12 @@ public actor CorpusContentEngine {
                 for checkpoint in checkpoints {
                     try await indexState.advance(checkpoint, into: txn.rowStore)
                 }
+            }
+            // The durable primary-key reference is the admission authority.
+            // Fold only after commit; an ambiguous error reloads below.
+            for admitted in newlyAdmitted {
+                slots[admitted.slotIndex].countsAccumulator?.addToCounts(text: admitted.text)
+                slots[admitted.slotIndex].countsDocumentCount += 1
             }
         } catch {
             // Treat the storage transaction as authoritative even when the

@@ -410,6 +410,54 @@ struct CorpusContentEngineTests {
         }
     }
 
+    @Test func queueRemoveReaddDoesNotDoubleFoldCountsReference() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            _ = try await store.put("training anchor", id: "anchor", now: now)
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+
+            let first = try await store.put("identity delta", id: "readd", now: now)
+            let firstJob = ContentIndexJob(
+                change: .upsert(id: first.id, revision: first.revision, digest: first.digest),
+                cursor: "readd-1")
+            let firstPrepared = try await engine.prepareQueueJob(
+                firstJob, now: now, contentAlreadyPrepared: false)
+            try await engine.commitQueueBatch(
+                checkpoints: firstPrepared.checkpoints,
+                countsUpdates: firstPrepared.countsUpdate.map { [$0] } ?? [], now: now)
+            #expect(await engine.maintainedDocumentCount() == 2)
+
+            try await store.remove(id: "readd", now: now)
+            let remove = ContentIndexJob(
+                change: .remove(id: "readd", revision: first.revision), cursor: "readd-2")
+            let removePrepared = try await engine.prepareQueueJob(
+                remove, now: now, contentAlreadyPrepared: false)
+            try await engine.commitQueueBatch(
+                checkpoints: removePrepared.checkpoints, countsUpdates: [], now: now)
+
+            let second = try await store.put("identity delta", id: "readd", now: now)
+            let secondJob = ContentIndexJob(
+                change: .upsert(id: second.id, revision: second.revision, digest: second.digest),
+                cursor: "readd-3")
+            let secondPrepared = try await engine.prepareQueueJob(
+                secondJob, now: now, contentAlreadyPrepared: false)
+            try await engine.commitQueueBatch(
+                checkpoints: secondPrepared.checkpoints,
+                countsUpdates: secondPrepared.countsUpdate.map { [$0] } ?? [], now: now)
+
+            #expect(await engine.maintainedDocumentCount() == 2)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_count_references", where: nil) == 1)
+        }
+    }
+
     // MARK: - Standalone passages
 
 #if CORPUSKIT_STANDALONE_PASSAGES

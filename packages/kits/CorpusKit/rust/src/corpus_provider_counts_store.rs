@@ -255,6 +255,43 @@ impl CorpusProviderCountsStore {
         Ok(())
     }
 
+    /// Whether this provider generation already carries a pending delta for a
+    /// canonical identity. The serialized queue batch uses this to keep a
+    /// remove/re-add idempotent in memory as well as on disk.
+    pub fn has_reference(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        content_id: &str,
+    ) -> CorpusKitResult<bool> {
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "content_id"),
+                TypedValue::Text(content_id.to_string()),
+            ),
+        ]);
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "corpus_provider_count_references",
+                Some(&predicate),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(|error| CorpusKitError::StoreUnavailable(error.to_string()))?;
+        Ok(!rows.is_empty())
+    }
+
     pub fn references(
         &self,
         model_id: &str,

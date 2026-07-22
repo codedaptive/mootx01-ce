@@ -289,6 +289,95 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
     );
 }
 
+#[test]
+fn queue_remove_readd_does_not_double_fold_counts_reference() {
+    use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
+    use corpus_kit_providers::RandomIndexingProvider;
+
+    let _guard = global_lock();
+    let (storage, _temp_dir, _sqlite_path) = make_scratch_storage();
+    storage
+        .migrate(&corpus_kit::standalone_declaration(false))
+        .expect("standalone content schema");
+    let source = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+    source
+        .put("training anchor", "anchor", NOW_MILLIS)
+        .expect("put anchor");
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .expect("configuration");
+    let engine = Arc::new(CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::new()),
+        }],
+    )
+    .expect("engine"));
+    engine
+        .train_trainable_slots(NOW_MILLIS, false)
+        .expect("train anchor");
+
+    let first = source
+        .put("identity delta", "readd", NOW_MILLIS + 1)
+        .expect("put first");
+    let first_job = ContentIndexJob::from_change(
+        &CorpusContentChange::Upsert {
+            id: first.id,
+            revision: first.revision,
+            digest: first.digest,
+        },
+        Some("readd-1".into()),
+    );
+    engine
+        .enqueue_change_batch(&[(first_job, NOW_MILLIS + 1)])
+        .expect("enqueue first");
+    engine.await_ingest_drain().expect("drain first");
+    assert_eq!(engine.maintained_document_count(), 2);
+
+    source.remove("readd", NOW_MILLIS + 2).expect("remove");
+    let remove_job = ContentIndexJob::from_change(
+        &CorpusContentChange::Remove {
+            id: "readd".into(),
+            revision: first.revision,
+        },
+        Some("readd-2".into()),
+    );
+    engine
+        .enqueue_change_batch(&[(remove_job, NOW_MILLIS + 2)])
+        .expect("enqueue remove");
+    engine.await_ingest_drain().expect("drain remove");
+
+    let second = source
+        .put("identity delta", "readd", NOW_MILLIS + 3)
+        .expect("put second");
+    let second_job = ContentIndexJob::from_change(
+        &CorpusContentChange::Upsert {
+            id: second.id,
+            revision: second.revision,
+            digest: second.digest,
+        },
+        Some("readd-3".into()),
+    );
+    engine
+        .enqueue_change_batch(&[(second_job, NOW_MILLIS + 3)])
+        .expect("enqueue second");
+    engine.await_ingest_drain().expect("drain second");
+
+    assert_eq!(engine.maintained_document_count(), 2);
+    assert_eq!(
+        CorpusProviderCountsStore::new(Arc::clone(&storage))
+            .references("random-indexing-v1", "1.1.0")
+            .expect("references")
+            .len(),
+        1
+    );
+    engine.drop_ingest_queue();
+}
+
 // ---------------------------------------------------------------------------
 // 1. Orphaned cur reclaim on mount
 // ---------------------------------------------------------------------------

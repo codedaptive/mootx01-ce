@@ -268,6 +268,26 @@ public actor CorpusProviderCountsStore {
         )
     }
 
+    /// Whether this provider generation already carries a pending delta for a
+    /// canonical identity. The serialized queue batch uses this to keep a
+    /// remove/re-add idempotent in memory as well as on disk.
+    public func hasReference(
+        modelID: String, modelVersion: String, contentID: String
+    ) async throws -> Bool {
+        let rows = try await storage.rowStore.query(
+            table: "corpus_provider_count_references",
+            where: .and([
+                .eq(Column(table: "corpus_provider_count_references", name: "model_id"),
+                    .text(modelID)),
+                .eq(Column(table: "corpus_provider_count_references", name: "model_version"),
+                    .text(modelVersion)),
+                .eq(Column(table: "corpus_provider_count_references", name: "content_id"),
+                    .text(contentID)),
+            ]),
+            orderBy: [], limit: 1, offset: nil)
+        return !rows.isEmpty
+    }
+
     /// Load deterministic reference deltas for one exact provider generation.
     public func references(modelID: String, modelVersion: String) async throws
         -> [PersistedCountsReference]
