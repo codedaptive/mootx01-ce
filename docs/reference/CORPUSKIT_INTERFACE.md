@@ -173,46 +173,48 @@ projects active Drawers into these values.
 ```swift
 public enum CorpusIndexUnitPolicy: Sendable, Equatable {
     case wholeContent
-    case passages(PassagePolicy)
-}
-
-public struct PassagePolicy: Sendable, Equatable {
-    public let maxTokens: Int
-    public let overlapTokens: Int
+#if CORPUSKIT_STANDALONE_PASSAGES
+    case tokenWindows(windowTokens: Int, overlapTokens: Int)
+#endif
 }
 
 public struct CorpusEvidence: Sendable, Equatable {
-    public let utf8Range: Range<Int>?
-    public let lane: String
-    public let score: Float
+    public let passageID: String
+    public let utf8Start: Int
+    public let utf8Length: Int
 }
 
-public struct CorpusHit: Sendable, Equatable {
-    public let contentID: CorpusContentID
+public struct CorpusContentHit: Sendable, Equatable {
+    public let id: CorpusContentID
     public let score: Float
     public let vectorScore: Float?
     public let keywordScore: Float?
-    public let evidence: [CorpusEvidence]
+    public let evidence: CorpusEvidence?
 }
 ```
 
-Rust exposes equivalent `CorpusIndexUnitPolicy`, `PassagePolicy`,
-`CorpusEvidence`, and `CorpusHit` values with snake-case fields.
+Rust exposes the equivalent `CorpusIndexUnitPolicy::TokenWindows`,
+`CorpusEvidence`, and `CorpusContentHit` values with snake-case fields when the
+`standalone-passages` feature is enabled.
 
 `.wholeContent` is the standalone default and the only policy accepted by the
-GeniusLocusKit adapter. `.passages` is standalone-only. Its persisted rows carry
-`content_id`, `revision`, `digest`, and UTF-8 range coordinates; they carry no
-text. Every recall result is aggregated to `contentID`.
+GeniusLocusKit adapter. `.tokenWindows` is compiled only with the Swift
+`StandalonePassages` trait and is standalone-only. Its persisted rows carry
+`content_id`, `revision`, `digest`, `policy_fingerprint`, and UTF-8 range
+coordinates; they carry no text. The database also stores one
+`corpus_index_configuration` authority row containing tokenizer identity,
+window, overlap, and version. Every recall result is aggregated to its canonical
+content ID.
 
 ### Operating modes and construction
 
 ```swift
 public enum CorpusOperatingMode: Sendable {
-    case standalone(store: any CorpusContentStore)
-    case attached(source: any CorpusContentSource)
+    case standalone
+    case attached
 }
 
-public actor Corpus {
+public actor CorpusContentEngine {
     public init(
         storage: any Storage,
         vectorStorage: any Storage,
@@ -228,7 +230,7 @@ public actor Corpus {
 }
 ```
 
-Rust exposes the equivalent `CorpusOperatingMode` and `Corpus::open`,
+Rust exposes the equivalent `CorpusOperatingMode` and `CorpusContentEngine::open`,
 `apply_source_changes`, `rebuild_from_source`, and `recall` surface.
 
 Standalone convenience methods delegate content mutation to the configured
@@ -238,9 +240,10 @@ remain LocusKit/GLK operations.
 
 ### Storage profiles
 
-- **Standalone:** canonical `corpus_documents`; optional range-only
-  `corpus_passages`; derived BM25, vector, provider-basis/counts, and
-  `corpus_index_state` tables.
+- **Standalone:** canonical `corpus_documents`; optional
+  `corpus_index_configuration` plus range-only `corpus_passages` when the
+  standalone passage build option is selected; derived BM25, vector,
+  provider-basis/counts, and `corpus_index_state` tables.
 - **GLK attached:** canonical `drawers` supplied by LocusKit; derived BM25,
   vector, provider-basis/counts, and `corpus_index_state` tables only. No
   `corpus_documents`, `corpus_passages`, `chunks`, or `corpus_metadata` table is
@@ -345,8 +348,10 @@ impl ScoredChunk {
 
 ### `ChunkerConfiguration`
 
-Standalone-only passage parameters. New 1.1 callers use `PassagePolicy`, whose
-limits are expressed in provider tokens. These character-based defaults remain
+Standalone-only passage parameters. New 1.1 callers use
+`CorpusIndexUnitPolicy.tokenWindows(windowTokens:overlapTokens:)`, whose limits
+are expressed in tokens under the versioned CorpusKit passage tokenizer. These
+character-based defaults remain
 only for 1.0 compatibility (target 800 chars, overlap 100). Overlap is clamped to
 `[0, targetChars-1]` (SPEC § 5, B-1).
 

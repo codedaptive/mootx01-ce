@@ -400,8 +400,8 @@ public extension GeniusLocusKit {
             // model), so a second store doubled the resident array + cold-start
             // table scan AND made the on-disk sidecar churn (each store's writes
             // invalidated the other's whole-table live-count). One shared store =
-            // one resident array, one sidecar kept in sync by every write (chunk
-            // vectors from encode + distilled vectors from the distillation cycle).
+            // one resident array, one sidecar kept in sync by every write
+            // (Drawer corpus vectors + distilled vectors).
             // CorpusKit owns the dense vector lane; GLK reaches it through Corpus's
             // public accessor (no reaching around the kit).
             let vectorStore = await corpus.sharedVectorStore
@@ -619,14 +619,9 @@ public extension GeniusLocusKit {
     ///      release the SQLite connection. If the handle is already closed
     ///      (`.estateNotOpen`), this step is skipped.
     ///
-    /// Note: the BundleStore's `chunks` table is append-only (PersistenceKit schema
-    /// invariant). Chunk rows are NOT deleted by this call — they remain in the
-    /// backing storage for audit purposes. The recall capability is destroyed (BM25
-    /// index cleared, vectors deleted), but the verbatim chunk content survives.
-    /// This is by design: destroying a MOOT invalidates its active recall surface,
-    /// not its stored verbatim content (which may be subject to retention requirements).
-    /// A future storage-erasure primitive (redaction / compaction layer) handles
-    /// verbatim content erasure.
+    /// Attached CorpusKit has no content or passage table. This call destroys
+    /// only its derived recall state; canonical Drawer content remains under
+    /// LocusKit ownership until the estate backing store itself is erased.
     ///
     /// - Parameters:
     ///   - storage: The backing storage that will have its vector data cleared.

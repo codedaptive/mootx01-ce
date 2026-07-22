@@ -11,7 +11,7 @@
 //   - `.wholeContent` (the default and the ONLY attached policy): one
 //     index unit per content row, keyed by the content ID itself. Recall
 //     returns content IDs directly.
-//   - standalone `.tokenBudgetedPassages`: index units are token-budgeted
+//   - standalone `.tokenWindows`: index units use a token window + overlap
 //     UTF-8 RANGES over canonical text (`corpus_passages` rows — no
 //     copied text). Passage hits AGGREGATE to the canonical ID; the range
 //     is carried as evidence and never changes result identity.
@@ -120,22 +120,58 @@ public struct ContentIndexJob: Sendable, Codable, Equatable {
     }
 }
 
-// MARK: - Passage production
+// MARK: - Index-unit identity
+
+/// Maps a derived-row key back to its canonical content identity. In the
+/// GLK/MOOTx01 build this compiles to the identity function because passage
+/// keys cannot be produced. The parsing branch exists only in standalone
+/// passage builds.
+enum IndexUnitIdentity {
+    /// Reserved internal separator. Content IDs reject it in every build so
+    /// a database created without passages can safely enable them only via an
+    /// explicit future rebuild.
+    static let reservedSeparator = "\u{1F}"
+
+    static func contentID(fromItemKey key: String) -> CorpusContentID {
+#if CORPUSKIT_STANDALONE_PASSAGES
+        guard let range = key.range(of: reservedSeparator) else { return key }
+        return String(key[key.startIndex..<range.lowerBound])
+#else
+        return key
+#endif
+    }
+
+    static func evidence(fromItemKey key: String) -> CorpusEvidence? {
+#if CORPUSKIT_STANDALONE_PASSAGES
+        let parts = key.components(separatedBy: reservedSeparator)
+        guard parts.count == 4, let start = Int(parts[2]), let length = Int(parts[3]) else {
+            return nil
+        }
+        return CorpusEvidence(passageID: key, utf8Start: start, utf8Length: length)
+#else
+        return nil
+#endif
+    }
+}
+
+#if CORPUSKIT_STANDALONE_PASSAGES
+// MARK: - Standalone passage production
 
 /// Deterministic token-budgeted passage ranges over UTF-8 text.
 ///
 /// Token boundaries follow the SAME alphanumeric-run rule as
 /// `defaultKeywordTokens` (runs of Unicode-alphabetic + ASCII-digit
 /// scalars), computed WITHOUT lowercasing so byte offsets refer to the
-/// original text. Passages are consecutive non-overlapping windows of at
-/// most `tokenBudget` tokens; each range spans from its first token's
+/// original text. Passages use a configurable sliding token window; each
+/// range spans from its first token's
 /// start byte through its last token's end byte. Cross-port identical
 /// (Rust `passage_ranges`).
 enum PassageProduction {
     static func passageRanges(
-        text: String, tokenBudget: Int
+        text: String, windowTokens: Int, overlapTokens: Int
     ) -> [(utf8Start: Int, utf8Length: Int)] {
-        precondition(tokenBudget > 0)
+        precondition(windowTokens > 0)
+        precondition(overlapTokens >= 0 && overlapTokens < windowTokens)
         // Token byte ranges under the alphanumeric-run rule.
         var tokenRanges: [(start: Int, end: Int)] = []
         var offset = 0
@@ -157,18 +193,19 @@ enum PassageProduction {
         var out: [(utf8Start: Int, utf8Length: Int)] = []
         var index = 0
         while index < tokenRanges.count {
-            let windowEnd = min(index + tokenBudget, tokenRanges.count)
+            let windowEnd = min(index + windowTokens, tokenRanges.count)
             let first = tokenRanges[index]
             let last = tokenRanges[windowEnd - 1]
             out.append((utf8Start: first.start, utf8Length: last.end - first.start))
-            index = windowEnd
+            if windowEnd == tokenRanges.count { break }
+            index += windowTokens - overlapTokens
         }
         return out
     }
 
     /// Field separator inside passage keys — cannot appear in validated
     /// content IDs.
-    static let keySeparator = "\u{1F}"
+    static let keySeparator = IndexUnitIdentity.reservedSeparator
 
     /// The deterministic passage key: contentID␟revision␟start␟length.
     static func passageKey(
@@ -177,21 +214,8 @@ enum PassageProduction {
         "\(contentID)\(keySeparator)\(revision)\(keySeparator)\(utf8Start)\(keySeparator)\(utf8Length)"
     }
 
-    /// Parse a derived-row item key back to its canonical content ID.
-    /// A whole-content key contains no separator and returns itself.
-    static func contentID(fromItemKey key: String) -> CorpusContentID {
-        guard let range = key.range(of: keySeparator) else { return key }
-        return String(key[key.startIndex..<range.lowerBound])
-    }
-
-    static func evidence(fromItemKey key: String) -> CorpusEvidence? {
-        let parts = key.components(separatedBy: keySeparator)
-        guard parts.count == 4, let start = Int(parts[2]), let length = Int(parts[3]) else {
-            return nil
-        }
-        return CorpusEvidence(passageID: key, utf8Start: start, utf8Length: length)
-    }
 }
+#endif
 
 // MARK: - Engine
 
@@ -302,10 +326,16 @@ public actor CorpusContentEngine {
         }
         switch configuration.mode {
         case .standalone:
+#if CORPUSKIT_STANDALONE_PASSAGES
             var passages = false
-            if case .tokenBudgetedPassages = configuration.indexUnit { passages = true }
+            if case .tokenWindows = configuration.indexUnit { passages = true }
             try await storage.migrate(
                 to: CorpusSchemaProfile.standaloneDeclaration(passageIndexing: passages))
+            try await CorpusIndexConfigurationStore(storage: storage)
+                .bind(configuration.indexUnit)
+#else
+            try await storage.migrate(to: CorpusSchemaProfile.standaloneDeclaration())
+#endif
         case .attached:
             try await storage.migrate(to: CorpusSchemaProfile.attachedDeclaration)
         }
@@ -499,6 +529,26 @@ public actor CorpusContentEngine {
             models: models)
     }
 
+#if CORPUSKIT_STANDALONE_PASSAGES
+    /// STANDALONE SDK convenience with an explicit database-bound index-unit
+    /// policy. Direct CorpusKit consumers enable the `StandalonePassages`
+    /// package trait and select `.wholeContent` or a token window + overlap.
+    /// This initializer is absent from GLK/MOOTx01 builds.
+    public init(
+        standaloneOn storage: any Storage,
+        indexUnit: CorpusIndexUnitPolicy,
+        models: [EmbeddingModel] = [.default]
+    ) async throws {
+        try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+        try await self.init(
+            storage: storage,
+            configuration: CorpusContentConfiguration(
+                mode: .standalone, indexUnit: indexUnit),
+            source: CorpusDocumentStore(storage: storage),
+            models: models)
+    }
+#endif
+
     /// STANDALONE convenience: put canonical text and index it in one call.
     /// Attached mode rejects content mutation through CorpusKit
     /// (`attachedModeViolation`) — removal/authorship authority there is the
@@ -519,7 +569,7 @@ public actor CorpusContentEngine {
     // MARK: - Content validation
 
     private func validate(id: CorpusContentID) throws {
-        guard !id.isEmpty, !id.contains(PassageProduction.keySeparator) else {
+        guard !id.isEmpty, !id.contains(IndexUnitIdentity.reservedSeparator) else {
             throw CorpusKitError.invalidConfiguration(
                 "content IDs must be non-empty and must not contain the U+001F separator")
         }
@@ -1190,9 +1240,10 @@ public actor CorpusContentEngine {
         switch configuration.indexUnit {
         case .wholeContent:
             units = [IndexUnit(key: record.id, text: record.text)]
-        case .tokenBudgetedPassages(let budget):
+#if CORPUSKIT_STANDALONE_PASSAGES
+        case .tokenWindows(let window, let overlap):
             let ranges = PassageProduction.passageRanges(
-                text: record.text, tokenBudget: budget)
+                text: record.text, windowTokens: window, overlapTokens: overlap)
             let utf8 = Array(record.text.utf8)
             units = ranges.map { range in
                 let key = PassageProduction.passageKey(
@@ -1213,9 +1264,11 @@ public actor CorpusContentEngine {
                     "revision": .int(record.revision),
                     "digest": .text(record.digest),
                     "utf8_start": .int(Int64(range.utf8Start)),
-                    "utf8_length": .int(Int64(range.utf8Length))
+                    "utf8_length": .int(Int64(range.utf8Length)),
+                    "policy_fingerprint": .text(configuration.indexUnit.persistedFingerprint)
                 ])
             }
+#endif
         }
 
         // Anything previously derived that is NOT a fresh unit is stale.
@@ -1231,7 +1284,8 @@ public actor CorpusContentEngine {
     /// whole-content key plus any recorded passage keys.
     private func unitKeys(for id: CorpusContentID) async throws -> Set<String> {
         var keys: Set<String> = [id]
-        if case .tokenBudgetedPassages = configuration.indexUnit {
+#if CORPUSKIT_STANDALONE_PASSAGES
+        if case .tokenWindows = configuration.indexUnit {
             let rows = try await storage.rowStore.query(
                 table: "corpus_passages",
                 where: .eq(Column(table: "corpus_passages", name: "content_id"), .text(id)),
@@ -1240,6 +1294,7 @@ public actor CorpusContentEngine {
                 if case let .text(passageID)? = row["passage_id"] { keys.insert(passageID) }
             }
         }
+#endif
         return keys
     }
 
@@ -1292,11 +1347,13 @@ public actor CorpusContentEngine {
         let keys = try await unitKeys(for: id)
         try await deleteDerivedRows(unitKeys: keys)
         try await coverageStore.clear(contentID: id)
-        if case .tokenBudgetedPassages = configuration.indexUnit {
+#if CORPUSKIT_STANDALONE_PASSAGES
+        if case .tokenWindows = configuration.indexUnit {
             _ = try await storage.rowStore.delete(
                 table: "corpus_passages",
                 where: .eq(Column(table: "corpus_passages", name: "content_id"), .text(id)))
         }
+#endif
         try await indexState.clear(contentID: id)
     }
 
@@ -1581,7 +1638,7 @@ public actor CorpusContentEngine {
         // best-unit score represents the content).
         var vectorBest: [CorpusContentID: (score: Float, key: String)] = [:]
         for match in vectorMatches {
-            let id = PassageProduction.contentID(fromItemKey: match.itemID)
+            let id = IndexUnitIdentity.contentID(fromItemKey: match.itemID)
             // Hamming distance → similarity for ranking (256 − distance).
             let score = Float(256 - match.distance)
             if let existing = vectorBest[id], existing.score >= score { continue }
@@ -1589,7 +1646,7 @@ public actor CorpusContentEngine {
         }
         var keywordBest: [CorpusContentID: (score: Float, key: String)] = [:]
         for hit in keywordHits {
-            let id = PassageProduction.contentID(fromItemKey: hit.itemID)
+            let id = IndexUnitIdentity.contentID(fromItemKey: hit.itemID)
             if let existing = keywordBest[id], existing.score >= hit.impact { continue }
             keywordBest[id] = (hit.impact, hit.itemID)
         }
@@ -1621,7 +1678,7 @@ public actor CorpusContentEngine {
             // Evidence: the best-scoring unit key for this content, when
             // it parses as a passage key (standalone passage mode only).
             let bestKey = keywordBest[id]?.key ?? vectorBest[id]?.key
-            let evidence = bestKey.flatMap { PassageProduction.evidence(fromItemKey: $0) }
+            let evidence = bestKey.flatMap { IndexUnitIdentity.evidence(fromItemKey: $0) }
             return CorpusContentHit(
                 id: id,
                 score: Float(score),
@@ -1640,7 +1697,7 @@ public actor CorpusContentEngine {
         let hits = try await invertedIndex.topK(queryTerms: tokens, k: limit * 4)
         var best: [CorpusContentID: Float] = [:]
         for hit in hits {
-            let id = PassageProduction.contentID(fromItemKey: hit.itemID)
+            let id = IndexUnitIdentity.contentID(fromItemKey: hit.itemID)
             best[id] = max(best[id] ?? 0, hit.impact)
         }
         return best.sorted {
@@ -1885,7 +1942,7 @@ public actor CorpusContentEngine {
             // a passage key parses to its content ID, a whole-content key IS it.
             var byContent: [String: Float] = [:]
             for match in matches {
-                let id = PassageProduction.contentID(fromItemKey: match.itemID)
+                let id = IndexUnitIdentity.contentID(fromItemKey: match.itemID)
                 let similarity = 1.0 - Float(match.distance) / 10_000.0
                 switch direction {
                 case .nearest:

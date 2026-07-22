@@ -315,11 +315,15 @@ fn document_store_survives_reopen_on_sqlite() {
 
 // ── Operating-mode / index-unit validation ───────────────────────────────
 
+#[cfg(feature = "standalone-passages")]
 #[test]
 fn attached_mode_rejects_passage_configuration_before_writing() {
     let result = CorpusContentConfiguration::new(
         CorpusOperatingMode::Attached,
-        CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget: 512 },
+        CorpusIndexUnitPolicy::TokenWindows {
+            window_tokens: 512,
+            overlap_tokens: 64,
+        },
     );
     assert!(matches!(
         result,
@@ -327,11 +331,26 @@ fn attached_mode_rejects_passage_configuration_before_writing() {
     ));
 }
 
+#[cfg(feature = "standalone-passages")]
 #[test]
-fn non_positive_token_budget_is_rejected() {
+fn invalid_passage_windows_are_rejected() {
     let result = CorpusContentConfiguration::new(
         CorpusOperatingMode::Standalone,
-        CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget: 0 },
+        CorpusIndexUnitPolicy::TokenWindows {
+            window_tokens: 0,
+            overlap_tokens: 0,
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(CorpusKitError::InvalidConfiguration(_))
+    ));
+    let result = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Standalone,
+        CorpusIndexUnitPolicy::TokenWindows {
+            window_tokens: 512,
+            overlap_tokens: 512,
+        },
     );
     assert!(matches!(
         result,
@@ -350,10 +369,23 @@ fn valid_configurations_construct_and_gate_mutation() {
 
     let standalone = CorpusContentConfiguration::new(
         CorpusOperatingMode::Standalone,
-        CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget: 512 },
+        CorpusIndexUnitPolicy::WholeContent,
     )
-    .expect("standalone passages is valid");
+    .expect("standalone whole-content is valid");
     assert!(standalone.allows_content_mutation());
+
+    #[cfg(feature = "standalone-passages")]
+    {
+        let passages = CorpusContentConfiguration::new(
+            CorpusOperatingMode::Standalone,
+            CorpusIndexUnitPolicy::TokenWindows {
+                window_tokens: 512,
+                overlap_tokens: 64,
+            },
+        )
+        .expect("standalone passages is valid");
+        assert!(passages.allows_content_mutation());
+    }
 }
 
 // ── Schema profiles ──────────────────────────────────────────────────────
@@ -404,12 +436,24 @@ fn standalone_profile_gates_passages_on_configuration() {
     assert!(!without.contains("chunks"));
     assert!(!without.contains("corpus_metadata"));
 
-    let with: std::collections::BTreeSet<String> = standalone_declaration(true)
-        .tables
-        .iter()
-        .map(|t| t.name.clone())
-        .collect();
-    assert!(with.contains("corpus_passages"));
+    #[cfg(feature = "standalone-passages")]
+    {
+        assert!(without.contains("corpus_index_configuration"));
+        let with: std::collections::BTreeSet<String> = standalone_declaration(true)
+            .tables
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert!(with.contains("corpus_passages"));
+        let passages = corpus_kit::schema_profile::passages_table();
+        assert!(!passages.columns.iter().any(|c| c.name == "text"));
+        assert!(passages
+            .columns
+            .iter()
+            .any(|c| c.name == "policy_fingerprint"));
+    }
+    #[cfg(not(feature = "standalone-passages"))]
+    assert!(!without.contains("corpus_index_configuration"));
 }
 
 #[test]

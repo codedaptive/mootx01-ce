@@ -3,11 +3,11 @@
 //
 // Mirrors `RAGWiringTests.swift`. Covers:
 //
-// 1. ExternalCorpus::hybrid_recall routes through corpus_kit::Corpus and
+// 1. ExternalCorpus::hybrid_recall routes through the canonical-content engine and
 //    returns results for ingested content.
 // 2. ExternalCorpus::hybrid_recall returns empty vecs for empty-content
 //    entries.
-// 3. ExternalCorpus::hybrid_recall on an empty Corpus returns empty results.
+// 3. ExternalCorpus::hybrid_recall on an empty engine returns empty results.
 // 4. VectorSimilaritySignal with pre-populated vectors emits real
 //    AssociateFrames for pairs within the proximity threshold.
 // 5. VectorSimilaritySignal does not emit AssociateFrames for distant pairs.
@@ -19,7 +19,7 @@ use genius_locus_kit::{SchedulerNoopDispatcher, SerialLaneScheduler};
 use genius_locus_kit::SchedulerSignalRouteOutcome as SignalRouteOutcome;
 use genius_locus_kit::SchedulerSignalTrigger as SignalTrigger;
 
-use corpus_kit::{CorpusContentEngine, Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use persistence_kit::inmemory::InMemoryStorage;
 use queuekit::{PersistenceKitBackend, QueueBackend, QueueKit};
 use substrate_types::hlc::HLCGenerator;
@@ -105,8 +105,8 @@ fn hybrid_recall_returns_results_for_ingested_content() {
     assert!(!results[0].is_empty(), "entry-0 should match ingested content");
     assert!(!results[1].is_empty(), "entry-1 should match ingested content");
 
-    for chunk in &results[0] {
-        assert!(chunk.score > 0.0, "fused score must be positive");
+    for hit in &results[0] {
+        assert!(hit.score > 0.0, "fused score must be positive");
     }
 }
 
@@ -149,7 +149,7 @@ fn hybrid_recall_on_empty_corpus_returns_empty_results() {
         .expect("hybrid_recall");
 
     assert_eq!(results.len(), 1);
-    assert!(results[0].is_empty(), "empty corpus → no matching chunks");
+    assert!(results[0].is_empty(), "empty corpus → no matching content");
 }
 
 // MARK: - VectorSimilaritySignal parity tests
@@ -250,15 +250,9 @@ fn signal_does_not_emit_associates_for_distant_vectors() {
 
 // MARK: - corpus-lane parity (mirrors Swift corpusLaneEmitsDrawerLevelAssociations)
 
-/// Production estates never hold drawer-keyed vectors: the estate lifecycle
-/// registers the corpus's shared vector store and the encode pipeline keys
-/// every row by CHUNK UUID under the corpus's own model_id. This test
-/// reproduces that wiring shape and proves the signal's corpus lane maps
-/// chunk kNN hits back to owning drawers:
-///   - two near chunks from DIFFERENT drawers → exactly one associate;
-///   - two near chunks of the SAME drawer → collapsed (no self-association).
-/// Without the chunk → source mapping, the same rows would produce ≥2
-/// chunk-id pairs; with it, exactly one drawer pair survives.
+/// Production shared-content estates key corpus vectors directly by Drawer
+/// ID. This test proves the signal's corpus lane emits one Drawer-level
+/// association for two semantically near Drawers without an identity remap.
 #[test]
 fn corpus_lane_emits_drawer_level_associations() {
     // Token-bag provider: sums a per-token deterministic vector so sentences
@@ -293,11 +287,11 @@ fn corpus_lane_emits_drawer_level_associations() {
     // Fdc is the plain pass-through provider slot (stateless, no training) —
     // the vehicle for injecting the token-bag provider.
     let corpus = Arc::new(
-        Corpus::open(
+        CorpusContentEngine::standalone_on(
             make_storage(),
-            EmbeddingModelConfig::Fdc { provider: Box::new(provider) },
+            vec![EmbeddingModelConfig::Fdc { provider: Box::new(provider) }],
         )
-        .expect("Corpus::open"),
+        .expect("CorpusContentEngine::standalone_on"),
     );
 
     // Cross-drawer near pair (one shared token universe) …
@@ -307,14 +301,10 @@ fn corpus_lane_emits_drawer_level_associations() {
     corpus
         .ingest("the api timeout is 90 seconds", "drawer-B", T0_MILLIS)
         .expect("ingest B");
-    // … and a same-drawer near pair in a DISJOINT token universe: two
-    // chunks of drawer-C near each other but far from the A/B cluster.
+    // … and a far drawer in a disjoint token universe.
     corpus
         .ingest("zebra quagga okapi giraffe pronghorn", "drawer-C", T0_MILLIS)
-        .expect("ingest C1");
-    corpus
-        .ingest("zebra quagga okapi giraffe wildebeest", "drawer-C", T0_MILLIS)
-        .expect("ingest C2");
+        .expect("ingest C");
 
     // "test-v1" matches no corpus row — the drawer-keyed lane is empty by
     // construction; only the corpus lane can find pairs.

@@ -115,15 +115,23 @@ impl ContentIndexJob {
 
 /// Field separator inside passage keys — cannot appear in validated
 /// content IDs. Mirrors Swift `PassageProduction.keySeparator`.
-pub const PASSAGE_KEY_SEPARATOR: char = '\u{1F}';
+const INDEX_UNIT_KEY_SEPARATOR: char = '\u{1F}';
+#[cfg(feature = "standalone-passages")]
+pub const PASSAGE_KEY_SEPARATOR: char = INDEX_UNIT_KEY_SEPARATOR;
 
 /// Deterministic token-budgeted passage ranges over UTF-8 text. Token
 /// boundaries follow the SAME alphanumeric-run rule as
 /// `default_keyword_tokens`, computed WITHOUT lowercasing so byte offsets
 /// refer to the original text. Mirrors Swift
 /// `PassageProduction.passageRanges`.
-pub fn passage_ranges(text: &str, token_budget: usize) -> Vec<(usize, usize)> {
-    assert!(token_budget > 0);
+#[cfg(feature = "standalone-passages")]
+pub fn passage_ranges(
+    text: &str,
+    window_tokens: usize,
+    overlap_tokens: usize,
+) -> Vec<(usize, usize)> {
+    assert!(window_tokens > 0);
+    assert!(overlap_tokens < window_tokens);
     let mut token_ranges: Vec<(usize, usize)> = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut offset = 0usize;
@@ -146,15 +154,19 @@ pub fn passage_ranges(text: &str, token_budget: usize) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut index = 0;
     while index < token_ranges.len() {
-        let window_end = (index + token_budget).min(token_ranges.len());
+        let window_end = (index + window_tokens).min(token_ranges.len());
         let first = token_ranges[index];
         let last = token_ranges[window_end - 1];
         out.push((first.0, last.1 - first.0));
-        index = window_end;
+        if window_end == token_ranges.len() {
+            break;
+        }
+        index += window_tokens - overlap_tokens;
     }
     out
 }
 
+#[cfg(feature = "standalone-passages")]
 fn passage_key(content_id: &str, revision: i64, utf8_start: usize, utf8_length: usize) -> String {
     format!(
         "{content_id}{sep}{revision}{sep}{utf8_start}{sep}{utf8_length}",
@@ -165,22 +177,37 @@ fn passage_key(content_id: &str, revision: i64, utf8_start: usize, utf8_length: 
 /// Parse a derived-row item key back to its canonical content ID. A
 /// whole-content key contains no separator and returns itself.
 pub fn content_id_from_item_key(key: &str) -> &str {
-    match key.find(PASSAGE_KEY_SEPARATOR) {
-        Some(pos) => &key[..pos],
-        None => key,
+    #[cfg(feature = "standalone-passages")]
+    {
+        match key.find(PASSAGE_KEY_SEPARATOR) {
+            Some(pos) => &key[..pos],
+            None => key,
+        }
+    }
+    #[cfg(not(feature = "standalone-passages"))]
+    {
+        key
     }
 }
 
 fn evidence_from_item_key(key: &str) -> Option<CorpusEvidence> {
-    let parts: Vec<&str> = key.split(PASSAGE_KEY_SEPARATOR).collect();
-    if parts.len() != 4 {
-        return None;
+    #[cfg(feature = "standalone-passages")]
+    {
+        let parts: Vec<&str> = key.split(PASSAGE_KEY_SEPARATOR).collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        Some(CorpusEvidence {
+            passage_id: key.to_string(),
+            utf8_start: parts[2].parse().ok()?,
+            utf8_length: parts[3].parse().ok()?,
+        })
     }
-    Some(CorpusEvidence {
-        passage_id: key.to_string(),
-        utf8_start: parts[2].parse().ok()?,
-        utf8_length: parts[3].parse().ok()?,
-    })
+    #[cfg(not(feature = "standalone-passages"))]
+    {
+        let _ = key;
+        None
+    }
 }
 
 /// Emit one CorpusKit-tagged counter (the same shape corpus.rs uses).
@@ -258,6 +285,9 @@ pub struct CorpusContentEngine {
     ingest_failure_hook: Mutex<Option<ContentIngestFailureHook>>,
     /// Test-only single-use forced float store error (default slot).
     forced_float_error: Mutex<Option<String>>,
+    /// Test-only single-use provider opt-out for the default float slot.
+    #[cfg(feature = "canonical-test-seams")]
+    forced_float_provider_opt_out: AtomicBool,
     /// Test-only training fault seams (crash-boundary suites).
     train_fault_after_model: Mutex<Option<String>>,
     train_fault_before_commit_model: Mutex<Option<String>>,
@@ -281,17 +311,31 @@ impl CorpusContentEngine {
         }
         let profile = match configuration.mode() {
             CorpusOperatingMode::Standalone => {
-                let passages = matches!(
-                    configuration.index_unit(),
-                    CorpusIndexUnitPolicy::TokenBudgetedPassages { .. }
-                );
-                standalone_declaration(passages)
+                #[cfg(feature = "standalone-passages")]
+                {
+                    let passages = matches!(
+                        configuration.index_unit(),
+                        CorpusIndexUnitPolicy::TokenWindows { .. }
+                    );
+                    standalone_declaration(passages)
+                }
+                #[cfg(not(feature = "standalone-passages"))]
+                {
+                    standalone_declaration(false)
+                }
             }
             CorpusOperatingMode::Attached => attached_declaration(),
         };
         storage
             .migrate(&profile)
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        #[cfg(feature = "standalone-passages")]
+        if configuration.mode() == CorpusOperatingMode::Standalone {
+            crate::index_configuration_store::CorpusIndexConfigurationStore::new(Arc::clone(
+                &storage,
+            ))
+            .bind(configuration.index_unit())?;
+        }
         storage
             .migrate(&VectorStore::schema_declaration())
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
@@ -340,6 +384,8 @@ impl CorpusContentEngine {
             encode_speed: Mutex::new(EncodeSpeed::Foreground),
             ingest_failure_hook: Mutex::new(None),
             forced_float_error: Mutex::new(None),
+            #[cfg(feature = "canonical-test-seams")]
+            forced_float_provider_opt_out: AtomicBool::new(false),
             train_fault_after_model: Mutex::new(None),
             train_fault_before_commit_model: Mutex::new(None),
             backfill_fault_hook: Mutex::new(None),
@@ -366,6 +412,26 @@ impl CorpusContentEngine {
                 CorpusOperatingMode::Standalone,
                 CorpusIndexUnitPolicy::WholeContent,
             )?,
+            store as Arc<dyn CorpusContentSource>,
+            models,
+        )
+    }
+
+    /// Standalone SDK convenience with an explicit database-bound token-window
+    /// policy. Absent from GLK/MOOTx01 builds.
+    #[cfg(feature = "standalone-passages")]
+    pub fn standalone_on_with_policy(
+        storage: Arc<dyn Storage>,
+        index_unit: CorpusIndexUnitPolicy,
+        models: Vec<EmbeddingModelConfig>,
+    ) -> CorpusKitResult<Self> {
+        storage
+            .migrate(&CorpusDocumentStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        let store = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+        Self::open(
+            storage,
+            CorpusContentConfiguration::new(CorpusOperatingMode::Standalone, index_unit)?,
             store as Arc<dyn CorpusContentSource>,
             models,
         )
@@ -445,6 +511,13 @@ impl CorpusContentEngine {
         if let Ok(mut guard) = self.forced_float_error.lock() {
             *guard = Some(message.into());
         }
+    }
+
+    /// Test seam: force the next default float call to report provider opt-out.
+    #[cfg(feature = "canonical-test-seams")]
+    pub fn test_force_float_provider_opt_out(&self) {
+        self.forced_float_provider_opt_out
+            .store(true, Ordering::Release);
     }
 
     /// The declared encode speed (serial drain today; surface retained).
@@ -628,7 +701,16 @@ impl CorpusContentEngine {
         // Consume the forced-error seam for the DEFAULT slot (nearest only).
         let mut forced_default: Option<FloatLaneOutcome> = None;
         if nearest {
-            if let Ok(mut guard) = self.forced_float_error.lock() {
+            #[cfg(feature = "canonical-test-seams")]
+            let forced_provider_opt_out = self
+                .forced_float_provider_opt_out
+                .swap(false, Ordering::AcqRel);
+            #[cfg(not(feature = "canonical-test-seams"))]
+            let forced_provider_opt_out = false;
+            if forced_provider_opt_out {
+                emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
+                forced_default = Some(FloatLaneOutcome::UnavailableProviderOptOut);
+            } else if let Ok(mut guard) = self.forced_float_error.lock() {
                 if let Some(message) = guard.take() {
                     emit_engine_metric("corpus.float_lane.store_error", 1.0);
                     forced_default = Some(FloatLaneOutcome::StoreError(message));
@@ -923,7 +1005,7 @@ impl CorpusContentEngine {
     }
 
     fn validate(id: &str) -> CorpusKitResult<()> {
-        if id.is_empty() || id.contains(PASSAGE_KEY_SEPARATOR) {
+        if id.is_empty() || id.contains(INDEX_UNIT_KEY_SEPARATOR) {
             return Err(CorpusKitError::InvalidConfiguration(
                 "content IDs must be non-empty and must not contain the U+001F separator".into(),
             ));
@@ -1553,8 +1635,12 @@ impl CorpusContentEngine {
             CorpusIndexUnitPolicy::WholeContent => {
                 vec![(record.id.clone(), record.text.clone())]
             }
-            CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget } => {
-                let ranges = passage_ranges(&record.text, token_budget);
+            #[cfg(feature = "standalone-passages")]
+            CorpusIndexUnitPolicy::TokenWindows {
+                window_tokens,
+                overlap_tokens,
+            } => {
+                let ranges = passage_ranges(&record.text, window_tokens, overlap_tokens);
                 let bytes = record.text.as_bytes();
                 let units: Vec<(String, String)> = ranges
                     .iter()
@@ -1584,6 +1670,12 @@ impl CorpusContentEngine {
                     values.insert("digest".into(), TypedValue::Text(record.digest.clone()));
                     values.insert("utf8_start".into(), TypedValue::Int(*start as i64));
                     values.insert("utf8_length".into(), TypedValue::Int(*length as i64));
+                    values.insert(
+                        "policy_fingerprint".into(),
+                        TypedValue::Text(crate::index_configuration_store::policy_fingerprint(
+                            self.configuration.index_unit(),
+                        )),
+                    );
                     self.storage
                         .row_store()
                         .insert("corpus_passages", values)
@@ -1605,9 +1697,10 @@ impl CorpusContentEngine {
     fn unit_keys(&self, id: &str) -> CorpusKitResult<BTreeSet<String>> {
         let mut keys: BTreeSet<String> = BTreeSet::new();
         keys.insert(id.to_string());
+        #[cfg(feature = "standalone-passages")]
         if matches!(
             self.configuration.index_unit(),
-            CorpusIndexUnitPolicy::TokenBudgetedPassages { .. }
+            CorpusIndexUnitPolicy::TokenWindows { .. }
         ) {
             let rows = self
                 .storage
@@ -1694,9 +1787,10 @@ impl CorpusContentEngine {
         let keys = self.unit_keys(id)?;
         self.delete_derived_rows(&keys)?;
         self.coverage_store.clear(id)?;
+        #[cfg(feature = "standalone-passages")]
         if matches!(
             self.configuration.index_unit(),
-            CorpusIndexUnitPolicy::TokenBudgetedPassages { .. }
+            CorpusIndexUnitPolicy::TokenWindows { .. }
         ) {
             self.storage
                 .row_store()

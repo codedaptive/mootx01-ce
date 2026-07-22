@@ -29,10 +29,14 @@ struct CorpusContentEngineTests {
     ) async throws -> (CorpusContentEngine, CorpusDocumentStore, any Storage) {
         let storage = try makeScratchStorage()
         let config = try CorpusContentConfiguration(mode: .standalone, indexUnit: indexUnit)
+#if CORPUSKIT_STANDALONE_PASSAGES
         var passages = false
-        if case .tokenBudgetedPassages = indexUnit { passages = true }
+        if case .tokenWindows = indexUnit { passages = true }
         try await storage.migrate(
             to: CorpusSchemaProfile.standaloneDeclaration(passageIndexing: passages))
+#else
+        try await storage.migrate(to: CorpusSchemaProfile.standaloneDeclaration())
+#endif
         let store = CorpusDocumentStore(storage: storage)
         let engine = try await CorpusContentEngine(
             storage: storage, configuration: config, source: store)
@@ -367,10 +371,67 @@ struct CorpusContentEngineTests {
 
     // MARK: - Standalone passages
 
+#if CORPUSKIT_STANDALONE_PASSAGES
+    @Test func passageWindowsUseTokenOverlapDeterministically() {
+        let text = "one two three four five six seven"
+        let ranges = PassageProduction.passageRanges(
+            text: text, windowTokens: 4, overlapTokens: 2)
+        let bytes = Array(text.utf8)
+        let excerpts = ranges.map {
+            String(decoding: bytes[$0.utf8Start..<($0.utf8Start + $0.utf8Length)], as: UTF8.self)
+        }
+        #expect(excerpts == [
+            "one two three four",
+            "three four five six",
+            "five six seven",
+        ])
+    }
+
+    @Test func passagePolicyIsBoundPerStandaloneDatabase() async throws {
+        let first = try makeScratchStorage()
+        try await first.migrate(
+            to: CorpusSchemaProfile.standaloneDeclaration(passageIndexing: true))
+        let firstPolicy = CorpusIndexUnitPolicy.tokenWindows(
+            windowTokens: 512, overlapTokens: 64)
+        let firstAuthority = CorpusIndexConfigurationStore(storage: first)
+        try await firstAuthority.bind(firstPolicy)
+        try await firstAuthority.bind(firstPolicy) // reopen-idempotent
+        #expect(try await firstAuthority.fingerprint()
+            == "token-windows-v1:corpus-alphanumeric-v1:512:64")
+        await #expect(throws: CorpusKitError.self) {
+            try await firstAuthority.bind(
+                .tokenWindows(windowTokens: 256, overlapTokens: 32))
+        }
+
+        // A different standalone database owns an independent policy.
+        let second = try makeScratchStorage()
+        try await second.migrate(
+            to: CorpusSchemaProfile.standaloneDeclaration(passageIndexing: true))
+        let secondAuthority = CorpusIndexConfigurationStore(storage: second)
+        try await secondAuthority.bind(
+            .tokenWindows(windowTokens: 256, overlapTokens: 32))
+        #expect(try await secondAuthority.fingerprint()
+            == "token-windows-v1:corpus-alphanumeric-v1:256:32")
+
+        // An unbound pre-feature database with existing whole-content state
+        // cannot silently reinterpret those rows as passages.
+        let existing = try makeScratchStorage()
+        try await existing.migrate(
+            to: CorpusSchemaProfile.standaloneDeclaration(passageIndexing: true))
+        _ = try await existing.rowStore.insert(table: "iix_doclens", values: [
+            "item_id": .text("existing-doc"), "length": .int(10),
+        ])
+        let existingAuthority = CorpusIndexConfigurationStore(storage: existing)
+        await #expect(throws: CorpusKitError.self) {
+            try await existingAuthority.bind(
+                .tokenWindows(windowTokens: 128, overlapTokens: 16))
+        }
+    }
+
     @Test func passageModeIndexesRangesAndAggregatesToContentID() async throws {
         try await GlobalTestLock.shared.withLock {
             let (engine, store, storage) = try await makeStandalone(
-                indexUnit: .tokenBudgetedPassages(tokenBudget: 6))
+                indexUnit: .tokenWindows(windowTokens: 6, overlapTokens: 2))
             let text = "alpha beta gamma delta epsilon zeta " // 6 tokens (passage 1)
                 + "eta theta iota kappa lambda mu "          // 6 tokens (passage 2)
                 + "nu xi omicron"                            // 3 tokens (passage 3)
@@ -382,7 +443,7 @@ struct CorpusContentEngineTests {
             // Range rows exist, hold NO text, and are revision-bound.
             let passageRows = try await storage.rowStore.query(
                 table: "corpus_passages", where: nil, orderBy: [], limit: nil, offset: nil)
-            #expect(passageRows.count == 3)
+            #expect(passageRows.count == 4)
             for row in passageRows {
                 #expect(row["text"] == nil)
                 if case let .int(revision)? = row["revision"] {
@@ -393,9 +454,9 @@ struct CorpusContentEngineTests {
             // Derived keys are passage keys that PARSE back to the content
             // ID — never a second identity.
             let bmKeys = try await itemIDs(storage, table: "iix_doclens", column: "item_id")
-            #expect(bmKeys.count == 3)
+            #expect(bmKeys.count == 4)
             for key in bmKeys {
-                #expect(PassageProduction.contentID(fromItemKey: key) == "doc-p")
+                #expect(IndexUnitIdentity.contentID(fromItemKey: key) == "doc-p")
             }
 
             // Recall aggregates to ONE hit whose identity is the content
@@ -423,6 +484,7 @@ struct CorpusContentEngineTests {
             }
         }
     }
+#endif
 
     // MARK: - Attached mode
 

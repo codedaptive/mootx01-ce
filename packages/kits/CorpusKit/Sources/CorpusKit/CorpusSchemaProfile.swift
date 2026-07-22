@@ -34,11 +34,15 @@ public enum CorpusIndexUnitPolicy: Sendable, Equatable {
     /// One index unit per canonical content row — the DEFAULT everywhere
     /// and the ONLY policy attached mode accepts.
     case wholeContent
+#if CORPUSKIT_STANDALONE_PASSAGES
     /// Standalone-only: optional token-budgeted passages. Boundaries use
-    /// the selected provider's token budget and tokenizer — never a
-    /// character-count threshold. Passage rows are ranges over canonical
-    /// text; they never copy text and never change result identity.
-    case tokenBudgetedPassages(tokenBudget: Int)
+    /// CorpusKit's versioned tokenizer — never a character-count threshold.
+    /// `overlapTokens` may be zero and must be smaller than `windowTokens`.
+    /// Passage rows are ranges over canonical text; they never copy text and
+    /// never change result identity. This case is not compiled into the
+    /// GLK/MOOTx01 dependency build.
+    case tokenWindows(windowTokens: Int, overlapTokens: Int)
+#endif
 }
 
 /// The operating mode a Corpus is constructed in.
@@ -62,17 +66,29 @@ public struct CorpusContentConfiguration: Sendable, Equatable {
     ///     in attached mode);
     ///   - a non-positive token budget → `invalidConfiguration`.
     public init(mode: CorpusOperatingMode, indexUnit: CorpusIndexUnitPolicy) throws {
+#if CORPUSKIT_STANDALONE_PASSAGES
         switch (mode, indexUnit) {
-        case (.attached, .tokenBudgetedPassages):
+        case (.attached, .tokenWindows):
             throw CorpusKitError.attachedModeViolation(
                 "attached mode indexes whole Drawers only — passage "
                 + "configuration is standalone-only and must be rejected before writing")
-        case (_, .tokenBudgetedPassages(let budget)) where budget <= 0:
+        case (_, .tokenWindows(let window, _)) where window <= 0:
             throw CorpusKitError.invalidConfiguration(
-                "token-budgeted passages require a positive token budget, got \(budget)")
+                "passage windows require a positive token window, got \(window)")
+        case (_, .tokenWindows(let window, let overlap))
+            where overlap < 0 || overlap >= window:
+            throw CorpusKitError.invalidConfiguration(
+                "passage overlap must be non-negative and smaller than the "
+                + "window (window=\(window), overlap=\(overlap))")
         default:
             break
         }
+#else
+        // The GLK/MOOTx01 build has only one representable index unit. Keep
+        // the mode parameter because standalone whole-content CorpusKit and
+        // attached GLK share the canonical engine.
+        _ = mode
+#endif
         self.mode = mode
         self.indexUnit = indexUnit
     }
@@ -92,6 +108,15 @@ public enum CorpusSchemaProfile {
     public static func standaloneDeclaration(
         passageIndexing: Bool = false
     ) -> SchemaDeclaration {
+        var components: [SchemaDeclaration] = [
+            CorpusDocumentStore.schemaDeclaration,
+            CorpusIndexStateStore.schemaDeclaration,
+            CorpusProviderCoverageStore.schemaDeclaration,
+            CorpusProviderConfigurationStore.schemaDeclaration,
+            InvertedIndexStore.schemaDeclaration,
+            BasisStore.schemaDeclaration,
+            CorpusProviderCountsStore.schemaDeclaration,
+        ]
         var tables = CorpusDocumentStore.schemaDeclaration.tables
             + CorpusIndexStateStore.schemaDeclaration.tables
             + CorpusProviderCoverageStore.schemaDeclaration.tables
@@ -102,6 +127,11 @@ public enum CorpusSchemaProfile {
         var indices = CorpusDocumentStore.schemaDeclaration.indices
             + CorpusIndexStateStore.schemaDeclaration.indices
             + InvertedIndexStore.schemaDeclaration.indices
+#if CORPUSKIT_STANDALONE_PASSAGES
+        // The policy row is standalone database authority. It is not part of
+        // the attached schema and therefore cannot enter a GLK estate.
+        components.append(CorpusIndexConfigurationStore.schemaDeclaration)
+        tables += CorpusIndexConfigurationStore.schemaDeclaration.tables
         if passageIndexing {
             tables.append(passagesTable)
             indices.append(IndexDeclaration(
@@ -109,17 +139,13 @@ public enum CorpusSchemaProfile {
                 table: "corpus_passages",
                 columns: ["content_id"]))
         }
+#else
+        precondition(!passageIndexing,
+                     "standalone passage indexing is not compiled in this build")
+#endif
         return SchemaDeclaration(
             kitID: "CorpusKitStandalone",
-            version: profileVersion(of: [
-                CorpusDocumentStore.schemaDeclaration,
-                CorpusIndexStateStore.schemaDeclaration,
-                CorpusProviderCoverageStore.schemaDeclaration,
-                CorpusProviderConfigurationStore.schemaDeclaration,
-                InvertedIndexStore.schemaDeclaration,
-                BasisStore.schemaDeclaration,
-                CorpusProviderCountsStore.schemaDeclaration
-            ]),
+            version: profileVersion(of: components),
             tables: tables,
             indices: indices)
     }
@@ -153,13 +179,15 @@ public enum CorpusSchemaProfile {
     /// exclusion list the profile test and the migration verifier assert.
     public static let attachedExcludedTables: Set<String> = [
         "chunks", "corpus_metadata", "corpus_documents",
-        "corpus_passages", "removed_sources", "corpus_content_changes"
+        "corpus_passages", "corpus_index_configuration",
+        "removed_sources", "corpus_content_changes"
     ]
 
     /// The standalone passage-range table (declared only when passage
     /// indexing is enabled). A passage row is
     /// (content_id, revision, digest, utf8_start, utf8_length, passage_id)
     /// — a RANGE over canonical text; it holds no verbatim text.
+#if CORPUSKIT_STANDALONE_PASSAGES
     static var passagesTable: TableDeclaration {
         TableDeclaration(
             name: "corpus_passages",
@@ -169,11 +197,13 @@ public enum CorpusSchemaProfile {
                 .int("revision", nullable: false),
                 .text("digest", nullable: false),
                 .int("utf8_start", nullable: false),
-                .int("utf8_length", nullable: false)
+                .int("utf8_length", nullable: false),
+                .text("policy_fingerprint", nullable: false)
             ],
             primaryKey: ["passage_id"]
         )
     }
+#endif
 
     /// A profile's version is the sum of its component declarations' live
     /// versions — the same live-sum convention as the GLK composite (never

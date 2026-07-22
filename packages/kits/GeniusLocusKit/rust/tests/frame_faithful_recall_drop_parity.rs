@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use corpus_kit::{CorpusContentEngine, Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath};
 use locus_kit::adjectives::State;

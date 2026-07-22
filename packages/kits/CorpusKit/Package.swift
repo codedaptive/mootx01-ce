@@ -3,8 +3,9 @@
 // CorpusKit -- retrieval-augmented generation storage and retrieval.
 //
 // Two targets:
-//   CorpusKit           -- core surface (chunkers, BM25, bundle store,
-//                       tokenizer protocols, sync manifest)
+//   CorpusKit           -- canonical-content engine, BM25/vector retrieval,
+//                       optional standalone passages, tokenizer protocols,
+//                       plus the legacy standalone compatibility surface
 //   CorpusKitProviders  -- text embedding providers (MiniLM, mpnet,
 //                       EmbeddingGemma) and their tokenizers
 //
@@ -27,6 +28,12 @@ let package = Package(
     products: [
         .library(name: "CorpusKit", targets: ["CorpusKit"]),
         .library(name: "CorpusKitProviders", targets: ["CorpusKitProviders"]),
+    ],
+    traits: [
+        .trait(
+            name: "StandalonePassages",
+            description: "Compile optional standalone token-window passage indexing. GeniusLocusKit/MOOTx01 intentionally leaves this trait disabled."
+        ),
     ],
     dependencies: [
         .package(path: "../../libs/SubstrateTypes"),
@@ -98,7 +105,13 @@ let package = Package(
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
-            path: "Sources/CorpusKit"
+            path: "Sources/CorpusKit",
+            swiftSettings: [
+                .define(
+                    "CORPUSKIT_STANDALONE_PASSAGES",
+                    .when(traits: ["StandalonePassages"])
+                ),
+            ]
         ),
         .target(
             name: "CorpusKitProviders",
@@ -153,6 +166,12 @@ let package = Package(
                 // finding W1). The Rust leg reads the SAME file at
                 // rust/tests/bm25_conformance_test.rs via include_bytes! up the tree.
                 .copy("../SharedVectors"),
+            ],
+            swiftSettings: [
+                .define(
+                    "CORPUSKIT_STANDALONE_PASSAGES",
+                    .when(traits: ["StandalonePassages"])
+                ),
             ]
         ),
     ]

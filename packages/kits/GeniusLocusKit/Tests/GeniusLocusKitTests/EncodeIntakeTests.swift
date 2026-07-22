@@ -202,7 +202,7 @@ struct EncodeIntakeTests {
     // MARK: - reindexMissing: backfill for pre-wiring drawers
 
     /// `reindexMissing` enqueues onto the Corpus ingest queue for every active
-    /// drawer that is NOT already in the Corpus BundleStore, so content captured before the
+    /// Drawer that is not already in CorpusKit's indexed-ID set, so content captured before the
     /// dual-path wiring (or after an index loss) becomes BM25/vector searchable.
     ///
     /// Sequence:
@@ -232,7 +232,7 @@ struct EncodeIntakeTests {
 
         // 2. Drain the queue and confirm the user drawer is NOT in the Corpus yet.
         //    (The legacy capture never enqueued a job, so the queue is empty and
-        //    the drawer's sourceID is absent from the BundleStore.)
+        //    the Drawer ID is absent from CorpusKit's index state.)
         try await kit.awaitEncodeDrain(for: handle)
         let beforeResult = try await kit.recall(handle, hybridRequest(query: "palladium catalyst"))
         let beforeHit = beforeResult.hits.first { $0.drawer?.id == drawer.id && $0.sources.contains(.corpusBM25) }

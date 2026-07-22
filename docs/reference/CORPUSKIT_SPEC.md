@@ -60,8 +60,10 @@ This specification defines:
 - Standalone document ownership through `CorpusContentStore`.
 - Whole-content indexing, which is mandatory in GeniusLocusKit and the default
   standalone policy.
-- Optional standalone passage indexing with provider-token budgets and
-  revision-bound offsets; passage text is never copied into passage rows.
+- Optional standalone passage indexing with a developer-selected token window
+  and overlap and revision-bound offsets; passage text is never copied into
+  passage rows. Swift selects it with the `StandalonePassages` package trait;
+  Rust selects it with the `standalone-passages` crate feature.
 - The BM25 inverted index and its scoring contract.
 - Hybrid recall: candidate-window fan-out, Reciprocal Rank Fusion of
   vector and keyword hits, deterministic ranking, and aggregation to canonical
@@ -251,17 +253,28 @@ persists copied Drawer text, and never imports LocusKit. The adapter that bridge
 the two kits is owned by GeniusLocusKit.
 
 **I-18 (chunking dark in GLK):** a GeniusLocusKit-composed Corpus always uses
-whole-content indexing. `Chunker`, passage identities, passage tables, overlap,
-and passage-text storage are absent from that operating mode and therefore absent
-from MOOTx01. One active GLK Drawer produces one BM25 document identity and one
-logical provider result identity per model.
+whole-content indexing. GLK/MOOTx01 enables neither the Swift
+`StandalonePassages` trait nor the Rust `standalone-passages` feature, so the
+passage-policy enum case, segmenter, policy authority, passage identities,
+passage table, overlap logic, and passage-text storage are absent from that
+build. One active GLK Drawer produces one BM25 document identity and one logical
+provider result identity per model.
 
 **I-19 (standalone passage containment):** standalone CorpusKit may enable
-passage indexing only as an explicit `IndexUnitPolicy`. Boundaries are derived
-from the selected provider's token budget. Persisted passage state contains the
-canonical content ID, content revision/digest, and range only; the text remains
-owned by the standalone document store. Public recall aggregates passage scores
-to `CorpusContentID` and may attach the best range as evidence.
+passage indexing only as an explicit `IndexUnitPolicy`. The developer selects a
+positive token window and an overlap in `[0, window)`. Boundaries use the
+versioned `corpus-alphanumeric-v1` tokenizer so Swift and Rust produce identical
+UTF-8 ranges. Persisted passage state contains the canonical content ID, content
+revision/digest, policy fingerprint, and range only; the text remains owned by
+the standalone document store. Public recall aggregates passage scores to
+`CorpusContentID` and may attach the best range as evidence.
+
+**I-19a (per-database passage authority):** each standalone database persists
+exactly one policy fingerprint containing policy version, tokenizer identity,
+window, and overlap. Reopening with the same policy is idempotent. Reopening
+with a different policy is rejected until the caller explicitly rebuilds the
+derived generation. An older unbound database with existing derived rows cannot
+silently enable passages; it must first bind whole-content or be rebuilt.
 
 **I-20 (derived-state migration):** the 1.1 migration from a chunk-backed GLK
 database preserves Drawers, audit history, lineage, tunnels, facts, and unrelated
@@ -302,11 +315,14 @@ rest of the linguistic pipeline (EideticLib SPEC B-10, I-13). Each
 emitted chunk carries an HLC drawn in order from the supplied
 generator.
 
-**B-1a (1.1 standalone passage policy):** new passage indexing uses the
-selected provider tokenizer and `PassagePolicy.maxTokens` /
-`overlapTokens`. It persists only canonical content id, revision/digest, and
-UTF-8 range. The source document remains the sole text owner. This policy is
-rejected in attached GLK mode.
+**B-1a (1.1 standalone passage policy):** new passage indexing uses
+`tokenWindows(windowTokens:overlapTokens:)` in Swift and the byte-equivalent
+`TokenWindows` policy in Rust. Consecutive windows advance by
+`windowTokens - overlapTokens`; the final window ends at the final token and is
+not followed by a redundant overlap-only tail. It persists only canonical
+content id, revision/digest, policy fingerprint, and UTF-8 range. The source
+document remains the sole text owner. The policy is rejected in attached mode
+and is not compiled into the GLK/MOOTx01 dependency build.
 
 **B-2 (BM25 scoring):** `BM25Index.search` scores with the
 Robertson–Spärck-Jones formula (defaults k1 = 1.5, b = 0.75) using
@@ -474,9 +490,18 @@ result identity that fails direct Drawer hydration.
 content table or passage-text column. Capturing and indexing a Drawer changes
 the canonical Drawer row and derived index tables only.
 
-**C-12 (passage darkness):** GLK construction rejects or ignores every passage
-policy other than `.wholeContent`, produces one logical index identity per
-Drawer, and never invokes `Chunker` during capture, drain, reindex, or recall.
+**C-12 (passage darkness):** GLK builds CorpusKit without the standalone
+passage trait/feature. The resulting `CorpusIndexUnitPolicy` contains only
+whole-content, the attached schema contains no passage-policy columns or tables,
+one logical index identity is produced per Drawer, and no segmenter can execute
+during capture, drain, reindex, or recall. Swift and Rust GLK suites carry
+negative compile-selection and schema gates.
+
+**C-12a (standalone policy binding):** opt-in standalone suites prove non-zero
+windows, bounded overlap, byte-identical overlapping UTF-8 ranges, idempotent
+same-policy reopen, independent policies in separate databases, rejection of a
+changed policy, and rejection of passage enablement over existing unbound
+derived state.
 
 **C-13 (migration preservation):** fixtures containing 1.0 chunk rows,
 chunk-keyed CorpusKit vectors, and unrelated Drawer-keyed vectors migrate to
@@ -782,7 +807,11 @@ queue burst to a published base plus reference-only canonical-content deltas.
 Added the atomic checkpoint/delta and provider-compaction requirements. Added
 the B-13 deferred resident-index requirement for full reindex. Historical 1.0
 basis fixtures remain immutable while production trainable providers use the
-1.1 tokenizer generation.
+1.1 tokenizer generation. Made standalone passage indexing an explicit Swift
+trait/Rust feature that GLK/MOOTx01 does not enable; added token window and
+overlap configuration, per-database policy authority, range policy
+fingerprints, mismatch/rebuild gating, and negative GLK compile-selection
+tests.
 
 ### 1.14.0 -- 2026-07-20
 

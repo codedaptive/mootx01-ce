@@ -195,19 +195,28 @@ struct CorpusContentBoundaryTests {
 
     // MARK: Operating-mode / index-unit validation
 
+#if CORPUSKIT_STANDALONE_PASSAGES
     @Test func attachedModeRejectsPassageConfigurationBeforeWriting() {
         #expect(throws: CorpusKitError.self) {
             _ = try CorpusContentConfiguration(
-                mode: .attached, indexUnit: .tokenBudgetedPassages(tokenBudget: 512))
+                mode: .attached,
+                indexUnit: .tokenWindows(windowTokens: 512, overlapTokens: 64))
         }
     }
 
-    @Test func nonPositiveTokenBudgetIsRejected() {
+    @Test func invalidPassageWindowsAreRejected() {
         #expect(throws: CorpusKitError.self) {
             _ = try CorpusContentConfiguration(
-                mode: .standalone, indexUnit: .tokenBudgetedPassages(tokenBudget: 0))
+                mode: .standalone,
+                indexUnit: .tokenWindows(windowTokens: 0, overlapTokens: 0))
+        }
+        #expect(throws: CorpusKitError.self) {
+            _ = try CorpusContentConfiguration(
+                mode: .standalone,
+                indexUnit: .tokenWindows(windowTokens: 512, overlapTokens: 512))
         }
     }
+#endif
 
     @Test func validConfigurationsConstructAndGateMutation() throws {
         let attached = try CorpusContentConfiguration(mode: .attached, indexUnit: .wholeContent)
@@ -215,9 +224,12 @@ struct CorpusContentBoundaryTests {
         let standaloneWhole = try CorpusContentConfiguration(
             mode: .standalone, indexUnit: .wholeContent)
         #expect(standaloneWhole.allowsContentMutation)
+#if CORPUSKIT_STANDALONE_PASSAGES
         let standalonePassages = try CorpusContentConfiguration(
-            mode: .standalone, indexUnit: .tokenBudgetedPassages(tokenBudget: 512))
+            mode: .standalone,
+            indexUnit: .tokenWindows(windowTokens: 512, overlapTokens: 64))
         #expect(standalonePassages.allowsContentMutation)
+#endif
     }
 
     // MARK: Schema profiles
@@ -239,8 +251,12 @@ struct CorpusContentBoundaryTests {
     }
 
     @Test func standaloneProfileGatesPassagesOnConfiguration() {
+#if CORPUSKIT_STANDALONE_PASSAGES
         let without = Set(CorpusSchemaProfile.standaloneDeclaration(passageIndexing: false)
             .tables.map(\.name))
+#else
+        let without = Set(CorpusSchemaProfile.standaloneDeclaration().tables.map(\.name))
+#endif
         #expect(without.contains("corpus_documents"))
         #expect(without.contains("corpus_index_state"))
         #expect(!without.contains("corpus_passages"))
@@ -248,12 +264,22 @@ struct CorpusContentBoundaryTests {
         #expect(!without.contains("chunks"))
         #expect(!without.contains("corpus_metadata"))
 
+#if CORPUSKIT_STANDALONE_PASSAGES
+        #expect(without.contains("corpus_index_configuration"))
         let with = Set(CorpusSchemaProfile.standaloneDeclaration(passageIndexing: true)
             .tables.map(\.name))
         #expect(with.contains("corpus_passages"))
 
         // The passage table is range-only: no text column.
         #expect(!CorpusSchemaProfile.passagesTable.columns.contains { $0.name == "text" })
+        #expect(CorpusSchemaProfile.passagesTable.columns.contains {
+            $0.name == "policy_fingerprint"
+        })
+#else
+        // The default dependency profile used by GLK/MOOTx01 has neither the
+        // policy authority nor passage ranges compiled into its schema.
+        #expect(!without.contains("corpus_index_configuration"))
+#endif
     }
 
     @Test func attachedProfileOpensWithoutCanonicalContentTables() async throws {

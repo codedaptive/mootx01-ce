@@ -46,6 +46,8 @@ pub mod engine;
 pub mod error;
 pub mod hybrid_recall;
 pub mod index_state_store;
+#[cfg(feature = "standalone-passages")]
+pub mod index_configuration_store;
 pub mod provider_configuration_store;
 pub mod provider_coverage_store;
 pub mod removed_source_store;
@@ -68,10 +70,13 @@ pub use content::{
     CorpusContentRecord, CorpusContentSource, CorpusContentStore,
 };
 pub use content_engine::{
-    content_id_from_item_key, passage_ranges, ContentIndexJob, ContentIndexJobKind,
-    CorpusContentEngine, CorpusContentHit, CorpusEvidence, CLAIMS_CONSUMER,
-    CONTENT_ENGINE_INDEX_VERSION,
+    content_id_from_item_key, ContentIndexJob, ContentIndexJobKind, CorpusContentEngine,
+    CorpusContentHit, CorpusEvidence, CLAIMS_CONSUMER, CONTENT_ENGINE_INDEX_VERSION,
 };
+#[cfg(feature = "standalone-passages")]
+pub use content_engine::passage_ranges;
+#[cfg(feature = "standalone-passages")]
+pub use index_configuration_store::CorpusIndexConfigurationStore;
 pub use corpus::Corpus;
 pub use corpus::EmbeddingModelConfig;
 pub use corpus::FloatLaneOutcome;

@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use corpus_kit::{CorpusContentEngine, Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::{EstateCoordinator, ExpungeIntegritySweepResult};
 use locus_kit::{
     drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,

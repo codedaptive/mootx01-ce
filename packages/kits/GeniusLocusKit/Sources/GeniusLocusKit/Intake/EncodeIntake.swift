@@ -420,8 +420,7 @@ public extension GeniusLocusKit {
         guard let corpus = corpusKits[handle] else { return 0 }
         let estate = try estate(for: handle)
 
-        // Fetch the set of source IDs already indexed in the BundleStore — the
-        // drawer IDs that already have chunks and can be skipped. A single
+        // Fetch the canonical Drawer IDs already indexed by CorpusKit. A single
         // snapshot, not re-fetched per pass: the missing set below is
         // determined once, up front, and the per-pass loop only enqueues
         // slices of that already-known list — see the sweep comment below
@@ -502,17 +501,18 @@ public extension GeniusLocusKit {
             let batch = Array(uncappedBatch[missingOffset..<passEnd])
             missingOffset = passEnd
 
-            // Batch-enqueue in chunks so the backend commits new/ ONCE per chunk
-            // instead of per job.
+            // Batch-enqueue in bounded groups so the backend commits once per
+            // group instead of once per job.
             //
             // Stream choice is the delta decision made above:
             //   • LARGE import → IMPORT stream: the discrete import drain worker
-            //     ingests chunk + BM25 only — no bootstrap train, no embed. The
+            //     ingests structural Drawer state + BM25 only — no bootstrap
+            //     train, no embed. The
             //     encode drain's embed-now work would be pure repeated waste for
             //     a bulk import whose basis is retrained on the WHOLE corpus and
-            //     whose chunks are embedded ONCE at the tail below.
+            //     whose Drawers are embedded once at the tail below.
             //   • SMALL delta → ENCODE stream: the encode drain embeds each
-            //     chunk through the LIVE basis as it ingests (identical to a
+            //     Drawer through the live basis as it ingests (identical to a
             //     live capture), so no tail retrain/re-embed is needed at all.
             // Same durable queue.sqlite either way, so a crash mid-import
             // cold-starts: the drain worker reclaims orphaned rows and resumes.
@@ -547,17 +547,17 @@ public extension GeniusLocusKit {
         }
 
         // total == 0 is unreachable here: the empty-sweep case (nothing was
-        // missing — no new chunks would enter the corpus, so the basis,
+        // missing — no new Drawers would enter the corpus, so the basis,
         // every embedding, and the Merkle tree are exactly as current as
         // before this call, and the O(corpus) tail below would be pure
         // waste, observed: an UNCHANGED vault reimport into a 50k estate
         // burned ~70 min of full retrain + re-embed for a no-op) already
         // returned early, right after the sweep, before `smallDelta` was
-        // even classified. A previously interrupted import (chunks present
+        // even classified. A previously interrupted import (structural rows present
         // but basis stale) is repaired by the explicit `moot_reindex` tool,
         // which exists for exactly that.
         if smallDelta {
-            // Small delta: every enqueued chunk was already embedded through the
+            // Small delta: every enqueued Drawer was already embedded through the
             // LIVE basis by the encode drain. Await the barrier once — it
             // publishes the resident vector index, the searchability contract —
             // and skip the full retrain. New vocabulary enters the basis at the
@@ -570,14 +570,14 @@ public extension GeniusLocusKit {
             // vector / RAG) recall lane is query-ready the moment the import
             // cycle completes.
             //
-            // The loop above reaches full CHUNK coverage: every drawer is
-            // chunked and BM25 (lexical) indexed — but import-stream ingest
+            // The loop above reaches full Drawer coverage: every Drawer is
+            // BM25 (lexical) indexed — but bulk ingest
             // deliberately does NOT embed. A query term that appears only in an
-            // unembedded chunk reads dense_lane:dark:vocabMiss until the basis
-            // is trained on the WHOLE corpus and every chunk embedded into that
-            // space. Corpus.reindex does exactly that (train the basis over all
-            // active chunks, then re-embed → one index rebuild). Lexical (BM25)
-            // and structured (Locus) recall are already live from chunk
+            // unembedded Drawer reads dense_lane:dark:vocabMiss until the basis
+            // is trained on the whole corpus and every Drawer embedded into that
+            // space. CorpusKit reindex does exactly that (train over all active
+            // Drawers, then re-embed → one index rebuild). Lexical (BM25)
+            // and structured (Locus) recall are already live from Drawer
             // coverage; THIS is the step that lights up semantic recall, so it
             // belongs at the tail of the import cycle, not on a later cadence.
             try await corpus.reindex(now: now)

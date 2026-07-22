@@ -33,11 +33,12 @@ fn make_standalone(
     let storage = in_memory_storage();
     let config =
         CorpusContentConfiguration::new(CorpusOperatingMode::Standalone, index_unit).unwrap();
+    #[cfg(feature = "standalone-passages")]
+    let passages = matches!(index_unit, CorpusIndexUnitPolicy::TokenWindows { .. });
+    #[cfg(not(feature = "standalone-passages"))]
+    let passages = false;
     storage
-        .migrate(&corpus_kit::standalone_declaration(matches!(
-            index_unit,
-            CorpusIndexUnitPolicy::TokenBudgetedPassages { .. }
-        )))
+        .migrate(&corpus_kit::standalone_declaration(passages))
         .expect("migrate standalone profile");
     let store = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
     let engine = CorpusContentEngine::open(
@@ -232,10 +233,95 @@ fn job_payload_carries_no_text_and_matches_swift_wire_form() {
     assert_eq!(hits.first().map(|h| h.id.as_str()), Some("drawer-q"));
 }
 
+#[cfg(feature = "standalone-passages")]
+#[test]
+fn passage_windows_use_token_overlap_deterministically() {
+    let text = "one two three four five six seven";
+    let ranges = corpus_kit::passage_ranges(text, 4, 2);
+    let excerpts: Vec<&str> = ranges
+        .iter()
+        .map(|(start, length)| {
+            std::str::from_utf8(&text.as_bytes()[*start..*start + *length]).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        excerpts,
+        vec!["one two three four", "three four five six", "five six seven"]
+    );
+}
+
+#[cfg(feature = "standalone-passages")]
+#[test]
+fn passage_policy_is_bound_per_standalone_database() {
+    let first = in_memory_storage();
+    first
+        .migrate(&corpus_kit::standalone_declaration(true))
+        .unwrap();
+    let first_authority = corpus_kit::CorpusIndexConfigurationStore::new(Arc::clone(&first));
+    let first_policy = CorpusIndexUnitPolicy::TokenWindows {
+        window_tokens: 512,
+        overlap_tokens: 64,
+    };
+    first_authority.bind(first_policy).unwrap();
+    first_authority.bind(first_policy).unwrap();
+    assert_eq!(
+        first_authority.fingerprint().unwrap().as_deref(),
+        Some("token-windows-v1:corpus-alphanumeric-v1:512:64")
+    );
+    let mismatch = first_authority.bind(
+        CorpusIndexUnitPolicy::TokenWindows {
+            window_tokens: 256,
+            overlap_tokens: 32,
+        },
+    );
+    assert!(matches!(mismatch, Err(CorpusKitError::InvalidConfiguration(_))));
+
+    let second = in_memory_storage();
+    second
+        .migrate(&corpus_kit::standalone_declaration(true))
+        .unwrap();
+    let second_authority = corpus_kit::CorpusIndexConfigurationStore::new(Arc::clone(&second));
+    second_authority
+        .bind(
+            CorpusIndexUnitPolicy::TokenWindows {
+                window_tokens: 256,
+                overlap_tokens: 32,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        second_authority.fingerprint().unwrap().as_deref(),
+        Some("token-windows-v1:corpus-alphanumeric-v1:256:32")
+    );
+
+    // A pre-feature database with existing whole-content state cannot be
+    // silently reinterpreted as passage-indexed.
+    let existing = in_memory_storage();
+    existing
+        .migrate(&corpus_kit::standalone_declaration(true))
+        .unwrap();
+    let mut row = BTreeMap::new();
+    row.insert("item_id".to_string(), TypedValue::Text("existing-doc".into()));
+    row.insert("length".to_string(), TypedValue::Int(10));
+    existing.row_store().insert("iix_doclens", row).unwrap();
+    let existing_authority =
+        corpus_kit::CorpusIndexConfigurationStore::new(Arc::clone(&existing));
+    let result = existing_authority.bind(
+        CorpusIndexUnitPolicy::TokenWindows {
+            window_tokens: 128,
+            overlap_tokens: 16,
+        },
+    );
+    assert!(matches!(result, Err(CorpusKitError::InvalidConfiguration(_))));
+}
+
+#[cfg(feature = "standalone-passages")]
 #[test]
 fn passage_mode_indexes_ranges_and_aggregates_to_content_id() {
-    let (engine, store, storage) =
-        make_standalone(CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget: 6 });
+    let (engine, store, storage) = make_standalone(CorpusIndexUnitPolicy::TokenWindows {
+        window_tokens: 6,
+        overlap_tokens: 2,
+    });
     let text = "alpha beta gamma delta epsilon zeta \
                 eta theta iota kappa lambda mu \
                 nu xi omicron";
@@ -257,7 +343,7 @@ fn passage_mode_indexes_ranges_and_aggregates_to_content_id() {
         .row_store()
         .query("corpus_passages", None, &[], None, None)
         .unwrap();
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 4);
     for row in &rows {
         assert!(row.get("text").is_none());
         if let Some(TypedValue::Int(revision)) = row.get("revision") {
@@ -266,9 +352,9 @@ fn passage_mode_indexes_ranges_and_aggregates_to_content_id() {
     }
 
     // Derived vector keys are passage keys that parse back to the ID
-    // (three distinct passage keys; each carries binary + float lanes).
+    // (four overlapping passage keys; each carries binary + float lanes).
     let vec_keys = item_ids(&storage, "vectors", "item_id");
-    assert_eq!(vec_keys.len(), 3);
+    assert_eq!(vec_keys.len(), 4);
     for key in &vec_keys {
         assert_eq!(corpus_kit::content_id_from_item_key(key), "doc-p");
     }

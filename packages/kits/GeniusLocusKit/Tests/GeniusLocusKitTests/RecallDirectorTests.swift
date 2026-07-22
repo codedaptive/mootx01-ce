@@ -730,9 +730,10 @@ struct RecallDirectorDenseSignalTests {
 
             // Direct probe: embed the same query text the director will, and ask the
             // store for the raw distances so we have an independent oracle.
-            let corpus = try await Corpus(storage: InMemoryStorage(
-                configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)),
-                model: .deterministic)
+            let corpus = try await CorpusContentEngine(
+                standaloneOn: InMemoryStorage(configuration: EstateConfiguration(
+                    estateID: UUID(), backend: .inMemory)),
+                models: [.deterministic])
             let probe = try await corpus.embed("mango fruit recall")
             let directMatches = try await vectorStore.findNearest(
                 probe: probe, modelID: modelID, limit: 256)

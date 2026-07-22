@@ -35,9 +35,14 @@ pub enum CorpusIndexUnitPolicy {
     /// One index unit per canonical content row — the DEFAULT everywhere
     /// and the ONLY policy attached mode accepts.
     WholeContent,
-    /// Standalone-only: optional token-budgeted passages (provider token
-    /// budget + tokenizer, never a character-count threshold).
-    TokenBudgetedPassages { token_budget: usize },
+    #[cfg(feature = "standalone-passages")]
+    /// Standalone-only: optional token-window passages (versioned CorpusKit
+    /// tokenizer + overlap, never a character-count threshold). This variant
+    /// is absent from the GLK/MOOTx01 dependency build.
+    TokenWindows {
+        window_tokens: usize,
+        overlap_tokens: usize,
+    },
 }
 
 /// The operating mode a Corpus is constructed in.
@@ -60,10 +65,11 @@ impl CorpusContentConfiguration {
         mode: CorpusOperatingMode,
         index_unit: CorpusIndexUnitPolicy,
     ) -> Result<Self, CorpusKitError> {
+        #[cfg(feature = "standalone-passages")]
         match (mode, index_unit) {
             (
                 CorpusOperatingMode::Attached,
-                CorpusIndexUnitPolicy::TokenBudgetedPassages { .. },
+                CorpusIndexUnitPolicy::TokenWindows { .. },
             ) => {
                 return Err(CorpusKitError::AttachedModeViolation(
                     "attached mode indexes whole Drawers only — passage configuration \
@@ -71,12 +77,24 @@ impl CorpusContentConfiguration {
                         .into(),
                 ));
             }
-            (_, CorpusIndexUnitPolicy::TokenBudgetedPassages { token_budget })
-                if token_budget == 0 =>
+            (_, CorpusIndexUnitPolicy::TokenWindows { window_tokens, .. })
+                if window_tokens == 0 =>
             {
                 return Err(CorpusKitError::InvalidConfiguration(
-                    "token-budgeted passages require a positive token budget, got 0".into(),
+                    "passage windows require a positive token window, got 0".into(),
                 ));
+            }
+            (
+                _,
+                CorpusIndexUnitPolicy::TokenWindows {
+                    window_tokens,
+                    overlap_tokens,
+                },
+            ) if overlap_tokens >= window_tokens => {
+                return Err(CorpusKitError::InvalidConfiguration(format!(
+                    "passage overlap must be smaller than the window \
+                     (window={window_tokens}, overlap={overlap_tokens})"
+                )));
             }
             _ => {}
         }
@@ -134,6 +152,7 @@ pub fn inverted_index_declaration() -> SchemaDeclaration {
 /// The standalone passage-range table (declared only when passage
 /// indexing is enabled). A passage row is a RANGE over canonical text —
 /// it holds no verbatim text.
+#[cfg(feature = "standalone-passages")]
 pub fn passages_table() -> TableDeclaration {
     TableDeclaration::new(
         "corpus_passages",
@@ -144,6 +163,7 @@ pub fn passages_table() -> TableDeclaration {
             ColumnDeclaration::text("digest"),
             ColumnDeclaration::int("utf8_start"),
             ColumnDeclaration::int("utf8_length"),
+            ColumnDeclaration::text("policy_fingerprint"),
         ],
         vec!["passage_id".to_string()],
     )
@@ -156,6 +176,7 @@ pub fn attached_excluded_tables() -> BTreeSet<&'static str> {
         "corpus_metadata",
         "corpus_documents",
         "corpus_passages",
+        "corpus_index_configuration",
         "removed_sources",
         "corpus_content_changes",
     ]
@@ -169,6 +190,11 @@ fn profile_version(components: &[&SchemaDeclaration]) -> i32 {
 
 /// The standalone profile declaration.
 pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
+    #[cfg(not(feature = "standalone-passages"))]
+    assert!(
+        !passage_indexing,
+        "standalone passage indexing is not compiled in this build"
+    );
     let documents = CorpusDocumentStore::schema_declaration();
     let index_state = CorpusIndexStateStore::schema_declaration();
     let coverage =
@@ -178,8 +204,12 @@ pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
     let iix = inverted_index_declaration();
     let basis = BasisStore::schema_declaration();
     let counts = CorpusProviderCountsStore::schema_declaration();
+    #[cfg(feature = "standalone-passages")]
+    let index_configuration =
+        crate::index_configuration_store::CorpusIndexConfigurationStore::schema_declaration();
 
-    let version = profile_version(&[
+    #[allow(unused_mut)] // mutable only in the standalone-passages build
+    let mut components = vec![
         &documents,
         &index_state,
         &coverage,
@@ -187,7 +217,10 @@ pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
         &iix,
         &basis,
         &counts,
-    ]);
+    ];
+    #[cfg(feature = "standalone-passages")]
+    components.push(&index_configuration);
+    let version = profile_version(&components);
     let mut tables = Vec::new();
     tables.extend(documents.tables.clone());
     tables.extend(index_state.tables.clone());
@@ -196,10 +229,13 @@ pub fn standalone_declaration(passage_indexing: bool) -> SchemaDeclaration {
     tables.extend(iix.tables.clone());
     tables.extend(basis.tables.clone());
     tables.extend(counts.tables.clone());
+    #[cfg(feature = "standalone-passages")]
+    tables.extend(index_configuration.tables.clone());
     let mut indices = Vec::new();
     indices.extend(documents.indices.clone());
     indices.extend(index_state.indices.clone());
     indices.extend(iix.indices.clone());
+    #[cfg(feature = "standalone-passages")]
     if passage_indexing {
         tables.push(passages_table());
         indices.push(IndexDeclaration::new(

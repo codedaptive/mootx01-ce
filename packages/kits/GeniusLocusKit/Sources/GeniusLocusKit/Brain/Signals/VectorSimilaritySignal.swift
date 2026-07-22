@@ -33,16 +33,12 @@ public typealias AssociationEdgeChecker =
 /// 64 — 25% of 256 bits) are deduplicated and emitted as
 /// `AssociationFrame` values with weight = 1 − (distance / 256).
 ///
-/// TWO row populations are mined (same lane split as the contradiction
-/// hunter): drawer-keyed rows under the caller's `modelID` (bespoke
-/// lanes and test-planted vectors), and — when a `Corpus` is supplied —
-/// chunk-keyed rows under the corpus's own modelID, which is the ONLY
-/// lane production estates populate (EstateLifecycle registers
-/// `corpus.sharedVectorStore`; the encode drain keys every row by chunk
-/// UUID). Chunk hits map back to their owning drawers via
-/// `Corpus.sourceIDs(forChunkIDs:)`; same-drawer chunk pairs collapse,
-/// and both lanes deduplicate together on drawer-pair keys, so every
-/// emitted `AssociationFrame` carries DRAWER ids.
+/// TWO model populations are mined (same lane split as the contradiction
+/// hunter): Drawer-keyed rows under the caller's `modelID` (bespoke lanes and
+/// test-planted vectors), and — when a `CorpusContentEngine` is supplied —
+/// Drawer-keyed rows under CorpusKit's own model ID. Shared-content 1.1 keys
+/// both directly by canonical Drawer ID, so no passage-to-Drawer identity map
+/// exists. Both lanes deduplicate on Drawer-pair keys.
 ///
 /// Routing: every emission goes through the `associate` verb at the
 /// GLK-02 boundary, which records the provenance bit `vector_similarity`
@@ -105,11 +101,9 @@ public enum VectorSimilaritySignal {
     ///     `VectorStore.addVector(itemID:engram:modelID:modelVersion:filedAt:)`.
     ///   - proximityThreshold: Maximum Hamming distance (0-256) for a
     ///     pair to qualify as an association candidate. Default 64.
-    ///   - corpus: The estate's `Corpus`, when one is registered. Enables
-    ///     the chunk-keyed corpus lane — the row population production
-    ///     estates actually hold. `nil` (the default) scans only the
-    ///     drawer-keyed `modelID` lane, which is correct for tests that
-    ///     plant drawer-keyed vectors directly.
+    ///   - corpus: The estate's `CorpusContentEngine`, when registered.
+    ///     Enables its Drawer-keyed model population. `nil` scans only the
+    ///     caller-selected `modelID` population.
     ///   - edgeChecker: Optional async closure that returns `true` when
     ///     a persisted (non-tombstoned) association already exists between
     ///     the two drawer IDs in either direction (FINDING-3 optimization).

@@ -410,11 +410,13 @@ knowledge. CorpusKit is the vector recall tier; LocusKit is the semantic
 recall tier (structured knowledge, KG facts, diary, associations).
 
 **Provides:**
-- `BundleStore` (actor) — content bundle management
+- `CorpusContentEngine` — canonical-ID whole-content BM25/vector indexing
+- `CorpusDocumentStore` — canonical standalone document ownership
 - `BM25Index` — inverted text index for keyword retrieval
-- `Chunker` — content splitting into chunks
-- `Chunk` — the stored content unit
-- `HybridRecall` — combined BM25 + vector retrieval
+- Optional `StandalonePassages` / `standalone-passages` range-only token
+  windows with database-bound window and overlap; not compiled for GLK/MOOTx01
+- `BundleStore`, `Chunker`, `Chunk`, and `HybridRecall` — legacy standalone
+  1.0 compatibility only; never GLK content identity
 - `EmbeddingProvider` protocol + `CorpusKitProviders` (MiniLM, MPNet, Gemma)
 - `SyncManifest` — replication metadata
 - `TokenizerProtocol`
