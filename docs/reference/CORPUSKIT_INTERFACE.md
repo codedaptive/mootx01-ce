@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-20
+date: 2026-07-22
 spec_type: kit
-version: 1.17.0
+version: 1.18.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -36,7 +36,7 @@ Two library targets plus tests:
   - `BundleStore.swift` — `BundleStore` (actor)
   - `BasisStore.swift` — `BasisStore` (actor), `PersistedBasis`
   - `CorpusProviderCountsStore.swift` — `CorpusProviderCountsStore` (actor),
-    `PersistedCounts`, `CountsGrowthAnchor`
+    `PersistedCounts`, `PersistedCountsReference`, `CountsGrowthAnchor`
   - `RemovedSourceStore.swift` — `RemovedSourceStore` (actor)
   - `HybridRecall.swift` — `HybridRecall`, `HybridRecallConfiguration`
   - `Tokenizer.swift` — `Tokenizer` protocol + default `keywordTokens`
@@ -679,6 +679,11 @@ The fifth default-ensemble signal. A deterministic, non-trainable provider that
 encodes each chunk as a 256-dimensional float vector by hashing its vocabulary
 terms through a fixed codebook (`fdcNodeVector`). No inference closure; no
 training. Projection seed `fdcProjectionSeed` ("FDCV1P", `0x4644_435F_5631_5F50`).
+Cross-port classification also requires the Lattice tokenizer contract: Rust
+splits ASCII `:` to match Foundation word enumeration, and macOS Rust resolves
+the writable `WordClassTable.json` from the same
+`~/Library/Application Support/com.mootx01.lattice` root as Swift. An explicit
+environment override still takes precedence.
 
 **Swift:**
 
@@ -1222,7 +1227,7 @@ public enum CorpusEnsemble {
 pub fn default_ensemble() -> Vec<EmbeddingModelConfig>;
 ```
 
-### `CorpusProviderCountsStore` — incremental maintained counts (both ports)
+### `CorpusProviderCountsStore` — base counts plus attached reference deltas (both ports)
 
 The persisted **counts table**: each trainable provider's raw additive statistics
 (RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary + document-count
@@ -1232,16 +1237,26 @@ table instead of re-reading and re-tokenizing the whole corpus. Sibling of
 never interprets the bytes (the provider owns the codec via the
 `TrainableEmbeddingBasis` counts seam). One row per `(model_id, model_version)`,
 keyed identically to the basis and vector rows; the two cheap integer columns
-`doc_count` / `vocab_size` are the growth-trigger anchors, readable without
-deserializing the blob.
+`doc_count` / `vocab_size` are the published growth-trigger anchors, readable
+without deserializing the blob.
 
-Lifecycle (driven by `Corpus`): the accumulator is restored on open, folded
-once per written chunk (`addToCounts`), and persisted at **batch boundaries**
-(end of `ingest` / `ingestBatch` / `reindex`) — never per chunk (that would be
-O(N·vocab) over an import). `Corpus.maintainedVocabAnchor()` /
+Standalone `Corpus` retains the established lifecycle: restore the accumulator,
+fold each newly written chunk, and publish the blob at bounded ingest/reindex
+boundaries. Attached `CorpusContentEngine` does not rewrite an estate-scale
+counts blob for each queue burst. It atomically publishes small rows in
+`corpus_provider_count_references`, keyed by provider generation and canonical
+content identity, alongside the content checkpoint. Those rows contain no text
+or token payload. Open restores the published base blob, resolves each pending
+identity through the canonical content source, and folds the current text once.
+A provider publication/retrain atomically replaces its base counts and removes
+the reference rows that generation subsumed.
+
+`Corpus.maintainedVocabAnchor()` /
 `maintained_vocab_anchor()` exposes the maximum maintained vocabulary size across
 trainable slots — the in-process read the autonomic governor's vocab-growth
-retrain trigger consumes (NeuronKit `CorpusGrowthProbe`).
+retrain trigger consumes (NeuronKit `CorpusGrowthProbe`). Store-level
+`growthAnchor` reads the last published base; the engine-level anchor includes
+its replayed reference deltas.
 
 **Swift:**
 
@@ -1258,12 +1273,23 @@ public struct CountsGrowthAnchor: Sendable, Equatable {
     public let documentCount: Int
     public let vocabSize: Int
 }
+public struct PersistedCountsReference: Sendable, Equatable {
+    public let modelID: String
+    public let modelVersion: String
+    public let contentID: String
+    public let revision: Int64
+    public let digest: String
+    public let updatedAt: Date
+}
 public actor CorpusProviderCountsStore {
     public static let schemaDeclaration: SchemaDeclaration
     public init(storage: any Storage)
     public func upsert(_ row: PersistedCounts) async throws
     public func load(modelID: String, modelVersion: String) async throws -> PersistedCounts?
     public func growthAnchor(modelID: String, modelVersion: String) async throws -> CountsGrowthAnchor?
+    public func upsertReference(_ row: PersistedCountsReference, into rowStore: any RowStore) async throws
+    public func references(modelID: String, modelVersion: String) async throws -> [PersistedCountsReference]
+    public func deleteReferences(modelID: String, modelVersion: String, into rowStore: any RowStore) async throws
     public func deleteAll() async throws
 }
 
@@ -1283,12 +1309,23 @@ pub struct PersistedCounts {
     pub updated_at_secs: i64,
 }
 pub struct CountsGrowthAnchor { pub document_count: usize, pub vocab_size: usize }
+pub struct PersistedCountsReference {
+    pub model_id: String,
+    pub model_version: String,
+    pub content_id: String,
+    pub revision: i64,
+    pub digest: String,
+    pub updated_at_secs: i64,
+}
 impl CorpusProviderCountsStore {
     pub fn schema_declaration() -> SchemaDeclaration;
     pub fn new(storage: Arc<dyn Storage>) -> Self;
     pub fn upsert(&self, row: &PersistedCounts) -> CorpusKitResult<()>;
     pub fn load(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<PersistedCounts>>;
     pub fn growth_anchor(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<CountsGrowthAnchor>>;
+    pub fn upsert_reference_into(&self, row: &PersistedCountsReference, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
+    pub fn references(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Vec<PersistedCountsReference>>;
+    pub fn delete_references_into(&self, model_id: &str, model_version: &str, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
     pub fn delete_all(&self) -> CorpusKitResult<()>;
 }
 
@@ -2107,6 +2144,18 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-07-22
+
+- Attached maintained counts now use a published provider base plus
+  reference-only canonical-content deltas. Queue commits no longer serialize
+  the complete RI/PPMI counts blobs; provider publication compacts deltas
+  atomically. The delta table stores no Drawer text.
+- Full `CorpusContentEngine.reindex` operations defer resident-index
+  publication across the corpus rewrite and publish once at completion.
+- Recorded the FDC cross-port tokenizer and macOS writable-artifact contract.
+- Historical shared basis fixtures remain pinned to their 1.0 envelope while
+  production trainable-provider defaults remain 1.1.
 
 ### 1.17.0 -- 2026-07-20
 

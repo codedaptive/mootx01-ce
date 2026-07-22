@@ -780,6 +780,22 @@ mod tests {
             2,
             "reopen must replay the durable reference exactly once"
         );
+        reopened
+            .train_trainable_slots(13, true)
+            .expect("provider publication compacts reference deltas");
+        let compacted_references = CorpusProviderCountsStore::new(Arc::clone(&storage))
+            .references("retry-counts-v1", "1.0.0")
+            .expect("load compacted references");
+        assert!(
+            compacted_references.is_empty(),
+            "published base must subsume its exact generation's references"
+        );
+        let compacted = CorpusProviderCountsStore::new(Arc::clone(&storage))
+            .load("retry-counts-v1", "1.0.0")
+            .expect("load compacted counts")
+            .expect("compacted counts row");
+        assert_eq!(compacted.document_count, 2);
+        assert_eq!(reopened.maintained_document_count(), 2);
         drop(reopened);
         drop(source);
         drop(storage);

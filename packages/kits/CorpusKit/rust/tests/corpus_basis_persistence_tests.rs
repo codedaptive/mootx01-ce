@@ -77,15 +77,21 @@ fn fresh_ri_corpus(storage: Arc<dyn Storage>) -> Corpus {
     .expect("Corpus::open must succeed")
 }
 
-/// The shared alpha fixture pins the current production provider envelope.
-fn canonical_ri_corpus(storage: Arc<dyn Storage>) -> Corpus {
+/// The shared alpha fixture pins the historical 1.0 provider envelope. Keep
+/// that fixture useful while production defaults advance to 1.1 to invalidate
+/// bases trained with the pre-correction tokenizer contract.
+fn legacy_ri_corpus(storage: Arc<dyn Storage>) -> Corpus {
     Corpus::open(
         storage,
         EmbeddingModelConfig::RandomIndexing {
-            provider: Box::new(RandomIndexingProvider::new()),
+            provider: Box::new(RandomIndexingProvider::with_parameters(
+                "random-indexing-v1",
+                "1.0.0",
+                corpus_kit_providers::RI_PROJECTION_SEED,
+            )),
         },
     )
-    .expect("Corpus::open canonical fixture provider must succeed")
+    .expect("Corpus::open legacy fixture provider must succeed")
 }
 
 // ── §2 reindex persists a basis ──
@@ -274,7 +280,7 @@ fn cross_port_persist_reopen_embed() {
     // byte-for-byte. Training fresh (reconstruct from the empty blob) makes the
     // basis the canonical from-scratch one, matching the Swift port.
     {
-        let corpus = canonical_ri_corpus(storage_at(&path));
+        let corpus = legacy_ri_corpus(storage_at(&path));
         for (i, doc) in RI_DOCS.iter().enumerate() {
             corpus
                 .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
@@ -284,7 +290,7 @@ fn cross_port_persist_reopen_embed() {
 
         let store = BasisStore::new(storage_at(&path));
         let persisted: PersistedBasis = store
-            .load("random-indexing-v1", "1.1.0")
+            .load("random-indexing-v1", "1.0.0")
             .expect("load")
             .expect("basis row");
         assert_eq!(
@@ -297,7 +303,7 @@ fn cross_port_persist_reopen_embed() {
     // provider from the persisted basis. The reopened corpus's embedding of the
     // fixed probe must equal the α canonical bit patterns. This proves
     // persist → reopen → embed is cross-port deterministic.
-    let reopened = canonical_ri_corpus(storage_at(&path));
+    let reopened = legacy_ri_corpus(storage_at(&path));
     let after = reopened.embed_float(probe).expect("embed_float");
     let after_bits: Vec<u32> = after.iter().map(|f| f.to_bits()).collect();
     assert_eq!(

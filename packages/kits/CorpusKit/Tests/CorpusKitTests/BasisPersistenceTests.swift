@@ -81,11 +81,13 @@ struct BasisPersistenceTests {
         try await Corpus(storage: storage, model: .randomIndexing(provider: RandomIndexingProvider()))
     }
 
-    /// The shared alpha fixture pins the current production provider envelope.
-    private func canonicalRICorpus(_ storage: any Storage) async throws -> Corpus {
+    /// The shared alpha fixture pins the historical 1.0 provider envelope.
+    /// Production defaults are 1.1 so persisted pre-correction tokenizer
+    /// generations cannot be mistaken for current ones.
+    private func legacyRICorpus(_ storage: any Storage) async throws -> Corpus {
         try await Corpus(
             storage: storage,
-            model: .randomIndexing(provider: RandomIndexingProvider()))
+            model: .randomIndexing(provider: RandomIndexingProvider(modelVersion: "1.0.0")))
     }
 
     // MARK: - §1 BasisStore round-trip
@@ -304,14 +306,14 @@ struct BasisPersistenceTests {
             // corpus (single-sentence docs → one chunk each whose text == the doc),
             // so the trained state — and the blob — is the α canonical one.
             do {
-                let corpus = try await canonicalRICorpus(try storage(at: url))
+                let corpus = try await legacyRICorpus(try storage(at: url))
                 for (i, doc) in riDocs.enumerated() {
                     try await corpus.ingest(doc, sourceID: "doc-\(i)", now: now)
                 }
                 try await corpus.reindex(now: now)
 
                 let store = BasisStore(storage: try storage(at: url))
-                let persisted = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.1.0")
+                let persisted = try await store.load(modelID: "random-indexing-v1", modelVersion: "1.0.0")
                 #expect(persisted?.basis == expectedBlob,
                         "persisted basis blob must equal the α canonical blob byte-for-byte")
             }
@@ -320,7 +322,7 @@ struct BasisPersistenceTests {
             // trained provider from the persisted basis. The reopened corpus's
             // embedding of the fixed probe must equal the α canonical bit patterns.
             // This proves persist → reopen → embed is cross-port deterministic.
-            let reopened = try await canonicalRICorpus(try storage(at: url))
+            let reopened = try await legacyRICorpus(try storage(at: url))
             let after = try await reopened.embedFloat(probe)
             #expect(after.map(\.bitPattern) == expectedEmbedding.floatBits,
                     "reopened embedding must equal the α canonical 'car engine' bit patterns")

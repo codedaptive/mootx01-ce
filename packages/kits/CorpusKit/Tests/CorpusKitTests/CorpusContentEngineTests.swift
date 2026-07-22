@@ -352,6 +352,16 @@ struct CorpusContentEngineTests {
             try await reopened.commitQueueBatch(
                 checkpoints: replay.checkpoints, countsUpdates: [], now: now)
             #expect(await reopened.maintainedDocumentCount() == 2)
+
+            // Provider publication compacts only this generation's pending
+            // references into its replacement base, in the same transaction.
+            try await reopened.trainTrainableSlots(now: now, force: true)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_count_references", where: nil) == 0)
+            let compacted = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(compacted.documentCount == 2)
+            #expect(await reopened.maintainedDocumentCount() == 2)
         }
     }
 

@@ -1,8 +1,8 @@
 ---
 title: CorpusKit Specification
-version: 1.14.0
+version: 1.15.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-07-22
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -625,6 +625,9 @@ provider (RI/PPMI/LSA/NMF):
   `reindex` a vector refresh with no basis row written. (Rust retains the
   trainable capability across reopen via `reconstruct_trainable_basis`,
   since it cannot cross-cast a boxed provider the way Swift's `as?` does.)
+  The full re-embedding loop MUST hold VectorKit's deferred-index bracket and
+  publish the resident index once after the durable rewrite; rebuilding the
+  resident index per content item is forbidden.
 - *Lifecycle:* `destroyRecallIndex` additionally deletes all basis rows
   AND all counts rows (no orphans). All paths are deterministic — `now` is
   the only clock source; the engine never reads the wall clock. Swift and
@@ -632,17 +635,23 @@ provider (RI/PPMI/LSA/NMF):
   corpus (I-7): the ingest → reindex → reopen → embed path reproduces the
   canonical RI basis blob and embedding bit patterns byte-for-byte on both ports.
 
-**B-14 (incremental maintained counts):** each trainable provider's raw
-additive statistics are maintained in the `corpus_provider_counts` table
-(`CorpusProviderCountsStore`) so a retrain reads the maintained table instead
-of rebuilding from scratch. The accumulator (held SEPARATELY from the serving
-provider, so growing the maintained vocabulary never desyncs an LSA/NMF serving
-basis) is restored on open, folded once per indexed canonical document (`addToCounts`), and
-persisted at BATCH boundaries (end of `ingest` / `ingestBatch` / `reindex`) —
-never per provider row (O(N·vocab) would re-introduce the import wall). LSA/NMF persist
-only the lightweight vocab + document-count anchor (TF re-derived by
-re-tokenizing at refactor — the re-tokenize-at-refactor decision); RI/PPMI
-persist their full additive state. `Corpus.maintainedVocabAnchor()` exposes the
+**B-14 (incremental maintained counts):** each trainable provider has a
+published raw-statistics base in `corpus_provider_counts`. Standalone `Corpus`
+may replace that base at bounded ingest/reindex publication points. Attached
+`CorpusContentEngine` MUST NOT serialize the full base for each canonical
+content change. It writes an idempotent row to
+`corpus_provider_count_references`, keyed by provider generation and canonical
+content identity, in the same transaction as the corresponding checkpoint.
+The row stores identity/revision/digest metadata only—never canonical text,
+tokens, or passages. Open reconstructs the accumulator from the base plus
+canonical-source hydration of pending references. A provider retrain/publication
+atomically replaces its base and deletes only that provider generation's
+subsumed references.
+
+The accumulator remains separate from the serving provider, so vocabulary
+growth cannot desynchronize a frozen LSA/NMF basis. LSA/NMF bases still derive
+TF from the canonical corpus during refactor; RI/PPMI retain their full additive
+base state. `Corpus.maintainedVocabAnchor()` exposes the
 maximum maintained vocabulary across trainable slots. The autonomic governor's
 auto-reindex trigger (NeuronKit) fires on VOCABULARY growth —
 `max(floor, ceil(fraction × lastReindexVocab))`, defaults floor 25 / fraction
@@ -650,12 +659,11 @@ auto-reindex trigger (NeuronKit) fires on VOCABULARY growth —
 is byte-identical across ports (the provider owns it via the
 `TrainableEmbeddingBasis` counts seam).
 
-The counts table is intentionally retained in attached GLK estates. It is not a
-second content store: it contains provider-specific additive statistics, not
-Drawer text. Removing it would either lose the vocabulary-growth governor's
-restart continuity or require a full corpus tokenization pass on every open.
-Reopen conformance therefore proves that the maintained vocabulary anchor is
-restored before serving.
+The base and reference tables are intentionally retained in attached GLK
+estates. Neither is a second content store: the base is provider-specific
+derived statistics and the reference table is identity metadata. Reopen
+conformance proves that the maintained vocabulary anchor is restored before
+serving and that reference replay is idempotent.
 
 ### 9.4 Conformance
 
@@ -691,7 +699,8 @@ Corpus's active recall capability without deleting canonical content:
 - CorpusKit-provider vector rows and their resident index state
 - All persisted basis rows in `corpus_provider_basis` (via `BasisStore.deleteAll`)
   — no orphaned basis survives a destroyed corpus (I-9, B-13)
-- All persisted counts rows in `corpus_provider_counts` (via
+- All persisted counts rows in `corpus_provider_counts` and all pending rows
+  in `corpus_provider_count_references` (via
   `CorpusProviderCountsStore.deleteAll`) — no orphaned counts survive (B-14)
 - All CorpusKit revision/checkpoint rows
 - Standalone-only passage range rows when the standalone Corpus itself is
@@ -765,6 +774,15 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.15.0 -- 2026-07-22
+
+Changed B-14 attached-count persistence from complete blob replacement per
+queue burst to a published base plus reference-only canonical-content deltas.
+Added the atomic checkpoint/delta and provider-compaction requirements. Added
+the B-13 deferred resident-index requirement for full reindex. Historical 1.0
+basis fixtures remain immutable while production trainable providers use the
+1.1 tokenizer generation.
 
 ### 1.14.0 -- 2026-07-20
 
