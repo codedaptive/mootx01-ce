@@ -2263,6 +2263,14 @@ impl CorpusContentEngine {
     /// streamed (bounded); each provider's basis+counts commit is atomic.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
         self.train_trainable_slots(now_millis, true)?;
+        // Bulk-write bracket (same idiom as reconcile_configured_providers
+        // and the drain worker): defer the resident dense index for the
+        // whole O(corpus) rewrite and publish ONCE. Without it every
+        // per-record vector write rebuilt the resident MIH index — an
+        // estate-scale retrain span measured in hours instead of minutes.
+        self.vector_store
+            .begin_deferred_index()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
         for id in self.source.active_content_ids()? {
             match self.source.record(&id)? {
                 Some(record) => {
@@ -2283,6 +2291,9 @@ impl CorpusContentEngine {
                 None => self.clear_derived_state(&id)?,
             }
         }
+        self.vector_store
+            .publish_resident_index()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
         self.provider_configuration_store
             .mark_current(&self.provider_generation_token(), now_millis)?;
         Ok(())

@@ -1484,6 +1484,11 @@ public actor CorpusContentEngine {
     /// basis+counts commit is atomic.
     public func reindex(now: Date) async throws {
         _ = try await trainTrainableSlots(now: now, force: true)
+        // Bulk-write bracket (same idiom as reconcileConfiguredProviders and
+        // the drain worker): defer the resident dense index for the whole
+        // O(corpus) rewrite and publish ONCE — per-record invalidation makes
+        // an estate-scale retrain rebuild the resident index per write.
+        try await vectorStore.beginDeferredIndex()
         for id in try await source.activeContentIDs() {
             guard let record = try await source.record(for: id) else {
                 try await clearDerivedState(id: id)
@@ -1500,6 +1505,7 @@ public actor CorpusContentEngine {
                 try await indexState.advance(checkpoint)
             }
         }
+        try await vectorStore.publishResidentIndex()
         try await providerConfigurationStore.markCurrent(
             providerGenerationToken(), now: now)
     }
