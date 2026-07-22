@@ -40,6 +40,10 @@ phases.
 constraints, validation plan, and recorded audits. This is what
 turns architectural assertions into testable propositions.
 
+**You want the lessons behind the product work.**
+[`articles/`](articles/) holds the reviewed learning series in two reading
+lanes: business consequences and the technical evidence behind them.
+
 **You are looking for history.**
 [`archive/`](archive/) holds superseded specs, historical math
 notes, and legacy product names. Preserved for traceability; not
