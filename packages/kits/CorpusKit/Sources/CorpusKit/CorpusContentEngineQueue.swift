@@ -224,7 +224,9 @@ public extension CorpusContentEngine {
 
         var encodedIDs: [String] = []
         var completions: [(jobID: JobID, status: ObservationStatus)] = []
-        var countsUpdates: [(contentID: String, text: String)] = []
+        var countsUpdates: [(
+            contentID: String, revision: Int64, digest: String, text: String
+        )] = []
         var checkpoints: [CorpusIndexState] = []
         var preparedUpserts: Set<String> = []
         completions.reserveCapacity(batch.count)

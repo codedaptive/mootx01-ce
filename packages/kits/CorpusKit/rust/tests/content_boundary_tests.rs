@@ -15,9 +15,7 @@ use corpus_kit::{
     CorpusOperatingMode,
 };
 use persistence_kit::inmemory::InMemoryStorage;
-use persistence_kit::{
-    BackendConfiguration, EstateConfiguration, SqliteStorage, Storage,
-};
+use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -181,7 +179,9 @@ fn exercise_content_store_conformance(store: &dyn CorpusContentStore) {
     assert_ne!(rec_a2.digest, rec_a1.digest);
 
     // A second document for enumeration/pagination coverage.
-    store.put("A second document.", "doc-b", NOW).expect("put b");
+    store
+        .put("A second document.", "doc-b", NOW)
+        .expect("put b");
     assert_eq!(store.active_content_ids().unwrap(), vec!["doc-a", "doc-b"]);
 
     // 4. Remove → record gone, remove change carries the removed revision.
@@ -276,8 +276,7 @@ fn document_store_survives_reopen_on_sqlite() {
                 busy_timeout_secs: 5.0,
             },
         );
-        let storage: Arc<dyn Storage> =
-            Arc::new(SqliteStorage::new(config).expect("open sqlite"));
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(config).expect("open sqlite"));
         storage
             .migrate(&CorpusDocumentStore::schema_declaration())
             .expect("migrate");
@@ -294,8 +293,7 @@ fn document_store_survives_reopen_on_sqlite() {
             busy_timeout_secs: 5.0,
         },
     );
-    let storage: Arc<dyn Storage> =
-        Arc::new(SqliteStorage::new(config).expect("reopen sqlite"));
+    let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(config).expect("reopen sqlite"));
     storage
         .migrate(&CorpusDocumentStore::schema_declaration())
         .expect("migrate");
@@ -306,7 +304,10 @@ fn document_store_survives_reopen_on_sqlite() {
         .expect("revise");
     let feed = store.changes(None, 10).unwrap();
     assert_eq!(
-        feed.changes.iter().map(|c| c.revision()).collect::<Vec<_>>(),
+        feed.changes
+            .iter()
+            .map(|c| c.revision())
+            .collect::<Vec<_>>(),
         vec![1, 2]
     );
     let _ = std::fs::remove_file(&path);
@@ -363,7 +364,10 @@ fn attached_profile_contains_no_canonical_content_table() {
     let names: std::collections::BTreeSet<&str> =
         declaration.tables.iter().map(|t| t.name.as_str()).collect();
     for excluded in attached_excluded_tables() {
-        assert!(!names.contains(excluded), "attached profile leaks {excluded}");
+        assert!(
+            !names.contains(excluded),
+            "attached profile leaks {excluded}"
+        );
     }
     let expected: std::collections::BTreeSet<&str> = [
         "corpus_index_state",
@@ -373,6 +377,7 @@ fn attached_profile_contains_no_canonical_content_table() {
         "corpus_provider_basis",
         "corpus_provider_configuration",
         "corpus_provider_counts",
+        "corpus_provider_count_references",
     ]
     .into_iter()
     .collect();
@@ -489,8 +494,7 @@ fn index_state_survives_reopen_on_sqlite() {
                 busy_timeout_secs: 5.0,
             },
         );
-        let storage: Arc<dyn Storage> =
-            Arc::new(SqliteStorage::new(config).expect("open"));
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(config).expect("open"));
         storage
             .migrate(&CorpusIndexStateStore::schema_declaration())
             .expect("migrate");
@@ -505,12 +509,13 @@ fn index_state_survives_reopen_on_sqlite() {
             busy_timeout_secs: 5.0,
         },
     );
-    let storage: Arc<dyn Storage> =
-        Arc::new(SqliteStorage::new(config).expect("reopen"));
+    let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(config).expect("reopen"));
     storage
         .migrate(&CorpusIndexStateStore::schema_declaration())
         .expect("migrate");
-    let reread = CorpusIndexStateStore::new(storage).state("drawer-1").unwrap();
+    let reread = CorpusIndexStateStore::new(storage)
+        .state("drawer-1")
+        .unwrap();
     assert_eq!(reread, Some(state));
     let _ = std::fs::remove_file(&path);
 }

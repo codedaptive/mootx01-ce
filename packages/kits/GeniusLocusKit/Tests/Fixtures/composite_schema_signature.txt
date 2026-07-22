@@ -55,6 +55,16 @@ table=corpus_provider_configuration
   col=updated_at type=timestamp null=0 default=- role=-
   pk=singleton_id
   appendOnly=0 hashable=0
+table=corpus_provider_count_references
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=content_id type=text null=0 default=- role=-
+  col=revision type=int null=0 default=- role=-
+  col=digest type=text null=0 default=- role=-
+  col=updated_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=model_id,model_version,content_id
+  appendOnly=0 hashable=0
 table=corpus_provider_counts
   col=model_id type=text null=0 default=- role=-
   col=model_version type=text null=0 default=- role=-

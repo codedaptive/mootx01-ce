@@ -103,6 +103,30 @@ public struct CountsGrowthAnchor: Sendable, Equatable {
     public let vocabSize: Int
 }
 
+/// A crash-durable, reference-only delta folded after the provider's persisted
+/// base counts snapshot. Canonical text remains owned by the content source and
+/// is resolved by identity when the accumulator is rebuilt after reopen.
+public struct PersistedCountsReference: Sendable, Equatable {
+    public let modelID: String
+    public let modelVersion: String
+    public let contentID: String
+    public let revision: Int64
+    public let digest: String
+    public let updatedAt: Date
+
+    public init(
+        modelID: String, modelVersion: String, contentID: String,
+        revision: Int64, digest: String, updatedAt: Date
+    ) {
+        self.modelID = modelID
+        self.modelVersion = modelVersion
+        self.contentID = contentID
+        self.revision = revision
+        self.digest = digest
+        self.updatedAt = updatedAt
+    }
+}
+
 /// Storage for a trainable embedding provider's maintained counts.
 ///
 /// One row per (modelID, modelVersion). `upsert` writes/replaces it; `load`
@@ -120,7 +144,7 @@ public actor CorpusProviderCountsStore {
     /// the nullable entity ext slots forward-compat reservation (written NULL / omitted in 1.0).
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitCounts",
-        version: 1,
+        version: 2,
         tables: [
             TableDeclaration(
                 name: "corpus_provider_counts",
@@ -139,6 +163,19 @@ public actor CorpusProviderCountsStore {
                 ],
                 primaryKey: ["model_id", "model_version"]
                 // appendOnly defaults to false: an update UPSERTs the row in place.
+            ),
+            TableDeclaration(
+                name: "corpus_provider_count_references",
+                columns: [
+                    .text("model_id", nullable: false),
+                    .text("model_version", nullable: false),
+                    .text("content_id", nullable: false),
+                    .int("revision", nullable: false),
+                    .text("digest", nullable: false),
+                    .timestamp("updated_at", nullable: false),
+                    .json("ext", nullable: true)
+                ],
+                primaryKey: ["model_id", "model_version", "content_id"]
             )
         ],
         indices: []
@@ -212,9 +249,65 @@ public actor CorpusProviderCountsStore {
         return CountsGrowthAnchor(documentCount: Int(docCount), vocabSize: Int(vocabSize))
     }
 
+    /// Append an idempotent reference delta through a caller-owned transaction.
+    /// The row deliberately contains no canonical text or token inventory.
+    public func upsertReference(
+        _ row: PersistedCountsReference, into rowStore: any RowStore
+    ) async throws {
+        _ = try await rowStore.upsert(
+            table: "corpus_provider_count_references",
+            values: [
+                "model_id": .text(row.modelID),
+                "model_version": .text(row.modelVersion),
+                "content_id": .text(row.contentID),
+                "revision": .int(row.revision),
+                "digest": .text(row.digest),
+                "updated_at": .timestamp(row.updatedAt)
+            ],
+            conflictColumns: ["model_id", "model_version", "content_id"]
+        )
+    }
+
+    /// Load deterministic reference deltas for one exact provider generation.
+    public func references(modelID: String, modelVersion: String) async throws
+        -> [PersistedCountsReference]
+    {
+        let rows = try await storage.rowStore.query(
+            table: "corpus_provider_count_references",
+            where: .and([
+                .eq(Column(table: "corpus_provider_count_references", name: "model_id"),
+                    .text(modelID)),
+                .eq(Column(table: "corpus_provider_count_references", name: "model_version"),
+                    .text(modelVersion))
+            ]),
+            orderBy: [], limit: nil, offset: nil)
+        return rows.compactMap(Self.decodeReference).sorted {
+            ($0.contentID, $0.revision, $0.digest) < ($1.contentID, $1.revision, $1.digest)
+        }
+    }
+
+    /// A full-corpus provider retrain subsumes its queued deltas. Delete them
+    /// in the same transaction that publishes the replacement basis+counts.
+    public func deleteReferences(
+        modelID: String, modelVersion: String, into rowStore: any RowStore
+    ) async throws {
+        _ = try await rowStore.delete(
+            table: "corpus_provider_count_references",
+            where: .and([
+                .eq(Column(table: "corpus_provider_count_references", name: "model_id"),
+                    .text(modelID)),
+                .eq(Column(table: "corpus_provider_count_references", name: "model_version"),
+                    .text(modelVersion))
+            ]))
+    }
+
     /// Delete every counts row. Used by `Corpus.destroyRecallIndex()` so a
     /// destroyed corpus leaves no orphaned counts behind.
     public func deleteAll() async throws {
+        _ = try await storage.rowStore.delete(
+            table: "corpus_provider_count_references",
+            where: .isTrue
+        )
         _ = try await storage.rowStore.delete(
             table: "corpus_provider_counts",
             where: .isTrue
@@ -246,6 +339,19 @@ public actor CorpusProviderCountsStore {
             vocabSize: Int(vocabSize),
             updatedAt: updatedAt
         )
+    }
+
+    private static func decodeReference(_ row: StorageRow) -> PersistedCountsReference? {
+        guard case let .text(modelID) = row["model_id"] ?? .null,
+              case let .text(modelVersion) = row["model_version"] ?? .null,
+              case let .text(contentID) = row["content_id"] ?? .null,
+              case let .int(revision) = row["revision"] ?? .null,
+              case let .text(digest) = row["digest"] ?? .null,
+              let updatedAt = decodeDate(row["updated_at"])
+        else { return nil }
+        return PersistedCountsReference(
+            modelID: modelID, modelVersion: modelVersion, contentID: contentID,
+            revision: revision, digest: digest, updatedAt: updatedAt)
     }
 
     /// Decode `updated_at` tolerant of `.timestamp` (InMemory) and `.text`

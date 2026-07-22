@@ -228,7 +228,8 @@ struct CorpusContentBoundaryTests {
         #expect(names == ["corpus_index_state", "corpus_provider_coverage",
                           "corpus_provider_configuration",
                           "iix_termfreqs", "iix_doclens",
-                          "corpus_provider_basis", "corpus_provider_counts"])
+                          "corpus_provider_basis", "corpus_provider_counts",
+                          "corpus_provider_count_references"])
         // No column named "text" anywhere in the attached profile — there
         // is no place a verbatim copy could land.
         for table in CorpusSchemaProfile.attachedDeclaration.tables {

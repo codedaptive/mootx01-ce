@@ -70,7 +70,7 @@ struct TrainableEmbeddingBasisTests {
         // RI fixture corpus is token arrays; join to raw texts. defaultKeywordTokens
         // tokenizes these back to the identical arrays (space-separated ASCII words).
         let texts = fixture.corpus.map { $0.joined(separator: " ") }
-        let provider = RandomIndexingProvider(modelVersion: "1.0.0")
+        let provider = RandomIndexingProvider()
         provider.trainOnCorpus(texts: texts)
         let blob = provider.serializeBasis()
         let expected = Data(base64Encoded: fixture.blobBase64)!
@@ -81,7 +81,7 @@ struct TrainableEmbeddingBasisTests {
     func ppmiSeamMatchesFixture() throws {
         let fixture = try loadArrayFixture("ppmi_basis_blob.json")
         let texts = fixture.corpus.map { $0.joined(separator: " ") }
-        let provider = PpmiProvider(modelVersion: "1.0.0")
+        let provider = PpmiProvider()
         provider.trainOnCorpus(texts: texts)
         let blob = provider.serializeBasis()
         let expected = Data(base64Encoded: fixture.blobBase64)!
@@ -96,7 +96,7 @@ struct TrainableEmbeddingBasisTests {
         // construction config the CALLER chooses, while `trainOnCorpus` governs
         // only the train+finalize SEQUENCE. Match the fixture's construction so
         // the trained state — and thus the blob — is byte-identical.
-        let provider = LsaProvider(modelVersion: "1.0.0", rank: 3, svdSweeps: 30)
+        let provider = LsaProvider(rank: 3, svdSweeps: 30)
         provider.trainOnCorpus(texts: fixture.corpus)
         let blob = provider.serializeBasis()
         let expected = Data(base64Encoded: fixture.blobBase64)!
@@ -110,7 +110,7 @@ struct TrainableEmbeddingBasisTests {
         // Rank, iterations, and seeds are construction config the CALLER chooses;
         // `trainOnCorpus` governs only the train+finalize SEQUENCE. Match the
         // fixture's construction so the trained state is byte-identical.
-        let provider = NmfProvider(modelVersion: "1.0.0", rank: 3, maxIterations: 100)
+        let provider = NmfProvider(rank: 3, maxIterations: 100)
         provider.trainOnCorpus(texts: fixture.corpus)
         let blob = provider.serializeBasis()
         let expected = Data(base64Encoded: fixture.blobBase64)!

@@ -675,21 +675,27 @@ public extension GeniusLocusKit {
         let store = SharedContentMigrationStore(storage: storage)
         guard var record = try await store.load(),
               record.state == .reclaimPending else { return nil }
+        // Remove the row-level inventories BEFORE physical maintenance. Saving
+        // this compact reclaimPending record first makes the freed pages part
+        // of the VACUUM itself. Trimming after VACUUM recreated about 60 MB of
+        // freelist on the 98k-Drawer qualification estate. A crash here is
+        // safe: verification is already complete and the next call retries
+        // maintenance from the same reclaimPending state.
+        if record.legacyChunkCount == nil {
+            record.legacyChunkCount = record.legacyChunkIDs.count
+        }
+        if record.legacyVectorKeyCount == nil {
+            record.legacyVectorKeyCount = record.legacyVectorKeys.count
+        }
+        record.legacyChunkIDs = []
+        record.legacyVectorKeys = []
+        record.protectedBaseline = [:]
+        try await store.save(record, now: now)
         var report: StorageMaintenanceReport?
         if let maintenance = storage as? any StorageMaintenance {
             report = try await maintenance.performMaintenance()
         }
         record.reclaimedBytes = report?.reclaimedBytes ?? 0
-        // Trim the consumed evidence (P6): the deletion inventory and the
-        // protected baseline exist to drive and verify the migration; once
-        // physically reclaimed, only the outcome (state, counts, cursor,
-        // reclaimed bytes) stays durable — a 110k-chunk / 1.1M-key estate
-        // otherwise carries ~60 MB of record forever.
-        record.legacyChunkCount = record.legacyChunkIDs.count
-        record.legacyVectorKeyCount = record.legacyVectorKeys.count
-        record.legacyChunkIDs = []
-        record.legacyVectorKeys = []
-        record.protectedBaseline = [:]
         record.state = .complete
         try await store.save(record, now: now)
         return report

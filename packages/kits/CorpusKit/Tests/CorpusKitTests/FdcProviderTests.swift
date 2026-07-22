@@ -438,4 +438,10 @@ struct FdcConformanceTests {
                 "engram drift for \"\(b.text)\"")
         }
     }
+
+    @Test("estate-scale classifier regression remains cross-port stable")
+    func estateScaleClassifierRegression() {
+        let text = "TASK:MXE-2026-0151-VERIFY|FILES:hydration.rs|PATTERNS:stale-inline-comment:CLOSED(v3+v3+v2=8)|TESTS:4/4-exit0|VERDICT:PASS"
+        #expect(FDC.encode(text) == "700")
+    }
 }

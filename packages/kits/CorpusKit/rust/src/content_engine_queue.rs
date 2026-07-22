@@ -274,7 +274,7 @@ impl CorpusContentEngine {
 
         let mut encoded_ids: Vec<String> = Vec::new();
         let mut completions: Vec<(JobId, ObservationStatus)> = Vec::with_capacity(batch.len());
-        let mut counts_updates: Vec<(String, String)> = Vec::new();
+        let mut counts_updates: Vec<(String, i64, String, String)> = Vec::new();
         let mut checkpoints: Vec<CorpusIndexState> = Vec::new();
         let mut prepared_upserts: HashSet<(String, i64, String)> = HashSet::new();
         for job in &batch {
@@ -315,7 +315,7 @@ impl CorpusContentEngine {
                             prepared_upserts
                                 .retain(|(content_id, _, _)| content_id != &payload.content_id);
                             counts_updates
-                                .retain(|(content_id, _)| content_id != &payload.content_id);
+                                .retain(|(content_id, _, _, _)| content_id != &payload.content_id);
                         }
                         if let Some(update) = job_counts_update {
                             counts_updates.push(update);
@@ -755,11 +755,32 @@ mod tests {
             .load("retry-counts-v1", "1.0.0")
             .expect("load counts")
             .expect("counts row");
-        assert_eq!(
-            persisted.document_count, 2,
-            "failed attempt must restore the in-memory accumulator before retry"
-        );
+        assert_eq!(persisted.document_count, 1, "base snapshot stays compact");
+        let references = CorpusProviderCountsStore::new(Arc::clone(&storage))
+            .references("retry-counts-v1", "1.0.0")
+            .expect("load references");
+        assert_eq!(references.len(), 1, "retry must persist one exact delta");
+        assert_eq!(engine.maintained_document_count(), 2);
         drop(engine);
+        let reopened = CorpusContentEngine::open(
+            Arc::clone(&storage),
+            CorpusContentConfiguration::new(
+                CorpusOperatingMode::Standalone,
+                CorpusIndexUnitPolicy::WholeContent,
+            )
+            .expect("configuration"),
+            Arc::clone(&source) as Arc<dyn crate::CorpusContentSource>,
+            vec![EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(RetryCountsProvider::default()),
+            }],
+        )
+        .expect("reopen engine");
+        assert_eq!(
+            reopened.maintained_document_count(),
+            2,
+            "reopen must replay the durable reference exactly once"
+        );
+        drop(reopened);
         drop(source);
         drop(storage);
         let _ = std::fs::remove_file(&path);

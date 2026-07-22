@@ -303,6 +303,58 @@ struct CorpusContentEngineTests {
         }
     }
 
+    @Test func queuePersistsCompactCountsReferenceAndReplaysItOnReopen() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            _ = try await store.put(
+                "initial training vocabulary", id: "drawer-anchor", now: now)
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let baseBefore = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            let record = try await store.put(
+                "queue delta remains reference only", id: "drawer-delta", now: now)
+            let job = ContentIndexJob(
+                change: .upsert(
+                    id: record.id, revision: record.revision, digest: record.digest),
+                cursor: "delta-1")
+            let prepared = try await engine.prepareQueueJob(
+                job, now: now, contentAlreadyPrepared: false)
+            try await engine.commitQueueBatch(
+                checkpoints: prepared.checkpoints,
+                countsUpdates: prepared.countsUpdate.map { [$0] } ?? [],
+                now: now)
+
+            let baseAfter = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(baseAfter.counts == baseBefore.counts)
+            #expect(baseAfter.documentCount == baseBefore.documentCount)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_count_references", where: nil) == 1)
+            #expect(await engine.maintainedDocumentCount() == 2)
+
+            let reopened = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            #expect(await reopened.maintainedDocumentCount() == 2)
+
+            let replay = try await reopened.prepareQueueJob(
+                job, now: now, contentAlreadyPrepared: false)
+            #expect(replay.countsUpdate == nil)
+            try await reopened.commitQueueBatch(
+                checkpoints: replay.checkpoints, countsUpdates: [], now: now)
+            #expect(await reopened.maintainedDocumentCount() == 2)
+        }
+    }
+
     // MARK: - Standalone passages
 
     @Test func passageModeIndexesRangesAndAggregatesToContentID() async throws {

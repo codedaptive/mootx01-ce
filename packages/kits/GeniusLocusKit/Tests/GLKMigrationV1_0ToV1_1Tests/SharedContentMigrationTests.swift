@@ -397,6 +397,46 @@ struct SharedContentMigrationTests {
         await reopened.close()
     }
 
+    @Test func reclaimCompactsLargeInventoryBeforeVacuum() async throws {
+        let (kit, handle, storage, _, url) = try await makeLegacyEstate(
+            drawerContents: ["inventory compaction fixture"])
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await kit.runSharedContentMigration(handle: handle, now: now)
+
+        // Model the large qualification record without making the fast suite
+        // carry the full million-row inventory.
+        let store = SharedContentMigrationStore(storage: storage)
+        var record = try #require(try await store.load())
+        let padding = String(repeating: "x", count: 120)
+        record.legacyChunkIDs = (0..<25_000).map {
+            String(format: "chunk-%08d-%@", $0, padding)
+        }
+        record.legacyVectorKeys = (0..<25_000).map {
+            String(format: "vector-%08d-%@", $0, padding)
+        }
+        try await store.save(record, now: now)
+
+        let report = try #require(
+            try await kit.completeSharedContentReclaim(handle: handle, now: now))
+        #expect(report.freelistPagesAfter == 0)
+        let completed = try #require(try await store.load())
+        #expect(completed.legacyChunkCount == 25_000)
+        #expect(completed.legacyVectorKeyCount == 25_000)
+        #expect(completed.legacyChunkIDs.isEmpty)
+        #expect(completed.legacyVectorKeys.isEmpty)
+
+        // The post-maintenance completion save must not recreate the removed
+        // inventory as freelist. This fails when compaction occurs after the
+        // VACUUM even though the maintenance report itself said zero.
+        let maintenance = try #require(storage as? any StorageMaintenance)
+        let remainingReclaimableBytes = try await maintenance.estimatedReclaimableBytes()
+        let walURL = URL(fileURLWithPath: url.path + "-wal")
+        let walBytes = (try? FileManager.default.attributesOfItem(atPath: walURL.path)[.size]
+            as? NSNumber)?.int64Value ?? 0
+        #expect(remainingReclaimableBytes == walBytes,
+                "post-completion reclaimable bytes must be WAL only, never freelist pages")
+    }
+
     // MARK: - Ensemble upgrade (add a provider to a migrated estate)
 
     @Test func ensembleUpgradeCoversAddedProviderAndStaysDarkUntilThen() async throws {

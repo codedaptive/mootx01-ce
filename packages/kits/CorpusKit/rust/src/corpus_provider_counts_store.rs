@@ -69,6 +69,18 @@ pub struct CountsGrowthAnchor {
     pub vocab_size: usize,
 }
 
+/// Crash-durable, reference-only delta folded after a provider's persisted
+/// base snapshot. Canonical text is resolved from the content source on reopen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedCountsReference {
+    pub model_id: String,
+    pub model_version: String,
+    pub content_id: String,
+    pub revision: i64,
+    pub digest: String,
+    pub updated_at_secs: i64,
+}
+
 /// Storage for a trainable embedding provider's maintained counts.
 ///
 /// One row per (model_id, model_version). `upsert` writes/replaces it; `load`
@@ -86,24 +98,43 @@ impl CorpusProviderCountsStore {
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "CorpusKitCounts",
-            1,
-            vec![TableDeclaration::new(
-                "corpus_provider_counts",
-                vec![
-                    ColumnDeclaration::text("model_id"),
-                    ColumnDeclaration::text("model_version"),
-                    // BLOB: the provider-serialized raw counts bytes.
-                    ColumnDeclaration::blob("counts"),
-                    // INTEGER growth anchors — NOT Bool flags.
-                    ColumnDeclaration::int("doc_count"),
-                    ColumnDeclaration::int("vocab_size"),
-                    // TIMESTAMP maps to TEXT ISO8601 (schema invariant) — never REAL.
-                    ColumnDeclaration::timestamp("updated_at"),
-                    // nullable entity ext slots forward-compat slot; nullable JSON; omitted on upsert in 1.0.
-                    ColumnDeclaration::json("ext").nullable(),
-                ],
-                vec!["model_id".to_string(), "model_version".to_string()],
-            )],
+            2,
+            vec![
+                TableDeclaration::new(
+                    "corpus_provider_counts",
+                    vec![
+                        ColumnDeclaration::text("model_id"),
+                        ColumnDeclaration::text("model_version"),
+                        // BLOB: the provider-serialized raw counts bytes.
+                        ColumnDeclaration::blob("counts"),
+                        // INTEGER growth anchors — NOT Bool flags.
+                        ColumnDeclaration::int("doc_count"),
+                        ColumnDeclaration::int("vocab_size"),
+                        // TIMESTAMP maps to TEXT ISO8601 (schema invariant) — never REAL.
+                        ColumnDeclaration::timestamp("updated_at"),
+                        // nullable entity ext slots forward-compat slot; nullable JSON; omitted on upsert in 1.0.
+                        ColumnDeclaration::json("ext").nullable(),
+                    ],
+                    vec!["model_id".to_string(), "model_version".to_string()],
+                ),
+                TableDeclaration::new(
+                    "corpus_provider_count_references",
+                    vec![
+                        ColumnDeclaration::text("model_id"),
+                        ColumnDeclaration::text("model_version"),
+                        ColumnDeclaration::text("content_id"),
+                        ColumnDeclaration::int("revision"),
+                        ColumnDeclaration::text("digest"),
+                        ColumnDeclaration::timestamp("updated_at"),
+                        ColumnDeclaration::json("ext").nullable(),
+                    ],
+                    vec![
+                        "model_id".to_string(),
+                        "model_version".to_string(),
+                        "content_id".to_string(),
+                    ],
+                ),
+            ],
         )
     }
 
@@ -133,9 +164,15 @@ impl CorpusProviderCountsStore {
             TypedValue::Text(row.model_version.clone()),
         );
         values.insert("counts".into(), TypedValue::Blob(row.counts.clone()));
-        values.insert("doc_count".into(), TypedValue::Int(row.document_count as i64));
+        values.insert(
+            "doc_count".into(),
+            TypedValue::Int(row.document_count as i64),
+        );
         values.insert("vocab_size".into(), TypedValue::Int(row.vocab_size as i64));
-        values.insert("updated_at".into(), TypedValue::Timestamp(row.updated_at_secs));
+        values.insert(
+            "updated_at".into(),
+            TypedValue::Timestamp(row.updated_at_secs),
+        );
         row_store
             .upsert(
                 "corpus_provider_counts",
@@ -181,9 +218,110 @@ impl CorpusProviderCountsStore {
         }))
     }
 
+    /// Insert an idempotent reference delta through the caller's transaction.
+    /// No canonical text or token inventory is stored in this row.
+    pub fn upsert_reference_into(
+        &self,
+        row: &PersistedCountsReference,
+        row_store: &std::sync::Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        let mut values = BTreeMap::new();
+        values.insert("model_id".into(), TypedValue::Text(row.model_id.clone()));
+        values.insert(
+            "model_version".into(),
+            TypedValue::Text(row.model_version.clone()),
+        );
+        values.insert(
+            "content_id".into(),
+            TypedValue::Text(row.content_id.clone()),
+        );
+        values.insert("revision".into(), TypedValue::Int(row.revision));
+        values.insert("digest".into(), TypedValue::Text(row.digest.clone()));
+        values.insert(
+            "updated_at".into(),
+            TypedValue::Timestamp(row.updated_at_secs),
+        );
+        row_store
+            .upsert(
+                "corpus_provider_count_references",
+                values,
+                &[
+                    "model_id".to_string(),
+                    "model_version".to_string(),
+                    "content_id".to_string(),
+                ],
+            )
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn references(
+        &self,
+        model_id: &str,
+        model_version: &str,
+    ) -> CorpusKitResult<Vec<PersistedCountsReference>> {
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+        ]);
+        let mut references: Vec<_> = self
+            .storage
+            .row_store()
+            .query(
+                "corpus_provider_count_references",
+                Some(&predicate),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?
+            .iter()
+            .filter_map(decode_reference)
+            .collect();
+        references.sort_by(|a, b| {
+            (&a.content_id, a.revision, &a.digest).cmp(&(&b.content_id, b.revision, &b.digest))
+        });
+        Ok(references)
+    }
+
+    pub fn delete_references_into(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        row_store: &std::sync::Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+        ]);
+        row_store
+            .delete("corpus_provider_count_references", &predicate)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        Ok(())
+    }
+
     /// Delete every counts row. Used by `Corpus::destroy_recall_index` so a
     /// destroyed corpus leaves no orphaned counts behind.
     pub fn delete_all(&self) -> CorpusKitResult<()> {
+        self.storage
+            .row_store()
+            .delete(
+                "corpus_provider_count_references",
+                &StoragePredicate::IsTrue,
+            )
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         self.storage
             .row_store()
             .delete("corpus_provider_counts", &StoragePredicate::IsTrue)
@@ -204,9 +342,41 @@ impl CorpusProviderCountsStore {
         ]);
         self.storage
             .row_store()
-            .query("corpus_provider_counts", Some(&predicate), &[], Some(1), None)
+            .query(
+                "corpus_provider_counts",
+                Some(&predicate),
+                &[],
+                Some(1),
+                None,
+            )
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))
     }
+}
+
+fn decode_reference(row: &StorageRow) -> Option<PersistedCountsReference> {
+    Some(PersistedCountsReference {
+        model_id: match row.get("model_id") {
+            Some(TypedValue::Text(value)) => value.clone(),
+            _ => return None,
+        },
+        model_version: match row.get("model_version") {
+            Some(TypedValue::Text(value)) => value.clone(),
+            _ => return None,
+        },
+        content_id: match row.get("content_id") {
+            Some(TypedValue::Text(value)) => value.clone(),
+            _ => return None,
+        },
+        revision: match row.get("revision") {
+            Some(TypedValue::Int(value)) => *value,
+            _ => return None,
+        },
+        digest: match row.get("digest") {
+            Some(TypedValue::Text(value)) => value.clone(),
+            _ => return None,
+        },
+        updated_at_secs: decode_updated_at_secs(row.get("updated_at"))?,
+    })
 }
 
 /// Decode a counts row, tolerant of BOTH the semantic `Timestamp(i64)` form a

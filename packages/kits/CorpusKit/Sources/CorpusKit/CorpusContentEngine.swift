@@ -357,6 +357,11 @@ public actor CorpusContentEngine {
                 basisDigest: digest))
         }
         self.slots = built
+        // A base counts blob is compacted only at provider publication. Replay
+        // the reference-only deltas accumulated since that snapshot so reopen
+        // restores the exact live growth anchor without rewriting estate-scale
+        // blobs for every Drawer.
+        try await reloadCountsFromStorage()
         try await invertedIndex.open()
     }
 
@@ -444,6 +449,13 @@ public actor CorpusContentEngine {
                 table: "corpus_provider_counts", where: .and([
                     .eq(Column(table: "corpus_provider_counts", name: "model_id"), .text(modelID)),
                     .eq(Column(table: "corpus_provider_counts", name: "model_version"), .text(modelVersion))
+                ]))
+            _ = try await storage.rowStore.delete(
+                table: "corpus_provider_count_references", where: .and([
+                    .eq(Column(table: "corpus_provider_count_references", name: "model_id"),
+                        .text(modelID)),
+                    .eq(Column(table: "corpus_provider_count_references", name: "model_version"),
+                        .text(modelVersion))
                 ]))
             if !desiredModelIDs.contains(modelID) {
                 _ = try await storage.rowStore.delete(
@@ -891,7 +903,9 @@ public actor CorpusContentEngine {
         _ job: ContentIndexJob, now: Date, contentAlreadyPrepared: Bool
     ) async throws -> (
         checkpoints: [CorpusIndexState],
-        countsUpdate: (contentID: String, text: String)?
+        countsUpdate: (
+            contentID: String, revision: Int64, digest: String, text: String
+        )?
     ) {
         if countsReloadRequired {
             try await reloadCountsFromStorage()
@@ -899,7 +913,9 @@ public actor CorpusContentEngine {
         }
         try validate(id: job.contentID)
         var checkpoints: [CorpusIndexState] = []
-        var countsUpdate: (contentID: String, text: String)?
+        var countsUpdate: (
+            contentID: String, revision: Int64, digest: String, text: String
+        )?
         switch job.kind {
         case .upsert:
             guard let digest = job.digest else {
@@ -916,13 +932,19 @@ public actor CorpusContentEngine {
                     "upsert for \(job.contentID) rev \(job.revision) does not match the current "
                     + "record rev \(record.revision) — stale job rejected without checkpoint advance")
             }
+            let previouslyIndexed = try await indexState.state(for: record.id) != nil
             if !contentAlreadyPrepared,
                let checkpoint = try await prepareIndex(
                     record: record, appliedCursor: job.cursor, force: false, now: now,
                     slotScope: .all, maintainCounts: false)
             {
                 checkpoints.append(checkpoint)
-                countsUpdate = (record.id, record.text)
+                // Counts are a monotonic vocabulary-growth anchor, not a
+                // revision inventory. Fold a canonical identity only once;
+                // later revisions replace derived rows without inflating it.
+                if !previouslyIndexed {
+                    countsUpdate = (record.id, record.revision, record.digest, record.text)
+                }
             }
         case .remove:
             try await clearDerivedState(id: job.contentID)
@@ -940,34 +962,36 @@ public actor CorpusContentEngine {
     /// the new pair, never a checkpoint that outruns its maintained counts.
     func commitQueueBatch(
         checkpoints: [CorpusIndexState],
-        countsUpdates: [(contentID: String, text: String)],
+        countsUpdates: [(
+            contentID: String, revision: Int64, digest: String, text: String
+        )],
         now: Date
     ) async throws {
-        var countsRows: [PersistedCounts] = []
+        var references: [PersistedCountsReference] = []
         if !countsUpdates.isEmpty {
             for index in slots.indices {
                 guard let accumulator = slots[index].countsAccumulator else { continue }
                 for update in countsUpdates {
                     accumulator.addToCounts(text: update.text)
                     slots[index].countsDocumentCount += 1
+                    references.append(PersistedCountsReference(
+                        modelID: slots[index].provider.modelID,
+                        modelVersion: slots[index].provider.modelVersion,
+                        contentID: update.contentID,
+                        revision: update.revision,
+                        digest: update.digest,
+                        updatedAt: now))
                 }
-                countsRows.append(PersistedCounts(
-                    modelID: slots[index].provider.modelID,
-                    modelVersion: slots[index].provider.modelVersion,
-                    counts: accumulator.serializeCounts(),
-                    documentCount: slots[index].countsDocumentCount,
-                    vocabSize: accumulator.countsVocabularySize,
-                    updatedAt: now))
             }
         }
 
-        let pendingCountsRows = countsRows
+        let pendingReferences = references
         let countsStore = self.countsStore
         let indexState = self.indexState
         do {
             try await storage.transaction(isolation: .serializable) { txn in
-                for row in pendingCountsRows {
-                    try await countsStore.upsert(row, into: txn.rowStore)
+                for row in pendingReferences {
+                    try await countsStore.upsertReference(row, into: txn.rowStore)
                 }
                 for checkpoint in checkpoints {
                     try await indexState.advance(checkpoint, into: txn.rowStore)
@@ -1006,6 +1030,19 @@ public actor CorpusContentEngine {
                 slots[index].countsDocumentCount = persisted.documentCount
             } else {
                 slots[index].countsDocumentCount = 0
+            }
+            for reference in try await countsStore.references(
+                modelID: slots[index].provider.modelID,
+                modelVersion: slots[index].provider.modelVersion)
+            {
+                // A reference is identity-scoped. If the Drawer advanced, fold
+                // its current canonical text once; if it was removed, it no
+                // longer contributes to the post-base delta on reopen.
+                guard let record = try await source.record(for: reference.contentID) else {
+                    continue
+                }
+                accumulator.addToCounts(text: record.text)
+                slots[index].countsDocumentCount += 1
             }
             slots[index].countsAccumulator = accumulator
         }
@@ -1421,6 +1458,10 @@ public actor CorpusContentEngine {
                 if let countsRow {
                     try await countsStore.upsert(countsRow, into: txn.rowStore)
                 }
+                try await countsStore.deleteReferences(
+                    modelID: provider.modelID,
+                    modelVersion: provider.modelVersion,
+                    into: txn.rowStore)
             }
             slots[slotIndex].provider = provider
             slots[slotIndex].basisDigest = digest
@@ -1475,13 +1516,20 @@ public actor CorpusContentEngine {
     private func persistCounts(now: Date) async throws {
         for slot in slots {
             guard let accumulator = slot.countsAccumulator else { continue }
-            try await countsStore.upsert(PersistedCounts(
+            let row = PersistedCounts(
                 modelID: slot.provider.modelID,
                 modelVersion: slot.provider.modelVersion,
                 counts: accumulator.serializeCounts(),
                 documentCount: slot.countsDocumentCount,
                 vocabSize: accumulator.countsVocabularySize,
-                updatedAt: now))
+                updatedAt: now)
+            let countsStore = self.countsStore
+            try await storage.transaction(isolation: .serializable) { txn in
+                try await countsStore.upsert(row, into: txn.rowStore)
+                try await countsStore.deleteReferences(
+                    modelID: row.modelID, modelVersion: row.modelVersion,
+                    into: txn.rowStore)
+            }
         }
     }
 
@@ -1496,6 +1544,12 @@ public actor CorpusContentEngine {
     /// semantics: documents folded are canonical records, not chunks).
     public func maintainedVocabAnchor() -> Int {
         slots.compactMap { $0.countsAccumulator?.countsVocabularySize }.max() ?? 0
+    }
+
+    /// Canonical records represented by the base snapshot plus durable deltas.
+    public func maintainedDocumentCount() -> Int {
+        slots.filter { $0.countsAccumulator != nil }
+            .map(\.countsDocumentCount).max() ?? 0
     }
 
     // MARK: - Recall

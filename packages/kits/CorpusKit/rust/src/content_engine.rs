@@ -19,7 +19,9 @@ use crate::content::{
     CorpusContentChange, CorpusContentId, CorpusContentRecord, CorpusContentSource,
 };
 use crate::corpus::{Corpus, EmbeddingModelConfig, EncodeSpeed, FloatLaneOutcome, ProviderSlot};
-use crate::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCounts};
+use crate::corpus_provider_counts_store::{
+    CorpusProviderCountsStore, PersistedCounts, PersistedCountsReference,
+};
 use crate::document_store::CorpusDocumentStore;
 use crate::engine::inverted_index_store::InvertedIndexStore;
 use crate::error::{CorpusKitError, CorpusKitResult};
@@ -319,7 +321,7 @@ impl CorpusContentEngine {
             slots.push(Corpus::build_slot(model, &basis_store, &counts_store)?);
         }
 
-        Ok(CorpusContentEngine {
+        let engine = CorpusContentEngine {
             storage,
             configuration,
             source,
@@ -341,7 +343,10 @@ impl CorpusContentEngine {
             train_fault_after_model: Mutex::new(None),
             train_fault_before_commit_model: Mutex::new(None),
             backfill_fault_hook: Mutex::new(None),
-        })
+        };
+        // Rehydrate the base snapshot plus crash-durable reference deltas.
+        engine.reload_counts_from_storage()?;
+        Ok(engine)
     }
 
     /// STANDALONE convenience: construct a whole-content standalone engine
@@ -847,7 +852,11 @@ impl CorpusContentEngine {
         let desired_model_ids: BTreeSet<String> =
             desired.iter().map(|key| key.model_id.clone()).collect();
         for (model_id, model_version) in retired {
-            for table in ["corpus_provider_basis", "corpus_provider_counts"] {
+            for table in [
+                "corpus_provider_basis",
+                "corpus_provider_counts",
+                "corpus_provider_count_references",
+            ] {
                 self.storage
                     .row_store()
                     .delete(
@@ -1211,7 +1220,7 @@ impl CorpusContentEngine {
         job: &ContentIndexJob,
         now_millis: i64,
         content_already_prepared: bool,
-    ) -> CorpusKitResult<(Vec<CorpusIndexState>, Option<(String, String)>)> {
+    ) -> CorpusKitResult<(Vec<CorpusIndexState>, Option<(String, i64, String, String)>)> {
         if self.counts_reload_required.load(Ordering::Acquire) {
             self.reload_counts_from_storage()?;
             self.counts_reload_required.store(false, Ordering::Release);
@@ -1239,6 +1248,7 @@ impl CorpusContentEngine {
                         job.content_id, job.revision, record.revision
                     )));
                 }
+                let previously_indexed = self.index_state.state(&record.id)?.is_some();
                 if !content_already_prepared {
                     if let Some(checkpoint) = self.prepare_index_record(
                         &record,
@@ -1248,7 +1258,16 @@ impl CorpusContentEngine {
                         SlotScope::All,
                         false,
                     )? {
-                        counts_update = Some((record.id.clone(), record.text.clone()));
+                        // Counts are a monotonic vocabulary-growth anchor, not
+                        // a revision inventory. Fold one content identity once.
+                        if !previously_indexed {
+                            counts_update = Some((
+                                record.id.clone(),
+                                record.revision,
+                                record.digest.clone(),
+                                record.text.clone(),
+                            ));
+                        }
                         checkpoints.push(checkpoint);
                     }
                 }
@@ -1274,10 +1293,10 @@ impl CorpusContentEngine {
     pub(crate) fn commit_queue_batch(
         &self,
         checkpoints: &[CorpusIndexState],
-        counts_updates: &[(String, String)],
+        counts_updates: &[(String, i64, String, String)],
         now_millis: i64,
     ) -> CorpusKitResult<()> {
-        let mut counts_rows = Vec::new();
+        let mut references = Vec::new();
         if !counts_updates.is_empty() {
             for slot in &self.slots {
                 let (model_id, model_version) = {
@@ -1292,18 +1311,18 @@ impl CorpusContentEngine {
                 let Some(state) = counts.as_mut() else {
                     continue;
                 };
-                for (_, text) in counts_updates {
+                for (content_id, revision, digest, text) in counts_updates {
                     state.accumulator.add_to_counts(text);
                     state.document_count += 1;
+                    references.push(PersistedCountsReference {
+                        model_id: model_id.clone(),
+                        model_version: model_version.clone(),
+                        content_id: content_id.clone(),
+                        revision: *revision,
+                        digest: digest.clone(),
+                        updated_at_secs: now_millis / 1000,
+                    });
                 }
-                counts_rows.push(PersistedCounts {
-                    model_id,
-                    model_version,
-                    counts: state.accumulator.serialize_counts(),
-                    document_count: state.document_count,
-                    vocab_size: state.accumulator.counts_vocabulary_size(),
-                    updated_at_secs: now_millis / 1000,
-                });
             }
         }
         let counts_store = &self.counts_store;
@@ -1312,12 +1331,12 @@ impl CorpusContentEngine {
             .storage
             .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
                 let rows = txn.row_store();
-                for counts in &counts_rows {
-                    counts_store.upsert_into(counts, &rows).map_err(|error| {
-                        persistence_kit::StorageError::BackendError {
-                            underlying: format!("queue counts: {error:?}"),
-                        }
-                    })?;
+                for reference in &references {
+                    counts_store
+                        .upsert_reference_into(reference, &rows)
+                        .map_err(|error| persistence_kit::StorageError::BackendError {
+                            underlying: format!("queue counts reference: {error:?}"),
+                        })?;
                 }
                 for checkpoint in checkpoints {
                     index_state
@@ -1367,12 +1386,22 @@ impl CorpusContentEngine {
                 ))
             })?;
             let mut accumulator = state.accumulator.reconstruct_trainable_basis(fresh_blob)?;
-            let document_count = if let Some(row) = persisted {
+            let mut document_count = if let Some(row) = persisted {
                 accumulator.restore_counts(&row.counts)?;
                 row.document_count
             } else {
                 0
             };
+            for reference in self.counts_store.references(&model_id, &model_version)? {
+                // Resolve by identity at reopen. A later revision contributes
+                // its current canonical text once; a removed identity no
+                // longer contributes to the post-base delta.
+                let Some(record) = self.source.record(&reference.content_id)? else {
+                    continue;
+                };
+                accumulator.add_to_counts(&record.text);
+                document_count += 1;
+            }
             *counts = Some(crate::corpus::CountsState {
                 accumulator,
                 document_count,
@@ -1872,6 +1901,11 @@ impl CorpusContentEngine {
                             underlying: format!("{e:?}"),
                         }
                     })?;
+                    counts_store
+                        .delete_references_into(&model_id, &model_version, &rows)
+                        .map_err(|e| persistence_kit::StorageError::BackendError {
+                            underlying: format!("{e:?}"),
+                        })?;
                     Ok(())
                 })
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
@@ -2283,7 +2317,7 @@ impl CorpusContentEngine {
             let Some(state) = counts.as_ref() else {
                 continue;
             };
-            self.counts_store.upsert(&PersistedCounts {
+            let row = PersistedCounts {
                 model_id,
                 model_version,
                 counts: state.accumulator.serialize_counts(),
@@ -2291,7 +2325,24 @@ impl CorpusContentEngine {
                 vocab_size: state.accumulator.counts_vocabulary_size(),
                 // Unix seconds per the store's field contract.
                 updated_at_secs: now_millis / 1000,
-            })?;
+            };
+            let counts_store = &self.counts_store;
+            self.storage
+                .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
+                    let rows = txn.row_store();
+                    counts_store.upsert_into(&row, &rows).map_err(|e| {
+                        persistence_kit::StorageError::BackendError {
+                            underlying: format!("{e:?}"),
+                        }
+                    })?;
+                    counts_store
+                        .delete_references_into(&row.model_id, &row.model_version, &rows)
+                        .map_err(|e| persistence_kit::StorageError::BackendError {
+                            underlying: format!("{e:?}"),
+                        })?;
+                    Ok(())
+                })
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         }
         Ok(())
     }
@@ -2306,6 +2357,21 @@ impl CorpusContentEngine {
                     .unwrap()
                     .as_ref()
                     .map(|s| s.accumulator.counts_vocabulary_size())
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Canonical records represented by the base snapshot plus durable deltas.
+    pub fn maintained_document_count(&self) -> usize {
+        self.slots
+            .iter()
+            .filter_map(|slot| {
+                slot.counts
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|state| state.document_count)
             })
             .max()
             .unwrap_or(0)

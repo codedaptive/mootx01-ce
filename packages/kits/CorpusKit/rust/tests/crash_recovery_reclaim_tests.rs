@@ -261,7 +261,16 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
         .load("random-indexing-v1", "1.1.0")
         .expect("load counts")
         .expect("counts row");
-    assert_eq!(counts.document_count, 2, "duplicate reference folded once");
+    assert_eq!(counts.document_count, 1, "base snapshot remains unchanged");
+    assert_eq!(
+        CorpusProviderCountsStore::new(Arc::clone(&storage))
+            .references("random-indexing-v1", "1.1.0")
+            .expect("load count references")
+            .len(),
+        1,
+        "duplicate reference batch must persist one exact delta"
+    );
+    assert_eq!(engine.maintained_document_count(), 2);
     let anchor = engine.maintained_vocab_anchor();
     engine.drop_ingest_queue();
 
@@ -272,6 +281,7 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
         models(),
     )
     .expect("reopen engine");
+    assert_eq!(reopened.maintained_document_count(), 2);
     assert_eq!(reopened.maintained_vocab_anchor(), anchor);
     assert_eq!(
         reopened.applied_feed_cursor().expect("cursor"),
