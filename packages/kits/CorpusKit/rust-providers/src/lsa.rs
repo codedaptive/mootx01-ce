@@ -150,9 +150,21 @@ impl LsaProvider {
     ///   cross-port conformance — do not change without updating both ports
     ///   and regenerating canonical vectors).
     pub fn new(rank: usize, svd_sweeps: usize, projection_seed: u64) -> Self {
+        Self::with_parameters("lsa-v1", "1.1.0", rank, svd_sweeps, projection_seed)
+    }
+
+    /// Build with explicit identity — the Swift `LsaProvider(modelID:modelVersion:…)`
+    /// twin (fixture tests pin the historical 1.0 envelope through this).
+    pub fn with_parameters(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        rank: usize,
+        svd_sweeps: usize,
+        projection_seed: u64,
+    ) -> Self {
         LsaProvider {
-            model_id: "lsa-v1".to_string(),
-            model_version: "1.1.0".to_string(),
+            model_id: model_id.into(),
+            model_version: model_version.into(),
             rank: rank.max(1),
             svd_sweeps,
             projection_seed,

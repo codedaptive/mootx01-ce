@@ -173,9 +173,22 @@ impl NmfProvider {
     /// - `seed`: SplitMix64 seed for factor initialization.
     /// - `projection_seed`: FloatSimHash seed.
     pub fn new(rank: usize, max_iterations: usize, seed: u64, projection_seed: u64) -> Self {
+        Self::with_parameters("nmf-v1", "1.1.0", rank, max_iterations, seed, projection_seed)
+    }
+
+    /// Build with explicit identity — the Swift `NmfProvider(modelID:modelVersion:…)`
+    /// twin (fixture tests pin the historical 1.0 envelope through this).
+    pub fn with_parameters(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        rank: usize,
+        max_iterations: usize,
+        seed: u64,
+        projection_seed: u64,
+    ) -> Self {
         NmfProvider {
-            model_id: "nmf-v1".to_string(),
-            model_version: "1.1.0".to_string(),
+            model_id: model_id.into(),
+            model_version: model_version.into(),
             rank: rank.max(1),
             max_iterations: max_iterations.max(1),
             seed,

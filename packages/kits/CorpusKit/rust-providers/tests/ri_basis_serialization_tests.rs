@@ -40,8 +40,11 @@ fn load() -> RIBasisFixture {
 
 /// Train an RI provider on the fixture corpus (the canonical training state).
 fn trained_from_fixture(f: &RIBasisFixture) -> RandomIndexingProvider {
-    use corpus_kit_providers::RI_WINDOW;
-    let mut p = RandomIndexingProvider::new();
+    use corpus_kit_providers::{RI_PROJECTION_SEED, RI_WINDOW};
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = RandomIndexingProvider::with_parameters(
+        "random-indexing-v1", "1.0.0", RI_PROJECTION_SEED);
     for doc in &f.corpus {
         let terms: Vec<&str> = doc.iter().map(String::as_str).collect();
         p.train(&terms, RI_WINDOW);

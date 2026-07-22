@@ -27,7 +27,10 @@ fn load() -> NmfBasisFixture {
 fn trained_from_fixture(f: &NmfBasisFixture) -> NmfProvider {
     use corpus_kit_providers::{NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED};
     // rank=3, iterations=100 — identical to the Swift fixture builder.
-    let mut p = NmfProvider::new(3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED);
+    // The shared fixture pins the historical 1.0 provider envelope
+    // (mirrors the Swift twin's modelVersion: "1.0.0" pinning).
+    let mut p = NmfProvider::with_parameters(
+        "nmf-v1", "1.0.0", 3, 100, NMF_FACTORIZATION_SEED, NMF_PROJECTION_SEED);
     for doc in &f.corpus {
         p.train(doc);
     }
