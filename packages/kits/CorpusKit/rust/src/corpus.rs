@@ -463,6 +463,10 @@ pub(crate) struct ProviderSlot {
 pub(crate) struct CountsState {
     pub(crate) accumulator: Box<dyn TrainableEmbeddingBasis>,
     pub(crate) document_count: usize,
+    /// The governor-facing vocabulary-growth anchor. Persisted on the counts
+    /// row in the same transaction as every reference mutation, so the
+    /// threshold decision is identical before and after a process restart.
+    pub(crate) vocab_anchor: usize,
 }
 
 // MARK: - Corpus
@@ -825,16 +829,19 @@ impl Corpus {
             let factory = trainable.serialize_basis();
             let mut accumulator = trainable.reconstruct_trainable_basis(&factory)?;
             let mut document_count = 0usize;
+            let mut vocab_anchor = 0usize;
             if let Some(persisted) =
                 counts_store.load(trainable.model_id(), trainable.model_version())?
             {
                 accumulator.restore_counts(&persisted.counts)?;
                 document_count = persisted.document_count;
+                vocab_anchor = persisted.vocab_size;
             }
             fresh_basis_blob = Some(factory);
             counts = Some(CountsState {
                 accumulator,
                 document_count,
+                vocab_anchor,
             });
         }
 

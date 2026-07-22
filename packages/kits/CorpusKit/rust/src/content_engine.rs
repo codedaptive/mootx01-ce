@@ -1421,7 +1421,16 @@ impl CorpusContentEngine {
         let _commit_guard = self.counts_commit_lock.lock().map_err(|_| {
             CorpusKitError::StoreUnavailable("counts commit lock poisoned".into())
         })?;
-        let mut references: Vec<(PersistedCountsReference, usize, String)> = Vec::new();
+        // A prior failed commit whose reload ALSO failed leaves the in-memory
+        // accumulator dirty; heal from storage before any new fold.
+        if self.counts_reload_required.load(Ordering::Acquire) {
+            self.reload_counts_from_storage()?;
+            self.counts_reload_required.store(false, Ordering::Release);
+        }
+        // (reference, slot, text, counts_document: false = revision of an
+        // already-admitted identity — fold its NOVEL text, keep the document
+        // anchor unchanged, refresh the durable reference row.)
+        let mut references: Vec<(PersistedCountsReference, usize, String, bool)> = Vec::new();
         if !counts_updates.is_empty() {
             for (slot_index, slot) in self.slots.iter().enumerate() {
                 let (model_id, model_version) = {
@@ -1437,15 +1446,18 @@ impl CorpusContentEngine {
                 }
                 let mut admitted_ids = HashSet::new();
                 for (content_id, revision, digest, text) in counts_updates {
-                    if !admitted_ids.insert(content_id.clone())
-                        || self.counts_store.has_reference(
-                            &model_id,
-                            &model_version,
-                            content_id,
-                        )?
-                    {
+                    if !admitted_ids.insert(content_id.clone()) {
                         continue;
                     }
+                    let counts_document = match self.counts_store.reference_for(
+                        &model_id,
+                        &model_version,
+                        content_id,
+                    )? {
+                        Some(existing) if existing.digest == *digest => continue,
+                        Some(_) => false,
+                        None => true,
+                    };
                     references.push((
                         PersistedCountsReference {
                             model_id: model_id.clone(),
@@ -1457,8 +1469,45 @@ impl CorpusContentEngine {
                         },
                         slot_index,
                         text.clone(),
+                        counts_document,
                     ));
                 }
+            }
+        }
+        // Fold BEFORE the durable commit so the anchors written inside the
+        // transaction reflect exactly the post-fold state — the transaction
+        // failure path below reconstructs the in-memory state from storage.
+        let mut touched_slots: BTreeSet<usize> = BTreeSet::new();
+        for (_, slot_index, text, counts_document) in &references {
+            let mut counts = self.slots[*slot_index].counts.lock().unwrap();
+            if let Some(state) = counts.as_mut() {
+                state.accumulator.add_to_counts(text);
+                if *counts_document {
+                    state.document_count += 1;
+                }
+                state.vocab_anchor = state.accumulator.counts_vocabulary_size();
+                touched_slots.insert(*slot_index);
+            }
+        }
+        let mut anchor_rows: Vec<(String, String, usize, usize)> = Vec::new();
+        for slot_index in &touched_slots {
+            let slot = &self.slots[*slot_index];
+            let (model_id, model_version) = {
+                let handle = slot.handle.lock().unwrap();
+                let provider = handle.provider();
+                (
+                    provider.model_id().to_string(),
+                    provider.model_version().to_string(),
+                )
+            };
+            let counts = slot.counts.lock().unwrap();
+            if let Some(state) = counts.as_ref() {
+                anchor_rows.push((
+                    model_id,
+                    model_version,
+                    state.document_count,
+                    state.vocab_anchor,
+                ));
             }
         }
         let counts_store = &self.counts_store;
@@ -1467,11 +1516,24 @@ impl CorpusContentEngine {
             .storage
             .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
                 let rows = txn.row_store();
-                for (reference, _, _) in &references {
+                for (reference, _, _, _) in &references {
                     counts_store
                         .upsert_reference_into(reference, &rows)
                         .map_err(|error| persistence_kit::StorageError::BackendError {
                             underlying: format!("queue counts reference: {error:?}"),
+                        })?;
+                }
+                for (model_id, model_version, document_count, vocab_anchor) in &anchor_rows {
+                    counts_store
+                        .update_anchors_into(
+                            model_id,
+                            model_version,
+                            *document_count,
+                            *vocab_anchor,
+                            &rows,
+                        )
+                        .map_err(|error| persistence_kit::StorageError::BackendError {
+                            underlying: format!("queue counts anchors: {error:?}"),
                         })?;
                 }
                 for checkpoint in checkpoints {
@@ -1497,15 +1559,6 @@ impl CorpusContentEngine {
             }
             self.counts_reload_required.store(false, Ordering::Release);
             return Err(transaction_error);
-        }
-        // The durable primary-key reference is the admission authority. Fold
-        // only after commit; the error path above reconstructs from storage.
-        for (_, slot_index, text) in references {
-            let mut counts = self.slots[slot_index].counts.lock().unwrap();
-            if let Some(state) = counts.as_mut() {
-                state.accumulator.add_to_counts(&text);
-                state.document_count += 1;
-            }
         }
         Ok(())
     }
@@ -1547,9 +1600,22 @@ impl CorpusContentEngine {
                 accumulator.add_to_counts(&record.text);
                 document_count += 1;
             }
+            // The STORED anchors are the authority: they were committed in
+            // the same transaction as each reference mutation, so a restarted
+            // process holds exactly the anchors the live process held. The
+            // rebuilt accumulator may legitimately differ in per-term folds
+            // for revised identities (it resolves current canonical text);
+            // its only behavioral consumer is the next training rebuild,
+            // which re-reads the full corpus anyway.
+            let (stored_docs, stored_vocab) = self
+                .counts_store
+                .load(&model_id, &model_version)?
+                .map(|row| (row.document_count, row.vocab_size))
+                .unwrap_or((document_count, accumulator.counts_vocabulary_size()));
             *counts = Some(crate::corpus::CountsState {
                 accumulator,
-                document_count,
+                document_count: stored_docs,
+                vocab_anchor: stored_vocab,
             });
         }
         Ok(())
@@ -2077,9 +2143,11 @@ impl CorpusContentEngine {
             *slot.basis_digest.lock().unwrap() = digest.clone();
             {
                 let mut counts = slot.counts.lock().unwrap();
+                let vocab_anchor = counts_accumulator.counts_vocabulary_size();
                 *counts = Some(crate::corpus::CountsState {
                     accumulator: counts_accumulator,
                     document_count,
+                    vocab_anchor,
                 });
             }
             digests.insert(model_id.clone(), digest);
@@ -2489,7 +2557,17 @@ impl CorpusContentEngine {
         record: &CorpusContentRecord,
         now_millis: i64,
     ) -> CorpusKitResult<()> {
-        for slot in &self.slots {
+        let _commit_guard = self.counts_commit_lock.lock().map_err(|_| {
+            CorpusKitError::StoreUnavailable("counts commit lock poisoned".into())
+        })?;
+        // A prior failed commit whose reload ALSO failed leaves the in-memory
+        // accumulator dirty; heal from storage before any new fold.
+        if self.counts_reload_required.load(Ordering::Acquire) {
+            self.reload_counts_from_storage()?;
+            self.counts_reload_required.store(false, Ordering::Release);
+        }
+        let mut references: Vec<(PersistedCountsReference, usize, bool)> = Vec::new();
+        for (slot_index, slot) in self.slots.iter().enumerate() {
             if slot.counts.lock().unwrap().is_none() {
                 continue;
             }
@@ -2498,14 +2576,16 @@ impl CorpusContentEngine {
                 let p = handle.provider();
                 (p.model_id().to_string(), p.model_version().to_string())
             };
-            if self
+            let counts_document = match self
                 .counts_store
-                .has_reference(&model_id, &model_version, &record.id)?
+                .reference_for(&model_id, &model_version, &record.id)?
             {
-                continue;
-            }
-            self.counts_store.upsert_reference_into(
-                &PersistedCountsReference {
+                Some(existing) if existing.digest == record.digest => continue,
+                Some(_) => false,
+                None => true,
+            };
+            references.push((
+                PersistedCountsReference {
                     model_id,
                     model_version,
                     content_id: record.id.clone(),
@@ -2513,13 +2593,69 @@ impl CorpusContentEngine {
                     digest: record.digest.clone(),
                     updated_at_secs: now_millis / 1000,
                 },
-                &self.storage.row_store(),
-            )?;
-            let mut counts = slot.counts.lock().unwrap();
+                slot_index,
+                counts_document,
+            ));
+        }
+        if references.is_empty() {
+            return Ok(());
+        }
+        // Fold first; the anchors written inside the transaction reflect the
+        // post-fold state exactly (restart-deterministic governor decision).
+        let mut anchor_rows: Vec<(String, String, usize, usize)> = Vec::new();
+        for (reference, slot_index, counts_document) in &references {
+            let mut counts = self.slots[*slot_index].counts.lock().unwrap();
             if let Some(state) = counts.as_mut() {
                 state.accumulator.add_to_counts(&record.text);
-                state.document_count += 1;
+                if *counts_document {
+                    state.document_count += 1;
+                }
+                state.vocab_anchor = state.accumulator.counts_vocabulary_size();
+                anchor_rows.push((
+                    reference.model_id.clone(),
+                    reference.model_version.clone(),
+                    state.document_count,
+                    state.vocab_anchor,
+                ));
             }
+        }
+        let counts_store = &self.counts_store;
+        let result = self
+            .storage
+            .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
+                let rows = txn.row_store();
+                for (reference, _, _) in &references {
+                    counts_store
+                        .upsert_reference_into(reference, &rows)
+                        .map_err(|error| persistence_kit::StorageError::BackendError {
+                            underlying: format!("direct counts reference: {error:?}"),
+                        })?;
+                }
+                for (model_id, model_version, document_count, vocab_anchor) in &anchor_rows {
+                    counts_store
+                        .update_anchors_into(
+                            model_id,
+                            model_version,
+                            *document_count,
+                            *vocab_anchor,
+                            &rows,
+                        )
+                        .map_err(|error| persistence_kit::StorageError::BackendError {
+                            underlying: format!("direct counts anchors: {error:?}"),
+                        })?;
+                }
+                Ok(())
+            })
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")));
+        if let Err(transaction_error) = result {
+            self.counts_reload_required.store(true, Ordering::Release);
+            if let Err(reload_error) = self.reload_counts_from_storage() {
+                return Err(CorpusKitError::StoreUnavailable(format!(
+                    "{transaction_error:?}; reload durable counts: {reload_error:?}"
+                )));
+            }
+            self.counts_reload_required.store(false, Ordering::Release);
+            return Err(transaction_error);
         }
         Ok(())
     }
@@ -2584,7 +2720,7 @@ impl CorpusContentEngine {
                     .lock()
                     .unwrap()
                     .as_ref()
-                    .map(|s| s.accumulator.counts_vocabulary_size())
+                    .map(|s| s.vocab_anchor)
             })
             .max()
             .unwrap_or(0)

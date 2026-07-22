@@ -755,7 +755,10 @@ mod tests {
             .load("retry-counts-v1", "1.0.0")
             .expect("load counts")
             .expect("counts row");
-        assert_eq!(persisted.document_count, 1, "base snapshot stays compact");
+        assert_eq!(
+            persisted.document_count, 2,
+            "the anchor columns advance transactionally; the base blob stays compact"
+        );
         let references = CorpusProviderCountsStore::new(Arc::clone(&storage))
             .references("retry-counts-v1", "1.0.0")
             .expect("load references");

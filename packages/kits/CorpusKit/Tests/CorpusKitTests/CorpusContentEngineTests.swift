@@ -381,7 +381,9 @@ struct CorpusContentEngineTests {
             let baseAfter = try #require(try await countsStore.load(
                 modelID: "random-indexing-v1", modelVersion: "1.1.0"))
             #expect(baseAfter.counts == baseBefore.counts)
-            #expect(baseAfter.documentCount == baseBefore.documentCount)
+            // The anchor columns advance in the same transaction as the
+            // reference; only the serialized base blob stays frozen.
+            #expect(baseAfter.documentCount == 2)
             #expect(try await storage.rowStore.count(
                 table: "corpus_provider_count_references", where: nil) == 1)
             #expect(await engine.maintainedDocumentCount() == 2)

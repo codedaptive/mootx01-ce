@@ -292,6 +292,76 @@ impl CorpusProviderCountsStore {
         Ok(!rows.is_empty())
     }
 
+    /// The pending reference for one canonical identity, if any. The digest
+    /// distinguishes an idempotent re-admission from a revision.
+    pub fn reference_for(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        content_id: &str,
+    ) -> CorpusKitResult<Option<PersistedCountsReference>> {
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "content_id"),
+                TypedValue::Text(content_id.to_string()),
+            ),
+        ]);
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "corpus_provider_count_references",
+                Some(&predicate),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(|error| CorpusKitError::StoreUnavailable(error.to_string()))?;
+        Ok(rows.first().and_then(decode_reference))
+    }
+
+    /// Persist the maintained-count anchors (document count + vocabulary) on
+    /// the provider's counts row WITHOUT rewriting the base blob. The anchors
+    /// commit in the SAME transaction as the reference mutation they reflect,
+    /// so a process restart reads exactly the anchors the live process held —
+    /// the governor's threshold decision is restart-deterministic. Returns
+    /// false when the generation has no counts row yet (bootstrap edge; the
+    /// caller upserts the full row instead).
+    pub fn update_anchors_into(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        document_count: usize,
+        vocab_size: usize,
+        row_store: &std::sync::Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<bool> {
+        let mut values = BTreeMap::new();
+        values.insert("doc_count".into(), TypedValue::Int(document_count as i64));
+        values.insert("vocab_size".into(), TypedValue::Int(vocab_size as i64));
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_counts", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_counts", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+        ]);
+        let updated = row_store
+            .update("corpus_provider_counts", values, &predicate)
+            .map_err(|error| CorpusKitError::StoreUnavailable(error.to_string()))?;
+        Ok(updated > 0)
+    }
+
     pub fn references(
         &self,
         model_id: &str,

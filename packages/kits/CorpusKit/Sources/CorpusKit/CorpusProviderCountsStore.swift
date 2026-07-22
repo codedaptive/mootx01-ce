@@ -268,6 +268,50 @@ public actor CorpusProviderCountsStore {
         )
     }
 
+    /// The pending reference for one canonical identity, if any. The digest
+    /// distinguishes an idempotent re-admission from a revision.
+    public func referenceFor(
+        modelID: String, modelVersion: String, contentID: String
+    ) async throws -> PersistedCountsReference? {
+        let rows = try await storage.rowStore.query(
+            table: "corpus_provider_count_references",
+            where: .and([
+                .eq(Column(table: "corpus_provider_count_references", name: "model_id"),
+                    .text(modelID)),
+                .eq(Column(table: "corpus_provider_count_references", name: "model_version"),
+                    .text(modelVersion)),
+                .eq(Column(table: "corpus_provider_count_references", name: "content_id"),
+                    .text(contentID)),
+            ]),
+            orderBy: [], limit: 1, offset: nil)
+        return rows.first.flatMap(Self.decodeReference)
+    }
+
+    /// Persist the maintained-count anchors (document count + vocabulary) on
+    /// the provider's counts row WITHOUT rewriting the base blob. Committed in
+    /// the SAME transaction as the reference mutation they reflect, so the
+    /// governor's threshold decision is restart-deterministic. Returns false
+    /// when the generation has no counts row yet (bootstrap edge).
+    public func updateAnchors(
+        modelID: String, modelVersion: String,
+        documentCount: Int, vocabSize: Int,
+        into rowStore: any RowStore
+    ) async throws -> Bool {
+        let updated = try await rowStore.update(
+            table: "corpus_provider_counts",
+            values: [
+                "doc_count": .int(Int64(documentCount)),
+                "vocab_size": .int(Int64(vocabSize)),
+            ],
+            where: .and([
+                .eq(Column(table: "corpus_provider_counts", name: "model_id"),
+                    .text(modelID)),
+                .eq(Column(table: "corpus_provider_counts", name: "model_version"),
+                    .text(modelVersion)),
+            ]))
+        return updated > 0
+    }
+
     /// Whether this provider generation already carries a pending delta for a
     /// canonical identity. The serialized queue batch uses this to keep a
     /// remove/re-add idempotent in memory as well as on disk.

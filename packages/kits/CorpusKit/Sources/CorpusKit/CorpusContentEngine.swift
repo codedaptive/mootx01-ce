@@ -244,6 +244,10 @@ public actor CorpusContentEngine {
         let freshBasisBlob: Data?
         var countsAccumulator: (any TrainableEmbeddingBasis)?
         var countsDocumentCount: Int
+        /// Governor-facing vocabulary-growth anchor: persisted on the counts
+        /// row in the same transaction as every reference mutation so the
+        /// threshold decision is restart-deterministic.
+        var countsVocabAnchor: Int = 0
         /// The basis-generation anchor stamped into coverage rows: for
         /// trainable slots the SHA-256 of the persisted basis blob (empty
         /// string while untrained); for stateless slots a constant derived
@@ -1046,8 +1050,16 @@ public actor CorpusContentEngine {
         )],
         now: Date
     ) async throws {
+        // A prior failed commit whose reload ALSO failed leaves the in-memory
+        // accumulator dirty; heal from storage before any new fold.
+        if countsReloadRequired {
+            try await reloadCountsFromStorage()
+            countsReloadRequired = false
+        }
         var references: [PersistedCountsReference] = []
-        var newlyAdmitted: [(slotIndex: Int, text: String)] = []
+        // countsDocument false = revision of an already-admitted identity:
+        // fold its novel text, keep the document anchor, refresh the row.
+        var folds: [(slotIndex: Int, text: String, countsDocument: Bool)] = []
         if !countsUpdates.isEmpty {
             for index in slots.indices {
                 guard slots[index].countsAccumulator != nil else { continue }
@@ -1056,10 +1068,16 @@ public actor CorpusContentEngine {
                 var admittedIDs: Set<String> = []
                 for update in countsUpdates {
                     guard admittedIDs.insert(update.contentID).inserted else { continue }
-                    guard try await !countsStore.hasReference(
+                    let countsDocument: Bool
+                    if let existing = try await countsStore.referenceFor(
                         modelID: modelID, modelVersion: modelVersion,
                         contentID: update.contentID)
-                    else { continue }
+                    {
+                        if existing.digest == update.digest { continue }
+                        countsDocument = false
+                    } else {
+                        countsDocument = true
+                    }
                     references.append(PersistedCountsReference(
                         modelID: modelID,
                         modelVersion: modelVersion,
@@ -1067,12 +1085,36 @@ public actor CorpusContentEngine {
                         revision: update.revision,
                         digest: update.digest,
                         updatedAt: now))
-                    newlyAdmitted.append((index, update.text))
+                    folds.append((index, update.text, countsDocument))
                 }
             }
         }
 
+        // Fold BEFORE the durable commit: the anchors written inside the
+        // transaction reflect exactly the post-fold state, so a restarted
+        // process reads the same anchors the live process held. The failure
+        // path reconstructs the in-memory state from storage.
+        var touchedSlots: Set<Int> = []
+        for fold in folds {
+            slots[fold.slotIndex].countsAccumulator?.addToCounts(text: fold.text)
+            if fold.countsDocument {
+                slots[fold.slotIndex].countsDocumentCount += 1
+            }
+            slots[fold.slotIndex].countsVocabAnchor =
+                slots[fold.slotIndex].countsAccumulator?.countsVocabularySize ?? 0
+            touchedSlots.insert(fold.slotIndex)
+        }
+        var anchorRows: [(modelID: String, modelVersion: String, docs: Int, vocab: Int)] = []
+        for index in touchedSlots.sorted() {
+            anchorRows.append((
+                slots[index].provider.modelID,
+                slots[index].provider.modelVersion,
+                slots[index].countsDocumentCount,
+                slots[index].countsVocabAnchor))
+        }
+
         let pendingReferences = references
+        let pendingAnchors = anchorRows
         let countsStore = self.countsStore
         let indexState = self.indexState
         do {
@@ -1080,15 +1122,15 @@ public actor CorpusContentEngine {
                 for row in pendingReferences {
                     try await countsStore.upsertReference(row, into: txn.rowStore)
                 }
+                for anchors in pendingAnchors {
+                    _ = try await countsStore.updateAnchors(
+                        modelID: anchors.modelID, modelVersion: anchors.modelVersion,
+                        documentCount: anchors.docs, vocabSize: anchors.vocab,
+                        into: txn.rowStore)
+                }
                 for checkpoint in checkpoints {
                     try await indexState.advance(checkpoint, into: txn.rowStore)
                 }
-            }
-            // The durable primary-key reference is the admission authority.
-            // Fold only after commit; an ambiguous error reloads below.
-            for admitted in newlyAdmitted {
-                slots[admitted.slotIndex].countsAccumulator?.addToCounts(text: admitted.text)
-                slots[admitted.slotIndex].countsDocumentCount += 1
             }
         } catch {
             // Treat the storage transaction as authoritative even when the
@@ -1138,6 +1180,17 @@ public actor CorpusContentEngine {
                 slots[index].countsDocumentCount += 1
             }
             slots[index].countsAccumulator = accumulator
+            // The STORED anchors are the authority (committed with each
+            // reference mutation) so a restart reads exactly what the live
+            // process held; the rebuilt accumulator may differ per-term for
+            // revised identities and only feeds the next training rebuild.
+            if let persisted {
+                slots[index].countsDocumentCount = persisted.documentCount
+                slots[index].countsVocabAnchor = persisted.vocabSize
+            } else {
+                slots[index].countsVocabAnchor =
+                    accumulator.countsVocabularySize
+            }
         }
     }
 
@@ -1568,6 +1621,8 @@ public actor CorpusContentEngine {
             slots[slotIndex].basisDigest = digest
             slots[slotIndex].countsAccumulator = countsAccumulator
             slots[slotIndex].countsDocumentCount = documentCount
+            slots[slotIndex].countsVocabAnchor =
+                countsAccumulator?.countsVocabularySize ?? 0
             digests[modelID] = digest
 
             if _trainFaultAfterModelID == modelID {
@@ -1629,22 +1684,70 @@ public actor CorpusContentEngine {
     /// (base snapshot + references resolved from the canonical source)
     /// therefore agrees with the live accumulator.
     private func admitIntoCounts(record: CorpusContentRecord, now: Date) async throws {
+        if countsReloadRequired {
+            try await reloadCountsFromStorage()
+            countsReloadRequired = false
+        }
+        var references: [(reference: PersistedCountsReference, slotIndex: Int, countsDocument: Bool)] = []
         for index in slots.indices where slots[index].countsAccumulator != nil {
             let modelID = slots[index].provider.modelID
             let modelVersion = slots[index].provider.modelVersion
-            if try await countsStore.hasReference(
-                modelID: modelID, modelVersion: modelVersion, contentID: record.id
-            ) {
-                continue
+            let countsDocument: Bool
+            if let existing = try await countsStore.referenceFor(
+                modelID: modelID, modelVersion: modelVersion, contentID: record.id)
+            {
+                if existing.digest == record.digest { continue }
+                countsDocument = false
+            } else {
+                countsDocument = true
             }
-            try await countsStore.upsertReference(
+            references.append((
                 PersistedCountsReference(
                     modelID: modelID, modelVersion: modelVersion,
                     contentID: record.id, revision: record.revision,
                     digest: record.digest, updatedAt: now),
-                into: storage.rowStore)
-            slots[index].countsAccumulator!.addToCounts(text: record.text)
-            slots[index].countsDocumentCount += 1
+                index, countsDocument))
+        }
+        guard !references.isEmpty else { return }
+        var anchorRows: [(modelID: String, modelVersion: String, docs: Int, vocab: Int)] = []
+        for item in references {
+            slots[item.slotIndex].countsAccumulator!.addToCounts(text: record.text)
+            if item.countsDocument {
+                slots[item.slotIndex].countsDocumentCount += 1
+            }
+            slots[item.slotIndex].countsVocabAnchor =
+                slots[item.slotIndex].countsAccumulator!.countsVocabularySize
+            anchorRows.append((
+                item.reference.modelID, item.reference.modelVersion,
+                slots[item.slotIndex].countsDocumentCount,
+                slots[item.slotIndex].countsVocabAnchor))
+        }
+        let pendingReferences = references.map(\.reference)
+        let pendingAnchors = anchorRows
+        let countsStore = self.countsStore
+        do {
+            try await storage.transaction(isolation: .serializable) { txn in
+                for row in pendingReferences {
+                    try await countsStore.upsertReference(row, into: txn.rowStore)
+                }
+                for anchors in pendingAnchors {
+                    _ = try await countsStore.updateAnchors(
+                        modelID: anchors.modelID, modelVersion: anchors.modelVersion,
+                        documentCount: anchors.docs, vocabSize: anchors.vocab,
+                        into: txn.rowStore)
+                }
+            }
+        } catch {
+            countsReloadRequired = true
+            do {
+                try await reloadCountsFromStorage()
+                countsReloadRequired = false
+            } catch let reloadError {
+                throw CorpusKitError.storeUnavailable(
+                    "direct counts admission failed: \(error); "
+                    + "durable counts reload failed: \(reloadError)")
+            }
+            throw error
         }
     }
 
@@ -1685,7 +1788,8 @@ public actor CorpusContentEngine {
     /// The vocab-growth anchor the autonomic governor reads (content-unit
     /// semantics: documents folded are canonical records, not chunks).
     public func maintainedVocabAnchor() -> Int {
-        slots.compactMap { $0.countsAccumulator?.countsVocabularySize }.max() ?? 0
+        slots.filter { $0.countsAccumulator != nil }
+            .map(\.countsVocabAnchor).max() ?? 0
     }
 
     /// Canonical records represented by the base snapshot plus durable deltas.

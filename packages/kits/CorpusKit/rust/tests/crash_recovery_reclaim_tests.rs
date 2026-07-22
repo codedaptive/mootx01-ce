@@ -261,7 +261,10 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
         .load("random-indexing-v1", "1.1.0")
         .expect("load counts")
         .expect("counts row");
-    assert_eq!(counts.document_count, 1, "base snapshot remains unchanged");
+    assert_eq!(
+        counts.document_count, 2,
+        "the anchor columns advance transactionally; the base blob stays compact"
+    );
     assert_eq!(
         CorpusProviderCountsStore::new(Arc::clone(&storage))
             .references("random-indexing-v1", "1.1.0")
