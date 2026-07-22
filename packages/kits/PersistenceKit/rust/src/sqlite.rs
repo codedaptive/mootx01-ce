@@ -364,9 +364,10 @@ const BLOB_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_blobs" (
   "bytes" BLOB NOT NULL
 )"#;
 
-// Rust-shaped audit table: holds the Rust AuditEvent fields. `hlc` is the
-// packed integer (PK + ordering, order-preserving by HLC); the three
-// component columns let events reconstruct without an unpack dependency.
+// Canonical audit table shared with the Swift estate format. Rust keeps the
+// descriptive AuditEvent field names in memory, but persists the established
+// short on-disk names. `hlc` is the packed integer (PK); the three component
+// columns preserve full-precision chronological ordering.
 // `reason` is nullable TEXT — None persists as NULL; old rows without a
 // reason read back as None (schema not frozen, no migration needed).
 const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
@@ -378,16 +379,16 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "estate_uuid" TEXT NOT NULL,
   "row_id" TEXT NOT NULL,
   "verb" TEXT NOT NULL,
-  "before_adjective" INTEGER,
-  "before_operational" INTEGER,
-  "before_provenance" INTEGER,
-  "after_adjective" INTEGER NOT NULL,
-  "after_operational" INTEGER NOT NULL,
-  "after_provenance" INTEGER NOT NULL,
-  "before_lattice_anchor" INTEGER,
-  "after_lattice_anchor" INTEGER NOT NULL,
-  "before_lattice_qid" INTEGER,
-  "after_lattice_qid" INTEGER NOT NULL DEFAULT 0,
+  "before_adj" INTEGER,
+  "before_op" INTEGER,
+  "before_pv" INTEGER,
+  "after_adj" INTEGER NOT NULL,
+  "after_op" INTEGER NOT NULL,
+  "after_pv" INTEGER NOT NULL,
+  "before_udc" INTEGER,
+  "after_udc" INTEGER NOT NULL,
+  "before_qid" INTEGER,
+  "after_qid" INTEGER NOT NULL DEFAULT 0,
   "actor" TEXT NOT NULL,
   "reason" TEXT,
   PRIMARY KEY ("event_id", "hlc")
@@ -2736,7 +2737,7 @@ fn audit_binds(e: &AuditEvent) -> Vec<SqlValue> {
     ]
 }
 
-const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","before_lattice_qid","after_lattice_qid","actor","reason""#;
+const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adj","before_op","before_pv","after_adj","after_op","after_pv","before_udc","after_udc","before_qid","after_qid","actor","reason""#;
 
 /// Decode one audit row from rusqlite into an AuditEvent.
 ///
