@@ -1667,11 +1667,13 @@ impl CorpusContentEngine {
         // overstates coverage).
         self.coverage_store.mark_covered(&covered, now_millis)?;
 
-        // Maintained counts: fold in memory. Persistence happens at BATCH
-        // boundaries (drain-burst close) and at training commits — never
-        // once per record.
+        // Maintained counts: the durable per-identity reference is the
+        // admission authority on this path too (the queue batch enforces the
+        // same rule at burst close) — a canonical identity is admitted at
+        // most once per provider generation, so a revision or remove/re-add
+        // through the direct feed path never re-folds the accumulator.
         if maintain_counts {
-            self.fold_into_counts(&record.text);
+            self.admit_into_counts(record, now_millis)?;
         }
 
         // The caller publishes this checkpoint LAST.
@@ -2476,6 +2478,51 @@ impl CorpusContentEngine {
     }
 
     // ── Maintained counts ────────────────────────────────────────────────
+
+    /// Direct-path (apply_change / index_content) counts admission under the
+    /// same durable-reference authority as the queue batch: write the
+    /// reference FIRST, fold only on new admission. Reopen reconstruction
+    /// (base snapshot + references resolved from the canonical source)
+    /// therefore agrees with the live accumulator.
+    fn admit_into_counts(
+        &self,
+        record: &CorpusContentRecord,
+        now_millis: i64,
+    ) -> CorpusKitResult<()> {
+        for slot in &self.slots {
+            if slot.counts.lock().unwrap().is_none() {
+                continue;
+            }
+            let (model_id, model_version) = {
+                let handle = slot.handle.lock().unwrap();
+                let p = handle.provider();
+                (p.model_id().to_string(), p.model_version().to_string())
+            };
+            if self
+                .counts_store
+                .has_reference(&model_id, &model_version, &record.id)?
+            {
+                continue;
+            }
+            self.counts_store.upsert_reference_into(
+                &PersistedCountsReference {
+                    model_id,
+                    model_version,
+                    content_id: record.id.clone(),
+                    revision: record.revision,
+                    digest: record.digest.clone(),
+                    updated_at_secs: now_millis / 1000,
+                },
+                &self.storage.row_store(),
+            )?;
+            let mut counts = slot.counts.lock().unwrap();
+            if let Some(state) = counts.as_mut() {
+                state.accumulator.add_to_counts(&record.text);
+                state.document_count += 1;
+            }
+        }
+        Ok(())
+    }
 
     fn fold_into_counts(&self, text: &str) {
         for slot in &self.slots {

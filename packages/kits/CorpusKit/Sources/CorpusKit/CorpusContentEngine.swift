@@ -1246,12 +1246,13 @@ public actor CorpusContentEngine {
         // overstates coverage).
         try await coverageStore.markCovered(covered, now: now)
 
-        // Maintained counts: fold the canonical text in memory. Persistence
-        // happens at BATCH boundaries (drain-burst close) and at training
-        // commits — never once per record (that was O(N·vocab) write
-        // amplification over an import).
+        // Maintained counts: the durable per-identity reference is the
+        // admission authority on this path too (the queue batch enforces the
+        // same rule at burst close) — a canonical identity is admitted at
+        // most once per provider generation, so a revision or remove/re-add
+        // through the direct feed path never re-folds the accumulator.
         if maintainCounts {
-            foldIntoCounts(text: record.text)
+            try await admitIntoCounts(record: record, now: now)
         }
 
         // The caller publishes this checkpoint LAST.
@@ -1621,6 +1622,31 @@ public actor CorpusContentEngine {
     }
 
     // MARK: - Maintained counts
+
+    /// Direct-path (applyChange / indexContent) counts admission under the
+    /// same durable-reference authority as the queue batch: write the
+    /// reference FIRST, fold only on new admission. Reopen reconstruction
+    /// (base snapshot + references resolved from the canonical source)
+    /// therefore agrees with the live accumulator.
+    private func admitIntoCounts(record: CorpusContentRecord, now: Date) async throws {
+        for index in slots.indices where slots[index].countsAccumulator != nil {
+            let modelID = slots[index].provider.modelID
+            let modelVersion = slots[index].provider.modelVersion
+            if try await countsStore.hasReference(
+                modelID: modelID, modelVersion: modelVersion, contentID: record.id
+            ) {
+                continue
+            }
+            try await countsStore.upsertReference(
+                PersistedCountsReference(
+                    modelID: modelID, modelVersion: modelVersion,
+                    contentID: record.id, revision: record.revision,
+                    digest: record.digest, updatedAt: now),
+                into: storage.rowStore)
+            slots[index].countsAccumulator!.addToCounts(text: record.text)
+            slots[index].countsDocumentCount += 1
+        }
+    }
 
     private func foldIntoCounts(text: String) {
         for index in slots.indices where slots[index].countsAccumulator != nil {
