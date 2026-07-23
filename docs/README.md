@@ -23,6 +23,15 @@ paper draft. Read here when you need durable definitions.
 the cross-cutting protocol and encoder specs. This is the contract
 surface — what each package exposes and what it promises.
 
+**You want the standalone open-source SDK repositories.**
+[`../SDK.MD`](../SDK.MD) maps all 17 Apache-2.0 packages to
+[`moot-memory`](https://github.com/codedaptive/moot-memory),
+[`moot-semantics`](https://github.com/codedaptive/moot-semantics),
+[`moot-system`](https://github.com/codedaptive/moot-system), and
+[`moot-core`](https://github.com/codedaptive/moot-core). Each repository has
+its own documentation index, concrete Swift and Rust install names, package
+overviews, implementation details, AI maps, and source provenance.
+
 **You want to know why something was built the way it was.**
 [`decisions/`](decisions/) holds the Architecture Decision Records.
 Every load-bearing choice is captured with the question asked, candidates
