@@ -108,10 +108,10 @@ impl SyncedTable {
 ///
 /// The hook receives this value after every pull in which at least one record
 /// was applied. The `storage` handle is the same `Arc<dyn Storage>` the pull
-/// used; writes made through it do NOT carry the pull guard (`pulling` flag),
-/// so they are treated as local mutations and flow into the observer workers'
-/// outbox — satisfying the hook-writes-must-ship invariant (Kong Q2
-/// adjudication).
+/// used; writes made through it use `upsert`/`insert`/`delete` (not the
+/// `_sync` variants), so they emit `ChangeOrigin::Local` and flow into the
+/// observer workers' outbox — satisfying the hook-writes-must-ship invariant
+/// (Kong Q2 adjudication).
 ///
 /// ## Atomicity caveat
 ///
