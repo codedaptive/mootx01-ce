@@ -105,11 +105,18 @@ The entry lands in `.mcp.json` in the current directory instead of
 
 Two flags let you skip parts of the install:
 
-**`--no-daemon`** — skips registering the resident daemon service. The
-installer still wires your clients, but they will connect over stdio
-(each spawning its own instance) rather than sharing the resident daemon.
-Use this if you want to manage the daemon lifecycle yourself or are
-installing in an environment where background services are not appropriate.
+**`--no-daemon`** — writes direct `mootx01 serve` stdio entries for the
+selected clients and skips registering the resident HTTP daemon. Command
+entries use explicit `args: ["serve"]`; with `--vault-off` they also carry
+`MOOTX01_VAULT=0`. They clear `MOOTX01_HTTP_PORT` so a value inherited from
+the parent environment cannot silently select HTTP mode. Plugin depth is
+reduced to skills depth so a plugin-owned proxy connection does not replace
+the direct entry.
+
+This flag does not stop a resident service installed by an earlier run. When
+`mootx01 serve` detects a live resident serving the same estate, it forwards
+the stdio connection to that daemon over localhost rather than opening a
+second writer.
 
 **`--no-manager`** — skips registering the `moot-mgr` management console.
 The daemon still runs; you just won't have the dashboard. The monitoring
@@ -118,6 +125,53 @@ running separately via `moot-mgr serve`.
 
 **`-y` / `--yes`** — skips the interactive client picker and installs into
 all detected clients automatically. Useful for scripted installs.
+
+---
+
+## Direct stdio for a tighter local transport
+
+The default resident daemon is convenient when several clients share one
+estate. A direct stdio setup removes the MCP TCP listener from the connection
+path and normally leaves the JSON-RPC stream on pipes inherited by the AI
+client's child process.
+
+For Codex:
+
+```bash
+mootx01 install --target codex --mode server --no-daemon --vault-off
+```
+
+The resulting `~/.codex/config.toml` entry should have this shape:
+
+```toml
+[mcp_servers.mootx01]
+command = "/absolute/path/to/mootx01"
+args = ["serve"]
+env = { MOOTX01_HTTP_PORT = "", MOOTX01_VAULT = "0" }
+```
+
+For genuinely socket-free MCP operation, stop and disable any previously
+registered resident before restarting the AI client:
+
+```bash
+# macOS
+launchctl bootout gui/$(id -u)/com.mootx01.daemon
+
+# Linux
+systemctl --user disable --now mootx01.service
+```
+
+Then verify:
+
+1. The client's MOOTx01 config has `command` and `args`, not `url`.
+2. The process tree shows the AI client as the parent of `mootx01 serve`.
+3. No MOOTx01 process is listening on `127.0.0.1:4242` (or another recorded
+   resident port).
+
+Direct stdio does not provide the resident daemon's shared autonomic governor,
+central telemetry, or `moot-mgr` visibility. Multiple clients may start
+separate processes, although the estate's writer controls still prevent two
+independent writers from owning it at once.
 
 ---
 

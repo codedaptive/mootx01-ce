@@ -57,7 +57,7 @@ struct Mootx01: AsyncParsableCommand {
     static let currentVersion = "1.0.34"
 
     /// Release date stamp shown alongside the version by --version.
-    static let releaseDate = "2026-07-20"
+    static let releaseDate = "2026-07-23"
 
     /// The exact string --version prints. The Rust port must print an identical
     /// string (see apps/mootx01/rust: CURRENT_VERSION + RELEASE_DATE).

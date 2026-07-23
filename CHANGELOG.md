@@ -5,11 +5,20 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
-## v1.0.34 — 2026-07-20
+## v1.0.34 — 2026-07-23
 
-Documentation-authority and packaging-integrity release. No core runtime
-behavior changes.
+Direct-stdio transport, documentation-authority, and packaging-integrity
+release.
 
+- **`--no-daemon` now changes client wiring.** Both Swift and Rust installers
+  write explicit `mootx01 serve` stdio entries instead of resident HTTP URLs
+  when the flag is selected. Direct entries clear inherited HTTP-port state,
+  `--vault-off` is carried into the child-process environment, and
+  connection-owning plugin depth falls back to skills.
+- **The tighter local setup is discoverable.** The root and CLI READMEs,
+  install guide, install-surface contract, CLI help, and security policy
+  document the Codex command/args configuration, the resident-forwarding
+  wrinkle, and the checks required for genuinely socket-free operation.
 - **Engineering documentation consolidated.** The durable rules from all 59
   legacy 1.0 decision records now live in the topic-based engineering masters.
   The live 1.0 decision directory is retired, and source comments state their

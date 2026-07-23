@@ -79,6 +79,17 @@ being driven into bulk egress by a compromised agent, a bad
 configuration, or an accident. They are not a defense against someone
 who already owns the machine. Seatbelts, not armor plate.
 
+**Choose the local MCP transport that fits the deployment.** The default
+resident daemon listens on loopback so several clients can share one writer,
+background governor, and telemetry stream. Any process running as the same
+user can attempt to contact that local endpoint. `mootx01 install --no-daemon`
+writes direct `mootx01 serve` stdio entries instead, keeping MCP traffic on
+the parent client's process pipes under normal operation. A stdio process
+forwards to an already-running resident that owns the same estate, so stop or
+disable the old resident when the MCP requirement is no listening socket. The
+[direct stdio setup](docs/start-here/INSTALLING_MOOTX01.md#direct-stdio-for-a-tighter-local-transport)
+documents the exact configuration and checks.
+
 ## Verifying your binary
 
 This is open source. Anyone can build a version with the locks
