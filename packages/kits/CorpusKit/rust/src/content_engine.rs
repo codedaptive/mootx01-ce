@@ -1377,7 +1377,6 @@ impl CorpusContentEngine {
                         false,
                         now_millis,
                         SlotScope::All,
-                        false,
                     )? {
                         // Every newly prepared revision reaches the durable-
                         // reference admission authority at batch close. It
@@ -1418,9 +1417,10 @@ impl CorpusContentEngine {
         counts_updates: &[(String, i64, String, String)],
         now_millis: i64,
     ) -> CorpusKitResult<()> {
-        let _commit_guard = self.counts_commit_lock.lock().map_err(|_| {
-            CorpusKitError::StoreUnavailable("counts commit lock poisoned".into())
-        })?;
+        let _commit_guard = self
+            .counts_commit_lock
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("counts commit lock poisoned".into()))?;
         // A prior failed commit whose reload ALSO failed leaves the in-memory
         // accumulator dirty; heal from storage before any new fold.
         if self.counts_reload_required.load(Ordering::Acquire) {
@@ -1632,9 +1632,9 @@ impl CorpusContentEngine {
         slot_scope: SlotScope,
     ) -> CorpusKitResult<()> {
         if let Some(checkpoint) =
-            self.prepare_index_record(record, applied_cursor, force, now_millis, slot_scope, true)?
+            self.prepare_index_record(record, applied_cursor, force, now_millis, slot_scope)?
         {
-            self.index_state.advance(&checkpoint)?;
+            self.commit_direct_index(record, &checkpoint, now_millis)?;
         }
         Ok(())
     }
@@ -1649,7 +1649,6 @@ impl CorpusContentEngine {
         force: bool,
         now_millis: i64,
         slot_scope: SlotScope,
-        maintain_counts: bool,
     ) -> CorpusKitResult<Option<CorpusIndexState>> {
         // Idempotence anchor: a checkpoint covering this exact (revision,
         // digest, index_version) means the derived rows are complete —
@@ -1734,15 +1733,6 @@ impl CorpusContentEngine {
         // overstates the vectors table (and the checkpoint below never
         // overstates coverage).
         self.coverage_store.mark_covered(&covered, now_millis)?;
-
-        // Maintained counts: the durable per-identity reference is the
-        // admission authority on this path too (the queue batch enforces the
-        // same rule at burst close) — a canonical identity is admitted at
-        // most once per provider generation, so a revision or remove/re-add
-        // through the direct feed path never re-folds the accumulator.
-        if maintain_counts {
-            self.admit_into_counts(record, now_millis)?;
-        }
 
         // The caller publishes this checkpoint LAST.
         Ok(Some(CorpusIndexState {
@@ -2021,6 +2011,14 @@ impl CorpusContentEngine {
         now_millis: i64,
         force: bool,
     ) -> CorpusKitResult<std::collections::BTreeMap<String, String>> {
+        // Publication replaces the base snapshot and deletes only reference
+        // deltas represented by that snapshot. Exclude admission while the
+        // snapshot is accumulated and published so a post-snapshot reference
+        // cannot be deleted as though it had been subsumed.
+        let _commit_guard = self
+            .counts_commit_lock
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("counts commit lock poisoned".into()))?;
         let mut digests = std::collections::BTreeMap::new();
         for slot in &self.slots {
             let Some(blob) = &slot.fresh_basis_blob else {
@@ -2524,7 +2522,6 @@ impl CorpusContentEngine {
                             true,
                             now_millis,
                             SlotScope::All,
-                            false,
                         )? {
                             self.index_state.advance(&checkpoint)?;
                         }
@@ -2544,23 +2541,28 @@ impl CorpusContentEngine {
     /// Persist the maintained counts snapshot — the BATCH-boundary write.
     /// Called by the drain worker at burst close; never once per record.
     pub fn persist_counts_snapshot(&self, now_millis: i64) -> CorpusKitResult<()> {
+        let _commit_guard = self
+            .counts_commit_lock
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("counts commit lock poisoned".into()))?;
         self.persist_counts(now_millis)
     }
 
     // ── Maintained counts ────────────────────────────────────────────────
 
-    /// Direct-path (apply_change / index_content) counts admission under the
-    /// same durable-reference authority as the queue batch. The reference and
-    /// nondecreasing anchors commit together; same-digest replay is a no-op and
-    /// a changed digest does not increment the document anchor.
-    fn admit_into_counts(
+    /// Direct-path last-write publication under the same durable-reference
+    /// authority as the queue batch. Reference mutation, nondecreasing anchors,
+    /// and the corresponding content checkpoint commit together.
+    fn commit_direct_index(
         &self,
         record: &CorpusContentRecord,
+        checkpoint: &CorpusIndexState,
         now_millis: i64,
     ) -> CorpusKitResult<()> {
-        let _commit_guard = self.counts_commit_lock.lock().map_err(|_| {
-            CorpusKitError::StoreUnavailable("counts commit lock poisoned".into())
-        })?;
+        let _commit_guard = self
+            .counts_commit_lock
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("counts commit lock poisoned".into()))?;
         // A prior failed commit whose reload ALSO failed leaves the in-memory
         // accumulator dirty; heal from storage before any new fold.
         if self.counts_reload_required.load(Ordering::Acquire) {
@@ -2598,9 +2600,6 @@ impl CorpusContentEngine {
                 counts_document,
             ));
         }
-        if references.is_empty() {
-            return Ok(());
-        }
         // Fold first; the anchors written inside the transaction reflect the
         // post-fold state exactly (restart-deterministic governor decision).
         let mut anchor_rows: Vec<(String, String, usize, usize)> = Vec::new();
@@ -2623,6 +2622,7 @@ impl CorpusContentEngine {
             }
         }
         let counts_store = &self.counts_store;
+        let index_state = &self.index_state;
         let result = self
             .storage
             .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
@@ -2647,6 +2647,11 @@ impl CorpusContentEngine {
                             underlying: format!("direct counts anchors: {error:?}"),
                         })?;
                 }
+                index_state.advance_into(checkpoint, &rows).map_err(|error| {
+                    persistence_kit::StorageError::BackendError {
+                        underlying: format!("direct checkpoint: {error:?}"),
+                    }
+                })?;
                 Ok(())
             })
             .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")));

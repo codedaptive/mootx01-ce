@@ -12,7 +12,7 @@ import Testing
 import Foundation
 import EngramLib
 import PersistenceKit
-import PersistenceKitSQLite
+@testable import PersistenceKitSQLite
 import VectorKit
 import CorpusKitProviders
 
@@ -56,6 +56,59 @@ private struct ReindexConcurrencyProvider: EmbeddingProvider {
     }
 
     func embedFloat(_ text: String) async throws -> [Float] { [1.0] }
+}
+
+private actor PublicationRaceSource: CorpusContentSource {
+    private var records: [String: CorpusContentRecord]
+    private var blockedID: String?
+    private var blockEntered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(records: [CorpusContentRecord]) {
+        self.records = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+    }
+
+    func add(_ record: CorpusContentRecord) {
+        records[record.id] = record
+    }
+
+    func blockNextRecord(id: String) {
+        blockedID = id
+        blockEntered = false
+    }
+
+    func waitUntilBlocked() async {
+        if blockEntered { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func releaseBlockedRecord() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    func record(for id: CorpusContentID) async throws -> CorpusContentRecord? {
+        if blockedID == id {
+            blockedID = nil
+            blockEntered = true
+            let waiters = enteredWaiters
+            enteredWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+            await withCheckedContinuation { releaseContinuation = $0 }
+        }
+        return records[id]
+    }
+
+    func changes(since cursor: String?, limit: Int) async throws
+        -> CorpusContentChangeBatch
+    {
+        .empty
+    }
+
+    func activeContentIDs() async throws -> [CorpusContentID] {
+        records.keys.sorted()
+    }
 }
 
 @Suite("CorpusContentEngine", .serialized)
@@ -593,6 +646,152 @@ struct CorpusContentEngineTests {
                 models: [.randomIndexing(provider: RandomIndexingProvider())])
             #expect(await reopenedAgain.maintainedVocabAnchor() == thirdAnchor)
             #expect(await reopenedAgain.maintainedDocumentCount() == 2)
+        }
+    }
+
+    @Test func directCheckpointFailureRollsBackCountsAdmission() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let sqlite = try #require(storage as? SQLiteStorage)
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            _ = try await store.put("direct atomic anchor", id: "anchor", now: now)
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let before = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            let revision = try await store.put(
+                "direct atomic novel vocabulary", id: "direct-atomic", now: now)
+
+            try await sqlite.backend.connection.exec("""
+                CREATE TRIGGER fail_direct_checkpoint
+                BEFORE INSERT ON corpus_index_state
+                BEGIN SELECT RAISE(ABORT, 'injected direct checkpoint failure'); END;
+                """)
+            await #expect(throws: (any Error).self) {
+                try await engine.applyChange(
+                    .upsert(
+                        id: revision.id, revision: revision.revision,
+                        digest: revision.digest),
+                    cursor: "direct-atomic-1", now: now)
+            }
+
+            let afterFailure = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(afterFailure.documentCount == before.documentCount)
+            #expect(afterFailure.vocabSize == before.vocabSize)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_count_references", where: nil) == 0)
+            #expect(try await CorpusIndexStateStore(storage: storage)
+                .state(for: revision.id) == nil)
+
+            try await sqlite.backend.connection.exec("DROP TRIGGER fail_direct_checkpoint;")
+            try await engine.applyChange(
+                .upsert(
+                    id: revision.id, revision: revision.revision,
+                    digest: revision.digest),
+                cursor: "direct-atomic-1", now: now)
+            let afterRetry = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(afterRetry.documentCount == before.documentCount + 1)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_count_references", where: nil) == 1)
+            #expect(try await CorpusIndexStateStore(storage: storage)
+                .state(for: revision.id)?.digest == revision.digest)
+        }
+    }
+
+    @Test func concurrentAdmissionCommitsOneReferenceDelta() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            _ = try await store.put("concurrent anchor", id: "anchor", now: now)
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let before = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            let checkpoint = CorpusIndexState(
+                contentID: "concurrent-admission", revision: 1,
+                digest: "same-digest", indexVersion: CorpusContentEngine.indexVersion,
+                appliedCursor: nil, updatedAt: now)
+            let update = (
+                contentID: "concurrent-admission", revision: Int64(1),
+                digest: "same-digest", text: "concurrent admission vocabulary")
+
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<16 {
+                    group.addTask {
+                        try await engine.commitQueueBatch(
+                            checkpoints: [checkpoint], countsUpdates: [update], now: now)
+                    }
+                }
+                try await group.waitForAll()
+            }
+
+            let after = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(after.documentCount == before.documentCount + 1)
+            #expect(try await storage.rowStore.count(
+                table: "corpus_provider_count_references", where: nil) == 1)
+        }
+    }
+
+    @Test func providerPublicationPreservesPostSnapshotAdmission() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let anchorText = "publication anchor"
+            let anchor = CorpusContentRecord(
+                id: "anchor", revision: 1,
+                digest: CorpusContentDigest.digest(anchorText), text: anchorText)
+            let source = PublicationRaceSource(records: [anchor])
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: source,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+
+            await source.blockNextRecord(id: anchor.id)
+            let retrain = Task {
+                try await engine.trainTrainableSlots(now: now, force: true)
+            }
+            await source.waitUntilBlocked()
+
+            let lateText = "post snapshot vocabulary"
+            let late = CorpusContentRecord(
+                id: "late", revision: 1,
+                digest: CorpusContentDigest.digest(lateText), text: lateText)
+            await source.add(late)
+            let admission = Task {
+                try await engine.applyChange(
+                    .upsert(id: late.id, revision: late.revision, digest: late.digest),
+                    cursor: nil, now: now)
+            }
+            try await Task.sleep(for: .milliseconds(50))
+            await source.releaseBlockedRecord()
+            _ = try await retrain.value
+            try await admission.value
+
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let after = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(after.documentCount == 2)
+            #expect(try await countsStore.referenceFor(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0",
+                contentID: late.id)?.digest == late.digest)
         }
     }
 

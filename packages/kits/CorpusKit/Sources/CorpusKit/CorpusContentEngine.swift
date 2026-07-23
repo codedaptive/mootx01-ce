@@ -284,6 +284,11 @@ public actor CorpusContentEngine {
     /// queue attempt must rehydrate the in-memory accumulators from durable
     /// state before it can fold another content reference.
     private var countsReloadRequired = false
+    /// Actor methods are reentrant at storage awaits. Keep reference lookup,
+    /// in-memory folding, and transactional publication in one logical
+    /// admission critical section without serializing preparation or reindex.
+    private var countsAdmissionActive = false
+    private var countsAdmissionWaiters: [CheckedContinuation<Void, Never>] = []
 
     // MARK: - Content-reference ingest queue state (GLK shared-content P3)
     //
@@ -1017,8 +1022,8 @@ public actor CorpusContentEngine {
             }
             if !contentAlreadyPrepared,
                let checkpoint = try await prepareIndex(
-                    record: record, appliedCursor: job.cursor, force: false, now: now,
-                    slotScope: .all, maintainCounts: false)
+                record: record, appliedCursor: job.cursor, force: false, now: now,
+                slotScope: .all)
             {
                 checkpoints.append(checkpoint)
                 // Every newly prepared revision reaches the durable-reference
@@ -1049,6 +1054,8 @@ public actor CorpusContentEngine {
         )],
         now: Date
     ) async throws {
+        await acquireCountsAdmission()
+        defer { releaseCountsAdmission() }
         // A prior failed commit whose reload ALSO failed leaves the in-memory
         // accumulator dirty; heal from storage before any new fold.
         if countsReloadRequired {
@@ -1206,9 +1213,9 @@ public actor CorpusContentEngine {
     ) async throws {
         if let checkpoint = try await prepareIndex(
             record: record, appliedCursor: appliedCursor, force: force, now: now,
-            slotScope: slotScope, maintainCounts: true
+            slotScope: slotScope
         ) {
-            try await indexState.advance(checkpoint)
+            try await commitDirectIndex(record: record, checkpoint: checkpoint, now: now)
         }
     }
 
@@ -1217,7 +1224,7 @@ public actor CorpusContentEngine {
     /// counts and all corresponding checkpoints atomically at batch close.
     private func prepareIndex(
         record: CorpusContentRecord, appliedCursor: String?, force: Bool, now: Date,
-        slotScope: SlotScope, maintainCounts: Bool
+        slotScope: SlotScope
     ) async throws -> CorpusIndexState? {
         // Idempotence anchor: when the checkpoint already covers this exact
         // (revision, digest, indexVersion), the derived rows are complete
@@ -1298,15 +1305,6 @@ public actor CorpusContentEngine {
         // overstates the vectors table (and the checkpoint below never
         // overstates coverage).
         try await coverageStore.markCovered(covered, now: now)
-
-        // Maintained counts: the durable per-identity reference is the
-        // admission authority on this path too (the queue batch enforces the
-        // same rule at burst close) — a canonical identity is admitted at
-        // most once per provider generation, so a revision or remove/re-add
-        // through the direct feed path never re-folds the accumulator.
-        if maintainCounts {
-            try await admitIntoCounts(record: record, now: now)
-        }
 
         // The caller publishes this checkpoint LAST.
         let checkpoint = CorpusIndexState(
@@ -1528,6 +1526,11 @@ public actor CorpusContentEngine {
     public func trainTrainableSlots(
         now: Date, force: Bool = false
     ) async throws -> [String: String] {
+        // Publication replaces the base snapshot and deletes only reference
+        // deltas represented by that snapshot. Prevent a reentrant admission
+        // from publishing a post-snapshot reference before that deletion.
+        await acquireCountsAdmission()
+        defer { releaseCountsAdmission() }
         var digests: [String: String] = [:]
         for slotIndex in slots.indices {
             guard let blob = slots[slotIndex].freshBasisBlob,
@@ -1665,7 +1668,7 @@ public actor CorpusContentEngine {
                 }
                 if let checkpoint = try await prepareIndex(
                     record: record, appliedCursor: nil, force: true, now: now,
-                    slotScope: .all, maintainCounts: false
+                    slotScope: .all
                 ) {
                     try await indexState.advance(checkpoint)
                 }
@@ -1678,11 +1681,14 @@ public actor CorpusContentEngine {
 
     // MARK: - Maintained counts
 
-    /// Direct-path (applyChange / indexContent) counts admission under the
-    /// same durable-reference authority as the queue batch. The reference and
-    /// nondecreasing anchors commit together; same-digest replay is a no-op and
-    /// a changed digest does not increment the document anchor.
-    private func admitIntoCounts(record: CorpusContentRecord, now: Date) async throws {
+    /// Direct-path last-write publication under the same durable-reference
+    /// authority as the queue batch. Reference mutation, nondecreasing anchors,
+    /// and the corresponding content checkpoint commit together.
+    private func commitDirectIndex(
+        record: CorpusContentRecord, checkpoint: CorpusIndexState, now: Date
+    ) async throws {
+        await acquireCountsAdmission()
+        defer { releaseCountsAdmission() }
         if countsReloadRequired {
             try await reloadCountsFromStorage()
             countsReloadRequired = false
@@ -1707,7 +1713,6 @@ public actor CorpusContentEngine {
                     digest: record.digest, updatedAt: now),
                 index, countsDocument))
         }
-        guard !references.isEmpty else { return }
         var anchorRows: [(modelID: String, modelVersion: String, docs: Int, vocab: Int)] = []
         for item in references {
             slots[item.slotIndex].countsAccumulator!.addToCounts(text: record.text)
@@ -1725,6 +1730,7 @@ public actor CorpusContentEngine {
         let pendingReferences = references.map(\.reference)
         let pendingAnchors = anchorRows
         let countsStore = self.countsStore
+        let indexState = self.indexState
         do {
             try await storage.transaction(isolation: .serializable) { txn in
                 for row in pendingReferences {
@@ -1736,6 +1742,7 @@ public actor CorpusContentEngine {
                         documentCount: anchors.docs, vocabSize: anchors.vocab,
                         into: txn.rowStore)
                 }
+                try await indexState.advance(checkpoint, into: txn.rowStore)
             }
         } catch {
             countsReloadRequired = true
@@ -1744,11 +1751,29 @@ public actor CorpusContentEngine {
                 countsReloadRequired = false
             } catch let reloadError {
                 throw CorpusKitError.storeUnavailable(
-                    "direct counts admission failed: \(error); "
+                    "direct counts/checkpoint transaction failed: \(error); "
                     + "durable counts reload failed: \(reloadError)")
             }
             throw error
         }
+    }
+
+    private func acquireCountsAdmission() async {
+        if !countsAdmissionActive {
+            countsAdmissionActive = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            countsAdmissionWaiters.append(continuation)
+        }
+    }
+
+    private func releaseCountsAdmission() {
+        guard !countsAdmissionWaiters.isEmpty else {
+            countsAdmissionActive = false
+            return
+        }
+        countsAdmissionWaiters.removeFirst().resume()
     }
 
     private func foldIntoCounts(text: String) {
@@ -1782,6 +1807,8 @@ public actor CorpusContentEngine {
     /// Called by the drain worker at burst close (and by training commits
     /// through their own atomic path); never once per record.
     public func persistCountsSnapshot(now: Date) async throws {
+        await acquireCountsAdmission()
+        defer { releaseCountsAdmission() }
         try await persistCounts(now: now)
     }
 

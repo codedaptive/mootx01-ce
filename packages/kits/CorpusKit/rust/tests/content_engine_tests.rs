@@ -1,6 +1,7 @@
 //! Canonical-ID engine coverage (GLK shared-content 1.1, P2).
 //! Rust twin of the Swift `CorpusContentEngineTests`.
 
+use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
 use corpus_kit::{
     content_digest, ContentIndexJob, CorpusContentChange, CorpusContentConfiguration,
     CorpusContentEngine, CorpusContentId, CorpusContentRecord, CorpusContentSource,
@@ -9,12 +10,13 @@ use corpus_kit::{
 };
 use persistence_kit::database_inventory::capture_inventory;
 use persistence_kit::inmemory::InMemoryStorage;
+use persistence_kit::SqliteStorage;
 use persistence_kit::{
     BackendConfiguration, Column, EstateConfiguration, Storage, StoragePredicate, TypedValue,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -39,6 +41,89 @@ impl ReindexConcurrencyProbe {
 
 struct ReindexConcurrencyProvider {
     probe: Arc<ReindexConcurrencyProbe>,
+}
+
+struct PublicationRaceState {
+    records: BTreeMap<String, CorpusContentRecord>,
+    blocked_id: Option<String>,
+    block_entered: bool,
+    released: bool,
+}
+
+struct PublicationRaceSource {
+    state: Mutex<PublicationRaceState>,
+    condition: Condvar,
+}
+
+impl PublicationRaceSource {
+    fn new(records: Vec<CorpusContentRecord>) -> Self {
+        Self {
+            state: Mutex::new(PublicationRaceState {
+                records: records
+                    .into_iter()
+                    .map(|record| (record.id.clone(), record))
+                    .collect(),
+                blocked_id: None,
+                block_entered: false,
+                released: false,
+            }),
+            condition: Condvar::new(),
+        }
+    }
+
+    fn add(&self, record: CorpusContentRecord) {
+        self.state
+            .lock()
+            .unwrap()
+            .records
+            .insert(record.id.clone(), record);
+    }
+
+    fn block_next_record(&self, id: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.blocked_id = Some(id.to_string());
+        state.block_entered = false;
+        state.released = false;
+    }
+
+    fn wait_until_blocked(&self) {
+        let mut state = self.state.lock().unwrap();
+        while !state.block_entered {
+            state = self.condition.wait(state).unwrap();
+        }
+    }
+
+    fn release_blocked_record(&self) {
+        self.state.lock().unwrap().released = true;
+        self.condition.notify_all();
+    }
+}
+
+impl CorpusContentSource for PublicationRaceSource {
+    fn record(&self, id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
+        let mut state = self.state.lock().unwrap();
+        if state.blocked_id.as_deref() == Some(id) {
+            state.blocked_id = None;
+            state.block_entered = true;
+            self.condition.notify_all();
+            while !state.released {
+                state = self.condition.wait(state).unwrap();
+            }
+        }
+        Ok(state.records.get(id).cloned())
+    }
+
+    fn changes(
+        &self,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<corpus_kit::CorpusContentChangeBatch, CorpusKitError> {
+        Ok(corpus_kit::CorpusContentChangeBatch::empty())
+    }
+
+    fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        Ok(self.state.lock().unwrap().records.keys().cloned().collect())
+    }
 }
 
 impl vectorkit::EmbeddingProvider for ReindexConcurrencyProvider {
@@ -334,6 +419,231 @@ fn direct_revisions_use_the_same_restart_stable_counts_admission() {
     .expect("reopen engine again");
     assert_eq!(reopened_again.maintained_vocab_anchor(), third_anchor);
     assert_eq!(reopened_again.maintained_document_count(), 2);
+}
+
+#[test]
+fn direct_checkpoint_failure_rolls_back_counts_admission() {
+    use corpus_kit_providers::RandomIndexingProvider;
+
+    let root = std::env::temp_dir().join(format!(
+        "corpus-direct-atomic-{}",
+        Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&root).expect("create scratch directory");
+    let path = root.join("estate.sqlite");
+    let storage: Arc<dyn Storage> = Arc::new(
+        SqliteStorage::new(EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        ))
+        .expect("open SQLite storage"),
+    );
+    storage
+        .migrate(&CorpusDocumentStore::schema_declaration())
+        .expect("document schema");
+    let source = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+    source
+        .put("direct atomic anchor", "anchor", NOW)
+        .expect("put anchor");
+    let configuration = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .expect("configuration");
+    let models = || {
+        vec![EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::new()),
+        }]
+    };
+    let engine = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        configuration,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        models(),
+    )
+    .expect("open engine");
+    engine
+        .train_trainable_slots(NOW, false)
+        .expect("train anchor");
+
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let before = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load counts")
+        .expect("counts row");
+    let revision = source
+        .put(
+            "direct atomic novel vocabulary",
+            "direct-atomic",
+            NOW + 1,
+        )
+        .expect("put direct revision");
+
+    rusqlite::Connection::open(&path)
+        .expect("open trigger connection")
+        .execute_batch(
+            "CREATE TRIGGER fail_direct_checkpoint \
+             BEFORE INSERT ON corpus_index_state \
+             BEGIN SELECT RAISE(ABORT, 'injected direct checkpoint failure'); END;",
+        )
+        .expect("install checkpoint trigger");
+    let result = engine.apply_change(
+        &CorpusContentChange::Upsert {
+            id: revision.id.clone(),
+            revision: revision.revision,
+            digest: revision.digest.clone(),
+        },
+        Some("direct-atomic-1"),
+        NOW + 1,
+    );
+    assert!(result.is_err(), "checkpoint trigger must fail direct apply");
+
+    let after_failure = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load counts after failure")
+        .expect("counts row after failure");
+    assert_eq!(after_failure.document_count, before.document_count);
+    assert_eq!(after_failure.vocab_size, before.vocab_size);
+    assert_eq!(
+        storage
+            .row_store()
+            .count("corpus_provider_count_references", None)
+            .expect("count references"),
+        0
+    );
+    assert!(
+        CorpusIndexStateStore::new(Arc::clone(&storage))
+            .state(&revision.id)
+            .expect("load failed checkpoint")
+            .is_none()
+    );
+
+    rusqlite::Connection::open(&path)
+        .expect("open trigger cleanup connection")
+        .execute_batch("DROP TRIGGER fail_direct_checkpoint;")
+        .expect("drop checkpoint trigger");
+    engine
+        .apply_change(
+            &CorpusContentChange::Upsert {
+                id: revision.id.clone(),
+                revision: revision.revision,
+                digest: revision.digest.clone(),
+            },
+            Some("direct-atomic-1"),
+            NOW + 1,
+        )
+        .expect("retry direct apply");
+    let after_retry = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load counts after retry")
+        .expect("counts row after retry");
+    assert_eq!(after_retry.document_count, before.document_count + 1);
+    assert_eq!(
+        storage
+            .row_store()
+            .count("corpus_provider_count_references", None)
+            .expect("count retry references"),
+        1
+    );
+    assert_eq!(
+        CorpusIndexStateStore::new(Arc::clone(&storage))
+            .state(&revision.id)
+            .expect("load retry checkpoint")
+            .map(|state| state.digest),
+        Some(revision.digest)
+    );
+
+    drop(engine);
+    drop(source);
+    drop(storage);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn provider_publication_preserves_post_snapshot_admission() {
+    use corpus_kit_providers::RandomIndexingProvider;
+
+    let storage = in_memory_storage();
+    let anchor_text = "publication anchor";
+    let anchor = CorpusContentRecord {
+        id: "anchor".into(),
+        revision: 1,
+        digest: content_digest(anchor_text),
+        text: anchor_text.into(),
+    };
+    let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .expect("configuration");
+    let engine = Arc::new(
+        CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+            vec![EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(RandomIndexingProvider::new()),
+            }],
+        )
+        .expect("open engine"),
+    );
+    engine
+        .train_trainable_slots(NOW, false)
+        .expect("train anchor");
+
+    source.block_next_record(&anchor.id);
+    let retraining_engine = Arc::clone(&engine);
+    let retrain = std::thread::spawn(move || {
+        retraining_engine
+            .train_trainable_slots(NOW + 1, true)
+            .expect("force retrain");
+    });
+    source.wait_until_blocked();
+
+    let late_text = "post snapshot vocabulary";
+    let late = CorpusContentRecord {
+        id: "late".into(),
+        revision: 1,
+        digest: content_digest(late_text),
+        text: late_text.into(),
+    };
+    source.add(late.clone());
+    let admission_engine = Arc::clone(&engine);
+    let admission = std::thread::spawn(move || {
+        admission_engine
+            .apply_change(
+                &CorpusContentChange::Upsert {
+                    id: late.id,
+                    revision: late.revision,
+                    digest: late.digest,
+                },
+                None,
+                NOW + 1,
+            )
+            .expect("apply post-snapshot admission");
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    source.release_blocked_record();
+    retrain.join().expect("join retrain");
+    admission.join().expect("join admission");
+
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let after = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load counts")
+        .expect("counts row");
+    assert_eq!(after.document_count, 2);
+    assert_eq!(
+        counts_store
+            .reference_for("random-indexing-v1", "1.1.0", "late")
+            .expect("load late reference")
+            .map(|reference| reference.digest),
+        Some(content_digest(late_text))
+    );
 }
 
 #[test]
