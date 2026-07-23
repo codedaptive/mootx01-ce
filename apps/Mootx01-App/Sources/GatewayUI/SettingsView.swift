@@ -21,8 +21,6 @@ public struct SettingsView: View {
     /// one are immediately visible in the other.
     @AppStorage(SyncPolicy.masterEnabledKey) private var masterEnabled = false
 
-    @State private var syncRunning = false
-
     public init() {}
 
     public var body: some View {
@@ -92,9 +90,7 @@ public struct SettingsView: View {
                     // the active engine; toggling on fires an immediate sync beat.
                     await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: newValue))
                     if newValue {
-                        syncRunning = true
                         _ = await MootSyncDriver.shared.syncNow()
-                        syncRunning = false
                     }
                 }
             }
