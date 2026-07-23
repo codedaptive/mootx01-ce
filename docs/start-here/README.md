@@ -61,7 +61,8 @@ and uninstall. The source of truth for what a product install does.
 **[`OBSIDIAN_VAULT.md`](OBSIDIAN_VAULT.md)** — the operational guide for a
 normal Markdown/Obsidian vault: export scopes, background import jobs, the
 hidden drift manifest, dry-run reconciliation, explicit resync, deletion
-behavior, and the filesystem security boundary.
+behavior, the filesystem security boundary, and the planned 1.1 continuously
+maintained mode.
 
 **[`AI_START_HERE.md`](../../AI_START_HERE.md)** — at the repo root, for an
 AI assistant a user asks to "explain and install this." Mission, safety

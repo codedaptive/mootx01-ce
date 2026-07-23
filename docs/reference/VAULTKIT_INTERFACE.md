@@ -726,9 +726,14 @@ Note: the aria-mcp `moot_vault_*` Rust mirror is delivered (see the Vault identi
 ## Out of scope (later missions)
 
 CorpusKit RAG bundling; substrate-level origin-date and `SourceRef` primitive;
-attachment blob custody; the watched-source scheduler and the real
-QueueKit enqueue (leg a) + dream → Proposal → Debrief consumption (a later,
-separately-gated mission).
+attachment blob custody; and the real QueueKit enqueue (leg a) + dream →
+Proposal → Debrief consumption (a later, separately-gated mission).
+
+A watched-source scheduler is planned for version 1.1, but it belongs to the
+resident service control layer rather than `VaultBridge`. It will automate the
+existing export, import, and reconcile primitives while blocking private,
+restricted, and secret data from the automated path. See
+[Obsidian vault workflows](../start-here/OBSIDIAN_VAULT.md#planned-version-11-continuous-mode).
 
 ---
 
@@ -736,6 +741,7 @@ separately-gated mission).
 
 | Version | Date | Change |
 |---|---|---|
+| 1.12.0 | 2026-07-23 | Clarified that continuous Obsidian maintenance is a version 1.1 resident-service plan, not current stable behavior or a `VaultBridge` responsibility. |
 | 1.11.0 | 2026-06-28 | Path-traversal hardening (planned lockdown). `ObsidianAdapter.fromIR(_:to:)` and `ExchangeAdapter.decode(_:)` now enforce vault containment as a security boundary. A shared `containedVaultURL(forRelativePath:under:)` helper (Swift) / `contained_vault_path` free function (Rust) validates every vault-relative path before any filesystem access: rejects `..`, absolute prefixes, backslash separators, empty and `.` components (lexical phase). A second pass via `ensureContainedInVault(_:under:)` (Swift) / `write_contained_file` (Rust) re-checks the fully-resolved path with symlink expansion (`resolvingSymlinksInPath` / `canonicalize`) and rejects pre-existing symlinks at the destination. `ExchangeAdapter.decode` validates `pathComponents` entries with the same lexical rules before projecting them to `NoteIR`. Both phases share identical rejection vocabulary across Swift and Rust. Errors surface as `VaultKitError.adapterError` (Swift) / `VaultKitError::AdapterError` (Rust) — fail-closed, never silent. Both ports. |
 | 1.10.0 | 2026-06-25 | T7 (one engine, many gates): `importVault` / `importVault(includingPaths:)` / `importMemPalace` and the shared `importNotes` core replace `batch: bool` with `mode: EncodeSpeed` — matching `importPalace` (T1). All source gates (MemPalace, Obsidian, OKF, Markdown vaults) now run the SAME ingest policy: encode SPEED is caller-declared, the bulk-vs-stream WRITE strategy is size-gated automatically via the new single-source `ImportPolicy` (`streamThreshold` = 250k; Rust `import_policy`). Each importer calls `setEncodeSpeed(mode)` then size-gates by item count, so adding a gate never re-invents the write strategy. Both ports. |
 | 1.9.0 | 2026-06-25 | T1 (encode mode): `importPalace` / `import_palace` replace the `batch: bool` arg with `mode: EncodeSpeed` (`.foreground` default / `.background`) — encode SPEED (drain QoS) only. The WRITE strategy is now chosen automatically by source size (`streamThreshold` = 250k rows): ≤ threshold → one bulk `captureBatch` transaction; above → per-item streaming. The caller no longer selects the write strategy. Both ports. |

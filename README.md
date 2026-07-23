@@ -126,7 +126,7 @@ Show me the current status of my MOOT estate.
 - **Read the story.** [`ABOUT.md`](ABOUT.md) explains why MOOTx01 exists and why memory belongs to you.
 - **Build on it.** [`docs/start-here/SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) shows the open → capture → recall loop, and [`SDK.MD`](SDK.MD) maps the standalone Apache-2.0 SDK repos.
 - **Operate it.** [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) covers the dashboard, read API, control plane, configuration, and troubleshooting.
-- **Maintain an Obsidian vault.** [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) documents export, import, drift detection, and explicit resync.
+- **Maintain an Obsidian vault.** [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) documents today's explicit workflow and the planned 1.1 continuous mode.
 - **Use two memory backends.** [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) explains the optional primary/secondary MCP bridge and its failure model.
 - **Inspect benchmark evidence.** [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) separates reproducible performance data from conformance and memory-quality evaluation.
 - **See the architecture.** [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) is the readable map of the repository.
@@ -415,6 +415,7 @@ names every issue and its fix or closing commit.
 Version 1.1.x
 - **Docs and Specs** — Clean up agentic baggage in the documentation. Remove the noise and organize for humans
 - **Improved Sidecar and embedded examples** — reference app patterns.    
+- **Continuous Obsidian vault (insecure mode)** — an optional resident watcher automates eligible import, export, and resync for a normal Obsidian vault. Private/non-exportable, restricted, and secret data are blocked from automation; private transfers remain explicit and authorization-gated.
 - **Apple iOS Native App**  — Full App with Shortcut Support and App Intents for Mootx01 sharing to External Apps
 - **Apple Intelligence integration** — native capture and recall across Apple surfaces.  
 - **Apple iCloud Sync** Seemless default estate sharing between iOS and MacOs
@@ -454,7 +455,7 @@ mootx01/
 | [`docs/start-here/END_USER_EXPLAINER.md`](docs/start-here/END_USER_EXPLAINER.md) | Plain-language explainer for a non-technical user |
 | [`docs/start-here/INSTALL_SURFACE.md`](docs/start-here/INSTALL_SURFACE.md) | Install fact sheet: addresses, flow, platform matrix, verification |
 | [`docs/start-here/SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) | Build on the substrate: open an estate, capture → recall (Swift + Rust) |
-| [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) | Maintain a Markdown/Obsidian vault with explicit export, import, and resync |
+| [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) | Stable on-demand vault workflow and planned 1.1 continuous mode |
 | [`docs/start-here/AI_INSTALL_MANIFEST.json`](docs/start-here/AI_INSTALL_MANIFEST.json) | Machine-readable install facts for AI agents (commands, ports, verification, adapters) |
 | [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) | Operator console, dashboard/read API, control plane, and troubleshooting |
 | [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) | Optional two-backend MCP bridge: routing, configuration, security, and failure behavior |

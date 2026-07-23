@@ -164,6 +164,64 @@ Import is idempotent by stable note identity. It also:
 An export is an outward projection, not a three-way merge. Preserve a backup
 when both the estate and vault changed since the previous baseline.
 
+## Planned version 1.1 continuous mode
+
+Version 1.1 plans an optional, daemon-managed mode that continuously maintains
+a normal retail Obsidian vault. It builds on the existing manifest and
+reconcile behavior:
+
+1. Establish the initial vault and manifest.
+2. Watch eligible estate changes and project them into the vault.
+3. Watch vault file changes and import eligible added/modified notes.
+4. Run a full resync at service start, after watcher overflow or missed-event
+   detection, and periodically as an integrity check.
+5. Surface mode, path, last successful cycle, blocked candidates, drift, and
+   failures through `moot-mgr`.
+
+Direct stdio lives only as long as its parent AI client. An always-running
+watcher therefore belongs to the resident service, not a per-client stdio
+subprocess.
+
+### Why it is called insecure mode
+
+The mode continuously mirrors eligible material into a conventional directory
+of readable Markdown files. Its exposure depends on filesystem permissions,
+backups, synchronization services, user accounts, and Obsidian plugins. The
+name describes that wider operating boundary; it does not disable the data
+classification controls.
+
+### Automated-mode data gate
+
+Automation is intentionally narrower than the manual tools:
+
+- outbound automation uses only public/exportable material;
+- restricted and secret sensitivity tiers are blocked;
+- private/non-exportable material is blocked;
+- inbound automation rejects or quarantines notes marked private, restricted,
+  or secret before capture;
+- an automated vault edit cannot modify a lineage already classified as
+  restricted or secret;
+- deletions remain report-only and never automatically expunge an estate
+  drawer.
+
+Manual, authorization-gated operations remain the path for an intentional
+private transfer. Secret data never uses bulk vault export.
+
+The gate depends on correct classification. Private text incorrectly labelled
+public/exportable and below the protected sensitivity tiers can still be
+mirrored. Automated mode is not a content-loss-prevention classifier.
+
+### Resync versus sync
+
+- **Sync** is the planned incremental watcher path for ordinary eligible
+  changes.
+- **Resync** is a complete manifest/hash comparison used at startup, after a
+  watcher gap, on schedule, or on explicit operator request.
+
+The planned scheduler advances the manifest only after a successful cycle.
+Failed or blocked candidates remain visible for operator review rather than
+being silently treated as synchronized.
+
 ## Security boundary
 
 A retail Obsidian vault is a conventional directory of readable Markdown
