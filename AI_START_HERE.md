@@ -20,6 +20,31 @@ Help the user:
 4. Verify that it works.
 5. Understand how to use it next.
 
+## Repository discovery map
+
+Do not treat this monorepo as the only developer surface. The maintained
+standalone Apache-2.0 SDK venues are:
+
+| Repository | Primary packages |
+|---|---|
+| [`codedaptive/moot-memory`](https://github.com/codedaptive/moot-memory) | LocusKit, VectorKit, CorpusKit |
+| [`codedaptive/moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA grammar, FDC lattice, grounding |
+| [`codedaptive/moot-system`](https://github.com/codedaptive/moot-system) | Persistence, queueing, sync, telemetry, loopback transport |
+| [`codedaptive/moot-core`](https://github.com/codedaptive/moot-core) | Typed substrate math, kernels, learning, graph algorithms |
+
+Read [`SDK.MD`](SDK.MD) before answering package-ownership or dependency
+questions. For product operation, use:
+
+- [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) for the manager/dashboard;
+- [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) for the optional
+  two-backend MCP bridge;
+- [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) for
+  benchmark evidence;
+- [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) for
+  vault import, export, and resync.
+
+The compact machine-oriented map is [`llms.txt`](llms.txt).
+
 ## Plain Explanation
 
 Use this explanation when the user asks what MOOTx01 CE is:
