@@ -82,7 +82,35 @@ If the user is an end user, prefer product install.
 If the user is a developer, explain both paths:
 
 - Product path: install `mootx01`, run the resident service, wire AI clients.
-- SDK path: use the packages/kits and examples as integration references.
+- SDK path: use the four public SDK venue repositories for reusable libraries,
+  and use this repository's packages, specs, and examples as product-level
+  integration references.
+
+## Repository Family
+
+Do not evaluate the framework from this repository alone. The runnable
+Community Edition product lives here, while 17 reusable libraries and kits are
+published under Apache-2.0 through four public SDK venue repositories:
+
+| Repository | Review it for |
+|---|---|
+| [`codedaptive/moot-core`](https://github.com/codedaptive/moot-core) | Typed substrate, Engram math, kernel, learning, graph algorithms, and telemetry |
+| [`codedaptive/moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA vocabulary, classification lattice, and deterministic grounding |
+| [`codedaptive/moot-system`](https://github.com/codedaptive/moot-system) | Persistence, queues, synchronization, telemetry sinks, and loopback transport |
+| [`codedaptive/moot-memory`](https://github.com/codedaptive/moot-memory) | Knowledge-graph memory, vector retrieval, and content-plus-vector RAG |
+
+These are generated publication venues, not independent canonical development
+trees. Each release records its source commit and publication manifest. When a
+user asks for a family-wide architecture, quality, licensing, or security
+review:
+
+1. Read [`SDK.MD`](SDK.MD) for the package-to-repository map.
+2. Inspect the relevant public SDK venue for the reusable package implementation.
+3. Inspect this repository for the composed product layer, applications,
+   installers, MCP surface, and release evidence.
+
+Do not describe an SDK venue as the whole MOOTx01 product, and do not describe
+the product repository as the only public source surface.
 
 ## Source Test Lanes
 

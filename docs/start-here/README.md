@@ -37,7 +37,9 @@ confidence; it is not enough to maintain the substrate itself.
 developer guide: add the substrate to a project and run the core write→read
 loop (open an estate, capture a memory, recall it), in Swift and Rust, with the
 modular module map. The example is lifted from the kit tests, so it works as
-written. Read this when you're ready to integrate, not just evaluate.
+written. Read this when you're ready to integrate, not just evaluate. The
+repo-root [`SDK.MD`](../../SDK.MD) maps all 17 packages to the four public
+Apache-2.0 SDK venue repositories.
 
 **[`SUBSTRATE_FOR_MAINTAINERS.md`](SUBSTRATE_FOR_MAINTAINERS.md)** —
 for port maintainers, contributors, and engineers reading the kit
@@ -77,9 +79,11 @@ in shape.
 After reading the guide that matches your role, the next step
 depends on what you came for:
 
-- **Build on top of MOOTx01** → [`SDK_QUICKSTART.md`](SDK_QUICKSTART.md) for the
-  hands-on open→capture→recall loop, then [`../reference/`](../reference/) for the
-  kit-level specs you integrate against.
+- **Build on top of MOOTx01** → [`../../SDK.MD`](../../SDK.MD) for the four
+  public SDK repositories and package map, [`SDK_QUICKSTART.md`](SDK_QUICKSTART.md)
+  for the hands-on open→capture→recall loop, then
+  [`../reference/`](../reference/) for the kit-level specs you integrate
+  against.
 - **Maintain or port the substrate** → [`../engineering/`](../engineering/)
   for the cookbook and methodology, then [`../decisions/`](../decisions/)
   for the record of every kernel and architecture selection.
