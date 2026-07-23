@@ -1,6 +1,6 @@
 ---
 title: MOOTx01 — User Guide
-version: v0.3
+version: v0.4
 status: draft
 ---
 
@@ -190,10 +190,13 @@ Sync requires two things:
 1. You are **signed into iCloud** on every device.
 2. You are running a build of MOOTx01 that has the iCloud container enabled.
    Sync is off by default — the app does nothing with iCloud until you
-   enable it in the Engine tab.
+   enable the master switch in Settings.
 
-Once both conditions are met, open the **Engine** tab, find the **iCloud Sync**
-toggle, and turn it on. The setting persists across launches.
+Once both conditions are met, open **Settings** and turn on the **iCloud Sync**
+switch in the Sync section. The setting persists across launches.
+
+On Mac, Settings opens from the app menu (⌘,). On iPhone and iPad, tap the
+gear icon in the Engine tab toolbar.
 
 ### What syncs — and what never leaves the machine
 
@@ -297,11 +300,18 @@ build supports sync and the toggle is on.
 
 ### Turning iCloud Sync on or off
 
-Open the **Engine** tab and look for the **iCloud Sync** section. There is a
-toggle labelled **iCloud Sync**. Turn it on to enable syncing; turn it off to
-stop. The change takes effect immediately — toggling off stops the sync engine
-and stops the app from forwarding push notifications to CloudKit; toggling on
+Open **Settings** and find the **iCloud Sync** switch:
+
+- **Mac:** choose Settings from the app menu (⌘,), or press Command-comma.
+- **iPhone / iPad:** tap the gear icon in the Engine tab toolbar, then look for
+  the Sync section.
+
+The change takes effect immediately — turning it off stops the sync engine and
+stops the app from forwarding push notifications to CloudKit; turning it on
 fires an immediate sync beat.
+
+The **Engine** tab also shows the current sync state in its iCloud Sync tile.
+The tile mirrors the same switch as Settings — changing either one changes both.
 
 The setting is saved and respected on every future launch. A device that has
 never enabled sync makes no iCloud calls and requires no iCloud container
