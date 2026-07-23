@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="700" viewBox="0 0 1120 700" role="img" aria-labelledby="title desc">
+  <title id="title">The absence test turns hidden decisions into product obligations</title>
+  <desc id="desc">A three-stage flow follows a user promise to a decision that still requires the creator and then to a product rule, recovery path, or verification check.</desc>
+  <rect width="1120" height="700" fill="#fbfaf7"/>
+
+  <text x="560" y="58" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="700" fill="#111827">Run the absence test before calling it a product</text>
+  <text x="560" y="96" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">Follow one user promise until progress still depends on the creator.</text>
+
+  <rect x="65" y="180" width="285" height="320" rx="10" fill="#eaf2ff" stroke="#4f83cc" stroke-width="3"/>
+  <text x="207" y="228" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#12356b">1. Name the promise</text>
+  <text x="207" y="282" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#14345f">“The tool starts, reaches</text>
+  <text x="207" y="312" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#14345f">my data, and can recover.”</text>
+  <rect x="105" y="370" width="205" height="72" rx="8" fill="#ffffff" stroke="#93b4e4" stroke-width="2"/>
+  <text x="207" y="400" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#12356b">Start with the outcome</text>
+  <text x="207" y="426" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">the next person expects.</text>
+
+  <path d="M350 340 H405" stroke="#334155" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="417" y="180" width="286" height="320" rx="10" fill="#fff7e6" stroke="#d97706" stroke-width="3"/>
+  <text x="560" y="228" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#8a4b00">2. Find the stop</text>
+  <text x="560" y="282" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#7a4300">Which process is right?</text>
+  <text x="560" y="318" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#7a4300">Which state is safe?</text>
+  <text x="560" y="354" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#7a4300">What restores service?</text>
+  <rect x="457" y="392" width="206" height="72" rx="8" fill="#ffffff" stroke="#e6b56b" stroke-width="2"/>
+  <text x="560" y="422" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="700" fill="#8a4b00">A creator-only answer</text>
+  <text x="560" y="448" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">reveals hidden knowledge.</text>
+
+  <path d="M703 340 H758" stroke="#334155" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+
+  <rect x="770" y="180" width="285" height="320" rx="10" fill="#e8f6ee" stroke="#39a368" stroke-width="3"/>
+  <text x="912" y="228" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#116033">3. Move the knowledge</text>
+  <text x="912" y="282" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#14532d">Name one owner.</text>
+  <text x="912" y="318" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#14532d">Preserve unknown state.</text>
+  <text x="912" y="354" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="19" fill="#14532d">Verify recovery.</text>
+  <rect x="800" y="392" width="225" height="72" rx="8" fill="#ffffff" stroke="#79c69b" stroke-width="2"/>
+  <text x="912" y="422" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#116033">Code, checks, and guidance</text>
+  <text x="912" y="448" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">carry the decision forward.</text>
+
+  <rect x="180" y="565" width="760" height="64" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="560" y="605" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="700" fill="#111827">The gap is not a reason to blame the prototype. It is the next product obligation.</text>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+  </defs>
+</svg>

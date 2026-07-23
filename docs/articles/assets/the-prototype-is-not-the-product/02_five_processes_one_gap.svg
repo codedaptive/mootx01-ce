@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="700" viewBox="0 0 1120 700" role="img" aria-labelledby="title desc">
+  <title id="title">Five processes exposed one ownership gap</title>
+  <desc id="desc">One intended resident process, two session-started services, and two development rigs all point toward the same local memory store.</desc>
+  <rect width="1120" height="700" fill="#fbfaf7"/>
+
+  <text x="560" y="58" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="34" font-weight="700" fill="#111827">Five processes exposed one ownership gap</text>
+  <text x="560" y="96" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">Every path had a reason. No shared rule decided which path owned the connection.</text>
+
+  <rect x="55" y="155" width="185" height="120" rx="9" fill="#e8f6ee" stroke="#39a368" stroke-width="3"/>
+  <text x="147" y="194" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="700" fill="#116033">Resident</text>
+  <text x="147" y="225" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" fill="#14532d">intended owner</text>
+  <text x="147" y="251" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">process 1</text>
+
+  <rect x="265" y="155" width="185" height="120" rx="9" fill="#fff1f2" stroke="#e05260" stroke-width="3"/>
+  <text x="357" y="194" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="700" fill="#9f1239">Agent session 1</text>
+  <text x="357" y="225" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" fill="#9f1239">private service</text>
+  <text x="357" y="251" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">process 2</text>
+
+  <rect x="475" y="155" width="185" height="120" rx="9" fill="#fff1f2" stroke="#e05260" stroke-width="3"/>
+  <text x="567" y="194" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="700" fill="#9f1239">Agent session 2</text>
+  <text x="567" y="225" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" fill="#9f1239">private service</text>
+  <text x="567" y="251" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">process 3</text>
+
+  <rect x="685" y="155" width="185" height="120" rx="9" fill="#fff7e6" stroke="#d97706" stroke-width="3" stroke-dasharray="8 6"/>
+  <text x="777" y="194" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="700" fill="#8a4b00">Dev rig A</text>
+  <text x="777" y="225" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" fill="#7a4300">intentional scope</text>
+  <text x="777" y="251" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">process 4</text>
+
+  <rect x="895" y="155" width="170" height="120" rx="9" fill="#fff7e6" stroke="#d97706" stroke-width="3" stroke-dasharray="8 6"/>
+  <text x="980" y="194" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="700" fill="#8a4b00">Dev rig B</text>
+  <text x="980" y="225" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="17" fill="#7a4300">intentional scope</text>
+  <text x="980" y="251" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">process 5</text>
+
+  <path d="M147 275 C147 335 370 340 475 410" stroke="#39a368" stroke-width="3" fill="none" marker-end="url(#arrowGreen)"/>
+  <path d="M357 275 C357 340 430 350 505 410" stroke="#e05260" stroke-width="3" fill="none" marker-end="url(#arrowRed)"/>
+  <path d="M567 275 V405" stroke="#e05260" stroke-width="3" fill="none" marker-end="url(#arrowRed)"/>
+  <path d="M777 275 C777 340 700 350 630 410" stroke="#d97706" stroke-width="3" fill="none" stroke-dasharray="8 6" marker-end="url(#arrowAmber)"/>
+  <path d="M980 275 C980 335 760 340 660 410" stroke="#d97706" stroke-width="3" fill="none" stroke-dasharray="8 6" marker-end="url(#arrowAmber)"/>
+
+  <rect x="365" y="420" width="390" height="125" rx="10" fill="#ffffff" stroke="#475569" stroke-width="3"/>
+  <text x="560" y="466" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#111827">One local memory store</text>
+  <text x="560" y="500" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">The user sees one promise.</text>
+  <text x="560" y="528" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">The machine had five possible owners.</text>
+
+  <rect x="145" y="590" width="830" height="58" rx="9" fill="#f2edff" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="560" y="626" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="700" fill="#4c1d95">The process count was evidence of a missing ownership rule, not operator untidiness.</text>
+
+  <defs>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#39a368"/></marker>
+    <marker id="arrowRed" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#e05260"/></marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#d97706"/></marker>
+  </defs>
+</svg>
