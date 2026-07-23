@@ -48,10 +48,10 @@ pub enum StorageEvent {
 /// `apply_inbound` writes re-enter the outbound queue and are pushed back
 /// to the originating peer (I-10, CVK-ICLOUD P1-M1).
 ///
-/// Rust federation uses an orthogonal mechanism (`pulling: Arc<AtomicBool>`)
-/// for echo suppression because its synchronous thread-based observer delivery
-/// makes the `pulling` flag sound (unlike Swift's unordered async Tasks). This
-/// field provides API parity with the Swift leg for future unified suppression.
+/// Rust federation uses the same mechanism as Swift: `apply_record` writes via
+/// `upsert_sync`/`insert_sync`/`delete_sync`, which stamp `SyncApply` at emit
+/// time in `InMemoryRowStore`. Observer workers check
+/// `change.origin == SyncApply` — race-free, no TOCTOU window (FAB5-FO, DUR-5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ChangeOrigin {
     /// Default: a local, user-initiated write.
