@@ -26,8 +26,9 @@ until the credential prompt is satisfied and the user is in the foreground. A
 remote client that connects before authentication is complete receives no
 response.
 
-Implementation reference: `LanSessionManager` in `GatewayUI`
-(`apps/Mootx01-App/Sources/MootGateway/LanSessionManager.swift`).
+Implementation: `PortableServerController` in `GatewayUI`
+(`apps/Mootx01-App/Sources/GatewayUI/PortableServerController.swift`),
+`BiometricLANCredentialStore` handles the credential gate.
 
 ### 2. Read-only tool allowlist
 
@@ -35,8 +36,6 @@ The MCP server exposes a fixed allowlist of recall and status tools — it does
 not expose write tools to LAN clients. Tools that mutate the estate
 (capture, delete, reorganize) are not available over the LAN endpoint.
 The allowlist is compiled into the binary and cannot be extended at runtime.
-
-Implementation reference: `LanToolRegistry` in `GatewayUI`.
 
 ### 3. Foreground-bound
 

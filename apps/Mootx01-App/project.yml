@@ -106,9 +106,10 @@ targets:
         # App Store review rejects builds with missing local-network usage strings.
         NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to connect to local memory services, to share your private estate with AI tools on your home or office network, and to pair with other Mootx01 devices."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
-        # App Intents (Siri Shortcuts): capture and recall voices phrases land in
-        # Mootx01Shortcuts (AppShortcutsProvider). Required by App Store review
-        # even though the framework calls are event-driven, not TCC-gated.
+        # App Intents (Siri Shortcuts): capture and recall voice phrases land in
+        # Mootx01Shortcuts (AppShortcutsProvider). Included for parity with iOS;
+        # macOS ships via Developer ID so App Store review does not require this key,
+        # but the AppShortcutsProvider registers these phrases on macOS too.
         NSSiriUsageDescription: "MOOTx01 uses Siri and Shortcuts to let you capture memories and recall them using voice commands. All memory data stays on your device."
         NSBonjourServices:
           - _mootx01._tcp
@@ -194,7 +195,7 @@ targets:
         NSLocalNetworkUsageDescription: "MOOTx01 uses your local network to connect to local memory services, to share your private estate with AI tools on your home or office network, and to pair with other Mootx01 devices."
         NSFaceIDUsageDescription: "MOOTx01 uses Face ID to confirm you are the estate owner before serving your memory on the local network."
         # App Intents (Siri Shortcuts): capture and recall voice phrases —
-        # see Mootx01Shortcuts (AppShortcutsProvider). Required by App Store review.
+        # see Mootx01Shortcuts (AppShortcutsProvider). Required for iOS App Store review.
         NSSiriUsageDescription: "MOOTx01 uses Siri and Shortcuts to let you capture memories and recall them using voice commands. All memory data stays on your device."
         NSBonjourServices:
           - _mootx01._tcp
