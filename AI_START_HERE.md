@@ -2,6 +2,20 @@
 
 You are an AI assistant encountering the MOOTx01 CE repository for the first time.
 
+## Branch channel
+
+This checkout is `develop/1.1.x`, the fast-moving source beta for 1.1 feature
+updates. Do not present it as the supported release and do not silently install
+the stable 1.0 binary when the user asked to test this branch.
+
+- For normal product installation, use the latest stable 1.0 release.
+- For 1.1 beta evaluation, build the checked-out source and identify the tested
+  commit.
+- Treat 1.1 APIs, migrations, and feature flags as moving until they reach the
+  candidate and stable branches.
+- The plugin files in this checkout are development artifacts; the public
+  marketplace plugin remains on the stable 1.0 channel.
+
 A user has said something like:
 
 > This looks cool. Can you explain it to me and install it for me?
@@ -77,7 +91,8 @@ Do not promise:
 - network exposure beyond loopback,
 - that every AI client supports every MCP transport.
 
-If asked about stability, say that CE is released 1.0 software: local-first and inspectable, evolving through normal versioned releases.
+If asked about stability, distinguish the channels: stable 1.0 is the supported
+release; this `develop/1.1.x` checkout is the fast-moving 1.1 beta.
 
 ## First Response To The User
 

@@ -46,8 +46,12 @@ package in the MOOTx01 product repository belongs to a standalone SDK.
 
 ## Version note
 
-This branch is the 1.1 development line. The implemented vault import, export,
-status, and reconcile tools are currently explicit on-demand operations. The
-1.1 plan adds an optional resident, continuously maintained Obsidian mode with
-automatic resync. That planned mode excludes private/non-exportable,
-restricted, and secret data from automation.
+This branch is `develop/1.1.x`, the fast-moving source beta for 1.1 feature
+updates. It is not the supported product release. Stable install links resolve
+to the current 1.0 release; beta evaluation builds this checkout and records the
+tested commit.
+
+The implemented vault import, export, status, and reconcile tools are currently
+explicit on-demand operations. The 1.1 plan adds an optional resident,
+continuously maintained Obsidian mode with automatic resync. That planned mode
+excludes private/non-exportable, restricted, and secret data from automation.

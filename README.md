@@ -13,6 +13,7 @@
 [![Homebrew](https://img.shields.io/badge/Homebrew-codedaptive%2Fmootx01--ce-FBB040?logo=homebrew&logoColor=white)](https://github.com/codedaptive/homebrew-mootx01-ce)
 [![Linux](https://img.shields.io/badge/Linux-x86__64%20·%20aarch64-FCC624?logo=linux&logoColor=black)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 [![SDKs](https://img.shields.io/badge/SDKs-4%20Apache--2.0%20library%20repos-8A2BE2)](#developer-sdks)
+![channel](https://img.shields.io/badge/channel-1.1%20development%20beta-orange)
 ![signed](https://img.shields.io/badge/releases-minisign%20signed-success)
 ![platforms](https://img.shields.io/badge/platforms-Apple%20Silicon%20·%20PC%2FLinux-blue)
 ![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
@@ -21,6 +22,39 @@
 
 > Every release asset ships with a minisign-signed `checksums.txt` so you can
 > verify what you install.
+
+> **Branch channel:** `develop/1.1.x` is the fast-moving source beta for 1.1
+> feature work. It is not the supported production release. The installers and
+> `releases/latest` links below install the current stable 1.0 line; use a source
+> build from this checkout to exercise 1.1 work in progress.
+
+## 1.1 development beta
+
+This branch is where compatible 1.1 capabilities land and are qualified before
+promotion. It moves continuously: APIs, migrations, documentation, and feature
+flags can change between commits. Pin the commit you test, use a disposable or
+backed-up estate, and report the commit with every beta issue.
+
+Current 1.1 work includes the native MOOTx01-App, CorpusKit shared-content
+architecture, Apple surfaces and on-demand federation, and the foundation for
+continuous Obsidian synchronization. The roadmap distinguishes implemented
+behavior from planned work.
+
+Build the beta directly:
+
+```bash
+# Swift — macOS 26+
+swift build -c release --package-path apps/mootx01 --product mootx01
+SWIFT_BIN="$(swift build -c release --package-path apps/mootx01 --show-bin-path)"
+"$SWIFT_BIN/mootx01" --version
+
+# Rust — Linux or Windows
+cargo build --locked --release --manifest-path apps/mootx01/rust/Cargo.toml
+apps/mootx01/rust/target/release/mootx01 --version
+```
+
+The plugin packages committed on this branch are development artifacts. The
+public marketplace plugin remains on the stable 1.0 channel.
 
 ## Install in 60 seconds
 
@@ -379,6 +413,9 @@ July 22, 2026. The linked [finding ledger](docs/validation/audits/SECURITY_FINDI
 names every issue and its fix or closing commit.
 
 ## Roadmap
+
+`develop/1.1.x` is the active beta for the following feature line. A roadmap
+item is not a shipped promise until its guide marks the behavior implemented.
 
 Version 1.1.x
 - **Docs and Specs** — Clean up agentic baggage in the documentation. Remove the noise and organize for humans

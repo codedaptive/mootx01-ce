@@ -5,6 +5,18 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
 the tag carries the pre-release qualifier.
 
+## develop/1.1.x — fast-moving 1.1 beta
+
+This branch is the source beta for 1.1 feature updates. It changes continuously
+and is identified by commit rather than a release tag. Stable installers and
+the public marketplace plugin continue to track the supported 1.0 line until
+1.1 work is promoted through candidate and stable.
+
+Current development themes include the native MOOTx01-App, CorpusKit
+shared-content architecture, Apple surfaces and on-demand federation, and the
+foundation for continuous Obsidian synchronization. Individual entries and
+feature guides distinguish implemented behavior from planned work.
+
 ## v1.0.33 — 2026-07-16
 
 Release-engineering release. No user-facing code changes — Windows release

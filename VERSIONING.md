@@ -1,7 +1,7 @@
 ---
-version: 1.2.0
+version: 1.3.0
 status: active
-date: 2026-07-03
+date: 2026-07-23
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
 ---
 
@@ -63,11 +63,17 @@ The governing question: does the consumer have to do anything? If yes, it is a M
 
 ### 1.5 Pre-Release Designation
 
-Releases in active development append a qualifier before tagging stable.
+The development channel and distributable artifact versions are distinct.
 
-- `1.1.0-dev` during development
-- `1.1.0-rc1`, `1.1.0-rc2` during release candidate review
-- `1.1.0` upon promotion to stable
+- `develop/1.1.x` is described as the **1.1 development beta**. Its HEAD is
+  identified by commit, not by a release tag.
+- Candidate artifacts use `1.1.Z-prerelease.N`.
+- Release-candidate tags may use `v1.1.Z-rcN`.
+- Stable releases use `v1.1.Z`.
+
+The source version remains a strict `MAJOR.MINOR.PATCH` value for the release
+and plugin tooling. A branch label such as “1.1 beta” does not turn every
+development commit into a tagged release artifact.
 
 Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guarantee. mootx01 does not ship production releases under `0.x.y`. The first public release is `1.0.0`.
 
@@ -79,7 +85,7 @@ Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guara
 
 | Branch Pattern | Purpose |
 |---|---|
-| `develop/X.Y.x` | **Default branch.** Active development; pull requests land here; the daily regression suite (`make test`) runs here; security scanning targets it. |
+| `develop/X.Y.x` | **Default branch and fast-moving source beta.** Feature work and pull requests land here; the daily regression suite (`make test`) runs here; security scanning targets it. |
 | `candidate/X.Y.x` | Test-build line. Every push produces an automatic **unsigned pre-release** whose installers are verified in CI (see 2.3). |
 | `stable/X.Y.x` | Release staging / last-known-good. Merges sit inert here; a `vX.Y.Z` tag on this branch is what cuts the **signed** production release. |
 
@@ -88,6 +94,12 @@ permanently and concurrently for the lifetime of that line. `develop` is the
 repository default branch (not `stable`): contributions and PRs target the
 active line, and released binaries are obtained from tagged releases, not by
 cloning.
+
+For the active minor line, the development branch is a source beta rather than
+a supported binary channel. Testers pin the commit they evaluate and use
+disposable or backed-up data. The public plugin and normal installer continue
+to track the stable line until a candidate or stable artifact is deliberately
+published.
 
 Per-branch automation:
 
@@ -276,6 +288,11 @@ Any mission that modifies a document governed by this standard must comply with 
 ---
 
 ## Changelog
+
+### 1.3.0 -- 2026-07-23
+Defined `develop/X.Y.x` as the fast-moving source beta for its minor feature
+line. Distinguished the branch channel from candidate and stable artifact
+versions, and documented the stable installer/plugin boundary.
 
 ### 1.2.0 -- 2026-07-03
 Documented the branch model as actually operated: `develop` is the repository
