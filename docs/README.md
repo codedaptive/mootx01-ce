@@ -41,7 +41,9 @@ constraints, validation plan, and recorded audits. This is what
 turns architectural assertions into testable propositions.
 
 **You want the lessons behind the product work.**
-[`articles/`](articles/) holds the reviewed learning series. Choose the
+[`articles/`](articles/) holds the reviewed repository editions of an ongoing
+series published on LinkedIn and Off-Axis Labs on Substack. As each article
+pair is written, reviewed, and released, it is added here. Choose the
 [`business/`](articles/business/) editions for product decisions, operating
 consequences, and team lessons. Choose the
 [`technical/`](articles/technical/) editions for implementation evidence,
