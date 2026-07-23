@@ -24,10 +24,10 @@ the cross-cutting protocol and encoder specs. This is the contract
 surface — what each package exposes and what it promises.
 
 **You want to know why something was built the way it was.**
-[`decisions/`](decisions/) holds the Architecture Decision Records.
-Every load-bearing choice is captured with the question asked,
-candidates considered, evidence gathered, and disposition. Code
-comments cite decision records by filename.
+Architecture Decision Records are maintained on the
+[`develop/1.1.x` documentation line](https://github.com/codedaptive/mootx01-ce/tree/develop/1.1.x/docs/decisions).
+The stable branch keeps the released contracts and validation evidence; code
+comments retain cited decision filenames for traceability.
 
 **You are implementing against the substrate.**
 [`engineering/`](engineering/) holds implementation-grade material:
@@ -40,6 +40,17 @@ phases.
 constraints, validation plan, and recorded audits. This is what
 turns architectural assertions into testable propositions.
 
+**You operate, bridge, or benchmark the product.**
+The operator-facing application guides live with their source:
+[`moot-mgr`](../apps/moot-mgr/README.md) documents the dashboard, read API,
+control plane, configuration, and troubleshooting;
+[`moot-bridge`](../apps/moot-bridge/README.md) documents the optional
+two-backend MCP multiplexer and its failure model; and
+[`moot-math-benchmark`](../apps/moot-math-benchmark/README.md) documents the
+benchmark protocol and tracked evidence. The
+[`Obsidian vault guide`](start-here/OBSIDIAN_VAULT.md) covers user-facing
+export, import, drift detection, and resync.
+
 **You want the lessons behind the product work.**
 [`articles/`](articles/) holds the reviewed learning series. Choose the
 [`business/`](articles/business/) editions for product decisions, operating
@@ -49,9 +60,8 @@ source trails, and diagrams. The article index keeps each business and
 technical edition together as a pair.
 
 **You are looking for history.**
-[`archive/`](archive/) holds superseded specs, historical math
-notes, and legacy product names. Preserved for traceability; not
-authoritative.
+Use the Git history and dated validation records. Superseded material is not
+published as an authoritative `docs/archive/` tree on this branch.
 
 ## Conventions
 

@@ -1,59 +1,153 @@
 # moot-mgr
 
-The standalone **observer / manager** process for MOOTx01 — the management and
-admin control surface for a running resident daemon.
+`moot-mgr` is the local operator console for a resident MOOTx01 installation.
+It reads the manager statistics store, serves the loopback dashboard and read
+API, runs retention, and exposes a separately gated estate-control plane.
 
-It provides two planes:
-- **Read plane** — a read-only loopback **HTTP API** and dashboard (health,
-  per-estate state, the write pipeline, an activity log, and a live node-link
-  topology view).
-- **Admin plane** — a gated **control channel** over a Unix domain socket for
-  estate provisioning and lifecycle operations.
+It does not serve MCP memory tools and it does not replace `mootx01 serve`.
+The resident MOOTx01 daemon owns the memory estate; `moot-mgr` makes that
+resident installation observable and operable.
 
-The dashboard's static assets are generated from `DashboardAssets/` into
-`Sources/MootManager/StaticAssets.swift` (kept in sync by a `make test` gate).
+## What it provides
 
-- Swift: `Sources/MootManager` → the `moot-mgr` binary; `Plugins/` for asset gen.
-- Rust: `rust/` → the Rust vertical.
+| Surface | Purpose | Default |
+|---|---|---|
+| CLI | Status, monitoring switch, and retention | `moot-mgr <command>` |
+| Dashboard | Estate state, write activity, topology, and manager health | `http://127.0.0.1:4200/` |
+| Read API | Loopback, read-only operational metadata | `http://127.0.0.1:4200/api/*` |
+| Control API | Token- and Origin-gated lifecycle operations | `POST /api/control/*` |
+| Local control channel | Gated local IPC for administrative commands | Unix domain socket |
 
-Installed alongside the CLI by default (`mootx01 install`); opt out with
-`mootx01 install --no-manager`. Reach it at `moot-mgr serve` /
-`http://127.0.0.1:4200`.
+The read API reports operational metadata, counts, state, and topology. It
+does not return memory bodies.
 
-## Security hardening
+## Install and start
 
-### Bounded loopback connection cap (CAND-011)
+The normal product installer includes the manager:
 
-The loopback HTTP server enforces a maximum of **16 simultaneous connections**
-(configurable via `MOOT_MGR_HTTP_MAX_CONNECTIONS`). Connections beyond the cap
-are shed immediately with HTTP 503 + `Retry-After: 1` before any request
-parsing runs. This bounds the availability impact of a caller that opens many
-blocking connections before authentication/control checks complete.
+```sh
+mootx01 install
+moot-mgr status
+```
 
-The cap is enforced at the accept loop (non-blocking depth check) so the
-accept thread itself never stalls. Each accepted connection releases its slot
-on all exit paths — normal completion, read timeout, or connection drop — via
-RAII (Rust `OnDrop` guard / Swift `defer`).
+Open the dashboard at:
 
-Both the Swift and Rust ports enforce the same cap (parity).
+```text
+http://127.0.0.1:4200/
+```
 
-### Slot-leak-on-spawn-failure fix (secfix/c-mootmgr-slotleak)
+To omit the manager:
 
-A regression from the connection-cap commit (5670f17) was found and fixed:
-in the Rust port, the slot-release RAII guard was created inside the worker
-closure passed to `std::thread::Builder::spawn`. If `spawn` failed (OS thread
-or resource limit), the closure — and its guard — was discarded with the `Err`
-return, so the gate slot reserved by `try_enqueue` was never released.
-Repeating up to `max_concurrent` times would permanently exhaust the gate,
-causing HTTP 503 for all new connections until restart (a persistent DoS from
-a transient OS failure).
+```sh
+mootx01 install --no-manager
+```
 
-Fixed by binding the release guard on the **accept thread** immediately after
-`try_enqueue` succeeds, then moving it into the spawn closure. If spawn fails,
-the `Err` destructor drops the closure and guard, calling `release()` atomically
-— no manual cleanup, no leak. If spawn succeeds, the guard lives in the worker
-and releases on all exit paths (normal, panic, read-timeout) as before.
+For a source build or foreground diagnostic run:
 
-The Swift port is unaffected: Swift `Task {}` dispatch never fails to enqueue
-the work item, so the `defer { gate.release() }` inside the Task is guaranteed
-to run.
+```sh
+cd apps/moot-mgr
+swift run moot-mgr serve
+```
+
+The Rust twin is under `apps/moot-mgr/rust/`.
+
+## CLI reference
+
+| Command | Result |
+|---|---|
+| `moot-mgr status` | Print manager/store health, totals, estates, and recent activity |
+| `moot-mgr monitoring on` | Enable monitoring for consumers of the shared manager store |
+| `moot-mgr monitoring off` | Disable monitoring |
+| `moot-mgr monitoring status` | Print `ON` or `OFF` |
+| `moot-mgr retention run` | Run one retention pass immediately |
+| `moot-mgr serve` | Start the dashboard, read API, control plane, and retention loop |
+| `moot-mgr help` | Print the live command and environment reference |
+
+## Read API
+
+These endpoints are loopback-only and read-only:
+
+| Endpoint | Contents |
+|---|---|
+| `GET /api/server` | Process and uptime information |
+| `GET /api/estates` | Per-estate operational summaries |
+| `GET /api/config` | Effective manager configuration |
+| `GET /api/events` | Recent activity; supports the dashboard event stream |
+| `GET /api/graph` | Node-link topology data |
+| `GET /api/lexicon` | ARIA grammar and lattice metadata |
+| `GET /api/lattice` | Lattice-address snapshot |
+
+Unknown non-API `GET` paths are handled by the embedded dashboard assets.
+The server validates loopback `Host` values to resist DNS rebinding.
+
+## Administrative control
+
+Administrative writes are not exposed through the unauthenticated read plane.
+HTTP control requests require both an accepted Origin and the configured bearer
+token. Supported operations include:
+
+- monitoring on/off;
+- retention-window updates;
+- estate provision, quiesce, drain, and destroy.
+
+Destructive estate operations carry their own confirmation requirements. Do
+not publish the control token, control socket, or dashboard port outside the
+local machine.
+
+## Configuration
+
+| Environment variable | Meaning | Default |
+|---|---|---|
+| `MOOT_MGR_STORE` | Manager statistics SQLite file | Platform app-data directory |
+| `MOOT_MGR_RETENTION_SECONDS` | Retention window | `604800` (7 days) |
+| `MOOT_MGR_RETENTION_CADENCE_SECONDS` | Resident retention cadence | `3600` (1 hour) |
+| `MOOT_MGR_HTTP_PORT` | Dashboard/read API port | `4200` |
+| `MOOT_MGR_HTTP_MAX_CONNECTIONS` | Concurrent loopback connection cap | `16` |
+| `MOOT_MGR_CONTROL_TOKEN` | HTTP control bearer token | Installer-managed when installed |
+| `MOOT_MGR_CONTROL_SOCKET` | Local control-channel path | Platform data directory |
+| `MOOT_MGR_ESTATES_DIR` | Estate administration root | MOOTx01 data directory |
+
+Invalid non-positive retention values fall back to the documented defaults.
+Use `moot-mgr help` as the executable truth for the installed version.
+
+## Resident daemon and direct stdio
+
+`moot-mgr` is most useful with the shared resident daemon because all clients
+then contribute to one continuously observable installation. A direct-stdio
+client launches a private `mootx01 serve` subprocess; that process does not
+automatically provide the same central telemetry or manager lifecycle.
+
+If a direct-stdio process detects an existing resident daemon for the same
+estate, MOOTx01 may forward to the resident over localhost. Stop the resident
+service when genuinely socket-free operation is required.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Dashboard does not open | Run `moot-mgr status`; confirm port `4200` or `MOOT_MGR_HTTP_PORT` |
+| No estates appear | Confirm `MOOT_MGR_STORE` and `MOOT_MGR_ESTATES_DIR` resolve to the same product data root |
+| Monitoring is empty | Run `moot-mgr monitoring status`, then enable it if desired |
+| Old samples remain | Run `moot-mgr retention run` and inspect the retention variables |
+| Control request is rejected | Confirm loopback Origin and bearer token; do not weaken the read/control separation |
+| Repeated HTTP 503 | Inspect connection pressure and `MOOT_MGR_HTTP_MAX_CONNECTIONS` |
+
+## Implementation and contract
+
+- Swift implementation: `Sources/MootManager`
+- Swift executable: `Sources/moot-mgr`
+- Rust twin: `rust/`
+- Dashboard sources: `Sources/MootManager/DashboardAssets/`
+- Generated assets: `Sources/MootManager/StaticAssets.swift`
+- Detailed contract: [`../../docs/reference/MOOT_MGR_SPEC.md`](../../docs/reference/MOOT_MGR_SPEC.md)
+
+The dashboard asset generator and Swift/Rust behavior are covered by the
+package tests.
+
+## Security notes
+
+The loopback HTTP server caps simultaneous connections and sheds excess work
+with HTTP 503 before request parsing. Accepted connections release their slot
+on normal completion, timeout, disconnect, and worker-spawn failure. The
+read/control separation, Host validation, Origin validation, bearer token, and
+local IPC gate are independent controls; keep all of them intact.

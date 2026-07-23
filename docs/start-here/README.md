@@ -58,6 +58,11 @@ humans and AI assistants: default addresses, the product-install flow, the
 platform matrix, expected commands, environment variables, verification,
 and uninstall. The source of truth for what a product install does.
 
+**[`OBSIDIAN_VAULT.md`](OBSIDIAN_VAULT.md)** — the operational guide for a
+normal Markdown/Obsidian vault: export scopes, background import jobs, the
+hidden drift manifest, dry-run reconciliation, explicit resync, deletion
+behavior, and the filesystem security boundary.
+
 **[`AI_START_HERE.md`](../../AI_START_HERE.md)** — at the repo root, for an
 AI assistant a user asks to "explain and install this." Mission, safety
 rules, a platform-aware install flow, verification, and troubleshooting, so
@@ -80,9 +85,13 @@ depends on what you came for:
 - **Build on top of MOOTx01** → [`SDK_QUICKSTART.md`](SDK_QUICKSTART.md) for the
   hands-on open→capture→recall loop, then [`../reference/`](../reference/) for the
   kit-level specs you integrate against.
+- **Operate the installed product** → [`INSTALLING_MOOTX01.md`](INSTALLING_MOOTX01.md),
+  [`OBSIDIAN_VAULT.md`](OBSIDIAN_VAULT.md), and
+  [`../../apps/moot-mgr/README.md`](../../apps/moot-mgr/README.md).
 - **Maintain or port the substrate** → [`../engineering/`](../engineering/)
-  for the cookbook and methodology, then [`../decisions/`](../decisions/)
-  for the record of every kernel and architecture selection.
+  for the cookbook and methodology, then the
+  [`develop/1.1.x` decision records](https://github.com/codedaptive/mootx01-ce/tree/develop/1.1.x/docs/decisions)
+  for the evolving record of kernel and architecture selections.
 - **Understand the design rationale** → [`../concepts/`](../concepts/)
   for the topology, the canon, the case studies, and the paper.
 
