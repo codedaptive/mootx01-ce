@@ -31,6 +31,7 @@ use crate::schema_profile::{
     CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
 use crate::tokenizer::default_keyword_tokens;
+use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use intellectus_lib::{report, StatSample};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
@@ -254,6 +255,101 @@ pub const CLAIMS_CONSUMER: &str = "corpus";
 
 /// Reserved checkpoint row recording the last APPLIED feed cursor.
 const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
+
+#[cfg(target_os = "macos")]
+fn physical_memory_bytes() -> Option<u64> {
+    use std::ffi::{c_char, c_void};
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+    let name = b"hw.memsize\0";
+    let mut value = 0u64;
+    let mut size = std::mem::size_of::<u64>();
+    let result = unsafe {
+        sysctlbyname(
+            name.as_ptr().cast(),
+            (&mut value as *mut u64).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && size == std::mem::size_of::<u64>()).then_some(value)
+}
+
+#[cfg(target_os = "linux")]
+fn physical_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib = meminfo.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next()? == "MemTotal:")
+            .then(|| fields.next()?.parse::<u64>().ok())
+            .flatten()
+    })?;
+    kib.checked_mul(1_024)
+}
+
+#[cfg(target_os = "windows")]
+fn physical_memory_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_physical: u64,
+        available_physical: u64,
+        total_page_file: u64,
+        available_page_file: u64,
+        total_virtual: u64,
+        available_virtual: u64,
+        available_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
+    }
+    let mut status = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_physical: 0,
+        available_physical: 0,
+        total_page_file: 0,
+        available_page_file: 0,
+        total_virtual: 0,
+        available_virtual: 0,
+        available_extended_virtual: 0,
+    };
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.total_physical)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn physical_memory_bytes() -> Option<u64> {
+    None
+}
+
+struct ProviderTrainingJob {
+    slot_index: usize,
+    model_id: String,
+    model_version: String,
+    fresh_basis_blob: Vec<u8>,
+}
+
+/// Fully computed provider state that has not yet touched durable storage.
+/// Worker threads return these; the caller publishes them in slot order.
+struct PreparedProviderTraining {
+    job: ProviderTrainingJob,
+    provider: Box<dyn TrainableEmbeddingBasis>,
+    counts_accumulator: Box<dyn TrainableEmbeddingBasis>,
+    basis_row: PersistedBasis,
+    counts_row: PersistedCounts,
+    basis_digest: String,
+    subsumed_references: Vec<PersistedCountsReference>,
+}
 
 /// The canonical-ID indexing/recall engine. One engine serves BOTH
 /// operating modes; only the content source and configuration differ.
@@ -1427,10 +1523,11 @@ impl CorpusContentEngine {
             self.reload_counts_from_storage()?;
             self.counts_reload_required.store(false, Ordering::Release);
         }
-        // (reference, slot, text, counts_document: false = revision of an
-        // already-admitted identity — fold its NOVEL text, keep the document
-        // anchor unchanged, refresh the durable reference row.)
-        let mut references: Vec<(PersistedCountsReference, usize, String, bool)> = Vec::new();
+        // The published provider counts stay frozen. Each reference carries
+        // only the hashes of genuinely novel terms accumulated for that
+        // identity, making repeated revisions byte-identical across reopen.
+        let mut references: Vec<(PersistedCountsReference, usize, BTreeSet<String>, bool)> =
+            Vec::new();
         let mut consumed_subsumed_references: Vec<(String, String, String)> = Vec::new();
         if !counts_updates.is_empty() {
             for (slot_index, slot) in self.slots.iter().enumerate() {
@@ -1450,6 +1547,7 @@ impl CorpusContentEngine {
                     if !admitted_ids.insert(content_id.clone()) {
                         continue;
                     }
+                    let mut term_digests = BTreeSet::new();
                     let counts_document = match self.counts_store.reference_for(
                         &model_id,
                         &model_version,
@@ -1465,9 +1563,24 @@ impl CorpusContentEngine {
                             }
                             continue;
                         }
-                        Some(_) => false,
+                        Some(existing) => {
+                            term_digests.extend(existing.growth_term_digests);
+                            false
+                        }
                         None => self.index_state.state(content_id)?.is_none(),
                     };
+                    {
+                        let counts = slot.counts.lock().unwrap();
+                        if let Some(state) = counts.as_ref() {
+                            for term in default_keyword_tokens(text) {
+                                if !state.accumulator.counts_contains_term(&term) {
+                                    term_digests.insert(crate::content::content_digest_bytes(
+                                        term.as_bytes(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     references.push((
                         PersistedCountsReference {
                             model_id: model_id.clone(),
@@ -1477,28 +1590,30 @@ impl CorpusContentEngine {
                             digest: digest.clone(),
                             updated_at_secs: now_millis / 1000,
                             is_subsumed: false,
+                            growth_term_digests: term_digests.iter().cloned().collect(),
                         },
                         slot_index,
-                        text.clone(),
+                        term_digests,
                         counts_document,
                     ));
                 }
             }
         }
-        // Fold BEFORE the durable commit so the anchors written inside the
-        // transaction reflect exactly the post-fold state — the transaction
-        // failure path below reconstructs the in-memory state from storage.
+        // Advance compact growth contributions before the durable commit; the
+        // same hashes are written with the anchors, so reload is exact.
         let mut touched_slots: BTreeSet<usize> = BTreeSet::new();
-        for (_, slot_index, text, counts_document) in &references {
+        for (_, slot_index, term_digests, counts_document) in &references {
             let mut counts = self.slots[*slot_index].counts.lock().unwrap();
             if let Some(state) = counts.as_mut() {
-                state.accumulator.add_to_counts(text);
+                state
+                    .growth_term_digests
+                    .extend(term_digests.iter().cloned());
                 if *counts_document {
                     state.document_count += 1;
                 }
-                state.vocab_anchor = state
-                    .vocab_anchor
-                    .max(state.accumulator.counts_vocabulary_size());
+                state.vocab_anchor = state.vocab_anchor.max(
+                    state.accumulator.counts_vocabulary_size() + state.growth_term_digests.len(),
+                );
                 touched_slots.insert(*slot_index);
             }
         }
@@ -1604,26 +1719,20 @@ impl CorpusContentEngine {
                 ))
             })?;
             let mut accumulator = state.accumulator.reconstruct_trainable_basis(fresh_blob)?;
-            let mut document_count = if let Some(row) = persisted {
+            let document_count = if let Some(row) = persisted {
                 accumulator.restore_counts(&row.counts)?;
                 row.document_count
             } else {
                 0
             };
+            let mut growth_term_digests = BTreeSet::new();
             for reference in self.counts_store.references(&model_id, &model_version)? {
                 // Already represented by the published base; retained only
                 // until the delayed admission commits its checkpoint.
                 if reference.is_subsumed {
                     continue;
                 }
-                // Resolve by identity at reopen. A later revision contributes
-                // its current canonical text once; a removed identity no
-                // longer contributes to the post-base delta.
-                let Some(record) = self.source.record(&reference.content_id)? else {
-                    continue;
-                };
-                accumulator.add_to_counts(&record.text);
-                document_count += 1;
+                growth_term_digests.extend(reference.growth_term_digests);
             }
             // The STORED anchors are the authority: they were committed in
             // the same transaction as each reference mutation, so a restarted
@@ -1636,11 +1745,15 @@ impl CorpusContentEngine {
                 .counts_store
                 .load(&model_id, &model_version)?
                 .map(|row| (row.document_count, row.vocab_size))
-                .unwrap_or((document_count, accumulator.counts_vocabulary_size()));
+                .unwrap_or((
+                    document_count,
+                    accumulator.counts_vocabulary_size() + growth_term_digests.len(),
+                ));
             *counts = Some(crate::corpus::CountsState {
                 accumulator,
                 document_count: stored_docs,
                 vocab_anchor: stored_vocab,
+                growth_term_digests,
             });
         }
         Ok(())
@@ -2016,8 +2129,151 @@ impl CorpusContentEngine {
         *self.backfill_fault_hook.lock().unwrap() = hook;
     }
 
+    /// Conservative provider-level training admission. The per-worker memory
+    /// envelope mirrors the migration capacity gate (2 GiB fixed + 320 KiB per
+    /// active content row). At least one worker is always retained, preserving
+    /// the former serial operability when memory is constrained.
+    fn provider_training_parallelism(content_count: usize, provider_count: usize) -> usize {
+        if provider_count == 0 {
+            return 1;
+        }
+        let explicit = std::env::var("MOOT_PROVIDER_TRAINING_MEMORY_BUDGET_BYTES")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                std::env::var("MOOT_MIGRATION_MEMORY_BUDGET_BYTES")
+                    .ok()
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .filter(|value| *value > 0)
+            });
+        let budget = explicit
+            .or_else(physical_memory_bytes)
+            .unwrap_or(0)
+            .saturating_mul(if explicit.is_some() { 1 } else { 4 })
+            / if explicit.is_some() { 1 } else { 5 };
+        let cpu_workers = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        Self::provider_training_parallelism_with_budget(
+            content_count,
+            provider_count,
+            budget,
+            cpu_workers,
+        )
+    }
+
+    fn provider_training_parallelism_with_budget(
+        content_count: usize,
+        provider_count: usize,
+        budget: u64,
+        cpu_workers: usize,
+    ) -> usize {
+        if provider_count == 0 {
+            return 1;
+        }
+        let per_worker = 2u64
+            .saturating_mul(1_024 * 1_024 * 1_024)
+            .saturating_add((content_count as u64).saturating_mul(320 * 1_024));
+        let memory_workers = ((budget / per_worker.max(1)) as usize).max(1);
+        provider_count.min(cpu_workers).min(memory_workers).max(1)
+    }
+
+    fn prepare_provider_training(
+        &self,
+        job: ProviderTrainingJob,
+        all_ids: &[CorpusContentId],
+        indexed_states: &BTreeMap<String, CorpusIndexState>,
+        now_millis: i64,
+    ) -> CorpusKitResult<PreparedProviderTraining> {
+        let slot = &self.slots[job.slot_index];
+        let (mut fresh, mut counts_accumulator) = {
+            let counts = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("provider counts mutex poisoned".into())
+            })?;
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::NotTrainable(format!(
+                    "provider {} has no retained counts accumulator",
+                    job.model_id
+                ))
+            })?;
+            (
+                state
+                    .accumulator
+                    .reconstruct_trainable_basis(&job.fresh_basis_blob)?,
+                state
+                    .accumulator
+                    .reconstruct_trainable_basis(&job.fresh_basis_blob)?,
+            )
+        };
+
+        let mut subsumed_references = Vec::new();
+        let mut document_count = 0usize;
+        let mut cursor = 0usize;
+        while cursor < all_ids.len() {
+            let end = (cursor + Self::TRAINING_PAGE_SIZE).min(all_ids.len());
+            let mut texts = Vec::with_capacity(end - cursor);
+            for id in &all_ids[cursor..end] {
+                if let Some(record) = self.source.record(id)? {
+                    let indexed = indexed_states.get(&record.id);
+                    if indexed.map_or(true, |state| {
+                        state.revision != record.revision
+                            || state.digest != record.digest
+                            || state.index_version != CONTENT_ENGINE_INDEX_VERSION
+                    }) {
+                        subsumed_references.push(PersistedCountsReference {
+                            model_id: job.model_id.clone(),
+                            model_version: job.model_version.clone(),
+                            content_id: record.id.clone(),
+                            revision: record.revision,
+                            digest: record.digest.clone(),
+                            updated_at_secs: now_millis / 1000,
+                            is_subsumed: true,
+                            growth_term_digests: Vec::new(),
+                        });
+                    }
+                    texts.push(record.text);
+                }
+            }
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            fresh.accumulate_training(&refs);
+            for text in &texts {
+                counts_accumulator.add_to_counts(text);
+            }
+            document_count += texts.len();
+            cursor = end;
+        }
+        fresh.finalize_training();
+
+        let basis_blob = fresh.serialize_basis();
+        let basis_digest = crate::content::content_digest_bytes(&basis_blob);
+        Ok(PreparedProviderTraining {
+            basis_row: PersistedBasis {
+                model_id: job.model_id.clone(),
+                model_version: job.model_version.clone(),
+                basis: basis_blob,
+                trained_at_secs: now_millis / 1000,
+                trained_chunk_count: document_count,
+            },
+            counts_row: PersistedCounts {
+                model_id: job.model_id.clone(),
+                model_version: job.model_version.clone(),
+                counts: counts_accumulator.serialize_counts(),
+                document_count,
+                vocab_size: counts_accumulator.counts_vocabulary_size(),
+                updated_at_secs: now_millis / 1000,
+            },
+            job,
+            provider: fresh,
+            counts_accumulator,
+            basis_digest,
+            subsumed_references,
+        })
+    }
+
     /// Stream-train every trainable slot that lacks a CURRENT basis (or
-    /// every trainable slot when `force`), one provider at a time.
+    /// every trainable slot when `force`) with bounded provider-level parallel
+    /// compute and deterministic configured-slot publication.
     ///
     /// Crash safety per provider: accumulation/finalization are in-memory
     /// only — a crash loses nothing durable; the resumed run retrains that
@@ -2049,170 +2305,151 @@ impl CorpusContentEngine {
             .filter(|state| state.content_id != FEED_CURSOR_ROW_ID)
             .map(|state| (state.content_id.clone(), state))
             .collect();
-        let mut digests = std::collections::BTreeMap::new();
-        for slot in &self.slots {
+        let mut digests = BTreeMap::new();
+        let mut jobs = Vec::new();
+        for (slot_index, slot) in self.slots.iter().enumerate() {
             let Some(blob) = &slot.fresh_basis_blob else {
                 continue;
             };
             let model_id = slot.model_id.clone();
-            {
-                let digest = slot.basis_digest.lock().unwrap().clone();
-                if !force && !digest.is_empty() {
-                    digests.insert(model_id, digest);
-                    continue;
-                }
-            }
-            let all_ids = self.source.active_content_ids()?;
-            if all_ids.is_empty() {
+            let digest = slot
+                .basis_digest
+                .lock()
+                .map_err(|_| {
+                    CorpusKitError::StoreUnavailable("basis digest mutex poisoned".into())
+                })?
+                .clone();
+            if !force && !digest.is_empty() {
+                digests.insert(model_id, digest);
                 continue;
             }
-            // Fresh accumulation state from the pristine blob — a retrain
-            // never compounds on a prior generation. A SEPARATE fresh
-            // counts accumulator folds the SAME pages, so the persisted
-            // counts are exactly the training corpus's statistics.
-            let model_version = {
-                let handle = slot.handle.lock().unwrap();
-                handle.provider().model_version().to_string()
-            };
-            // Reconstruct through the maintained-counts accumulator, not the
-            // serving handle. A reopened persisted basis is intentionally held
-            // as `Plain` because Rust cannot cross-cast that trait object back
-            // to trainable; the separately retained accumulator remains the
-            // stable trainable witness across reopen (the standalone Corpus
-            // uses the same pattern in `train_and_persist_basis`).
-            let (mut fresh, mut counts_accumulator) = {
-                let counts = slot.counts.lock().unwrap();
-                let state = counts.as_ref().ok_or_else(|| {
-                    CorpusKitError::NotTrainable(format!(
-                        "provider {model_id} has no retained counts accumulator"
-                    ))
-                })?;
-                (
-                    state.accumulator.reconstruct_trainable_basis(blob)?,
-                    state.accumulator.reconstruct_trainable_basis(blob)?,
-                )
-            };
-            let mut subsumed_pending_references = Vec::new();
-            let mut document_count = 0usize;
-            let mut cursor = 0usize;
-            while cursor < all_ids.len() {
-                let end = (cursor + Self::TRAINING_PAGE_SIZE).min(all_ids.len());
-                let mut texts: Vec<String> = Vec::with_capacity(end - cursor);
-                for id in &all_ids[cursor..end] {
-                    if let Some(record) = self.source.record(id)? {
-                        let indexed = indexed_states.get(&record.id);
-                        if indexed.map_or(true, |state| {
-                            state.revision != record.revision
-                                || state.digest != record.digest
-                                || state.index_version != CONTENT_ENGINE_INDEX_VERSION
-                        }) {
-                            subsumed_pending_references.push(PersistedCountsReference {
-                                model_id: model_id.clone(),
-                                model_version: model_version.clone(),
-                                content_id: record.id.clone(),
-                                revision: record.revision,
-                                digest: record.digest.clone(),
-                                updated_at_secs: now_millis / 1000,
-                                is_subsumed: true,
-                            });
-                        }
-                        texts.push(record.text);
+            let model_version = slot
+                .handle
+                .lock()
+                .map_err(|_| {
+                    CorpusKitError::StoreUnavailable("provider handle mutex poisoned".into())
+                })?
+                .provider()
+                .model_version()
+                .to_string();
+            jobs.push(ProviderTrainingJob {
+                slot_index,
+                model_id,
+                model_version,
+                fresh_basis_blob: blob.clone(),
+            });
+        }
+
+        let all_ids = self.source.active_content_ids()?;
+        if all_ids.is_empty() {
+            return Ok(digests);
+        }
+        let cap = Self::provider_training_parallelism(all_ids.len(), jobs.len());
+        for job_batch in jobs.chunks(cap) {
+            let prepared: Vec<PreparedProviderTraining> = std::thread::scope(|scope| {
+                let handles: Vec<_> = job_batch
+                    .iter()
+                    .map(|job| {
+                        let owned_job = ProviderTrainingJob {
+                            slot_index: job.slot_index,
+                            model_id: job.model_id.clone(),
+                            model_version: job.model_version.clone(),
+                            fresh_basis_blob: job.fresh_basis_blob.clone(),
+                        };
+                        scope.spawn(|| {
+                            self.prepare_provider_training(
+                                owned_job,
+                                &all_ids,
+                                &indexed_states,
+                                now_millis,
+                            )
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().map_err(|_| {
+                            CorpusKitError::StoreUnavailable(
+                                "provider training worker panicked".into(),
+                            )
+                        })?
+                    })
+                    .collect::<CorpusKitResult<Vec<_>>>()
+            })?;
+
+            for result in prepared {
+                let model_id = result.job.model_id.clone();
+                {
+                    let mut seam = self.train_fault_before_commit_model.lock().unwrap();
+                    if seam.as_deref() == Some(model_id.as_str()) {
+                        *seam = None;
+                        return Err(CorpusKitError::InvalidConfiguration(format!(
+                            "injected training fault before commit: {model_id}"
+                        )));
                     }
                 }
-                let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                fresh.accumulate_training(&refs);
-                for text in &texts {
-                    counts_accumulator.add_to_counts(text);
-                }
-                document_count += texts.len();
-                cursor = end;
-            }
-            fresh.finalize_training();
 
-            {
-                let mut seam = self.train_fault_before_commit_model.lock().unwrap();
-                if seam.as_deref() == Some(model_id.as_str()) {
-                    *seam = None;
-                    return Err(CorpusKitError::InvalidConfiguration(format!(
-                        "injected training fault before commit: {model_id}"
-                    )));
-                }
-            }
-
-            // ATOMIC commit: basis + training-corpus counts in ONE
-            // transaction — the pair can never disagree durably.
-            let basis_blob = fresh.serialize_basis();
-            let digest = crate::content::content_digest_bytes(&basis_blob);
-            let basis_row = PersistedBasis {
-                model_id: model_id.clone(),
-                model_version: model_version.clone(),
-                basis: basis_blob,
-                trained_at_secs: now_millis / 1000,
-                trained_chunk_count: document_count,
-            };
-            let counts_row = PersistedCounts {
-                model_id: model_id.clone(),
-                model_version: model_version.clone(),
-                counts: counts_accumulator.serialize_counts(),
-                document_count,
-                vocab_size: counts_accumulator.counts_vocabulary_size(),
-                updated_at_secs: now_millis / 1000,
-            };
-            let basis_store = &self.basis_store;
-            let counts_store = &self.counts_store;
-            self.storage
-                .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
-                    let rows = txn.row_store();
-                    basis_store.upsert_into(&basis_row, &rows).map_err(|e| {
-                        persistence_kit::StorageError::BackendError {
-                            underlying: format!("{e:?}"),
-                        }
-                    })?;
-                    counts_store.upsert_into(&counts_row, &rows).map_err(|e| {
-                        persistence_kit::StorageError::BackendError {
-                            underlying: format!("{e:?}"),
-                        }
-                    })?;
-                    counts_store
-                        .delete_references_into(&model_id, &model_version, &rows)
-                        .map_err(|e| persistence_kit::StorageError::BackendError {
-                            underlying: format!("{e:?}"),
-                        })?;
-                    for reference in &subsumed_pending_references {
-                        counts_store
-                            .upsert_reference_into(reference, &rows)
+                let basis_store = &self.basis_store;
+                let counts_store = &self.counts_store;
+                self.storage
+                    .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
+                        let rows = txn.row_store();
+                        basis_store
+                            .upsert_into(&result.basis_row, &rows)
                             .map_err(|e| persistence_kit::StorageError::BackendError {
                                 underlying: format!("{e:?}"),
                             })?;
+                        counts_store
+                            .upsert_into(&result.counts_row, &rows)
+                            .map_err(|e| persistence_kit::StorageError::BackendError {
+                                underlying: format!("{e:?}"),
+                            })?;
+                        counts_store
+                            .delete_references_into(
+                                &result.job.model_id,
+                                &result.job.model_version,
+                                &rows,
+                            )
+                            .map_err(|e| persistence_kit::StorageError::BackendError {
+                                underlying: format!("{e:?}"),
+                            })?;
+                        for reference in &result.subsumed_references {
+                            counts_store
+                                .upsert_reference_into(reference, &rows)
+                                .map_err(|e| persistence_kit::StorageError::BackendError {
+                                    underlying: format!("{e:?}"),
+                                })?;
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+
+                let slot = &self.slots[result.job.slot_index];
+                {
+                    let mut handle = slot.handle.lock().unwrap();
+                    *handle = crate::corpus::ProviderHandle::Trainable(result.provider);
+                }
+                *slot.basis_digest.lock().unwrap() = result.basis_digest.clone();
+                {
+                    let mut counts = slot.counts.lock().unwrap();
+                    *counts = Some(crate::corpus::CountsState {
+                        accumulator: result.counts_accumulator,
+                        document_count: result.counts_row.document_count,
+                        vocab_anchor: result.counts_row.vocab_size,
+                        growth_term_digests: BTreeSet::new(),
+                    });
+                }
+                digests.insert(model_id.clone(), result.basis_digest);
+
+                {
+                    let mut seam = self.train_fault_after_model.lock().unwrap();
+                    if seam.as_deref() == Some(model_id.as_str()) {
+                        *seam = None;
+                        return Err(CorpusKitError::InvalidConfiguration(format!(
+                            "injected training fault after commit: {model_id}"
+                        )));
                     }
-                    Ok(())
-                })
-                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-
-            // Serve the new generation.
-            {
-                let mut handle = slot.handle.lock().unwrap();
-                *handle = crate::corpus::ProviderHandle::Trainable(fresh);
-            }
-            *slot.basis_digest.lock().unwrap() = digest.clone();
-            {
-                let mut counts = slot.counts.lock().unwrap();
-                let vocab_anchor = counts_accumulator.counts_vocabulary_size();
-                *counts = Some(crate::corpus::CountsState {
-                    accumulator: counts_accumulator,
-                    document_count,
-                    vocab_anchor,
-                });
-            }
-            digests.insert(model_id.clone(), digest);
-
-            {
-                let mut seam = self.train_fault_after_model.lock().unwrap();
-                if seam.as_deref() == Some(model_id.as_str()) {
-                    *seam = None;
-                    return Err(CorpusKitError::InvalidConfiguration(format!(
-                        "injected training fault after commit: {model_id}"
-                    )));
                 }
             }
         }
@@ -2623,7 +2860,8 @@ impl CorpusContentEngine {
             self.reload_counts_from_storage()?;
             self.counts_reload_required.store(false, Ordering::Release);
         }
-        let mut references: Vec<(PersistedCountsReference, usize, bool)> = Vec::new();
+        let mut references: Vec<(PersistedCountsReference, usize, bool, BTreeSet<String>)> =
+            Vec::new();
         let mut consumed_subsumed_references: Vec<(String, String, String)> = Vec::new();
         for (slot_index, slot) in self.slots.iter().enumerate() {
             if slot.counts.lock().unwrap().is_none() {
@@ -2634,6 +2872,7 @@ impl CorpusContentEngine {
                 let p = handle.provider();
                 (p.model_id().to_string(), p.model_version().to_string())
             };
+            let mut term_digests = BTreeSet::new();
             let counts_document = match self
                 .counts_store
                 .reference_for(&model_id, &model_version, &record.id)?
@@ -2648,9 +2887,23 @@ impl CorpusContentEngine {
                     }
                     continue;
                 }
-                Some(_) => false,
+                Some(existing) => {
+                    term_digests.extend(existing.growth_term_digests);
+                    false
+                }
                 None => self.index_state.state(&record.id)?.is_none(),
             };
+            {
+                let counts = slot.counts.lock().unwrap();
+                if let Some(state) = counts.as_ref() {
+                    for term in default_keyword_tokens(&record.text) {
+                        if !state.accumulator.counts_contains_term(&term) {
+                            term_digests
+                                .insert(crate::content::content_digest_bytes(term.as_bytes()));
+                        }
+                    }
+                }
+            }
             references.push((
                 PersistedCountsReference {
                     model_id,
@@ -2660,24 +2913,28 @@ impl CorpusContentEngine {
                     digest: record.digest.clone(),
                     updated_at_secs: now_millis / 1000,
                     is_subsumed: false,
+                    growth_term_digests: term_digests.iter().cloned().collect(),
                 },
                 slot_index,
                 counts_document,
+                term_digests,
             ));
         }
-        // Fold first; the anchors written inside the transaction reflect the
-        // post-fold state exactly (restart-deterministic governor decision).
+        // Update the exact identity-scoped growth set first; the transaction
+        // persists those same hashes with the resulting anchors.
         let mut anchor_rows: Vec<(String, String, usize, usize)> = Vec::new();
-        for (reference, slot_index, counts_document) in &references {
+        for (reference, slot_index, counts_document, term_digests) in &references {
             let mut counts = self.slots[*slot_index].counts.lock().unwrap();
             if let Some(state) = counts.as_mut() {
-                state.accumulator.add_to_counts(&record.text);
+                state
+                    .growth_term_digests
+                    .extend(term_digests.iter().cloned());
                 if *counts_document {
                     state.document_count += 1;
                 }
-                state.vocab_anchor = state
-                    .vocab_anchor
-                    .max(state.accumulator.counts_vocabulary_size());
+                state.vocab_anchor = state.vocab_anchor.max(
+                    state.accumulator.counts_vocabulary_size() + state.growth_term_digests.len(),
+                );
                 anchor_rows.push((
                     reference.model_id.clone(),
                     reference.model_version.clone(),
@@ -2699,7 +2956,7 @@ impl CorpusContentEngine {
                             underlying: format!("direct subsumed reference: {error:?}"),
                         })?;
                 }
-                for (reference, _, _) in &references {
+                for (reference, _, _, _) in &references {
                     counts_store
                         .upsert_reference_into(reference, &rows)
                         .map_err(|error| persistence_kit::StorageError::BackendError {
@@ -2740,16 +2997,6 @@ impl CorpusContentEngine {
         Ok(())
     }
 
-    fn fold_into_counts(&self, text: &str) {
-        for slot in &self.slots {
-            let mut counts = slot.counts.lock().unwrap();
-            if let Some(state) = counts.as_mut() {
-                state.accumulator.add_to_counts(text);
-                state.document_count += 1;
-            }
-        }
-    }
-
     fn persist_counts(&self, now_millis: i64) -> CorpusKitResult<()> {
         for slot in &self.slots {
             let (model_id, model_version) = {
@@ -2766,39 +3013,13 @@ impl CorpusContentEngine {
                 model_version,
                 counts: state.accumulator.serialize_counts(),
                 document_count: state.document_count,
-                vocab_size: state.accumulator.counts_vocabulary_size(),
+                vocab_size: state.vocab_anchor,
                 // Unix seconds per the store's field contract.
                 updated_at_secs: now_millis / 1000,
             };
-            let counts_store = &self.counts_store;
-            let compacted_references: Vec<_> = counts_store
-                .references(&row.model_id, &row.model_version)?
-                .into_iter()
-                .filter(|reference| !reference.is_subsumed)
-                .collect();
-            self.storage
-                .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
-                    let rows = txn.row_store();
-                    counts_store.upsert_into(&row, &rows).map_err(|e| {
-                        persistence_kit::StorageError::BackendError {
-                            underlying: format!("{e:?}"),
-                        }
-                    })?;
-                    for reference in &compacted_references {
-                        counts_store
-                            .delete_reference_into(
-                                &reference.model_id,
-                                &reference.model_version,
-                                &reference.content_id,
-                                &rows,
-                            )
-                            .map_err(|e| persistence_kit::StorageError::BackendError {
-                                underlying: format!("{e:?}"),
-                            })?;
-                    }
-                    Ok(())
-                })
-                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            // This blob is the immutable publication snapshot. Reference
+            // contributions remain authoritative until provider publication.
+            self.counts_store.upsert(&row)?;
         }
         Ok(())
     }
@@ -2807,13 +3028,7 @@ impl CorpusContentEngine {
     pub fn maintained_vocab_anchor(&self) -> usize {
         self.slots
             .iter()
-            .filter_map(|slot| {
-                slot.counts
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|s| s.vocab_anchor)
-            })
+            .filter_map(|slot| slot.counts.lock().unwrap().as_ref().map(|s| s.vocab_anchor))
             .max()
             .unwrap_or(0)
     }
@@ -2968,5 +3183,29 @@ impl CorpusContentEngine {
     /// The default signal's model ID.
     pub fn model_id(&self) -> String {
         self.slots[0].model_id.clone()
+    }
+}
+
+#[cfg(test)]
+mod training_admission_tests {
+    use super::CorpusContentEngine;
+
+    #[test]
+    fn provider_training_parallelism_uses_cpu_when_memory_allows() {
+        let workers = CorpusContentEngine::provider_training_parallelism_with_budget(
+            2_000,
+            4,
+            128u64 * 1_024 * 1_024 * 1_024,
+            18,
+        );
+        assert_eq!(workers, 4);
+
+        let constrained = CorpusContentEngine::provider_training_parallelism_with_budget(
+            98_118,
+            4,
+            16u64 * 1_024 * 1_024 * 1_024,
+            18,
+        );
+        assert_eq!(constrained, 1);
     }
 }

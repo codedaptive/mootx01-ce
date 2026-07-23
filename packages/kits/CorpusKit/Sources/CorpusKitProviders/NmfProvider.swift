@@ -677,4 +677,8 @@ extension NmfProvider: TrainableEmbeddingBasis {
 
     /// Maintained vocabulary size for the growth trigger.
     public var countsVocabularySize: Int { counts.vocabularySize }
+
+    public func countsContainsTerm(_ term: String) -> Bool {
+        counts.vocab[term] != nil
+    }
 }

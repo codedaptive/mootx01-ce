@@ -188,6 +188,11 @@ impl VectorExactKey {
 ///
 /// Mirrors Swift `VectorStore.deferredPendingLimit = 50_000`.
 const DEFERRED_PENDING_LIMIT: usize = 50_000;
+/// Small drain bursts update the resident indexes directly instead of
+/// rebuilding the whole estate snapshot.
+const INCREMENTAL_PUBLISH_LIMIT: usize = 256;
+/// Periodically materialize a clean snapshot to bound accumulated tombstones.
+const INCREMENTAL_COMPACTION_INTERVAL: usize = 1_024;
 
 // ── Hot-path inner state ──────────────────────────────────────────────────
 
@@ -245,15 +250,28 @@ struct HotState {
     /// `publish_resident_index` so it is a no-op on an idle barrier.
     deferred_index_dirty: bool,
 
-    /// Live keys tracked incrementally across the deferred window so replacement
-    /// detection stays O(batch) per call. Seeded by `begin_deferred_index`;
-    /// `None` when not in deferred mode. Mirrors Swift `deferredLiveKeys`.
-    deferred_live_keys: Option<std::collections::HashSet<VectorRecordKey>>,
+    /// Live full keys grouped by the durable schema's logical UNIQUE position.
+    /// The grouping excludes model version, so a version bump removes the stale
+    /// resident slot instead of leaving two searchable versions in memory.
+    deferred_live_keys: Option<
+        std::collections::HashMap<
+            VectorExactKey,
+            std::collections::HashSet<VectorRecordKey>,
+        >,
+    >,
+
+    /// Full keys superseded in the active window. Small-delta publication uses
+    /// these to remove stale model-version entries before incremental upsert.
+    deferred_replaced_keys: std::collections::HashSet<VectorRecordKey>,
 
     /// Memory-only deferral buffer (Rust twin of Swift `deferredPendingRecords`).
     /// With no sidecar `array_store`, deferred `add_payloads` records accumulate
     /// here and `publish_resident_index` merges them all in one pass at burst end.
     deferred_pending_records: Vec<(VectorRecordKey, Vec<u8>)>,
+
+    /// Number of small incremental publications since the last full snapshot
+    /// materialization. Bounds tombstone history in the brute-force oracle.
+    incremental_publication_count: usize,
 
     /// Maximum records allowed in `deferred_pending_records` before an
     /// intermediate flush is forced (memory-only deferred path only).
@@ -483,7 +501,9 @@ impl VectorStore {
                 deferred_index_active: false,
                 deferred_index_dirty: false,
                 deferred_live_keys: None,
+                deferred_replaced_keys: std::collections::HashSet::new(),
                 deferred_pending_records: Vec::new(),
+                incremental_publication_count: 0,
                 deferred_pending_limit,
                 // Float indices are built lazily per modelID on first
                 // find_nearest_float; the map starts empty.
@@ -865,26 +885,34 @@ impl VectorStore {
                     let mut new_key_count: u32 = 0;
                     let mut replaced = std::collections::HashSet::new();
                     for (k, _) in &binary_records {
-                        if live.contains(k) {
-                            // Already live (earlier window write or pre-existing)
-                            // → replacement, not a new key.
-                            replaced.insert(k.clone());
-                        } else if !seen_in_batch.contains(k) {
+                        let pos = VectorExactKey::new(
+                            k.item_id.clone(),
+                            k.vector_index,
+                            k.model_id.clone(),
+                        );
+                        if let Some(existing) = live.get(&pos) {
+                            // The durable UNIQUE key excludes model_version.
+                            // Replace every resident full key at this position.
+                            replaced.extend(existing.iter().cloned());
+                        } else if !seen_in_batch.contains(&pos) {
                             new_key_count += 1;
                         }
-                        seen_in_batch.insert(k.clone());
-                        live.insert(k.clone());
+                        seen_in_batch.insert(pos.clone());
+                        live.insert(pos, std::iter::once(k.clone()).collect());
                     }
                     if state.array_store.is_some() {
                         // Sidecar present: stage into the resident array store now.
                         let store = state.array_store.as_mut().unwrap();
                         store.tombstone_deferred(&replaced);
                         store.append_batch(&binary_records)?;
-                    } else {
-                        // Memory-only: accumulate; publish_resident_index() merges
-                        // all pending records into the resident index in one pass.
-                        state.deferred_pending_records.extend(binary_records.iter().cloned());
                     }
+                    // Keep the compact delta in both modes. Small publications
+                    // update the resident indexes directly; large publications
+                    // materialize the sidecar/current snapshot once.
+                    state
+                        .deferred_pending_records
+                        .extend(binary_records.iter().cloned());
+                    state.deferred_replaced_keys.extend(replaced);
                     state.deferred_live_keys = Some(live);
                     state.live_binary_count =
                         state.live_binary_count.saturating_add(new_key_count);
@@ -1013,15 +1041,29 @@ impl VectorStore {
         self.ensure_index_built_locked(&mut state)?;
         // Seed live keys from the currently-published snapshot so replacement
         // detection across the window is O(batch), not O(N), per call.
-        let keys: std::collections::HashSet<VectorRecordKey> = {
+        let keys: std::collections::HashMap<
+            VectorExactKey,
+            std::collections::HashSet<VectorRecordKey>,
+        > = {
             let arr = state.brute_force_index.array();
-            (0..arr.count)
-                .filter(|&i| !arr.is_tombstoned(i))
-                .map(|i| arr.keys[i].clone())
-                .collect()
+            let mut grouped = std::collections::HashMap::new();
+            for i in (0..arr.count).filter(|&i| !arr.is_tombstoned(i)) {
+                let key = arr.keys[i].clone();
+                let pos = VectorExactKey::new(
+                    key.item_id.clone(),
+                    key.vector_index,
+                    key.model_id.clone(),
+                );
+                grouped
+                    .entry(pos)
+                    .or_insert_with(std::collections::HashSet::new)
+                    .insert(key);
+            }
+            grouped
         };
         state.deferred_live_keys = Some(keys);
         state.deferred_pending_records.clear();
+        state.deferred_replaced_keys.clear();
         state.deferred_index_dirty = false;
         state.deferred_index_active = true;
         Ok(())
@@ -1041,7 +1083,30 @@ impl VectorStore {
         state.deferred_index_dirty = false;
         state.deferred_live_keys = None;
         let pending = std::mem::take(&mut state.deferred_pending_records);
+        let replaced = std::mem::take(&mut state.deferred_replaced_keys);
         if !was_dirty {
+            return Ok(());
+        }
+        let delta = Self::dedup_last_wins(pending);
+        if delta.len() <= INCREMENTAL_PUBLISH_LIMIT
+            && state.incremental_publication_count < INCREMENTAL_COMPACTION_INTERVAL
+        {
+            for key in &replaced {
+                state.brute_force_index.remove(key)?;
+                state.mih_index.remove(key)?;
+            }
+            for (key, bytes) in delta {
+                let payload = VectorPayload {
+                    kind: VectorKind::Binary,
+                    dim: 256,
+                    bytes,
+                    scale: None,
+                };
+                state.brute_force_index.add(key.clone(), payload.clone())?;
+                state.mih_index.add(key, payload)?;
+            }
+            state.incremental_publication_count += 1;
+            Self::select_index(&mut state);
             return Ok(());
         }
         let snap = if state.array_store.is_some() {
@@ -1053,7 +1118,7 @@ impl VectorStore {
             // the window keeps its latest bytes (merge_batch_into_snapshot appends
             // every record, so a duplicate key must not produce two live slots).
             let cur = state.brute_force_index.array().clone();
-            Self::merge_batch_into_snapshot(&cur, &Self::dedup_last_wins(pending))
+            Self::merge_batch_into_snapshot(&cur, &delta)
         };
         let (payloads, keys) = Self::array_to_payloads_keys(&snap);
         state.brute_force_index.build(&payloads, &keys)?;
@@ -1062,6 +1127,7 @@ impl VectorStore {
         // incremental drift over the window is corrected.
         let live = (0..snap.count).filter(|&i| !snap.is_tombstoned(i)).count() as u32;
         state.live_binary_count = live;
+        state.incremental_publication_count = 0;
         Self::select_index(&mut state);
         Ok(())
     }
@@ -1101,26 +1167,32 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Collapse duplicate keys in the deferred memory buffer: keep only the last
-    /// occurrence of each key, preserving first-seen order of the survivors.
-    /// Applied before `merge_batch_into_snapshot` so duplicate keys in a single
-    /// deferral window don't produce two live slots. Mirrors Swift `dedupLastWins`.
+    /// Collapse deferred records by the durable logical UNIQUE position, keeping
+    /// only the final revision in a burst. Model version is excluded so a version
+    /// bump cannot leave both old and new resident slots searchable.
     fn dedup_last_wins(
         records: Vec<(VectorRecordKey, Vec<u8>)>,
     ) -> Vec<(VectorRecordKey, Vec<u8>)> {
         if records.is_empty() {
             return records;
         }
-        let mut last_index: std::collections::HashMap<&VectorRecordKey, usize> =
+        let mut last_index: std::collections::HashMap<VectorExactKey, usize> =
             std::collections::HashMap::with_capacity(records.len());
         for (i, (k, _)) in records.iter().enumerate() {
-            last_index.insert(k, i);
+            last_index.insert(
+                VectorExactKey::new(k.item_id.clone(), k.vector_index, k.model_id.clone()),
+                i,
+            );
         }
-        // Collect the indices to keep (last occurrence per key), in order.
+        // Collect the indices to keep (last occurrence per logical key), in order.
         let keep: Vec<bool> = records
             .iter()
             .enumerate()
-            .map(|(i, (k, _))| last_index.get(k) == Some(&i))
+            .map(|(i, (k, _))| {
+                let pos =
+                    VectorExactKey::new(k.item_id.clone(), k.vector_index, k.model_id.clone());
+                last_index.get(&pos) == Some(&i)
+            })
             .collect();
         records
             .into_iter()
@@ -1155,17 +1227,28 @@ impl VectorStore {
         // merged snapshot so incremental drift is corrected before the next
         // batch arrives.
         let mut live_count: u32 = 0;
-        let mut live_keys = std::collections::HashSet::new();
+        let mut live_keys: std::collections::HashMap<
+            VectorExactKey,
+            std::collections::HashSet<VectorRecordKey>,
+        > = std::collections::HashMap::new();
         for i in 0..merged.count {
             if !merged.is_tombstoned(i) {
                 live_count += 1;
-                live_keys.insert(merged.keys[i].clone());
+                let key = merged.keys[i].clone();
+                let pos = VectorExactKey::new(
+                    key.item_id.clone(),
+                    key.vector_index,
+                    key.model_id.clone(),
+                );
+                live_keys.entry(pos).or_default().insert(key);
             }
         }
         state.live_binary_count = live_count;
         // Replace the deferred live key set so the next batch's replacement
         // detection is based on what is actually in the rebuilt snapshot.
         state.deferred_live_keys = Some(live_keys);
+        state.deferred_replaced_keys.clear();
+        state.incremental_publication_count = 0;
         // deferred_index_active and deferred_index_dirty intentionally stay true.
         Ok(())
     }
@@ -1609,6 +1692,8 @@ impl VectorStore {
         state.deferred_index_dirty = false;
         state.deferred_live_keys = None;
         state.deferred_pending_records.clear();
+        state.deferred_replaced_keys.clear();
+        state.incremental_publication_count = 0;
         // Reset the Lane D float indices — every float row was just deleted, so
         // every per-modelID resident float array must be cleared. Dropping all
         // map entries clears every model's index; each rebuilds lazily (and

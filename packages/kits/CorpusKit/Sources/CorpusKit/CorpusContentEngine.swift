@@ -244,6 +244,11 @@ public actor CorpusContentEngine {
         let freshBasisBlob: Data?
         var countsAccumulator: (any TrainableEmbeddingBasis)?
         var countsDocumentCount: Int
+        /// Hashes of vocabulary terms first observed after the published
+        /// counts generation. Persisted inside identity-scoped references, so
+        /// repeated revisions and reopen reconstruct the same monotonic set
+        /// without mutating the frozen provider counts blob.
+        var growthTermDigests: Set<String> = []
         /// Governor-facing vocabulary-growth anchor: persisted on the counts
         /// row in the same transaction as every reference mutation so the
         /// threshold decision is restart-deterministic.
@@ -1064,9 +1069,13 @@ public actor CorpusContentEngine {
         }
         var references: [PersistedCountsReference] = []
         var consumedSubsumedReferences: [(modelID: String, modelVersion: String, contentID: String)] = []
-        // countsDocument false = revision of an already-admitted identity:
-        // fold its novel text, keep the document anchor, refresh the row.
-        var folds: [(slotIndex: Int, text: String, countsDocument: Bool)] = []
+        // countsDocument false = revision of an already-admitted identity.
+        // The published provider counts stay frozen. Only the identity's
+        // compact set of genuinely novel term hashes advances, so obsolete
+        // revisions cannot accumulate differently before and after reopen.
+        var growthUpdates: [(
+            slotIndex: Int, termDigests: Set<String>, countsDocument: Bool
+        )] = []
         if !countsUpdates.isEmpty {
             for index in slots.indices {
                 guard slots[index].countsAccumulator != nil else { continue }
@@ -1076,6 +1085,7 @@ public actor CorpusContentEngine {
                 for update in countsUpdates {
                     guard admittedIDs.insert(update.contentID).inserted else { continue }
                     let countsDocument: Bool
+                    var termDigests: Set<String> = []
                     if let existing = try await countsStore.referenceFor(
                         modelID: modelID, modelVersion: modelVersion,
                         contentID: update.contentID)
@@ -1088,6 +1098,7 @@ public actor CorpusContentEngine {
                             continue
                         }
                         countsDocument = false
+                        termDigests.formUnion(existing.growthTermDigests)
                     } else {
                         // A prior checkpoint proves this canonical identity
                         // was already represented by the published base.
@@ -1095,32 +1106,41 @@ public actor CorpusContentEngine {
                         countsDocument = try await indexState.state(
                             for: update.contentID) == nil
                     }
+                    if let accumulator = slots[index].countsAccumulator {
+                        for term in defaultKeywordTokens(update.text)
+                            where !accumulator.countsContainsTerm(term)
+                        {
+                            termDigests.insert(CorpusContentDigest.digest(Data(term.utf8)))
+                        }
+                    }
                     references.append(PersistedCountsReference(
                         modelID: modelID,
                         modelVersion: modelVersion,
                         contentID: update.contentID,
                         revision: update.revision,
                         digest: update.digest,
-                        updatedAt: now))
-                    folds.append((index, update.text, countsDocument))
+                        updatedAt: now,
+                        growthTermDigests: Array(termDigests)))
+                    growthUpdates.append((index, termDigests, countsDocument))
                 }
             }
         }
 
-        // Fold BEFORE the durable commit: the anchors written inside the
-        // transaction reflect exactly the post-fold state, so a restarted
-        // process reads the same anchors the live process held. The failure
-        // path reconstructs the in-memory state from storage.
+        // Advance the compact growth sets BEFORE the durable commit: anchors
+        // written in the transaction reflect the exact same identity-scoped
+        // contributions a reopened process loads from the reference rows.
         var touchedSlots: Set<Int> = []
-        for fold in folds {
-            slots[fold.slotIndex].countsAccumulator?.addToCounts(text: fold.text)
-            if fold.countsDocument {
-                slots[fold.slotIndex].countsDocumentCount += 1
+        for update in growthUpdates {
+            slots[update.slotIndex].growthTermDigests.formUnion(update.termDigests)
+            if update.countsDocument {
+                slots[update.slotIndex].countsDocumentCount += 1
             }
-            slots[fold.slotIndex].countsVocabAnchor = max(
-                slots[fold.slotIndex].countsVocabAnchor,
-                slots[fold.slotIndex].countsAccumulator?.countsVocabularySize ?? 0)
-            touchedSlots.insert(fold.slotIndex)
+            let publishedVocabulary =
+                slots[update.slotIndex].countsAccumulator?.countsVocabularySize ?? 0
+            slots[update.slotIndex].countsVocabAnchor = max(
+                slots[update.slotIndex].countsVocabAnchor,
+                publishedVocabulary + slots[update.slotIndex].growthTermDigests.count)
+            touchedSlots.insert(update.slotIndex)
         }
         var anchorRows: [(modelID: String, modelVersion: String, docs: Int, vocab: Int)] = []
         for index in touchedSlots.sorted() {
@@ -1190,6 +1210,7 @@ public actor CorpusContentEngine {
             } else {
                 slots[index].countsDocumentCount = 0
             }
+            var growthTerms: Set<String> = []
             for reference in try await countsStore.references(
                 modelID: slots[index].provider.modelID,
                 modelVersion: slots[index].provider.modelVersion)
@@ -1198,20 +1219,12 @@ public actor CorpusContentEngine {
                 // persisted base. They exist only to make a delayed admission
                 // consume that fact instead of folding the content twice.
                 if reference.isSubsumed { continue }
-                // A reference is identity-scoped. If the Drawer advanced, fold
-                // its current canonical text once; if it was removed, it no
-                // longer contributes to the post-base delta on reopen.
-                guard let record = try await source.record(for: reference.contentID) else {
-                    continue
-                }
-                accumulator.addToCounts(text: record.text)
-                slots[index].countsDocumentCount += 1
+                growthTerms.formUnion(reference.growthTermDigests)
             }
             slots[index].countsAccumulator = accumulator
-            // The STORED anchors are the authority (committed with each
-            // reference mutation) so a restart reads exactly what the live
-            // process held; the rebuilt accumulator may differ per-term for
-            // revised identities and only feeds the next training rebuild.
+            slots[index].growthTermDigests = growthTerms
+            // The STORED anchors are the authority, committed with the same
+            // reference bytes that reconstruct `growthTermDigests`.
             if let persisted {
                 slots[index].countsDocumentCount = persisted.documentCount
                 slots[index].countsVocabAnchor = persisted.vocabSize
@@ -1527,8 +1540,131 @@ public actor CorpusContentEngine {
         _trainFaultBeforeCommitModelID = beforeCommitModelID
     }
 
+    /// One provider's immutable input to the bounded training fan-out.
+    private struct ProviderTrainingJob: Sendable {
+        let slotIndex: Int
+        let modelID: String
+        let modelVersion: String
+        let freshBasisBlob: Data
+        let witness: any TrainableEmbeddingBasis
+    }
+
+    /// One provider's fully-computed, not-yet-durable generation. The worker
+    /// writes no durable state; the actor publishes these in slot order.
+    private struct PreparedProviderTraining: Sendable {
+        let job: ProviderTrainingJob
+        let provider: any EmbeddingProvider & Sendable
+        let countsAccumulator: any TrainableEmbeddingBasis
+        let basisRow: PersistedBasis
+        let countsRow: PersistedCounts
+        let basisDigest: String
+        let subsumedReferences: [PersistedCountsReference]
+    }
+
+    /// Conservative memory admission for concurrent provider training. The
+    /// calibrated per-worker envelope mirrors the migration capacity gate:
+    /// 2 GiB fixed plus 320 KiB per active content row. The default budget is
+    /// 80% of physical RAM; operators may lower it explicitly. At least one
+    /// worker is always admitted so this never makes an estate less operable
+    /// than the former serial implementation.
+    static func providerTrainingParallelism(
+        contentCount: Int,
+        providerCount: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        processorCount: Int = ProcessInfo.processInfo.activeProcessorCount
+    ) -> Int {
+        guard providerCount > 0 else { return 1 }
+        let explicit = environment["MOOT_PROVIDER_TRAINING_MEMORY_BUDGET_BYTES"]
+            .flatMap(UInt64.init)
+            ?? environment["MOOT_MIGRATION_MEMORY_BUDGET_BYTES"].flatMap(UInt64.init)
+        let budget = explicit ?? physicalMemory * 4 / 5
+        let perWorker = 2 * UInt64(1_024 * 1_024 * 1_024)
+            + UInt64(max(0, contentCount)) * UInt64(320 * 1_024)
+        let memoryWorkers = max(1, Int(budget / max(1, perWorker)))
+        return max(1, min(providerCount, max(1, processorCount), memoryWorkers))
+    }
+
+    private static func prepareProviderTraining(
+        job: ProviderTrainingJob,
+        allIDs: [CorpusContentID],
+        indexedStates: [CorpusContentID: CorpusIndexState],
+        source: any CorpusContentSource,
+        now: Date
+    ) async throws -> PreparedProviderTraining {
+        let provider = try job.witness.reconstructBasis(from: job.freshBasisBlob)
+        guard let trainable = provider as? any TrainableEmbeddingBasis else {
+            throw CorpusKitError.notTrainable(
+                "reconstructed provider is not trainable — basis seam invariant violated")
+        }
+        guard let countsAccumulator =
+            try job.witness.reconstructBasis(from: job.freshBasisBlob)
+                as? any TrainableEmbeddingBasis
+        else {
+            throw CorpusKitError.notTrainable(
+                "reconstructed counts provider is not trainable — basis seam invariant violated")
+        }
+
+        var subsumedPendingReferences: [PersistedCountsReference] = []
+        var documentCount = 0
+        var cursor = 0
+        while cursor < allIDs.count {
+            let end = min(cursor + Self.trainingPageSize, allIDs.count)
+            var texts: [String] = []
+            texts.reserveCapacity(end - cursor)
+            for id in allIDs[cursor..<end] {
+                if let record = try await source.record(for: id) {
+                    texts.append(record.text)
+                    let indexed = indexedStates[record.id]
+                    if indexed?.revision != record.revision
+                        || indexed?.digest != record.digest
+                        || indexed?.indexVersion != Self.indexVersion
+                    {
+                        subsumedPendingReferences.append(
+                            PersistedCountsReference(
+                                modelID: job.modelID,
+                                modelVersion: job.modelVersion,
+                                contentID: record.id,
+                                revision: record.revision,
+                                digest: record.digest,
+                                updatedAt: now,
+                                isSubsumed: true))
+                    }
+                }
+            }
+            trainable.accumulateTraining(texts: texts)
+            for text in texts { countsAccumulator.addToCounts(text: text) }
+            documentCount += texts.count
+            cursor = end
+        }
+        trainable.finalizeTraining()
+
+        let basisBlob = trainable.serializeBasis()
+        let digest = CorpusContentDigest.digest(basisBlob)
+        return PreparedProviderTraining(
+            job: job,
+            provider: provider,
+            countsAccumulator: countsAccumulator,
+            basisRow: PersistedBasis(
+                modelID: job.modelID,
+                modelVersion: job.modelVersion,
+                basis: basisBlob,
+                trainedAt: now,
+                trainedChunkCount: documentCount),
+            countsRow: PersistedCounts(
+                modelID: job.modelID,
+                modelVersion: job.modelVersion,
+                counts: countsAccumulator.serializeCounts(),
+                documentCount: documentCount,
+                vocabSize: countsAccumulator.countsVocabularySize,
+                updatedAt: now),
+            basisDigest: digest,
+            subsumedReferences: subsumedPendingReferences)
+    }
+
     /// Stream-train every trainable slot that lacks a CURRENT basis (or
-    /// every trainable slot when `force` is true), one provider at a time.
+    /// every trainable slot when `force` is true), with bounded provider-level
+    /// parallel compute and deterministic slot-order publication.
     ///
     /// Crash safety per provider: accumulation and finalization are
     /// in-memory only — a crash loses nothing durable and the resumed run
@@ -1557,6 +1693,7 @@ public actor CorpusContentEngine {
                 .filter { $0.contentID != Self.feedCursorRowID }
                 .map { ($0.contentID, $0) })
         var digests: [String: String] = [:]
+        var jobs: [ProviderTrainingJob] = []
         for slotIndex in slots.indices {
             guard let blob = slots[slotIndex].freshBasisBlob,
                   let fresh = slots[slotIndex].provider as? any TrainableEmbeddingBasis
@@ -1568,117 +1705,84 @@ public actor CorpusContentEngine {
                 digests[modelID] = slots[slotIndex].basisDigest
                 continue
             }
-            // Fresh accumulation state, reconstructed from the pristine blob
-            // so a retrain never compounds on a prior generation.
-            let provider = try fresh.reconstructBasis(from: blob)
-            guard let trainable = provider as? any TrainableEmbeddingBasis else {
-                throw CorpusKitError.notTrainable(
-                    "reconstructed provider is not trainable — basis seam invariant violated")
-            }
-            // Streamed accumulation in canonical ascending-ID order; the
-            // counts accumulator folds the SAME pages so the persisted
-            // counts are exactly the training corpus's statistics — no
-            // second pass, no double count.
-            let allIDs = try await source.activeContentIDs()
-            guard !allIDs.isEmpty else { continue }
-            // A FRESH counts accumulator (reconstructed from the pristine
-            // blob → empty accumulation): the persisted counts blob is
-            // defined as the fold of the training corpus through
-            // `addToCounts`, on its own instance so providers whose
-            // addToCounts shares training state never double-train.
-            let countsAccumulator =
-                try fresh.reconstructBasis(from: blob) as? any TrainableEmbeddingBasis
-            var subsumedPendingReferences: [PersistedCountsReference] = []
-            var documentCount = 0
-            var cursor = 0
-            while cursor < allIDs.count {
-                let page = allIDs[cursor..<min(cursor + Self.trainingPageSize, allIDs.count)]
-                var texts: [String] = []
-                texts.reserveCapacity(page.count)
-                for id in page {
-                    if let record = try await source.record(for: id) {
-                        texts.append(record.text)
-                        let indexed = indexedStates[record.id]
-                        if indexed?.revision != record.revision
-                            || indexed?.digest != record.digest
-                            || indexed?.indexVersion != Self.indexVersion
-                        {
-                            subsumedPendingReferences.append(
-                                PersistedCountsReference(
-                                    modelID: provider.modelID,
-                                    modelVersion: provider.modelVersion,
-                                    contentID: record.id,
-                                    revision: record.revision,
-                                    digest: record.digest,
-                                    updatedAt: now,
-                                    isSubsumed: true))
-                        }
+            jobs.append(ProviderTrainingJob(
+                slotIndex: slotIndex,
+                modelID: modelID,
+                modelVersion: slots[slotIndex].provider.modelVersion,
+                freshBasisBlob: blob,
+                witness: fresh))
+        }
+
+        let allIDs = try await source.activeContentIDs()
+        guard !allIDs.isEmpty else { return digests }
+        let cap = Self.providerTrainingParallelism(
+            contentCount: allIDs.count, providerCount: jobs.count)
+        let trainingSource = source
+
+        var start = 0
+        while start < jobs.count {
+            let end = min(start + cap, jobs.count)
+            var prepared = [PreparedProviderTraining?](
+                repeating: nil, count: end - start)
+            try await withThrowingTaskGroup(
+                of: (Int, PreparedProviderTraining).self
+            ) { group in
+                for offset in 0..<(end - start) {
+                    let job = jobs[start + offset]
+                    group.addTask {
+                        (offset, try await Self.prepareProviderTraining(
+                            job: job,
+                            allIDs: allIDs,
+                            indexedStates: indexedStates,
+                            source: trainingSource,
+                            now: now))
                     }
                 }
-                trainable.accumulateTraining(texts: texts)
-                if let accumulator = countsAccumulator {
-                    for text in texts { accumulator.addToCounts(text: text) }
-                }
-                documentCount += texts.count
-                cursor += Self.trainingPageSize
-            }
-            trainable.finalizeTraining()
-
-            if _trainFaultBeforeCommitModelID == modelID {
-                _trainFaultBeforeCommitModelID = nil
-                throw CorpusKitError.invalidConfiguration(
-                    "injected training fault before commit: \(modelID)")
-            }
-
-            // ATOMIC commit: basis + training-corpus counts in ONE
-            // transaction — the pair can never disagree durably.
-            let basisBlob = trainable.serializeBasis()
-            let digest = CorpusContentDigest.digest(basisBlob)
-            let basisRow = PersistedBasis(
-                modelID: provider.modelID,
-                modelVersion: provider.modelVersion,
-                basis: basisBlob,
-                trainedAt: now,
-                trainedChunkCount: documentCount)
-            let countsRow = countsAccumulator.map { accumulator in
-                PersistedCounts(
-                    modelID: provider.modelID,
-                    modelVersion: provider.modelVersion,
-                    counts: accumulator.serializeCounts(),
-                    documentCount: documentCount,
-                    vocabSize: accumulator.countsVocabularySize,
-                    updatedAt: now)
-            }
-            let basisStore = self.basisStore
-            let countsStore = self.countsStore
-            let pendingSubsumedReferences = subsumedPendingReferences
-            try await storage.transaction(isolation: .serializable) { txn in
-                try await basisStore.upsert(basisRow, into: txn.rowStore)
-                if let countsRow {
-                    try await countsStore.upsert(countsRow, into: txn.rowStore)
-                }
-                try await countsStore.deleteReferences(
-                    modelID: provider.modelID,
-                    modelVersion: provider.modelVersion,
-                    into: txn.rowStore)
-                for reference in pendingSubsumedReferences {
-                    try await countsStore.upsertReference(
-                        reference, into: txn.rowStore)
+                for try await (offset, result) in group {
+                    prepared[offset] = result
                 }
             }
-            slots[slotIndex].provider = provider
-            slots[slotIndex].basisDigest = digest
-            slots[slotIndex].countsAccumulator = countsAccumulator
-            slots[slotIndex].countsDocumentCount = documentCount
-            slots[slotIndex].countsVocabAnchor =
-                countsAccumulator?.countsVocabularySize ?? 0
-            digests[modelID] = digest
 
-            if _trainFaultAfterModelID == modelID {
-                _trainFaultAfterModelID = nil
-                throw CorpusKitError.invalidConfiguration(
-                    "injected training fault after commit: \(modelID)")
+            // Publication remains deterministic and crash-resumable: each
+            // provider commits atomically in configured slot order.
+            for result in prepared.compactMap({ $0 }) {
+                let modelID = result.job.modelID
+                if _trainFaultBeforeCommitModelID == modelID {
+                    _trainFaultBeforeCommitModelID = nil
+                    throw CorpusKitError.invalidConfiguration(
+                        "injected training fault before commit: \(modelID)")
+                }
+                let basisStore = self.basisStore
+                let countsStore = self.countsStore
+                try await storage.transaction(isolation: .serializable) { txn in
+                    try await basisStore.upsert(result.basisRow, into: txn.rowStore)
+                    try await countsStore.upsert(result.countsRow, into: txn.rowStore)
+                    try await countsStore.deleteReferences(
+                        modelID: result.job.modelID,
+                        modelVersion: result.job.modelVersion,
+                        into: txn.rowStore)
+                    for reference in result.subsumedReferences {
+                        try await countsStore.upsertReference(
+                            reference, into: txn.rowStore)
+                    }
+                }
+                let slotIndex = result.job.slotIndex
+                slots[slotIndex].provider = result.provider
+                slots[slotIndex].basisDigest = result.basisDigest
+                slots[slotIndex].countsAccumulator = result.countsAccumulator
+                slots[slotIndex].countsDocumentCount =
+                    result.countsRow.documentCount
+                slots[slotIndex].growthTermDigests = []
+                slots[slotIndex].countsVocabAnchor = result.countsRow.vocabSize
+                digests[modelID] = result.basisDigest
+
+                if _trainFaultAfterModelID == modelID {
+                    _trainFaultAfterModelID = nil
+                    throw CorpusKitError.invalidConfiguration(
+                        "injected training fault after commit: \(modelID)")
+                }
             }
+            start = end
         }
         return digests
     }
@@ -1739,12 +1843,16 @@ public actor CorpusContentEngine {
             try await reloadCountsFromStorage()
             countsReloadRequired = false
         }
-        var references: [(reference: PersistedCountsReference, slotIndex: Int, countsDocument: Bool)] = []
+        var references: [(
+            reference: PersistedCountsReference, slotIndex: Int,
+            countsDocument: Bool, termDigests: Set<String>
+        )] = []
         var consumedSubsumedReferences: [(modelID: String, modelVersion: String, contentID: String)] = []
         for index in slots.indices where slots[index].countsAccumulator != nil {
             let modelID = slots[index].provider.modelID
             let modelVersion = slots[index].provider.modelVersion
             let countsDocument: Bool
+            var termDigests: Set<String> = []
             if let existing = try await countsStore.referenceFor(
                 modelID: modelID, modelVersion: modelVersion, contentID: record.id)
             {
@@ -1756,25 +1864,36 @@ public actor CorpusContentEngine {
                     continue
                 }
                 countsDocument = false
+                termDigests.formUnion(existing.growthTermDigests)
             } else {
                 countsDocument = try await indexState.state(for: record.id) == nil
+            }
+            if let accumulator = slots[index].countsAccumulator {
+                for term in defaultKeywordTokens(record.text)
+                    where !accumulator.countsContainsTerm(term)
+                {
+                    termDigests.insert(CorpusContentDigest.digest(Data(term.utf8)))
+                }
             }
             references.append((
                 PersistedCountsReference(
                     modelID: modelID, modelVersion: modelVersion,
                     contentID: record.id, revision: record.revision,
-                    digest: record.digest, updatedAt: now),
-                index, countsDocument))
+                    digest: record.digest, updatedAt: now,
+                    growthTermDigests: Array(termDigests)),
+                index, countsDocument, termDigests))
         }
         var anchorRows: [(modelID: String, modelVersion: String, docs: Int, vocab: Int)] = []
         for item in references {
-            slots[item.slotIndex].countsAccumulator!.addToCounts(text: record.text)
+            slots[item.slotIndex].growthTermDigests.formUnion(item.termDigests)
             if item.countsDocument {
                 slots[item.slotIndex].countsDocumentCount += 1
             }
+            let publishedVocabulary =
+                slots[item.slotIndex].countsAccumulator?.countsVocabularySize ?? 0
             slots[item.slotIndex].countsVocabAnchor = max(
                 slots[item.slotIndex].countsVocabAnchor,
-                slots[item.slotIndex].countsAccumulator!.countsVocabularySize)
+                publishedVocabulary + slots[item.slotIndex].growthTermDigests.count)
             anchorRows.append((
                 item.reference.modelID, item.reference.modelVersion,
                 slots[item.slotIndex].countsDocumentCount,
@@ -1835,13 +1954,6 @@ public actor CorpusContentEngine {
         countsAdmissionWaiters.removeFirst().resume()
     }
 
-    private func foldIntoCounts(text: String) {
-        for index in slots.indices where slots[index].countsAccumulator != nil {
-            slots[index].countsAccumulator!.addToCounts(text: text)
-            slots[index].countsDocumentCount += 1
-        }
-    }
-
     private func persistCounts(now: Date) async throws {
         for slot in slots {
             guard let accumulator = slot.countsAccumulator else { continue }
@@ -1850,22 +1962,14 @@ public actor CorpusContentEngine {
                 modelVersion: slot.provider.modelVersion,
                 counts: accumulator.serializeCounts(),
                 documentCount: slot.countsDocumentCount,
-                vocabSize: accumulator.countsVocabularySize,
+                vocabSize: slot.countsVocabAnchor,
                 updatedAt: now)
             let countsStore = self.countsStore
-            let compactedReferences = try await countsStore.references(
-                modelID: row.modelID, modelVersion: row.modelVersion)
-                .filter { !$0.isSubsumed }
-            try await storage.transaction(isolation: .serializable) { txn in
-                try await countsStore.upsert(row, into: txn.rowStore)
-                for reference in compactedReferences {
-                    try await countsStore.deleteReference(
-                        modelID: reference.modelID,
-                        modelVersion: reference.modelVersion,
-                        contentID: reference.contentID,
-                        into: txn.rowStore)
-                }
-            }
+            // The blob is the immutable publication snapshot. Identity-scoped
+            // growth references remain authoritative until the next provider
+            // publication; deleting them here would lose restart-exact term
+            // contributions.
+            try await countsStore.upsert(row)
         }
     }
 

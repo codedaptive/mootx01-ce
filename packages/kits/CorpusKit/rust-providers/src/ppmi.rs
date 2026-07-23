@@ -698,6 +698,10 @@ impl TrainableEmbeddingBasis for PpmiProvider {
     fn counts_vocabulary_size(&self) -> usize {
         self.co_count.len()
     }
+
+    fn counts_contains_term(&self, term: &str) -> bool {
+        self.co_count.contains_key(term)
+    }
 }
 
 // MARK: - Unit tests

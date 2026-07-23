@@ -723,6 +723,10 @@ impl TrainableEmbeddingBasis for NmfProvider {
     fn counts_vocabulary_size(&self) -> usize {
         self.counts.vocabulary_size()
     }
+
+    fn counts_contains_term(&self, term: &str) -> bool {
+        self.counts.vocab.contains_key(term)
+    }
 }
 
 // ---------------------------------------------------------------------------

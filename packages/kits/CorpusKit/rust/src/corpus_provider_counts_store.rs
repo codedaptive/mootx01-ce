@@ -83,6 +83,9 @@ pub struct PersistedCountsReference {
     pub digest: String,
     pub updated_at_secs: i64,
     pub is_subsumed: bool,
+    /// Sorted SHA-256 digests of genuinely novel terms accumulated across
+    /// revisions of this identity since the published provider generation.
+    pub growth_term_digests: Vec<String>,
 }
 
 /// Storage for a trainable embedding provider's maintained counts.
@@ -96,6 +99,57 @@ pub struct CorpusProviderCountsStore {
 }
 
 const SUBSUMED_REFERENCE_EXT: &[u8] = br#"{"kind":"subsumed"}"#;
+
+fn growth_reference_ext(terms: &[String]) -> Option<Vec<u8>> {
+    let sorted: std::collections::BTreeSet<_> = terms
+        .iter()
+        .filter(|term| {
+            term.len() == 64
+                && term
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .cloned()
+        .collect();
+    if sorted.is_empty() {
+        return None;
+    }
+    let body = sorted
+        .iter()
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!("{{\"kind\":\"growth\",\"terms\":[{body}]}}").into_bytes())
+}
+
+fn decode_reference_ext(bytes: &[u8]) -> (bool, Vec<String>) {
+    if bytes == SUBSUMED_REFERENCE_EXT {
+        return (true, Vec::new());
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return (false, Vec::new());
+    };
+    if value.get("kind").and_then(|v| v.as_str()) != Some("growth") {
+        return (false, Vec::new());
+    }
+    let mut terms: Vec<String> = value
+        .get("terms")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .filter(|term| {
+            term.len() == 64
+                && term
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .map(str::to_string)
+        .collect();
+    terms.sort();
+    terms.dedup();
+    (false, terms)
+}
 
 impl CorpusProviderCountsStore {
     /// Additive schema declaration for the maintained-counts table. Mirrors the
@@ -251,6 +305,8 @@ impl CorpusProviderCountsStore {
             "ext".into(),
             if row.is_subsumed {
                 TypedValue::Json(SUBSUMED_REFERENCE_EXT.to_vec())
+            } else if let Some(bytes) = growth_reference_ext(&row.growth_term_digests) {
+                TypedValue::Json(bytes)
             } else {
                 TypedValue::Null
             },
@@ -503,6 +559,12 @@ impl CorpusProviderCountsStore {
 }
 
 fn decode_reference(row: &StorageRow) -> Option<PersistedCountsReference> {
+    let (is_subsumed, growth_term_digests) = match row.get("ext") {
+        Some(TypedValue::Json(bytes)) | Some(TypedValue::Blob(bytes)) => {
+            decode_reference_ext(bytes)
+        }
+        _ => (false, Vec::new()),
+    };
     Some(PersistedCountsReference {
         model_id: match row.get("model_id") {
             Some(TypedValue::Text(value)) => value.clone(),
@@ -525,11 +587,8 @@ fn decode_reference(row: &StorageRow) -> Option<PersistedCountsReference> {
             _ => return None,
         },
         updated_at_secs: decode_updated_at_secs(row.get("updated_at"))?,
-        is_subsumed: matches!(
-            row.get("ext"),
-            Some(TypedValue::Json(bytes)) | Some(TypedValue::Blob(bytes))
-                if bytes.as_slice() == SUBSUMED_REFERENCE_EXT
-        ),
+        is_subsumed,
+        growth_term_digests,
     })
 }
 

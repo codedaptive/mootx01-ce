@@ -111,11 +111,17 @@ public struct PersistedCountsReference: Sendable, Equatable {
     public let digest: String
     public let updatedAt: Date
     public let isSubsumed: Bool
+    /// Sorted SHA-256 digests of terms that were not present in the published
+    /// provider generation. This is the complete identity-scoped growth
+    /// contribution accumulated across revisions of this content ID. It carries
+    /// no canonical text and is discarded at the next provider publication.
+    public let growthTermDigests: [String]
 
     public init(
         modelID: String, modelVersion: String, contentID: String,
         revision: Int64, digest: String, updatedAt: Date,
-        isSubsumed: Bool = false
+        isSubsumed: Bool = false,
+        growthTermDigests: [String] = []
     ) {
         self.modelID = modelID
         self.modelVersion = modelVersion
@@ -124,6 +130,7 @@ public struct PersistedCountsReference: Sendable, Equatable {
         self.digest = digest
         self.updatedAt = updatedAt
         self.isSubsumed = isSubsumed
+        self.growthTermDigests = growthTermDigests.sorted()
     }
 }
 
@@ -138,6 +145,24 @@ public actor CorpusProviderCountsStore {
     let storage: any Storage
     private static let subsumedReferenceExt =
         Data(#"{"kind":"subsumed"}"#.utf8)
+
+    private struct ReferenceExtension: Codable {
+        let kind: String
+        let terms: [String]?
+    }
+
+    /// Canonical ASCII JSON. Term identities are lowercase SHA-256 hex, so no
+    /// JSON escaping or cross-runtime Unicode policy can alter persisted bytes.
+    private static func growthReferenceExt(_ terms: [String]) -> Data? {
+        let sorted = Array(Set(terms.filter { term in
+            term.utf8.count == 64 && term.utf8.allSatisfy {
+                ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+            }
+        })).sorted()
+        guard !sorted.isEmpty else { return nil }
+        let quoted = sorted.map { "\"\($0)\"" }.joined(separator: ",")
+        return Data("{\"kind\":\"growth\",\"terms\":[\(quoted)]}".utf8)
+    }
 
     /// Additive schema declaration for the maintained-counts table. Mirrors the
     /// BasisStore declaration pattern. `appendOnly` is false: an incremental
@@ -267,7 +292,8 @@ public actor CorpusProviderCountsStore {
                 "updated_at": .timestamp(row.updatedAt),
                 "ext": row.isSubsumed
                     ? .json(Self.subsumedReferenceExt)
-                    : .null
+                    : Self.growthReferenceExt(row.growthTermDigests)
+                        .map(TypedValue.json) ?? .null
             ],
             conflictColumns: ["model_id", "model_version", "content_id"]
         )
@@ -437,17 +463,31 @@ public actor CorpusProviderCountsStore {
               case let .text(digest) = row["digest"] ?? .null,
               let updatedAt = decodeDate(row["updated_at"])
         else { return nil }
+        let decodedExtension: (isSubsumed: Bool, terms: [String]) = {
+            let data: Data?
+            switch row["ext"] ?? .null {
+            case let .json(value), let .blob(value):
+                data = value
+            default:
+                data = nil
+            }
+            guard let data else { return (false, []) }
+            if data == Self.subsumedReferenceExt { return (true, []) }
+            guard let ext = try? JSONDecoder().decode(ReferenceExtension.self, from: data),
+                  ext.kind == "growth"
+            else { return (false, []) }
+            let terms = Array(Set(ext.terms ?? [])).filter { term in
+                term.utf8.count == 64 && term.utf8.allSatisfy {
+                    ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+                }
+            }.sorted()
+            return (false, terms)
+        }()
         return PersistedCountsReference(
             modelID: modelID, modelVersion: modelVersion, contentID: contentID,
             revision: revision, digest: digest, updatedAt: updatedAt,
-            isSubsumed: {
-                switch row["ext"] ?? .null {
-                case let .json(data), let .blob(data):
-                    return data == Self.subsumedReferenceExt
-                default:
-                    return false
-                }
-            }())
+            isSubsumed: decodedExtension.isSubsumed,
+            growthTermDigests: decodedExtension.terms)
     }
 
     /// Decode `updated_at` tolerant of `.timestamp` (InMemory) and `.text`

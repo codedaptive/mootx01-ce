@@ -1077,6 +1077,24 @@ struct CorpusContentEngineTests {
 
     // MARK: - Reindex
 
+    @Test func providerTrainingParallelismUsesAvailableCPUWithinMemoryBudget() {
+        let roomy = CorpusContentEngine.providerTrainingParallelism(
+            contentCount: 2_000,
+            providerCount: 4,
+            environment: [:],
+            physicalMemory: 128 * 1_024 * 1_024 * 1_024,
+            processorCount: 18)
+        #expect(roomy == 4)
+
+        let constrained = CorpusContentEngine.providerTrainingParallelism(
+            contentCount: 98_118,
+            providerCount: 4,
+            environment: [:],
+            physicalMemory: 16 * 1_024 * 1_024 * 1_024,
+            processorCount: 18)
+        #expect(constrained == 1)
+    }
+
     @Test func reindexReindexesEveryActiveContentRow() async throws {
         try await GlobalTestLock.shared.withLock {
             let (engine, store, storage) = try await makeStandalone()

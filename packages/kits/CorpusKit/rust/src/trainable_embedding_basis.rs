@@ -182,4 +182,14 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
     fn counts_vocabulary_size(&self) -> usize;
+
+    /// Whether the published counts generation already contains `term`.
+    ///
+    /// Attached engines use this read-only seam to retain hashes only for
+    /// genuinely novel terms. The default keeps synthetic test providers
+    /// source-compatible; every production distributional provider overrides
+    /// it with an exact vocabulary lookup.
+    fn counts_contains_term(&self, _term: &str) -> bool {
+        false
+    }
 }

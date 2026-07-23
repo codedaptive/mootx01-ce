@@ -669,4 +669,8 @@ extension PpmiProvider: TrainableEmbeddingBasis {
     /// target terms seen during accumulation (before PPMI filtering), which is
     /// the vocabulary the next finalize will derive from.
     public var countsVocabularySize: Int { coCount.count }
+
+    public func countsContainsTerm(_ term: String) -> Bool {
+        coCount[term] != nil
+    }
 }

@@ -497,4 +497,8 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
 
     /// Maintained vocabulary size for the growth trigger.
     public var countsVocabularySize: Int { vocab.count }
+
+    public func countsContainsTerm(_ term: String) -> Bool {
+        vocab[term] != nil
+    }
 }

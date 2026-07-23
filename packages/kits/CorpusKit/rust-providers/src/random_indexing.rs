@@ -566,6 +566,10 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
     fn counts_vocabulary_size(&self) -> usize {
         self.vocab.len()
     }
+
+    fn counts_contains_term(&self, term: &str) -> bool {
+        self.vocab.contains_key(term)
+    }
 }
 
 // MARK: - Unit tests

@@ -184,4 +184,20 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
     var countsVocabularySize: Int { get }
+
+    /// Whether the published counts generation already contains `term`.
+    ///
+    /// Attached engines use this read-only seam to persist only the hashes of
+    /// genuinely novel terms in their compact growth references. The published
+    /// counts blob remains frozen between provider publications: revisions do
+    /// not append obsolete text into an in-memory accumulator, so live and
+    /// reopened growth state are identical.
+    func countsContainsTerm(_ term: String) -> Bool
+}
+
+public extension TrainableEmbeddingBasis {
+    /// Synthetic/test providers that do not expose a vocabulary conservatively
+    /// treat every term as novel. Production distributional providers override
+    /// this with their exact maintained-vocabulary lookup.
+    func countsContainsTerm(_ term: String) -> Bool { false }
 }

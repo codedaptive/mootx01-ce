@@ -220,11 +220,16 @@ public actor VectorStore {
     /// nothing was deferred (the drain barrier may fire on an idle corpus).
     private var deferredIndexDirty: Bool = false
 
-    /// Live keys tracked incrementally across the deferred window so replacement
-    /// detection stays O(batch) per call instead of re-scanning the (stale) index
-    /// snapshot every write. Seeded from the published snapshot by
-    /// `beginDeferredIndex()`; nil when not in deferred mode.
-    private var deferredLiveKeys: Set<VectorRecordKey>? = nil
+    /// Live full keys grouped by the schema's logical UNIQUE position. Grouping
+    /// by `(itemID, vectorIndex, modelID)` is essential: a model-version change
+    /// replaces the durable row and must also remove the old-version resident
+    /// slot. Seeded from the published snapshot by `beginDeferredIndex()`.
+    private var deferredLiveKeys: [VKLogicalPos: Set<VectorRecordKey>]? = nil
+
+    /// Full keys superseded during the current window. Needed when a model
+    /// version changes at the same logical position and the small-delta
+    /// publisher updates the resident indexes incrementally.
+    private var deferredReplacedKeys: Set<VectorRecordKey> = []
 
     /// Memory-only deferral buffer. With NO sidecar `arrayStore`, deferred
     /// `addPayloads` calls accumulate their binary records here (an O(batch)
@@ -243,6 +248,13 @@ public actor VectorStore {
     /// callers hold the deferred window open indefinitely.
     /// (secfix/punt-vector: unbounded deferred buffer fix)
     private var deferredPendingRecords: [(key: VectorRecordKey, bytes: [UInt8])] = []
+
+    /// Small bursts update both resident indexes incrementally. A periodic
+    /// full materialization compacts BruteForce tombstones and bounds overlay
+    /// history without making every single-Drawer capture O(estate).
+    private static let incrementalPublishLimit = 256
+    private static let incrementalCompactionInterval = 1_024
+    private var incrementalPublicationCount = 0
 
     /// Maximum number of records that `deferredPendingRecords` may hold before
     /// an intermediate flush is triggered (memory-only deferred path only).
@@ -770,30 +782,37 @@ public actor VectorStore {
                 // publishResidentIndex(). Replacement detection uses the
                 // incrementally-maintained live-key set, so the whole window stays
                 // O(batch) per call rather than O(N) (no per-call snapshot scan).
-                var live = deferredLiveKeys ?? []
-                var seenInBatch = Set<VectorRecordKey>()
+                var live = deferredLiveKeys ?? [:]
+                var seenInBatch = Set<VKLogicalPos>()
                 var newKeyCount: UInt32 = 0
                 var replacedKeys = Set<VectorRecordKey>()
                 for k in batchKeys {
-                    if live.contains(k) {
-                        // Already live (earlier window write or pre-existing) →
-                        // this is a replacement, not a new key.
-                        replacedKeys.insert(k)
-                    } else if !seenInBatch.contains(k) {
+                    let pos = VKLogicalPos(
+                        itemID: k.itemID,
+                        vectorIndex: k.vectorIndex,
+                        modelID: k.modelID
+                    )
+                    if let existing = live[pos] {
+                        // The durable UNIQUE key excludes modelVersion, so every
+                        // full key already resident at this logical position is
+                        // superseded — including an old model version.
+                        replacedKeys.formUnion(existing)
+                    } else if !seenInBatch.contains(pos) {
                         newKeyCount += 1
                     }
-                    seenInBatch.insert(k)
-                    live.insert(k)
+                    seenInBatch.insert(pos)
+                    live[pos] = [k]
                 }
                 if let store = arrayStore {
                     // Sidecar present: stage into the resident array store now.
                     await store.tombstoneDeferred(keys: replacedKeys)
                     try await store.appendBatch(records: binaryRecords)
-                } else {
-                    // Memory-only: accumulate; publishResidentIndex() merges all
-                    // pending records into the resident index in one pass.
-                    deferredPendingRecords.append(contentsOf: binaryRecords)
                 }
+                // Retain the compact delta in both sidecar and memory-only
+                // modes. Small publications apply it directly to the resident
+                // indexes; large publications materialize the final snapshot.
+                deferredPendingRecords.append(contentsOf: binaryRecords)
+                deferredReplacedKeys.formUnion(replacedKeys)
                 deferredLiveKeys = live
                 liveBinaryCount += newKeyCount
                 deferredIndexDirty = true
@@ -924,13 +943,20 @@ public actor VectorStore {
         // Seed live keys from the currently-published snapshot so replacement
         // detection across the window is O(batch), not O(N), per call.
         let snap = await bruteForceIndex.currentSnapshot()
-        var keys = Set<VectorRecordKey>()
+        var keys: [VKLogicalPos: Set<VectorRecordKey>] = [:]
         keys.reserveCapacity(Int(snap.count))
         for i in 0..<Int(snap.count) where !snap.isTombstoned(i) {
-            keys.insert(snap.keys[i])
+            let key = snap.keys[i]
+            let pos = VKLogicalPos(
+                itemID: key.itemID,
+                vectorIndex: key.vectorIndex,
+                modelID: key.modelID
+            )
+            keys[pos, default: []].insert(key)
         }
         deferredLiveKeys = keys
         deferredPendingRecords = []
+        deferredReplacedKeys = []
         deferredIndexDirty = false
         deferredIndexActive = true
     }
@@ -949,7 +975,28 @@ public actor VectorStore {
         deferredLiveKeys = nil
         let pending = deferredPendingRecords
         deferredPendingRecords = []
+        let replaced = deferredReplacedKeys
+        deferredReplacedKeys = []
         guard wasDirty else { return }
+
+        let delta = Self.dedupLastWins(pending)
+        if delta.count <= Self.incrementalPublishLimit,
+           incrementalPublicationCount < Self.incrementalCompactionInterval
+        {
+            for key in replaced {
+                try await bruteForceIndex.remove(key: key)
+                try await mihIndex.remove(key: key)
+            }
+            for record in delta {
+                let payload = VectorPayload(
+                    kind: .binary, dim: 256, bytes: record.bytes)
+                try await bruteForceIndex.add(key: record.key, vector: payload)
+                try await mihIndex.add(key: record.key, vector: payload)
+            }
+            incrementalPublicationCount += 1
+            _selectIndex()
+            return
+        }
 
         let merged: ResidentVectorArray
         if let store = arrayStore {
@@ -963,7 +1010,7 @@ public actor VectorStore {
             let cur = await bruteForceIndex.currentSnapshot()
             merged = Self.mergeBatchIntoSnapshot(
                 snapshot: cur,
-                records: Self.dedupLastWins(pending)
+                records: delta
             )
         }
         await bruteForceIndex.build(from: merged)
@@ -973,6 +1020,7 @@ public actor VectorStore {
         var liveCount: UInt32 = 0
         for i in 0..<Int(merged.count) where !merged.isTombstoned(i) { liveCount += 1 }
         liveBinaryCount = liveCount
+        incrementalPublicationCount = 0
         _selectIndex()
     }
 
@@ -991,6 +1039,7 @@ public actor VectorStore {
         guard !deferredPendingRecords.isEmpty else { return }
         let pending = Self.dedupLastWins(deferredPendingRecords)
         deferredPendingRecords = []
+        deferredReplacedKeys = []
         let cur = await bruteForceIndex.currentSnapshot()
         let merged = Self.mergeBatchIntoSnapshot(snapshot: cur, records: pending)
         await bruteForceIndex.build(from: merged)
@@ -998,31 +1047,49 @@ public actor VectorStore {
         // Recompute live count and reseed the live-key set authoritatively from
         // the flushed snapshot so subsequent replacement detection remains correct.
         var liveCount: UInt32 = 0
-        var liveKeys = Set<VectorRecordKey>()
+        var liveKeys: [VKLogicalPos: Set<VectorRecordKey>] = [:]
         for i in 0..<Int(merged.count) where !merged.isTombstoned(i) {
             liveCount += 1
-            liveKeys.insert(merged.keys[i])
+            let key = merged.keys[i]
+            let pos = VKLogicalPos(
+                itemID: key.itemID,
+                vectorIndex: key.vectorIndex,
+                modelID: key.modelID
+            )
+            liveKeys[pos, default: []].insert(key)
         }
         liveBinaryCount = liveCount
         deferredLiveKeys = liveKeys
+        incrementalPublicationCount = 0
         // deferredIndexActive stays true, deferredIndexDirty stays true.
     }
 
-    /// Keep only the last occurrence of each key, preserving first-seen order of
-    /// the survivors. Used to collapse a memory-only deferral buffer before the
-    /// single merge, since `mergeBatchIntoSnapshot` appends every record (two
-    /// records with one key would otherwise both go live).
+    /// Keep only the last occurrence at each durable logical position.
+    /// `modelVersion` is deliberately excluded: several revisions in one
+    /// deferred burst must publish only the final version at the table's
+    /// `(itemID, vectorIndex, modelID)` UNIQUE key.
     private static func dedupLastWins(
         _ records: [(key: VectorRecordKey, bytes: [UInt8])]
     ) -> [(key: VectorRecordKey, bytes: [UInt8])] {
         guard !records.isEmpty else { return records }
-        var lastIndex: [VectorRecordKey: Int] = [:]
+        var lastIndex: [VKLogicalPos: Int] = [:]
         lastIndex.reserveCapacity(records.count)
-        for (i, r) in records.enumerated() { lastIndex[r.key] = i }
+        for (i, r) in records.enumerated() {
+            lastIndex[VKLogicalPos(
+                itemID: r.key.itemID,
+                vectorIndex: r.key.vectorIndex,
+                modelID: r.key.modelID
+            )] = i
+        }
         var out: [(key: VectorRecordKey, bytes: [UInt8])] = []
         out.reserveCapacity(lastIndex.count)
-        for (i, r) in records.enumerated() where lastIndex[r.key] == i {
-            out.append(r)
+        for (i, r) in records.enumerated() {
+            let pos = VKLogicalPos(
+                itemID: r.key.itemID,
+                vectorIndex: r.key.vectorIndex,
+                modelID: r.key.modelID
+            )
+            if lastIndex[pos] == i { out.append(r) }
         }
         return out
     }

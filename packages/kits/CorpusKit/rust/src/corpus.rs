@@ -467,6 +467,10 @@ pub(crate) struct CountsState {
     /// row in the same transaction as every reference mutation, so the
     /// threshold decision is identical before and after a process restart.
     pub(crate) vocab_anchor: usize,
+    /// Hashes of terms first observed after the published counts generation.
+    /// ContentEngine persists these in identity-scoped references; standalone
+    /// Corpus leaves the set empty and keeps its historical accumulator path.
+    pub(crate) growth_term_digests: std::collections::BTreeSet<String>,
 }
 
 // MARK: - Corpus
@@ -842,6 +846,7 @@ impl Corpus {
                 accumulator,
                 document_count,
                 vocab_anchor,
+                growth_term_digests: std::collections::BTreeSet::new(),
             });
         }
 
