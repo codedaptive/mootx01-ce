@@ -34,13 +34,24 @@ pub mod bm25_index;
 pub mod bundle_store;
 pub mod chunk;
 pub mod chunker;
+// Canonical content boundary + operating profiles (GLK shared-content 1.1, P1).
+pub mod content;
+pub mod content_engine;
+pub mod content_engine_queue;
 pub mod corpus;
 pub mod corpus_ingest_queue;
 pub mod corpus_provider_counts_store;
-pub mod removed_source_store;
+pub mod document_store;
 pub mod engine;
 pub mod error;
 pub mod hybrid_recall;
+pub mod index_state_store;
+#[cfg(feature = "standalone-passages")]
+pub mod index_configuration_store;
+pub mod provider_configuration_store;
+pub mod provider_coverage_store;
+pub mod removed_source_store;
+pub mod schema_profile;
 pub mod sync_manifest;
 pub mod tokenizer;
 // Mission 6a-ii-α: the trainable-basis type-erasure seam. Declared here in
@@ -54,16 +65,34 @@ pub use bm25_index::*;
 pub use bundle_store::*;
 pub use chunk::*;
 pub use chunker::*;
+pub use content::{
+    content_digest, CorpusContentChange, CorpusContentChangeBatch, CorpusContentId,
+    CorpusContentRecord, CorpusContentSource, CorpusContentStore,
+};
+pub use content_engine::{
+    content_id_from_item_key, ContentIndexJob, ContentIndexJobKind, CorpusContentEngine,
+    CorpusContentHit, CorpusEvidence, CLAIMS_CONSUMER, CONTENT_ENGINE_INDEX_VERSION,
+};
+#[cfg(feature = "standalone-passages")]
+pub use content_engine::passage_ranges;
+#[cfg(feature = "standalone-passages")]
+pub use index_configuration_store::CorpusIndexConfigurationStore;
 pub use corpus::Corpus;
 pub use corpus::EmbeddingModelConfig;
 pub use corpus::FloatLaneOutcome;
 pub use corpus::NamedInferenceFn;
+pub use document_store::CorpusDocumentStore;
+pub use index_state_store::{CorpusIndexState, CorpusIndexStateStore};
+pub use schema_profile::{
+    attached_declaration, attached_excluded_tables, standalone_declaration,
+    CorpusContentConfiguration, CorpusIndexUnitPolicy, CorpusOperatingMode,
+};
 // Lane F types (sparse + fusion).
 pub use engine::{FusedHit, ImpactPosting, LaneTag, SparseHit};
 // Lane D types (inverted index + BM25 weighting + persistence store).
 pub use engine::{
-    Algorithm, BM25Parameters, BM25Weighting, InvertedIndex, InvertedIndexStore,
-    BLOCK_SIZE, QUANT_SCALE, TermFreqTable, quantize_impact,
+    quantize_impact, Algorithm, BM25Parameters, BM25Weighting, InvertedIndex, InvertedIndexStore,
+    TermFreqTable, BLOCK_SIZE, QUANT_SCALE,
 };
 // Lane E types (generalized RRF fusion entry points).
 pub use engine::{fuse, fuse_scored};

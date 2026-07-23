@@ -76,7 +76,11 @@ struct DeltaReindexTests {
     ) async throws -> (encode: Int, imported: Int) {
         let corpus = try #require(await kit.corpusKits[handle])
         guard let queue = await corpus.ingestQueue else { return (0, 0) }
-        let encode = try await queue.completed(streamID: Corpus.encodeStreamID).count
+        // Shared-content 1.1: the copied-text import stream no longer exists —
+        // every change reference rides the one encode stream. `imported` is
+        // retained in the tuple shape for the assertions below and is always
+        // the legacy stream's count (0 on a cutover estate).
+        let encode = try await queue.completed(streamID: CorpusContentEngine.encodeStreamID).count
         let imported = try await queue.completed(streamID: Corpus.importStreamID).count
         return (encode, imported)
     }
@@ -131,7 +135,8 @@ struct DeltaReindexTests {
         try await bulkCapture(kit, handle, count: 40, tag: "baseline")
         _ = try await kit.reindexMissing(handle: handle, now: Date())
         let baseline = try await completedCounts(kit, handle)
-        #expect(baseline.imported >= 40, "bulk load rides the import stream")
+        #expect(baseline.encode >= 40,
+                "bulk load rides the encode stream (change references; the import stream is gone)")
 
         // Delta: 1 new drawer = 2.5% of 40 indexed — under the 5% threshold.
         let deltaDrawers = try await kit.captureBatch(
@@ -143,8 +148,8 @@ struct DeltaReindexTests {
         let after = try await completedCounts(kit, handle)
         #expect(after.encode == baseline.encode + 1,
                 "small delta must ride the ENCODE stream (live-basis embed)")
-        #expect(after.imported == baseline.imported,
-                "small delta must not touch the import stream")
+        #expect(after.imported == 0,
+                "the legacy import stream must stay empty on a cutover estate")
 
         // The delta content is semantically searchable — the encode drain
         // embedded it through the live basis (no full retrain needed).
@@ -178,7 +183,7 @@ struct DeltaReindexTests {
     // MARK: - Large delta takes the import stream (full tail)
 
     @Test
-    func largeDeltaTakesImportStream() async throws {
+    func largeDeltaRidesEncodeStream() async throws {
         let (kit, handle) = try await provisionGLKEstate()
 
         // Flush provisioning-seeded drawers, then baseline: 40 drawers indexed.
@@ -194,9 +199,9 @@ struct DeltaReindexTests {
         #expect(enqueued == 10)
 
         let after = try await completedCounts(kit, handle)
-        #expect(after.imported == baseline.imported + 10,
-                "large delta must ride the IMPORT stream")
-        #expect(after.encode == baseline.encode,
-                "large delta must not leak onto the encode stream")
+        #expect(after.encode == baseline.encode + 10,
+                "large delta rides the encode stream too — change references only")
+        #expect(after.imported == 0,
+                "the legacy import stream must stay empty on a cutover estate")
     }
 }

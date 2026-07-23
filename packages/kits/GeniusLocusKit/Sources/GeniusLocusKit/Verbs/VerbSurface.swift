@@ -653,8 +653,9 @@ public extension GeniusLocusKit {
     /// step 2 confirms the storage half completed.
     ///
     /// **Step 2 — Cross-kit vector delete (GLK orchestration, fail-closed):**
-    /// when a `Corpus` is registered, calls `corpus.expunge(sourceID:)` to scrub
-    /// verbatim chunk text and purge BM25 index entries and all vector embeddings. When a standalone
+    /// when an engine is registered, calls `corpus.removeContent(id:)` to purge
+    /// BM25 index entries and Drawer-keyed vector embeddings by exact key
+    /// (shared-content 1.1: no second text copy exists to scrub). When a standalone
     /// `VectorStore` is also registered (`.glk` estate), additionally calls
     /// `vectorStore.deleteAllVectors` to invalidate the standalone store's
     /// resident array (the corpus and the standalone store share backing storage
@@ -744,13 +745,12 @@ public extension GeniusLocusKit {
             do {
                 for deleteId in idsToDelete {
                     if let corpus {
-                        // Expunge: zero verbatim chunk text AND remove from recall
-                        // (BM25 + internal vector index). sourceID == drawer.id
-                        // (EncodeIntake G4). expunge() is the hard-delete variant of
-                        // remove() — it calls scrubText first so verbatim content is
-                        // erased even if the subsequent recall-removal steps fail.
-                        // (secfix/ws2-coredelete: destruction contract)
-                        try await corpus.expunge(sourceID: deleteId)
+                        // Shared-content 1.1: the canonical text lives ONLY in the
+                        // Drawer row LocusKit just tombstoned/zeroed — there is no
+                        // second copy to scrub. Clearing the engine's derived state
+                        // (BM25 postings + Drawer-keyed vectors, by exact key)
+                        // completes the destruction contract.
+                        try await corpus.removeContent(id: deleteId)
                     }
                     if let vectorStore, let corpus {
                         // Invalidate the standalone VectorStore's resident slot
@@ -979,8 +979,9 @@ public extension GeniusLocusKit {
             if corpus != nil || vectorStore != nil {
                 do {
                     if let corpus {
-                        // Hard-delete: scrub chunk text AND remove from recall.
-                        try await corpus.expunge(sourceID: rowID)
+                        // Shared-content 1.1: clear derived state (no second copy
+                        // exists to scrub — the Drawer row is the only text home).
+                        try await corpus.removeContent(id: rowID)
                     }
                     if let vectorStore {
                         if let corpus {

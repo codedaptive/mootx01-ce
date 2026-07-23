@@ -1,8 +1,8 @@
 ---
 title: CorpusKit Specification
-version: 1.14.0
+version: 1.15.0
 status: accepted-1.1-target
-date: 2026-07-20
+date: 2026-07-22
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -60,8 +60,10 @@ This specification defines:
 - Standalone document ownership through `CorpusContentStore`.
 - Whole-content indexing, which is mandatory in GeniusLocusKit and the default
   standalone policy.
-- Optional standalone passage indexing with provider-token budgets and
-  revision-bound offsets; passage text is never copied into passage rows.
+- Optional standalone passage indexing with a developer-selected token window
+  and overlap and revision-bound offsets; passage text is never copied into
+  passage rows. Swift selects it with the `StandalonePassages` package trait;
+  Rust selects it with the `standalone-passages` crate feature.
 - The BM25 inverted index and its scoring contract.
 - Hybrid recall: candidate-window fan-out, Reciprocal Rank Fusion of
   vector and keyword hits, deterministic ranking, and aggregation to canonical
@@ -153,7 +155,10 @@ tokenizer concern applied at index/query time, not at storage time.
 **I-7 (cross-port parity):** the Swift and Rust ports produce
 byte-identical canonical results, BM25 rankings, and RRF fusion for every
 shared test vector. The standalone compatibility suite additionally gates chunk
-ids and boundaries. Neither port leads.
+ids and boundaries. Canonical keyword tokens lowercase the whole string and
+fold Greek final sigma U+03C2 to U+03C3 before boundary splitting, preventing
+platform Unicode engines from producing different training bytes. Neither port
+leads.
 
 **I-8 (provider separation):** the core `CorpusKit` target ships only
 the `Tokenizer` protocol; the `EmbeddingProvider` protocol is
@@ -248,17 +253,28 @@ persists copied Drawer text, and never imports LocusKit. The adapter that bridge
 the two kits is owned by GeniusLocusKit.
 
 **I-18 (chunking dark in GLK):** a GeniusLocusKit-composed Corpus always uses
-whole-content indexing. `Chunker`, passage identities, passage tables, overlap,
-and passage-text storage are absent from that operating mode and therefore absent
-from MOOTx01. One active GLK Drawer produces one BM25 document identity and one
-logical provider result identity per model.
+whole-content indexing. GLK/MOOTx01 enables neither the Swift
+`StandalonePassages` trait nor the Rust `standalone-passages` feature, so the
+passage-policy enum case, segmenter, policy authority, passage identities,
+passage table, overlap logic, and passage-text storage are absent from that
+build. One active GLK Drawer produces one BM25 document identity and one logical
+provider result identity per model.
 
 **I-19 (standalone passage containment):** standalone CorpusKit may enable
-passage indexing only as an explicit `IndexUnitPolicy`. Boundaries are derived
-from the selected provider's token budget. Persisted passage state contains the
-canonical content ID, content revision/digest, and range only; the text remains
-owned by the standalone document store. Public recall aggregates passage scores
-to `CorpusContentID` and may attach the best range as evidence.
+passage indexing only as an explicit `IndexUnitPolicy`. The developer selects a
+positive token window and an overlap in `[0, window)`. Boundaries use the
+versioned `corpus-alphanumeric-v1` tokenizer so Swift and Rust produce identical
+UTF-8 ranges. Persisted passage state contains the canonical content ID, content
+revision/digest, policy fingerprint, and range only; the text remains owned by
+the standalone document store. Public recall aggregates passage scores to
+`CorpusContentID` and may attach the best range as evidence.
+
+**I-19a (per-database passage authority):** each standalone database persists
+exactly one policy fingerprint containing policy version, tokenizer identity,
+window, and overlap. Reopening with the same policy is idempotent. Reopening
+with a different policy is rejected until the caller explicitly rebuilds the
+derived generation. An older unbound database with existing derived rows cannot
+silently enable passages; it must first bind whole-content or be rebuilt.
 
 **I-20 (derived-state migration):** the 1.1 migration from a chunk-backed GLK
 database preserves Drawers, audit history, lineage, tunnels, facts, and unrelated
@@ -268,6 +284,22 @@ rebuilds CorpusKit state from active Drawers under Drawer IDs. CorpusKit remains
 dark until verification succeeds. Migration failure never damages canonical
 Drawer content and is resumable through PersistenceKit's ordered migration
 mechanism.
+
+**I-21 (current-runtime provider reconciliation):** provider additions and
+removals are normal CorpusKit lifecycle changes, not historical schema
+migrations. On open, CorpusKit compares the configured `(modelID,
+modelVersion)` generations with a singleton durable attestation. A changed
+configuration selectively releases retired representation claims, deletes only
+their unowned vectors/basis/counts/coverage, trains and backfills added slots,
+then writes the attestation last. An equal attestation is an O(1) open path; a
+crash before the final write safely replays reconciliation.
+
+**I-22 (dataset handles are not prose):** a GLK Drawer whose content kind is
+`.dataset`, including the legacy `dataset-handle` sentinel, is excluded from
+CorpusKit indexing. Its backing MX-TAB table, typed row values, primary and
+secondary indexes, statistics, signatures, and handle remain owned by the
+dataset tier and byte-equivalent across shared-content migration. No dataset
+handle receives a BM25 document or CorpusKit-provider vector.
 
 ## § 5 — Behavioral contracts
 
@@ -283,11 +315,14 @@ rest of the linguistic pipeline (EideticLib SPEC B-10, I-13). Each
 emitted chunk carries an HLC drawn in order from the supplied
 generator.
 
-**B-1a (1.1 standalone passage policy):** new passage indexing uses the
-selected provider tokenizer and `PassagePolicy.maxTokens` /
-`overlapTokens`. It persists only canonical content id, revision/digest, and
-UTF-8 range. The source document remains the sole text owner. This policy is
-rejected in attached GLK mode.
+**B-1a (1.1 standalone passage policy):** new passage indexing uses
+`tokenWindows(windowTokens:overlapTokens:)` in Swift and the byte-equivalent
+`TokenWindows` policy in Rust. Consecutive windows advance by
+`windowTokens - overlapTokens`; the final window ends at the final token and is
+not followed by a redundant overlap-only tail. It persists only canonical
+content id, revision/digest, policy fingerprint, and UTF-8 range. The source
+document remains the sole text owner. The policy is rejected in attached mode
+and is not compiled into the GLK/MOOTx01 dependency build.
 
 **B-2 (BM25 scoring):** `BM25Index.search` scores with the
 Robertson–Spärck-Jones formula (defaults k1 = 1.5, b = 0.75) using
@@ -455,15 +490,32 @@ result identity that fails direct Drawer hydration.
 content table or passage-text column. Capturing and indexing a Drawer changes
 the canonical Drawer row and derived index tables only.
 
-**C-12 (passage darkness):** GLK construction rejects or ignores every passage
-policy other than `.wholeContent`, produces one logical index identity per
-Drawer, and never invokes `Chunker` during capture, drain, reindex, or recall.
+**C-12 (passage darkness):** GLK builds CorpusKit without the standalone
+passage trait/feature. The resulting `CorpusIndexUnitPolicy` contains only
+whole-content, the attached schema contains no passage-policy columns or tables,
+one logical index identity is produced per Drawer, and no segmenter can execute
+during capture, drain, reindex, or recall. Swift and Rust GLK suites carry
+negative compile-selection and schema gates.
+
+**C-12a (standalone policy binding):** opt-in standalone suites prove non-zero
+windows, bounded overlap, byte-identical overlapping UTF-8 ranges, idempotent
+same-policy reopen, independent policies in separate databases, rejection of a
+changed policy, and rejection of passage enablement over existing unbound
+derived state.
 
 **C-13 (migration preservation):** fixtures containing 1.0 chunk rows,
 chunk-keyed CorpusKit vectors, and unrelated Drawer-keyed vectors migrate to
 1.1 with identical canonical Drawer/audit data, rebuilt CorpusKit rows keyed by
 Drawer ID, no surviving chunk-keyed artifacts, and byte-identical unrelated
 Drawer-keyed vectors.
+
+**C-14 (maintained-count restart determinism):** both ports exercise the queue
+and direct-feed paths with a new canonical identity, multiple revisions,
+remove/re-add, same-digest replay, and reopen between revisions. The document
+anchor increments once per canonical identity, the vocabulary anchor never
+decreases, the frozen base blob is unchanged until provider publication, and a
+fixed governor threshold produces the same decision immediately before and
+after reopen.
 
 ## § 8 — Self-report telemetry
 
@@ -606,6 +658,9 @@ provider (RI/PPMI/LSA/NMF):
   `reindex` a vector refresh with no basis row written. (Rust retains the
   trainable capability across reopen via `reconstruct_trainable_basis`,
   since it cannot cross-cast a boxed provider the way Swift's `as?` does.)
+  The full re-embedding loop MUST hold VectorKit's deferred-index bracket and
+  publish the resident index once after the durable rewrite; rebuilding the
+  resident index per content item is forbidden.
 - *Lifecycle:* `destroyRecallIndex` additionally deletes all basis rows
   AND all counts rows (no orphans). All paths are deterministic — `now` is
   the only clock source; the engine never reads the wall clock. Swift and
@@ -613,23 +668,43 @@ provider (RI/PPMI/LSA/NMF):
   corpus (I-7): the ingest → reindex → reopen → embed path reproduces the
   canonical RI basis blob and embedding bit patterns byte-for-byte on both ports.
 
-**B-14 (incremental maintained counts):** each trainable provider's raw
-additive statistics are maintained in the `corpus_provider_counts` table
-(`CorpusProviderCountsStore`) so a retrain reads the maintained table instead
-of rebuilding from scratch. The accumulator (held SEPARATELY from the serving
-provider, so growing the maintained vocabulary never desyncs an LSA/NMF serving
-basis) is restored on open, folded once per indexed canonical document (`addToCounts`), and
-persisted at BATCH boundaries (end of `ingest` / `ingestBatch` / `reindex`) —
-never per provider row (O(N·vocab) would re-introduce the import wall). LSA/NMF persist
-only the lightweight vocab + document-count anchor (TF re-derived by
-re-tokenizing at refactor — the re-tokenize-at-refactor decision); RI/PPMI
-persist their full additive state. `Corpus.maintainedVocabAnchor()` exposes the
+**B-14 (incremental maintained counts):** each trainable provider has a
+published raw-statistics base in `corpus_provider_counts`. Standalone `Corpus`
+may replace that base at bounded ingest/reindex publication points. Attached
+`CorpusContentEngine` MUST NOT serialize the full base for each canonical
+content change. It writes an idempotent row to
+`corpus_provider_count_references`, keyed by provider generation and canonical
+content identity. In the same transaction it publishes that reference, the
+corresponding content checkpoint, and the `doc_count` / `vocab_size` anchor
+columns. The row stores identity/revision/digest metadata only—never canonical
+text, tokens, or passages. A new identity increments the document anchor once;
+a changed digest refreshes the existing identity reference, folds its text for
+novel vocabulary, and MUST NOT increment the document anchor; an identical
+digest is an idempotent no-op. Both anchors are nondecreasing. Open reconstructs
+the working accumulator from the frozen base plus canonical-source hydration of
+pending references, then restores the stored anchor columns as the governor's
+durable authority. A provider retrain/publication atomically replaces its base,
+publishes matching anchors, and deletes only that provider generation's
+subsumed references.
+
+The accumulator remains separate from the serving provider, so vocabulary
+growth cannot desynchronize a frozen LSA/NMF basis. LSA/NMF bases still derive
+TF from the canonical corpus during refactor; RI/PPMI retain their full additive
+base state. `Corpus.maintainedVocabAnchor()` exposes the
 maximum maintained vocabulary across trainable slots. The autonomic governor's
 auto-reindex trigger (NeuronKit) fires on VOCABULARY growth —
 `max(floor, ceil(fraction × lastReindexVocab))`, defaults floor 25 / fraction
 0.10 — reading that anchor, replacing the prior +25-index-unit gate. The counts codec
 is byte-identical across ports (the provider owns it via the
 `TrainableEmbeddingBasis` counts seam).
+
+The base and reference tables are intentionally retained in attached GLK
+estates. Neither is a second content store: the base is provider-specific
+derived statistics and the reference table is identity metadata. Reopen
+conformance proves that the maintained vocabulary anchor and threshold decision
+are restored before serving, that same-digest replay is idempotent, that
+revision/remove/re-add paths do not double-count a canonical identity, and that
+queued and direct-feed revisions use the same admission authority.
 
 ### 9.4 Conformance
 
@@ -665,7 +740,8 @@ Corpus's active recall capability without deleting canonical content:
 - CorpusKit-provider vector rows and their resident index state
 - All persisted basis rows in `corpus_provider_basis` (via `BasisStore.deleteAll`)
   — no orphaned basis survives a destroyed corpus (I-9, B-13)
-- All persisted counts rows in `corpus_provider_counts` (via
+- All persisted counts rows in `corpus_provider_counts` and all pending rows
+  in `corpus_provider_count_references` (via
   `CorpusProviderCountsStore.deleteAll`) — no orphaned counts survive (B-14)
 - All CorpusKit revision/checkpoint rows
 - Standalone-only passage range rows when the standalone Corpus itself is
@@ -739,6 +815,20 @@ cross-estate CPU cap is the 1.1 central drain master
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
+
+### 1.15.0 -- 2026-07-22
+
+Changed B-14 attached-count persistence from complete blob replacement per
+queue burst to a published base plus reference-only canonical-content deltas.
+Added atomic checkpoint/reference/anchor publication, revision-aware admission,
+restart-stable governor decisions, and provider-compaction requirements. Added
+the B-13 deferred resident-index requirement for full reindex. Historical 1.0
+basis fixtures remain immutable while production trainable providers use the
+1.1 tokenizer generation. Made standalone passage indexing an explicit Swift
+trait/Rust feature that GLK/MOOTx01 does not enable; added token window and
+overlap configuration, per-database policy authority, range policy
+fingerprints, mismatch/rebuild gating, and negative GLK compile-selection
+tests.
 
 ### 1.14.0 -- 2026-07-20
 

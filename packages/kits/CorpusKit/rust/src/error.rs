@@ -15,6 +15,18 @@ pub enum CorpusKitError {
     /// `EmbeddingModelConfig::reconstruct` for those cases rather than
     /// panicking or returning a wrong provider.
     NotTrainable(String),
+    /// An attached-mode Corpus was asked to do something only standalone
+    /// mode permits — mutate canonical content through CorpusKit, or
+    /// configure passage indexing. Rejected BEFORE anything is written
+    /// (GLK shared-content 1.1, P1).
+    AttachedModeViolation(String),
+    /// A (mode, index-unit) or store configuration is structurally invalid
+    /// (GLK shared-content 1.1, P1).
+    InvalidConfiguration(String),
+    /// A queued job's (revision, digest) no longer matches the CURRENT
+    /// canonical record — the job is stale and is rejected WITHOUT
+    /// advancing the index checkpoint (GLK shared-content 1.1).
+    StaleRevision(String),
 }
 
 impl std::fmt::Display for CorpusKitError {
@@ -27,6 +39,13 @@ impl std::fmt::Display for CorpusKitError {
             CorpusKitError::EmbeddingFailed(s) => write!(f, "embedding failed: {}", s),
             CorpusKitError::StoreUnavailable(s) => write!(f, "store unavailable: {}", s),
             CorpusKitError::NotTrainable(s) => write!(f, "not trainable: {}", s),
+            CorpusKitError::AttachedModeViolation(s) => {
+                write!(f, "attached-mode violation: {}", s)
+            }
+            CorpusKitError::InvalidConfiguration(s) => {
+                write!(f, "invalid configuration: {}", s)
+            }
+            CorpusKitError::StaleRevision(s) => write!(f, "stale revision: {}", s),
         }
     }
 }

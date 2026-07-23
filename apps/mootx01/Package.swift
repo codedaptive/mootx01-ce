@@ -37,7 +37,11 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(name: "AriaLexiconLib", path: "../../packages/libs/AriaLexiconLib"),
-        .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
+        .package(
+            name: "GeniusLocusKit",
+            path: "../../packages/kits/GeniusLocusKit",
+            traits: ["MigrationFloor1_0"]
+        ),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
@@ -71,6 +75,7 @@ let package = Package(
                 .product(name: "AriaResident", package: "AriaMcpKit"),
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),

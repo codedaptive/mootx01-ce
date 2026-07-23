@@ -1012,15 +1012,14 @@ fn v4_to_v5_migration_adds_composite_index() {
         "v4→v5 migration must create idx_metric_samples_dropbox_name_ts; found {composite_count}"
     );
 
-    // 3. Old index behaviour: Rust PersistenceKit SQLite backend does NOT replay
-    // Migration.operations (DropIndex, AddColumn etc.) — it uses idempotent
-    // CREATE TABLE/INDEX IF NOT EXISTS semantics on every open(). Swift does apply
-    // per-step migration ops, so Swift drops idx_metric_samples_dropbox_id here.
-    //
-    // On Rust v4 stores the old single-column index REMAINS after open() (it is
-    // inert — SQLite's planner picks the better-matching composite for the query;
-    // both coexist safely). This assertion documents the known divergence so that
-    // any future change that does start dropping it shows up as a diff.
+    // 3. Old index behaviour — PARITY RESTORED (GLK shared-content 1.1 P4):
+    // the Rust PersistenceKit SQLite backend now EXECUTES declared
+    // Migration.operations (DropIndex, AddColumn etc.) with the same
+    // per-step semantics as Swift, so the v4→v5 DropIndex runs and the old
+    // single-column index is GONE on both ports. This assertion previously
+    // documented the divergence (Rust left the inert index in place); it
+    // now pins the agreed behaviour so a regression to ignoring declared
+    // ops shows up as a diff.
     let old_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_metric_samples_dropbox_id'",
@@ -1029,7 +1028,7 @@ fn v4_to_v5_migration_adds_composite_index() {
         )
         .expect("sqlite_master query must succeed");
     assert_eq!(
-        old_count, 1,
-        "Rust v4→v5: old idx_metric_samples_dropbox_id remains (Rust does not replay DropIndex ops); found {old_count}"
+        old_count, 0,
+        "v4→v5: old idx_metric_samples_dropbox_id must be dropped by the declared DropIndex (both ports); found {old_count}"
     );
 }

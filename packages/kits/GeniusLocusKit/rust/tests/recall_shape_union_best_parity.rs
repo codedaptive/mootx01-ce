@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::{Corpus, EmbeddingModelConfig};
+use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallShape,
@@ -97,11 +97,11 @@ fn mpnet_config() -> EmbeddingModelConfig {
     }
 }
 
-fn corpus_two_provider() -> Arc<Corpus> {
+fn corpus_two_provider() -> Arc<CorpusContentEngine> {
     let config = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
     Arc::new(
-        Corpus::open_many(storage, vec![minilm_config(), mpnet_config()])
+        CorpusContentEngine::standalone_on(storage, vec![minilm_config(), mpnet_config()])
             .expect("Corpus::open_many"),
     )
 }
@@ -133,7 +133,7 @@ fn two_provider_estate() -> (
     for d in [&single, &consensus] {
         let engram = corpus.embed(&d.content).expect("embed");
         vector_store
-            .add_vector(&d.id, &engram, corpus.model_id(), "1", NOW)
+            .add_vector(&d.id, &engram, &corpus.model_id(), "1", NOW)
             .expect("add_vector");
     }
     coord.register_corpus(&h, corpus);

@@ -37,6 +37,7 @@ import Foundation
 import ArgumentParser
 import AriaMCP
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import NeuronKit
 import LocusKit
 import PersistenceKit
@@ -127,6 +128,8 @@ struct DreamCommand: AsyncParsableCommand {
         let handle: EstateHandle
         do {
             handle = try await kit.open(storage: storage, owner: owner)
+            _ = try await GLKMigrationCatalog.prepare(
+                kit: kit, handle: handle, now: Date())
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         } catch {
             Logging.stderr.log("mootx01 dream fatal: estate open/wiring failed: \(error)")

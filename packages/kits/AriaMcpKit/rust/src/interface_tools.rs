@@ -48,6 +48,7 @@ use locus_kit::{
 };
 
 use genius_locus_kit::{EncodeSpeed, VerbDispatchError, VerbError, WriteMode};
+use genius_locus_kit_migrations::SharedContentMigrationExt;
 
 use substrate_types::{RowState, RowStateCluster};
 
@@ -2161,6 +2162,25 @@ fn run_estate_status(
         sync_token,
         fdc_floor.as_deref().unwrap_or("none"),
     );
+    // Shared-content migration/reclaim status (shared-content 1.1 P5):
+    // appended only when a migration record exists — fresh estates that
+    // never ran detection leave the response shape unchanged. Mirrors Swift
+    // runEstateStatus (state token = the record's camelCase serde form).
+    let reclaim = coord.shared_content_reclaim_status(&estate.handle);
+    if let Some(state) = reclaim.state {
+        let token = serde_json::to_string(&state).unwrap_or_default();
+        let mut line = format!(
+            "shared_content_migration: {}",
+            token.trim_matches('"')
+        );
+        if let Some(estimated) = reclaim.estimated_reclaimable_bytes {
+            line.push_str(&format!(", estimated_reclaimable_bytes: {estimated}"));
+        }
+        if let Some(reclaimed) = reclaim.reclaimed_bytes {
+            line.push_str(&format!(", reclaimed_bytes: {reclaimed}"));
+        }
+        body.push_str(&format!("\n{line}"));
+    }
     if !version_skew.is_empty() {
         body.push_str(&format!("\nversion_skew: {version_skew}"));
     }
@@ -2523,24 +2543,17 @@ fn run_reindex_responsive(
         );
         let jobs = &missing_jobs[missing_offset..pass_end];
         missing_offset = pass_end;
-        // Stream choice is the delta decision above:
-        //   • LARGE import → IMPORT stream: the discrete corpus-import-drain
-        //     worker ingests chunk + BM25 only — no bootstrap train, no embed.
-        //     The encode drain's embed-now work would be pure repeated waste
-        //     for a bulk import whose basis is retrained on the WHOLE corpus
-        //     and whose chunks are embedded ONCE at the tail below.
-        //   • SMALL delta → ENCODE stream: the encode drain embeds each chunk
-        //     through the LIVE basis as it ingests (identical to a live
-        //     capture), so no tail retrain/re-embed is needed at all.
-        // Same durable queue.sqlite either way, so a crash mid-import
-        // cold-starts: the drain worker reclaims orphaned rows and resumes.
+        // Shared-content 1.1: ONE canonical ingest stream. The jobs are
+        // Drawer change references (id/revision/digest — never text); the
+        // drain worker resolves CURRENT content by ID through the adapter
+        // and indexes BM25 + vectors together, so the legacy import stream
+        // (chunk + BM25 only, embed deferred) is retired with the copy
+        // lane. The delta decision above still governs the TAIL: small
+        // deltas skip the O(corpus) basis retrain below. Durable queue
+        // either way, so a crash mid-import cold-starts: the drain worker
+        // reclaims orphaned rows and resumes.
         for chunk in jobs.chunks(ENQUEUE_CHUNK) {
-            let enqueued = if small_delta {
-                corpus.enqueue_ingest_batch(chunk).is_ok()
-            } else {
-                corpus.enqueue_ingest_batch_import(chunk).is_ok()
-            };
-            if enqueued {
+            if corpus.enqueue_change_batch(chunk).is_ok() {
                 total += chunk.len();
             }
         }
@@ -2552,12 +2565,7 @@ fn run_reindex_responsive(
         // drain; this loop only observes the read-only depth probe FOR THE
         // STREAM the batch was enqueued on.
         loop {
-            let depth = if small_delta {
-                corpus.ingest_queue_depth()
-            } else {
-                corpus.import_queue_depth()
-            };
-            match depth {
+            match corpus.ingest_queue_depth() {
                 Ok((0, 0)) => break,
                 Ok(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
                 Err(_) => break, // depth probe fault — stop rather than spin

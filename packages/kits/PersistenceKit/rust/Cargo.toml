@@ -54,3 +54,8 @@ postgres-native-tls = "0.5"
 # in build_tls_connector() in postgres.rs. Version constraint matches what
 # postgres-native-tls 0.5 pulls in (0.2.x).
 native-tls = "0.2"
+# Disk-capacity preflight for the maintenance VACUUM (statvfs on the estate
+# directory; shared-content 1.1 P5). Unix-only; non-unix builds skip the
+# preflight (best-effort contract, mirrors Swift's optional volume probe).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

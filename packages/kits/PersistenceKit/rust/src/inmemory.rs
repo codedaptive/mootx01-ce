@@ -119,6 +119,30 @@ impl InMemoryStorage {
 }
 
 impl Storage for InMemoryStorage {
+    /// The in-memory backend has no page model and no on-disk footprint:
+    /// nothing is ever reclaimable (explicit per-backend contract, mirrors
+    /// the Swift `InMemoryStorage: StorageMaintenance` conformance).
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        Ok(0)
+    }
+
+    /// Explicit no-op (per the maintenance backend table). The report says
+    /// `performed: false` so callers can distinguish "ran and freed
+    /// nothing" from "nothing to run".
+    fn perform_maintenance(
+        &self,
+        _progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        _should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        Ok(crate::maintenance::MaintenanceReport::no_op(
+            "inmemory",
+            "in-memory backend holds no pages; nothing to reclaim",
+        ))
+    }
+
     fn configuration(&self) -> &EstateConfiguration {
         &self.configuration
     }

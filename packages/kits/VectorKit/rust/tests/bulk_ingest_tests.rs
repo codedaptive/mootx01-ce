@@ -439,3 +439,36 @@ fn deferred_window_same_item_id_both_survive() {
     assert_eq!(hits[1].item_id, "shared-item");
     assert_eq!(hits[1].distance, 1, "one-bit-set slot must rank second (dist=1)");
 }
+
+#[test]
+fn deferred_revisions_publish_only_final_model_version() {
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    open_schema(&storage);
+    let store = VectorStore::new_no_sidecar(storage);
+
+    store.begin_deferred_index().expect("begin");
+    store.add_payloads(&[VectorPayloadInput {
+        item_id: "versioned".to_string(),
+        vector_index: 0,
+        payload: VectorPayload::from_engram(&Engram::new(0, 0, 0, 0)),
+        model_id: "test-model".to_string(),
+        model_version: "1".to_string(),
+        filed_at_unix_secs: FILED_AT,
+    }]).expect("add v1");
+    store.add_payloads(&[VectorPayloadInput {
+        item_id: "versioned".to_string(),
+        vector_index: 0,
+        payload: VectorPayload::from_engram(&Engram::new(7, 0, 0, 0)),
+        model_id: "test-model".to_string(),
+        model_version: "2".to_string(),
+        filed_at_unix_secs: FILED_AT,
+    }]).expect("add v2");
+    store.publish_resident_index().expect("publish");
+
+    let hits = store
+        .find_nearest(&Engram::new(7, 0, 0, 0), "test-model", 10)
+        .expect("find");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].item_id, "versioned");
+    assert_eq!(hits[0].distance, 0);
+}

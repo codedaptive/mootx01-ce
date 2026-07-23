@@ -467,4 +467,35 @@ struct BulkIngestTests {
             #expect(hits[1].distance == 1, "one-bit-set slot must rank second")
         }
     }
+
+    @Test func deferredRevisionsPublishOnlyFinalModelVersion() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.open(schema: VectorStore.schemaDeclaration)
+            let store = VectorStore(storage: storage, sidecarURL: nil)
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+            try await store.beginDeferredIndex()
+            try await store.addPayloads([
+                VectorPayloadInput(
+                    itemID: "versioned", vectorIndex: 0,
+                    payload: VectorPayload(engram: Engram(blocks: 0, 0, 0, 0)),
+                    modelID: "test-model", modelVersion: "1", filedAt: now)
+            ])
+            try await store.addPayloads([
+                VectorPayloadInput(
+                    itemID: "versioned", vectorIndex: 0,
+                    payload: VectorPayload(engram: Engram(blocks: 7, 0, 0, 0)),
+                    modelID: "test-model", modelVersion: "2", filedAt: now)
+            ])
+            try await store.publishResidentIndex()
+
+            let hits = try await store.findNearest(
+                probe: Engram(blocks: 7, 0, 0, 0),
+                modelID: "test-model", limit: 10)
+            #expect(hits.count == 1)
+            #expect(hits.first?.itemID == "versioned")
+            #expect(hits.first?.distance == 0)
+        }
+    }
 }

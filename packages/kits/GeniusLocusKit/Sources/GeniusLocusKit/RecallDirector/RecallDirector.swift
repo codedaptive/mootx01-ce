@@ -780,7 +780,7 @@ public extension GeniusLocusKit {
     /// embed failure without a real corpus error.
     private func compileSketch(
         from request: GLKRecallRequest,
-        corpus: Corpus,
+        corpus: CorpusContentEngine,
         handle: EstateHandle,
         degradedStages: inout [String]
     ) async -> RecallQuerySketch {

@@ -45,7 +45,7 @@
 //! ## Projection seed
 //!
 //!   RI_PROJECTION_SEED = 0x5249_5F56_315F_4D58  ("RI_V1_MX")
-//!   Model ID = "random-indexing-v1",  version = "1.0.0"
+//!   Model ID = "random-indexing-v1",  version = "1.1.0"
 //!
 //! Swift port: `packages/kits/CorpusKit/Sources/CorpusKitProviders/RandomIndexingProvider.swift`
 //!
@@ -158,7 +158,7 @@ pub fn ri_index_vector(term: &str) -> Vec<f32> {
 /// ## Conformance
 ///
 /// Conforms to `vectorkit::EmbeddingProvider`. `model_id = "random-indexing-v1"`,
-/// `model_version = "1.0.0"`. Projection seed = `RI_PROJECTION_SEED`.
+/// `model_version = "1.1.0"`. Projection seed = `RI_PROJECTION_SEED`.
 ///
 /// honest semantic fusion, signal #2 — the first honest distributional provider
 /// in the dense recall lane.
@@ -175,10 +175,10 @@ pub struct RandomIndexingProvider {
 
 impl RandomIndexingProvider {
     /// Build an untrained provider with the canonical defaults:
-    /// `model_id = "random-indexing-v1"`, `model_version = "1.0.0"`,
+    /// `model_id = "random-indexing-v1"`, `model_version = "1.1.0"`,
     /// projection seed = `RI_PROJECTION_SEED`.
     pub fn new() -> Self {
-        Self::with_parameters("random-indexing-v1", "1.0.0", RI_PROJECTION_SEED)
+        Self::with_parameters("random-indexing-v1", "1.1.0", RI_PROJECTION_SEED)
     }
 
     /// Build with explicit identity and projection seed.
@@ -489,6 +489,20 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
         }
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `train_on_corpus` runs. RI has no finalization pass.
+    fn accumulate_training(&mut self, texts: &[&str]) {
+        for text in texts {
+            let terms = corpus_kit::default_keyword_tokens(text);
+            let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+            self.train(&term_refs, RI_WINDOW);
+        }
+    }
+
+    fn finalize_training(&mut self) {
+        // Random Indexing is finalization-free (mirrors train_on_corpus).
+    }
+
     /// Serialize the trained RI basis (6a-i codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         RandomIndexingProvider::serialize_basis(self)
@@ -551,6 +565,10 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
     /// Maintained vocabulary size for the growth trigger.
     fn counts_vocabulary_size(&self) -> usize {
         self.vocab.len()
+    }
+
+    fn counts_contains_term(&self, term: &str) -> bool {
+        self.vocab.contains_key(term)
     }
 }
 

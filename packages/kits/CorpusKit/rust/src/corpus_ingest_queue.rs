@@ -1206,6 +1206,19 @@ mod tests {
     use queuekit::StreamId;
     use substrate_types::hlc::HLC;
 
+    /// CURRENT-BEHAVIOR characterization (GLK shared-content 1.1, P0): the
+    /// serialized queue job embeds the full verbatim text — the 1.1 contract
+    /// replaces this with ID/revision/digest/cursor. Mirrors the Swift
+    /// `ingestQueueJobCarriesVerbatimText`. Expected to be updated WITH the
+    /// P2 queue-payload change; it documents a defect, not a contract.
+    #[test]
+    fn ingest_queue_job_carries_verbatim_text() {
+        let text = "Verbatim content should not ride the queue.";
+        let job = IngestJob::new("drawer-q".to_string(), text.to_string(), 1_700_000_000_000);
+        let payload = serde_json::to_string(&job).expect("serialize");
+        assert!(payload.contains("Verbatim content should not ride the queue."));
+    }
+
     /// The IngestJob payload survives a QueueKit Job encode/decode round-trip,
     /// preserving the sourceID, text, and (sub-second) capture instant. Mirrors
     /// the Swift `ingestJobRoundTripsThroughJob`.

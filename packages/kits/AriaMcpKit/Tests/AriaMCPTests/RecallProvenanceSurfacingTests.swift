@@ -59,10 +59,9 @@ private func openInMemoryEstateWithSemanticRecall()
         configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
     _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
     let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-    let corpus = try await Corpus(storage: storage, model: .deterministic)
-    await kit.registerCorpus(corpus, for: handle)
-    let vectorStore = VectorStore(storage: storage)
-    await kit.registerVectorStore(vectorStore, for: handle)
+    // Shared-content 1.1: canonical wiring seam — attached engine over the
+    // LocusKit adapter, engine + shared VectorStore registered.
+    try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
     let dispatcher = ToolDispatcher(kit: kit, handle: handle)
     return (dispatcher, kit, handle)
 }

@@ -45,6 +45,12 @@ libc       = { version = "0.2" }
 # Autonomic Governor). `serve` is a thin translation of spec flags onto
 # this library's ServerConfig.
 aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
+# Reuse-estate installer repair: open the existing SQLCipher database with its
+# sibling install key, then retire the legacy Rust audit-column dialect before
+# the new binary serves it. Both crates are already in the product graph via
+# aria-mcp; naming them directly keeps the install code honest and removable.
+persistence-kit = { path = "../../../packages/kits/PersistenceKit/rust" }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # queuekit: dream command acquires the "dreaming" DrainLease to prevent
 # concurrent dreamers for the same estate. Already
 # a transitive dep via aria-mcp; named here so commands/dream.rs can
@@ -62,3 +68,7 @@ trash = "5.2.3"
 [dev-dependencies]
 # tempfile: temporary directories for sensitivity_hashes unit tests.
 tempfile = "3"
+# Installer reuse integration gate: open the repaired estate through the real
+# LocusKit SQLite store and prove a Drawer capture succeeds. Dev-only; the
+# production installer continues to depend only on PersistenceKit for repair.
+locus-kit = { path = "../../../packages/kits/LocusKit/rust" }

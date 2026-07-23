@@ -109,28 +109,19 @@ lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 # test-seams: exposes EstateCoordinator::inject_vector_hamming_error and
 # inject_embed_error for P1 degradation force-tests in the integration test suite
 # (tests/recall_scored_parity.rs GROUP E). Compiled out of the production binary.
-# Pattern mirrors corpus-kit's test-seams feature (same crate, same technique).
 # Also enables locus-kit/test-seams so the LocusKit recall internal-read fault
 # seam (Estate::set_test_force_internal_read_error) is reachable from GLK
 # integration tests that drive recall through the RecallDirector (P0-5 sites
 # 1-5). Without this, the dependency crate's `test` cfg does NOT apply to GLK's
 # integration tests and the seam method would be absent.
-test-seams = ["locus-kit/test-seams", "corpus-kit/test-seams"]
+test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
 
 [dev-dependencies]
-# Test-only: engram-lib is needed to implement the EmbeddingProvider trait in
-# integration tests (D5: ThrowingFloatProvider for dense_lane_status parity tests).
-# engram-lib is already a transitive dependency via vectorkit → engram-lib;
-# this dev-dep makes it directly nameable in tests/ without altering the
-# production dependency graph.
-# Per in-repository dependency direction (dev-dep, no layering inversion:
-# engram-lib is a substrate lib below GLK).
-engram-lib = { path = "../../../libs/EngramLib/rust" }
-# test-seams feature enables Corpus::open_with_provider and
-# Corpus::forced_float_error for gate-2 storeError force-testing (D-6 parity
-# test). The production [dependencies] entry above carries no features so the
-# seams are absent from the shipped binary. Dev-dep only; no inversion.
-corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
+# P6 scale-qualification driver (tests/scale_qualification.rs, #[ignore],
+# env-gated): raw read-only metrics probe (page/freelist counts, dbstat
+# per-table bytes) on the qualification clone. Dev-dep only; rusqlite is
+# already in the tree via persistence-kit. Version matches persistence-kit's.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # test-seams exposes LocusKit's test-only orphan-seal failure hook used by
 # tests/expunge_vector_orphan.rs E8. The production dependency above carries
 # no features, so this remains test-only wiring.

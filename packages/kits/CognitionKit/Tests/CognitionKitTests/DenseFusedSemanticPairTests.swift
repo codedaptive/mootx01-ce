@@ -137,9 +137,9 @@ struct DenseFusedSemanticPairTests {
         // engram and BM25 lane are still driven by the phrase's words.
         let corpusStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
-        let corpus = try await Corpus(
-            storage: corpusStorage,
-            model: .miniLM(inference: Self.makeInference()))
+        let corpus = try await CorpusContentEngine(
+            standaloneOn: corpusStorage,
+            models: [.miniLM(inference: Self.makeInference())])
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
@@ -159,7 +159,7 @@ struct DenseFusedSemanticPairTests {
             let drawer = try await kit.capture(handle, frame)
             ids.append(drawer.id)
             // ingest writes BM25 + binary engram + the float row (Lane D).
-            try await corpus.ingest(content, sourceID: drawer.id, now: now)
+            try await corpus.ingest(content, contentID: drawer.id, now: now)
             let engram = try await corpus.embed(content)
             try await vectorStore.addVector(
                 itemID: drawer.id, engram: engram,

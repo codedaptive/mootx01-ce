@@ -711,3 +711,22 @@ extension HLC {
         return (p << 16) | (l << 4) | n
     }
 }
+
+// MARK: - StorageMaintenance (shared-content 1.1 P5)
+
+extension InMemoryStorage: StorageMaintenance {
+    /// The in-memory backend has no page model and no on-disk footprint:
+    /// nothing is ever reclaimable.
+    public func estimatedReclaimableBytes() async throws -> Int64 { 0 }
+
+    /// Explicit no-op (per the StorageMaintenance backend table). The report
+    /// says `performed: false` so callers can distinguish "ran and freed
+    /// nothing" from "nothing to run".
+    public func performMaintenance(
+        progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
+        shouldCancel: (@Sendable () -> Bool)?
+    ) async throws -> StorageMaintenanceReport {
+        .noOp(backend: "inmemory",
+              note: "in-memory backend holds no pages; nothing to reclaim")
+    }
+}

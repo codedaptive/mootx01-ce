@@ -42,10 +42,9 @@ struct RecallShapeSignedWeightTests {
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner)
 
-        let corpus = try await Corpus(
-            storage: InMemoryStorage(
-                configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)),
-            model: .deterministic)
+        let corpus = try await CorpusContentEngine(
+            standaloneOn: InMemoryStorage(
+                configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)))
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
@@ -64,7 +63,7 @@ struct RecallShapeSignedWeightTests {
             )
             let drawer = try await kit.capture(handle, frame)
             ids.append(drawer.id)
-            try await corpus.ingest(content, sourceID: drawer.id, now: Self.now)
+            try await corpus.ingest(content, contentID: drawer.id, now: Self.now)
             let engram = try await corpus.embed(content)
             try await vectorStore.addVector(
                 itemID: drawer.id, engram: engram, modelID: modelID,

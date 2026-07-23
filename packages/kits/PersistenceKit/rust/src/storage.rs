@@ -369,6 +369,42 @@ pub trait Storage: Send + Sync {
         isolation: IsolationLevel,
         block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
     ) -> StorageResult<()>;
+
+    /// Estimate of the filesystem bytes `perform_maintenance` would release
+    /// (shared-content 1.1 P5). SQLite: freelist pages × page size + WAL
+    /// file bytes. Default (and the explicit contract for backends with no
+    /// client-reclaimable pages): 0.
+    ///
+    /// Lives on `Storage` (defaulted) rather than a separate trait because
+    /// `dyn Storage` cannot be capability-probed the way Swift's
+    /// `as? StorageMaintenance` can. Mirrors Swift's
+    /// `StorageMaintenance.estimatedReclaimableBytes`.
+    fn estimated_reclaimable_bytes(
+        &self,
+    ) -> Result<i64, crate::maintenance::MaintenanceError> {
+        Ok(0)
+    }
+
+    /// Run the physical maintenance pass (SQLite: WAL checkpoint + VACUUM)
+    /// with the contract declared in `crate::maintenance`: quiescence check,
+    /// disk-capacity preflight, per-phase progress, phase-boundary
+    /// cancellation, and post-operation introspection. The default is the
+    /// explicit "not implemented" no-op report; SQLite overrides with the
+    /// real operation, in-memory and PostgreSQL override with their
+    /// documented no-op reports. Mirrors Swift's
+    /// `StorageMaintenance.performMaintenance(progress:shouldCancel:)`.
+    fn perform_maintenance(
+        &self,
+        progress: Option<&(dyn Fn(crate::maintenance::MaintenanceProgress) + Send + Sync)>,
+        should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> Result<crate::maintenance::MaintenanceReport, crate::maintenance::MaintenanceError>
+    {
+        let _ = (progress, should_cancel);
+        Ok(crate::maintenance::MaintenanceReport::no_op(
+            "unsupported",
+            "backend does not implement physical maintenance",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

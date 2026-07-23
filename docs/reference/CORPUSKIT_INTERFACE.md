@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: accepted-1.1-target
 authors: MOOTx01 maintainers
-date: 2026-07-20
+date: 2026-07-22
 spec_type: kit
-version: 1.17.0
+version: 1.18.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -36,7 +36,7 @@ Two library targets plus tests:
   - `BundleStore.swift` — `BundleStore` (actor)
   - `BasisStore.swift` — `BasisStore` (actor), `PersistedBasis`
   - `CorpusProviderCountsStore.swift` — `CorpusProviderCountsStore` (actor),
-    `PersistedCounts`, `CountsGrowthAnchor`
+    `PersistedCounts`, `PersistedCountsReference`, `CountsGrowthAnchor`
   - `RemovedSourceStore.swift` — `RemovedSourceStore` (actor)
   - `HybridRecall.swift` — `HybridRecall`, `HybridRecallConfiguration`
   - `Tokenizer.swift` — `Tokenizer` protocol + default `keywordTokens`
@@ -173,46 +173,48 @@ projects active Drawers into these values.
 ```swift
 public enum CorpusIndexUnitPolicy: Sendable, Equatable {
     case wholeContent
-    case passages(PassagePolicy)
-}
-
-public struct PassagePolicy: Sendable, Equatable {
-    public let maxTokens: Int
-    public let overlapTokens: Int
+#if CORPUSKIT_STANDALONE_PASSAGES
+    case tokenWindows(windowTokens: Int, overlapTokens: Int)
+#endif
 }
 
 public struct CorpusEvidence: Sendable, Equatable {
-    public let utf8Range: Range<Int>?
-    public let lane: String
-    public let score: Float
+    public let passageID: String
+    public let utf8Start: Int
+    public let utf8Length: Int
 }
 
-public struct CorpusHit: Sendable, Equatable {
-    public let contentID: CorpusContentID
+public struct CorpusContentHit: Sendable, Equatable {
+    public let id: CorpusContentID
     public let score: Float
     public let vectorScore: Float?
     public let keywordScore: Float?
-    public let evidence: [CorpusEvidence]
+    public let evidence: CorpusEvidence?
 }
 ```
 
-Rust exposes equivalent `CorpusIndexUnitPolicy`, `PassagePolicy`,
-`CorpusEvidence`, and `CorpusHit` values with snake-case fields.
+Rust exposes the equivalent `CorpusIndexUnitPolicy::TokenWindows`,
+`CorpusEvidence`, and `CorpusContentHit` values with snake-case fields when the
+`standalone-passages` feature is enabled.
 
 `.wholeContent` is the standalone default and the only policy accepted by the
-GeniusLocusKit adapter. `.passages` is standalone-only. Its persisted rows carry
-`content_id`, `revision`, `digest`, and UTF-8 range coordinates; they carry no
-text. Every recall result is aggregated to `contentID`.
+GeniusLocusKit adapter. `.tokenWindows` is compiled only with the Swift
+`StandalonePassages` trait and is standalone-only. Its persisted rows carry
+`content_id`, `revision`, `digest`, `policy_fingerprint`, and UTF-8 range
+coordinates; they carry no text. The database also stores one
+`corpus_index_configuration` authority row containing tokenizer identity,
+window, overlap, and version. Every recall result is aggregated to its canonical
+content ID.
 
 ### Operating modes and construction
 
 ```swift
 public enum CorpusOperatingMode: Sendable {
-    case standalone(store: any CorpusContentStore)
-    case attached(source: any CorpusContentSource)
+    case standalone
+    case attached
 }
 
-public actor Corpus {
+public actor CorpusContentEngine {
     public init(
         storage: any Storage,
         vectorStorage: any Storage,
@@ -228,7 +230,7 @@ public actor Corpus {
 }
 ```
 
-Rust exposes the equivalent `CorpusOperatingMode` and `Corpus::open`,
+Rust exposes the equivalent `CorpusOperatingMode` and `CorpusContentEngine::open`,
 `apply_source_changes`, `rebuild_from_source`, and `recall` surface.
 
 Standalone convenience methods delegate content mutation to the configured
@@ -238,9 +240,10 @@ remain LocusKit/GLK operations.
 
 ### Storage profiles
 
-- **Standalone:** canonical `corpus_documents`; optional range-only
-  `corpus_passages`; derived BM25, vector, provider-basis/counts, and
-  `corpus_index_state` tables.
+- **Standalone:** canonical `corpus_documents`; optional
+  `corpus_index_configuration` plus range-only `corpus_passages` when the
+  standalone passage build option is selected; derived BM25, vector,
+  provider-basis/counts, and `corpus_index_state` tables.
 - **GLK attached:** canonical `drawers` supplied by LocusKit; derived BM25,
   vector, provider-basis/counts, and `corpus_index_state` tables only. No
   `corpus_documents`, `corpus_passages`, `chunks`, or `corpus_metadata` table is
@@ -345,8 +348,10 @@ impl ScoredChunk {
 
 ### `ChunkerConfiguration`
 
-Standalone-only passage parameters. New 1.1 callers use `PassagePolicy`, whose
-limits are expressed in provider tokens. These character-based defaults remain
+Standalone-only passage parameters. New 1.1 callers use
+`CorpusIndexUnitPolicy.tokenWindows(windowTokens:overlapTokens:)`, whose limits
+are expressed in tokens under the versioned CorpusKit passage tokenizer. These
+character-based defaults remain
 only for 1.0 compatibility (target 800 chars, overlap 100). Overlap is clamped to
 `[0, targetChars-1]` (SPEC § 5, B-1).
 
@@ -528,10 +533,16 @@ public protocol Tokenizer: Sendable {
     func keywordTokens(_ text: String) -> [String]
 }
 public extension Tokenizer {
-    // default: lowercase, split on Unicode word boundaries
+    // default: lowercase, fold final sigma U+03C2 to U+03C3,
+    // then split on Unicode-alphabetic / ASCII-digit boundaries
     func keywordTokens(_ text: String) -> [String]
 }
 ```
+
+The final-sigma fold is part of the cross-port canonical-token contract.
+Because it changes training input for RI, PPMI, LSA, and NMF, their production
+defaults use model version `1.1.0`; persisted `1.0.0` bases are not reused.
+FDC is stateless and remains `1.0.0`.
 
 **Rust:**
 
@@ -673,6 +684,11 @@ The fifth default-ensemble signal. A deterministic, non-trainable provider that
 encodes each chunk as a 256-dimensional float vector by hashing its vocabulary
 terms through a fixed codebook (`fdcNodeVector`). No inference closure; no
 training. Projection seed `fdcProjectionSeed` ("FDCV1P", `0x4644_435F_5631_5F50`).
+Cross-port classification also requires the Lattice tokenizer contract: Rust
+splits ASCII `:` to match Foundation word enumeration, and macOS Rust resolves
+the writable `WordClassTable.json` from the same
+`~/Library/Application Support/com.mootx01.lattice` root as Swift. An explicit
+environment override still takes precedence.
 
 **Swift:**
 
@@ -713,8 +729,8 @@ public func riIndexVector(term: String) -> [Float]
 
 public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendable {
     public let modelID: String              // default "random-indexing-v1"
-    public let modelVersion: String         // default "1.0.0"
-    public init(modelID: String = "random-indexing-v1", modelVersion: String = "1.0.0",
+    public let modelVersion: String         // default "1.1.0"
+    public init(modelID: String = "random-indexing-v1", modelVersion: String = "1.1.0",
                 dimension: Int = riDimension, nonzeros: Int = riNonzeros,
                 window: Int = riWindow, projectionSeed: UInt64 = riProjectionSeed)
     public func train(terms: [String], window: Int = riWindow)
@@ -741,7 +757,7 @@ public let ppmiProjectionSeed: UInt64       // 0x5050_4D49_5F56_314D ("PPMI_V1M"
 public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
     public let modelID: String              // default "ppmi-v1"
     public let modelVersion: String
-    public init(modelID: String = "ppmi-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "ppmi-v1", modelVersion: String = "1.1.0",
                 dimension: Int = ppmiDimension, nonzeros: Int = ppmiNonzeros,
                 window: Int = ppmiWindow, projectionSeed: UInt64 = ppmiProjectionSeed)
     public func train(terms: [String], window: Int = ppmiWindow)
@@ -766,7 +782,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     public let rank: Int                    // SVD rank (default lsaDefaultRank)
     public let reducedVocabCap: Int         // vocabulary cap before SVD
     public let svdSweeps: Int               // Jacobi sweep count
-    public init(modelID: String = "lsa-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "lsa-v1", modelVersion: String = "1.1.0",
                 rank: Int = lsaDefaultRank, reducedVocabCap: Int = 8192,
                 svdSweeps: Int = 30, projectionSeed: UInt64 = lsaProjectionSeed)
     public func train(document: String)     // accumulate one document's TF
@@ -796,7 +812,7 @@ public final class NmfProvider: EmbeddingProvider, @unchecked Sendable {
     public let reducedVocabCap: Int
     public let maxIterations: Int           // default nmfDefaultIterations
     public let seed: UInt64                 // NMF random init seed (default nmfFactorizationSeed)
-    public init(modelID: String = "nmf-v1", modelVersion: String = "1.0.0",
+    public init(modelID: String = "nmf-v1", modelVersion: String = "1.1.0",
                 rank: Int = nmfDefaultRank, reducedVocabCap: Int = 8192,
                 maxIterations: Int = nmfDefaultIterations,
                 seed: UInt64 = nmfFactorizationSeed,
@@ -1123,12 +1139,13 @@ It surfaces three operations:
 
 The seam also carries the **maintained-counts** operations (the incremental
 counts table — see the `CorpusProviderCountsStore` section below). These let the
-host keep each trainable provider's raw additive statistics current as chunks are
-written, through the type-erased provider, instead of rebuilding from scratch on
-every reindex:
-- `addToCounts(text:)` / `add_to_counts(&mut self, text:)` — fold one chunk into
-  the maintained accumulated counts (RI/PPMI fold a term sequence; LSA/NMF fold a
-  document into a lightweight vocab+doc-count anchor, O(vocab) not O(corpus)).
+host maintain each trainable provider's raw additive statistics through the
+type-erased provider instead of rebuilding them merely to measure growth:
+- `addToCounts(text:)` / `add_to_counts(&mut self, text:)` — fold one canonical
+  index unit into the accumulated counts (RI/PPMI fold a term sequence; LSA/NMF
+  fold a document into a lightweight vocab+doc-count anchor, O(vocab) not
+  O(corpus)). In attached GLK mode that unit is a whole GLK Drawer; standalone
+  behavior follows the standalone database's explicit index-unit policy.
 - `serializeCounts()` / `serialize_counts()` — snapshot the raw additive state
   (distinct from `serializeBasis`; the counts codec, persisted in
   `corpus_provider_counts`). Byte-identical across ports.
@@ -1216,26 +1233,40 @@ public enum CorpusEnsemble {
 pub fn default_ensemble() -> Vec<EmbeddingModelConfig>;
 ```
 
-### `CorpusProviderCountsStore` — incremental maintained counts (both ports)
+### `CorpusProviderCountsStore` — base counts plus attached reference deltas (both ports)
 
-The persisted **counts table**: each trainable provider's raw additive statistics
-(RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary + document-count
-anchor), kept current as chunks are written so a retrain reads the maintained
-table instead of re-reading and re-tokenizing the whole corpus. Sibling of
+The persisted **counts table**: each trainable provider's published additive
+statistics base (RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary +
+document-count anchor). Sibling of
 `BasisStore`; CorpusKit-core, depends only on PersistenceKit + SubstrateTypes,
 never interprets the bytes (the provider owns the codec via the
 `TrainableEmbeddingBasis` counts seam). One row per `(model_id, model_version)`,
-keyed identically to the basis and vector rows; the two cheap integer columns
-`doc_count` / `vocab_size` are the growth-trigger anchors, readable without
-deserializing the blob.
+keyed identically to the basis and vector rows. The two cheap integer columns
+`doc_count` / `vocab_size` are independently maintained, durable growth-trigger
+anchors. Between provider publications they intentionally describe the live
+maintained state while `counts` remains the frozen published base blob.
 
-Lifecycle (driven by `Corpus`): the accumulator is restored on open, folded
-once per written chunk (`addToCounts`), and persisted at **batch boundaries**
-(end of `ingest` / `ingestBatch` / `reindex`) — never per chunk (that would be
-O(N·vocab) over an import). `Corpus.maintainedVocabAnchor()` /
-`maintained_vocab_anchor()` exposes the maximum maintained vocabulary size across
-trainable slots — the in-process read the autonomic governor's vocab-growth
-retrain trigger consumes (NeuronKit `CorpusGrowthProbe`).
+Standalone `Corpus` retains the established lifecycle: restore the accumulator,
+fold each newly written standalone index unit, and publish the blob at bounded
+ingest/reindex boundaries. Attached `CorpusContentEngine` does not rewrite an
+estate-scale counts blob for each queue burst. It atomically publishes small rows in
+`corpus_provider_count_references`, keyed by provider generation and canonical
+content identity, alongside the content checkpoint and the updated anchor
+columns. A new identity advances the document anchor once. A changed digest
+refreshes the same reference and may advance the nondecreasing vocabulary anchor
+without incrementing documents; an identical digest is a no-op. Those rows
+contain no text or token payload. Open restores the published base blob, resolves
+each pending identity through the canonical content source, rebuilds the working
+accumulator, and then restores the transactional anchor columns as the governor's
+authority. A provider publication/retrain atomically replaces its base counts
+and removes the reference rows that generation subsumed.
+
+`CorpusContentEngine.maintainedVocabAnchor()` /
+`CorpusContentEngine::maintained_vocab_anchor()` exposes the maximum durable,
+nondecreasing vocabulary anchor across trainable slots — the in-process read the
+autonomic governor's vocab-growth retrain trigger consumes (NeuronKit
+`CorpusGrowthProbe`). Store-level `growthAnchor` reads the same transactional
+anchor columns; it does not infer them from the frozen blob.
 
 **Swift:**
 
@@ -1252,12 +1283,24 @@ public struct CountsGrowthAnchor: Sendable, Equatable {
     public let documentCount: Int
     public let vocabSize: Int
 }
+public struct PersistedCountsReference: Sendable, Equatable {
+    public let modelID: String
+    public let modelVersion: String
+    public let contentID: String
+    public let revision: Int64
+    public let digest: String
+    public let updatedAt: Date
+}
 public actor CorpusProviderCountsStore {
     public static let schemaDeclaration: SchemaDeclaration
     public init(storage: any Storage)
     public func upsert(_ row: PersistedCounts) async throws
     public func load(modelID: String, modelVersion: String) async throws -> PersistedCounts?
     public func growthAnchor(modelID: String, modelVersion: String) async throws -> CountsGrowthAnchor?
+    public func upsertReference(_ row: PersistedCountsReference, into rowStore: any RowStore) async throws
+    public func updateAnchors(modelID: String, modelVersion: String, documentCount: Int, vocabSize: Int, into rowStore: any RowStore) async throws -> Bool
+    public func references(modelID: String, modelVersion: String) async throws -> [PersistedCountsReference]
+    public func deleteReferences(modelID: String, modelVersion: String, into rowStore: any RowStore) async throws
     public func deleteAll() async throws
 }
 
@@ -1277,12 +1320,24 @@ pub struct PersistedCounts {
     pub updated_at_secs: i64,
 }
 pub struct CountsGrowthAnchor { pub document_count: usize, pub vocab_size: usize }
+pub struct PersistedCountsReference {
+    pub model_id: String,
+    pub model_version: String,
+    pub content_id: String,
+    pub revision: i64,
+    pub digest: String,
+    pub updated_at_secs: i64,
+}
 impl CorpusProviderCountsStore {
     pub fn schema_declaration() -> SchemaDeclaration;
     pub fn new(storage: Arc<dyn Storage>) -> Self;
     pub fn upsert(&self, row: &PersistedCounts) -> CorpusKitResult<()>;
     pub fn load(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<PersistedCounts>>;
     pub fn growth_anchor(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<CountsGrowthAnchor>>;
+    pub fn upsert_reference_into(&self, row: &PersistedCountsReference, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
+    pub fn update_anchors_into(&self, model_id: &str, model_version: &str, document_count: usize, vocab_size: usize, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<bool>;
+    pub fn references(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Vec<PersistedCountsReference>>;
+    pub fn delete_references_into(&self, model_id: &str, model_version: &str, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
     pub fn delete_all(&self) -> CorpusKitResult<()>;
 }
 
@@ -2101,6 +2156,21 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.18.0 -- 2026-07-22
+
+- Attached maintained counts now use a published provider base plus
+  reference-only canonical-content deltas. Queue commits no longer serialize
+  the complete RI/PPMI counts blobs; provider publication compacts deltas
+  atomically. The delta table stores no Drawer text. Document and vocabulary
+  anchors commit transactionally with each admitted reference, remain
+  nondecreasing across revision/reopen cycles, and drive identical governor
+  decisions before and after restart.
+- Full `CorpusContentEngine.reindex` operations defer resident-index
+  publication across the corpus rewrite and publish once at completion.
+- Recorded the FDC cross-port tokenizer and macOS writable-artifact contract.
+- Historical shared basis fixtures remain pinned to their 1.0 envelope while
+  production trainable-provider defaults remain 1.1.
 
 ### 1.17.0 -- 2026-07-20
 

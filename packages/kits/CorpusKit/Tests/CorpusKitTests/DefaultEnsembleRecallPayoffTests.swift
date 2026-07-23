@@ -1,6 +1,6 @@
 // DefaultEnsembleRecallPayoffTests.swift
 //
-// Mission 6a-iii-wire — end-to-end PAYOFF proof: the 1.0 default recall ensemble
+// Mission 6a-iii-wire — end-to-end PAYOFF proof: the default recall ensemble
 // (CorpusEnsemble.defaultEnsemble(): RI/PPMI/LSA/NMF/FDC) un-pins recall.
 //
 // This is the deterministic, CI-verifiable proof that flipping the production
@@ -42,6 +42,20 @@ struct DefaultEnsembleRecallPayoffTests {
 
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
+    @Test("Default ensemble invalidates trainable 1.0 bases")
+    func defaultEnsembleModelVersions() {
+        let versions = CorpusEnsemble.defaultEnsemble().compactMap { model -> String? in
+            switch model {
+            case .randomIndexing(let provider), .ppmi(let provider),
+                 .lsa(let provider), .nmf(let provider), .fdc(let provider):
+                return provider.modelVersion
+            default:
+                return nil
+            }
+        }
+        #expect(versions == ["1.1.0", "1.1.0", "1.1.0", "1.1.0", "1.0.0"])
+    }
+
     /// A diverse multi-topic corpus spanning four clearly separated topical
     /// clusters (space / cooking / finance / gardening). Enough distinct topics
     /// that a single surface-hash lane would collapse recall onto a tiny set,
@@ -77,7 +91,7 @@ struct DefaultEnsembleRecallPayoffTests {
             backend: .sqlite(url: url, busyTimeout: 5.0)))
     }
 
-    /// Build a Corpus on the canonical 1.0 default ensemble, ingest the diverse
+    /// Build a Corpus on the canonical default ensemble, ingest the diverse
     /// corpus, and reindex (which trains all four trainable signals on the full
     /// corpus). Returns the trained-ready Corpus.
     private func makeTrainedEnsembleCorpus() async throws -> Corpus {

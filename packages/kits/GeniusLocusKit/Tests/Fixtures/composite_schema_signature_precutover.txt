@@ -1,0 +1,329 @@
+table=associations
+  col=id type=text null=0 default=- role=-
+  col=sourceWing type=text null=0 default=- role=-
+  col=sourceRoom type=text null=0 default=- role=-
+  col=sourceDrawerId type=text null=1 default=- role=-
+  col=targetWing type=text null=0 default=- role=-
+  col=targetRoom type=text null=0 default=- role=-
+  col=targetDrawerId type=text null=1 default=- role=-
+  col=label type=text null=0 default=- role=-
+  col=addedBy type=text null=0 default=- role=-
+  col=filedAt type=timestamp null=0 default=- role=-
+  col=tombstonedAt type=timestamp null=1 default=- role=-
+  col=removedByBatch type=text null=1 default=- role=-
+  col=udcCode type=text null=0 default=text role=-
+  col=udcFacets type=text null=1 default=- role=-
+  col=wikidataQID type=text null=1 default=- role=-
+  col=wikidataQidsSecondary type=text null=1 default=- role=-
+  col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=provenanceBitmap type=bitmap null=0 default=bitmap role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  unique=sourceWing,sourceRoom,sourceDrawerId,targetWing,targetRoom,targetDrawerId,label
+  appendOnly=0 hashable=0
+table=chunks
+  col=id type=uuid null=0 default=- role=-
+  col=source_id type=text null=0 default=- role=-
+  col=start_offset type=int null=0 default=- role=-
+  col=length type=int null=0 default=- role=-
+  col=text type=text null=0 default=- role=-
+  col=hlc type=hlc null=0 default=- role=-
+  col=metadata type=json null=0 default=- role=-
+  col=created_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  col=content_hash type=blob null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=1
+table=container_fingerprints
+  col=wing type=text null=0 default=- role=-
+  col=room type=text null=0 default=- role=-
+  col=adjectiveOR type=bitmap null=0 default=bitmap role=-
+  col=operationalOR type=bitmap null=0 default=bitmap role=-
+  col=provenanceOR type=bitmap null=0 default=bitmap role=-
+  col=updatedAt type=timestamp null=0 default=- role=-
+  pk=wing,room
+  appendOnly=0 hashable=0
+table=corpus_metadata
+  col=source_id type=text null=0 default=- role=-
+  col=merkle_root type=blob null=1 default=- role=-
+  pk=source_id
+  appendOnly=0 hashable=0
+table=diary
+  col=id type=text null=0 default=- role=-
+  col=agentName type=text null=0 default=- role=-
+  col=entry type=text null=0 default=- role=-
+  col=topic type=text null=0 default=- role=-
+  col=wing type=text null=0 default=- role=-
+  col=room type=text null=0 default=- role=-
+  col=filedAt type=timestamp null=0 default=- role=-
+  col=embeddingModelID type=text null=0 default=- role=-
+  col=tombstonedAt type=timestamp null=1 default=- role=-
+  col=removedByBatch type=text null=1 default=- role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=reward type=float null=1 default=- role=-
+  col=rewardProvenance type=text null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=drawers
+  col=id type=text null=0 default=- role=-
+  col=content type=text null=0 default=- role=-
+  col=parent_node_id type=text null=0 default=- role=-
+  col=sourceFile type=text null=1 default=- role=-
+  col=chunkIndex type=int null=1 default=- role=-
+  col=addedBy type=text null=0 default=- role=-
+  col=filedAt type=timestamp null=0 default=- role=-
+  col=eventTime type=timestamp null=1 default=- role=-
+  col=embeddingModelID type=text null=0 default=- role=-
+  col=tombstonedAt type=timestamp null=1 default=- role=-
+  col=removedByBatch type=text null=1 default=- role=-
+  col=provenance type=bitmap null=0 default=bitmap role=-
+  col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=lineageID type=text null=0 default=text role=-
+  col=udcCode type=text null=0 default=text role=-
+  col=udcFacets type=text null=1 default=- role=-
+  col=wikidataQID type=text null=1 default=- role=-
+  col=wikidataQidsSecondary type=text null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  col=keyID type=text null=1 default=- role=-
+  col=content_hash type=blob null=1 default=- role=-
+  col=content_fingerprint type=blob null=1 default=- role=-
+  gen=g_state_cluster type=int
+  gen=g_provenance_source type=int
+  gen=g_provenance_confirmation type=int
+  gen=g_operational_channel type=int
+  pk=id
+  appendOnly=0 hashable=1
+table=erasure_ledger
+  col=drawer_id type=text null=0 default=- role=-
+  col=erased_hlc type=hlc null=0 default=- role=-
+  pk=drawer_id
+  appendOnly=1 hashable=0
+table=grants
+  col=id type=text null=0 default=- role=-
+  col=grantee_id type=text null=0 default=- role=-
+  col=scope_json type=text null=0 default=- role=-
+  col=content_level type=int null=0 default=- role=-
+  col=custody_mode type=text null=0 default=- role=-
+  col=lifetime_json type=text null=0 default=- role=-
+  col=reshare type=text null=0 default=- role=-
+  col=inference_budget type=float null=0 default=- role=-
+  col=issued_at type=timestamp null=0 default=- role=-
+  col=revoked_at type=timestamp null=1 default=- role=-
+  col=signature type=blob null=0 default=- role=-
+  col=decay_half_life type=int null=1 default=- role=-
+  col=decay_started_at type=timestamp null=1 default=- role=-
+  col=decay_floor type=int null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=keys
+  col=key_id type=text null=0 default=- role=-
+  col=algorithm type=text null=0 default=- role=-
+  col=wrapped type=blob null=0 default=- role=-
+  col=created_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=key_id
+  appendOnly=0 hashable=0
+table=kg_facts
+  col=id type=text null=0 default=- role=-
+  col=subject type=text null=0 default=- role=-
+  col=predicate type=text null=0 default=- role=-
+  col=object type=text null=0 default=- role=-
+  col=sourceDrawerID type=text null=0 default=- role=-
+  col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=provenanceBitmap type=bitmap null=0 default=bitmap role=-
+  col=filedAt type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  gen=g_state_cluster type=int
+  pk=id
+  appendOnly=0 hashable=0
+table=learned_references
+  col=id type=text null=0 default=- role=-
+  col=sourceCatalogID type=text null=0 default=- role=-
+  col=handle type=text null=0 default=- role=-
+  col=addedBy type=text null=0 default=- role=-
+  col=filedAt type=timestamp null=0 default=- role=-
+  col=tombstonedAt type=timestamp null=1 default=- role=-
+  col=removedByBatch type=text null=1 default=- role=-
+  col=udcCode type=text null=0 default=text role=-
+  col=udcFacets type=text null=1 default=- role=-
+  col=wikidataQID type=text null=1 default=- role=-
+  col=wikidataQidsSecondary type=text null=1 default=- role=-
+  col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=provenanceBitmap type=bitmap null=0 default=bitmap role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=manifest
+  col=key type=text null=0 default=- role=-
+  col=value type=text null=0 default=- role=-
+  pk=key
+  appendOnly=0 hashable=0
+table=matrix_snapshot
+  col=estate_id type=text null=0 default=- role=-
+  col=schema_version type=int null=0 default=- role=-
+  col=snapshot type=blob null=0 default=- role=-
+  col=last_hlc type=text null=0 default=- role=-
+  col=updated_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=estate_id
+  appendOnly=0 hashable=0
+table=node_bundles
+  col=wing type=text null=0 default=- role=-
+  col=room type=text null=0 default=- role=-
+  col=bundleKind type=text null=0 default=- role=-
+  col=n type=int null=0 default=- role=-
+  col=counts type=blob null=0 default=- role=-
+  col=updatedAt type=timestamp null=0 default=- role=-
+  pk=wing,room,bundleKind
+  appendOnly=0 hashable=0
+table=nodes
+  col=id type=text null=0 default=- role=-
+  col=parent_id type=text null=1 default=- role=-
+  col=display_name type=text null=0 default=- role=-
+  col=lookup_name type=text null=0 default=- role=-
+  col=depth type=int null=0 default=- role=-
+  col=lifecycle type=int null=0 default=- role=-
+  col=created_hlc type=hlc null=0 default=- role=createdHlc
+  col=tombstoned_hlc type=hlc null=1 default=- role=tombstonedHlc
+  col=tombstoned_at type=timestamp null=1 default=- role=-
+  col=merkle_root type=blob null=1 default=- role=-
+  col=created_at type=timestamp null=0 default=- role=-
+  col=updated_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=proposals
+  col=id type=text null=0 default=- role=-
+  col=targetRowID type=text null=0 default=- role=-
+  col=justification type=text null=1 default=- role=-
+  col=candidateState type=bitmap null=0 default=bitmap role=-
+  col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=provenanceBitmap type=bitmap null=0 default=bitmap role=-
+  col=udcCode type=text null=0 default=text role=-
+  col=udcFacets type=text null=1 default=- role=-
+  col=wikidataQID type=text null=1 default=- role=-
+  col=wikidataQidsSecondary type=text null=1 default=- role=-
+  col=filedAt type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  gen=g_state_cluster type=int
+  pk=id
+  appendOnly=0 hashable=0
+table=recall_trace
+  col=id type=text null=0 default=- role=-
+  col=target type=text null=0 default=- role=-
+  col=recalledAt type=timestamp null=0 default=- role=-
+  col=score type=float null=1 default=- role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=snapshot_attestations
+  col=snapshot_id type=text null=0 default=- role=-
+  col=subject_kind type=text null=0 default=- role=-
+  col=subject_id type=text null=0 default=- role=-
+  col=merkle_root type=text null=0 default=- role=-
+  col=key_version type=int null=1 default=- role=-
+  pk=snapshot_id,subject_kind,subject_id
+  appendOnly=0 hashable=0
+table=snapshot_registry
+  col=snapshot_id type=text null=0 default=- role=-
+  col=hlc type=hlc null=0 default=- role=-
+  col=label type=text null=1 default=- role=-
+  col=created_at type=timestamp null=0 default=- role=-
+  pk=snapshot_id
+  appendOnly=0 hashable=0
+table=source_catalog
+  col=id type=text null=0 default=- role=-
+  col=kind type=int null=0 default=- role=-
+  col=handle type=text null=0 default=- role=-
+  col=addedBy type=text null=0 default=- role=-
+  col=firstSeen type=timestamp null=0 default=- role=-
+  col=udcCode type=text null=0 default=text role=-
+  col=udcFacets type=text null=1 default=- role=-
+  col=wikidataQID type=text null=1 default=- role=-
+  col=wikidataQidsSecondary type=text null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=tunnels
+  col=id type=text null=0 default=- role=-
+  col=sourceWing type=text null=0 default=- role=-
+  col=sourceRoom type=text null=0 default=- role=-
+  col=sourceDrawerId type=text null=1 default=- role=-
+  col=targetWing type=text null=0 default=- role=-
+  col=targetRoom type=text null=0 default=- role=-
+  col=targetDrawerId type=text null=1 default=- role=-
+  col=label type=text null=0 default=- role=-
+  col=addedBy type=text null=0 default=- role=-
+  col=filedAt type=timestamp null=0 default=- role=-
+  col=tombstonedAt type=timestamp null=1 default=- role=-
+  col=removedByBatch type=text null=1 default=- role=-
+  col=kind_id type=int null=0 default=int role=-
+  col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
+  col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=provenanceBitmap type=bitmap null=0 default=bitmap role=-
+  col=order_key type=float null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  appendOnly=0 hashable=0
+table=vectors
+  col=id type=uuid null=0 default=- role=-
+  col=item_id type=text null=0 default=- role=-
+  col=vector_index type=int null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=kind type=int null=0 default=- role=-
+  col=dim type=int null=0 default=- role=-
+  col=payload type=blob null=0 default=- role=-
+  col=scale type=float null=1 default=- role=-
+  col=filed_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=id
+  unique=item_id,vector_index,model_id
+  appendOnly=0 hashable=0
+index=idx_associations_source table=associations cols=sourceWing,sourceRoom unique=0
+index=idx_associations_target table=associations cols=targetWing,targetRoom unique=0
+index=idx_associations_udcCode table=associations cols=udcCode unique=0
+index=idx_chunks_hlc table=chunks cols=hlc unique=0
+index=idx_chunks_source table=chunks cols=source_id unique=0
+index=idx_diary_agent table=diary cols=agentName unique=0
+index=idx_diary_filedAt table=diary cols=filedAt unique=0
+index=idx_diary_wing table=diary cols=wing unique=0
+index=idx_drawers_lineageID table=drawers cols=lineageID unique=0
+index=idx_drawers_operational_channel table=drawers cols=g_operational_channel unique=0
+index=idx_drawers_parent_node_id table=drawers cols=parent_node_id unique=0
+index=idx_drawers_provenance_confirmation table=drawers cols=g_provenance_confirmation unique=0
+index=idx_drawers_provenance_source table=drawers cols=g_provenance_source unique=0
+index=idx_drawers_sourceFile table=drawers cols=sourceFile unique=0
+index=idx_drawers_state_cluster table=drawers cols=g_state_cluster unique=0
+index=idx_drawers_tombstoned table=drawers cols=tombstonedAt unique=0
+index=idx_drawers_udcCode table=drawers cols=udcCode unique=0
+index=idx_kg_facts_sourceDrawer table=kg_facts cols=sourceDrawerID unique=0
+index=idx_kg_facts_state_cluster table=kg_facts cols=g_state_cluster unique=0
+index=idx_kg_facts_subject table=kg_facts cols=subject unique=0
+index=idx_learned_references_handle table=learned_references cols=handle unique=0
+index=idx_learned_references_source table=learned_references cols=sourceCatalogID unique=0
+index=idx_learned_references_udcCode table=learned_references cols=udcCode unique=0
+index=idx_nodes_depth_lookup table=nodes cols=depth,lookup_name unique=0
+index=idx_nodes_parent_id table=nodes cols=parent_id unique=0
+index=idx_nodes_parent_lookup table=nodes cols=parent_id,lookup_name unique=0
+index=idx_proposals_state_cluster table=proposals cols=g_state_cluster unique=0
+index=idx_proposals_target table=proposals cols=targetRowID unique=0
+index=idx_proposals_udcCode table=proposals cols=udcCode unique=0
+index=idx_recall_trace_recalledAt table=recall_trace cols=recalledAt unique=0
+index=idx_recall_trace_target table=recall_trace cols=target unique=0
+index=idx_source_catalog_handle table=source_catalog cols=handle unique=0
+index=idx_tunnels_kind_source_drawer table=tunnels cols=kind_id,sourceDrawerId unique=0
+index=idx_tunnels_kind_target_drawer table=tunnels cols=kind_id,targetDrawerId unique=0
+index=idx_tunnels_source table=tunnels cols=sourceWing,sourceRoom unique=0
+index=idx_tunnels_target table=tunnels cols=targetWing,targetRoom unique=0
+index=idx_vectors_filed_at_item table=vectors cols=filed_at,item_id unique=0
+index=idx_vectors_item table=vectors cols=item_id unique=0
+index=idx_vectors_model_item table=vectors cols=model_id,item_id unique=0

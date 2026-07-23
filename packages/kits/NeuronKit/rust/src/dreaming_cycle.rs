@@ -1581,32 +1581,38 @@ impl DreamingDaemon {
         let report = self.run_cycle(now_epoch_secs, reader, reward_source, sink);
 
         if let Some(p) = probe {
-            let live_vocab = p.vocab_anchor();
-            if self.last_reindex_vocab == -1 {
-                // First cycle: establish baseline, do not retrain.
-                self.last_reindex_vocab = live_vocab;
-            } else {
-                // Trigger = max(absolute floor, ceil(fraction × baseline)). The
-                // floor dominates at small vocabularies (no thrashing); the
-                // fraction dominates at large ones (proportional drift tolerance).
-                let fractional = (self.last_reindex_vocab as f64
-                    * self.reindex_vocab_growth_fraction)
-                    .ceil() as i64;
-                let trigger = self.reindex_vocab_growth_floor.max(fractional);
-                if live_vocab - self.last_reindex_vocab >= trigger {
-                    // Vocabulary drift crossed the trigger — retrain. Advance the
-                    // baseline ONLY on success: a failed reindex leaves the
-                    // baseline unadvanced so the gate re-fires next cycle (retry),
-                    // matching Swift, where a throwing `reindex(now:)` skips the
-                    // baseline assignment.
-                    if p.reindex(now_epoch_secs) {
-                        self.last_reindex_vocab = live_vocab;
-                    }
-                }
-            }
+            self.check_corpus_growth(now_epoch_secs, p);
         }
 
         report
+    }
+
+    /// Apply the vocabulary-growth retrain gate after a production host has
+    /// completed a cycle and released any coordinator/read locks. Keeping this
+    /// as a separate seam lets the Rust resident governor avoid holding the GLK
+    /// coordinator mutex across an estate-scale retrain.
+    pub fn check_corpus_growth<P: CorpusGrowthProbe>(
+        &mut self,
+        now_epoch_secs: f64,
+        probe: &mut P,
+    ) {
+        let live_vocab = probe.vocab_anchor();
+        if self.last_reindex_vocab == -1 {
+            // First cycle: establish baseline, do not retrain.
+            self.last_reindex_vocab = live_vocab;
+            return;
+        }
+        // Trigger = max(absolute floor, ceil(fraction × baseline)). The floor
+        // dominates at small vocabularies; the fraction dominates at scale.
+        let fractional =
+            (self.last_reindex_vocab as f64 * self.reindex_vocab_growth_fraction).ceil() as i64;
+        let trigger = self.reindex_vocab_growth_floor.max(fractional);
+        if live_vocab - self.last_reindex_vocab >= trigger
+            && probe.reindex(now_epoch_secs)
+        {
+            // Advance only on success so a failed retrain re-fires next cycle.
+            self.last_reindex_vocab = live_vocab;
+        }
     }
 }
 

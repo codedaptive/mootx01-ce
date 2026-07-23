@@ -109,9 +109,9 @@ struct RecallDirectorTests {
         // Corpus: standalone InMemory storage keyed by drawer.id as sourceID.
         let corpusConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let corpusStorage = InMemoryStorage(configuration: corpusConfig)
-        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage)
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
-        try await corpus.ingest(content, sourceID: drawer.id, now: now)
+        try await corpus.ingest(content, contentID: drawer.id, now: now)
 
         // VectorStore: separate InMemory storage, vector keyed by drawer.id directly.
         // This lets the RecallDirector join VectorMatch.itemID → LocusKit Drawer.id
@@ -626,7 +626,7 @@ struct RecallDirectorDenseSignalTests {
         // Shared corpus + vector store across all three drawers, keyed by drawer id.
         let corpusConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let corpusStorage = InMemoryStorage(configuration: corpusConfig)
-        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage)
 
         let vsConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let vsStorage = InMemoryStorage(configuration: vsConfig)
@@ -647,7 +647,7 @@ struct RecallDirectorDenseSignalTests {
             )
             let drawer = try await kit.capture(handle, captureFrame)
             ids.append(drawer.id)
-            try await corpus.ingest(content, sourceID: drawer.id, now: now)
+            try await corpus.ingest(content, contentID: drawer.id, now: now)
             let engram = try await corpus.embed(content)
             try await vectorStore.addVector(
                 itemID: drawer.id,
@@ -730,9 +730,10 @@ struct RecallDirectorDenseSignalTests {
 
             // Direct probe: embed the same query text the director will, and ask the
             // store for the raw distances so we have an independent oracle.
-            let corpus = try await Corpus(storage: InMemoryStorage(
-                configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)),
-                model: .deterministic)
+            let corpus = try await CorpusContentEngine(
+                standaloneOn: InMemoryStorage(configuration: EstateConfiguration(
+                    estateID: UUID(), backend: .inMemory)),
+                models: [.deterministic])
             let probe = try await corpus.embed("mango fruit recall")
             let directMatches = try await vectorStore.findNearest(
                 probe: probe, modelID: modelID, limit: 256)
@@ -1256,9 +1257,9 @@ struct RecallDirectorSafetyTests {
         // drawer.id for matching queries — that is the scenario we are testing.
         let corpusConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let corpusStorage = InMemoryStorage(configuration: corpusConfig)
-        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage)
         let now = Date(timeIntervalSinceReferenceDate: 2_000_000)
-        try await corpus.ingest(content, sourceID: drawer.id, now: now)
+        try await corpus.ingest(content, contentID: drawer.id, now: now)
         await kit.registerCorpus(corpus, for: handle)
 
         // Verify expunge precondition: BM25 finds the content BEFORE expunge.
@@ -2206,7 +2207,7 @@ struct RecallByIDHydrationEquivalenceTests {
         // Standalone corpus + vector stores keyed by drawer.id.
         let corpusStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
-        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage)
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
@@ -2231,7 +2232,7 @@ struct RecallByIDHydrationEquivalenceTests {
                 embeddingModelID: "test-model-v1"
             )
             let drawer = try await kit.capture(handle, frame)
-            try await corpus.ingest(text, sourceID: drawer.id, now: now)
+            try await corpus.ingest(text, contentID: drawer.id, now: now)
             let engram = try await corpus.embed(text)
             try await vectorStore.addVector(
                 itemID: drawer.id, engram: engram,

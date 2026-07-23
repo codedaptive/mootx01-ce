@@ -40,6 +40,31 @@ let package = Package(
             name: "GeniusLocusKit",
             targets: ["GeniusLocusKit"]
         ),
+        .library(
+            name: "GeniusLocusKitMigrations",
+            targets: ["GeniusLocusKitMigrations"]
+        ),
+        // Maintainer tool: the shared-content scale-qualification driver.
+        // A standalone executable (NOT a test) so large-estate qualification
+        // runs free of the swiftpm test harness; env-gated exactly like the
+        // Rust twin (MOOT_SCF_QUAL_DB names a recoverable clone).
+        .executable(
+            name: "glk-scale-qual",
+            targets: ["GLKScaleQual"]
+        ),
+    ],
+    traits: [
+        // Step traits name concrete historical code. Floor traits are the
+        // consumer-facing cumulative selection and enable every required step.
+        .trait(
+            name: "MigrationV1_0ToV1_1",
+            description: "Compile the historical GLK 1.0 to 1.1 shared-content migration capsule."
+        ),
+        .trait(
+            name: "MigrationFloor1_0",
+            description: "Support estates as old as GLK format 1.0.",
+            enabledTraits: ["MigrationV1_0ToV1_1"]
+        ),
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
@@ -85,6 +110,55 @@ let package = Package(
         .package(name: "ConvergenceKit", path: "../ConvergenceKit"),
     ],
     targets: [
+        .executableTarget(
+            name: "GLKScaleQual",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKScaleQual",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
+        .target(
+            name: "GLKMigrationV1_0ToV1_1",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+            ],
+            path: "Sources/GLKMigrationV1_0ToV1_1"
+        ),
+        .target(
+            name: "GeniusLocusKitMigrations",
+            dependencies: [
+                "GeniusLocusKit",
+                .target(
+                    name: "GLKMigrationV1_0ToV1_1",
+                    condition: .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ],
+            path: "Sources/GeniusLocusKitMigrations",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
+        ),
         .target(
             name: "GeniusLocusKit",
             dependencies: [
@@ -166,6 +240,31 @@ let package = Package(
                 .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
             ],
             path: "Tests/GeniusLocusKitTests"
+        ),
+        .testTarget(
+            name: "GLKMigrationV1_0ToV1_1Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_0ToV1_1",
+                    condition: .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+                .product(name: "CorpusKit", package: "CorpusKit"),
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "VectorKit", package: "VectorKit"),
+            ],
+            path: "Tests/GLKMigrationV1_0ToV1_1Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_0_TO_V1_1",
+                    .when(traits: ["MigrationV1_0ToV1_1"])
+                ),
+            ]
         ),
     ]
 )

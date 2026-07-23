@@ -24,6 +24,7 @@ pub mod blob_store;
 pub mod cache_config;
 pub mod cache_invalidator;
 pub mod caching_row_store;
+pub mod database_inventory;
 pub mod dataset_store;
 pub mod encryption;
 pub mod error;
@@ -33,6 +34,13 @@ pub mod generated_column;
 pub mod hashing_row_store;
 pub mod inmemory;
 pub mod introspection;
+// Canonical schema layout signatures + deterministic table inventories
+// (GLK shared-content 1.1, P0). Accessed via module path or the re-exports
+// below.
+pub mod layout_signature;
+// Physical storage maintenance — WAL checkpoint + page reclamation
+// (GLK shared-content 1.1, P5).
+pub mod maintenance;
 pub mod observer;
 pub mod postgres;
 pub mod postgres_tls;
@@ -65,6 +73,8 @@ pub use encryption::{
 pub use error::*;
 pub use generated_column::*;
 pub use introspection::{StorageIntrospection, StorageStats};
+pub use layout_signature::{layout_signature_digest, layout_signature_text};
+pub use database_inventory::{capture_inventory, TableInventory};
 pub use telemetry::report_storage_stats;
 pub use observer::*;
 pub use postgres::PostgresStorage;

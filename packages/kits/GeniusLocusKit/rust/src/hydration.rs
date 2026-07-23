@@ -129,7 +129,14 @@ use uuid::Uuid;
 pub fn composite_schema() -> SchemaDeclaration {
     let lk = locus_kit::schema::schema();
     let vk = vectorkit::VectorStore::schema_declaration();
-    let ck = corpus_kit::BundleStore::schema_declaration();
+    // Shared-content 1.1: the composite carries the CorpusKit ATTACHED
+    // profile (derived state only, Drawer-ID keyed) plus the VectorKit
+    // representation-claims ledger — NO canonical content table. The legacy
+    // BundleStore chunks/corpus_metadata copy lane is gone from fresh
+    // estates and retired by the shared-content migration on existing ones.
+    let ck = corpus_kit::attached_declaration();
+    let claims = vectorkit::VectorRepresentationClaims::schema_declaration();
+    let estate_format = crate::estate_format::EstateFormatStore::schema_declaration();
 
     // Composite version = sum of the three GLK-composed component versions
     // plus two GLK-owned addends:
@@ -141,10 +148,12 @@ pub fn composite_schema() -> SchemaDeclaration {
     // rebuild_derived_accelerators runs. Without it, hydrated estates always
     // cold-rebuild the matrix tier, discarding persisted calibration state.
     //
-    // Mirrors Swift `GeniusLocusKitSchema.version` (= 18).
+    // Mirrors Swift `GeniusLocusKitSchema.version` — the live sum, never a
+    // copied number (stale-literal rule, GLK shared-content 1.1 P0).
     let grants_schema_version = 1;
     let matrix_snapshot_schema_version = MatrixSnapshotStore::schema_declaration().version;
-    let composite_version = lk.version + vk.version + ck.version
+    let composite_version = lk.version + vk.version + claims.version + ck.version
+        + estate_format.version
         + grants_schema_version
         + matrix_snapshot_schema_version;
 
@@ -153,7 +162,9 @@ pub fn composite_schema() -> SchemaDeclaration {
     let mut tables = Vec::new();
     tables.extend(lk.tables);
     tables.extend(vk.tables);
+    tables.extend(claims.tables);
     tables.extend(ck.tables);
+    tables.extend(estate_format.tables);
     tables.push(GrantStore::grants_table());
     // matrix_snapshot: must be last so version ordering matches Swift composite.
     tables.extend(mx_snapshot.tables);
@@ -161,11 +172,15 @@ pub fn composite_schema() -> SchemaDeclaration {
     let mut indices = Vec::new();
     indices.extend(lk.indices);
     indices.extend(vk.indices);
+    indices.extend(claims.indices);
     indices.extend(ck.indices);
 
     SchemaDeclaration {
         kit_id: "GeniusLocusKit".to_string(),
-        // LocusKit v9 + VectorKit v4 + CorpusKit v3 + Grants v1 + MatrixSnapshot v1 = 18
+        // The live sum computed above — deliberately not restated as a
+        // number (a copied literal goes stale; the live sum cannot). The
+        // cross-port layout signature is frozen by
+        // composite_schema_signature_tests.rs.
         version: composite_version,
         tables,
         indices,
@@ -182,29 +197,29 @@ mod composite_version_tests {
     use super::*;
 
     /// The composite version is the SUM of the three GLK-composed component
-    /// versions plus two GLK-owned addends: grants (+1) and matrix_snapshot (+1).
-    /// LocusKit v9 + VectorKit v4 + CorpusKit/BundleStore v3 + Grants v1
-    ///   + MatrixSnapshot v1 = 18.
-    /// VectorKit bumped to v4 when idx_vectors_filed_at_item was added
-    /// (VK-PERF-FIX-2026-07-13). This guards the coupling the global-MAX
-    /// replication gate depends on: a drift between composite and components
-    /// would let a fresh estate open at a version the gate rejects.
-    /// Mirrors Swift `CompositeSchemaVersionTests`.
+    /// versions plus two GLK-owned addends: grants (+1) and matrix_snapshot
+    /// (+1) — computed from the LIVE declarations, never restated as a magic
+    /// number (stale-literal rule, GLK shared-content 1.1 P0; the layout is
+    /// frozen structurally by composite_schema_signature_tests.rs instead).
+    /// This guards the coupling the global-MAX replication gate depends on:
+    /// a drift between composite and components would let a fresh estate
+    /// open at a version the gate rejects.
+    /// Mirrors Swift `CompositeSchemaSignatureTests`.
     #[test]
     fn composite_version_equals_component_sum() {
         let lk = locus_kit::schema::SCHEMA_VERSION;
         let vk = vectorkit::VectorStore::schema_declaration().version;
-        let ck = corpus_kit::BundleStore::schema_declaration().version;
+        let claims = vectorkit::VectorRepresentationClaims::schema_declaration().version;
+        let ck = corpus_kit::attached_declaration().version;
         let mx = MatrixSnapshotStore::schema_declaration().version;
         let s = composite_schema();
-        // Two GLK-owned addends: +1 grants, +matrix_snapshot version
-        // LocusKit v10 (FINDING-3 associations unique constraint) +
-        // VectorKit v4 + CorpusKit v3 + Grants v1 + MatrixSnapshot v1 = 19.
-        assert_eq!(s.version, lk + vk + ck + 1 + mx);
-        assert_eq!(s.version, 19);
+        // Two GLK-owned addends: +1 grants, +matrix_snapshot version.
+        let format = crate::estate_format::EstateFormatStore::schema_declaration().version;
+        assert_eq!(s.version, lk + vk + claims + ck + format + 1 + mx);
         assert!(s.tables.iter().any(|t| t.name == "grants"));
         // matrix_snapshot must be in composite for hydration to copy it from durable storage
         assert!(s.tables.iter().any(|t| t.name == "matrix_snapshot"));
+        assert!(s.tables.iter().any(|t| t.name == "glk_estate_format"));
         assert_eq!(s.kit_id, "GeniusLocusKit");
     }
 }

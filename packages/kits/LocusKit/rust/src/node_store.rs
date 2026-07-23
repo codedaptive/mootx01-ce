@@ -52,6 +52,24 @@ pub struct NodeStore {
     hlc: Mutex<HLCGenerator>,
 }
 
+
+/// UUID node ids are TEXT columns compared under SQLite's default BINARY
+/// collation, and the two legs serialize UUIDs differently: Swift's
+/// `UUID().uuidString` is UPPERCASE while Rust's `Uuid::to_string()` is
+/// lowercase. On a Swift-written estate a lowercase equality probe misses
+/// every node (a false I-NT-5 on capture), so every id/parent_id READ
+/// matches both casings. Writes keep this leg's existing lowercase form —
+/// same-leg string cross-references (drawer.parent_node_id, fingerprint
+/// and rollup maps) key on the stored text verbatim.
+fn uuid_eq(column: &str, id: Uuid) -> StoragePredicate {
+    let lower = id.to_string();
+    let upper = lower.to_uppercase();
+    StoragePredicate::Or(vec![
+        StoragePredicate::Eq(col(column), TypedValue::Text(upper)),
+        StoragePredicate::Eq(col(column), TypedValue::Text(lower)),
+    ])
+}
+
 impl NodeStore {
     /// Construct over a storage handle. The schema must already be
     /// opened (LocusKitSchema). The HLC generator is optional: None =
@@ -196,7 +214,7 @@ impl NodeStore {
             .row_store()
             .query(
                 T_NODES,
-                Some(&StoragePredicate::Eq(col("id"), TypedValue::Text(id.to_string()))),
+                Some(&uuid_eq("id", id)),
                 &[],
                 Some(1),
                 None,
@@ -239,7 +257,7 @@ impl NodeStore {
             .query(
                 T_NODES,
                 Some(&StoragePredicate::And(vec![
-                    StoragePredicate::Eq(col("parent_id"), TypedValue::Text(parent_id.to_string())),
+                    uuid_eq("parent_id", parent_id),
                     StoragePredicate::Eq(col("lifecycle"), TypedValue::Int(0)),
                 ])),
                 &[OrderClause {
@@ -286,7 +304,7 @@ impl NodeStore {
             .update(
                 T_NODES,
                 values,
-                &StoragePredicate::Eq(col("id"), TypedValue::Text(id.to_string())),
+                &uuid_eq("id", id),
             )
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
 
@@ -316,7 +334,7 @@ impl NodeStore {
             .update(
                 T_NODES,
                 values,
-                &StoragePredicate::Eq(col("id"), TypedValue::Text(node_id.to_string())),
+                &uuid_eq("id", node_id),
             )
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
         Ok(())
@@ -345,7 +363,7 @@ impl NodeStore {
             .query(
                 T_NODES,
                 Some(&StoragePredicate::And(vec![
-                    StoragePredicate::Eq(col("parent_id"), TypedValue::Text(parent_id.to_string())),
+                    uuid_eq("parent_id", parent_id),
                     StoragePredicate::Eq(
                         col("lookup_name"),
                         TypedValue::Text(lookup_name.to_string()),
@@ -637,6 +655,53 @@ pub(crate) mod tests {
         let store = make_store();
         let result = store.tombstone_node(Uuid::new_v4(), 1000).unwrap();
         assert!(result.is_none());
+    }
+
+    /// Cross-leg estate: the Swift leg stores node ids as UPPERCASE
+    /// `UUID().uuidString` text. Resolution and create-on-demand must see
+    /// those rows (a lowercase-only equality probe produced a false I-NT-5
+    /// on every capture into a Swift-written estate).
+    #[test]
+    fn resolves_swift_uppercase_node_rows() {
+        let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        storage.open(&schema::schema()).unwrap();
+        let store = NodeStore::new(Arc::clone(&storage), None);
+
+        let root_id = Uuid::new_v4();
+        let wing_id = Uuid::new_v4();
+        let hlc = store.generate_hlc(1_000);
+        for (id, parent, name, lookup, depth) in [
+            (root_id, None, "Estate", "estate", 0i64),
+            (wing_id, Some(root_id), "Agentic Memory", "agentic memory", 1),
+        ] {
+            let mut values = BTreeMap::new();
+            values.insert("id".into(), TypedValue::Text(id.to_string().to_uppercase()));
+            if let Some(parent) = parent {
+                values.insert(
+                    "parent_id".into(),
+                    TypedValue::Text(parent.to_string().to_uppercase()),
+                );
+            }
+            values.insert("display_name".into(), TypedValue::Text(name.into()));
+            values.insert("lookup_name".into(), TypedValue::Text(lookup.into()));
+            values.insert("depth".into(), TypedValue::Int(depth));
+            values.insert("lifecycle".into(), TypedValue::Int(0));
+            values.insert("created_hlc".into(), TypedValue::Hlc(hlc));
+            values.insert("created_at".into(), TypedValue::Timestamp(1_000));
+            values.insert("updated_at".into(), TypedValue::Timestamp(1_000));
+            storage.row_store().insert(T_NODES, values).unwrap();
+        }
+
+        // get_node sees the uppercase root row.
+        assert!(store.get_node(root_id).unwrap().is_some(), "root must resolve");
+        // Create-on-demand resolves the EXISTING uppercase wing instead of
+        // failing I-NT-5 or inserting a duplicate.
+        let wing = store.create_node("Agentic Memory", root_id, 2_000).unwrap();
+        assert_eq!(wing.id, wing_id, "existing Swift-cased wing must be returned");
+        assert_eq!(store.child_nodes(root_id).unwrap().len(), 1, "no duplicate wing");
+        // A room created under it resolves the uppercase parent.
+        let room = store.create_node("general", wing_id, 2_001).unwrap();
+        assert_eq!(room.parent_id, Some(wing_id));
     }
 
     /// Shared test-skeleton helper: root + wing + room.

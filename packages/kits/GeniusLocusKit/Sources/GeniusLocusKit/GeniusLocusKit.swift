@@ -91,12 +91,18 @@ public actor GeniusLocusKit {
     /// grants in the same backend as the estate they belong to.
     internal var storages: [EstateHandle: any Storage] = [:]
 
-    /// Per-estate `Corpus` instances for BM25 and embedding recall lanes.
+    /// Per-estate `CorpusContentEngine` instances for BM25 and embedding
+    /// recall lanes (the shared-content 1.1 canonical-ID engine — attached
+    /// mode, whole-Drawer index units, Drawer IDs across every lane).
     ///
     /// Populated via `registerCorpus(_:for:)` after an estate is opened.
     /// The RecallDirector reads this registry to drive `corpusOnly` and
     /// `hybrid` BM25/vector lanes. Dropped when the estate is closed.
-    internal var corpusKits: [EstateHandle: Corpus] = [:]
+    internal var corpusKits: [EstateHandle: CorpusContentEngine] = [:]
+
+    /// Opaque fault token used by optional migration targets' resume proofs.
+    /// The core stores no historical migration type or state machine.
+    internal var _migrationFaultTokenStorage: String? = nil
 
     /// Per-estate `VectorStore` instances for Hamming nearest-neighbour recall.
     ///
@@ -365,20 +371,20 @@ public actor GeniusLocusKit {
 
 public extension GeniusLocusKit {
 
-    /// Register a `Corpus` instance for the given estate handle.
+    /// Register a `CorpusContentEngine` for the given estate handle.
     ///
     /// The RecallDirector reads this registry to drive the BM25 and embedding
-    /// lanes in `corpusOnly` and `hybrid` recall. The corpus should already be
-    /// populated via `Corpus.ingest` before recall is invoked; the director
-    /// does not ingest on behalf of the caller.
+    /// lanes in `corpusOnly` and `hybrid` recall. The engine is attached-mode
+    /// (whole-Drawer index units) and keys every derived row by `Drawer.id`;
+    /// hits hydrate directly with no translation join.
     ///
-    /// Re-registering with a different corpus for the same handle replaces the
+    /// Re-registering with a different engine for the same handle replaces the
     /// existing entry. Call with `close(_:)` semantics to drop the reference.
     ///
     /// - Parameters:
-    ///   - corpus: The `Corpus` actor for BM25 and embedding recall.
-    ///   - handle: The estate this corpus is associated with. Must be open.
-    func registerCorpus(_ corpus: Corpus, for handle: EstateHandle) {
+    ///   - corpus: The engine for BM25 and embedding recall.
+    ///   - handle: The estate this engine is associated with. Must be open.
+    func registerCorpus(_ corpus: CorpusContentEngine, for handle: EstateHandle) {
         corpusKits[handle] = corpus
     }
 

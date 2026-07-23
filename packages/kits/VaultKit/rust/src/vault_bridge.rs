@@ -93,7 +93,7 @@ pub struct ImportReport {
     /// The bulk `capture_batch` path intentionally skips the per-item encode
     /// enqueue to avoid flooding the queue for large imports. After the batch
     /// write completes, `import_notes` calls `collect_reindex_jobs` and enqueues
-    /// the resulting jobs via `Corpus::enqueue_ingest_batch` (capped at
+    /// the resulting change references via `enqueue_change_batch` (capped at
     /// `REINDEX_MAX_JOBS` = 10,000 per call).
     ///
     /// The per-item path (`capture_with_mode(WriteMode::Regular)`) enqueues each
@@ -488,8 +488,8 @@ impl<'a> VaultBridge<'a> {
                     jobs.len()
                 );
                 corpus
-                    .enqueue_ingest_batch(&jobs)
-                    .map_err(|e| VaultKitError::VerbError(format!("enqueue_ingest_batch failed: {e:?}")))?;
+                    .enqueue_change_batch(&jobs)
+                    .map_err(|e| VaultKitError::VerbError(format!("enqueue_change_batch failed: {e:?}")))?;
                 self.coordinator
                     .rollup_after_reindex(handle, now / 1000)
                     .map_err(|e| VaultKitError::VerbError(format!("rollup_after_reindex failed: {e:?}")))?;

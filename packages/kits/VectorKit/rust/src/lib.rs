@@ -34,6 +34,8 @@
 pub mod embedding_provider;
 pub mod engine;
 pub mod error;
+// Representation-ownership manifest (GLK shared-content 1.1, P0).
+pub mod representation_claims;
 pub mod simhash_embedding_provider;
 pub mod vector_store;
 
@@ -52,4 +54,5 @@ pub use engine::{
 };
 pub use error::VectorKitError;
 pub use simhash_embedding_provider::FloatSimHashEmbeddingProvider;
-pub use vector_store::{StoredVector, VectorMatch, VectorPayloadInput, VectorStore};
+pub use representation_claims::{VectorRepresentationClaims, VectorRepresentationKey};
+pub use vector_store::{StoredVector, VectorExactKey, VectorMatch, VectorPayloadInput, VectorStore};

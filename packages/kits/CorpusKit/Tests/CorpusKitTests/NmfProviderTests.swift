@@ -238,7 +238,7 @@ struct NmfProviderTests {
         // Verify the provider protocol conformance.
         let ep: any EmbeddingProvider = provider
         #expect(ep.modelID == "nmf-v1")
-        #expect(ep.modelVersion == "1.0.0")
+        #expect(ep.modelVersion == "1.1.0")
     }
 
     @Test("projection seed differs from LSA, RI, and PPMI seeds")

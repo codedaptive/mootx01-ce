@@ -49,7 +49,7 @@ struct MerkleCompositionTests {
             snapshotId: snapshot.snapshotId
         )
         let corpusKinds = attestations.filter {
-            $0.subjectKind == "corpus" || $0.subjectKind == "corpus_global"
+            $0.subjectKind == "corpus_index" || $0.subjectKind == "corpus_index_global"
         }
         #expect(corpusKinds.isEmpty)
 
@@ -72,9 +72,9 @@ struct MerkleCompositionTests {
         let handle = try await kit.open(storage: estateStorage, owner: owner)
 
         // Stand up a Corpus and ingest a document.
-        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage)
         let ingestNow = Date(timeIntervalSince1970: 1_700_000_000)
-        try await corpus.ingest("Hello world corpus content", sourceID: "doc-1", now: ingestNow)
+        try await corpus.ingest("Hello world corpus content", contentID: "doc-1", now: ingestNow)
         await kit.registerCorpus(corpus, for: handle)
 
         let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -93,14 +93,17 @@ struct MerkleCompositionTests {
         let estateAtts = attestations.filter { $0.subjectKind == "estate" }
         #expect(estateAtts.count == 1)
 
-        // CorpusKit per-corpus attestation.
-        let corpusAtts = attestations.filter { $0.subjectKind == "corpus" }
+        // Shared-content 1.1: the engine attests derived-index COVERAGE —
+        // the canonical (revision, digest) each ID's derived rows reflect —
+        // and never builds a second content Merkle hierarchy.
+        let corpusAtts = attestations.filter { $0.subjectKind == "corpus_index" }
         #expect(corpusAtts.count == 1)
         #expect(corpusAtts.first?.subjectId == "doc-1")
-        #expect(corpusAtts.first?.merkleRoot != MerkleRoot.empty.hexString)
+        #expect(corpusAtts.first?.merkleRoot
+            == CorpusContentDigest.digest("Hello world corpus content"))
 
-        // CorpusKit global attestation.
-        let globalAtts = attestations.filter { $0.subjectKind == "corpus_global" }
+        // Global coverage attestation over the sorted per-content rows.
+        let globalAtts = attestations.filter { $0.subjectKind == "corpus_index_global" }
         #expect(globalAtts.count == 1)
         #expect(globalAtts.first?.merkleRoot != MerkleRoot.empty.hexString)
     }

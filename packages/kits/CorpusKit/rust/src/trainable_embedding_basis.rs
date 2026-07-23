@@ -71,6 +71,21 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// `texts` are raw document texts (NOT pre-tokenized term arrays).
     fn train_on_corpus(&mut self, texts: &[&str]);
 
+    /// Streamed-training page (GLK shared-content 1.1 corrective pass): fold
+    /// one page of raw document texts into the SAME accumulation
+    /// `train_on_corpus` uses, WITHOUT finalizing. For every implementor,
+    /// `accumulate_training(pages...) + finalize_training()` is BYTE-IDENTICAL
+    /// to a single `train_on_corpus(all_texts)` — the pair is the same
+    /// per-text accumulation split from the same finalize, so the trained
+    /// basis (and its digest) does not depend on page size. Peak memory is
+    /// bounded by the accumulator (vocabulary-scale), never the corpus text.
+    fn accumulate_training(&mut self, texts: &[&str]);
+
+    /// Run the method-specific finalization pass over the accumulated state
+    /// (PPMI/LSA/NMF; RI has none — no-op). Call exactly once, after the
+    /// last `accumulate_training` page.
+    fn finalize_training(&mut self);
+
     /// Serialize the trained basis to a versioned, little-endian blob.
     ///
     /// This is the same blob the concrete provider's `serialize_basis()`
@@ -167,4 +182,14 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
     fn counts_vocabulary_size(&self) -> usize;
+
+    /// Whether the published counts generation already contains `term`.
+    ///
+    /// Attached engines use this read-only seam to retain hashes only for
+    /// genuinely novel terms. The default keeps synthetic test providers
+    /// source-compatible; every production distributional provider overrides
+    /// it with an exact vocabulary lookup.
+    fn counts_contains_term(&self, _term: &str) -> bool {
+        false
+    }
 }

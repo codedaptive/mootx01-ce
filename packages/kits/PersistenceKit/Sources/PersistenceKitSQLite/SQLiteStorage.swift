@@ -1545,3 +1545,159 @@ actor SQLiteBackend {
         )
     }
 }
+
+// MARK: - StorageMaintenance (shared-content 1.1 P5)
+
+extension SQLiteStorage: StorageMaintenance {
+    public func estimatedReclaimableBytes() async throws -> Int64 {
+        try await backend.maintenanceEstimatedReclaimableBytes()
+    }
+
+    public func performMaintenance(
+        progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
+        shouldCancel: (@Sendable () -> Bool)?
+    ) async throws -> StorageMaintenanceReport {
+        try await backend.performMaintenance(progress: progress, shouldCancel: shouldCancel)
+    }
+}
+
+extension SQLiteBackend {
+
+    /// Freelist pages × page size, plus the WAL file's current size — the
+    /// filesystem bytes a checkpoint + VACUUM pass would release. Read-only
+    /// (two PRAGMAs + one file stat); safe for status polling.
+    func maintenanceEstimatedReclaimableBytes() throws -> Int64 {
+        let pageSize = try pragmaInt64("page_size")
+        let freelist = try pragmaInt64("freelist_count")
+        return freelist * pageSize + walFileBytes()
+    }
+
+    /// WAL checkpoint (TRUNCATE) + VACUUM with the four-phase contract
+    /// declared on `StorageMaintenance`: quiescence check, disk-capacity
+    /// preflight, per-phase progress, phase-boundary cancellation, and
+    /// post-operation introspection.
+    ///
+    /// Runs entirely inside the backend actor: no row/blob operation can
+    /// interleave, so the quiescence check (`inTransaction`) is authoritative
+    /// for this process. Cross-process writers are excluded by the existing
+    /// one-connection-per-estate exclusivity posture; a cross-process lock
+    /// surfaces as a backend failure from VACUUM itself, never as corruption.
+    func performMaintenance(
+        progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
+        shouldCancel: (@Sendable () -> Bool)?
+    ) throws -> StorageMaintenanceReport {
+        let started = Date()
+        let totalPhases = StorageMaintenancePhase.allCases.count
+        var completed = 0
+        func enter(_ phase: StorageMaintenancePhase) throws {
+            if shouldCancel?() == true {
+                throw StorageMaintenanceError.cancelled(atPhase: phase)
+            }
+            progress?(StorageMaintenanceProgress(
+                phase: phase, completedPhases: completed, totalPhases: totalPhases))
+        }
+
+        // Phase 1 — preflight: quiescence, baselines, disk capacity.
+        try enter(.preflight)
+        guard !inTransaction else {
+            throw StorageMaintenanceError.notQuiescent(
+                reason: "a transaction is open on the estate connection")
+        }
+        let pageSize = try pragmaInt64("page_size")
+        let pageCountBefore = try pragmaInt64("page_count")
+        let freelistBefore = try pragmaInt64("freelist_count")
+        let fileBefore = dbFileBytes()
+        let walBefore = walFileBytes()
+        // VACUUM rewrites the live pages into a temporary database before
+        // swapping it in, so the volume needs at least the live-content size
+        // free. The check is best-effort: when the volume capacity cannot be
+        // read (nil), VACUUM proceeds and its own failure is still surfaced.
+        let requiredBytes = (pageCountBefore - freelistBefore) * pageSize
+        if let available = volumeAvailableBytes(), available < requiredBytes {
+            throw StorageMaintenanceError.insufficientDiskCapacity(
+                requiredBytes: requiredBytes, availableBytes: available)
+        }
+        completed = 1
+
+        // Phase 2 — WAL checkpoint. TRUNCATE flushes every frame into the
+        // main database file and truncates the WAL to zero bytes, so the
+        // subsequent VACUUM operates on the complete committed state and the
+        // WAL's disk footprint is released along with the freelist pages.
+        try enter(.walCheckpoint)
+        do {
+            let stmt = try connection.prepare("PRAGMA wal_checkpoint(TRUNCATE)")
+            defer { stmt.finalize() }
+            _ = try stmt.step()
+        } catch {
+            throw StorageMaintenanceError.backendFailure(
+                reason: "wal_checkpoint failed: \(error)")
+        }
+        completed = 2
+
+        // Phase 3 — VACUUM. Atomic at the SQLite level; never interrupted
+        // mid-flight (cancellation was honoured at the phase boundary above).
+        try enter(.vacuum)
+        do {
+            try connection.exec("VACUUM")
+        } catch {
+            throw StorageMaintenanceError.backendFailure(
+                reason: "VACUUM failed: \(error)")
+        }
+        completed = 3
+
+        // Phase 4 — post-operation introspection. VACUUM itself commits
+        // through the WAL in WAL mode, so a second TRUNCATE checkpoint runs
+        // first — without it the rewritten pages would sit in a fresh WAL
+        // file and the filesystem would not see the reclaim.
+        try enter(.introspection)
+        do {
+            let stmt = try connection.prepare("PRAGMA wal_checkpoint(TRUNCATE)")
+            defer { stmt.finalize() }
+            _ = try stmt.step()
+        } catch {
+            throw StorageMaintenanceError.backendFailure(
+                reason: "post-VACUUM wal_checkpoint failed: \(error)")
+        }
+        let pageCountAfter = try pragmaInt64("page_count")
+        let freelistAfter = try pragmaInt64("freelist_count")
+        let fileAfter = dbFileBytes()
+        let walAfter = walFileBytes()
+        let reclaimed = max(0, (fileBefore + walBefore) - (fileAfter + walAfter))
+        return StorageMaintenanceReport(
+            backend: "sqlite", performed: true, note: nil,
+            pageSizeBytes: pageSize,
+            pageCountBefore: pageCountBefore, pageCountAfter: pageCountAfter,
+            freelistPagesBefore: freelistBefore, freelistPagesAfter: freelistAfter,
+            fileSizeBytesBefore: fileBefore, fileSizeBytesAfter: fileAfter,
+            walBytesBefore: walBefore, walBytesAfter: walAfter,
+            reclaimedBytes: reclaimed,
+            durationSeconds: Date().timeIntervalSince(started))
+    }
+
+    // MARK: maintenance helpers
+
+    private func pragmaInt64(_ name: String) throws -> Int64 {
+        let stmt = try connection.prepare("PRAGMA \(name)")
+        defer { stmt.finalize() }
+        return try stmt.step() ? stmt.columnInt64(0) : 0
+    }
+
+    private func dbFileBytes() -> Int64 {
+        (try? FileManager.default.attributesOfItem(atPath: connection.url.path)[.size] as? Int64)
+            .flatMap { $0 } ?? 0
+    }
+
+    private func walFileBytes() -> Int64 {
+        (try? FileManager.default.attributesOfItem(atPath: connection.url.path + "-wal")[.size] as? Int64)
+            .flatMap { $0 } ?? 0
+    }
+
+    private func volumeAvailableBytes() -> Int64? {
+        let dir = connection.url.deletingLastPathComponent()
+        guard let values = try? dir.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+            let capacity = values.volumeAvailableCapacityForImportantUsage
+        else { return nil }
+        return capacity
+    }
+}

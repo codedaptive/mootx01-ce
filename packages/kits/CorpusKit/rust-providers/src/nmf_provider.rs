@@ -39,7 +39,7 @@
 //! ## Constants
 //!
 //!   NMF_PROJECTION_SEED = 0x4E4D465F56315F4D  ("NMF_V1_M" in ASCII)
-//!   Model ID = "nmf-v1",  version = "1.0.0"
+//!   Model ID = "nmf-v1",  version = "1.1.0"
 //!   Default rank k = 32
 //!   Default maxIterations = 100
 //!   Factorization seed = 0xDEADBEEFCAFEBABE
@@ -173,9 +173,22 @@ impl NmfProvider {
     /// - `seed`: SplitMix64 seed for factor initialization.
     /// - `projection_seed`: FloatSimHash seed.
     pub fn new(rank: usize, max_iterations: usize, seed: u64, projection_seed: u64) -> Self {
+        Self::with_parameters("nmf-v1", "1.1.0", rank, max_iterations, seed, projection_seed)
+    }
+
+    /// Build with explicit identity — the Swift `NmfProvider(modelID:modelVersion:…)`
+    /// twin (fixture tests pin the historical 1.0 envelope through this).
+    pub fn with_parameters(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        rank: usize,
+        max_iterations: usize,
+        seed: u64,
+        projection_seed: u64,
+    ) -> Self {
         NmfProvider {
-            model_id: "nmf-v1".to_string(),
-            model_version: "1.0.0".to_string(),
+            model_id: model_id.into(),
+            model_version: model_version.into(),
             rank: rank.max(1),
             max_iterations: max_iterations.max(1),
             seed,
@@ -637,6 +650,18 @@ impl TrainableEmbeddingBasis for NmfProvider {
         self.finalize();
     }
 
+    /// Streamed-training page: the same per-document accumulation
+    /// `train_on_corpus` runs, finalization deferred to `finalize_training`.
+    fn accumulate_training(&mut self, texts: &[&str]) {
+        for text in texts {
+            self.train(text);
+        }
+    }
+
+    fn finalize_training(&mut self) {
+        self.finalize();
+    }
+
     /// Serialize the finalized NMF basis (6a-i codec), surfaced through the seam.
     fn serialize_basis(&self) -> Vec<u8> {
         NmfProvider::serialize_basis(self)
@@ -697,6 +722,10 @@ impl TrainableEmbeddingBasis for NmfProvider {
     /// Maintained vocabulary size for the growth trigger.
     fn counts_vocabulary_size(&self) -> usize {
         self.counts.vocabulary_size()
+    }
+
+    fn counts_contains_term(&self, term: &str) -> bool {
+        self.counts.vocab.contains_key(term)
     }
 }
 

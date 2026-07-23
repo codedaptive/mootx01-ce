@@ -33,16 +33,12 @@ public typealias AssociationEdgeChecker =
 /// 64 — 25% of 256 bits) are deduplicated and emitted as
 /// `AssociationFrame` values with weight = 1 − (distance / 256).
 ///
-/// TWO row populations are mined (same lane split as the contradiction
-/// hunter): drawer-keyed rows under the caller's `modelID` (bespoke
-/// lanes and test-planted vectors), and — when a `Corpus` is supplied —
-/// chunk-keyed rows under the corpus's own modelID, which is the ONLY
-/// lane production estates populate (EstateLifecycle registers
-/// `corpus.sharedVectorStore`; the encode drain keys every row by chunk
-/// UUID). Chunk hits map back to their owning drawers via
-/// `Corpus.sourceIDs(forChunkIDs:)`; same-drawer chunk pairs collapse,
-/// and both lanes deduplicate together on drawer-pair keys, so every
-/// emitted `AssociationFrame` carries DRAWER ids.
+/// TWO model populations are mined (same lane split as the contradiction
+/// hunter): Drawer-keyed rows under the caller's `modelID` (bespoke lanes and
+/// test-planted vectors), and — when a `CorpusContentEngine` is supplied —
+/// Drawer-keyed rows under CorpusKit's own model ID. Shared-content 1.1 keys
+/// both directly by canonical Drawer ID, so no passage-to-Drawer identity map
+/// exists. Both lanes deduplicate on Drawer-pair keys.
 ///
 /// Routing: every emission goes through the `associate` verb at the
 /// GLK-02 boundary, which records the provenance bit `vector_similarity`
@@ -105,11 +101,9 @@ public enum VectorSimilaritySignal {
     ///     `VectorStore.addVector(itemID:engram:modelID:modelVersion:filedAt:)`.
     ///   - proximityThreshold: Maximum Hamming distance (0-256) for a
     ///     pair to qualify as an association candidate. Default 64.
-    ///   - corpus: The estate's `Corpus`, when one is registered. Enables
-    ///     the chunk-keyed corpus lane — the row population production
-    ///     estates actually hold. `nil` (the default) scans only the
-    ///     drawer-keyed `modelID` lane, which is correct for tests that
-    ///     plant drawer-keyed vectors directly.
+    ///   - corpus: The estate's `CorpusContentEngine`, when registered.
+    ///     Enables its Drawer-keyed model population. `nil` scans only the
+    ///     caller-selected `modelID` population.
     ///   - edgeChecker: Optional async closure that returns `true` when
     ///     a persisted (non-tombstoned) association already exists between
     ///     the two drawer IDs in either direction (FINDING-3 optimization).
@@ -121,7 +115,7 @@ public enum VectorSimilaritySignal {
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int = defaultProximityThreshold,
-        corpus: Corpus? = nil,
+        corpus: CorpusContentEngine? = nil,
         edgeChecker: AssociationEdgeChecker? = nil
     ) -> SignalSpec {
         SignalSpec(
@@ -150,7 +144,7 @@ public enum VectorSimilaritySignal {
         vectorStore: VectorStore,
         modelID: String,
         proximityThreshold: Int,
-        corpus: Corpus?,
+        corpus: CorpusContentEngine?,
         edgeChecker: AssociationEdgeChecker?,
         context: SignalContext
     ) async -> [SignalEmission] {
@@ -217,45 +211,25 @@ public enum VectorSimilaritySignal {
             }
         }
 
-        // Lane 2 — chunk-keyed corpus rows. On a production estate this is
-        // the ONLY populated lane: the encode drain keys every vector row by
-        // chunk UUID under the corpus provider's modelID, so lane 1 finds
-        // nothing there. Mine the same probe sample on the corpus lane and
-        // map chunk hits back to their owning drawers (chunk → source_id via
-        // the corpus's warm map). Chunk pairs from the SAME drawer collapse.
-        // First hit wins per drawer pair — findNearest returns matches in
-        // ascending distance, so the first hit for a pair is its closest
-        // chunk evidence. Mirrors the contradiction hunter's lane split.
+        // Lane 2 — the corpus provider's rows. Shared-content 1.1: the
+        // engine keys every vector row by the DRAWER ID itself, so a hit's
+        // itemID is the owning drawer directly — no chunk→drawer remap and
+        // no same-drawer chunk collapse (one row per drawer per lane).
+        // Mirrors the contradiction hunter's lane split.
         if let corpus {
             let corpusModelID = await corpus.modelID
-            var chunkMatches: [(a: String, b: String, weight: Double)] = []
-            var involvedChunkIDs: Set<UUID> = []
             for itemID in itemIDs {
-                guard let probeUUID = UUID(uuidString: itemID),
-                      let probeEngram = try? await vectorStore.getVector(
-                          itemID: itemID, modelID: corpusModelID) else { continue }
+                guard let probeEngram = try? await vectorStore.getVector(
+                    itemID: itemID, modelID: corpusModelID) else { continue }
                 guard let matches = try? await vectorStore.findNearest(
                     probe: probeEngram,
                     modelID: corpusModelID,
                     limit: neighboursPerProbe) else { continue }
                 for match in matches {
                     guard match.itemID != itemID,
-                          match.distance <= proximityThreshold,
-                          let matchUUID = UUID(uuidString: match.itemID) else { continue }
-                    involvedChunkIDs.insert(probeUUID)
-                    involvedChunkIDs.insert(matchUUID)
-                    chunkMatches.append(
-                        (a: itemID, b: match.itemID,
-                         weight: 1.0 - Double(match.distance) / 256.0))
-                }
-            }
-            if !chunkMatches.isEmpty {
-                let owners = await corpus.sourceIDs(forChunkIDs: Array(involvedChunkIDs))
-                for match in chunkMatches {
-                    guard let ua = UUID(uuidString: match.a),
-                          let ub = UUID(uuidString: match.b),
-                          let sourceA = owners[ua], let sourceB = owners[ub],
-                          sourceA != sourceB else { continue }
+                          match.distance <= proximityThreshold else { continue }
+                    let sourceA = itemID
+                    let sourceB = match.itemID
                     let pairKey = sourceA < sourceB
                         ? "\(sourceA)||\(sourceB)"
                         : "\(sourceB)||\(sourceA)"
@@ -263,7 +237,7 @@ public enum VectorSimilaritySignal {
                     candidatePairs.append(
                         (a: min(sourceA, sourceB),
                          b: max(sourceA, sourceB),
-                         weight: match.weight))
+                         weight: 1.0 - Double(match.distance) / 256.0))
                 }
             }
         }

@@ -480,3 +480,25 @@ final class PostgreSQLTransactionContext: Sendable {
         self.backend = backend
     }
 }
+
+// MARK: - StorageMaintenance (shared-content 1.1 P5)
+
+extension PostgreSQLStorage: StorageMaintenance {
+    /// PostgreSQL page reclamation is server-managed (autovacuum); the
+    /// client cannot meaningfully estimate reclaimable bytes without
+    /// superuser-level pgstattuple access, so the estimate is 0.
+    public func estimatedReclaimableBytes() async throws -> Int64 { 0 }
+
+    /// Explicit no-op (per the StorageMaintenance backend table): dead-tuple
+    /// reclamation and WAL recycling are the server's responsibility
+    /// (autovacuum / checkpointer). Client-driven VACUUM FULL takes an
+    /// ACCESS EXCLUSIVE lock and is an operator decision, not a substrate
+    /// maintenance primitive.
+    public func performMaintenance(
+        progress: (@Sendable (StorageMaintenanceProgress) -> Void)?,
+        shouldCancel: (@Sendable () -> Bool)?
+    ) async throws -> StorageMaintenanceReport {
+        .noOp(backend: "postgresql",
+              note: "physical reclamation is server-managed (autovacuum); no client-side maintenance is performed")
+    }
+}

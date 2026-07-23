@@ -50,6 +50,7 @@ pub mod brain;
 // schema + sampled content. Byte-identical mirror of
 // GeniusLocusKit/Sources/GeniusLocusKit/Intake/DatasetSignatures.swift.
 pub mod dataset_signatures;
+pub mod estate_format;
 pub mod branches;
 pub mod coordinator;
 // telemetry.rs — per-estate rollup metrics (GLK_ROLLUPS_001). Metric name

@@ -75,10 +75,15 @@ persists only derived Drawer-keyed state. GLK rejects a standalone Corpus or a
 passage-enabled policy at `registerCorpus`; LocusKit and CorpusKit remain
 independently usable because neither imports the other.
 
-Legacy pre-1.1 layouts are migrated inside the open/provision lifecycle before
-Corpus registration. The Corpus lane stays dark until redundant content/chunk
-rows are removed, derived state is rebuilt from Drawers, and verification
-succeeds. This is a lifecycle gate, not a new public migration verb.
+Legacy pre-1.1 layouts are prepared by the optional
+`GeniusLocusKitMigrations` catalog before Corpus registration. The current GLK
+product exposes only opaque storage/Corpus host seams and contains no concrete
+historical step. Swift consumers select `MigrationFloor1_0`; Rust consumers
+enable `genius-locus-kit-migrations/migration-floor-1-0`. With no floor selected,
+fresh/current SDK builds do not compile the 1.0-to-1.1 capsule. The Corpus lane
+stays dark until redundant content/chunk rows are removed, derived state is
+rebuilt from Drawers, and verification succeeds. This is a lifecycle gate, not
+a new public migration verb.
 
 > **Two-tier surface.** GeniusLocusKit declares 118 top-level public
 > nominal types (plus 18 public typealiases) in the Swift version, of
@@ -1771,7 +1776,7 @@ a durable (SQLite) backend at launch.
 
 | Concept | Swift | Rust | Notes |
 |---|---|---|---|
-| Composite schema declaration | `GeniusLocusKitSchema.estateSchemaDeclaration: SchemaDeclaration` (`GeniusLocusKitSchema.swift`) | `composite_schema() -> SchemaDeclaration` (`hydration.rs`) | kitID / kit_id = "GeniusLocusKit". Version is derived from the live LocusKit, VectorKit, and CorpusKit **attached-profile** declarations in both ports. The 1.1 declaration excludes standalone Corpus document/passage/chunk tables and includes an explicit migration from historical composite v7. Component and composite cannot drift; conformance-tested by `CompositeSchemaVersionTests` / `composite_version_tests`. |
+| Composite schema declaration | `GeniusLocusKitSchema.estateSchemaDeclaration: SchemaDeclaration` (`GeniusLocusKitSchema.swift`) | `composite_schema() -> SchemaDeclaration` (`hydration.rs`) | kitID / kit_id = "GeniusLocusKit". Version is derived from the live LocusKit, VectorKit, and CorpusKit **attached-profile** declarations in both ports. The current declaration excludes standalone Corpus document/passage/chunk tables. Historical v7 conversion lives only in the optional floor-selected migration capsule, not this declaration or the core runtime. Component and composite cannot drift; conformance-tested by `CompositeSchemaVersionTests` / `composite_version_tests`. |
 
 ### Hydrate-on-open surface
 

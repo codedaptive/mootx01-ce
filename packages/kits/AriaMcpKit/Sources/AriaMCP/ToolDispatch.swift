@@ -1,6 +1,7 @@
 import Foundation
 import EideticLib
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LatticeLib
 import LocusKit
 import SubstrateML
@@ -2455,6 +2456,21 @@ extension ToolDispatcher {
             "fdc_recalculation_floor: \(fdcFloor ?? "none")",
             "fdc_recalculation_current: \(currentFDCRecalculationVersion)",
         ]
+        // Shared-content migration/reclaim status (shared-content 1.1 P5):
+        // appended only when a migration record exists — fresh estates that
+        // never ran detection leave the response shape unchanged. Best-effort:
+        // a read failure appends nothing rather than breaking the response.
+        if let reclaim = try? await kit.sharedContentReclaimStatus(handle: handle),
+           let state = reclaim.state {
+            var line = "shared_content_migration: \(state.rawValue)"
+            if let estimated = reclaim.estimatedReclaimableBytes {
+                line += ", estimated_reclaimable_bytes: \(estimated)"
+            }
+            if let reclaimed = reclaim.reclaimedBytes {
+                line += ", reclaimed_bytes: \(reclaimed)"
+            }
+            stats.append(line)
+        }
         // surface a plugin/binary version-skew advisory when the
         // host detected one. Appended only when present so the common
         // no-skew case leaves the response shape unchanged.

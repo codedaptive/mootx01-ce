@@ -46,7 +46,7 @@
 // ## Projection seed
 //
 //   RI_PROJECTION_SEED = 0x5249_5F56_315F_4D58  ("RI_V1_MX")
-//   Model ID = "random-indexing-v1",  version = "1.0.0"
+//   Model ID = "random-indexing-v1",  version = "1.1.0"
 //
 // Rust port: packages/kits/CorpusKit/rust-providers/src/random_indexing.rs
 //
@@ -156,7 +156,7 @@ public func riIndexVector(term: String) -> [Float] {
 /// ## Conformance
 ///
 /// Conforms to `VectorKit.EmbeddingProvider`. modelID = "random-indexing-v1",
-/// modelVersion = "1.0.0". Projection seed = `riProjectionSeed`.
+/// modelVersion = "1.1.0". Projection seed = `riProjectionSeed`.
 ///
 /// honest semantic fusion, signal #2 — the first honest distributional
 /// provider in the dense recall lane.
@@ -179,7 +179,7 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
 
     public init(
         modelID: String = "random-indexing-v1",
-        modelVersion: String = "1.0.0",
+        modelVersion: String = "1.1.0",
         projectionSeed: UInt64 = riProjectionSeed
     ) {
         self.modelID = modelID
@@ -426,6 +426,19 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
         }
     }
 
+    /// Streamed-training page: the same per-text accumulation
+    /// `trainOnCorpus` runs. RI has no finalization pass.
+    public func accumulateTraining(texts: [String]) {
+        for text in texts {
+            train(terms: defaultKeywordTokens(text), window: riWindow)
+        }
+    }
+
+    public func finalizeTraining() {
+        // Random Indexing is finalization-free: vectors are the accumulated
+        // state itself (mirrors trainOnCorpus, which runs no finalize).
+    }
+
     /// Reconstruct a fresh `RandomIndexingProvider` from a serialized basis,
     /// type-erased. Delegates to `init(deserializing:)` (6a-i).
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
@@ -484,4 +497,8 @@ extension RandomIndexingProvider: TrainableEmbeddingBasis {
 
     /// Maintained vocabulary size for the growth trigger.
     public var countsVocabularySize: Int { vocab.count }
+
+    public func countsContainsTerm(_ term: String) -> Bool {
+        vocab[term] != nil
+    }
 }

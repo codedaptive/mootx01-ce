@@ -1,6 +1,6 @@
 ---
 title: PersistenceKit Specification
-version: 1.9.0
+version: 1.10.0
 status: active
 date: 2026-07-20
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -847,6 +847,16 @@ Authority for the Package.swift / Cargo.toml addition:
 `the package-dependency rule`.
 
 ## Changelog
+
+### 1.10.0 -- 2026-07-20
+Cross-port parity fix (GLK shared-content 1.1 P4): the Rust SQLite
+backend now EXECUTES declared `SchemaDeclaration.migrations` operations
+(createTable/dropTable/addColumn/dropColumn/renameColumn/addIndex/
+dropIndex/custom) with the same forward-only, per-step version-recording
+semantics as the Swift backend — previously it silently ignored them, so
+declared retirements (e.g. the shared-content dropTable migration) never
+ran on Rust SQLite estates. Version recording is now upgrade-only
+(matching Swift); dropped tables leave the accumulated schema view.
 
 ### 1.9.0 -- 2026-07-20
 

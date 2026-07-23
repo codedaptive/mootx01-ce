@@ -16,6 +16,7 @@ import Foundation
 import ArgumentParser
 import AriaMCP
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -77,6 +78,8 @@ struct DrainCommand: AsyncParsableCommand {
         let handle: EstateHandle
         do {
             handle = try await kit.open(storage: storage, owner: owner)
+            _ = try await GLKMigrationCatalog.prepare(
+                kit: kit, handle: handle, now: Date())
             // Wire the semantic layer so the corpus + its lease-gated drain worker
             // mount; the worker drains the persisted queue (taking the T3 lease
             // unless a resident holds it). Idempotent on reopen.
