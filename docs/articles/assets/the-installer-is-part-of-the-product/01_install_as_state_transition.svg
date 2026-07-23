@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Installation as a state transition</title>
+  <desc id="desc">A flow from an existing machine through discovery and product-owned changes to a verified product state.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#475569"/></marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#111827" flood-opacity="0.13"/></filter>
+  </defs>
+  <rect width="1200" height="720" fill="#fbfaf7"/>
+  <text x="600" y="72" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="700" fill="#111827">Installation is a state transition</text>
+  <text x="600" y="114" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="22" fill="#4b5563">Success is the verified result, not the copied file.</text>
+
+  <rect x="70" y="230" width="250" height="250" rx="22" fill="#fff7ed" stroke="#fb923c" stroke-width="2" filter="url(#shadow)"/>
+  <text x="195" y="280" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="27" font-weight="700" fill="#7c2d12">Existing machine</text>
+  <text x="195" y="332" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#9a3412">older release</text>
+  <text x="195" y="366" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#9a3412">client config</text>
+  <text x="195" y="400" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#9a3412">user data</text>
+  <text x="195" y="434" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#9a3412">running services</text>
+
+  <path d="M320 355 L435 355" stroke="#475569" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="455" y="195" width="290" height="320" rx="22" fill="#eff6ff" stroke="#60a5fa" stroke-width="2" filter="url(#shadow)"/>
+  <text x="600" y="248" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="27" font-weight="700" fill="#1e3a8a">Installer work</text>
+  <rect x="510" y="288" width="180" height="42" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text x="600" y="315" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="700" fill="#1e40af">discover state</text>
+  <rect x="510" y="352" width="180" height="42" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text x="600" y="379" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="700" fill="#1e40af">classify ownership</text>
+  <rect x="510" y="416" width="180" height="42" rx="10" fill="#dbeafe" stroke="#93c5fd"/>
+  <text x="600" y="443" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="700" fill="#1e40af">change + verify</text>
+
+  <path d="M745 355 L860 355" stroke="#475569" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="880" y="230" width="250" height="250" rx="22" fill="#ecfdf5" stroke="#34d399" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1005" y="280" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="27" font-weight="700" fill="#065f46">Verified state</text>
+  <text x="1005" y="332" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#047857">one command</text>
+  <text x="1005" y="366" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#047857">one service owner</text>
+  <text x="1005" y="400" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#047857">client connects</text>
+  <text x="1005" y="434" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#047857">data preserved</text>
+
+  <rect x="290" y="585" width="620" height="62" rx="31" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="600" y="624" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="21" font-weight="700" fill="#334155">Inspect what exists → change what you own → prove the outcome</text>
+</svg>

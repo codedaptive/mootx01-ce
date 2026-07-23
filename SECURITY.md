@@ -79,6 +79,17 @@ being driven into bulk egress by a compromised agent, a bad
 configuration, or an accident. They are not a defense against someone
 who already owns the machine. Seatbelts, not armor plate.
 
+**Choose the local MCP transport that fits the deployment.** The default
+resident daemon listens on loopback so several clients can share one writer,
+background governor, and telemetry stream. Any process running as the same
+user can attempt to contact that local endpoint. `mootx01 install --no-daemon`
+writes direct `mootx01 serve` stdio entries instead, keeping MCP traffic on
+the parent client's process pipes under normal operation. A stdio process
+forwards to an already-running resident that owns the same estate, so stop or
+disable the old resident when the MCP requirement is no listening socket. The
+[direct stdio setup](docs/start-here/INSTALLING_MOOTX01.md#direct-stdio-for-a-tighter-local-transport)
+documents the exact configuration and checks.
+
 ## Verifying your binary
 
 This is open source. Anyone can build a version with the locks
@@ -159,14 +170,25 @@ bug bounty and no response-time guarantee.
 
 ## Current posture
 
-This project completed an independent external security review in
-July 2026. All findings, 108 across medium, low, and informational
-severities, have been remediated. The review covered the codebase
-at review time; the invariants above are design guarantees
-exercised continuously by the test suite.
+Security review is continuous. From June 25 through July 22, 2026,
+the project ran repeated independent adversarial review, remediation,
+cross-port verification, and current-head revalidation across the EE,
+CE, and public SDK repositories.
+
+The combined remediation record contains **537 security findings**:
+281 from the pre-reset EE campaign and 256 fixed findings from the
+retained post-reset archive. The count does not multiply dual-port
+fixes or EE-to-CE backports.
+
+The full public count, process, and commit record is in the
+[continuous security review audit](docs/validation/audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md).
+Its [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+names every issue and the EE fix, workstream-closing commit, or public
+CE delivery commit that closed it.
+The review covers the codebase at each reviewed commit; the invariants
+above remain design guarantees exercised continuously by the test
+suite.
 
 ## Supported versions
 
 Only the tip of `stable/1.0.x` (the default branch) is supported.
-
-

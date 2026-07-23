@@ -610,7 +610,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --grant-permissions     Write EVERY tool to permissions.allow (full auto-approval). Default is tiered: diagnostics allow, reads/writes ask, destructive deny.\n\
             \x20 --no-permissions        Do not write tool permissions at all (skips the tiered default).\n\
             \x20 --no-mgr                Skip registering the moot-mgr management console as a background service.\n\
-            \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background service.\n\
+            \x20 --no-daemon             Wire clients directly to `mootx01 serve` over stdio and skip registering the resident HTTP daemon. Stop an existing resident for socket-free MCP operation.\n\
             \x20 --vault-on              Enable Vault MCP tools (moot_vault_*). Default behavior: vault is on when neither flag is specified.\n\
             \x20 --vault-off             Hide Vault MCP tools from the MCP surface. Disables import/export for a more secure install position.\n\
             \x20 --reuse-db              When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).\n\

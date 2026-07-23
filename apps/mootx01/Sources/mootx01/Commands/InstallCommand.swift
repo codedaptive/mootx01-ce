@@ -38,7 +38,7 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
     var noManager: Bool = false
 
-    @Flag(name: .long, help: "Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background launchd service (macOS).")
+    @Flag(name: .long, help: "Use direct stdio client wiring (`mootx01 serve`) and skip registering the resident HTTP daemon as a background service. Stop an already-running resident for socket-free MCP operation.")
     var noDaemon: Bool = false
 
     @Flag(name: .long, help: "Enable Vault MCP tools (moot_vault_*): expose export/import/status/reconcile/job on the MCP surface. Default behavior when neither --vault-on nor --vault-off is specified.")
@@ -86,16 +86,23 @@ struct InstallCommand: AsyncParsableCommand {
         //   → --yes default (plugin, no prompt)
         //   → guided depth prompt (after the client picker, before apply)
         //   → default (plugin) when the prompt is non-interactive.
-        let depth: InstallDepth
+        let requestedDepth: InstallDepth
         if let mode {
             guard let parsed = InstallDepth(modeFlag: mode) else {
                 throw ValidationError("--mode must be 'server', 'skills', or 'plugin' (got '\(mode)').")
             }
-            depth = parsed
+            requestedDepth = parsed
         } else if yes {
-            depth = .default
+            requestedDepth = .default
         } else {
-            depth = AgentPicker.pickDepth()
+            requestedDepth = AgentPicker.pickDepth()
+        }
+        // A plugin can own its own MCP connection and route through the resident
+        // daemon. Direct stdio installs therefore stop at the skills ceiling;
+        // the client config written below remains the connection owner.
+        let depth: InstallDepth = noDaemon && requestedDepth == .plugin ? .skills : requestedDepth
+        if noDaemon && requestedDepth == .plugin {
+            print("Direct stdio requested: using skills depth instead of a connection-owning plugin.")
         }
 
         // Place the binary and use its installed absolute path as the config
@@ -150,7 +157,8 @@ struct InstallCommand: AsyncParsableCommand {
             // enabledPlugins map), and an installed-but-disabled plugin
             // does not own the connection. Skipping/removing the direct
             // entry in that state would leave the client with nothing.
-            if let pluginID = pluginOwnedClients[client.id],
+            if !noDaemon,
+               let pluginID = pluginOwnedClients[client.id],
                PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
                 // The plugin is the preferred connection owner (§1): still
                 // place the binary/daemon (done above, unconditionally) but
@@ -198,7 +206,9 @@ struct InstallCommand: AsyncParsableCommand {
                     daemonURL: MootPaths.residentEndpointURL,
                     homeDirectory: home,
                     workingDirectory: cwd,
-                    local: local
+                    local: local,
+                    directStdio: noDaemon,
+                    vaultOff: vaultOff
                 )
                 installed.append(client.displayName)
             } catch {

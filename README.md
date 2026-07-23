@@ -210,6 +210,37 @@ By default:
 
 Both are loopback addresses. They are meant for your own machine, not the public internet. For security they will reject connection from other devices.
 
+#### If you want a more secure local setup
+
+Use direct stdio when one AI client should launch its own MOOTx01 subprocess
+instead of connecting to the resident HTTP listener:
+
+```bash
+mootx01 install --target codex --mode server --no-daemon --vault-off
+```
+
+For Codex, this writes a command entry to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.mootx01]
+command = "/absolute/path/to/mootx01"
+args = ["serve"]
+env = { MOOTX01_HTTP_PORT = "", MOOTX01_VAULT = "0" }
+```
+
+Direct stdio normally limits the MCP transport to the parent client's process
+pipes. Clearing `MOOTX01_HTTP_PORT` prevents an inherited shell setting from
+turning that child back into an HTTP server. `mootx01 serve` will, however, forward to a resident daemon over
+localhost when that daemon already owns the same estate. Stop or disable the
+existing resident service first if you require socket-free MCP operation, then
+restart the AI client and confirm its MOOTx01 entry contains `command` and
+`args`, not `url`.
+
+This mode gives up the shared resident's background governor, central
+telemetry, and `moot-mgr` visibility. See
+[`INSTALLING_MOOTX01.md`](docs/start-here/INSTALLING_MOOTX01.md#direct-stdio-for-a-tighter-local-transport)
+for service-stop and verification steps.
+
 ### 3 · Verify it
 
 ```bash
@@ -367,6 +398,13 @@ Neither port leads. Both must agree bit for bit.
 ## Security
 
 Security-relevant changes go through an independent adversarial review before merge, verified against the live code and gated on that pass.
+Users who prefer process-pipe MCP transport can install in
+[direct stdio mode](#if-you-want-a-more-secure-local-setup) instead of keeping
+the resident HTTP listener.
+The [continuous security review record](docs/validation/audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md)
+documents **537 remediated security finding records** from June 25 through
+July 22, 2026. The linked [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+names every issue and its fix or closing commit.
 
 ## Roadmap
 

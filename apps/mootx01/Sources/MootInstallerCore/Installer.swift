@@ -440,7 +440,9 @@ public enum Installer {
         daemonURL: String,
         homeDirectory: URL,
         workingDirectory: URL,
-        local: Bool
+        local: Bool,
+        directStdio: Bool = false,
+        vaultOff: Bool = false
     ) throws {
         let configURL = resolveConfigURL(
             client: client,
@@ -458,17 +460,21 @@ public enum Installer {
             try installContinue(
                 configURL: configURL,
                 binaryPath: binaryPath,
-                httpURL: client.supportsLocalHTTP ? daemonURL : nil
+                httpURL: !directStdio && client.supportsLocalHTTP ? daemonURL : nil,
+                vaultOff: vaultOff
             )
         } else {
             // HTTP, proxy-bridge, and headless-stdio entry shapes are determined
             // by the client's transport flags; mergeIntoJSONConfig selects the
             // correct shape and writes the config atomically.
-            if client.isHeadlessStdio {
-                // Headless stdio mode: the client spawns an ephemeral serve process
-                // rather than routing through the resident daemon. No telemetry,
-                // no moot-mgr monitoring, no single-writer guarantee.
-                print("  ⚠︎  \(client.displayName): lightweight headless mode — statistics and monitoring are not available in this configuration.")
+            if directStdio {
+                // Direct stdio mode: the client spawns an ephemeral serve process
+                // rather than targeting a resident HTTP endpoint. If an existing
+                // resident owns the same estate, `serve` deliberately forwards to
+                // it over loopback instead of opening a second writer.
+                print("  ⓘ \(client.displayName): direct stdio mode — no resident service will be registered; stop any existing resident for socket-free MCP operation.")
+            } else if client.isHeadlessStdio {
+                print("  ⚠︎ \(client.displayName): lightweight headless mode — statistics and monitoring are not available in this configuration.")
             }
             // Dispatch on the config file format. Writing a JSON body into a
             // non-JSON config silently corrupts it (this is what broke Codex,
@@ -481,14 +487,18 @@ public enum Installer {
                     at: configURL,
                     client: client,
                     binaryPath: binaryPath,
-                    daemonURL: daemonURL
+                    daemonURL: daemonURL,
+                    directStdio: directStdio,
+                    vaultOff: vaultOff
                 )
             case "json", "jsonc":
                 try mergeIntoJSONConfig(
                     at: configURL,
                     client: client,
                     binaryPath: binaryPath,
-                    daemonURL: daemonURL
+                    daemonURL: daemonURL,
+                    directStdio: directStdio,
+                    vaultOff: vaultOff
                 )
             default:
                 if client.id == "hermes" {
@@ -499,7 +509,8 @@ public enum Installer {
                         at: configURL,
                         serverName: client.serverName,
                         binaryPath: binaryPath,
-                        url: client.supportsLocalHTTP ? daemonURL : nil
+                        url: !directStdio && client.supportsLocalHTTP ? daemonURL : nil,
+                        vaultOff: vaultOff
                     )
                 } else {
                     // Unknown non-JSON, non-TOML config. Refuse loudly instead
@@ -735,16 +746,36 @@ public enum Installer {
         at configURL: URL,
         client: MCPClient,
         binaryPath: String,
-        daemonURL: String
+        daemonURL: String,
+        directStdio: Bool = false,
+        vaultOff: Bool = false
     ) throws {
         let entry: [String: Any]
-        if client.id == "opencode" && client.supportsLocalHTTP {
+        var stdioEnvironment = ["MOOTX01_HTTP_PORT": ""]
+        if vaultOff {
+            stdioEnvironment["MOOTX01_VAULT"] = "0"
+        }
+        if directStdio && client.id == "opencode" {
+            // OpenCode's local MCP schema uses a command array and
+            // `environment`, rather than the standard command/args/env shape.
+            var local: [String: Any] = [
+                "type": "local",
+                "command": [binaryPath, "serve"],
+            ]
+            local["environment"] = stdioEnvironment
+            entry = local
+        } else if directStdio {
+            entry = [
+                "command": binaryPath,
+                "args": ["serve"],
+                "env": stdioEnvironment,
+            ]
+        } else if client.id == "opencode" && client.supportsLocalHTTP {
             // Schema-verified (https://opencode.ai/config.json, McpRemoteConfig):
             // remote servers are { "type": "remote", "url": … } under the
             // top-level "mcp" key — not the mcpServers/"http" convention.
-            // The fixed loopback endpoint is the accepted CE posture (see
-            // docs(secfix/ce-loopback-impersonation)); endpoint auth lands
-            // with EE v1.1 off-localhost hosting.
+            // This is OpenCode's default shared-resident path. The direct stdio
+            // override is handled above with its documented local schema.
             entry = ["type": "remote", "url": daemonURL]
         } else if client.supportsLocalHTTP {
             entry = client.httpEntryIncludesType
@@ -825,7 +856,7 @@ public enum Installer {
     /// The entry shape follows the same transport logic as the JSON writer:
     ///   - supportsLocalHTTP → `url = "<daemonURL>"`
     ///   - useProxyBridge    → `command = "<proxySymlinkPath>"` (bare, no args)
-    ///   - headless stdio    → `command`/`args = []`
+    ///   - direct stdio      → `command`/`args = ["serve"]`
     ///
     /// - Throws: `InstallerError.malformedConfig` if the existing file contains
     ///   a JSON object (the signature of a prior broken install that wrote JSON
@@ -834,11 +865,21 @@ public enum Installer {
         at configURL: URL,
         client: MCPClient,
         binaryPath: String,
-        daemonURL: String
+        daemonURL: String,
+        directStdio: Bool = false,
+        vaultOff: Bool = false
     ) throws {
         let header = "[mcp_servers.\(client.serverName)]"
         var block = [header]
-        if client.supportsLocalHTTP {
+        if directStdio {
+            block.append("command = \"\(binaryPath)\"")
+            block.append("args = [\"serve\"]")
+            if vaultOff {
+                block.append("env = { MOOTX01_HTTP_PORT = \"\", MOOTX01_VAULT = \"0\" }")
+            } else {
+                block.append("env = { MOOTX01_HTTP_PORT = \"\" }")
+            }
+        } else if client.supportsLocalHTTP {
             block.append("url = \"\(daemonURL)\"")
         } else if client.useProxyBridge {
             // Same proxy-symlink rationale as mergeIntoJSONConfig: bare command
@@ -987,13 +1028,14 @@ public enum Installer {
     ///
     /// When `url` is non-nil the entry is written as a URL entry
     /// (`url: <url>`). When `url` is nil a command entry is written
-    /// (`command: <binaryPath>\nargs: []`) to avoid trusting a fixed
+    /// (`command: <binaryPath>\nargs: ["serve"]`) to avoid a fixed
     /// unauthenticated loopback address.
     public static func mergeIntoHermesYAML(
         at configURL: URL,
         serverName: String,
         binaryPath: String,
-        url: String?
+        url: String?,
+        vaultOff: Bool = false
     ) throws {
         let existing: String
         if FileManager.default.fileExists(atPath: configURL.path) {
@@ -1010,11 +1052,15 @@ public enum Installer {
         } else {
             existing = ""
         }
-        let block: String
+        var block: String
         if let url {
             block = "  \(serverName):\n    url: \(url)"
         } else {
-            block = "  \(serverName):\n    command: \(binaryPath)\n    args: []"
+            block = "  \(serverName):\n    command: \(binaryPath)\n    args: [\"serve\"]"
+            block += "\n    env:\n      MOOTX01_HTTP_PORT: \"\""
+            if vaultOff {
+                block += "\n      MOOTX01_VAULT: \"0\""
+            }
         }
         let merged = try replacingHermesBlock(
             in: existing,
@@ -1242,7 +1288,12 @@ public enum Installer {
 
     // MARK: - Continue YAML helper
 
-    private static func installContinue(configURL: URL, binaryPath: String, httpURL: String?) throws {
+    private static func installContinue(
+        configURL: URL,
+        binaryPath: String,
+        httpURL: String?,
+        vaultOff: Bool = false
+    ) throws {
         let dir = configURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // Continue expects a minimal YAML structure for each MCP server config.
@@ -1251,11 +1302,15 @@ public enum Installer {
         // the format is stable per Continue docs.
         // Trailing newline: POSIX text hygiene, and byte-conformance with the
         // Rust vertical's write_continue_yaml.
-        let yaml: String
+        var yaml: String
         if let httpURL {
             yaml = "type: streamable-http\nurl: \(httpURL)\n"
         } else {
-            yaml = "command: \(binaryPath)\nargs: []\n"
+            yaml = "command: \(binaryPath)\nargs: [\"serve\"]\n"
+            yaml += "env:\n  MOOTX01_HTTP_PORT: \"\"\n"
+            if vaultOff {
+                yaml += "  MOOTX01_VAULT: \"0\"\n"
+            }
         }
         try yaml.write(to: configURL, atomically: true, encoding: .utf8)
     }

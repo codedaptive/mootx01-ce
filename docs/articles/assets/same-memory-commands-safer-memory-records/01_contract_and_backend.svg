@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Stable memory contract and replaceable backend</title>
+  <desc id="desc">Claude uses a file-shaped memory contract while the application maps requests to storage and record semantics it controls.</desc>
+  <defs><marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#475569"/></marker></defs>
+  <rect width="1200" height="720" fill="#fbfaf7"/>
+  <text x="600" y="70" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="700" fill="#111827">Keep the contract stable. Improve the record.</text>
+  <text x="600" y="112" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="22" fill="#4b5563">The model asks for file operations; the application chooses what they mean in storage.</text>
+
+  <rect x="70" y="205" width="310" height="350" rx="24" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+  <text x="225" y="257" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="29" font-weight="700" fill="#312e81">Agent contract</text>
+  <text x="225" y="300" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#4338ca">tool: memory</text>
+  <text x="225" y="332" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#4338ca">root: /memories</text>
+  <rect x="115" y="370" width="220" height="48" rx="10" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text x="225" y="401" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="700" fill="#3730a3">view • create • edit</text>
+  <rect x="115" y="438" width="220" height="48" rx="10" fill="#e0e7ff" stroke="#a5b4fc"/>
+  <text x="225" y="469" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="700" fill="#3730a3">insert • delete • rename</text>
+  <text x="225" y="526" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" fill="#4338ca">file-like responses</text>
+
+  <path d="M380 380 L490 380" stroke="#475569" stroke-width="4" marker-end="url(#arrow)"/>
+  <text x="435" y="356" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="16" fill="#475569">handler</text>
+
+  <rect x="510" y="165" width="620" height="430" rx="26" fill="#ecfdf5" stroke="#34d399" stroke-width="2"/>
+  <text x="820" y="220" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="29" font-weight="700" fill="#065f46">Application-controlled backend</text>
+  <text x="820" y="259" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#047857">Map the virtual path to storage you own.</text>
+
+  <rect x="560" y="305" width="230" height="190" rx="18" fill="#ffffff" stroke="#86efac" stroke-width="2"/>
+  <text x="675" y="348" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="700" fill="#065f46">Storage choice</text>
+  <text x="675" y="393" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" fill="#047857">local files</text>
+  <text x="675" y="425" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" fill="#047857">database records</text>
+  <text x="675" y="457" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" fill="#047857">per-user keys</text>
+
+  <rect x="850" y="305" width="230" height="190" rx="18" fill="#ffffff" stroke="#86efac" stroke-width="2"/>
+  <text x="965" y="348" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="700" fill="#065f46">Record choice</text>
+  <text x="965" y="393" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" fill="#047857">provenance</text>
+  <text x="965" y="425" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" fill="#047857">confirmation</text>
+  <text x="965" y="457" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" fill="#047857">lineage + withdrawal</text>
+
+  <text x="600" y="660" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="700" fill="#334155">Compatibility belongs at the handle; governance belongs behind it.</text>
+</svg>
