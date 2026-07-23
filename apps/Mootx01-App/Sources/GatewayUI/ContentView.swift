@@ -73,12 +73,16 @@ public struct ContentView: View {
         // First-run onboarding overlay — dismissed once, never shown again.
         // iOS: fullScreenCover for immersive first-run (hides tab bar).
         // macOS: sheet (fullScreenCover unavailable on macOS).
+        // interactiveDismissDisabled prevents the iOS pull-down gesture from
+        // snap-back-dismissing the cover with set:{_ in}, which would leave
+        // hasCompletedOnboarding false and immediately re-present the cover.
         #if os(iOS)
         .fullScreenCover(isPresented: Binding(
             get: { !model.hasCompletedOnboarding },
             set: { _ in }
         )) {
             OnboardingView(model: model)
+                .interactiveDismissDisabled(true)
         }
         #else
         .sheet(isPresented: Binding(
@@ -86,6 +90,7 @@ public struct ContentView: View {
             set: { _ in }
         )) {
             OnboardingView(model: model)
+                .interactiveDismissDisabled(true)
         }
         #endif
         // A5: route inbound mootx01://x-callback-url/<verb>?… through MootURLRouter.
