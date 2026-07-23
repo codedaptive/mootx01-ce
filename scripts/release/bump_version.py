@@ -9,7 +9,7 @@ replacement, never re-serialization — the embedded copies must stay byte-ident
 to what the packager produces), then runs verify_version.py as the gate.
 
   python3 scripts/release/bump_version.py 1.0.32
-  python3 scripts/release/bump_version.py 1.0.32 --date 2026-07-20
+  python3 scripts/release/bump_version.py 1.1.0-beta-03 --date 2026-07-23
 
 It REFUSES to run unless the tree is already consistent at the current version
 (verify_version passes first), so it can never compound an existing drift.
@@ -50,7 +50,9 @@ PLUGIN_MANIFESTS = [
     "distribution/plugin/gemini-extension.json",
 ]
 
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+VERSION_RE = re.compile(
+    r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 def rd(rel: str) -> str:
@@ -111,13 +113,16 @@ def run_verify(version: str) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Coordinated CE release version bump.")
-    ap.add_argument("new_version", help="target version, e.g. 1.0.32")
+    ap.add_argument(
+        "new_version",
+        help="target SemVer, e.g. 1.0.32 or 1.1.0-beta-03",
+    )
     ap.add_argument("--date", help="release date YYYY-MM-DD (default: today)")
     args = ap.parse_args()
 
     new = args.new_version
     if not VERSION_RE.match(new):
-        raise SystemExit(f"bump: {new!r} is not a MAJOR.MINOR.PATCH version")
+        raise SystemExit(f"bump: {new!r} is not a supported SemVer")
     new_date = args.date or datetime.date.today().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", new_date):
         raise SystemExit(f"bump: {new_date!r} is not an ISO date (YYYY-MM-DD)")

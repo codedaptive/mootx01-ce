@@ -1,21 +1,27 @@
 # Changelog
 
 All notable code changes to MOOTx01 are recorded here. Versions follow
-`VERSIONING.md`: semantic `MAJOR.MINOR.PATCH`, pre-release builds tagged with a
-qualifier (`v1.0.1-beta`). The version constant tracks the semantic version;
-the tag carries the pre-release qualifier.
+`VERSIONING.md`: stable releases use `MAJOR.MINOR.PATCH`; the active 1.1
+development line uses the explicit SemVer pre-release
+`1.1.0-beta-YY`.
 
-## develop/1.1.x — fast-moving 1.1 beta
+## 1.1.0-beta-03 — develop/1.1.x
 
 This branch is the source beta for 1.1 feature updates. It changes continuously
-and is identified by commit rather than a release tag. Stable installers and
-the public marketplace plugin continue to track the supported 1.0 line until
-1.1 work is promoted through candidate and stable.
+and the exact code under test is identified by version plus commit. `03` is the
+three-push history of `candidate/1.1.x`: its creation push on 2026-07-15 and
+two subsequent pushes on 2026-07-20. Stable installers and the public
+marketplace plugin continue to track the supported 1.0 line until 1.1 work is
+promoted through candidate and stable.
 
 Current development themes include the native MOOTx01-App, CorpusKit
 shared-content architecture, Apple surfaces and on-demand federation, and the
 foundation for continuous Obsidian synchronization. Individual entries and
 feature guides distinguish implemented behavior from planned work.
+
+The Swift and Rust upgrade comparators now honor SemVer pre-release precedence,
+so `1.1.0` is correctly offered as newer than `1.1.0-beta-03`, and later beta
+sequence values sort after earlier ones.
 
 ## v1.0.33 — 2026-07-16
 

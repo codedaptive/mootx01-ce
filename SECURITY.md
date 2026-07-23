@@ -182,6 +182,7 @@ suite.
 
 The supported production line is the tip of `stable/1.0.x`.
 
-`develop/1.1.x` is the fast-moving 1.1 beta. It receives continuous review and
-regression testing, but it is not a supported release and may change between
-commits. Reports against the beta must name the tested commit.
+`develop/1.1.x` is the fast-moving `1.1.0-beta-03` line. It receives
+continuous review and regression testing, but it is not a supported release
+and may change between commits. Reports against the beta must name the version
+and tested commit.

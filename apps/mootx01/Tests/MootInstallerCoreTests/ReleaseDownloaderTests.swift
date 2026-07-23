@@ -100,6 +100,30 @@ struct ReleaseDownloaderTests {
         #expect(tag == "v1.1.0", "Should return the raw tag when a newer version exists")
     }
 
+    /// A stable release outranks a beta with the same numeric core.
+    @Test func latestStableTagOutranksCurrentBeta() async throws {
+        let json = #"{"tag_name":"v1.1.0","name":"Release v1.1.0"}"#
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.1.0-beta-03",
+            fetchData: mockFetch([ok(apiURL, json)]))
+
+        let tag = try await downloader.latestTag()
+        #expect(tag == "v1.1.0")
+    }
+
+    /// The zero-padded beta sequence remains ordered before the stable release.
+    @Test func laterBetaSequenceOutranksEarlierBeta() async throws {
+        let json = #"{"tag_name":"1.1.0-beta-04","name":"Beta 04"}"#
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.1.0-beta-03",
+            fetchData: mockFetch([ok(apiURL, json)]))
+
+        let tag = try await downloader.latestTag()
+        #expect(tag == "1.1.0-beta-04")
+    }
+
     // MARK: download — checksum verification
 
     /// When the downloaded asset's SHA-256 does not match checksums.txt, download()

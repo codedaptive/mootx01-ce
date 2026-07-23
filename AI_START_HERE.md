@@ -4,13 +4,14 @@ You are an AI assistant encountering the MOOTx01 CE repository for the first tim
 
 ## Branch channel
 
-This checkout is `develop/1.1.x`, the fast-moving source beta for 1.1 feature
-updates. Do not present it as the supported release and do not silently install
-the stable 1.0 binary when the user asked to test this branch.
+This checkout is `develop/1.1.x`, currently versioned `1.1.0-beta-03`. It is
+the fast-moving beta for 1.1 feature updates. Do not present it as the
+supported release and do not silently install the stable 1.0 binary when the
+user asked to test this branch.
 
 - For normal product installation, use the latest stable 1.0 release.
-- For 1.1 beta evaluation, build the checked-out source and identify the tested
-  commit.
+- For 1.1 beta evaluation, build the checked-out source and identify both
+  `1.1.0-beta-03` and the tested commit.
 - Treat 1.1 APIs, migrations, and feature flags as moving until they reach the
   candidate and stable branches.
 - The plugin files in this checkout are development artifacts; the public

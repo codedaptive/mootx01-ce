@@ -13,7 +13,7 @@
 [![Homebrew](https://img.shields.io/badge/Homebrew-codedaptive%2Fmootx01--ce-FBB040?logo=homebrew&logoColor=white)](https://github.com/codedaptive/homebrew-mootx01-ce)
 [![Linux](https://img.shields.io/badge/Linux-x86__64%20·%20aarch64-FCC624?logo=linux&logoColor=black)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 [![SDKs](https://img.shields.io/badge/SDKs-4%20Apache--2.0%20library%20repos-8A2BE2)](#developer-sdks)
-![channel](https://img.shields.io/badge/channel-1.1%20development%20beta-orange)
+![channel](https://img.shields.io/badge/channel-1.1.0--beta--03-orange)
 ![signed](https://img.shields.io/badge/releases-minisign%20signed-success)
 ![platforms](https://img.shields.io/badge/platforms-Apple%20Silicon%20·%20PC%2FLinux-blue)
 ![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
@@ -23,17 +23,20 @@
 > Every release asset ships with a minisign-signed `checksums.txt` so you can
 > verify what you install.
 
-> **Branch channel:** `develop/1.1.x` is the fast-moving source beta for 1.1
-> feature work. It is not the supported production release. The installers and
-> `releases/latest` links below install the current stable 1.0 line; use a source
-> build from this checkout to exercise 1.1 work in progress.
+> **Branch channel:** `develop/1.1.x` is currently versioned
+> `1.1.0-beta-03`. It is the fast-moving beta for 1.1 feature work, not the
+> supported production release. The installers and `releases/latest` links
+> below install the current stable 1.0 line; use a source build from this
+> checkout to exercise 1.1 work in progress.
 
 ## 1.1 development beta
 
 This branch is where compatible 1.1 capabilities land and are qualified before
 promotion. It moves continuously: APIs, migrations, documentation, and feature
-flags can change between commits. Pin the commit you test, use a disposable or
-backed-up estate, and report the commit with every beta issue.
+flags can change between commits. `beta-03` records the three pushes made to
+`candidate/1.1.x` since that branch was created. Pin the commit you test, use a
+disposable or backed-up estate, and report the version and commit with every
+beta issue.
 
 Current 1.1 work includes the native MOOTx01-App, CorpusKit shared-content
 architecture, Apple surfaces and on-demand federation, and the foundation for

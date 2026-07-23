@@ -1,4 +1,4 @@
-# Candidate — test builds from candidate/1.0.x, published as GitHub pre-releases.
+# Candidate — test builds from candidate/1.1.x, published as GitHub pre-releases.
 #
 # Branch model: develop (default, active work) → candidate (this: test builds /
 # pre-release) → stable (last-known-good; release tags cut from there).
@@ -19,17 +19,17 @@
 # because the key is absent).
 #
 # Testers install a candidate with the pre-release tag:
-#   MOOTX01_VERSION=1.0.10-prerelease.42 sh install.sh
+#   MOOTX01_VERSION=1.1.0-beta-03 sh install.sh
 # (the normal `releases/latest` path deliberately skips pre-releases).
 
 name: candidate
 
 on:
   push:
-    branches: ["candidate/1.0.x"]
+    branches: ["candidate/1.1.x"]
   schedule:
     # Weekly build, Monday 09:00 UTC. Scheduled runs fire from the DEFAULT
-    # branch (develop), so every job pins `ref: candidate/1.0.x` to build the
+    # branch (develop), so every job pins `ref: candidate/1.1.x` to build the
     # candidate line regardless of what triggered the run.
     - cron: "0 9 * * 1"
   workflow_dispatch:
@@ -48,48 +48,44 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      commit: ${{ steps.v.outputs.commit }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Source version constant (matches Swift Mootx01.currentVersion).
           version="$(grep -m1 '^version = ' apps/mootx01/rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
-          # Supply-chain guard: reject version strings that aren't strict
-          # semver. A crafted Cargo.toml version containing shell metacharacters
-          # would be interpolated into later run blocks while the signing
-          # keychain is unlocked. Fail the job before any signing step.
-          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
-            echo "ERROR: version '$version' is not valid semver — aborting" >&2
+          commit="$(git rev-parse HEAD)"
+          # The 1.1 candidate train uses the source beta version verbatim.
+          # beta-01 was the branch-creation push; every later candidate push
+          # increments the zero-padded sequence before promotion.
+          if ! echo "$version" | grep -qE '^1\.1\.0-beta-[0-9]{2,}$'; then
+            echo "ERROR: version '$version' is not a 1.1.0-beta-YY version — aborting" >&2
             exit 1
           fi
-          # The tag previews the NEXT patch release. The tree's version
-          # constant equals the last SHIPPED release between bumps, so a
-          # candidate built from it contains post-<version> work: stamping it
-          # <version>-prerelease.N reads as if it predates the release it
-          # follows (and sorts that way under semver). <next>-prerelease.N
-          # sorts correctly before the upcoming <next> tag. Known edge: in the
-          # short window after a release bump lands on this branch but before
-          # its tag is cut, candidates stamp one patch high — harmless for
-          # test builds. `version` (unbumped) stays the assertion target for
-          # install-verify: the built binary prints the SOURCE version.
-          #
-          # Tag carries NO leading v on purpose — a v* tag would trigger
-          # release.yml and a signed public release. The `-prerelease` suffix
-          # (with the `-`) is what the installers key on to skip their
-          # v-normalization, so it installs as-is.
-          # Bump from the bare numeric triple — the guard above also admits
-          # -suffixed semver, where naive last-dot splitting grabs the wrong
-          # field.
-          base="${version%%-*}"
-          patch="${base##*.}"
-          next="${base%.*}.$((patch + 1))"
-          tag="${next}-prerelease.${{ github.run_number }}"
+          # No leading v: v* is reserved for the signed production pipeline.
+          # Keeping tag and source version identical lets installer verification
+          # prove the exact beta value printed by both binaries.
+          tag="$version"
+          # A repeated run for the same candidate commit is allowed. Reusing a
+          # beta tag for a different commit means YY was not incremented before
+          # the next candidate push, so fail before building or signing.
+          if release="$(gh api "repos/${{ github.repository }}/releases/tags/${tag}" 2>/dev/null)"; then
+            target="$(echo "$release" | jq -r '.target_commitish')"
+            if [ "$target" != "$commit" ]; then
+              echo "ERROR: candidate tag '$tag' already targets '$target'; increment beta-YY before another candidate push" >&2
+              exit 1
+            fi
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Candidate build: $tag (source version $version)"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Candidate build: $tag (source version $version, commit $commit)"
 
   # ── macOS builds (arm64 + x86_64) — signed best-effort ───────────────────────
   # Mirrors release.yml's signing pipeline when Apple Developer ID secrets are
@@ -106,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
@@ -311,7 +307,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Build
@@ -353,7 +349,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -400,7 +396,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - name: Download unsigned binaries
         # Places mootx01.exe + moot-mgr.exe at the workspace root (where the zip
@@ -496,7 +492,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -534,7 +530,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.meta.outputs.tag }}
         run: |
-          notes="Automated **candidate/test build** from \`candidate/1.0.x\` at \`${{ github.sha }}\`.
+          notes="Automated **candidate/test build** from \`candidate/1.1.x\` at \`${{ needs.meta.outputs.commit }}\`.
 
           NOT a release. macOS binaries and .pkg are Apple Developer ID signed and notarized when secrets are available. Linux and Windows binaries are unsigned. For testing only.
 
@@ -542,19 +538,28 @@ jobs:
           \`\`\`
           MOOTX01_VERSION=${TAG} sh install.sh
           \`\`\`"
-          gh release create "$TAG" \
-            --prerelease \
-            --title "Candidate ${TAG}" \
-            --notes "$notes" \
-            flat/*
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --prerelease \
+              --title "Candidate ${TAG}" \
+              --notes "$notes"
+            gh release upload "$TAG" flat/* --clobber
+          else
+            gh release create "$TAG" \
+              --target "${{ needs.meta.outputs.commit }}" \
+              --prerelease \
+              --title "Candidate ${TAG}" \
+              --notes "$notes" \
+              flat/*
+          fi
       - name: Prune to the last 4 candidate pre-releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Select our candidate pre-releases: prerelease + a `-prerelease.`
-          # tag. Keeps real releases (v1.0.10, v1.0.10-beta) untouched.
+          # Select this train's candidate pre-releases by its `-beta-YY` tag.
+          # Stable v* releases and the older `-prerelease.N` train are untouched.
           gh release list --limit 100 --json tagName,isPrerelease,createdAt \
-            --jq '[.[] | select(.isPrerelease and (.tagName|contains("-prerelease.")))]
+            --jq '[.[] | select(.isPrerelease and (.tagName|test("^1\\.1\\.0-beta-[0-9]+$")))]
                   | sort_by(.createdAt) | reverse | .[4:] | .[].tagName' \
           | while read -r old; do
               [ -n "$old" ] || continue
@@ -580,7 +585,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          ref: candidate/1.0.x
+          ref: candidate/1.1.x
           persist-credentials: false
       - name: install.sh against the published pre-release (sandbox HOME)
         env:

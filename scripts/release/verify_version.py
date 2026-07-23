@@ -12,6 +12,7 @@ Run before cutting a tag (and in CI). Exits non-zero on ANY disagreement.
 
   python3 scripts/release/verify_version.py            # infer version, check all
   python3 scripts/release/verify_version.py 1.0.31     # also assert it equals this
+  python3 scripts/release/verify_version.py 1.1.0-beta-03
 
 The authoritative version is the mootx01-cli package version in
 apps/mootx01/rust/Cargo.toml; every other site must match it.
@@ -25,10 +26,13 @@ from pathlib import Path
 # Repo root = two levels up from scripts/release/.
 ROOT = Path(__file__).resolve().parents[2]
 
-# 3-part version, but NOT a slice of a longer dotted number (e.g. the IP
-# 127.0.0.1 must not read as the version 127.0.0). Reject a match adjacent to
-# another digit or dot on either side.
-SEMVER = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])")
+# SemVer with an optional pre-release component, but NOT a slice of a longer
+# dotted number (e.g. the IP 127.0.0.1 must not read as version 127.0.0).
+SEMVER = re.compile(
+    r"(?<![\d.])\d+\.\d+\.\d+"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?![\d.])"
+)
 
 PLUGIN_MANIFESTS = [
     "distribution/plugin/.claude-plugin/plugin.json",
@@ -108,12 +112,18 @@ def main() -> None:
             errs.append(f"{rel}: version {v!r} != {expected!r}")
 
     readme = read("distribution/plugin/README.md")
-    m = re.search(r"Version\s+(\d+\.\d+\.\d+)", readme)
+    m = re.search(
+        r"Version\s+(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)",
+        readme,
+    )
     if not m or m.group(1) != expected:
         errs.append(f"plugin README version {m.group(1) if m else '?'!r} != {expected!r}")
 
     changelog = read("distribution/plugin/CHANGELOG.md")
-    m = re.search(r"##\s*\[(\d+\.\d+\.\d+)\]", changelog)
+    m = re.search(
+        r"##\s*\[(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)\]",
+        changelog,
+    )
     if not m or m.group(1) != expected:
         errs.append(f"plugin CHANGELOG heading {m.group(1) if m else '?'!r} != {expected!r}")
 

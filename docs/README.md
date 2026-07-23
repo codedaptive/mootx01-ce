@@ -1,9 +1,8 @@
 # MOOTx01 Documentation
 
-> **Channel:** this documentation is from `develop/1.1.x`, the fast-moving
-> source beta for 1.1 feature updates. Stable installers and the public plugin
-> continue to track the supported 1.0 line. Pin the commit when evaluating beta
-> behavior.
+> **Channel:** this documentation is from `develop/1.1.x`, currently
+> `1.1.0-beta-03`. Stable installers and the public plugin continue to track the
+> supported 1.0 line. Pin the beta version and commit when evaluating behavior.
 
 This directory holds every public-facing document for the MOOTx01
 substrate. The layout is organized by reader intent, not author

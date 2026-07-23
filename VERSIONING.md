@@ -1,5 +1,5 @@
 ---
-version: 1.3.0
+version: 1.4.0
 status: active
 date: 2026-07-23
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
@@ -63,17 +63,24 @@ The governing question: does the consumer have to do anything? If yes, it is a M
 
 ### 1.5 Pre-Release Designation
 
-The development channel and distributable artifact versions are distinct.
+The development channel carries an explicit SemVer pre-release version.
 
-- `develop/1.1.x` is described as the **1.1 development beta**. Its HEAD is
-  identified by commit, not by a release tag.
-- Candidate artifacts use `1.1.Z-prerelease.N`.
+- `develop/1.1.x` uses `1.1.0-beta-YY`.
+- `YY` is the zero-padded count of pushes to `candidate/1.1.x`, starting with
+  the branch-creation push as `01`. The field expands beyond two digits when
+  necessary.
+- The current value is `1.1.0-beta-03`: the creation push on 2026-07-15 plus
+  two later pushes on 2026-07-20.
+- CE and EE source, binary, plugin, and embedded-installer stamps use the same
+  beta version.
+- Candidate artifacts use the source version verbatim, without a leading `v`.
 - Release-candidate tags may use `v1.1.Z-rcN`.
 - Stable releases use `v1.1.Z`.
 
-The source version remains a strict `MAJOR.MINOR.PATCH` value for the release
-and plugin tooling. A branch label such as “1.1 beta” does not turn every
-development commit into a tagged release artifact.
+The exact commit still identifies the code under test between candidate
+promotions. Before the next push to `candidate/1.1.x`, increment `YY` once
+across both repositories and all generated artifacts so the pushed candidate,
+its tag, and both binaries report the same version.
 
 Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guarantee. mootx01 does not ship production releases under `0.x.y`. The first public release is `1.0.0`.
 
@@ -106,8 +113,9 @@ Per-branch automation:
 - **develop** — daily `make test` (regression backstop; runs only when develop
   moved that day). Not a build.
 - **candidate** — on every push, build all platforms UNSIGNED, publish a
-  GitHub pre-release tagged `X.Y.Z-prerelease.<run>`, then verify the installers
-  by installing that pre-release. No signing here.
+  GitHub pre-release tagged with the source beta version
+  (`X.Y.Z-beta-YY`), then verify the installers by installing that exact
+  pre-release. No signing here.
 - **stable** — no automation on push. Only a pushed `vX.Y.Z` tag triggers the
   signed, notarized release build.
 
@@ -139,7 +147,7 @@ develop/X.Y.x  --merge-->  candidate/X.Y.x  --merge-->  stable/X.Y.x
 1. Development lands on `develop/X.Y.x`.
 2. When preparing a release, `develop` is merged into `candidate`. That push
    automatically builds every platform and publishes an unsigned pre-release
-   (`X.Y.Z-prerelease.<run>`); CI then installs it via the product installers
+   (`X.Y.Z-beta-YY`); CI then installs it via the product installers
    to prove they work. Deeper hardware testing (e.g. the Windows VM harness)
    runs against that same pre-release before promotion.
 3. On a passing candidate, `candidate` is merged into `stable`. This does NOT
@@ -179,12 +187,12 @@ pre-release qualifier is allowed on a signed release when applicable
 a repository tag ruleset), since a `v*` tag creates a Codedaptive-signed
 release.
 
-Candidate pre-release tags are a **separate namespace**: `X.Y.Z-prerelease.<run>`
+Candidate pre-release tags are a **separate namespace**: `X.Y.Z-beta-YY`
 with **no leading `v`**. This is deliberate — a `v*` tag would trigger the
 signed release pipeline, so candidate builds must stay clear of it. The
 installers normalize a bare `X.Y.Z` to its `vX.Y.Z` tag but leave
-`-prerelease` tags untouched, so a candidate installs with
-`MOOTX01_VERSION=X.Y.Z-prerelease.<run>`.
+pre-release tags untouched, so a candidate installs with
+`MOOTX01_VERSION=X.Y.Z-beta-YY`.
 
 Tags are immutable. A tagged release is never altered. If a critical fix is
 required, a new PATCH tag is created.
@@ -288,6 +296,12 @@ Any mission that modifies a document governed by this standard must comply with 
 ---
 
 ## Changelog
+
+### 1.4.0 -- 2026-07-23
+Made the 1.1 development version explicit as `1.1.0-beta-YY`, defined `YY` as
+the `candidate/1.1.x` push count, synchronized the value across CE and EE
+product/plugin stamps, and made candidate artifact tags equal the source beta
+version.
 
 ### 1.3.0 -- 2026-07-23
 Defined `develop/X.Y.x` as the fast-moving source beta for its minor feature

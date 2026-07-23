@@ -374,19 +374,13 @@ public struct ReleaseDownloader: Sendable {
         }
     }
 
-    /// Compare two semver strings (e.g. "1.1.0" vs "1.0.0") component by component.
-    /// Returns true if `a` is strictly greater than `b`. Non-numeric components are
-    /// treated as 0.
+    /// Compare two SemVer strings, including pre-release precedence.
+    /// A stable version sorts after a beta with the same numeric core.
     private func isVersion(_ a: String, newerThan b: String) -> Bool {
-        let partsA = a.split(separator: ".").map { Int($0) ?? 0 }
-        let partsB = b.split(separator: ".").map { Int($0) ?? 0 }
-        let count  = max(partsA.count, partsB.count)
-        for i in 0..<count {
-            let va = i < partsA.count ? partsA[i] : 0
-            let vb = i < partsB.count ? partsB[i] : 0
-            if va != vb { return va > vb }
-        }
-        return false  // equal
+        guard let parsedA = ParsedSemanticVersion(a),
+              let parsedB = ParsedSemanticVersion(b)
+        else { return false }
+        return parsedA > parsedB
     }
 
     /// Platform OS token matching install.sh detect_os(): "macos" or "linux".
@@ -405,6 +399,95 @@ public struct ReleaseDownloader: Sendable {
         #else
         return "x86_64"
         #endif
+    }
+}
+
+private struct ParsedSemanticVersion: Comparable {
+    private enum PrereleaseIdentifier: Equatable {
+        case numeric(Int)
+        case text(String)
+    }
+
+    private let core: [Int]
+    private let prerelease: [PrereleaseIdentifier]?
+
+    init?(_ source: String) {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw = trimmed.hasPrefix("v") ? String(trimmed.dropFirst()) : trimmed
+        let versionParts = raw.split(
+            separator: "-",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        guard let coreText = versionParts.first, !coreText.isEmpty else { return nil }
+        let coreParts = coreText.split(separator: ".", omittingEmptySubsequences: false)
+        guard !coreParts.isEmpty, coreParts.count <= 3 else { return nil }
+
+        var parsedCore = [0, 0, 0]
+        for (index, part) in coreParts.enumerated() {
+            guard !part.isEmpty, part.allSatisfy(\.isNumber), let value = Int(part) else {
+                return nil
+            }
+            parsedCore[index] = value
+        }
+        core = parsedCore
+
+        if versionParts.count == 1 {
+            prerelease = nil
+            return
+        }
+
+        let identifiers = versionParts[1].split(
+            separator: ".",
+            omittingEmptySubsequences: false
+        )
+        guard !identifiers.isEmpty else { return nil }
+        var parsedIdentifiers: [PrereleaseIdentifier] = []
+        for identifier in identifiers {
+            guard !identifier.isEmpty,
+                  identifier.unicodeScalars.allSatisfy({
+                      (48...57).contains($0.value)
+                          || (65...90).contains($0.value)
+                          || (97...122).contains($0.value)
+                          || $0.value == 45
+                  })
+            else { return nil }
+            if identifier.allSatisfy(\.isNumber), let value = Int(identifier) {
+                parsedIdentifiers.append(.numeric(value))
+            } else {
+                parsedIdentifiers.append(.text(String(identifier)))
+            }
+        }
+        prerelease = parsedIdentifiers
+    }
+
+    static func < (lhs: Self, rhs: Self) -> Bool {
+        if lhs.core != rhs.core {
+            return lhs.core.lexicographicallyPrecedes(rhs.core)
+        }
+        switch (lhs.prerelease, rhs.prerelease) {
+        case (nil, nil):
+            return false
+        case (nil, .some(_)):
+            return false
+        case (.some(_), nil):
+            return true
+        case let (.some(lhsIDs), .some(rhsIDs)):
+            for (lhsID, rhsID) in zip(lhsIDs, rhsIDs) {
+                guard lhsID != rhsID else { continue }
+                switch (lhsID, rhsID) {
+                case let (.numeric(lhsValue), .numeric(rhsValue)):
+                    return lhsValue < rhsValue
+                case (.numeric, .text):
+                    return true
+                case (.text, .numeric):
+                    return false
+                case let (.text(lhsValue), .text(rhsValue)):
+                    return lhsValue < rhsValue
+                }
+            }
+            return lhsIDs.count < rhsIDs.count
+        }
     }
 }
 
