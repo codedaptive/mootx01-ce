@@ -457,12 +457,12 @@ mootx01/
 | [`SDK.MD`](SDK.MD) | The framework SDKs: four Apache-2.0 venues, what they give you, what the product adds |
 | [`apps/moot-agent-skills/PLUGIN.MD`](apps/moot-agent-skills/PLUGIN.MD) | Why the plugin install depth matters — server vs. skills vs. plugin |
 | [`docs/reference/PLUGIN_SPEC.md`](docs/reference/PLUGIN_SPEC.md) | Plugin distribution specification |
-| [`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md`](docs/reference/) | Authoritative substrate specification |
+| [`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md`](docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md) | Authoritative substrate specification |
 | [`EDITIONS.md`](EDITIONS.md) · [`LICENSING.md`](LICENSING.md) | Open core + commercial editions, in plain language |
 
 ## Standards
 
-Swift 6 strict concurrency · zero external Swift dependencies in kits (except sqlite-vec in PersistenceKit-SQLite) · raw SQLite via PersistenceKit, no Core Data · dates as TEXT/ISO8601 · no Bool stored properties on entities (bitmap fields) · Metal for GPU compute on Apple Silicon · every computation deterministic.
+Swift 6 strict concurrency · external dependencies declared per package (including swift-crypto, postgres-nio, swift-nio-ssl, and sqlite-vec where used) · raw SQLite via PersistenceKit, no Core Data · dates as TEXT/ISO8601 · no Bool stored properties on entities (bitmap fields) · Metal for GPU compute on Apple Silicon · every computation deterministic.
 
 ---
 

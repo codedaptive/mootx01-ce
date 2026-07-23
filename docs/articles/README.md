@@ -15,6 +15,10 @@ chapters through implementation evidence, public sources, and diagrams.
 4. [Security Boundaries Are Product Design](business/04-security-boundaries-are-product-design.md) ([technical edition](technical/04-security-boundaries-are-product-design.md))
 6. [Same Memory Commands. Safer Memory Records.](business/06-same-memory-commands-safer-memory-records.md) ([technical edition](technical/06-same-memory-commands-safer-memory-records.md))
 
+The numbering preserves the original publication sequence. Article 5 is
+reserved for a historical article that has not yet passed the current writing
+review; it will appear here only after that review.
+
 Only published articles that have passed the current writing review enter
 this repository. Historical publications receive the same review before
 they are added. The private editorial schedule, drafts, scorecards, and
