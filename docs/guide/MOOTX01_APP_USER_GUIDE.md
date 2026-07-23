@@ -1,6 +1,6 @@
 ---
 title: MOOTx01 — User Guide
-version: v0.4
+version: v0.5
 status: draft
 ---
 
@@ -30,13 +30,30 @@ called out.
 
 ---
 
+## First launch — what to expect
+
+The first time you open MOOTx01, a short guided walkthrough helps you save
+your first memory and retrieve it. It takes under a minute. You can also tap
+**Skip** to jump straight into the app.
+
+Once the walkthrough is complete it never appears again.
+
+---
+
 ## The app at a glance
 
-The app has these tabs:
+MOOTx01 uses two tab profiles:
 
-- **Capture** — file a new memory, and choose whether it's private or public.
+**Standard profile (default)** — everything a new user needs:
+
+- **Capture** — save a thought, note, or idea to your memory.
 - **Recall** — search your memories.
-- **Intelligence** — ask an on-device assistant that answers from your estate.
+- **Intelligence** — ask an on-device assistant that answers from your memories.
+- **Settings** — iCloud Sync switch and the Advanced Mode toggle (see below).
+
+**Advanced Mode** — adds engineering and power-user tabs. Turn it on in
+**Settings → Advanced Mode**:
+
 - **The Top** — your most relevant / recent memories.
 - **Apple Surfaces** — see how MOOTx01 shows up in Siri, Spotlight, and
   Shortcuts.
@@ -45,6 +62,9 @@ The app has these tabs:
 - **Miners** — optional automatic capture from Calendar and Contacts.
 - **Federation** — share selected memories with another Mootx01 estate on your
   local network, on demand, for a limited time.
+
+Advanced Mode persists across launches. You can switch back to Standard any
+time from **Settings**.
 
 ---
 
@@ -192,11 +212,13 @@ Sync requires two things:
    Sync is off by default — the app does nothing with iCloud until you
    enable the master switch in Settings.
 
-Once both conditions are met, open **Settings** and turn on the **iCloud Sync**
-switch in the Sync section. The setting persists across launches.
+Once both conditions are met, open the **Settings** tab and turn on the
+**iCloud Sync** switch. The setting persists across launches.
 
-On Mac, Settings opens from the app menu (⌘,). On iPhone and iPad, tap the
-gear icon in the Engine tab toolbar.
+- **Mac:** Settings also opens from the app menu (⌘,).
+- **iPhone / iPad (Standard profile):** tap the **Settings** tab.
+- **iPhone / iPad (Advanced profile):** tap the **Settings** tab or the gear
+  icon in the Engine tab toolbar — both control the same switch.
 
 ### What syncs — and what never leaves the machine
 
@@ -294,17 +316,18 @@ that persist across multiple beats are usually caused by a temporary CloudKit
 error — check iCloud status and your connection.
 
 **Sync not starting at all:** verify both conditions in "Before you begin"
-above, and confirm the **iCloud Sync** toggle in the Engine tab is turned on.
+above, and confirm the **iCloud Sync** toggle in the Settings tab is turned on.
 The app makes no iCloud calls — and shows no sync status — until both the
 build supports sync and the toggle is on.
 
 ### Turning iCloud Sync on or off
 
-Open **Settings** and find the **iCloud Sync** switch:
+Open the **Settings** tab and find the **iCloud Sync** switch:
 
-- **Mac:** choose Settings from the app menu (⌘,), or press Command-comma.
-- **iPhone / iPad:** tap the gear icon in the Engine tab toolbar, then look for
-  the Sync section.
+- **Mac:** Settings tab, or the app menu (⌘,).
+- **iPhone / iPad (Standard profile):** Settings tab.
+- **iPhone / iPad (Advanced profile):** Settings tab or the gear icon in the
+  Engine tab toolbar — both toggle the same switch.
 
 The change takes effect immediately — turning it off stops the sync engine and
 stops the app from forwarding push notifications to CloudKit; turning it on
