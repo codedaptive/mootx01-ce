@@ -119,7 +119,7 @@ smallest lane that proves the change:
 
 - `make test-one DIR=packages/libs/LatticeLib` runs the nearest owning Swift
   package, Rust crate, or Python package.
-- `make test-changed BASE=origin/develop/1.0.x` runs only changed owning roots.
+- `make test-changed BASE=origin/develop/1.1.x` runs only changed owning roots.
 - `make test` runs the fast core unit lane under `packages/`.
 - `make test-product`, `make test-validation`, and `make test-full` are explicit
   broader lanes. Use `make test-full` for the full regression backstop, not for
