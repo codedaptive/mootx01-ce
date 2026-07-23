@@ -364,6 +364,50 @@ Fail-closed for security: path traversal, vault containment violations,
 and pre-existing symlink detections all throw — the write is never
 performed silently.
 
+### Planned 1.1 resident automation
+
+The 1.1 product plan adds an optional resident control layer that automates
+eligible vault import, export, and resync. This does not become a new
+`VaultBridge` responsibility: the bridge remains a deterministic per-call
+adapter. The resident scheduler owns filesystem watching, estate-change
+observation, debounce/coalescing, retry, lifecycle, and operator status.
+
+The scheduler builds on the existing tool-layer manifest:
+
+- incremental sync handles ordinary eligible changes;
+- full resync re-hashes the vault at startup, after watcher overflow or a
+  detected event gap, on a periodic integrity cadence, and on explicit request;
+- deletion remains report-only;
+- a manifest advances only after the corresponding cycle succeeds;
+- failures and policy-blocked candidates remain visible to the operator.
+
+Automated mode is fail-closed and narrower than manual import/export:
+
+- outbound selection is limited to public/exportable content;
+- `.restricted` and `.secret` sensitivity tiers are always excluded;
+- private/non-exportable content is excluded;
+- inbound candidates marked private, restricted, or secret are rejected or
+  quarantined before `DrawerMapping.importNote`;
+- an existing restricted/secret lineage cannot be changed through the
+  automated vault path;
+- `.believedIncludingPrivate` is never a scheduler scope.
+
+Manual, explicit, authorization-gated operations remain the only path for an
+intentional private transfer. Secret content never rides bulk export.
+
+The product calls this **insecure mode** because eligible content is
+continuously projected into an ordinary filesystem vault whose permissions,
+backups, sync providers, and plugins sit outside MOOTx01's estate boundary.
+The label does not relax the automated data gate. Correct classification
+remains necessary: automation cannot protect private text incorrectly marked
+public/exportable and below the protected sensitivity tiers.
+
+The always-running scheduler requires the resident service. Direct-stdio
+processes are client-lifetime transports and do not own continuous vault
+maintenance. `moot-mgr` is the operator surface for configured path, watcher
+health, last successful cycle, resync reason, blocked-candidate counts, and
+failures.
+
 ## § 7 — Conformance requirements
 
 **C-1 (cross-port byte-identical canonical JSON):** `CorpusDocument.canonicalJSON()` /
@@ -419,6 +463,13 @@ fixture and the golden OKF round-trip fixture are asserted byte-identically
 in both ports.
 
 ## Changelog
+
+### v0.2 — 2026-07-23
+
+Documented the planned 1.1 resident vault scheduler: continuous eligible sync,
+full-resync triggers, manifest commit rules, `moot-mgr` observability, and the
+fail-closed automated-mode gate that excludes private/non-exportable,
+restricted, and secret content.
 
 ### v0.1 — 2026-07-16
 

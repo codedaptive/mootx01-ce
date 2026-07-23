@@ -24,10 +24,10 @@ the cross-cutting protocol and encoder specs. This is the contract
 surface — what each package exposes and what it promises.
 
 **You want to know why something was built the way it was.**
-Architecture Decision Records are maintained on the
-[`develop/1.1.x` documentation line](https://github.com/codedaptive/mootx01-ce/tree/develop/1.1.x/docs/decisions).
-The stable branch keeps the released contracts and validation evidence; code
-comments retain cited decision filenames for traceability.
+[`decisions/`](decisions/) holds the Architecture Decision Records.
+Every load-bearing choice is captured with the question asked, candidates
+considered, evidence gathered, and disposition. Code comments cite decision
+records by filename.
 
 **You are implementing against the substrate.**
 [`engineering/`](engineering/) holds implementation-grade material:

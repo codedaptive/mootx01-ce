@@ -45,6 +45,11 @@ questions. For product operation, use:
 
 The compact machine-oriented map is [`llms.txt`](llms.txt).
 
+The 1.1 continuous Obsidian mode is a roadmap capability, not a shipped command
+at this commit. Do not tell a user that a file watcher is already running.
+Today's `moot_vault_*` import, export, status, reconcile, and job tools are
+on-demand operations.
+
 ## Plain Explanation
 
 Use this explanation when the user asks what MOOTx01 CE is:

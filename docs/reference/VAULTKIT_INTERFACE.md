@@ -772,9 +772,11 @@ Note: the aria-mcp `moot_vault_*` Rust mirror is delivered (see the Vault identi
 ## Out of scope (later missions)
 
 CorpusKit RAG bundling; substrate-level origin-date and `SourceRef` primitive;
-attachment blob custody; the watched-source scheduler and the real
-QueueKit enqueue (leg a) + dream → Proposal → Debrief consumption (a later,
-separately-gated mission).
+attachment blob custody; the watched-source scheduler and the real QueueKit
+enqueue (leg a) + dream → Proposal → Debrief consumption. The watched-source
+scheduler is a planned 1.1 resident control-layer mission; it does not move
+into `VaultBridge`. See `VAULTKIT_SPEC.md` §6.4 for lifecycle and sensitivity
+requirements.
 
 ---
 
@@ -782,6 +784,7 @@ separately-gated mission).
 
 | Version | Date | Change |
 |---|---|---|
+| 1.14.0 | 2026-07-23 | Clarified that the watched-source scheduler is a planned 1.1 resident control-layer mission, not a `VaultBridge` responsibility; linked the lifecycle and automated sensitivity requirements in `VAULTKIT_SPEC.md`. |
 | 1.13.0 | 2026-07-16 | Concordance table: added two missing public Rust types re-exported at the `vault_kit` crate root. (1) `PalaceItemJobPayload` — the four-noun checkpoint-job payload struct (fields: `noun`, `source_id`, `body`, `call`); Swift-internal counterpart also documented. (2) `CheckpointQueue` — Rust-only dependency-free maildir-style filesystem queue that stands in for QueueKit on the Rust leg; public methods `mount`/`send`/`send_item`/`pending_jobs`/`read_job`/`read_item_job`/`complete` documented. Both types live in `vault_kit::palace_pump` and were re-exported via `lib.rs` but had no concordance rows. |
 | 1.12.0 | 2026-07-16 | Audit corrections: (1) `VaultExportScope` default corrected from `.believed` to `.exportable` (CAND-032 shipped before the doc was updated) — fixed in prose, enum annotation, MCP tool table, and both concordance rows (`VaultExportScope` Rust Default, `moot_vault_export` scope). (2) `VaultProgress` typealias added (Swift + Rust). (3) `VaultAdapter` protocol extended with `fromIR(_:to:progress:)` / `from_ir_with_progress` overload. (4) `VaultBridge.export` scope default and all bridge method signatures updated to include `progress: VaultProgress?` parameter (present in source since T7; missing from doc). (5) `VaultBridge.importVault(includingPaths:)` and `importMemPalace` updated with `mode` and `progress` params. (6) `PalaceBridge.importPalace` updated with `progress` param. (7) `ImportReport` four missing fields added: `drawersSkippedUnchanged`, `drawersSkippedTombstoned`, `drawersSkippedPartialWrite`, `enqueuedForEncode` (FINDING-1a, FINDING-1b). (8) Import receipt JSON updated to include `drawersSkippedPartialWrite`. (9) Concordance table rows corrected for `VaultAdapter`, `ImportReport`, `VaultBridge`, and `PalaceBridge`. |
 | 1.11.0 | 2026-06-28 | Path-traversal hardening (planned lockdown). `ObsidianAdapter.fromIR(_:to:)` and `ExchangeAdapter.decode(_:)` now enforce vault containment as a security boundary. A shared `containedVaultURL(forRelativePath:under:)` helper (Swift) / `contained_vault_path` free function (Rust) validates every vault-relative path before any filesystem access: rejects `..`, absolute prefixes, backslash separators, empty and `.` components (lexical phase). A second pass via `ensureContainedInVault(_:under:)` (Swift) / `write_contained_file` (Rust) re-checks the fully-resolved path with symlink expansion (`resolvingSymlinksInPath` / `canonicalize`) and rejects pre-existing symlinks at the destination. `ExchangeAdapter.decode` validates `pathComponents` entries with the same lexical rules before projecting them to `NoteIR`. Both phases share identical rejection vocabulary across Swift and Rust. Errors surface as `VaultKitError.adapterError` (Swift) / `VaultKitError::AdapterError` (Rust) — fail-closed, never silent. Both ports. |
