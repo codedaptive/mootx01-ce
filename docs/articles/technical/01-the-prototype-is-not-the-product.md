@@ -87,7 +87,7 @@ Fast creation moved the bottleneck from proving that a path exists to proving th
 
 ---
 
-[Series index](../README.md) | [Business edition](../business/01-the-prototype-is-not-the-product.md)
+[Series index](../README.md) | [Business edition](../business/01-the-prototype-is-not-the-product.md) | [Next: You Still Have to Write the Manual →](02-you-still-have-to-write-the-manual.md)
 
 Originally published on [Off-Axis Labs](https://offaxislabs.io/p/the-prototype-is-not-the-product) on 2026-07-07. Revised for this repository on 2026-07-22.
 

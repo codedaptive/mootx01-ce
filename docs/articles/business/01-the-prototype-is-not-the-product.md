@@ -47,7 +47,7 @@ A prototype can depend on the creator's memory and still be valuable. A product 
 
 ---
 
-[Series index](../README.md) | [Technical edition](../technical/01-the-prototype-is-not-the-product.md)
+[Series index](../README.md) | [Technical edition](../technical/01-the-prototype-is-not-the-product.md) | [Next: You Still Have to Write the Manual →](02-you-still-have-to-write-the-manual.md)
 
 Originally published on [LinkedIn](https://www.linkedin.com/pulse/prototype-product-bob-pankratz-vz6fc/) on 2026-07-07. Revised for this repository on 2026-07-22.
 
