@@ -138,6 +138,18 @@ Verdict: **CLEAN-WITH-FOLLOWUPS**
 Finding #1 resolved: removed dead `syncRunning` state and its write sites from SettingsView.
 Tests re-run after fix: exit 0, all counts unchanged.
 
+## Final Test Verification Log
+
+- Command: `swift test --package-path apps/Mootx01-App`
+- Exit code: **0**
+- MootGatewayTests: **144 tests in 27 suites** (4 new: SettingsSyncPolicyTests)
+- GatewayUITests: **25 tests in 5 suites**
+- Tail output (verbatim):
+  ```
+  Test run with 144 tests in 27 suites passed after 1.987 seconds.
+  Test run with 25 tests in 5 suites passed after 0.017 seconds.
+  ```
+
 ## Visual Review (Friedlander)
 
 Verdict: **ADVISORY-FINDINGS** — two low-stakes observations, neither blocking.
@@ -157,7 +169,7 @@ Everything else clean: zero `Color()` calls, `.foregroundStyle(.secondary)` is s
 | 9e5d7fbe | feat(app-ui): SettingsView master iCloudSync switch |
 | 7876793d | test(app-sync): cold-start default-off assertions + guide update |
 | b1e7194f | fix(app-ui): remove dead syncRunning state from SettingsView |
-| (final) | fix(app-ui): Friedlander: remove explicit footer font override |
+| 1dd374a0 | fix(app-ui): Friedlander: remove explicit footer font override |
 
 ## Success Criteria Checklist
 
