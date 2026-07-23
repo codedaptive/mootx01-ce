@@ -177,7 +177,22 @@ Pass count: 168+ (all suites green)
 
 ## Adams Post-flight
 
-*To be filled after Adams runs (see below).*
+**Verdict: PASS** (after one fix applied)
+
+Adams found one CRITICAL blocking finding:
+
+> **CRITICAL (fixed):** `packages/kits/PersistenceKit/rust/src/observer.rs:51-54` — stale doc
+> comment described `pulling: Arc<AtomicBool>` as the active Rust echo-suppression mechanism.
+> That field was removed in `e784e8c8`. Fixed in `0d3145be`.
+
+All other checks passed:
+- DUR-1..5 all pass, exit 0 — verified by re-run
+- `pendingOutbound` zero live references
+- `pulling` zero live code references
+- `apply_record` `*_sync` migration complete at all 8 application-table write sites
+- `OutboxStore.swift` untouched; `CONVERGENCEKIT_SPEC.md` untouched
+- PersistenceKit scope expansion justified — `InMemoryRowStore` is test-support only; SQLite unchanged
+- No bridges, shims, orphan deprecations, or prohibited patterns
 
 ---
 
