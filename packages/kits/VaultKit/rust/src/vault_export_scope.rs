@@ -4,7 +4,7 @@
 //! applied by `DrawerMapping::export`. The recall evaluator supplies
 //! per-axis defaults for any axis not addressed by the chain.
 //!
-//! ## Privacy-tier enforcement (ADR-007 Decision 2)
+//! ## Privacy-tier enforcement
 //!
 //! Sensitivity is NOT part of `filter_chain()` — the bulk channel enforces
 //! the tier rules itself so exclusions are counted, never silent:
@@ -14,7 +14,7 @@
 //!   explicit `BelievedIncludingPrivate` scope includes it
 //!   (`includes_private_tier()`). The owner-key ceremony that authorizes
 //!   selecting that scope is the planned 1.1 vault authorization gate
-//!   (ADR-015): a human-presence consent check, not encryption. Vault
+//!: a human-presence consent check, not encryption. Vault
 //!   ships open through the 1.0.x-beta line by design; this scope is the
 //!   enforcement hook that gate will attach to.
 //! - **Normal tier** (`Normal` + `Elevated`) exports freely.
@@ -22,7 +22,7 @@
 //! `DrawerMapping::export` recalls with an explicit
 //! `Filter::SensitivityAtMost(Secret)` appended (suppressing the
 //! evaluator's implicit `Elevated` ceiling so every tier is visible), then
-//! partitions by the ADR-007 tier predicates and reports per-tier
+//! partitions by the data-movement privacy tiers tier predicates and reports per-tier
 //! exclusion counts.
 
 use locus_kit::filter::Filter;
@@ -45,7 +45,7 @@ pub enum VaultExportScope {
     Believed,
 
     /// `Believed` selection plus Private-tier (`Restricted`) drawers — the
-    /// explicit scope option ADR-007 Decision 2 requires for private-tier
+    /// explicit scope option data-movement privacy tiers requires for private-tier
     /// bulk export. Secret tier is still never included.
     ///
     /// Filter chain: identical to `Believed`; the tier widening happens in
@@ -83,7 +83,7 @@ pub enum VaultExportScope {
 impl VaultExportScope {
     /// Whether this scope includes Private-tier (`Restricted`) drawers in
     /// bulk export. True only for the explicit `BelievedIncludingPrivate`
-    /// opt-in (ADR-007 Decision 2: Private tier is excluded from bulk
+    /// opt-in (data-movement privacy tiers: Private tier is excluded from bulk
     /// channels by default). Secret tier is excluded regardless of scope.
     /// Mirrors Swift `VaultExportScope.includesPrivateTier`.
     pub fn includes_private_tier(&self) -> bool {
@@ -98,7 +98,7 @@ impl VaultExportScope {
     /// AND. Per-axis defaults (trust, provenance) are supplied by the
     /// evaluator when the chain does not address an axis. Sensitivity is
     /// deliberately unaddressed here — the bulk channel enforces the
-    /// ADR-007 tier rules after recall so per-tier exclusion counts are
+    /// data-movement privacy tiers tier rules after recall so per-tier exclusion counts are
     /// reported, never silent. Mirrors Swift `VaultExportScope.filterChain`.
     pub fn filter_chain(&self) -> Vec<Filter> {
         match self {

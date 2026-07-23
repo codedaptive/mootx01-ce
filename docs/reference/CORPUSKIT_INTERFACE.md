@@ -10,7 +10,7 @@ package: CorpusKit
 languages: [swift, rust]
 relates_to:
   - CORPUSKIT_SPEC.md  (the contract this interface implements)
-  - DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md  (authorizes the IntellectusLib dependency)
+  - the package-dependency rule  (authorizes the IntellectusLib dependency)
 purpose: |
   Public API surface of CorpusKit in both ports: the Chunk content
   model and its content-addressed identity, the Chunker, the BM25Index
@@ -43,7 +43,7 @@ Two library targets plus tests:
   - `MiniLMTextProvider.swift`, `MPNetTextProvider.swift`,
     `EmbeddingGemmaProvider.swift`, `DeterministicTokenizer.swift`
   - `NLEmbeddingProvider.swift`, `NLContextualEmbeddingProvider.swift`
-    (Swift-only, `#if canImport(NaturalLanguage)` — see ADR-019)
+    (Swift-only, `#if canImport(NaturalLanguage)` — see the Apple embedding-provider contract)
 - `Tests/CorpusKitTests/`, `Package.swift`
 
 **Rust:** `packages/kits/CorpusKit/rust/` (crate `corpus-kit`,
@@ -255,7 +255,7 @@ Swift over a PersistenceKit `Storage`.
 
 ```swift
 public actor BundleStore {
-    public static let schemaDeclaration: SchemaDeclaration   // chunks + corpus_metadata tables (kit-ID "CorpusKit", v3), appendOnly; chunks carries content_hash BLOB nullable (hash-on-write, ADR-017 §19) and ext JSON nullable (ADR-012, inert in 1.0)
+    public static let schemaDeclaration: SchemaDeclaration   // chunks + corpus_metadata tables (kit-ID "CorpusKit", v3), appendOnly; chunks carries content_hash BLOB nullable (hash-on-write, the node-integrity contract §19) and ext JSON nullable (the forward-compatible ext-slot contract, inert in 1.0)
     public init(storage: any Storage)
     public func insert(_ chunks: [Chunk]) async throws        // idempotent (B-5); hash-on-write + Merkle rollup (I-11, I-13)
     public func get(id: UUID, asOf: AsOfCoordinate? = nil) async throws -> Chunk?
@@ -487,12 +487,12 @@ impl EmbeddingProvider for EmbeddingGemmaProvider { /* embed, embed_float */ }
 > the kit owns only the tokenizer and projection; model weights remain
 > the host's concern on every platform.
 
-#### Apple NL providers — Swift-only (ADR-019)
+#### Apple NL providers — Swift-only (the Apple embedding-provider contract)
 
 Two additional providers exist in `CorpusKitProviders` behind
 `#if canImport(NaturalLanguage)`. They are **not** available in the
 Rust port (sanctioned divergence — same class as the `.nlTagger`
-word-class path; see ADR-019). They are item-local (stateless,
+word-class path; see the Apple embedding-provider contract). They are item-local (stateless,
 compute-once-on-write) and **opt-in** (not part of the default ensemble).
 
 **`NLEmbeddingProvider`** — OS-bundled sentence embedding (macOS 12+/iOS 15+):
@@ -557,7 +557,7 @@ extension EmbeddingModel {
 ```
 
 Neither case joins `CorpusEnsemble.defaultEnsemble()`. Neither conforms to
-`TrainableEmbeddingBasis`. Rust has no counterpart. Recorded in SPEC I-14 and ADR-019.
+`TrainableEmbeddingBasis`. Rust has no counterpart. Recorded in SPEC I-14 and the Apple embedding-provider contract.
 
 ### Distributional-provider basis serialization (both ports)
 
@@ -963,7 +963,7 @@ monitoring is enabled. Off by default; off-path cost is one
 
 Both ports add IntellectusLib as a dependency (non-breaking addition to
 `Package.swift` and `Cargo.toml`, authorized by
-`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+`the package-dependency rule`).
 
 **Swift:** `Package.swift` in `packages/kits/CorpusKit/` adds
 `.product(name: "IntellectusLib", package: "IntellectusLib")` to both
@@ -1275,7 +1275,7 @@ public actor Corpus {
 public actor BasisStore {
     /// Additive schema (kit-ID "CorpusKitBasis", version 2): corpus_provider_basis(
     /// model_id TEXT, model_version TEXT, basis BLOB, trained_at TIMESTAMP/ISO8601,
-    /// trained_chunk_count INTEGER, ext JSON nullable — ADR-012 forward-compat slot,
+    /// trained_chunk_count INTEGER, ext JSON nullable — the forward-compatible ext-slot contract forward-compat slot,
     /// inert in 1.0), PK (model_id, model_version). NO Bool columns; dates TEXT ISO8601.
     public static let schemaDeclaration: SchemaDeclaration
     public init(storage: any Storage)
@@ -1335,7 +1335,7 @@ pub struct PersistedBasis {
 impl BasisStore {
     /// corpus_provider_basis(model_id TEXT, model_version TEXT, basis BLOB,
     /// trained_at TIMESTAMP/ISO8601, trained_chunk_count INTEGER, ext JSON nullable
-    /// — ADR-012 forward-compat slot, inert in 1.0), PK (model_id, model_version).
+    /// — the forward-compatible ext-slot contract forward-compat slot, inert in 1.0), PK (model_id, model_version).
     /// kit-ID "CorpusKitBasis", version 2. No Bool columns; dates TEXT ISO8601.
     pub fn schema_declaration() -> SchemaDeclaration;
     pub fn new(storage: Arc<dyn Storage>) -> Self;
@@ -1491,7 +1491,7 @@ trigger (NeuronKit). ADDITIVE — no existing surface changed; the counts table 
 maintained on write, restored on open, persisted at batch boundaries.
 
 ### 1.10.0 -- 2026-06-24
-Added two Apple NaturalLanguage embedding providers (ADR-019), Swift-only
+Added two Apple NaturalLanguage embedding providers (the Apple embedding-provider contract), Swift-only
 (`#if canImport(NaturalLanguage)`), no Rust counterpart (sanctioned divergence):
 `NLEmbeddingProvider` (model_id "apple-nlembedding-v1", seed "APNLEMB1"
 `0x4150_4E4C_454D_4231`) and `NLContextualEmbeddingProvider` (model_id
@@ -1514,10 +1514,10 @@ Behaviorally specified in CORPUSKIT_SPEC § 11. Additive; no existing signature
 removed.
 
 ### 1.8.0 -- 2026-06-21
-BundleStore schema v2 → v3 (NT-C1, ADR-017 §19): all six query methods (`get`, `getMany`, `chunksForSource`, `count`, `allChunks`) now accept an `AsOfCoordinate` parameter for temporal reads (I-12); `count` accepts it for API parity but does not forward it. New `content_hash` BLOB nullable column on `chunks` (hash-on-write via HashingRowStore, I-11). New `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable). New public methods: `corpusMerkleRoot(for:)` / `corpus_merkle_root` returns per-corpus Merkle root (I-13), `globalCorpusMerkleRoot()` / `global_corpus_merkle_root` returns interior hash over all per-corpus roots. Updated schemaDeclaration comment from v2 to v3. Additive; no existing signature removed.
+BundleStore schema v2 → v3 (NT-C1, the node-integrity contract §19): all six query methods (`get`, `getMany`, `chunksForSource`, `count`, `allChunks`) now accept an `AsOfCoordinate` parameter for temporal reads (I-12); `count` accepts it for API parity but does not forward it. New `content_hash` BLOB nullable column on `chunks` (hash-on-write via HashingRowStore, I-11). New `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable). New public methods: `corpusMerkleRoot(for:)` / `corpus_merkle_root` returns per-corpus Merkle root (I-13), `globalCorpusMerkleRoot()` / `global_corpus_merkle_root` returns interior hash over all per-corpus roots. Updated schemaDeclaration comment from v2 to v3. Additive; no existing signature removed.
 
 ### 1.7.0 -- 2026-06-17
-Schema bumps (ADR-012): `chunks` (BundleStore, kit-ID "CorpusKit") v1 → v2 and `corpus_provider_basis` (BasisStore, kit-ID "CorpusKitBasis") v1 → v2, each gaining a nullable `.json` `ext` forward-compat slot. Both ports; inert in 1.0 (NULL / omitted on insert, never read). `chunks.ext` is distinct from the existing per-chunk `metadata` column. Updated the BundleStore / BasisStore schema concordance.
+Schema bumps (the forward-compatible ext-slot contract): `chunks` (BundleStore, kit-ID "CorpusKit") v1 → v2 and `corpus_provider_basis` (BasisStore, kit-ID "CorpusKitBasis") v1 → v2, each gaining a nullable `.json` `ext` forward-compat slot. Both ports; inert in 1.0 (NULL / omitted on insert, never read). `chunks.ext` is distinct from the existing per-chunk `metadata` column. Updated the BundleStore / BasisStore schema concordance.
 
 ### 1.6.0 -- 2026-06-17
 Added `Corpus.floatFarthestPerSignal` / `Corpus::float_farthest_per_signal`

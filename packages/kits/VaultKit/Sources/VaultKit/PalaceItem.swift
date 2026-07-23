@@ -15,7 +15,7 @@ import Foundation
 // carries the same envelope a `NoteIR` drawer would, so the two paths agree on
 // drawer bytes.
 //
-// ## The read seam (DECISION_PALACE_PUMP_CANONICAL_2026-06-12)
+// ## The read seam
 //
 // VaultKit does NOT read the four nouns itself — that would invert the layering
 // (it sits above GeniusLocusKit and would have to reach down for tunnels / KG

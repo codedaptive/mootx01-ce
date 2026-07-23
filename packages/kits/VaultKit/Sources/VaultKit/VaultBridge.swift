@@ -103,7 +103,7 @@ public struct ImportReport: Sendable, Equatable {
 }
 
 /// Counts returned by an export run, including the per-tier exclusion
-/// counts the ADR-007 Decision 2 bulk-channel rules produced. Exclusions
+/// counts the data-movement privacy tiers bulk-channel rules produced. Exclusions
 /// are reported, never silent (zero-loss reporting symmetry with C-13).
 public struct ExportReport: Sendable, Equatable {
 
@@ -177,7 +177,7 @@ public struct VaultBridge: Sendable {
     /// `.references` tunnels → wikilinks, room → folders,
     /// provenance/anchors → frontmatter. One vault per MOOT.
     ///
-    /// Enforces the ADR-007 Decision 2 privacy-tier rules on this bulk
+    /// Enforces the data-movement privacy tiers privacy-tier rules on this bulk
     /// channel: secret-tier drawers never export, private-tier drawers
     /// export only under `.believedIncludingPrivate`, and every tier
     /// exclusion is counted in the returned `ExportReport` — visible,
@@ -225,7 +225,7 @@ public struct VaultBridge: Sendable {
     /// the existing drawer (no duplicate) and creates no duplicate
     /// tunnels. Every captured drawer satisfies invariant I-5.
     ///
-    /// Import is ungated (ADR-007: arrival is free), but each note's
+    /// Import is ungated (data-movement privacy tiers: arrival is free), but each note's
     /// sensitivity tier is preserved from the IR when the adapter supplies
     /// it (`sensitivity` frontmatter → `CaptureFrame.sensitivity`). A
     /// successful run writes one audit receipt to the estate's diary (see
@@ -493,7 +493,7 @@ public struct VaultBridge: Sendable {
         return report
     }
 
-    // MARK: - Audit receipts (ADR-007 Decision 2)
+    // MARK: - Audit receipts
 
     /// Actor name receipts are filed under. Receipts are read back via
     /// `GeniusLocusKit.readDiaryEntries(in:agentName:lastN:)` with this name.
@@ -510,11 +510,11 @@ public struct VaultBridge: Sendable {
         | (Int64(DiaryActorClass.migrationTool.rawValue) << 7)
 
     /// Write the export receipt: one diary entry per successful export run
-    /// (ADR-007 Decision 2 — "every bulk operation writes an audit receipt:
+    /// (data-movement privacy tiers — "every bulk operation writes an audit receipt:
     /// what left, where, when, how many"). The bitmap-audit trail is per-row
     /// and cannot carry an estate-level payload, so receipts use the diary —
     /// the estate-level event log whose `migration` event class exists for
-    /// exactly this (see DECISION_NEEDED_VK-TIER-01).
+    /// exactly this.
     ///
     /// The entry body is canonical JSON with a fixed key order, shared
     /// verbatim with the Rust port.
@@ -677,7 +677,7 @@ public struct VaultBridge: Sendable {
             )
         )
         // Resolve display names (wing, room) from the node tree in one batch
-        // (ADR-017: Drawer no longer stores wing/room).
+        // (node-tree integrity: Drawer no longer stores wing/room).
         let estate = try await kit.estate(for: handle)
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: drawers.map(\.parentNodeId))

@@ -17,7 +17,7 @@ import GeniusLocusKit
 /// `ExternalCorpus.asRecallFrames()` surface and the C-13
 /// migration-loss invariant (and its read-only corollary).
 /// ExternalCorpus JSON-decode coverage lives in VaultKit's
-/// ExchangeAdapterTests (VK-ADAPT-01 Part 3, ADR-007 Decision 1).
+/// ExchangeAdapterTests (VK-ADAPT-01 Part 3, data-movement privacy tiers).
 ///
 /// Estate setup mirrors `GLK_COW_01_BranchTests` — an in-memory estate
 /// opened through `GeniusLocusKit`, captured into through the branch

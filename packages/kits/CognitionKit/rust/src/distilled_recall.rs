@@ -201,7 +201,7 @@ pub fn run_distilled_recall(
     //                                              hydrationLevel: .full))`
     //    Swift hydrates the explicit NN candidate ids; the frame's filter chain routes
     //    through BitmapEvaluator::insert_defaults and enforces the
-    //    SensitivityAtMost(Elevated) ceiling (ADR-007 Decision 2 / VK-TIER-01).
+    //    SensitivityAtMost(Elevated) ceiling (data-movement privacy tiers / VK-TIER-01).
     //    Restricted and secret factoids are excluded before their body reaches the MCP
     //    boundary — secfix/punt-g2 part 2.
     //

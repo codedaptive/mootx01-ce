@@ -1,6 +1,6 @@
 // NounType.swift
 //
-// Phase 6.3 (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.6)
+
 // Moved from SubstrateLib/Sources/SubstrateLib/Verbs.swift.
 //
 // The eight noun categories that a substrate row can hold,

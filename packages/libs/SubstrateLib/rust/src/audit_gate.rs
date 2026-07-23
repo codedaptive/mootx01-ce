@@ -109,7 +109,7 @@ pub fn basis() -> Vec<FieldSlot> {
         // transparently. Sealed (bit 27) is deliberately NOT in this
         // slot — its set-once integrity lifecycle is owned by the Clock
         // Triangle decision and the dreaming-pass wiring (see
-        // DECISION_CAPTURE_GENESIS_EVENT_2026-05-28 line 92).
+        // gated capture genesis).
         FieldSlot::new(Column::Adjective, 24, 3, "flags"),
     ]
 }

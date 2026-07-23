@@ -55,7 +55,7 @@ Reach for MOOTx01 when the user asks about:
 8. Use `moot_list_lenses`, `moot_lens_*`, and `moot_synthesize` for analysis before loading many memories into context.
 9. Use `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal` to persist durable knowledge.
 10. Use correction tools instead of silently rewriting history.
-11. Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
+11. Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
 
 ## Vault Import
 

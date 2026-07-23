@@ -99,7 +99,7 @@ public enum RecipeCatalog {
             name: "drift", version: "1.0.0",
             description: "Reasoning lens: how far the room distribution after a split instant has drifted from the distribution before it.",
             requiredCapabilities: []),
-        // Diffusion node layer (ADR-DIFFUSION-001): a single memory's motion over time.
+        // Diffusion node layer: a single memory's motion over time.
         RecipeDescriptor(
             name: "node_motion", version: "1.0.0",
             description: "Reasoning lens (diffusion, node layer): how a single memory has MOVED over time — its mutation volatility (decay-weighted recent-churn mass), its topic trajectory (the UDC anchors it has occupied), whether it reanchored, and a write-time anomaly verdict (churning / reanchored / stable). Reads the memory's fresh audit history.",

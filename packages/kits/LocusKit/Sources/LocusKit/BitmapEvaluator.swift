@@ -60,7 +60,7 @@ import SubstrateTypes
 /// pipeline through `Estate.recall(_:)` in `EstateVerbs.swift`.
 struct BitmapEvaluator {
 
-    // MARK: - Layout constants (derived from §§ 5.5–5.6 and Q1_DECISION_PROVENANCE_BITMAP.md)
+    // MARK: - Packed provenance layout constants
     //
     // Mirrors the accessor decoders on `Drawer` exactly. These constants
     // are deliberately private — the evaluator's translation table, not
@@ -165,7 +165,7 @@ struct BitmapEvaluator {
             if let asOf = frame.asOf {
                 // Fold the row's audit log up to `asOf` (HLC) — one
                 // projection returns all three column snapshots in a
-                // single pass (DECISION_CLOCK_TRIANGLE: state evolves
+                // single pass (single-maker HLC and event integrity: state evolves
                 // in HLC order; wall-clock is not a fold axis).
                 let projected = try await reconstructAt(
                     rowID: drawer.id, asOf: asOf, store: store)
@@ -229,7 +229,7 @@ struct BitmapEvaluator {
         }
         if !chain.contains(where: isBitmapSensitivityFilter) {
             // Sensitivity default — ceiling is `.elevated`, the Normal-tier
-            // ceiling per ADR-007 Decision 2 / VK-TIER-01 mapping (Normal
+            // ceiling per data-movement privacy tiers / VK-TIER-01 mapping (Normal
             // tier = normal + elevated; restricted = Private tier; secret =
             // Secret tier). `restricted` and `secret` are excluded from
             // default recall. This is the no-claims posture: § 9.2

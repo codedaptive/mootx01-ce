@@ -13,7 +13,7 @@
 # needed for unrelated reasons; otherwise, keep this stable so
 # the harness's behavior is deterministic across machines.
 #
-# See `docs/decisions/DECISION_OR_REDUCE_BACKENDS_2026-05-17.md`
+# See measured SIMD OR-reduce selection
 # for the rationale on nightly Rust in this project.
 
 [toolchain]

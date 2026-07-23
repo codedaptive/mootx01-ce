@@ -35,7 +35,7 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::recall_trace_item::RecallTraceItem;
 
-// Epoch MILLISECONDS (ADR-023): the `now` params to capture/recall_scored are ms.
+// Epoch MILLISECONDS: the `now` params to capture/recall_scored are ms.
 // 1_700_000_000_000 ms == 1_700_000_000 s, so NOW_ISO is unchanged. The governor
 // tick takes a real SystemTime and derives epoch-SECONDS internally, so its tick
 // is built with `from_millis(NOW)` (below) to land on the same 2023 instant.

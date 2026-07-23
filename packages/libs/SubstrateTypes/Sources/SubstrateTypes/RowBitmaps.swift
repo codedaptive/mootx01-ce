@@ -1,6 +1,6 @@
 // RowBitmaps.swift
 //
-// Phase 5 (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.5)
+
 //
 // The substrate's row-level adjective/operational/provenance
 // bitmap layout, made explicit as a value type. Centralizes the

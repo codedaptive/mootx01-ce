@@ -152,7 +152,7 @@ impl<B: QueueBackend> QueueKit<B> {
         Ok(result)
     }
 
-    /// Drain only the jobs belonging to `stream` (ADR-021 Decision 7 / T1).
+    /// Drain only the jobs belonging to `stream`.
     ///
     /// Routes to the backend's `drain_available_for_stream`, which on
     /// PersistenceKitBackend uses the `(stream_id, status)` index (one
@@ -250,7 +250,7 @@ impl<B: QueueBackend> QueueKit<B> {
         self.backend.pending_count()
     }
 
-    /// Count pending jobs belonging to `stream` only (ADR-021 Decision 7 / T1).
+    /// Count pending jobs belonging to `stream` only.
     ///
     /// Routes to the backend's `pending_count_for_stream`. Non-claiming.
     /// Swift twin: `QueueKit.pendingCount(stream:)`.
@@ -298,7 +298,7 @@ impl<B: QueueBackend> QueueKit<B> {
         self.backend.await_drain(poll_interval, timeout)
     }
 
-    /// Block until `stream` has no pending and no in-flight work (ADR-021
+    /// Block until `stream` has no pending and no in-flight work (recall-driven dreaming
     /// Decision 7 / T1). Stream-scoped twin of `await_drain`: a per-stream
     /// drainer on the shared per-estate queue must not wait on other streams'
     /// jobs it never processes. Swift twin: `QueueKit.awaitDrain(stream:...)`.

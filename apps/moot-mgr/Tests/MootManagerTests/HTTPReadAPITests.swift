@@ -166,7 +166,7 @@ struct HTTPReadAPIReadTests {
         #expect(status == 404)
     }
 
-    // MARK: - Wave 8.3 smoke: default monitoring seed (ADR-025)
+    // MARK: -  smoke: default monitoring seed
 
     /// Wave 8.3 smoke test: verify that a fresh StatsStore seeds monitoring=ON
     /// by default (wave 8.1 commits 4ad7b2f9 / 1d16cd17), and that this state

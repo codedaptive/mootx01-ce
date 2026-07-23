@@ -27,7 +27,7 @@
 //     doc_count     INTEGER NOT NULL, -- documents (chunks) folded into the counts
 //     vocab_size    INTEGER NOT NULL, -- distinct terms in the vocabulary
 //     updated_at    TEXT NOT NULL,    -- ISO8601 (schema invariant); never REAL
-//     ext           JSON NULL         -- ADR-012 forward-compat slot
+//     ext           JSON NULL         -- nullable entity ext slots forward-compat slot
 //   )  PRIMARY KEY (model_id, model_version)
 //
 // ## Why each column
@@ -117,7 +117,7 @@ public actor CorpusProviderCountsStore {
     /// BasisStore declaration pattern. `appendOnly` is false: an incremental
     /// update UPSERTs the existing (modelID, modelVersion) row, so the table
     /// holds at most one counts row per provider key. The `.json` `ext` slot is
-    /// the ADR-012 forward-compat reservation (written NULL / omitted in 1.0).
+    /// the nullable entity ext slots forward-compat reservation (written NULL / omitted in 1.0).
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitCounts",
         version: 1,
@@ -134,7 +134,7 @@ public actor CorpusProviderCountsStore {
                     .int("vocab_size", nullable: false),
                     // TIMESTAMP maps to TEXT ISO8601 (schema invariant) — never REAL.
                     .timestamp("updated_at", nullable: false),
-                    // ADR-012 forward-compat slot; nullable, omitted on upsert in 1.0.
+                    // nullable entity ext slots forward-compat slot; nullable, omitted on upsert in 1.0.
                     .json("ext", nullable: true)
                 ],
                 primaryKey: ["model_id", "model_version"]

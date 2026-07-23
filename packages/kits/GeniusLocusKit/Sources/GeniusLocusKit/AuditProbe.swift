@@ -1,13 +1,13 @@
 // AuditProbe.swift
 //
 // Internal audit probe helpers used by the autonomic governor's cheap
-// change-detection checks (ADR025-AUDITLOG-GOVERNOR O(N) RAM fixes).
+// change-detection checks without retaining full-estate state in memory.
 //
 // Visibility: public, not internal. The governor lives in NeuronKit, a
 // different module from GeniusLocusKit, so it cannot reach `internal` methods.
 // These methods are deliberately narrow (audit event count only — no row data)
 // and documented as governor-specific. Callers outside the governor should
-// prefer the full audit query API (Bug 1 additions to GeniusLocusKit.swift)
+// prefer the full audit query API in GeniusLocusKit.swift
 // unless they specifically need the cheap change-detection probe.
 //
 // Design: `Storage.auditLog.count()` is a single SQL `COUNT(*)` call —

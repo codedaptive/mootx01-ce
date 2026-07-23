@@ -4,7 +4,7 @@
 //
 // This SwiftPM package vends the two Swift-only, Apple-side libraries the
 // Mootx01 app (and the developer example apps) build on. It is the "Apple
-// layer" of ADR-005: it ENVELOPES the clean, Rust-mirrored engine through a
+// layer" of the app/engine boundary: it ENVELOPES the clean, Rust-mirrored engine through a
 // transport seam — it never absorbs it. The headless `mootx01`/`aria-mcp`
 // server is a separate, untouched binary.
 //

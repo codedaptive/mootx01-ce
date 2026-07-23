@@ -1,6 +1,6 @@
 // EstateConfiguration.swift
 //
-// Estate configuration per DECISION_STORAGEKIT_DESIGN §8 (Q6).
+// Estate configuration per the PersistenceKit storage surface (Q6).
 // One configuration value per estate; opens one Storage instance.
 
 import Foundation
@@ -29,11 +29,11 @@ public struct EstateConfiguration: Sendable {
     /// constraints, especially the federation-incompatibility note.
     public let novelTokenTagger: NovelTokenTaggerChoice
 
-    /// ADR-026: controls whether kits hold computed indexes in RAM
+    /// controls whether kits hold computed indexes in RAM
     /// between queries (`.ramResident`) or load from the durable store
     /// on demand (`.diskBacked`, the default). `.diskBacked` uses mmap
     /// and OS page cache — small estates stay fully resident; large
-    /// estates page on demand. `.ramResident` is the pre-ADR-026
+    /// estates page on demand. `.ramResident` is the pre-disk-default storage residency
     /// behavior: all indexes cached in heap for minimum query latency
     /// at the cost of multi-GB memory on large estates.
     public let residencyHint: ResidencyHint
@@ -66,7 +66,7 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 
-/// ADR-026: controls whether kits hold computed indexes in heap
+/// controls whether kits hold computed indexes in heap
 /// between queries or load from the durable store on demand.
 public enum ResidencyHint: Sendable, Equatable {
     /// Indexes loaded from disk on demand; OS page cache manages RAM
@@ -75,17 +75,17 @@ public enum ResidencyHint: Sendable, Equatable {
     /// the OS page cache with no measurable latency difference.
     case diskBacked
     /// All indexes cached in the Swift/Rust heap for minimum query
-    /// latency. Pre-ADR-026 behavior. Use for test fixtures, small
+    /// latency. Pre-disk-default storage residency behavior. Use for test fixtures, small
     /// embedded deployments, or any path that needs guaranteed
     /// sub-millisecond float NN search without a SQLite round-trip.
     case ramResident
 }
 
-// MARK: — Queue sibling derivation (ADR-021 T3)
+// MARK: — Queue sibling derivation
 
 extension EstateConfiguration {
     /// Derive a sibling `EstateConfiguration` pointing at a per-estate queue
-    /// database file beside the estate's own database file (ADR-021 Decision 7).
+    /// database file beside the estate's own database file.
     ///
     /// The sibling file is named `<estate-stem>.<filename>` (e.g. for estate
     /// `<dir>/<uuid>.sqlite` and filename `"queue.sqlite"` the result is
@@ -94,7 +94,7 @@ extension EstateConfiguration {
     /// one estate's encode/dreaming queue is never accessible to another estate's
     /// workers. Within the same estate, the path is deterministic across
     /// processes — all processes that open the same estate file share exactly
-    /// one queue file (ADR-021 Decision 7: one per-estate queue).
+    /// one queue file (recall-driven dreaming: one per-estate queue).
     ///
     /// The encryption configuration is carried over verbatim — an encrypted
     /// estate produces an encrypted queue, sharing the cipher key so QueueKit
@@ -108,8 +108,8 @@ extension EstateConfiguration {
     /// - `.inMemory` — returns an InMemory config. The queue is ephemeral
     ///   alongside the ephemeral estate, which is correct for testing and
     ///   transient sessions.
-    /// - `.postgresql(...)` — **deferred** per ADR-021 §SQLite-first
-    ///   sequencing. Throws `StorageError.featureGated` with a clear message.
+    /// - `.postgresql(...)` — **deferred**. The queue sibling is SQLite-first;
+    ///   this branch throws `StorageError.featureGated` with a clear message.
     ///   A caller relying on a Postgres-backed queue will learn immediately
     ///   that this path is not yet implemented; it will never silently produce
     ///   a wrong or half-initialised config.
@@ -132,7 +132,7 @@ extension EstateConfiguration {
     ///   estates in the same directory produce distinct sibling paths.
     /// - Returns: A new `EstateConfiguration` for the queue database.
     /// - Throws: `StorageError.featureGated` if the estate uses a PostgreSQL
-    ///   backend (the Postgres queue path is deferred to ADR-021 Postgres pass).
+    ///   backend because the PostgreSQL queue sibling is not implemented.
     public func queueSibling(filename: String) throws -> EstateConfiguration {
         let siblingID = deriveQueueSiblingID(parentID: estateID, filename: filename)
 
@@ -166,16 +166,16 @@ extension EstateConfiguration {
             )
 
         case .postgresql:
-            // TODO(ADR-021 Postgres pass): implement the PostgreSQL queue-sibling
+            // TODO: implement the PostgreSQL queue-sibling
             // path. The Postgres backend requires coordination primitives beyond
             // a simple file-sibling (connection string scoping, schema namespacing)
-            // and is explicitly deferred in ADR-021's SQLite-first sequencing.
+            // and is explicitly deferred while queue storage remains SQLite-first.
             // Fail loud so any caller depending on a Postgres queue learns
             // immediately that this is not implemented, rather than receiving a
             // silently wrong or half-initialised configuration.
             throw StorageError.featureGated(
                 feature: "queueSibling for PostgreSQL backend is deferred " +
-                         "(ADR-021 Postgres pass). Use SQLite or InMemory estates " +
+                         "Use SQLite or InMemory estates " +
                          "for per-estate queue configuration."
             )
         }

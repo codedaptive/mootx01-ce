@@ -45,7 +45,7 @@ use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
 use uuid::Uuid;
 
 /// Resolve (wing_name, room_name) for a drawer via the coordinator's
-/// node-tree lookup (ADR-017: Drawer no longer has wing/room fields).
+/// node-tree lookup (node-tree integrity: Drawer no longer has wing/room fields).
 fn resolve_names(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
@@ -786,17 +786,16 @@ fn t13b_provision_corpus_only_on_sqlite_backend_succeeds() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// T14–T18: ADR-016 — Default wing seeding at provision
+// –wing organization — Default wing seeding at provision
 //
-// Parity targets for Swift EstateProvisionLifecycleTests.swift
-// ADR016DefaultWingSeedingTests (T14–T18). Seven default wings are
-// seeded at provision for every estate kind.
+// Parity targets for Swift EstateProvisionLifecycleTests.swift. Seven
+// default wings are seeded at provision for every estate kind.
 // ─────────────────────────────────────────────────────────────────
 
 /// T14: A freshly provisioned estate exposes exactly 7 distinct wing names
 /// drawn from `locus_kit::default_wings::DEFAULT_WINGS`.
 #[test]
-fn adr016_provision_seeds_seven_distinct_wings() {
+fn provision_seeds_seven_distinct_wings() {
     use locus_kit::default_wings::DEFAULT_WINGS;
 
     let (store, storage) = make_stores();
@@ -806,8 +805,8 @@ fn adr016_provision_seeds_seven_distinct_wings() {
             store,
             storage,
             None,
-            OwnerCredentials::new("adr016-test"),
-            glk_params("ADR016-T14"),
+            OwnerCredentials::new("default-wing-test"),
+            glk_params("default-wing-seeding"),
             vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision must succeed");
@@ -829,7 +828,7 @@ fn adr016_provision_seeds_seven_distinct_wings() {
 /// T15: Each of the 7 default wings has exactly one hint drawer in the
 /// `AI_Charter_Hint` room (`HINT_ROOM`).
 #[test]
-fn adr016_each_default_wing_has_one_hint_drawer() {
+fn each_default_wing_has_one_hint_drawer() {
     use locus_kit::default_wings::{HINT_ROOM, DEFAULT_WINGS};
 
     let (store, storage) = make_stores();
@@ -839,8 +838,8 @@ fn adr016_each_default_wing_has_one_hint_drawer() {
             store,
             storage,
             None,
-            OwnerCredentials::new("adr016-test"),
-            glk_params("ADR016-T15"),
+            OwnerCredentials::new("default-wing-test"),
+            glk_params("default-wing-hints"),
             vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision must succeed");
@@ -871,14 +870,14 @@ fn adr016_each_default_wing_has_one_hint_drawer() {
 
 /// T16: `DEFAULT_WING_NAME` is "Agentic Memory" and capture lands there.
 #[test]
-fn adr016_default_wing_name_is_agentic_memory() {
+fn default_wing_name_is_agentic_memory() {
     use locus_kit::default_wings::DEFAULT_WING_NAME;
     use locus_kit::estate_types::LatticeAnchor;
     use locus_kit::frames::CaptureFrame;
 
     assert_eq!(
         DEFAULT_WING_NAME, "Agentic Memory",
-        "DEFAULT_WING_NAME must be 'Agentic Memory' per ADR-016 §1"
+        "DEFAULT_WING_NAME must be 'Agentic Memory'"
     );
 
     let (store, storage) = make_stores();
@@ -888,8 +887,8 @@ fn adr016_default_wing_name_is_agentic_memory() {
             Arc::clone(&store),
             storage,
             None,
-            OwnerCredentials::new("adr016-test"),
-            glk_params("ADR016-T16"),
+            OwnerCredentials::new("default-wing-test"),
+            glk_params("default-wing-capture"),
             vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision must succeed");
@@ -915,7 +914,7 @@ fn adr016_default_wing_name_is_agentic_memory() {
 /// T17: Hint drawers do NOT carry the "none" embedding sentinel.
 /// Hint drawers are normal content — they enter the semantic pipeline.
 #[test]
-fn adr016_hint_drawers_do_not_carry_none_embedding_sentinel() {
+fn hint_drawers_do_not_carry_none_embedding_sentinel() {
     use locus_kit::default_wings::HINT_ROOM;
 
     let (store, storage) = make_stores();
@@ -925,8 +924,8 @@ fn adr016_hint_drawers_do_not_carry_none_embedding_sentinel() {
             store,
             storage,
             None,
-            OwnerCredentials::new("adr016-test"),
-            glk_params("ADR016-T17"),
+            OwnerCredentials::new("default-wing-test"),
+            glk_params("default-wing-embedding"),
             vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision must succeed");
@@ -947,13 +946,13 @@ fn adr016_hint_drawers_do_not_carry_none_embedding_sentinel() {
 
 /// T18: All estate kinds (Glk, CorpusOnly, LocusOnly) seed the 7 default wings.
 #[test]
-fn adr016_all_estate_kinds_seed_default_wings() {
+fn all_estate_kinds_seed_default_wings() {
     use locus_kit::default_wings::DEFAULT_WINGS;
 
     let kinds = [
-        (EstateKind::Glk, "ADR016-T18-GLK"),
-        (EstateKind::CorpusOnly, "ADR016-T18-CorpusOnly"),
-        (EstateKind::LocusOnly, "ADR016-T18-LocusOnly"),
+        (EstateKind::Glk, "default-wings-glk"),
+        (EstateKind::CorpusOnly, "default-wings-corpus"),
+        (EstateKind::LocusOnly, "default-wings-locus"),
     ];
 
     for (kind, name) in &kinds {
@@ -972,7 +971,7 @@ fn adr016_all_estate_kinds_seed_default_wings() {
                 store,
                 storage,
                 None,
-                OwnerCredentials::new("adr016-test"),
+                OwnerCredentials::new("default-wing-test"),
                 params,
                 vec![EmbeddingModelConfig::Deterministic],
             )
@@ -995,7 +994,7 @@ fn adr016_all_estate_kinds_seed_default_wings() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T19–T21: Serve-path wing seeding via seed_default_wings (ADR-016 + serve fix)
+// –Serve-path wing seeding via seed_default_wings (wing organization + serve fix)
 //
 // Parity of Swift `ServePathWingSeedingTests` in EstateProvisionLifecycleTests.swift.
 //

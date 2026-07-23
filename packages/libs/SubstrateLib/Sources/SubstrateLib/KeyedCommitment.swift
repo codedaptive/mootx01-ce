@@ -1,6 +1,6 @@
 // KeyedCommitment.swift
 //
-// Public keyed-commitment API for expunge provenance (ADR-017 §17).
+// Public keyed-commitment API for expunge provenance.
 //
 // Computes HMAC-SHA256 over the canonical leaf payload bytes (the same
 // encoding MerkleHash.leaf uses), keyed by an estate-held secret.

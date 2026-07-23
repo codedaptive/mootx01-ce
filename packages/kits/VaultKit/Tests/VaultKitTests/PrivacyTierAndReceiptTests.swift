@@ -6,7 +6,7 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import VaultKit
 
-/// VK-TIER-01 — ADR-007 Decision 2 enforcement on the bulk channels.
+/// VK-TIER-01 — data-movement privacy tiers enforcement on the bulk channels.
 ///
 /// Fixture corpus (shared expectations with the Rust port's
 /// `privacy_tiers.rs`): four drawers, one per sensitivity value, in one
@@ -101,7 +101,7 @@ struct PrivacyTierAndReceiptTests {
         #expect(report.scope == .believed)
 
         let exported = allMarkdown(in: vault)
-        // Elevated is Normal tier per ADR-007 — its silent exclusion by the
+        // Elevated is Normal tier per data-movement privacy tiers — its silent exclusion by the
         // evaluator's implicit `.normal` ceiling was the pre-mission defect.
         #expect(exported.contains("normal note"))
         #expect(exported.contains("elevated note"))
@@ -252,7 +252,7 @@ struct PrivacyTierAndReceiptTests {
         #expect(survivor.adjectiveSensitivity == .restricted)
 
         // And under the `.believed` scope it is admitted by the scope but
-        // excluded by the ADR-007 tier partition — a COUNTED exclusion, never
+        // excluded by the data-movement privacy tiers tier partition — a COUNTED exclusion, never
         // silent. (Under the default `.exportable` scope it is filtered earlier
         // by exportability; `.believed` is what exercises the private-tier
         // partition counter here.)
@@ -430,7 +430,7 @@ struct PrivacyTierAndReceiptTests {
 
     // MARK: - CAND-EXP-PROV: provenance tunnel target privacy
 
-    /// Resolve display names for a single drawer (ADR-017 helper for provenance tests).
+    /// Resolve display names for a single drawer (node-tree integrity helper for provenance tests).
     private func resolveNames(
         _ drawer: Drawer, kit: GeniusLocusKit, handle: EstateHandle
     ) async throws -> (wing: String, room: String) {
@@ -481,7 +481,7 @@ struct PrivacyTierAndReceiptTests {
     /// CAND-EXP-PROV: A factoid with a `_distilled_from` tunnel to a SECRET source drawer
     /// must NOT include the secret drawer's wing/room in `distilled_from_sources` frontmatter.
     ///
-    /// Motivation: a secret drawer is excluded from bulk export (ADR-007 Decision 2).
+    /// Motivation: a secret drawer is excluded from bulk export.
     /// Writing its wing/room into the exported factoid's frontmatter leaks its location
     /// to any reader of the vault — violating the tier guarantee.
     @Test("CAND-EXP-PROV: provenance tunnel to secret drawer is excluded from distilled_from_sources")
@@ -549,7 +549,7 @@ struct PrivacyTierAndReceiptTests {
     /// source drawer must NOT include the restricted drawer's location under the DEFAULT scope,
     /// but MUST include it under `.believedIncludingPrivate`.
     ///
-    /// The restricted tier is excluded from default-scope export (ADR-007 Decision 2),
+    /// The restricted tier is excluded from default-scope export,
     /// so the fix must omit its location from `distilled_from_sources` under the default scope
     /// but include it when the private tier is explicitly opted in.
     @Test("CAND-EXP-PROV: provenance tunnel to restricted drawer excluded by default, included under private scope")

@@ -9,7 +9,7 @@ import Foundation
 ///
 /// Cadence: hourly (3 600 seconds), per design-council 2026-06-04
 /// decision superseding the cookbook §6.4 weekly cadence.
-/// See DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+/// See hourly temporal-matrix scheduling.
 ///
 /// Usage pattern (mirrors DreamingSignal):
 ///

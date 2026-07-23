@@ -11,7 +11,7 @@
 //!     basis               BLOB NOT NULL,
 //!     trained_at          TIMESTAMP NOT NULL,   -- TEXT ISO8601, never REAL
 //!     trained_chunk_count INTEGER NOT NULL,
-//!     ext                 JSON                  -- forward-compat slot (ADR-012, v2); nullable, NULL in 1.0
+//!     ext                 JSON                  -- forward-compat slot (nullable entity ext slots, v2); nullable, NULL in 1.0
 //!   )  PRIMARY KEY (model_id, model_version)
 //!
 //! ## Why each column (mirrors the Swift rationale exactly)
@@ -89,7 +89,7 @@ impl BasisStore {
     /// the (model_id, model_version) row, so the table holds at most one basis
     /// per provider key.
     pub fn schema_declaration() -> SchemaDeclaration {
-        // v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012):
+        // v2 adds the nullable `.json` `ext` forward-compat slot:
         // reserves the slot for future per-basis typed metadata without a
         // migration. 1.0 omits it on upsert and never reads it.
         SchemaDeclaration::new(
@@ -106,7 +106,7 @@ impl BasisStore {
                     ColumnDeclaration::timestamp("trained_at"),
                     // INTEGER staleness anchor — NOT a Bool flag.
                     ColumnDeclaration::int("trained_chunk_count"),
-                    // ADR-012 forward-compat slot (v2). Nullable JSON; 1.0 omits
+                    // nullable entity ext slots forward-compat slot (v2). Nullable JSON; 1.0 omits
                     // it on upsert and never reads it.
                     ColumnDeclaration::json("ext").nullable(),
                 ],

@@ -1,4 +1,4 @@
-//! rem_cycle_table.rs — the shared REM-cycle dispatch table (ADR-021 Phase 6, T11).
+//! rem_cycle_table.rs — the shared REM-cycle dispatch table.
 //!
 //! Dreaming is ONE engine parameterised by four cadences (NEURONKIT_SPEC § 12.6).
 //! This file defines the table that both drivers — the resident Autonomic Governor
@@ -34,7 +34,7 @@ pub enum RemCycleKind {
     /// Implemented in T12; run-fn is `DreamingDaemon::run_beta_cycle`.
     Beta,
     /// Biweekly retire of dreamed tunnels no longer reinforced by recall.
-    /// T13 / ADR-021 Phase 7 — implemented; run-fn is `DreamingDaemon::run_omega_cycle`.
+    ///  / recall-driven dreaming — implemented; run-fn is `DreamingDaemon::run_omega_cycle`.
     Omega,
 }
 
@@ -76,12 +76,12 @@ pub fn rem_cycle_table() -> [RemCycleEntry; 4] {
         },
         RemCycleEntry {
             name: "REM-BETA",
-            cadence_secs: 604_800.0, // 7 days (T12 / ADR-021 Phase 7)
+            cadence_secs: 604_800.0, // 7 days
             kind: RemCycleKind::Beta,
         },
         RemCycleEntry {
             name: "REM-OMEGA",
-            cadence_secs: 1_209_600.0, // 14 days (T13 / ADR-021 Phase 7)
+            cadence_secs: 1_209_600.0, // 14 days
             kind: RemCycleKind::Omega,
         },
     ]

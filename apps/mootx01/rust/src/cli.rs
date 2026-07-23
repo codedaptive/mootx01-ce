@@ -48,7 +48,7 @@ pub enum Command {
         /// True when vault is enabled (default). False when --vault-off is passed.
         /// --vault-on is a no-op (vault is on by default) but is accepted for
         /// symmetry and to let users be explicit. If both flags are given,
-        /// vault_on=false (--vault-off wins — the safer choice) per ADR-015.
+        /// vault_on=false (--vault-off wins — the safer choice).
         vault_on: bool,
         /// Integration depth (§4.4). None when `--mode` was not supplied — the
         /// command then prompts (interactive) or defaults to plugin (`--yes` /
@@ -82,15 +82,15 @@ pub enum Command {
     Drain { db: Option<String> },
     /// dream [--db <name>] — run one REM-ALPHA dreaming cycle, then exit
     /// (the detached background finisher an stdio serve spawns on startup/exit
-    /// when the dreaming queue has pending items; T10 / ADR-021 Phase 5).
+    /// when the dreaming queue has pending items;  / recall-driven dreaming).
     Dream { db: Option<String> },
     /// §4.8 upgrade [--from <path>] [--check] [--yes] [--no-restart]
     Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool },
-    /// ADR-025 unlock <private|secret> [--db <name>]
+    /// out-of-band sensitivity grants unlock <private|secret> [--db <name>]
     /// Authenticate and issue an in-RAM sensitivity-tier grant to the daemon.
     /// "private" maps to the restricted tier; "secret" to the secret tier.
     Unlock { tier: String, db: Option<String> },
-    /// ADR-025 lock — revoke all sensitivity grants (no auth required).
+    /// out-of-band sensitivity grants lock — revoke all sensitivity grants (no auth required).
     Lock,
     /// --version on the root command.
     Version,
@@ -350,7 +350,7 @@ fn parse_install(it: &mut Args) -> Result<Command, UsageError> {
             "--no-permissions" => no_permissions = true,
             "--no-mgr" => no_mgr = true,
             "--no-daemon" => no_daemon = true,
-            // ADR-015: vault surface toggle. --vault-off wins over --vault-on
+            // vault surface toggle. --vault-off wins over --vault-on
             // when both are present (the safer choice). --vault-on is explicit
             // opt-in to the default and is accepted for symmetry / scripting.
             "--vault-on" => { /* vault_on already true; explicit for clarity */ }
@@ -610,7 +610,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --grant-permissions     Write EVERY tool to permissions.allow (full auto-approval). Default is tiered: diagnostics allow, reads/writes ask, destructive deny.\n\
             \x20 --no-permissions        Do not write tool permissions at all (skips the tiered default).\n\
             \x20 --no-mgr                Skip registering the moot-mgr management console as a background service.\n\
-            \x20 --no-daemon             Skip registering the resident mootx01 daemon (HTTP MCP server + autonomic governor) as a background service.\n\
+            \x20 --no-daemon             Wire clients directly to `mootx01 serve` over stdio and skip registering the resident HTTP daemon. Stop an existing resident for socket-free MCP operation.\n\
             \x20 --vault-on              Enable Vault MCP tools (moot_vault_*). Default behavior: vault is on when neither flag is specified.\n\
             \x20 --vault-off             Hide Vault MCP tools from the MCP surface. Disables import/export for a more secure install position.\n\
             \x20 --reuse-db              When an estate database already exists: adopt it as the default estate and reset the moot-mgr history store (no prompt).\n\
@@ -659,7 +659,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \n\
             OPTIONS:\n\
             \x20 --db <name>             Named estate to drain. Default: active estate.".into(),
-        "dream" => "Run one REM-ALPHA dreaming cycle, then exit. The detached background finisher an stdio serve spawns on startup or exit when the dreaming queue has pending items (T10 / ADR-021 Phase 5); rarely run by hand.\n\
+        "dream" => "Run one REM-ALPHA dreaming cycle, then exit. The detached background finisher an stdio serve spawns on startup or exit when the dreaming queue has pending items; rarely run by hand.\n\
             \n\
             USAGE: mootx01 dream [--db <name>]\n\
             \n\
@@ -679,7 +679,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             USAGE: mootx01 unlock <private|secret> [--db <name>]\n\
             \n\
             ARGUMENTS:\n\
-            \x20 private                 Grant access to restricted-tier rows until local midnight (ADR-025 §1).\n\
+            \x20 private                 Grant access to restricted-tier rows until local midnight.\n\
             \x20 secret                  Grant access to secret-tier rows for 30 minutes.\n\
             \n\
             OPTIONS:\n\
@@ -693,7 +693,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \n\
             Calls the daemon's /api/control/lock endpoint and clears any active restricted\n\
             and secret grants for the current session. Reducing your own access is always\n\
-            permitted — no identity verification is needed (ADR-025 §1).".into(),
+            permitted — no identity verification is needed.".into(),
         other => format!("(no help for '{other}')"),
     }
 }
@@ -958,7 +958,7 @@ mod tests {
         assert!(p(&["frobnicate"]).is_err());
     }
 
-    // ADR-025 unlock / lock
+    // out-of-band sensitivity grants unlock / lock
 
     #[test]
     fn unlock_private_parses() {

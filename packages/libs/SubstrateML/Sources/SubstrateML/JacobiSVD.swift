@@ -1,7 +1,7 @@
 // JacobiSVD.swift
 //
 // Deterministic one-sided Jacobi SVD for real matrices (m × n, m ≥ n).
-// Part 1 of the ADR-010 Decision B LSA signal.
+// Part 1 of the honest semantic fusion LSA signal.
 //
 // ## Algorithm
 //

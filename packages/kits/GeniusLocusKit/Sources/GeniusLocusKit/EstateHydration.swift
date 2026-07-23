@@ -195,14 +195,14 @@ public extension GeniusLocusKit {
         now: Date = Date()
     ) async throws {
         // Step 3 — Load the unified audit log.
-        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): `feedAuditLog` (N+1 per-drawer
-        // queries into a grow-only RAM dict) is removed. `auditLog(for:)` now
+        // `feedAuditLog` (N+1 per-drawer queries into a grow-only RAM dict)
+        // is removed. `auditLog(for:)` now
         // issues a single bounded SQL query against `_storagekit_audit`.
         let log_ = try await auditLog(for: handle)
 
         // Build the eventTime map (rowID → authored-in-world epoch ms) so the
         // temporal (T) matrix pass keys off `eventTime`, not the capture HLC —
-        // ADR-004: all temporal-cognition primitives key off eventTime. A bulk
+        // all temporal-cognition primitives key off eventTime. A bulk
         // historical import stamps every capture with one HLC, so hlc-based lags
         // are all 0 and no causality pairs form; the real ordering lives in each
         // drawer's eventTime. For streaming capture eventTime == captureTime, so

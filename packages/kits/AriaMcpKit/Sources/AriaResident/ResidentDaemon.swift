@@ -7,7 +7,7 @@ import ObserverSink
 import IntellectusLib
 import Synchronization
 
-/// The resident-daemon composition layer (see ADR-LOOPBACKHTTP-001).
+/// The resident-daemon composition layer (see bounded loopback HTTP).
 ///
 /// Both the product binary (`mootx01 serve`, resident mode) and the dev/reference
 /// build (`aria-mcp`) run the SAME resident wiring through this one entry point —
@@ -219,7 +219,7 @@ public enum AriaResident {
     /// Run the resident daemon: install telemetry (if configured), spawn the Brain
     /// pump and the continuous monitoring gate, and serve the HTTP MCP transport
     /// until the process is terminated. Throws on bind failure (the caller decides
-    // MARK: - MonitoringControl concrete implementation (ADR-025 wave 8.2)
+    // MARK: - MonitoringControl concrete implementation
 
     /// Concrete `MonitoringControl` backed by the resident `StatsStore`.
     ///
@@ -308,7 +308,7 @@ public enum AriaResident {
             { @Sendable in (try? await store.isMonitoringEnabled()) ?? true }
         }
 
-        // ADR-025 wave 8.2: inject the monitoring control into the dispatcher
+        // inject the monitoring control into the dispatcher
         // so moot_monitoring_status can read/write the stats store without
         // AriaMcpKit importing ObserverSink. The concrete type lives here because
         // AriaResident is the only module that imports both AriaMCP (for the
@@ -349,7 +349,7 @@ public enum AriaResident {
         let graphAnalyticsHandler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void)? = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
             // Resolve parentNodeIds to display names for per-wing iteration.
-            // Drawer no longer carries stored wing/room after ADR-017.
+            // Drawer no longer carries stored wing/room after node-tree integrity.
             let estate = try await kit.estate(for: handle)
             let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
             let nodeNames = try await estate.resolveNodeNames(

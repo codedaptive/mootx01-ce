@@ -13,7 +13,7 @@
 //!     payload        BLOB NOT NULL,        -- raw bytes (Engram wire form for Binary)
 //!     scale          REAL,                 -- dequantisation scale for Int8; NULL otherwise
 //!     filed_at       TIMESTAMP NOT NULL,
-//!     ext            JSON                  -- forward-compat slot (ADR-012, v3); nullable, NULL in 1.0
+//!     ext            JSON                  -- forward-compat slot (nullable entity ext slots, v3); nullable, NULL in 1.0
 //!   )
 //!   UNIQUE(item_id, vector_index, model_id)
 //!
@@ -78,7 +78,7 @@ use uuid::Uuid;
 
 /// One row of the `vectors` table. Parallel to the Swift `StoredVector`.
 ///
-/// `filed_at` is Unix epoch milliseconds (ADR-023); `vector_index` is 0 for
+/// `filed_at` is Unix epoch milliseconds; `vector_index` is 0 for
 /// single-vector models.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredVector {
@@ -89,7 +89,7 @@ pub struct StoredVector {
     pub model_id: String,
     pub model_version: String,
     pub engram: Engram,
-    /// Unix epoch milliseconds (ADR-023). Callers pass the drawer's
+    /// Unix epoch milliseconds. Callers pass the drawer's
     /// `filed_at`, which is epoch-ms; the `_unix_secs` suffix on the input
     /// params is legacy naming, not a unit — the value is milliseconds.
     pub filed_at: i64,
@@ -142,7 +142,7 @@ pub struct VectorPayloadInput {
     pub model_id: String,
     /// The embedding model version.
     pub model_version: String,
-    /// Wall-clock filing time as Unix epoch milliseconds (ADR-023; determinism
+    /// Wall-clock filing time as Unix epoch milliseconds (epoch-millisecond instants; determinism
     /// discipline: passed in, never read from the system clock inside the engine).
     pub filed_at_unix_secs: i64,
 }
@@ -297,7 +297,7 @@ impl VectorStore {
     /// Schema declaration consumed by `Storage::open`. Lane F
     /// multi-vector schema: UNIQUE(item_id, vector_index, model_id).
     ///
-    /// v3 adds the nullable `.json` `ext` forward-compat slot (ADR-012);
+    /// v3 adds the nullable `.json` `ext` forward-compat slot;
     /// 1.0 writes NULL and never reads it.
     ///
     /// v4 adds `idx_vectors_filed_at_item` on (filed_at, item_id).
@@ -329,7 +329,7 @@ impl VectorStore {
                     // scale: dequantisation multiplier for Int8; NULL for Binary/Float32.
                     ColumnDeclaration::float("scale").nullable(),
                     ColumnDeclaration::timestamp("filed_at"),
-                    // ext: ADR-012 forward-compat slot (v3). Nullable JSON;
+                    // ext: nullable entity ext slots forward-compat slot (v3). Nullable JSON;
                     // future per-vector typed metadata (quantisation provenance,
                     // embedding-run tags) serializes here migration-free. 1.0
                     // writes NULL and never reads it.
@@ -1403,7 +1403,7 @@ impl VectorStore {
     ///
     /// Returns up to `k` matches, nearest first. Empty if `k` is 0, the
     /// probe is empty, or no float rows exist.
-    /// ADR-026: float NN search scans the SQLite `vectors` table directly.
+    /// float NN search scans the SQLite `vectors` table directly.
     /// No FloatBruteForceIndex, no cached ResidentVectorArray, no multi-GB
     /// heap copy. With PRAGMA mmap_size, row reads come from the OS page
     /// cache. Cosine distance is computed per row; the result set is sorted
@@ -1962,7 +1962,7 @@ impl VectorStore {
     /// map entry's presence is the per-model "built" flag. Unlike the binary
     /// lane there is no sidecar for the float lane yet — the float resident
     /// array is rebuilt from the table on first use.
-    /// ADR-026: scan the SQLite `vectors` table directly for float NN
+    /// scan the SQLite `vectors` table directly for float NN
     /// search, computing cosine distance per row. No cached index, no
     /// heap-resident vector array. Returns (distance, item_id) pairs.
     /// Scan the model's float rows and return the `k` best-scoring by cosine
@@ -2084,7 +2084,7 @@ impl VectorStore {
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
-        // ADR-026 string interning: model_id and model_version repeat for
+        // disk-default storage residency string interning: model_id and model_version repeat for
         // every row in a partition. Interning collapses N identical String
         // heap allocations to one shared instance per unique value.
         let mut intern_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2389,7 +2389,7 @@ fn decode_stored_vector(
         Ok(e) => e,
         Err(_) => return Ok(None),
     };
-    // filed_at is a unix-milliseconds i64 (ADR-023). A timestamp column reads back as `Timestamp`
+    // filed_at is a unix-milliseconds i64. A timestamp column reads back as `Timestamp`
     // on the InMemory backend and as a primitive `Int` on the SQLite backend
     // (the column stores the integer). Accept both — decoding only `Timestamp`
     // dropped every persisted vector on reopen, blanking the vector recall lane

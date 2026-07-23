@@ -1,7 +1,7 @@
 // PortableKernel-NEON.swift
 //
 // Swift simd-type kernel implementation per
-// DECISION_HAMMING_BACKENDS_2026-05-17.md Phase 2.β-2 candidate
+// measured SIMD Hamming selection candidate
 // expansion. Uses Swift `simd` types and lane-wise nonzeroBitCount
 // rather than direct NEON intrinsics (Swift has no vector-wide popcount
 // primitive; see comments below for the per-lane approach used).

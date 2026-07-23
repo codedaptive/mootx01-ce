@@ -1805,7 +1805,7 @@ Internal callers were updated to pass `"", 0.0`.
 ### Dependency change
 
 `Package.swift` — `IntellectusLib` added to SubstrateML target and test
-target dependencies (authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+target dependencies (authority: `the package-dependency rule`).
 
 `Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.
 

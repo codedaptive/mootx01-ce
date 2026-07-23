@@ -2,7 +2,7 @@
 //
 // Mission GLK-06 — Selectable matrix-tier persistence.
 //
-// Per DECISION_MATRIX_TIER_PERSISTENCE_2026-05-21, persistence is a
+// Per durable matrix snapshots, persistence is a
 // per-estate mode chosen at instantiation:
 //
 //   .inMemory             — the matrix tier is held purely in memory and
@@ -38,7 +38,7 @@ import SubstrateTypes
 // MARK: - Mode
 
 /// Matrix-tier persistence mode. Chosen by the consumer at estate
-/// instantiation per DECISION_MATRIX_TIER_PERSISTENCE_2026-05-21.
+/// instantiation per durable matrix snapshots.
 public enum MatrixPersistenceMode: Sendable, Equatable {
     /// Hold the matrix tier purely in memory. Cold-start rebuilds from
     /// the full audit log.

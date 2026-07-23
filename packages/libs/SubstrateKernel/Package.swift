@@ -50,7 +50,7 @@ let package = Package(
         // IntellectusLib is the substrate's zero-dep telemetry leaf.
         // Adding it here lets kernelForCurrentPlatform() emit the
         // backend_selected metric at the selection site.
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 +
+        // Authority: in-repository dependency direction +
         //            MANAGER_1.0_PLAN.md §2 (SubstrateLib bullet).
         // Layering: IntellectusLib has zero repo deps; this is strictly
         // downstream→upstream, no cycle.

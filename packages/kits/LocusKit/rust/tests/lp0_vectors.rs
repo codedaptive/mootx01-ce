@@ -168,7 +168,7 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                     "[{}] captured content mismatch",
                     case_id
                 );
-                // ADR-017: room resolved from node tree via parent_node_id.
+                // room resolved from node tree via parent_node_id.
                 let node_names = store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
                 let resolved_room = node_names.get(&drawer.parent_node_id)
                     .map(|(_, r)| r.as_str())

@@ -12,7 +12,7 @@
 // only need bundle storage and BM25 do not pull in CoreML models.
 //
 // IntellectusLib dependency added per
-// DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (P2 self-report telemetry
+// in-repository dependency direction (P2 self-report telemetry
 // coverage, cp-corpuskit-report). IntellectusLib is a zero-dependency
 // leaf lib; layering is not inverted.
 
@@ -31,14 +31,14 @@ let package = Package(
     dependencies: [
         .package(path: "../../libs/SubstrateTypes"),
         // SubstrateLib: MerkleHash.leaf for the ContentHashProvider callback
-        // that HashingRowStore invokes on every chunk insert (ADR-017 §16).
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + ADR-017 §19.
+        // that HashingRowStore invokes on every chunk insert.
+        // Authority: in-repository dependency direction + node-tree integrity.
         .package(path: "../../libs/SubstrateLib"),
         // SubstrateKernel: float-vector ops (l2Norm, l2Normalize, dot,
         // cosine) now live here as the canonical conformance-gated
         // implementations. CorpusKitProviders consumes FloatVecOps;
         // higher kits must call the substrate, not inline their own math.
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + arch mandate §4.
+        // Repository-owned dependencies use local package paths.
         .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/EngramLib"),
@@ -47,7 +47,7 @@ let package = Package(
         // derivation consumed by FDCProvider in CorpusKitProviders.
         // Transitive dependency of EideticLib; declared explicitly here so
         // CorpusKitProviders can import LatticeLib directly.
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // Authority: in-repository dependency direction.
         .package(path: "../../libs/LatticeLib"),
         // IntellectusLib: zero-dependency telemetry leaf. Added for P2
         // self-report coverage (cp-corpuskit-report). When monitoring is
@@ -62,7 +62,7 @@ let package = Package(
         // itself with no GeniusLocusKit). QueueKit is a low-level primitive
         // (SubstrateTypes + PersistenceKit + IntellectusLib); CorpusKit →
         // QueueKit is downstream→upstream, no inversion.
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (in-repo kit
+        // Authority: in-repository dependency direction (in-repo kit
         // dependency required by the encode-pipeline relocation into CorpusKit).
         .package(path: "../QueueKit"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
@@ -87,8 +87,8 @@ let package = Package(
                 // encrypted queue.sqlite sibling via SQLiteStorage(configuration:). This
                 // is the same encrypted SQLite the estate itself uses — queueSibling
                 // derives the sibling config (path + encryption key) so the queue.sqlite
-                // is never plaintext beside a plaintext estate (ADR-021 Decision 7 / T4).
-                // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+                // is never plaintext beside a plaintext estate.
+                // Authority: in-repository dependency direction.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
                 "VectorKit",
@@ -116,7 +116,7 @@ let package = Package(
                 // (FDC.encode). Ancestor chain via FDC.ancestors(of:), the
                 // runtime façade over FDCFrame.ancestors(of:). FDC math lives
                 // in LatticeLib — not reimplemented in CorpusKitProviders.
-                // Authority: ADR-010 Decision B (FDC co-classification signal).
+                // Authority: honest semantic fusion (FDC co-classification signal).
                 .product(name: "LatticeLib", package: "LatticeLib"),
             ],
             path: "Sources/CorpusKitProviders"

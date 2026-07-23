@@ -28,7 +28,7 @@
 //     snapshot       BLOB NOT NULL,    -- JSON-encoded MatrixSnapshot
 //     last_hlc       TEXT NOT NULL,    -- F/O/C cursor watermark (human-readable)
 //     updated_at     TEXT NOT NULL,    -- ISO8601 (schema invariant); never REAL
-//     ext            JSON NULL         -- ADR-012 forward-compat slot
+//     ext            JSON NULL         -- nullable entity ext slots forward-compat slot
 //   )  PRIMARY KEY (estate_id)
 //
 // ## Why each column
@@ -78,7 +78,7 @@ public actor MatrixSnapshotStore {
     /// kitID so it migrates independently of the GLK composite (the same pattern
     /// CorpusProviderCountsStore / RemovedSourceStore use). `appendOnly` is false:
     /// a save UPSERTs the estate's row, so the table holds at most one snapshot
-    /// per estate. The `.json` `ext` slot is the ADR-012 forward-compat slot
+    /// per estate. The `.json` `ext` slot is the nullable entity ext slots forward-compat slot
     /// (written NULL / omitted in 1.0).
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "GeniusLocusKitMatrix",
@@ -96,7 +96,7 @@ public actor MatrixSnapshotStore {
                     .text("last_hlc", nullable: false),
                     // TIMESTAMP maps to TEXT ISO8601 (schema invariant) — never REAL.
                     .timestamp("updated_at", nullable: false),
-                    // ADR-012 forward-compat slot; nullable, omitted on upsert in 1.0.
+                    // nullable entity ext slots forward-compat slot; nullable, omitted on upsert in 1.0.
                     .json("ext", nullable: true)
                 ],
                 primaryKey: ["estate_id"]

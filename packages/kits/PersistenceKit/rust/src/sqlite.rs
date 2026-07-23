@@ -7,7 +7,7 @@
 //! Implements RowStore, BlobStore, AuditLog, and StorageObserver plus
 //! schema/migrations/generated-columns/append-only. The backend owns no
 //! vector-search engine; it accommodates vector workloads' storage needs
-//! through RowStore/BlobStore (ADR-008).
+//! through RowStore/BlobStore.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str;

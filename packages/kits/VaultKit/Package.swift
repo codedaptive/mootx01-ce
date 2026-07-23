@@ -49,7 +49,7 @@ let package = Package(
         // QueueKit: the outbound MemPalace pump (PalacePump.swift) uses the
         // queue as its checkpoint + pacing layer — each note becomes a job, so
         // a crash mid-pump resumes from the queue rather than from zero
-        // (DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28, cited in this mission's
+        // (in-repository dependency direction, cited in this mission's
         // Blast Radius Report). Layering: VaultKit (above GLK) → QueueKit (kit
         // layer); no inversion.
         .package(name: "QueueKit", path: "../QueueKit"),

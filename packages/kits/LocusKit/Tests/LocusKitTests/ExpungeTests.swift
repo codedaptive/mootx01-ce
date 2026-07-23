@@ -409,7 +409,7 @@ struct ExpungeTests {
         #expect(raw.contains("."), "tombstonedAt stored value '\(raw)' must contain fractional seconds (a '.' in the time component) — write must use TypedValue.timestamp, not a bare ISO8601DateFormatter")
     }
 
-    // MARK: - Lineage-wide expunge conformance (ADR-017 §17)
+    // MARK: - Lineage-wide expunge conformance
 
     /// The exact governance defect test: create D1, supersede it with D2
     /// (same lineageID), expunge D2 (the head), verify D1's content is
@@ -473,6 +473,6 @@ struct ExpungeTests {
         let predecessorAfter = try await store.getDrawer(id: predecessorId)
         #expect(predecessorAfter?.state == .tombstoned)
         #expect(predecessorAfter?.content == "",
-                "Predecessor content must be empty after lineage-wide expunge (ADR-017 §17)")
+                "Predecessor content must be empty after lineage-wide expunge")
     }
 }

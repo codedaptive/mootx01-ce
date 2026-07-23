@@ -72,17 +72,17 @@ public struct ToolDispatcher: Sendable {
     /// are still correlated.
     let recallLedger: SurfacedRecallLedger
 
-    /// ADR-025 sensitivity unlock: daemon-RAM-only grant ledger for the
+    /// sensitivity unlock: daemon-RAM-only grant ledger for the
     /// restricted/secret sensitivity tiers. Actor-isolated (Sendable) — safe
     /// in the immutable Sendable struct. Shared across dispatchers derived
     /// via `registering(_:)` for the same reason `recallLedger` is: exactly
     /// one instance lives for the lifetime of one `mootx01 serve` process,
-    /// so "daemon restart = everything locked" (ADR-025 §1) falls out of
+    /// so "daemon restart = everything locked" falls out of
     /// `ToolDispatcher` construction rather than needing special-cased
     /// reset logic. See `SensitivityGrantLedger`'s own doc comment.
     let sensitivityUnlockLedger: SensitivityGrantLedger
 
-    /// Injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+    /// Injection seam for daemon telemetry monitoring state.
     ///
     /// Nil when the host has no stats store wired (stdio mode, test harnesses,
     /// provision-less contexts). The concrete implementation (AriaResident's
@@ -107,7 +107,7 @@ public struct ToolDispatcher: Sendable {
     /// not pass an explicit value receive the default "aria-mcp-server".
     public let serverIdentity: String
 
-    /// ADR-024 §5: advisory message when the host has detected a version
+    /// advisory message when the host has detected a version
     /// mismatch between an installed plugin (e.g. Claude Code's
     /// `mootx01@mootx01`) and this running binary — `nil` when no plugin is
     /// detected or its version matches. Computed once by the host at
@@ -712,7 +712,7 @@ public struct ToolDispatcher: Sendable {
     /// `true` if `chain` already constrains sensitivity in any way — an
     /// exact `.sensitivity` match, an explicit `.sensitivityAtMost`
     /// ceiling (whether from the caller's own `filter` argument or
-    /// injected by ADR-025's grant ceiling), or one nested inside
+    /// injected by the sensitivity-grant ceiling), or one nested inside
     /// `.all`/`.any`/`.not`. Mirrors LocusKit `BitmapEvaluator`'s private
     /// `isBitmapSensitivityFilter` classifier — kept as a small local
     /// duplicate rather than exposing that private substrate function,
@@ -1121,7 +1121,7 @@ enum InterfaceTools {
         "moot_write_journal", "moot_read_journal",
         // Tier 5 — Estate
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
-        // Monitoring control (ADR-025 wave 8.2) — read/write daemon telemetry flag
+        // Monitoring control — read/write daemon telemetry flag
         "moot_monitoring_status",
         // Maintenance / admin
         "moot_reindex", "moot_drain_status", "moot_reclassify_fdc",
@@ -1168,7 +1168,7 @@ enum InterfaceTools {
         case "moot_estate_status":      return try await dispatcher.runEstateStatus(args)
         case "moot_estate_map":         return try await dispatcher.runEstateMap(args)
         case "moot_estate_ping":        return try await dispatcher.runEstatePing(args)
-        // Monitoring control (ADR-025 wave 8.2)
+        // Monitoring control
         case "moot_monitoring_status":  return try await dispatcher.runMonitoringStatus(args)
         // Maintenance / admin
         case "moot_reindex":           return try await dispatcher.runReindex(args)
@@ -1223,7 +1223,7 @@ extension ToolDispatcher {
         // background). True = inline-encode before returning.
         let impatient = try optionalBool(args["impatient"], argument: "impatient") ?? false
         let mode: WriteMode = impatient ? .impatient : .regular
-        // ADR-016 §3: optional `wing` argument routes this memory into a specific wing.
+        // optional `wing` argument routes this memory into a specific wing.
         // When supplied, the drawer files into that wing.
         // When absent, defaults to LocusKit.defaultWingName ("Agentic Memory") — the AI's
         // working memory wing. `location` maps to room only and never encodes a wing.
@@ -1256,7 +1256,7 @@ extension ToolDispatcher {
         // semantic indexing); impatient encodes inline before returning.
         let drawer = try await kit.capture(handle, frame, mode: mode)
         // Resolve the drawer's parentNodeId to a display room name via the
-        // node tree (Drawer no longer carries stored wing/room after ADR-017).
+        // node tree (Drawer no longer carries stored wing/room after node-tree integrity).
         let estate = try await kit.estate(for: handle)
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: [drawer.parentNodeId])
@@ -1290,13 +1290,13 @@ extension ToolDispatcher {
             try optionalInt(args["limit"], argument: "limit"), argument: "limit")
         // Wall-clock time for this request. Hoisted to the top of the
         // function (rather than the later `let now = Date()` this replaces)
-        // so the SAME instant gates both the ADR-025 grant check below and
+        // so the SAME instant gates both the out-of-band sensitivity grants grant check below and
         // the surfaced-recall-ledger recording further down — one request,
         // one `now`.
         let now = Date()
         // Build the base filter chain from the `filter` argument.
         var filterChain = try decodeFilterChain(args["filter"])
-        // ADR-025 sensitivity unlock: when a restricted/secret grant is
+        // sensitivity unlock: when a restricted/secret grant is
         // live, inject the grant-lifted ceiling explicitly. This is the
         // seam BitmapEvaluator.insertDefaults documents: "conditional on
         // absence so an explicit sensitivity constraint from the caller
@@ -1312,7 +1312,7 @@ extension ToolDispatcher {
             filterChain.append(ceiling)
             sensitivityCeilingLifted = true
         }
-        // ADR-016 §4: optional `wing` argument scopes recall to a single wing.
+        // optional `wing` argument scopes recall to a single wing.
         // When absent, recall spans all wings (existing default behavior unchanged).
         // Appended to the filter chain so it composes with any explicit filter.
         if let wingName = try optionalString(args["wing"], argument: "wing") {
@@ -1375,7 +1375,7 @@ extension ToolDispatcher {
         if !surfacedIDs.isEmpty {
             await recallLedger.recordSurfaced(surfacedIDs, at: now)
         }
-        // ADR-025 §4: record a sensitivityReadUnderGrant audit entry for
+        // record a sensitivityReadUnderGrant audit entry for
         // each hit that was admitted PAST the substrate's own default
         // ceiling specifically because a grant is live. Only rows whose
         // own adjective sensitivity is restricted/secret qualify — an
@@ -1407,7 +1407,7 @@ extension ToolDispatcher {
         // (which would violate the signal's trustworthiness contract).
         let denseLaneDark = result.denseLaneStatus != nil
 
-        // ADR-017 §3: Drawer no longer carries stored wing/room. Resolve
+        // Drawer no longer carries stored wing/room. Resolve
         // parentNodeIds to display names via the node tree for result formatting.
         let estate = try await kit.estate(for: handle)
         let hitNodeIds = result.hits.compactMap { $0.drawer?.parentNodeId }
@@ -1458,7 +1458,7 @@ extension ToolDispatcher {
         }
         lines.append(RecallDiscrimination.resultLine(for: discriminationLevel, denseLaneDark: denseLaneDark))
         // Recall provenance: surface the dense-lane status and any degraded stages
-        // so callers can distinguish retrieval quality (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
+        // so callers can distinguish retrieval quality.
         //
         // denseLaneStatus non-nil means the dense float vector lane (Lane D) did not
         // contribute hits. Lane D uses the deterministic embedding provider (FNV-1a
@@ -1483,7 +1483,7 @@ extension ToolDispatcher {
         if let darkReason = result.denseLaneStatus {
             // Dense vector lane (Lane D) was dark — ranking came from structural/BM25
             // lanes only. Surface the reason so the caller knows vector scoring did not
-            // contribute. Honest-labeling requirement per the embedding ADR.
+            // contribute. The response must label embedding provenance honestly.
             provenanceParts = ["dense_lane:\(darkReason)"]
         } else {
             // Lane D active: deterministic vector (FNV-1a + FloatSimHash) + structural/BM25 ranking.
@@ -1496,7 +1496,7 @@ extension ToolDispatcher {
             degradedPart = "degraded_stages:[\(result.degradedStages.joined(separator: ","))]"
         }
         lines.append("recall_provenance: \((provenanceParts + [degradedPart]).joined(separator: " "))")
-        // ADR-025 §4: redaction advisory stat (Wave 7.4).
+        // redaction advisory stat.
         // When no grant is active, check cheaply whether the estate holds any
         // restricted or secret rows. If so, append an advisory so the AI client
         // knows results may be incomplete and how to request access.
@@ -1554,7 +1554,7 @@ extension ToolDispatcher {
         let rowID = try requireString(args, "id")
         let estate = try await kit.estate(for: handle)
 
-        // ADR-025 sensitivity unlock: same grant-ceiling injection as
+        // sensitivity unlock: same grant-ceiling injection as
         // runMemorySearch — see that function's doc comment. moot_memory_get
         // deliberately uses the SAME containment gate moot_memory_search
         // does (its own doc history says so explicitly), so the grant must
@@ -1580,7 +1580,7 @@ extension ToolDispatcher {
                 message: "Memory not found: \(rowID)"
             )
         }
-        // ADR-025 §4: same read-under-grant audit recording as
+        // same read-under-grant audit recording as
         // runMemorySearch — see that function's comment for why this is
         // gated on BOTH the ceiling having been lifted AND the drawer's
         // own sensitivity actually being restricted/secret.
@@ -1594,7 +1594,7 @@ extension ToolDispatcher {
             }
         }
 
-        // ADR-017 §3: Drawer no longer carries stored wing/room; resolve via
+        // Drawer no longer carries stored wing/room; resolve via
         // the node tree, same pattern as every other read tool in this file.
         let nodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
         let names = nodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
@@ -1637,7 +1637,7 @@ extension ToolDispatcher {
         // tool exists to return.
         lines.append("content:")
         lines.append(drawer.content)
-        // ADR-025 §4: redaction advisory stat (Wave 7.4) — same logic as
+        // redaction advisory stat  — same logic as
         // runMemorySearch. When no grant is active, surface an advisory if the
         // estate contains any restricted/secret rows not visible through the
         // default gate. Consistent with search so the AI client receives the
@@ -1656,7 +1656,7 @@ extension ToolDispatcher {
     ///
     /// Used by `runMemorySearch` and `runMemoryGet` to decide whether to append a
     /// sensitivity advisory. The advisory tells the AI client that results may be
-    /// incomplete and how to unlock the hidden tier (ADR-025 §4, Wave 7.4).
+    /// incomplete and how to unlock the hidden tier.
     ///
     /// Implementation: two limit-1 `GLKRecallRequest` scans with explicit
     /// `Filter.sensitivity(tier)` — these filters suppress the default
@@ -1791,7 +1791,7 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
         let location = try requireString(args, "location")
-        // ADR-016 §3: optional `wing` moves the drawer into a different wing.
+        // optional `wing` moves the drawer into a different wing.
         // When absent, the drawer stays in its current wing — room-only move.
         let wing = try optionalString(args["wing"], argument: "wing")
         // Note usage: moving a surfaced drawer means the user acted on it.
@@ -1904,7 +1904,7 @@ extension ToolDispatcher {
                 message: "Memory not found: \(toID)"
             )
         }
-        // ADR-017 §3: Drawer no longer carries stored wing/room. Resolve
+        // Drawer no longer carries stored wing/room. Resolve
         // parentNodeIds via the node tree for TunnelCaptureFrame display names.
         let linkNodeNames = try await estate.resolveNodeNames(
             parentNodeIds: [source.parentNodeId, target.parentNodeId])
@@ -2067,7 +2067,7 @@ extension ToolDispatcher {
     /// hint is appended so the AI caller can distinguish "no lexical match" from
     /// "semantic search was not consulted". This mirrors the honest-lane-state
     /// reporting that `moot_memory_search` and `moot_recall_shaped` emit, keeping
-    /// the ARIA surface consistent (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
+    /// the ARIA surface consistent.
     func runFactSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let allFactsRaw = try await kit.recallKGFacts(handle)
@@ -2390,7 +2390,7 @@ extension ToolDispatcher {
         // "total" counts all non-erased rows (tombstone = erased permanently).
         let total = drawers.filter { $0.tombstonedAt == nil }
         // Resolve parentNodeIds to display names for wing listing. Drawer
-        // no longer carries stored wing/room after ADR-017 node-tree migration.
+        // no longer carries stored wing/room after node-tree migration.
         let activeNodeNames = try await estate.resolveNodeNames(
             parentNodeIds: visible.map(\.parentNodeId))
         let wings = Set(visible.compactMap { activeNodeNames[$0.parentNodeId]?.wing }).sorted()
@@ -2433,7 +2433,7 @@ extension ToolDispatcher {
             "fdc_recalculation_floor: \(fdcFloor ?? "none")",
             "fdc_recalculation_current: \(currentFDCRecalculationVersion)",
         ]
-        // ADR-024 §5: surface a plugin/binary version-skew advisory when the
+        // surface a plugin/binary version-skew advisory when the
         // host detected one. Appended only when present so the common
         // no-skew case leaves the response shape unchanged.
         if let versionSkewAdvisory {
@@ -2464,7 +2464,7 @@ extension ToolDispatcher {
     /// a false enabled/disabled state. Mirrors the B-6 honesty discipline.
     ///
     /// Permission tier: `ask` (it can mutate monitoring state when `enabled` is
-    /// supplied — classified in PermissionsWriter.mutationTools, ADR-025 wave 8.2).
+    /// supplied — classified in PermissionsWriter.mutationTools, out-of-band sensitivity grants).
     func runMonitoringStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
         guard let control = monitoringControl else {
             // No stats store wired — honest "unavailable" response. Never say
@@ -2498,7 +2498,7 @@ extension ToolDispatcher {
     /// All drawers (including hint memories in AI_Charter_Hint) are counted
     /// normally — no special-casing. The map shows wing → rooms → counts.
     ///
-    /// Drawer no longer carries stored wing/room (ADR-017 node-tree migration).
+    /// Drawer no longer carries stored wing/room (node-tree migration).
     /// All display names are resolved from the node tree via
     /// `Estate.resolveNodeNames(parentNodeIds:)`.
     /// `moot_memory_list` — enumerate drawer IDs in a wing, optionally filtered
@@ -2611,7 +2611,7 @@ extension ToolDispatcher {
         let state = await kit.mountState(for: handle)
         switch state {
         case .mounted:
-            // ADR-024 §5: append the version-skew advisory when present —
+            // append the version-skew advisory when present —
             // same opt-in shape as moot_estate_status.
             var pong = "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live — build \(buildSerial)"
             if let versionSkewAdvisory {

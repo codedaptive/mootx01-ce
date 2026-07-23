@@ -1,4 +1,4 @@
-//! GC pin via snapshot-registry minimum HLC (ADR-017 §15).
+//! GC pin via snapshot-registry minimum HLC.
 //!
 //! The maintenance vacuum must not delete tombstoned/superseded rows
 //! that are newer than the oldest live snapshot's HLC. This module

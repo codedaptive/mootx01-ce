@@ -479,7 +479,7 @@ table and would lie about reward-pipeline depth. The read failure does not
 break the rest of the status response (the other fields are still returned).
 Both ports identical (`runEstateStatus`, `run_estate_status`).
 
-### Version-skew advisory (ADR-024 §5)
+### Version-skew advisory (the connection-ownership contract §5)
 
 Both `moot_estate_ping` and `moot_estate_status` append an OPT-IN
 `version_skew: <text>` line — present only when the host detected a mismatch
@@ -546,7 +546,7 @@ update phone-home surface.
 **Scope:** resident daemons only. stdio one-shot serves and
 `aria-mcp-server` (both ports) never wire a provider — ping is documented
 as returning immediately, and plugin-capable hosts reach the resident over
-HTTP anyway (ADR-024 §2).
+HTTP anyway (the connection-ownership contract §2).
 
 ### Session protocol block — `ToolDispatcher.ARIASessionProtocol`
 
@@ -873,7 +873,7 @@ serialization failure.
 
 `GET <anything-else>` returns HTTP 404 `{"error":"not_found"}`.
 
-## § 4.6 — Sensitivity control POST endpoints (HTTP transport only, ADR-025)
+## § 4.6 — Sensitivity control POST endpoints (HTTP transport only, the sensitivity-grant contract)
 
 Two write-only POST endpoints accept out-of-band sensitivity grants and revocations.
 Both ports (Swift + Rust) share the same CSRF/DNS-rebinding Origin guard as the
@@ -1191,7 +1191,7 @@ always uses `registry.default` and explicitly documents that `?estate=` is ignor
 The observable GET /api/graph response format is unchanged.
 
 ### 1.15.0 -- 2026-07-04
-ADR-024 §5: `moot_estate_ping` / `moot_estate_status` gain an opt-in
+the connection-ownership contract §5: `moot_estate_ping` / `moot_estate_status` gain an opt-in
 `version_skew:` line (see the new "Version-skew advisory" subsection under
 §`moot_estate_status` — sync field vocabulary, below) when the host detects a
 mismatch between an installed plugin (currently Claude Code's
@@ -1260,7 +1260,7 @@ updated: 68 total, 62 vault-off (Swift `ToolProjectionTests` /
 installer `PermissionsWriter` inventories both legs).
 
 ### 1.18.0 -- 2026-07-05
-ADR-025 wave 8.2: `moot_monitoring_status` tool (§2 Tool projection, Tier 5 —
+the sensitivity-grant contract wave 8.2: `moot_monitoring_status` tool (§2 Tool projection, Tier 5 —
 Estate tools, monitoring-control entry). Injection pattern: `MonitoringControl`
 protocol (Swift) / trait (Rust) defined in AriaMcpKit; concrete implementation
 (`StatsStoreMonitoringControl`) in AriaResident (Swift) and `http_server.rs`
@@ -1274,7 +1274,7 @@ fresh StatsStore seeds monitoring=ON (wave 8.1 regression gate). Tool count: 64
 (Swift and Rust at parity).
 
 ### 1.17.0 -- 2026-07-05
-ADR-025 sensitivity unlock/lock control endpoints (§4.6). Documents
+the sensitivity-grant contract sensitivity unlock/lock control endpoints (§4.6). Documents
 `POST /api/control/unlock` and `POST /api/control/lock` — platform-
 specific identity verification (macOS: LocalAuthentication; Linux/Windows:
 PBKDF2-HMAC-SHA256), request/response shapes, proof freshness gate,

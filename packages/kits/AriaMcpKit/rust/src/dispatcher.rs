@@ -79,18 +79,18 @@ pub struct Dispatcher {
     /// `moot_vault_export` / `moot_vault_import` write here on completion;
     /// `moot_vault_job` reads by job ID. Bounded to 100 entries.
     vault_ledger: VaultJobLedger,
-    /// ADR-025 sensitivity-unlock grant ledger. Process-scoped, RAM-only —
+    /// sensitivity unlock grant ledger. Process-scoped, RAM-only —
     /// constructed fresh exactly once per `Dispatcher` (i.e. once per
     /// `mootx01 serve` process), so a daemon restart drops any live grant
     /// by construction, mirroring Swift `ToolDispatcher.sensitivityUnlockLedger`.
     /// `pub(crate)` so `http_server.rs` can access it for the control routes
-    /// that are structurally outside the JSON-RPC/MCP surface (ADR-025 §3).
+    /// that are structurally outside the JSON-RPC/MCP surface.
     pub(crate) sensitivity_ledger: SensitivityGrantLedger,
     /// Build serial surfaced by `moot_estate_ping`. Computed once at
     /// server startup via `crate::build_serial::derive()` and stored here
     /// so the filesystem is not touched on every ping call.
     pub(crate) build_serial: String,
-    /// ADR-024 §5: version-skew advisory surfaced by `moot_estate_ping` /
+    /// version-skew advisory surfaced by `moot_estate_ping` /
     /// `moot_estate_status` when the host detected a mismatch between an
     /// installed plugin (e.g. Claude Code's `mootx01@mootx01`) and this
     /// running binary. Empty string when no plugin is detected or its
@@ -112,7 +112,7 @@ pub struct Dispatcher {
     /// the host wired no provider — stdio one-shots and the aria-mcp dev
     /// server.
     pub(crate) update_advisory: Option<UpdateAdvisoryProvider>,
-    /// Injection seam for daemon telemetry monitoring state (ADR-025 wave 8.2).
+    /// Injection seam for daemon telemetry monitoring state.
     ///
     /// `None` when no stats store is configured (stdio mode, test harnesses,
     /// provision-less contexts). The concrete type lives in the serve host
@@ -132,7 +132,7 @@ impl Dispatcher {
     /// talking to the most recently compiled binary.
     ///
     /// `version_skew` is empty when the host detected no plugin/binary
-    /// version mismatch (ADR-024 §5) — pass `""` from callers that have no
+    /// version mismatch — pass `""` from callers that have no
     /// skew to report (e.g. `aria-mcp-server`, which has no plugin concept).
     pub fn new(
         registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
@@ -274,7 +274,7 @@ impl Dispatcher {
             // Upstream-release advisory provider — evaluated by ping/status
             // only; None when the host wired none.
             self.update_advisory.as_ref(),
-            // ADR-025 wave 8.2: thread the monitoring-control seam so the
+            // thread the monitoring-control seam so the
             // interface-tools layer can reach it without importing observer_sink.
             self.monitoring_control.as_deref(),
         )

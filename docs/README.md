@@ -40,6 +40,14 @@ phases.
 constraints, validation plan, and recorded audits. This is what
 turns architectural assertions into testable propositions.
 
+**You want the lessons behind the product work.**
+[`articles/`](articles/) holds the reviewed learning series. Choose the
+[`business/`](articles/business/) editions for product decisions, operating
+consequences, and team lessons. Choose the
+[`technical/`](articles/technical/) editions for implementation evidence,
+source trails, and diagrams. The article index keeps each business and
+technical edition together as a pair.
+
 **You are looking for history.**
 [`archive/`](archive/) holds superseded specs, historical math
 notes, and legacy product names. Preserved for traceability; not

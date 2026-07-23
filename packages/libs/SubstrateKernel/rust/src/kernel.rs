@@ -40,7 +40,7 @@ pub trait SubstrateKernel: Send + Sync {
     fn simhash_block(&self, input: &[u64], family: &HyperplaneFamily) -> u64;
 
     // ----- Batched variants (Phase 1 trait extension per
-    //       DECISION_KERNEL_LEARNED_DISPATCH_2026-05-17).
+    //       portable kernel dispatch).
     //
     // Default impls are loops over the pair-at-a-time ops above,
     // so trait extensions are non-breaking and every backend gets
@@ -91,7 +91,7 @@ pub trait SubstrateKernel: Send + Sync {
     /// Count-fold a slice of fingerprints into a count-vector: for
     /// each of the 256 bit positions, the number of members with that
     /// bit set, plus the member count. The bundle-algebra fold
-    /// (DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20). The OR-reduce
+    ///. The OR-reduce
     /// above is its degenerate case, saturating each count at one. The
     /// default is the scalar reference; performance backends override
     /// with a vectorized vertical counter, gated against the reference
@@ -120,7 +120,7 @@ pub trait SubstrateKernel: Send + Sync {
     /// from a seed in SubstrateML — so the kernel does pure signed-sum-and-sign
     /// with no RNG. The default impl is the scalar reference; a SIMD backend
     /// overrides it (over-hyperplanes vertical pattern, gated bit-for-bit;
-    /// DECISION_SIMHASH_BACKENDS_2026-05-18).
+    /// measured scalar/SIMD SimHash selection).
     fn float_simhash_project(
         &self,
         vector: &[f32],
@@ -250,7 +250,7 @@ pub enum KernelKind {
     Scalar,
     /// Portable SIMD backend via `std::simd::u64x4`. On aarch64
     /// this compiles to NEON `orr.16b` for OR-reduce. See
-    /// DECISION_OR_REDUCE_BACKENDS_2026-05-17.md. Available only
+    /// measured SIMD OR-reduce selection. Available only
     /// in builds with the `simd-nightly` Cargo feature; without
     /// it, `of_kind(Simd)` falls through to `ScalarKernel`.
     Simd,
@@ -297,7 +297,7 @@ impl PortableKernel {
     /// `simd-nightly` feature enabled, returns `SimdKernel`
     /// (portable SIMD via `std::simd::u64x4`, compiles to NEON
     /// `orr.16b` for or_reduce per
-    /// DECISION_OR_REDUCE_BACKENDS_2026-05-17). Stable builds
+    /// measured SIMD OR-reduce selection). Stable builds
     /// without the feature fall through to `ScalarKernel`.
     ///
     /// On all other platforms (including x86_64), returns
@@ -535,7 +535,7 @@ mod tests {
                    dispatched.hamming_distance_256(&a, &b));
     }
     // Phase 3.2 spec-pinned tie-check tests
-    // (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.3.2)
+    //
 
     #[test]
     fn hamming_top_k_ties_break_by_index_ascending() {

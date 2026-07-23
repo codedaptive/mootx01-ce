@@ -858,6 +858,56 @@ struct InstallerTests {
         #expect(entry?["command"] == nil, "HTTP-wired entry carries no command")
     }
 
+    @Test("mergeIntoJSONConfig writes explicit serve stdio entry when direct mode is requested")
+    func mergeIntoJSONConfigDirectStdio() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        let configURL = home.appendingPathComponent("test-config.json")
+        try Installer.mergeIntoJSONConfig(
+            at: configURL,
+            client: client,
+            binaryPath: "/usr/local/bin/mootx01",
+            daemonURL: MootPaths.residentEndpointURL,
+            directStdio: true,
+            vaultOff: true
+        )
+
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+        let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
+        #expect(entry?["command"] as? String == "/usr/local/bin/mootx01")
+        #expect(entry?["args"] as? [String] == ["serve"])
+        #expect((entry?["env"] as? [String: String])?["MOOTX01_VAULT"] == "0")
+        #expect((entry?["env"] as? [String: String])?["MOOTX01_HTTP_PORT"] == "")
+        #expect(entry?["url"] == nil, "direct stdio entry must not retain a daemon URL")
+    }
+
+    @Test("mergeIntoJSONConfig uses OpenCode's local command-vector schema in direct mode")
+    func mergeIntoJSONConfigOpenCodeDirectStdio() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let client = MCPClients.supported.first { $0.id == "opencode" }!
+        let configURL = home.appendingPathComponent("opencode.json")
+        try Installer.mergeIntoJSONConfig(
+            at: configURL,
+            client: client,
+            binaryPath: "/usr/local/bin/mootx01",
+            daemonURL: MootPaths.residentEndpointURL,
+            directStdio: true,
+            vaultOff: true
+        )
+
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+        let entry = (obj?["mcp"] as? [String: Any])?[client.serverName] as? [String: Any]
+        #expect(entry?["type"] as? String == "local")
+        #expect(entry?["command"] as? [String] == ["/usr/local/bin/mootx01", "serve"])
+        #expect((entry?["environment"] as? [String: String])?["MOOTX01_VAULT"] == "0")
+        #expect((entry?["environment"] as? [String: String])?["MOOTX01_HTTP_PORT"] == "")
+        #expect(entry?["url"] == nil)
+    }
+
     @Test("mergeIntoJSONConfig is idempotent: second call produces identical file content")
     func mergeIntoJSONConfigIdempotent() throws {
         let home = try makeSandboxHome()
@@ -952,6 +1002,29 @@ struct InstallerTests {
                 "url entry must target the resident daemon")
         #expect(!text.contains("command = "), "HTTP-wired table carries no command entry")
         #expect(text.first != "{", "must be TOML, not JSON")
+    }
+
+    @Test("mergeIntoTOMLConfig writes Codex command, serve args, and vault-off env in direct mode")
+    func mergeIntoTOMLDirectStdio() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let client = MCPClients.supported.first { $0.id == "codex" }!
+        let configURL = home.appendingPathComponent("config.toml")
+        try Installer.mergeIntoTOMLConfig(
+            at: configURL,
+            client: client,
+            binaryPath: "/usr/local/bin/mootx01",
+            daemonURL: MootPaths.residentEndpointURL,
+            directStdio: true,
+            vaultOff: true
+        )
+
+        let text = try String(contentsOf: configURL, encoding: .utf8)
+        #expect(text.contains("command = \"/usr/local/bin/mootx01\""))
+        #expect(text.contains("args = [\"serve\"]"))
+        #expect(text.contains("env = { MOOTX01_HTTP_PORT = \"\", MOOTX01_VAULT = \"0\" }"))
+        #expect(!text.contains("url = "), "direct stdio table must not retain a daemon URL")
     }
 
     @Test("mergeIntoTOMLConfig preserves top-level keys and other tables")

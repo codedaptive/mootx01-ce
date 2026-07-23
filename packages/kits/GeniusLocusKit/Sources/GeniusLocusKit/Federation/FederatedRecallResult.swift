@@ -9,7 +9,7 @@ import LocusKit
 /// authorizing `Grant` and both estate handles so the ARIA access
 /// surface above this layer (`MCP-MULTI-01`) and the audit trail can
 /// attribute the disclosure to a specific grant without re-querying the
-/// grant store. Per DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §10,
+/// grant store. Per federation disclosure controls,
 /// attribution of which content was disclosed under which grant is the
 /// load-bearing fact the answer-assembly layer needs.
 ///
@@ -63,7 +63,7 @@ public struct FederatedRecallResult: Sendable {
 ///
 /// This is the payload of `GeniusLocusKitError.crossEstateReadRefused`
 /// and the assertion surface for the A-versus-C refusal conformance
-/// tests (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §13, cookbook
+/// tests (federation disclosure controls, cookbook
 /// I-23). The substrate refuses — it never returns silently empty —
 /// when the source estate holds no valid grant naming the requester.
 public enum FederatedReadRefusalReason: Sendable, Equatable {
@@ -120,8 +120,7 @@ public enum FederatedReadRefusalReason: Sendable, Equatable {
     case custodyRefused
 
     /// The grant's Ed25519 signature does not verify against the GRANTER's
-    /// registered identity public key (D9 hardening,
-    /// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Delta 6).
+    /// registered identity public key.
     ///
     /// Trust derives from the estate registry (the key material stored at
     /// `Estate.open` time), not from any field in the grant blob itself —

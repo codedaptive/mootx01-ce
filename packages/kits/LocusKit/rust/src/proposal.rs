@@ -31,7 +31,7 @@
 //!   cookbook §2.4 ("Proposal operational"). See
 //!   `proposal_operational.rs`.
 //! - `provenance_bitmap` — source type, confirmation, confidence,
-//!   channel, sensitivity per `Q1_DECISION_PROVENANCE_BITMAP.md`.
+//!   channel, sensitivity per `the packed provenance layout`.
 //!
 //! All three bitmaps default to `0` so callers constructing a bare
 //! proposal get the safe baseline without threading every axis through
@@ -39,7 +39,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023), the convention
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, epoch-millisecond instants), the convention
 //!   used across the LocusKit Rust port.
 //! - `id: String = UUID().uuidString` Swift default → Rust callers
 //!   supply `id` explicitly.
@@ -106,7 +106,7 @@ pub struct Proposal {
     /// cookbook §2.4. See `proposal_operational.rs`.
     pub operational_bitmap: i64,
 
-    /// Provenance bitmap per `Q1_DECISION_PROVENANCE_BITMAP.md`.
+    /// Provenance bitmap per `the packed provenance layout`.
     pub provenance_bitmap: i64,
 
     /// When this proposal was filed. Epoch seconds in the Rust port;

@@ -1,6 +1,6 @@
 # PersistenceKit
 
-PersistenceKit is the storage abstraction layer for the GeniusLocus substrate. Second foundation kit in the eleven-kit family per `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`. Design settled in `docs/decisions/DECISION_STORAGEKIT_DESIGN_2026-05-19.md`.
+PersistenceKit is the storage abstraction layer for the GeniusLocus substrate. Second foundation kit in the eleven-kit family per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`. Design settled in `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#41-persistencekit-contract`.
 
 PersistenceKit answers: where do the durable bits live on this device? ConvergenceKit answers the orthogonal question of how bits converge across boundaries.
 
@@ -69,7 +69,7 @@ unchanged. Modes 2 and 3 encrypt the content column under AES-GCM-256
 split) is FedRAMP-tier and not built.
 
 The authoritative mechanism specification is
-`docs/decisions/DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md` Appendix A
+`docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#72-disclosure-model` Appendix A
 (A.1 mechanism, A.2 the four modes, A.3 mode-3 query-forwarding federation).
 The data key is generated for the user — full entropy, never a passphrase —
 and wrapped by device hardware where available, on the model of a disk
@@ -77,7 +77,7 @@ encryptor or crypto wallet.
 
 ## Eight settled design decisions
 
-Per DECISION_STORAGEKIT_DESIGN_2026-05-19.md:
+Per the PersistenceKit contract:
 
 1. **Schema DSL**: typed Swift structs, no result builder. Diff-friendly, FFI-clean.
 2. **Predicate tree**: closed enum, three operator families. No extension points.
@@ -112,7 +112,11 @@ When implementing a downstream kit that consumes PersistenceKit, read `docs/INTE
 
 ## Public API stability
 
-Once shipped, public API follows semantic versioning. Adding a case to TypedValue, ColumnType, StoragePredicate, IndexParameters, or SearchParameters is a breaking change requiring a major version bump and a decision record in `docs/decisions/`. Backend additions are additive.
+Once shipped, public API follows semantic versioning. Adding a case to
+TypedValue, ColumnType, StoragePredicate, IndexParameters, or SearchParameters
+is a breaking change requiring a major version bump plus updates to the owning
+reference and engineering contracts. Backend additions are additive when they
+pass the full backend conformance suite.
 
 ## Next missions
 

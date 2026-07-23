@@ -12,7 +12,7 @@
 //! This is a GENUINE distributional method — "car" and "vehicle"
 //! share similar context vectors when they co-occur with the same
 //! neighbours ("drive", "road", "engine"). It captures co-occurrence
-//! meaning, not surface form, satisfying ADR-010 D-1's honesty
+//! meaning, not surface form, satisfying honest semantic fusion D-1's honesty
 //! requirement: the dense lane must not lie about what it computes.
 //!
 //! The provider conforms to `vectorkit::EmbeddingProvider`:
@@ -49,7 +49,7 @@
 //!
 //! Swift port: `packages/kits/CorpusKit/Sources/CorpusKitProviders/RandomIndexingProvider.swift`
 //!
-//! ADR-010 reference: Decision B, signal #2 of the honest fusion.
+//! honest semantic fusion reference: Decision B, signal #2 of the honest fusion.
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -160,7 +160,7 @@ pub fn ri_index_vector(term: &str) -> Vec<f32> {
 /// Conforms to `vectorkit::EmbeddingProvider`. `model_id = "random-indexing-v1"`,
 /// `model_version = "1.0.0"`. Projection seed = `RI_PROJECTION_SEED`.
 ///
-/// ADR-010 Decision B, signal #2 — the first honest distributional provider
+/// honest semantic fusion, signal #2 — the first honest distributional provider
 /// in the dense recall lane.
 pub struct RandomIndexingProvider {
     model_id: String,
@@ -506,7 +506,7 @@ impl TrainableEmbeddingBasis for RandomIndexingProvider {
         Ok(Box::new(provider))
     }
 
-    /// ADR-026: release the in-memory vocab to free heap.
+    /// release the in-memory vocab to free heap.
     fn release_basis(&mut self) {
         self.vocab.clear();
         self.vocab.shrink_to_fit();

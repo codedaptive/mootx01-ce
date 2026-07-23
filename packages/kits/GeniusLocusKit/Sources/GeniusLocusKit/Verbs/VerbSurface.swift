@@ -1096,8 +1096,8 @@ public extension GeniusLocusKit {
         // Resolve the handle up front so a stale handle raises
         // estateNotOpen before any storage work, matching the other verbs.
         _ = try estate(for: handle)
-        // Bug 1 fix (ADR025-AUDITLOG-GOVERNOR): auditLog(for:) now reads directly
-        // from the _storagekit_audit table via a single bounded SQL query —
+        // auditLog(for:) reads directly from the _storagekit_audit table via
+        // a single bounded SQL query —
         // the former feedAuditLog N+1 call is gone; the log is populated here.
         let log = try await auditLog(for: handle)
         return AuditChainVerifier.verify(log)
@@ -1252,7 +1252,7 @@ public extension GeniusLocusKit {
         // estate's node tree (branch rows have parentNodeIds pointing to
         // branch-local nodes, not parent estate nodes).
         //
-        // Wing integrity (ADR-016): all security/placement/lifecycle fields
+        // Wing integrity: all security/placement/lifecycle fields
         // are preserved on promotion so non-default-wing rows re-file into
         // the correct wing rather than silently falling back to defaultWing().
         // lineageID is intentionally NOT preserved — see derivation comment.
@@ -1360,7 +1360,7 @@ public extension GeniusLocusKit {
         // estate's node tree (branch rows have parentNodeIds pointing to
         // branch-local nodes, not parent estate nodes).
         //
-        // Wing integrity (ADR-016): all security/placement/lifecycle fields
+        // Wing integrity: all security/placement/lifecycle fields
         // are preserved on merge so non-default-wing rows re-file into the
         // correct wing rather than silently falling back to defaultWing().
         // lineageID is intentionally NOT preserved — see derivation comment.
@@ -1642,7 +1642,7 @@ public extension GeniusLocusKit {
 
     /// Issue a federation grant from the estate addressed by `handle`.
     ///
-    /// Per DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §6 and Appendix
+    /// Per federation disclosure controls and Appendix
     /// B. The grant is signed by the estate's Ed25519 identity key, then
     /// persisted to the estate's `grants` table. The scope key is
     /// handled per custody mode: mode 1 retains it in the vault and
@@ -1879,7 +1879,7 @@ extension GeniusLocusKit {
     /// The private key is loaded from the identity key store (Keychain in
     /// production) by `Estate.open` and held in memory for the lifetime of the
     /// Estate instance. This method reads that cached value — no Keychain
-    /// round-trip occurs at signing time (ADR-007, secfix/ed25519-keychain).
+    /// round-trip occurs at signing time (data-movement privacy tiers, secfix/ed25519-keychain).
     ///
     /// Throws `GeniusLocusKitError.invalidManifest` when the key is absent,
     /// which happens when the estate was opened after a Keychain wipe or was

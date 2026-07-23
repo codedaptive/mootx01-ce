@@ -1,7 +1,7 @@
 // EncryptionMode.swift
 //
 // At-rest encryption modes 1–3 per
-// DECISION_FEDERATION_SHARING_MODEL_2026-05-21.md Appendix A.2.
+// federation disclosure controls Appendix A.2.
 // These types live in PersistenceKit core (not LocusKit) because the
 // SQLite backend consumes them and the kit dependency runs one way
 // (LocusKit → PersistenceKit). LocusKit already imports PersistenceKit, so the

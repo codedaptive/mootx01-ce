@@ -20,7 +20,7 @@
 //
 // The families come from EstateFingerprintFamilies, which derives four
 // independent seeds from the estate UUID per
-// DECISION_FINGERPRINT_SEEDS_DERIVED_2026-05-20. Determinism is the
+// deterministic fingerprint seed derivation. Determinism is the
 // contract: two rows with identical fields, even on independently
 // started replicas of one estate, produce bit-identical fingerprints.
 //

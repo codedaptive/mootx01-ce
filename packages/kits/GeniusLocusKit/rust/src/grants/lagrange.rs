@@ -11,7 +11,7 @@
 // derives from the published algorithmic description only.  The activating
 // party's `experimental_ip_clearance_confirmed: true` assertion is recorded
 // in the grant audit record and is their legal responsibility, not the
-// substrate's.  See DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix
+// substrate's.  See federation disclosure controls Appendix
 // B.3 and B.8.
 //
 // GF(p) parameters (identical to Swift):

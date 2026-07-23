@@ -16,8 +16,8 @@ path = "src/lib.rs"
 [dependencies]
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # SubstrateLib: MerkleHash::leaf for the ContentHashProvider callback
-# that HashingRowStore invokes on every chunk insert (ADR-017 §16).
-# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + ADR-017 §19.
+# that HashingRowStore invokes on every chunk insert.
+# Authority: in-repository dependency direction + node-tree integrity.
 substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 # SubstrateKernel: sha256::hash for deterministic corpus UUID derivation,
 # used by the HashParentChainProvider (chunk → corpus parent chain).
@@ -41,7 +41,7 @@ vectorkit = { path = "../../VectorKit/rust" }
 # the Swift `import QueueKit` in CorpusKit. QueueKit is a low-level primitive
 # (substrate-types + persistence-kit + intellectus-lib); corpus-kit → queuekit
 # is downstream→upstream, no inversion.
-# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+# Per in-repository dependency direction (Rust no-inversion rule).
 queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 # IntellectusLib: zero-dependency telemetry leaf. Added for P2
 # self-report coverage (cp-corpuskit-report). When monitoring is

@@ -76,7 +76,7 @@ Default address:
 
     http://127.0.0.1:4200
 
-It is for observing and managing the local MOOTx01 system. Depending on the beta build, it may show health, estate status, pipeline activity, topology, or management controls.
+It is for observing and managing the local MOOTx01 system. Depending on the build, it may show health, estate status, pipeline activity, topology, or management controls.
 
 If the dashboard is not installed or not running, MOOTx01 may still be usable through the command line and AI client integration.
 
@@ -114,19 +114,11 @@ Example prompts:
 
     What do you remember about this project from previous sessions?
 
-## What Beta Means
+## Maturity
 
-MOOTx01 CE beta is for early users and builders.
-
-During beta:
-
-- some docs may still be catching up,
-- SDK surfaces may still be formalizing,
-- platform behavior may differ,
-- security hardening may not be complete,
-- you should verify what was installed.
-
-Do not treat beta as a finished managed cloud service. Treat it as a local tool that is becoming a stable product.
+MOOTx01 CE is a released 1.0 product, locally installed and
+locally owned. It is a local tool, not a managed cloud service.
+Verify what was installed with `mootx01 status`.
 
 ## What A Good AI Install Should Do
 

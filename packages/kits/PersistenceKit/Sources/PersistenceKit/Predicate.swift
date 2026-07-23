@@ -1,6 +1,6 @@
 // StoragePredicate.swift
 //
-// StoragePredicate tree per DECISION_STORAGEKIT_DESIGN §4 (Q2).
+// StoragePredicate tree per the PersistenceKit storage surface (Q2).
 // Closed enum, three operator families: logical, comparison, bitmap.
 // BitmapEvaluator compiles Filter → StoragePredicate; backend compiles
 // StoragePredicate → backend-native SQL. PersistenceKit treats predicates

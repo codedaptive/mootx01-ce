@@ -3,10 +3,10 @@ import Foundation
 import LocusKit
 @testable import AriaMCP
 
-/// ADR-025 sensitivity unlock — the Grant Ledger. Fixed-timezone `Calendar`
+/// sensitivity unlock — the Grant Ledger. Fixed-timezone `Calendar`
 /// injected everywhere a local-midnight boundary matters, so these tests are
 /// deterministic regardless of the machine's timezone.
-@Suite("SensitivityGrantLedger (ADR-025)")
+@Suite("SensitivityGrantLedger")
 struct SensitivityGrantLedgerTests {
 
     private var utcCalendar: Calendar {

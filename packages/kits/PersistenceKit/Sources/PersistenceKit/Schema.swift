@@ -1,6 +1,6 @@
 // Schema.swift
 //
-// Schema declaration per DECISION_STORAGEKIT_DESIGN §3 (Q1).
+// Schema declaration per the PersistenceKit storage surface (Q1).
 // Typed Swift structs. No result builder. Kits declare their
 // schema once; PersistenceKit emits backend-native DDL.
 
@@ -50,7 +50,7 @@ public struct TableDeclaration: Sendable {
     /// hash is supplied by a `ContentHashProvider` callback injected
     /// into `HashingRowStore`; PersistenceKit does not import
     /// SubstrateLib or SubstrateKernel. Non-hashable tables (the
-    /// default) pass through writes unmodified (ADR-017 §16 / NT-P2).
+    /// default) pass through writes unmodified (node-tree integrity / NT-P2).
     public let hashable: Bool
 
     public init(
@@ -73,7 +73,7 @@ public struct TableDeclaration: Sendable {
 }
 
 /// Semantic role of a column within the as-of temporal filter
-/// (ADR-017 §15). Columns tagged with a role participate in the
+///. Columns tagged with a role participate in the
 /// temporal validity window: `created_hlc <= T AND
 /// (tombstoned_hlc IS NULL OR tombstoned_hlc > T)`.
 /// Kits declare roles at schema time; PersistenceKit uses them to
@@ -192,13 +192,13 @@ public extension ColumnDeclaration {
     }
 
     /// HLC column tagged as the row-creation timestamp for
-    /// as-of temporal filtering (ADR-017 §15).
+    /// as-of temporal filtering.
     static func createdHlc(_ name: String) -> ColumnDeclaration {
         ColumnDeclaration(name: name, type: .hlc, nullable: false, role: .createdHlc)
     }
 
     /// HLC column tagged as the row-tombstone timestamp for
-    /// as-of temporal filtering (ADR-017 §15). Nullable by
+    /// as-of temporal filtering. Nullable by
     /// convention — a nil tombstone means "still live."
     static func tombstonedHlc(_ name: String) -> ColumnDeclaration {
         ColumnDeclaration(name: name, type: .hlc, nullable: true, role: .tombstonedHlc)

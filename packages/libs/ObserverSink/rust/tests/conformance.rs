@@ -496,7 +496,7 @@ fn storage_stats_reports_backend_health() {
         stats.blob_count.is_none(),
         "blob_count must be None for SQLite backend"
     );
-    // vector_count was removed from StorageStats in ADR-008 (blast-radius miss fix).
+    // vector_count was removed from StorageStats in VectorKit-owned vector search (blast-radius miss fix).
     // The field no longer exists on the struct; the InMemory-only assertion is gone.
 }
 

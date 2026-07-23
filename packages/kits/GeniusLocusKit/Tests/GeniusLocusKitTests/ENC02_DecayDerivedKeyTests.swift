@@ -8,7 +8,7 @@ import PersistenceKitInMemory
 /// ENC-02 — Custody mode 3 (decay-derived key) conformance.
 ///
 /// Seven tests against the decay-derived custody mode per
-/// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix B.3 (the
+/// federation disclosure controls Appendix B.3 (the
 /// mechanism), B.7 (the negative conformance tests), and B.8 (the
 /// clean-room statement). Mode 3 reconstructs a scope key by Lagrange
 /// interpolation at x=0 over K-of-N shares in GF(p); once the xi shares

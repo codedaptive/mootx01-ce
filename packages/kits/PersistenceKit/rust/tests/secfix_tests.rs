@@ -553,7 +553,7 @@ fn pg_identifier_guard_accepts_valid_names() {
 // CAND-029 — PostgreSQL TLS config knob and transport (SECFIX-WS2-PK F3)
 //
 // The postgres-native-tls = "0.5" crate has been approved (C-1 exception
-// in DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md) and is compiled in.
+// in the Rust PostgreSQL TLS seam) and is compiled in.
 // Pool::open_connection now wires Prefer and Require through a real
 // MakeTlsConnector (platform TLS stack) rather than returning
 // InvalidConfiguration.

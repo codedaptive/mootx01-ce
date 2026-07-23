@@ -223,7 +223,7 @@ The trait surface is stable. To add a new kernel:
 6. Run `stress-test --kernel {name}` and capture the JSON in
    `benchmarks/results/{date}-{hw}/`.
 7. Write a decision-doc addendum to the relevant per-op record
-   (e.g., `DECISION_HAMMING_BACKENDS_2026-05-17.md`) with the
+   (e.g., `the measured Hamming selection`) with the
    measured numbers, the disposition (selected / rejected /
    declined), and the citation to the benchmark JSON.
 8. If the kernel becomes the new production default for an op,

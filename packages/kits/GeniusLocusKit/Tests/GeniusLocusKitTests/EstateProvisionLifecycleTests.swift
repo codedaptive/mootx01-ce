@@ -739,21 +739,21 @@ struct EstateProvisionSQLiteTests {
     }
 }
 
-// MARK: - ADR-016: Default wing seeding at provision
+// MARK: - Default wing seeding at provision
 
-/// T14–T18: ADR-016 §1 + §2 — seven default wings are seeded at provision.
+/// Seven default wings are seeded at provision.
 ///
 /// Every provisioned estate (any kind) has seven wings, each carrying a
 /// hint drawer (AI_Charter_Hint room) that describes the wing's role. The
 /// default wing for `capture` is "Agentic Memory". Hint drawers are normal
 /// drawers — embedded and recalled like any other drawer.
-@Suite("ADR-016 — Default Wing Seeding at Provision")
-struct ADR016DefaultWingSeedingTests {
+@Suite("Default Wing Seeding at Provision")
+struct DefaultWingSeedingTests {
 
     // MARK: - T14: seven wings present after provision
 
     /// A freshly provisioned estate exposes exactly 7 distinct wing names —
-    /// the ADR-016 default wing set, drawn from `LocusKit.defaultWings`.
+    /// the wing organization default wing set, drawn from `LocusKit.defaultWings`.
     @Test
     func provisionSeedsSevenDistinctWings() async throws {
         let kit = GeniusLocusKit()
@@ -807,7 +807,7 @@ struct ADR016DefaultWingSeedingTests {
     @Test
     func defaultWingNameIsAgenticMemory() async throws {
         #expect(LocusKit.defaultWingName == "Agentic Memory",
-            "defaultWingName must be 'Agentic Memory' per ADR-016 §1")
+            "defaultWingName must be 'Agentic Memory'")
 
         let kit = GeniusLocusKit()
         let storage = makeStorage()
@@ -879,7 +879,7 @@ struct ADR016DefaultWingSeedingTests {
     }
 }
 
-// MARK: - T19–T21: serve-path wing seeding via seedDefaultWings (ADR-016 + serve-wires-corpus fix)
+// MARK: - –serve-path wing seeding via seedDefaultWings (wing organization + serve-wires-corpus fix)
 
 /// Tests proving that the SERVE-STYLE open path (bare Estate.create → kit.open →
 /// kit.seedDefaultWings) produces the same seven wings as the provision path.
@@ -893,7 +893,7 @@ struct ADR016DefaultWingSeedingTests {
 /// T19: Serve-style open + seedDefaultWings yields exactly 7 wings each with a hint drawer.
 /// T20: Calling seedDefaultWings twice (idempotency) still yields exactly 7 wings.
 /// T21: seedDefaultWings on a provision-created estate is a no-op (still 7 wings, no duplicates).
-@Suite("ADR-016 — Serve-Path Wing Seeding (seedDefaultWings)")
+@Suite("wing organization — Serve-Path Wing Seeding (seedDefaultWings)")
 struct ServePathWingSeedingTests {
 
     // MARK: - T19: bare open + seedDefaultWings produces 7 wings

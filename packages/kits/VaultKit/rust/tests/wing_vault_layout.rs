@@ -1,15 +1,15 @@
-//! ADR-016 wing vault-layout round-trip test.
+//! wing vault-layout round-trip test.
 //!
 //! Verifies that:
 //!   1. Export produces stable_source_key = `"<wing>/<room>/<slug>"` — wing is
-//!      the top-level vault folder (ADR-016).
+//!      the top-level vault folder.
 //!   2. After `ObsidianAdapter::from_ir`, each note's vault path starts with
 //!      its wing prefix: `<wing>/<room>/<slug>.md`.
 //!   3. Import into a fresh estate writes the expected number of drawers and
 //!      preserves room (via frontmatter `room:` round-trip).
 //!   4. Wing is restored: each re-imported drawer lands in its original wing,
 //!      not in DEFAULT_WING_NAME. This is the proof that `CaptureFrame.wing`
-//!      is wired end-to-end through `make_capture_frame` (ADR-016).
+//!      is wired end-to-end through `make_capture_frame`.
 //!   5. Re-import is content-idempotent: second pass writes 0, skips
 //!      `drawers_skipped_unchanged` == initial count.
 //!
@@ -77,7 +77,7 @@ fn bridge(coord: &mut EstateCoordinator) -> VaultBridge<'_> {
     )
 }
 
-// MARK: - ADR-016: wing is the top-level vault folder, and import restores it
+// MARK: - wing organization: wing is the top-level vault folder, and import restores it
 
 /// Capture two drawers in DIFFERENT wings via GLK (CaptureFrame.wing), export the
 /// estate, verify the vault layout has one folder per wing, then import into a fresh
@@ -87,7 +87,7 @@ fn bridge(coord: &mut EstateCoordinator) -> VaultBridge<'_> {
 ///   - re-import is content-idempotent
 ///
 /// This test is the proof that CaptureFrame.wing is wired end-to-end through
-/// `DrawerMapping::make_capture_frame` (ADR-016 multi-wing round-trip).
+/// `DrawerMapping::make_capture_frame` (wing organization multi-wing round-trip).
 ///
 /// Mirrors Swift `VaultBridgeTests.wingVaultLayoutRoundTrip`.
 #[test]

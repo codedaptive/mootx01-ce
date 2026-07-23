@@ -1,4 +1,4 @@
-//! Concrete adapter (ADR-017 §10) bridging LocusKit's `NodeStore`
+//! Concrete adapter bridging LocusKit's `NodeStore`
 //! (Uuid ids, `Result`) to GeniusLocusKit's `NodeTopologyProvider`
 //! trait (String ids, infallible).
 //!
@@ -14,7 +14,7 @@
 //!
 //! Tree walk strategy for `tree_edges`: BFS from the root node,
 //! collecting all active parent-child pairs. The tree is fixed-depth
-//! (max depth 2: estate→wing→room per ADR-017 I-NT-2), so the walk
+//! (max depth 2: estate→wing→room under the maximum node depth of two), so the walk
 //! is bounded and fast.
 
 use crate::node_topology::NodeTopologyProvider;

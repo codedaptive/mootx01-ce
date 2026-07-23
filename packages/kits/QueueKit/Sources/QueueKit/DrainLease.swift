@@ -6,8 +6,7 @@
 // drain worker for a given queue stream. This lease guarantees exactly ONE
 // drainer per (estate, stream) pair runs at a time, while two DIFFERENT streams
 // can each hold their own lease simultaneously — enabling the encode drainer
-// and the dreaming drainer to run concurrently without blocking each other
-// (ADR-021, Decision 7: one per-estate queue, per-(estate, stream) leases).
+// and the dreaming drainer to run concurrently without blocking each other.
 //
 // The lease file is keyed by stream: `<dir>/<stream>.drain.lease`, so streams
 // are fully independent — both can be acquired at once.
@@ -21,7 +20,7 @@
 //
 // This is the SQLite-first form: the lease file lives beside the durable
 // maildir. A Postgres-estate DB-backed lease (row lock or advisory lock) is
-// deferred to the Postgres pass per ADR-021's SQLite-first sequencing.
+// deferred while the queue implementation remains SQLite-first.
 //
 // Wall-clock here is INFRASTRUCTURE (lease liveness), not the deterministic
 // drain engine. Same exception that QueueKit's drain telemetry clock takes.

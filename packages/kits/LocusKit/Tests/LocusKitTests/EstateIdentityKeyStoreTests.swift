@@ -5,7 +5,7 @@ import PersistenceKitInMemory
 import Testing
 @testable import LocusKit
 
-/// Tests for the Ed25519 Keychain migration (secfix/ed25519-keychain, ADR-007).
+/// Tests for the Ed25519 Keychain migration (secfix/ed25519-keychain, data-movement privacy tiers).
 ///
 /// Verifies three properties:
 ///

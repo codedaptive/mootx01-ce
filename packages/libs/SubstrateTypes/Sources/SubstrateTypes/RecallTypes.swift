@@ -35,7 +35,7 @@
 //
 // PROMOTED 2026-05-19 from glref-swift-CognitionKit.swift, then
 // relocated 2026-05-29 from SubstrateLib to SubstrateTypes per the
-// four-package split (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR
+// four-package split (the four-package substrate layout
 // addendum 2026-05-29). TierAscendingQuery (federation, SubstrateML)
 // and CognitionKit (upstream) both consume these types from this
 // single source.

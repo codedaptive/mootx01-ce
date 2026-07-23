@@ -277,7 +277,7 @@ public actor GeniusLocusKit {
     public func flush(from inMemory: any Storage, into durable: any Storage) async throws -> ReplicationCursor
 
     // Migration (MigrationAPI.swift) — SPEC B-14. Mass ingestion is NOT a
-    // GLK verb: retired per ADR-007 Decision 1, superseded by
+    // GLK verb: retired per the data-movement contract Decision 1, superseded by
     // VaultKit's ExchangeAdapter → VaultBridge.importVault path.
     public func runParallel(source: EstateHandle, target: EstateHandle, mode: ParallelCaptureMode) async throws -> ParallelRunHandle
     public func verifyMigration(estate: EstateHandle, against corpus: ExternalCorpus, now: Date) async throws -> MigrationVerification
@@ -710,7 +710,7 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     public let name: String; public let entries: [ExternalEntry]; public init(...)
     // Construction: programmatic only — VaultKit's CorpusProjection ([NoteIR] → ExternalCorpus)
     // or inline (aria-mcp wire args). Export-JSON decode lives in VaultKit's ExchangeAdapter
-    // (ADR-007 Decision 1); the former load(from:) is retired.
+    // (the data-movement contract Decision 1); the former load(from:) is retired.
     public func asRecallFrames() -> [LocusKit.RecallFrame]   // LocusKit content-match path; used by verifyMigration
     public func hybridRecall(via corpus: CorpusKit.Corpus, limit: Int = 10, now: Date) async throws -> [[CorpusKit.ScoredChunk]]  // hybrid BM25+vector via CorpusKit
 }
@@ -821,7 +821,7 @@ role, source file. Full signatures live in the cited file.
   `AuditRecovery`, `AuditRecoveryResult`, `AuditRecoveryDivergence`
   (+ nested `RowMismatch`), `UnifiedAuditEntryKey` — `Audit/*.swift`.
 - **Grant custody internals:** `GrantStore` (actor, the `grants` table over
-  the estate's storage; the table carries the ADR-012 `ext` JSON nullable
+  the estate's storage; the table carries the the forward-compatible ext-slot contract `ext` JSON nullable
   forward-compat slot — the #11 custody-payload slot, inert in 1.0 and the
   migration-free home for any future federation/encryption custody metadata),
   `StoredGrant`, `ScopeKeyVault` (actor, mode-1 key
@@ -933,7 +933,7 @@ let federated = try await kit.federatedRecall(RecallFrame(filterChain: [.inWing(
 Both rebuild entry points exist in both languages. The Rust crate
 depends on `substrate-ml` to access `temporal_causality_fold::fold`
 (mirrors the Swift `import SubstrateML`, per
-DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md).
+the temporal-matrix cadence).
 
 | Swift | Rust | Notes |
 |---|---|---|
@@ -1220,7 +1220,7 @@ to the Swift `recallTunnels(_:wing:)`. Synthetic containment tunnel `filed_at` u
 |---|---|
 | `public final class SubstrateNodeTopologyProvider: GLKNodeTopologyProvider, @unchecked Sendable` | `pub struct SubstrateNodeTopologyProvider` (implements `NodeTopologyProvider`) |
 
-The substrate-native adapter (ADR-017 §10) bridges LocusKit's `NodeStore`
+The substrate-native adapter (the node-integrity contract §10) bridges LocusKit's `NodeStore`
 (UUID ids, async throws / `Result`) to `GLKNodeTopologyProvider` (String ids,
 infallible). It constructs a separate read-only `NodeStore` from the estate's
 `Storage` instance — the same database, different handle. All operations are
@@ -1269,7 +1269,7 @@ pub fn register_preference_store(
 ```
 
 **Rust parity status:** the recall-CONSUMPTION surface is wired in both ports
-(mission glk-recall-graphpref-rust, 2026-06-17, closing ADR-011 D-4). Trait,
+(mission glk-recall-graphpref-rust, 2026-06-17, closing the recall-shape contract D-4). Trait,
 registration, per-candidate lookup, and live `RecallScoreVector` columns mirror
 Swift exactly. A constant cache (0.8 / 0.9) normalizes to `0.5` cross-port
 (`recall_shape_matrix_steer_parity.rs` / `RecallShapeMatrixSteerTests.swift`).
@@ -1572,7 +1572,7 @@ a durable (SQLite) backend at launch.
 
 | Concept | Swift | Rust | Notes |
 |---|---|---|---|
-| Composite schema declaration | `GeniusLocusKitSchema.estateSchemaDeclaration: SchemaDeclaration` (`GeniusLocusKitSchema.swift`) | `composite_schema() -> SchemaDeclaration` (`hydration.rs`) | kitID / kit_id = "GeniusLocusKit", version = 7 = LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore) v2 (the ADR-012 `ext` pre-provisioning bumped all three). The version is DERIVED from the live component declarations in both ports, so component and composite can never drift; conformance-tested (`CompositeSchemaVersionTests` / `composite_version_tests`). Aggregates all 14 tables + indices from component schemas. migrations = []. |
+| Composite schema declaration | `GeniusLocusKitSchema.estateSchemaDeclaration: SchemaDeclaration` (`GeniusLocusKitSchema.swift`) | `composite_schema() -> SchemaDeclaration` (`hydration.rs`) | kitID / kit_id = "GeniusLocusKit", version = 7 = LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore) v2 (the the forward-compatible ext-slot contract `ext` pre-provisioning bumped all three). The version is DERIVED from the live component declarations in both ports, so component and composite can never drift; conformance-tested (`CompositeSchemaVersionTests` / `composite_version_tests`). Aggregates all 14 tables + indices from component schemas. migrations = []. |
 
 ### Hydrate-on-open surface
 
@@ -1632,10 +1632,10 @@ telemetry leaf library). This dependency is additive and non-inverting:
 - **Swift**: `Package.swift` target `GeniusLocusKit` declares
   `.product(name: "IntellectusLib", package: "IntellectusLib")` in both
   `target` and `testTarget` dependencies. Citation:
-  `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
+  `the package-dependency rule`.
 - **Rust**: `Cargo.toml` declares
   `intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }`.
-  Citation: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28` (Rust layering
+  Citation: `the package-dependency rule` (Rust layering
   equivalent: no inversion rule).
 
 ### Swift surface
@@ -1867,7 +1867,7 @@ section above.
 | Grant-store error | — | `GrantStoreError` (`rust/src/grants/grant_store.rs`) | — / pub enum | Rust-only error enum for the grants persistence layer; Swift errors bubble as `GeniusLocusKitError` (no distinct grant-store type) | grant tests | Confirmed (Rust-only) |
 | Sync-engine entry | — | `SyncEngineEntry` (`rust/src/coordinator.rs`) | — / pub struct | Rust-only coordinator state record for the sync engine; no Swift parallel (sync lifecycle managed via actor state) | coordinator tests | Confirmed (Rust-only) |
 | Distillation brain signal | `DistillationSignal` (`Brain/Signals/DistillationSignal.swift:30`, `public enum`) | `DistillationSignal` (`rust/src/brain/signals/distillation.rs:18`, `pub struct`) | public / pub | Swift uses a caseless `public enum` as a namespace; Rust uses a zero-size `pub struct` — same idiom for a type that is only a factory for `SignalSpec`. Both expose `spec(distillationCycle:)`/`spec(distillation_cycle)` (production wiring) and `defaultSpec()`/`default_spec()` (no-op diagnostic variant). Signal name `"distillation-sweep"`, hourly cadence (3 600 s). Wired in DG5. NT-DOC-1. | `DistillationSignalTests.swift` ↔ `distillation_signal_tests.rs` | Confirmed |
-| Training brain signal | `TrainingSignal` (`Brain/Signals/TrainingSignal.swift:42`, `public enum`) | `TrainingSignal` (`rust/src/brain/signals/training.rs:24`, `pub struct`) | public / pub | Same Swift-enum/Rust-struct namespace idiom as `DistillationSignal`. Both expose `spec(trainingCycle:)`/`spec(training_cycle)` and `defaultSpec()`/`default_spec()`. Signal name `"training-daemon"`, hourly cadence (3 600 s). Wired per ADR-018 F1. NT-DOC-1. | `StandingSignalsTests.swift` ↔ `distillation_signal_tests.rs` (covers both brain signals) | Confirmed |
+| Training brain signal | `TrainingSignal` (`Brain/Signals/TrainingSignal.swift:42`, `public enum`) | `TrainingSignal` (`rust/src/brain/signals/training.rs:24`, `pub struct`) | public / pub | Same Swift-enum/Rust-struct namespace idiom as `DistillationSignal`. Both expose `spec(trainingCycle:)`/`spec(training_cycle)` and `defaultSpec()`/`default_spec()`. Signal name `"training-daemon"`, hourly cadence (3 600 s). Wired per the brain-layer ownership contract F1. NT-DOC-1. | `StandingSignalsTests.swift` ↔ `distillation_signal_tests.rs` (covers both brain signals) | Confirmed |
 | Contradiction hunt pass | `GeniusLocusKit.huntContradictions(in:modelID:probeLimit:filedAfter:proximityThreshold:now:)` (`Brain/ContradictionHunt.swift`) | `EstateCoordinator::hunt_contradictions(handle, model_id, probe_limit, filed_after, proximity_threshold, now)` (`rust/src/coordinator.rs`) | public / pub | identical pass: candidates from `recentItemIDs` newest-first probes mined on TWO lanes — Lane 1 drawer-keyed binary Hamming kNN under the caller's modelID (`getVector` → `findNearest` limit 5, proximity ≤ 64) for bespoke/test-planted vectors; Lane 2 (when a Corpus is registered — the ONLY lane production estates populate) LEXICAL via the corpus's persistent BM25 inverted index (`Corpus.bm25TopKBySource(query:limit:)`, `huntBM25CandidateK` = 20 per probe, query capped to `huntBM25QueryCharLimit` = 240 chars), which returns SOURCE drawer IDs directly. BM25 not vectors on the corpus lane: contradictions are lexically similar (the shared-term notion ConflictCue screens on), and the binary SimHash space is degenerate at estate scale (109k estate buried a true twin at rank #399) while a whole-partition float scan is ~3 s/probe. Both lanes dedupe on drawer-pair keys, then SubstrateML conflict-cue screen; strong cue (≥ 0.70) → `capture(TunnelCaptureFrame(kind: .contradicts, lifecycle: .proposed, originClass: .derived))`, borderline (≥ 0.45) → returned with ≤ 160-char snippets, never persisted; durable dedup vs ALL contradicts tunnels incl. withdrawn; `filedAfter` watermark; `vectorStoreAvailable` honesty flag | `ContradictionHuntTests.swift` (incl. corpus-lane test) ↔ `coordinator.rs` hunt tests | Confirmed |
 | Contradiction hunt report | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`Brain/ContradictionHunt.swift`) | `ContradictionHuntReport` / `ProposedContradiction` / `BorderlineContradiction` (`rust/src/coordinator.rs`) | public / pub | identical field sets (vectorStoreAvailable/probesScanned/pairsScreened/proposed/borderline/deduplicated; borderline adds sourceSnippet/targetSnippet) | `ContradictionHuntTests.swift` ↔ `coordinator.rs` hunt tests | Confirmed |
 | Contradiction-scout brain signal | `ContradictionScoutSignal` (`Brain/Signals/ContradictionScoutSignal.swift`, `public enum`) | `ContradictionScoutSignal` (`rust/src/brain/signals/contradiction_scout.rs:19`, `pub struct`) | public / pub | Same namespace idiom as `DistillationSignal`. Both expose `spec(huntCycle:)`/`spec(hunt_cycle)` (production wiring; the hunt persists its own writes, the signal emits one summary diagnostic) and `defaultSpec()`/`default_spec()`. Signal name `"contradiction-scout"`, hourly cadence (3 600 s). Registered 4th in `registerDefaultStandingSignals`. | `StandingSignalsTests.swift` ↔ `standing_signals_parity.rs` | Confirmed |
@@ -1979,12 +1979,12 @@ NT-DOC-1: Added 2 concordance rows to `## Swift/Rust Concordance — additional
 public types`. `DistillationSignal` (Swift `public enum` namespace / Rust
 `pub struct` unit struct; signal name `"distillation-sweep"`, hourly cadence,
 DG5) and `TrainingSignal` (same Swift-enum/Rust-struct idiom; signal name
-`"training-daemon"`, hourly cadence, ADR-018 F1). Both factories expose
+`"training-daemon"`, hourly cadence, the brain-layer ownership contract F1). Both factories expose
 `spec(…)` (production) and `defaultSpec()`/`default_spec()` (no-op diagnostic).
 
 ### 1.9.4 -- 2026-06-21
 NT-G1: Added `SubstrateNodeTopologyProvider` section documenting the auto-registered
-substrate-native adapter (ADR-017 §10). Updated Swift test coverage table: test #1
+substrate-native adapter (the node-integrity contract §10). Updated Swift test coverage table: test #1
 changed from "no-provider unchanged" to "auto-registered substrate adapter produces
 containment edges"; added `SubstrateNodeTopologyProviderTests` coverage.
 
@@ -2021,7 +2021,7 @@ signature, body, or semantics change; no Swift change. See ARIA_MCP_INTERFACE
 §2 (Rust governor — standing-signal harness) for the consumer surface.
 
 ### 1.8.0 -- 2026-06-17
-ADR-012 `ext` forward-compat slot: the `grants` table gained a nullable `.json` `ext` column (the #11 custody-payload slot, inert in 1.0), both ports. Composite schema version 3 → 7 = LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore) v2 — now DERIVED from the live component declarations in both ports (Swift sums the component `.version` fields; Rust sums `lk/vk/ck.version`), guarded by a new conformance test on each port. Corrected the composite-schema concordance row (previously read "version 3 / 1+1+1", already stale vs VectorKit v2). Also corrected the misleading GRT-01 custody comment: mode-3 (decay-derived) is no-vault BY DESIGN — the issuer retains nothing, so not persisting threshold/totalShares/driftRate is correct, not a defect.
+the forward-compatible ext-slot contract `ext` forward-compat slot: the `grants` table gained a nullable `.json` `ext` column (the #11 custody-payload slot, inert in 1.0), both ports. Composite schema version 3 → 7 = LocusKit v2 + VectorKit v3 + CorpusKit (BundleStore) v2 — now DERIVED from the live component declarations in both ports (Swift sums the component `.version` fields; Rust sums `lk/vk/ck.version`), guarded by a new conformance test on each port. Corrected the composite-schema concordance row (previously read "version 3 / 1+1+1", already stale vs VectorKit v2). Also corrected the misleading GRT-01 custody comment: mode-3 (decay-derived) is no-vault BY DESIGN — the issuer retains nothing, so not persisting threshold/totalShares/driftRate is correct, not a defect.
 
 ### 1.7.0 -- 2026-06-17
 Additive + surface-narrowing (parity-sweep-batch):
@@ -2068,7 +2068,7 @@ subsection with the Rust trait definitions (`GraphCache` / `PreferenceStore`:
 `Send + Sync`, per-drawer score lookup), `EstateCoordinator.register_graph_cache`
 / `register_preference_store`, and the per-candidate `col_graph` / `col_preference`
 lookup in the unionBest `.matrixAware` score loop (both columns share the
-`weights.graph` budget, Swift parity). Closes ADR-011 D-4 (Rust columns were
+`weights.graph` budget, Swift parity). Closes the recall-shape contract D-4 (Rust columns were
 hardcoded `0.0`). Cache producers remain absent in both ports (future mission).
 
 ### 1.4.0 -- 2026-06-17
@@ -2085,7 +2085,7 @@ ports). The matrix keys are a NO-OP under `.raw`/`.rrf` (those paths do not run 
 weighted matrix formula). On the Rust port `graph`/`preference` are 0.0 (no cache
 wired), so steering them is a no-op there; the steering SURFACE is identical
 cross-port. No type change — the keys read through the existing `weight(for:)` /
-`weight()` lookup (default 1.0). See ADR-011. ADDITIVE (MINOR).
+`weight()` lookup (default 1.0). See the recall-shape contract. ADDITIVE (MINOR).
 
 ### 1.3.0 -- 2026-06-17
 Added `RecallShape.antiSimilarLanes` / `RecallShape.anti_similar_lanes`

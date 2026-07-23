@@ -143,7 +143,7 @@ struct SessionProtocolTests {
     /// `moot_list_lenses` returns the full cognition menu with at least the
     /// 27 Tier 6 tools: `moot_synthesize`, `moot_lens_keystones`, and
     /// `moot_lens_concepts` must all appear in the response text.
-    /// 27 = 26 baseline + moot_lens_node_motion (ADR-DIFFUSION-001).
+    /// 27 = 26 baseline + moot_lens_node_motion.
     @Test func listLensesReturnsAllCognitionTools() async throws {
         let dispatcher = try await makeDispatcher(ownerID: "sp-4")
 

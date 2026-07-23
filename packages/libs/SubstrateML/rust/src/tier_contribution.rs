@@ -14,8 +14,8 @@
 // nor signs. Authenticity is a federation-egress concern, not a
 // substrate one: the originating estate signs the outbound payload
 // and encrypts it to the recipient scope at the share point
-// (sign-then-encrypt-to-scope, DECISION_FEDERATION_SHARING_MODEL).
-// That signature is ECDSA P-256 (ADR-013, EE FIPS requirement) and
+// (sign-then-encrypt-to-scope, federation disclosure controls).
+// That signature is ECDSA P-256 (P-256 federation signatures, EE FIPS requirement) and
 // is built with the federation transport in v1.1; nothing signs
 // this payload before then.
 

@@ -2,7 +2,7 @@ import Foundation
 
 /// Aggregate count for a single wing — produced by `listWings`.
 ///
-/// Per ADR-017, wings and rooms are node rows in the `nodes` table.
+/// Under the node-tree model, wings and rooms are node rows in the `nodes` table.
 /// `WingSummary` and `RoomSummary` are produced by
 /// `DrawerStore.listWings`/`listRooms`, which resolve node ids and
 /// count drawers by `parent_node_id`. Their counts therefore reflect

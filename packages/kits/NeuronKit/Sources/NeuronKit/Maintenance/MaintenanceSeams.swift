@@ -54,7 +54,7 @@ public struct LearnedReferenceObservation: Sendable, Equatable {
 
 /// One fingerprint-drift observation, the input to the fingerprint-drift
 /// scan (NEURONKIT_SPEC § 3.2 scan category 4). A container node
-/// (room-level per ADR-017) carries a rolled-up fingerprint OR-aggregate
+/// (room-level under the node-tree model) carries a rolled-up fingerprint OR-aggregate
 /// of its drawers' bitmap lanes; the adapter computes `driftFraction` as
 /// the set-bit density of the OR-aggregate over the three bitmap lanes
 /// (192 bits; no baseline-persistence surface exists). The daemon proposes
@@ -64,7 +64,7 @@ public struct LearnedReferenceObservation: Sendable, Equatable {
 /// scope key and the precomputed drift fraction.
 public struct FingerprintDriftObservation: Sendable, Equatable {
 
-    /// The parentNodeId (room-level container node per ADR-017) whose
+    /// The parentNodeId (room-level container node under the node-tree model) whose
     /// fingerprint has drifted. Used as the scope key for dedup and
     /// as the basis for the proposal target.
     public let scopeKey: String
@@ -238,9 +238,9 @@ public struct MaintenanceCycleReport: Sendable, Equatable {
     /// `neuronkit.enrichment.qid_still_pending` counter.
     public let qidStillPending: Int
 
-    // MARK: - ADR-017 node invariant verification telemetry
+    // MARK: - node-tree invariant verification telemetry
 
-    /// Number of ADR-017 node-tree invariant violations detected this
+    /// Number of node-tree invariant violations detected this
     /// cycle. Covers I-NT-3 (empty parentNodeId) and sibling display-name
     /// consistency. Emitted as the
     /// `neuronkit.node_invariant.violations` counter.

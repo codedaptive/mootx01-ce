@@ -5,15 +5,15 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import GeniusLocusKit
 
-/// ADR-025 §4 (Audit) — the sensitivity-unlock audit seam. Mirrors
+/// out-of-band sensitivity grants (Audit) — the sensitivity-unlock audit seam. Mirrors
 /// GRT_AuditEmissionTests' harness (FUP-C's federation-grant audit seam),
 /// applied to the four NEW sensitivity-unlock verbs.
-@Suite("Sensitivity-unlock audit emission (ADR-025 §4)")
+@Suite("Sensitivity-unlock audit emission")
 struct SensitivityAuditVerbsTests {
 
     private func openOneEstate() async throws -> (GeniusLocusKit, EstateHandle) {
         let kit = GeniusLocusKit()
-        let owner = OwnerCredentials(ownerIdentifier: "owner-adr025")
+        let owner = OwnerCredentials(ownerIdentifier: "sensitivity-audit-owner")
         let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner)
@@ -39,7 +39,7 @@ struct SensitivityAuditVerbsTests {
             Issue.record("expected .integer afterValue carrying the expiry epoch-ms"); return
         }
         #expect(storedExpiry == Int64((expiresAt.timeIntervalSince1970 * 1000).rounded()),
-                "the issued entry must carry its own expiry timestamp (ADR-025 §4: expiry is passive)")
+                "the issued entry must carry its own expiry timestamp (out-of-band sensitivity grants: expiry is passive)")
     }
 
     @Test
@@ -97,7 +97,7 @@ struct SensitivityAuditVerbsTests {
         try await kit.recordSensitivityGrantIssued(handle, tier: .restricted, grantID: UUID(), expiresAt: now.addingTimeInterval(60), now: now)
         let log = try await kit.auditLog(for: handle)
         #expect(log.orderedEntries.filter { $0.verb == .grantIssued }.isEmpty,
-                "ADR-025 §4: sensitivity-unlock must never write the federation-reserved .grantIssued verb")
+                "sensitivity-unlock must never write the federation-reserved .grantIssued verb")
         #expect(log.orderedEntries.filter { $0.verb == .grantRevoked }.isEmpty)
     }
 }

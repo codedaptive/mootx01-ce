@@ -54,11 +54,15 @@ unlocked keyboard. None of the application controls (sensitivity
 tiers, export gates, receipts) defend against code already running on
 your machine. At that level the protections are the operating
 system's: file permissions, FileVault, and your own judgment about
-what you install. The committed exception is encryption at rest for
-`secret` rows under a key only you hold, scheduled for the v1.x
-series. That is the one layer built to survive a hostile local
-process. Until it ships, `secret` means excluded from recall and from
-every bulk channel. It does not mean unreadable on disk.
+what you install. Estates on the default SQLite backend are whole-database encrypted
+at rest by SQLCipher under a 256-bit per-install key,
+Secure-Enclave-wrapped on Apple, with fail-closed key handling.
+Two caveats. Estates created before the encryption lockdown
+(circa v1.0.2) remain plaintext files until migrated. A
+PostgreSQL backend you configure yourself is protected by that
+server's controls, not by MOOTx01. `secret` rows remain excluded
+from recall and from every bulk channel in addition to at-rest
+encryption.
 
 **The AI reads what you let it recall.** This is a knowledge engine.
 Anything the AI can recall can leave through a conversation, slowly
@@ -74,6 +78,17 @@ key prompts, and receipts exist to stop a legitimate install from
 being driven into bulk egress by a compromised agent, a bad
 configuration, or an accident. They are not a defense against someone
 who already owns the machine. Seatbelts, not armor plate.
+
+**Choose the local MCP transport that fits the deployment.** The default
+resident daemon listens on loopback so several clients can share one writer,
+background governor, and telemetry stream. Any process running as the same
+user can attempt to contact that local endpoint. `mootx01 install --no-daemon`
+writes direct `mootx01 serve` stdio entries instead, keeping MCP traffic on
+the parent client's process pipes under normal operation. A stdio process
+forwards to an already-running resident that owns the same estate, so stop or
+disable the old resident when the MCP requirement is no listening socket. The
+[direct stdio setup](docs/start-here/INSTALLING_MOOTX01.md#direct-stdio-for-a-tighter-local-transport)
+documents the exact configuration and checks.
 
 ## Verifying your binary
 
@@ -155,16 +170,25 @@ bug bounty and no response-time guarantee.
 
 ## Current posture
 
-This project is in beta (pre-1.0). The security review gate in the
-[README](README.md) status tables has not yet run on any kit: build
-status reflects functionality only, and nothing here has been hardened
-or audited. The invariants above describe what the substrate is built
-to guarantee; until the gate runs, evaluate them as designed and
-claimed, not as certified.
+Security review is continuous. From June 25 through July 22, 2026,
+the project ran repeated independent adversarial review, remediation,
+cross-port verification, and current-head revalidation across the EE,
+CE, and public SDK repositories.
+
+The combined remediation record contains **537 security findings**:
+281 from the pre-reset EE campaign and 256 fixed findings from the
+retained post-reset archive. The count does not multiply dual-port
+fixes or EE-to-CE backports.
+
+The full public count, process, and commit record is in the
+[continuous security review audit](docs/validation/audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md).
+Its [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+names every issue and the EE fix, workstream-closing commit, or public
+CE delivery commit that closed it.
+The review covers the codebase at each reviewed commit; the invariants
+above remain design guarantees exercised continuously by the test
+suite.
 
 ## Supported versions
 
-Only the tip of `stable/1.0.x` (the default branch) is supported. There
-are no other maintained release branches during the beta.
-
-
+Only the tip of `stable/1.0.x` (the default branch) is supported.

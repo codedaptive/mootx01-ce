@@ -1,16 +1,15 @@
 import Foundation
 
 // VK-ADAPT-01 (read side) + VK-EXPORT-01 (write side) — the first
-// programmatic-tool adapter (ADR-007 Decision 1).
+// programmatic-tool adapter.
 //
 // `ExchangeAdapter` teaches VaultKit both directions of the external
 // memory-tool JSON export (the MOOT exchange format v1): `toIR`/`decode` read it
 // into the canonical `NoteIR`, and `fromIR`/`encode` write `NoteIR` back
-// out as the tool's export document — the programmatic exit promise
-// (ADR-007 Decision 4, gold item 7). Per ADR-007 Decision 1 this adapter
-// is the single owner of the export's codec knowledge: mass import is
+// out as the tool's export document. This adapter is the single owner of the
+// export codec: mass import is
 // exclusively adapter → `VaultBridge.importVault`, and mass export is
-// `VaultBridge.export` → adapter, which applies the Decision 2 tier rules
+// `VaultBridge.export` → adapter, which applies the privacy-tier rules
 // and writes the audit receipt BEFORE the adapter sees the notes.
 //
 // Adapters are pure transforms (`tool format ⇄ NoteIR`): no process
@@ -75,7 +74,7 @@ public struct ExchangeExport: Sendable, Equatable {
 /// decode through the same path.
 ///
 /// Both sides ship: `toIR`/`decode` (VK-ADAPT-01) and `fromIR`/`encode`
-/// (VK-EXPORT-01 — programmatic export-my-data, ADR-007 Decision 4,
+/// (VK-EXPORT-01 — programmatic export-my-data, data-movement privacy tiers,
 /// gold item 7). Write-side output is canonical and deterministic; see
 /// `encode(_:)` for the canonical-form contract and the enumeration of
 /// `NoteIR` fields the export format cannot carry.
@@ -273,7 +272,7 @@ public struct ExchangeAdapter: VaultAdapter {
     }
 
     /// Write canonical notes out as the external tool's export document —
-    /// the programmatic exit promise (ADR-007 Decision 4, gold item 7).
+    /// the programmatic exit promise (data-movement privacy tiers, gold item 7).
     ///
     /// `VaultAdapter` conformance: as with `toIR`, the "vault" is a single
     /// JSON export file, so `vaultURL` is the destination file's URL.

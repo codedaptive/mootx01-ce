@@ -123,9 +123,19 @@ Supported clients may be wired in one of two ways.
 | Transport | Meaning |
 |---|---|
 | HTTP MCP | Client connects to resident daemon, usually `http://127.0.0.1:4242`. |
-| stdio MCP | Client starts a local `mootx01` process directly. |
+| stdio MCP | Client starts `mootx01 serve` directly and exchanges JSON-RPC over process pipes. |
 
 Prefer the installer's supported path. Do not hand-edit client configs unless the installer fails or the user asks.
+
+For a tighter single-client local transport, use:
+
+    mootx01 install --target codex --mode server --no-daemon --vault-off
+
+`--no-daemon` must write a `command` plus `args = ["serve"]` entry, clear
+`MOOTX01_HTTP_PORT`, and not leave a resident `url` in that client's MOOTx01
+block. It skips new service registration but does not stop a resident installed earlier. Because
+`mootx01 serve` forwards to a live resident that already owns the estate,
+socket-free MCP operation also requires stopping or disabling that prior service.
 
 After wiring, restart the AI client.
 

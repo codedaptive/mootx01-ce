@@ -1,6 +1,6 @@
 // NodeMotion.swift
 //
-// The diffusion NODE-LAYER motion lens (ADR-DIFFUSION-001 §2/§4/§9, step §11.2).
+// The diffusion node-layer motion lens.
 //
 // Diffusion is the time-axis peer of distillation; this is its bottom layer, the
 // node. Structured exactly like the other temporal lenses here (Anticipation,
@@ -15,8 +15,8 @@
 //
 // The decay weight exp(-λ·Δt_days) is the per-layer noise schedule: the node
 // layer is HIGH frequency, so λ is LARGE. λ and the churn threshold are open
-// ablation parameters (ADR §12). The folds are deterministic and conformance-
-// portable to Rust (NeuronKit/rust diffusion/{node_motion,node_anomaly}.rs).
+// ablation parameters. The folds are deterministic and conformance-portable to
+// Rust (NeuronKit/rust diffusion/{node_motion,node_anomaly}.rs).
 
 import Foundation
 import GeniusLocusKit
@@ -89,10 +89,10 @@ public struct NodeAnomaly: Sendable, Equatable {
 /// The node-layer diffusion lens: pure folds + the estate-reading `run`/`anomaly`.
 public enum NodeMotionLens {
 
-    /// Informed-prior node decay constant, per DAY (fast layer). Ablate (ADR §12).
+    /// Informed-prior node decay constant, per DAY (fast layer). Subject to ablation.
     public static let defaultNodeLambda: Double = 0.5
 
-    /// Volatility at/above which a node is "churning". Ablate (ADR §12).
+    /// Volatility at/above which a node is "churning". Subject to ablation.
     public static let defaultChurnThreshold: Double = 3.0
 
     /// Milliseconds in one day — the Δt unit for the decay.

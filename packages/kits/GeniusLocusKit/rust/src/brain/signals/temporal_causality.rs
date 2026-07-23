@@ -3,7 +3,7 @@
 //
 // Architecture spec §11.2, signal 7. Runs the T-population fold on each
 // hourly fire and surfaces the result as a diagnostic. Added 2026-06-04 per
-// DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md, superseding the cookbook
+// hourly temporal-matrix scheduling, superseding the cookbook
 // §6.4 weekly cadence.
 //
 // The `spec` factory accepts a closure that runs the T-population fold.

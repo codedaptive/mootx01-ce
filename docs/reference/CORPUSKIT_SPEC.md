@@ -16,7 +16,7 @@ relates_to:
   - docs/reference/INTELLECTUSLIB_SPEC.md
   - docs/reference/SUBSTRATELIB_SPEC.md
   - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
-  - docs/decisions/ADR-019-apple-nl-embedding-providers.md
+  - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#53-embedding-provider-seam
 ---
 
 # CorpusKit Specification
@@ -160,15 +160,15 @@ migrate-aware connection and as ISO8601 `Text` on a fresh connection, so
 a persisted basis survives reopen on both ports (the same read-back
 discipline as I-2's chunk decode).
 
-**I-10 (`ext` forward-compat slot, ADR-012):** both persistent entity tables
+**I-10 (`ext` forward-compat slot, the forward-compatible ext-slot contract):** both persistent entity tables
 carry one nullable `.json` column named `ext` — `chunks` at BundleStore schema
 v3 and `corpus_provider_basis` at BasisStore ("CorpusKitBasis") schema v2. On
 `chunks` it is distinct from the existing per-chunk `metadata` column. In 1.0
 `ext` is inert — written NULL / omitted on insert/upsert and never read; it
 carries no behavior. Provisioned during the 1.0.0 free-migration window. See
-ADR-012.
+the forward-compatible ext-slot contract.
 
-**I-11 (hash-on-write, ADR-017 §19):** every chunk insert computes a
+**I-11 (hash-on-write, the node-integrity contract §19):** every chunk insert computes a
 `content_hash` via `MerkleHash.leaf` (SubstrateLib) and stores it in the
 nullable `content_hash` BLOB column added in schema v3. The hash is computed
 by the `HashingRowStore` decorator wrapping the `RowStore` and fed by a
@@ -176,7 +176,7 @@ by the `HashingRowStore` decorator wrapping the `RowStore` and fed by a
 The `content_hash` column is nullable to tolerate rows written before v3;
 new inserts always populate it.
 
-**I-12 (as-of temporal reads, ADR-017 §19):** all six `BundleStore` query
+**I-12 (as-of temporal reads, the node-integrity contract §19):** all six `BundleStore` query
 methods (`get`, `getMany`, `chunksForSource`, `count`, `allChunks`, and
 the internal `affectedSourceIDs`) accept an `AsOfCoordinate` parameter
 (`.present` or `.asOf(HLC)`). In the current implementation, only methods
@@ -194,7 +194,7 @@ The `globalCorpusMerkleRoot()` query computes the interior hash over all
 per-corpus roots, enabling an estate-level integrity check across all
 corpora.
 
-**I-14 (Apple NL providers are Swift-only, opt-in, absent-lane safe, ADR-019):**
+**I-14 (Apple NL providers are Swift-only, opt-in, absent-lane safe, the Apple embedding-provider contract):**
 `CorpusKitProviders` ships two Apple NaturalLanguage embedding providers —
 `NLEmbeddingProvider` (sentence-level, always-available) and
 `NLContextualEmbeddingProvider` (transformer, requires a downloadable per-language
@@ -539,7 +539,7 @@ belongs here so every SDK consumer — CorpusKit-direct, no GLK — gets multi-c
 encode, and so GeniusLocusKit is pure orchestration.
 
 **Mechanism.** A Corpus mounts the **shared per-estate encrypted queue** as its
-encode lane (T4 / ADR-021 Decision 7): a PersistenceKit backend over
+encode lane (T4 / the recall-driven dreaming contract Decision 7): a PersistenceKit backend over
 `queue.sqlite` beside the estate — derived via
 `EstateConfiguration.queueSibling("queue.sqlite")`, carrying the estate's
 encryption key — for a SQLite estate; an in-memory PersistenceKit backend for an
@@ -580,13 +580,13 @@ cross-document, so a reindex/burst encodes multi-core.
 
 **1.0 vs 1.1.** The 1.0 worker pool is per-corpus. The process-global
 cross-estate CPU cap is the 1.1 central drain master
-(`DECISION_CENTRAL_DRAIN_MASTER_2026-06-23`); ~70% of this (the `ingestBatch`
+(`the deferred central-drain design`); ~70% of this (the `ingestBatch`
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
 ## Changelog
 
 ### 1.12.0 -- 2026-06-25
-T4 (ADR-021 Decision 7): the encode queue moved off its own plaintext
+T4 (the recall-driven dreaming contract Decision 7): the encode queue moved off its own plaintext
 `corpus_ingest_queue/` maildir onto the **shared per-estate encrypted queue** —
 a PersistenceKit backend over `queue.sqlite` beside the estate (via
 `EstateConfiguration.queueSibling`, same encryption key) for SQLite estates,
@@ -651,10 +651,10 @@ GeniusLocusKit's `EncodeIntake`. Added QueueKit to the § 3 dependency list
 the queue). No change to the existing recall / embedding / lifecycle contracts.
 
 ### 1.5.0 -- 2026-06-21
-BundleStore schema v2 → v3 (NT-C1, ADR-017 §19): added nullable `content_hash` BLOB column to `chunks` table (hash-on-write via `HashingRowStore`); added `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable) for per-corpus Merkle roots; added `AsOfCoordinate` parameter to all six BundleStore query methods for temporal reads. New invariants: I-11 (hash-on-write), I-12 (as-of temporal reads), I-13 (per-corpus Merkle root). Updated I-10 reference from v2 to v3.
+BundleStore schema v2 → v3 (NT-C1, the node-integrity contract §19): added nullable `content_hash` BLOB column to `chunks` table (hash-on-write via `HashingRowStore`); added `corpus_metadata` table (source_id TEXT PK, merkle_root BLOB nullable) for per-corpus Merkle roots; added `AsOfCoordinate` parameter to all six BundleStore query methods for temporal reads. New invariants: I-11 (hash-on-write), I-12 (as-of temporal reads), I-13 (per-corpus Merkle root). Updated I-10 reference from v2 to v3.
 
 ### 1.4.0 -- 2026-06-17
-Added invariant I-10 (the `ext` forward-compat slot, ADR-012): `chunks` (BundleStore v2) and `corpus_provider_basis` (BasisStore v2) each carry a nullable `.json` `ext` column, inert in 1.0; on `chunks` it is distinct from `metadata`. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
+Added invariant I-10 (the `ext` forward-compat slot, the forward-compatible ext-slot contract): `chunks` (BundleStore v2) and `corpus_provider_basis` (BasisStore v2) each carry a nullable `.json` `ext` column, inert in 1.0; on `chunks` it is distinct from `metadata`. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.3.0 -- 2026-06-17
 Added the per-signal dense float FARTHEST (anti-similarity) contract (mission
@@ -694,12 +694,12 @@ default-flip to all-five is a later mission (6a-iii-wire). No existing contract
 changed.
 
 ### 1.7.0 -- 2026-06-24
-Added invariant I-14 (Apple NL embedding providers — ADR-019): `NLEmbeddingProvider`
+Added invariant I-14 (Apple NL embedding providers — the Apple embedding-provider contract): `NLEmbeddingProvider`
 and `NLContextualEmbeddingProvider` are Swift-only, opt-in, item-local providers
 gated `#if canImport(NaturalLanguage)`. No Rust counterpart (sanctioned divergence).
 Absent asset → `[]` / `.zero` (graceful opt-out; never crash, never throw). Projection
 seeds "APNLEMB1" and "APNLCTX1" isolate their `model_id` partitions. Neither joins the
-default ensemble. Updated `relates_to` to include ADR-019.
+default ensemble. Updated `relates_to` to include the Apple embedding-provider contract.
 
 ### 1.1.0 -- 2026-06-17
 Added the basis-persistence + training lifecycle contract (mission 6a-ii-β,

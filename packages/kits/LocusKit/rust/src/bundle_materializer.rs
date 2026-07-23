@@ -155,7 +155,7 @@ mod tests {
         // a distinct id and `Drawer::new` assigns a fresh random
         // lineage_id, so each test drawer gets a distinct fingerprint.
         let mut d = Drawer::new(id, "content", "test-parent", "alice", 0, "test-v1");
-        // ADR-017: wing/room are resolved from node tree, not stored on Drawer.
+        // wing/room are resolved from node tree, not stored on Drawer.
         // The bundle materializer tests only need distinct drawers with different
         // parent_node_ids; the actual wing/room names are irrelevant here.
         d.parent_node_id = format!("node-{}-{}", wing, room);

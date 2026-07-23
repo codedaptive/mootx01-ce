@@ -103,7 +103,7 @@ public struct EstateDreamingSink: DreamingProposalSink {
         try await kit.pruneRecallTraces(in: handle, olderThan: cutoff)
     }
 
-    /// Retire a tunnel by flipping bit 13 of its `operationalBitmap` (T13 / ADR-021 Phase 7).
+    /// Retire a tunnel by flipping bit 13 of its `operationalBitmap`.
     ///
     /// Called by OMEGA through the GLK seam (B-1 compliance). Delegates to
     /// `GeniusLocusKit.retireTunnel(in:id:changedBy:now:)`.

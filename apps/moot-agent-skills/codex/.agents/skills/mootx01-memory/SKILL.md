@@ -45,7 +45,7 @@ Use this skill for prompts containing or implying:
 5. Analyze with `moot_list_lenses`, relevant `moot_lens_*` tools, or `moot_synthesize`.
 6. Write durable results with `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, and `moot_write_journal`.
 7. Correct stale knowledge with confirm/update/withdraw/retire tools.
-8. Run `moot_reindex` after batch import, then `moot_dream` after bulk import or major memory growth.
+8. Imports and captures index themselves; after a bulk import, poll `moot_drain_status` until encoding settles. Use `moot_reindex` only to recover a lost index and `moot_dream` only to re-trigger a cycle on demand.
 
 ## Cost Rule
 

@@ -19,7 +19,7 @@
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, ADR-023). Same convention
+//! - `Date filedAt` → `i64 filed_at` (epoch milliseconds, epoch-millisecond instants). Same convention
 //!   as `Drawer::filed_at`; the SQLite column is still TEXT ISO8601.
 //! - `Date? tombstonedAt` → `Option<i64> tombstoned_at`.
 //! - `TunnelKind = .references` Swift default → Rust callers supply
@@ -109,7 +109,7 @@ pub struct Tunnel {
     pub removed_by_batch: Option<String>,
 
     /// Fractional-index ordering key for `Parent` tunnels
-    /// (ADR-017 §11). Siblings under the same parent sort by
+    ///. Siblings under the same parent sort by
     /// ascending `order_key`. `None` for non-parent tunnel kinds.
     pub order_key: Option<f64>,
 }

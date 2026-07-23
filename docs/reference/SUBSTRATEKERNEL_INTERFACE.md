@@ -257,13 +257,13 @@ public enum GrantHKDF {
 pub fn derive_key(ikm: &[u8], salt: &str, info: &[u8], output_byte_count: usize) -> Vec<u8>;
 
 /// RFC 2104 HMAC-SHA256 over the in-repo SHA-256. Building block for
-/// KeyedCommitment (SubstrateLib ADR-017 §17).
+/// KeyedCommitment (SubstrateLib the node-integrity contract §17).
 pub fn hmac(key: &[u8], data: &[u8]) -> [u8; 32];
 ```
 
 `hmac` computes RFC 2104 HMAC-SHA256 using the in-repo SHA-256
 primitive. It is the building block for the keyed-commitment API
-in SubstrateLib (ADR-017 §17). The function was promoted from
+in SubstrateLib (the node-integrity contract §17). The function was promoted from
 package-internal to public to support this use.
 
 **Swift** (additional on `GrantHKDF`):
@@ -435,7 +435,7 @@ differences; the two ports remain behaviorally equivalent.
 ### 1.1.0 -- 2026-06-20
 Added `GrantHKDF.hmac` (RFC 2104 HMAC-SHA256) to the public API surface.
 Promoted from package-internal to support the keyed-commitment API in
-SubstrateLib (ADR-017 §17).
+SubstrateLib (the node-integrity contract §17).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

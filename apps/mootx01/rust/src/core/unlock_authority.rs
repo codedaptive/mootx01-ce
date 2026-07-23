@@ -1,7 +1,7 @@
-//! core/unlock_authority.rs — ADR-025 sensitivity unlock identity-verification
+//! core/unlock_authority.rs — sensitivity unlock identity-verification
 //! seam for the Rust/Linux/Windows vertical.
 //!
-//! ADR-025 §2 mandates two distinct approval mechanisms:
+//! The sensitivity policy requires two distinct approval mechanisms:
 //!   * Swift/macOS  → LocalAuthentication (LAContext.evaluatePolicy)
 //!   * Rust/Linux/Windows → two discrete PBKDF2-HMAC-SHA256 passwords
 //!
@@ -14,7 +14,7 @@
 //! The HTTP call is the same `/api/control/unlock` endpoint that the Swift
 //! CLI calls — JSON body `{"tier": "restricted"|"secret", "proof": {"ts": ms}}`.
 //! The daemon verifies the timestamp freshness (±10 s) and issues the grant
-//! with the TTL specified by ADR-025 §1.
+//! with the TTL specified by out-of-band sensitivity grants.
 //!
 //! ## Why passwords-not-LA on Linux/Windows
 //!
@@ -131,7 +131,7 @@ pub fn authenticate_and_grant(tier: SensitivityTier, data_dir: &Path) -> UnlockO
 /// Call the daemon's `/api/control/lock` endpoint to clear all grants.
 ///
 /// No identity verification is required — locking is always permitted so the
-/// user can reduce their own access at will (ADR-025 §1). The daemon port is
+/// user can reduce their own access at will. The daemon port is
 /// resolved via `daemon_client::resolved_port()` (port file → 4242).
 pub fn lock_all() -> LockOutcome {
     let port = daemon_client::resolved_port();

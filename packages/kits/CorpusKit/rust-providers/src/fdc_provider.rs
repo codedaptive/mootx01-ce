@@ -1,7 +1,7 @@
 //! FDC (Frame Decimal Classification) relatedness embedding provider.
 //! Rust port of Swift's `FDCProvider` in `CorpusKitProviders`.
 //!
-//! Part of the ADR-010 Decision B honest-fusion signal set.
+//! Part of the honest semantic fusion honest-fusion signal set.
 //!
 //! ## What this provides
 //!
@@ -62,7 +62,7 @@
 //!
 //! Swift port: packages/kits/CorpusKit/Sources/CorpusKitProviders/FdcProvider.swift
 //!
-//! ADR-010 reference: Decision B, "FDC lattice co-classification" signal.
+//! honest semantic fusion reference: Decision B, "FDC lattice co-classification" signal.
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -221,7 +221,7 @@ pub fn fdc_embedding_vector(text: &str) -> Option<Vec<f32>> {
 /// text returns `vec![]` — the expected opt-out signal. The Corpus float lane
 /// skips the dense lane row for those chunks. Fallback: BM25 lane.
 ///
-/// ADR-010 Decision B: FDC lattice co-classification signal.
+/// FDC lattice co-classification signal.
 pub struct FDCProvider {
     model_id: String,
     model_version: String,

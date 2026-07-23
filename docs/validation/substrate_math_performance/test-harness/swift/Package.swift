@@ -11,7 +11,7 @@
 //                      latency for the batched kernel ops;
 //                      produces structured JSON for the
 //                      learned dispatcher (Phase 1 of
-//                      DECISION_KERNEL_LEARNED_DISPATCH_2026-05-17)
+//                      portable kernel dispatch)
 //
 // Path 2 wire-up: the harness now depends on the real
 // `GeniusLocusReference` package at
@@ -43,7 +43,7 @@ let package = Package(
         // the production Swift implementations, matching the Rust harness.
         // SubstrateTypes, SubstrateKernel, and IntellectusLib are brought
         // in transitively by SubstrateML.
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // Authority: in-repository dependency direction.
         .package(path: "../../../../../packages/libs/SubstrateML"),
     ],
     targets: [

@@ -1,6 +1,6 @@
 // ErasureLedger.swift
 //
-// Grow-only erasure ledger (ADR-017 §17).
+// Grow-only erasure ledger.
 //
 // Records THAT a drawer was erased, never the content. The table
 // is append-only: once a drawer_id is in the ledger, it stays.

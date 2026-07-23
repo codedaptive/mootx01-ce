@@ -5,10 +5,12 @@ installs. One tool, three roles:
 
 - **`mootx01 install`** — detect the user's installed MCP clients and wire each
   one to the resident daemon; on macOS, register the `moot-mgr` console as a
-  launchd background service. Idempotent — re-running replaces the `mootx01`
-  entry and preserves every other key in a client's config.
-- **`mootx01 serve`** — the resident MCP daemon (HTTP on `127.0.0.1:4242` by
-  default) that owns the single-writer estate and runs background maintenance.
+  launchd background service. `--no-daemon` instead writes direct stdio
+  entries. Idempotent — re-running replaces the `mootx01` entry and preserves
+  every other key in a client's config.
+- **`mootx01 serve`** — a stdio MCP server by default. `--http <port>` or
+  `MOOTX01_HTTP_PORT` selects the resident HTTP daemon that owns the
+  single-writer estate and runs background maintenance.
 - **`mootx01 proxy --http <url>`** — a stdio↔HTTP bridge for clients whose config
   can't take a raw HTTP URL (Claude Desktop), so they route through the one
   resident daemon and share its single-writer guarantee and telemetry.
@@ -39,15 +41,24 @@ code runs.
 ## Client wiring
 
 `mootx01 install` writes per-client config
-(see `Sources/MootInstallerCore/ClientConfig.swift` and ADR-LOOPBACKHTTP-001):
+(see `Sources/MootInstallerCore/ClientConfig.swift` and the loopback HTTP contract):
 
 | Client | How it's wired |
 |---|---|
-| Claude Code, Cursor, Cline, Continue | local HTTP MCP entry → resident daemon (`http://127.0.0.1:4242`) |
+| Claude Code, Cursor, Cline, Continue, Codex, and other HTTP-capable clients | local HTTP MCP entry → resident daemon (`http://127.0.0.1:4242`) |
 | Claude Desktop | `mootx01 proxy --http` bridge → the same resident daemon |
 
-Every wired client shares the one resident daemon; none spawns its own estate
-writer.
+That is the default shared-resident setup. For a tighter local transport, use:
+
+```bash
+mootx01 install --target codex --mode server --no-daemon --vault-off
+```
+
+The installer then writes a direct `mootx01 serve` command entry, clears
+`MOOTX01_HTTP_PORT`, and does not register the resident service. Stop a
+resident installed by an earlier run if the requirement is socket-free MCP
+operation; a stdio server otherwise forwards to that live resident to preserve
+the single-writer estate.
 
 ## Removing it
 

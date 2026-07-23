@@ -33,7 +33,7 @@
 //! (which routes to SubstrateKernel). MIH does candidate generation; the
 //! kernel does every distance. No XOR/popcount in this file.
 //!
-//! Enumeration-budget guard (DECISION_MIH_ENUM_BUDGET_2026-06-12):
+//! Enumeration-budget guard:
 //!   MIH progressive-radius expansion is sub-linear only on clustered data.
 //!   On sparse/random data the k-th best Hamming distance can be ~120 bits,
 //!   causing the per-band colex enumeration to reach C(64,~30) ≈ 10^17 masks
@@ -47,7 +47,7 @@
 //!   metric is emitted on fallback so operators see when m is poorly chosen.
 //!   The `cumulative_choose` function and the projection arithmetic are
 //!   integer-only and bit-identical to the Swift port so both fall back at
-//!   the same radius (DECISION_MIH_ENUM_BUDGET_2026-06-12 §conformance).
+//!   the same radius (the bounded MIH enumeration budget conformance).
 
 use std::collections::{HashMap, HashSet};
 
@@ -231,7 +231,7 @@ impl BoundedMaxHeap {
 /// we saturate to usize::MAX — a saturating return still correctly triggers
 /// the budget guard. This matches the Swift port's Int.max capping exactly
 /// so both ports fall back at the same radius
-/// (DECISION_MIH_ENUM_BUDGET_2026-06-12 §conformance).
+/// (the bounded MIH enumeration budget conformance).
 ///
 /// The function is integer-only (no floats) so results are bit-identical
 /// across Rust (x86_64/aarch64) and Swift (arm64).
@@ -381,7 +381,7 @@ pub struct MIHIndex {
     /// None means use the dynamic max(n, 2^20) formula at query time.
     /// A fixed Some(budget) overrides the formula — useful in tests
     /// that need deterministic fallback thresholds. Mirrors Swift's
-    /// `fixedMaskBudget` (DECISION_MIH_ENUM_BUDGET_2026-06-12).
+    /// `fixedMaskBudget`.
     mask_budget: Option<usize>,
     /// m substring hash tables, one per band.
     tables: Vec<SubstringTable>,

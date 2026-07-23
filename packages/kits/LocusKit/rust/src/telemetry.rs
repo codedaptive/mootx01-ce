@@ -45,7 +45,7 @@
 //! The pattern mirrors the Swift implementation which calls
 //! `Intellectus.report(_:)` twice per operation.
 //!
-//! Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+//! Repository-owned dependencies use local package paths.
 
 use intellectus_lib::{StatSample, report};
 use std::time::Instant;

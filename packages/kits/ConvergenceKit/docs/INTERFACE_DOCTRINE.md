@@ -112,4 +112,6 @@ If you find yourself wanting to:
 - Sync something that isn't a PersistenceKit row (large blob, file, stream)
 - Add a backend-specific escape hatch
 
-Stop. Write a decision record in `docs/decisions/` proposing the change. The closed-enum design depends on every change being deliberate.
+Stop. Update the owning reference specification and engineering master before
+changing code. The closed-enum design depends on every change declaring its
+compatibility effect and cross-port conformance requirement.

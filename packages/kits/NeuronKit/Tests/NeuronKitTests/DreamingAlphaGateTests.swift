@@ -1,5 +1,5 @@
 // DreamingAlphaGateTests.swift — T9 REM-ALPHA pending-count gate tests
-// (ADR-021 Phase 4, NEURONKIT_SPEC §12.2).
+// The ALPHA gate requires both a due timer and a non-empty dreaming queue.
 //
 // The §12.2 gate skips the dreaming cycle when the dreaming queue is empty
 // (or not yet mounted), EVEN when the timer interval is due. Only a non-empty

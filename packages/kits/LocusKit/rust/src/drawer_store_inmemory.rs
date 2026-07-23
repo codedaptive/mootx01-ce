@@ -175,7 +175,7 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
 pub struct DrawerStoreCore {
     storage: Arc<dyn Storage>,
     /// The HLC clock this store stamps audit events with. Per the clock
-    /// decision (DECISION_CLOCK_TRIANGLE_TIME_MODEL): the top entity
+    /// decision: the top entity
     /// *makes* the clock, holders *receive* it. `new(.., None)` = top
     /// mode (make own, node id from estate uuid); `Some(gen)` = holder
     /// mode (GLK's one estate-wide maker). One generator, `send()` once
@@ -492,7 +492,7 @@ impl DrawerStoreCore {
         let prior_adjective = i64_value_of(prior_row.get("adjectiveBitmap"));
         let _ = prior_adjective;
 
-        // ADR-017 §3: resolve wing/room display names from node tree for
+        // resolve wing/room display names from node tree for
         // the supersedes tunnel. Both the new drawer and the predecessor
         // carry parent_node_id; resolve to display names via node tree.
         let prior_parent_node_id = string_value_of(prior_row.get("parent_node_id"));
@@ -883,7 +883,7 @@ impl DrawerStoreCore {
     }
 
     // ------------------------------------------------------------------
-    // Node-tree helpers (ADR-017 §3)
+    // Node-tree helpers
     //
     // Query the nodes table directly through the shared Storage to resolve
     // wing/room names ↔ node IDs. Mirrors the Swift DrawerStore private
@@ -1253,7 +1253,7 @@ impl DrawerStore for DrawerStoreCore {
             // backing Storage and OR the drawer's bitmaps into the room-level
             // and wing-rollup rows. The schema re-open is idempotent.
             //
-            // Drawer no longer carries wing/room display names (ADR-017);
+            // Drawer no longer carries wing/room display names;
             // resolve them from parent_node_id via the node tree.
             let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
             let names = self.resolve_node_names(&[drawer.parent_node_id.clone()])?;
@@ -1342,7 +1342,7 @@ impl DrawerStore for DrawerStoreCore {
     fn drawers_in_wing(&self, wing: &str) -> Result<Vec<Drawer>, LocusKitError> {
         let _tel_start = std::time::Instant::now();
 
-        // ADR-017 NT-L2: resolve wing name → room node IDs via node tree,
+        // node-tree integrity NT-L2: resolve wing name → room node IDs via node tree,
         // then query drawers by parent_node_id IN (...).
         let room_ids = self.room_node_ids_in_wing(wing)?;
         if room_ids.is_empty() {
@@ -1382,7 +1382,7 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn drawers_in_wing_room(&self, wing: &str, room: &str) -> Result<Vec<Drawer>, LocusKitError> {
-        // ADR-017 NT-L2: resolve wing/room → room node ID via node tree.
+        // node-tree integrity NT-L2: resolve wing/room → room node ID via node tree.
         let room_id = match self.room_node_id(wing, room)? {
             Some(id) => id,
             None => return Ok(Vec::new()),
@@ -1810,7 +1810,7 @@ impl DrawerStore for DrawerStoreCore {
             new_bitmap,
         );
 
-        // Route through the substrate write gate (DECISION_CLOCK_TRIANGLE_
+        // Route through the substrate write gate (single-maker HLC and event integrity_
         // TIME_MODEL): RMW the state field into the snapshot, run the
         // basis automaton + I-22 (subsuming validate_with_fields), enforce
         // verb/state consistency, assign the deterministic content-id, and
@@ -2040,7 +2040,7 @@ impl DrawerStore for DrawerStoreCore {
             )
             .map_err(map_storage_err)?;
 
-        // Record head drawer in the erasure ledger (ADR-017 §17).
+        // Record head drawer in the erasure ledger.
         // Direct row_store insert — mirrors Swift ErasureLedgerOps.
         let mut ledger_vals = BTreeMap::new();
         ledger_vals.insert(
@@ -2425,7 +2425,7 @@ impl DrawerStore for DrawerStoreCore {
                     .unwrap_or(TypedValue::Null),
             );
         }
-        // ADR-017: resolve wing/room names to parent_node_id via
+        // resolve wing/room names to parent_node_id via
         // NodeStore create-on-demand, then update parent_node_id.
         if to_room.is_some() || to_wing.is_some() {
             let current_parent_id = {
@@ -2515,7 +2515,7 @@ impl DrawerStore for DrawerStoreCore {
         validate_non_empty(&tunnel.label, "label")?;
         validate_non_empty(&tunnel.added_by, "addedBy")?;
 
-        // One parent per child (ADR-017 §11): a drawer may have at
+        // One parent per child: a drawer may have at
         // most one active Parent tunnel. Kit-level constraint
         // (not a DB-level partial unique index, which PersistenceKit's
         // schema declaration does not expose).
@@ -2678,7 +2678,7 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     // -----------------------------------------------------------------
-    // Tunnel retirement (T13 / ADR-021 Phase 7)
+    // Tunnel retirement
     // -----------------------------------------------------------------
 
     fn retire_tunnel(
@@ -2773,7 +2773,7 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     // -----------------------------------------------------------------
-    // Outline helpers (ADR-017 §11, NT-L5)
+    // Outline helpers (node-tree integrity, NT-L5)
     // -----------------------------------------------------------------
 
     fn outline_children(&self, parent_drawer_id: &str) -> Result<Vec<Tunnel>, LocusKitError> {
@@ -3751,7 +3751,7 @@ impl DrawerStore for DrawerStoreCore {
     // -----------------------------------------------------------------
 
     fn list_wings(&self) -> Result<Vec<WingSummary>, LocusKitError> {
-        // ADR-017: enumerate wings from the node tree (depth=1, active).
+        // enumerate wings from the node tree (depth=1, active).
         let row_store = self.storage.row_store();
         let wing_rows = row_store
             .query(
@@ -3830,7 +3830,7 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn list_rooms(&self, wing: Option<&str>) -> Result<Vec<RoomSummary>, LocusKitError> {
-        // ADR-017: enumerate rooms from the node tree. Wing nodes are
+        // enumerate rooms from the node tree. Wing nodes are
         // depth=1, room nodes are depth=2 under them.
         let row_store = self.storage.row_store();
         let wing_predicate = match wing {
@@ -4167,7 +4167,7 @@ impl DrawerStore for DrawerStoreCore {
 
         // `bucket_seconds` is a bucket WIDTH in seconds (mirrors Swift
         // `fingerprintBitSeries(bucketSeconds:)`), while `ending_at` and the
-        // captured `event_time` values are epoch MILLISECONDS (ADR-023).
+        // captured `event_time` values are epoch MILLISECONDS.
         // Convert the width to ms so all three share one unit — Swift performs
         // the equivalent in Date-space via `addingTimeInterval(-seconds)`.
         let bucket_millis = bucket_seconds * 1000;
@@ -4279,7 +4279,7 @@ impl DrawerStore for DrawerStoreCore {
             .into_iter()
             .filter(|d| d.tombstoned_at.is_none())
             .collect();
-        // ADR-017 §3: resolve parent_node_id → (wing, room) display names
+        // resolve parent_node_id → (wing, room) display names
         // from the node tree so the fingerprint store can group by container.
         let parent_ids: Vec<String> = active.iter().map(|d| d.parent_node_id.clone()).collect();
         let node_names = self.resolve_node_names(&parent_ids)?;
@@ -4572,7 +4572,7 @@ impl DrawerStore for InMemoryDrawerStore {
     fn all_tunnels(&self) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.all_tunnels()
     }
-    // Retirement forwarding — T13 / ADR-021 Phase 7.
+    // Retirement forwarding —  / recall-driven dreaming
     fn retire_tunnel(&self, tunnel_id: &str, changed_by: &str, now: i64) -> Result<(), LocusKitError> {
         self.inner.retire_tunnel(tunnel_id, changed_by, now)
     }
@@ -5818,7 +5818,7 @@ fn map_storage_err(e: persistence_kit::error::StorageError) -> LocusKitError {
 // written by either side round-trips through the other.
 
 fn format_iso8601(epoch_ms: i64) -> String {
-    // Minimal ISO8601-Z formatter over epoch MILLISECONDS (ADR-023). Avoids
+    // Minimal ISO8601-Z formatter over epoch MILLISECONDS. Avoids
     // pulling in chrono / time at this layer; the manifest stores two
     // timestamps and they only need round-trip equality with the parser below.
     // The calendar helper is seconds-based, so split the millisecond fraction
@@ -5836,7 +5836,7 @@ fn parse_iso8601(s: &str) -> Option<i64> {
     // Accept "YYYY-MM-DDTHH:MM:SS[.fff]Z" — the shape `format_iso8601`
     // emits and the shape Swift's `ISO8601DateFormatter`
     // `.withInternetDateTime` produces. Returns epoch MILLISECONDS
-    // (ADR-023): the fractional-seconds field is parsed and retained as the
+    //: the fractional-seconds field is parsed and retained as the
     // millisecond component.
     let bytes = s.as_bytes();
     if bytes.len() < 20 {
@@ -5910,7 +5910,7 @@ fn epoch_to_components(t: i64) -> (i64, i64, i64, i64, i64, i64) {
 // ---------------------------------------------------------------------------
 
 /// Parse a row id string to a UUID for the audit event, or error.
-/// DECISION_ROW_IDENTITY_UUID: row identity is a UUID; a non-UUID id at
+/// row identity is a UUID; a non-UUID id at
 /// a gated write is a contract violation, surfaced loudly, never bridged.
 pub(crate) fn require_uuid(s: &str, label: &str) -> Result<Uuid, LocusKitError> {
     Uuid::parse_str(s)
@@ -6329,7 +6329,7 @@ mod tests {
         store.add_drawer(&d, NOW).unwrap();
         let back = store.get_drawer(&tid("d1")).unwrap().unwrap();
         assert_eq!(back.content, "hello");
-        // ADR-017: wing/room are no longer stored in the drawers table;
+        // wing/room are no longer stored in the drawers table;
         // they default to empty on read-back (populated by node-tree
         // JOIN at fetch time in production paths).
         assert_eq!(back.parent_node_id, d.parent_node_id);
@@ -7177,7 +7177,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Tunnel retirement tests (T13 / ADR-021 Phase 7)
+    // Tunnel retirement tests
     // -----------------------------------------------------------------
 
     fn dreamed_tunnel(id: &str) -> Tunnel {
@@ -7447,7 +7447,7 @@ mod tests {
 
     #[test]
     fn iso8601_known_epoch_components() {
-        // 2023-11-14T22:13:20.000Z (epoch 1_700_000_000_000 milliseconds, ADR-023).
+        // 2023-11-14T22:13:20.000Z (epoch 1_700_000_000_000 milliseconds, epoch-millisecond instants).
         assert_eq!(format_iso8601(1_700_000_000_000), "2023-11-14T22:13:20.000Z");
         // A sub-second value round-trips its millisecond fraction.
         assert_eq!(format_iso8601(1_700_000_000_437), "2023-11-14T22:13:20.437Z");
@@ -7709,7 +7709,7 @@ mod tests {
     // HLC unit contract — physical_time must be milliseconds
     //
     // Swift feeds HLCGenerator::send() in milliseconds (DrawerStore.swift:
-    // `let nowMillis = Int64(now.timeIntervalSince1970 * 1000)`). Under ADR-023
+    // `let nowMillis = Int64(now.timeIntervalSince1970 * 1000)`). Under epoch-millisecond instants
     // Rust callers also pass epoch-milliseconds directly (the `now` clock is ms),
     // so send() receives ms with no conversion. These tests verify the contract
     // so a future regression is caught at CI rather than at federation time.
@@ -7770,7 +7770,7 @@ mod tests {
     /// This validates the HLC generator works correctly with millis as input.
     #[test]
     fn hlc_monotonic_within_same_second() {
-        // Epoch MILLISECONDS (ADR-023) — the `now` the store and HLC take.
+        // Epoch MILLISECONDS — the `now` the store and HLC take.
         const CAPTURE_MILLIS: i64 = 1_765_000_000_000;
 
         let store = open_store_at(CAPTURE_MILLIS);

@@ -100,7 +100,7 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     /// A cross-estate federated read was refused because the source
     /// estate holds no valid grant naming the requester as grantee.
     /// This is the substrate-level enforcement of the A-versus-C
-    /// refusal (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §13,
+    /// refusal (federation disclosure controls,
     /// cookbook I-23): absent a grant, B's content is never disclosed
     /// to A. `reason` distinguishes no-grant from expired/revoked.
     case crossEstateReadRefused(source: UUID, requester: UUID, reason: FederatedReadRefusalReason)

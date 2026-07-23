@@ -193,7 +193,7 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
         let search_text = content_text(&search_result);
 
         // The persisted memory must survive reopen and be found. A reopened
-        // SQLite estate also re-seeds the 7 ADR-016 wings (each an
+        // SQLite estate also re-seeds the seven default wings (each an
         // AI_Charter_Hint memory) — normal drawers now — so the count is not
         // exactly 1. The id + content assertions below prove THIS memory
         // round-tripped; here we only require the search found something.

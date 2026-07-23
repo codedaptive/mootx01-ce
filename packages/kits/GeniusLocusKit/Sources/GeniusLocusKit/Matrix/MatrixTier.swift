@@ -46,7 +46,7 @@ import SubstrateTypes
 // the canonical T-matrix engine (cookbook §6.4). GeniusLocusKit
 // is the composition layer; importing SubstrateML (algorithms)
 // does not invert the kit layering graph. Added 2026-06-04 per
-// DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+// hourly temporal-matrix scheduling.
 import SubstrateML
 
 // MARK: - Coordinate types
@@ -528,7 +528,7 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         var tier = MatrixTier()
 
         // Temporal causality keys off the AUTHORED-IN-WORLD clock (`eventTime`),
-        // never the capture HLC — ADR-004: "all temporal-cognition primitives
+        // never the capture HLC — authored event time: "all temporal-cognition primitives
         // key off eventTime, not filedAt." A bulk historical import stamps every
         // drawer with one capture HLC (same physicalTime), so hlc-based lags are
         // all 0 and no pairs form; the real causal structure lives in each
@@ -582,7 +582,7 @@ public struct MatrixTier: Sendable, Equatable, Codable {
                 // causal signal, and the dominant term in the T key blow-up on a
                 // dense import window. It stays in O (rebuild()); it is dropped
                 // here only. Mirrors Rust MatrixTier::rebuild_temporal_from.
-                // See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+                // See the 512-source temporal-matrix bound.
                 guard entry.fieldPath != "wikidataQID" else { return nil }
                 let clock = temporalClock(for: entry)
                 guard clock.physicalTime >= temporalCutoffMs else { return nil }
@@ -744,7 +744,7 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         // Pass 1: F, O, C, liveRowCount, lastHLC.
         var tier = rebuild(from: log)
 
-        // Pass 2: T, temporalWatermarkHLC. Keys off eventTime (ADR-004); the
+        // Pass 2: T, temporalWatermarkHLC. Keys off eventTime; the
         // map is empty for streaming/conformance, where eventTime == captureTime.
         let tTier = rebuildTemporal(from: log, eventTimes: eventTimes)
 
@@ -786,7 +786,7 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         Self.applyCaptureEntries(into: &self, entries: newEntries)
 
         // T — fold from the persisted temporal watermark (eventTime space,
-        // ADR-004), but first check for backdated eventTime entries among the
+        // authored event time), but first check for backdated eventTime entries among the
         // new-since-snapshot rows. A "new" row (capture HLC > foCursor, i.e. the
         // field cursor captured above) can carry an eventTime before the persisted
         // temporalWatermarkHLC — a common pattern in bulk historical imports.

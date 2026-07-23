@@ -7,7 +7,7 @@
 //
 // Design council 2026-06-04 decision: hourly batch cadence (3600 s),
 // superseding the weekly cadence in cookbook §6.4.
-// See DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+// See hourly temporal-matrix scheduling.
 //
 // Types mirror the Swift port: TemporalFieldCoord, TemporalAuditEntry,
 // TemporalCausalityKey, TemporalCausalityFold. The caller maps
@@ -119,7 +119,7 @@ pub const DEFAULT_WINDOW_MINUTES: i32 = 256;
 /// in the window — the weakest temporal proximity — so the near-lag causal
 /// signal the T matrix exists to capture is preserved. Must mirror Swift
 /// `TemporalCausalityFold.maxWindowOccupancy` exactly for bit-identical
-/// conformance. See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+/// conformance. See the 512-source temporal-matrix bound.
 pub const MAX_WINDOW_OCCUPANCY: usize = 512;
 
 /// Map a minute delta to the smallest lag bucket >= deltaMinutes.

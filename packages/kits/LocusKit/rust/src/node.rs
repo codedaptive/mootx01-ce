@@ -1,4 +1,4 @@
-//! Container node in the estate's containment tree (ADR-017 §1–§2).
+//! Container node in the estate's containment tree.
 //!
 //! The estate is a fixed-depth tree: estate (depth 0), wing (depth 1),
 //! room (depth 2). Drawers are leaf nodes in the `drawers` table, not
@@ -69,7 +69,7 @@ pub struct Node {
     /// Wall-clock last-update timestamp (epoch seconds; ISO8601 TEXT in SQLite).
     pub updated_at: i64,
 
-    /// Forward-compat JSON extension slot (ADR-012). None in 1.0.
+    /// Forward-compat JSON extension slot. None in 1.0.
     pub ext: Option<String>,
 }
 

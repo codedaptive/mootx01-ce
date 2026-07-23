@@ -1,5 +1,5 @@
 //! substrate-kernel — Layer 2 of the three-package SubstrateLib split
-//! per DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md §6.
+//! per the four-package substrate layout.
 //!
 //! Hardware-dispatched fast paths. `ScalarKernel` (in this crate's
 //! `kernel` module) is the oracle; all other kernels must produce

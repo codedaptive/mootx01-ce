@@ -12,13 +12,13 @@
 // pure orchestration: it enqueues work and, via `on_encoded`, coordinates the
 // LocusKit room rollup for the encoded drawers — it never performs the encode.
 //
-// T4 (ADR-021 Decision 7): the encode queue is now the SHARED per-estate
+// the encode queue is now the SHARED per-estate
 // encrypted queue — a PersistenceKitBackend over `queue.sqlite` beside the
 // estate (derived via `EstateConfiguration.queue_sibling("queue.sqlite")`). This
 // replaces the old `FilesystemBackend` maildir (`corpus_ingest_queue/`) that was
 // plaintext even when the estate was encrypted — a security hole. The encode
 // stream is isolated by `stream_id = "encode"` so a future dreaming drainer can
-// share the same queue.sqlite without claiming encode jobs (ADR-021 Decision 7:
+// share the same queue.sqlite without claiming encode jobs (recall-driven dreaming:
 // one per-estate queue, per-(estate, stream) drainers). The private CorpusKit
 // `DrainLease` is replaced by the QueueKit-provided `DrainLease` (T2), keyed on
 // `stream = "encode"`. Drain uses the T1 stream-scoped `drain_for_stream`.
@@ -27,7 +27,7 @@
 // ingest_batch → reply terminal → sleep), so the latency floor is the ~15 ms
 // idle interval and the parallelism is cross-document. The 1.0 worker pool is
 // per-corpus; the process-global cross-estate cap is the 1.1 central drain
-// master (DECISION_CENTRAL_DRAIN_MASTER_2026-06-23) — ~70% of this (the
+// master — ~70% of this (the
 // `ingest_batch` concurrent compute) carries forward unchanged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -104,7 +104,7 @@ pub(crate) struct IngestQueueState {
 }
 
 
-/// The corpus encode stream id (T4 / ADR-021 Decision 7). The shared
+/// The corpus encode stream id. The shared
 /// `queue.sqlite` can host other streams (e.g. `"dreaming"`) concurrently;
 /// this drainer claims only `"encode"` jobs via `drain_for_stream`.
 fn encode_stream_id() -> StreamId {
@@ -146,7 +146,7 @@ impl Corpus {
     /// because the worker thread holds a cloned `Arc<Corpus>` to call
     /// `ingest_batch`. Mirrors Swift's `Corpus.mountIngestQueue()`.
     ///
-    /// Backend selection follows the estate's durability (T4 — ADR-021 Decision 7):
+    /// Backend selection follows the estate's durability ( — recall-driven dreaming):
     ///   - SQLite estate → the SHARED encrypted `queue.sqlite` beside the estate.
     ///     `storage.configuration().queue_sibling("queue.sqlite")` derives the
     ///     sibling config (same directory, same encryption key). A
@@ -591,7 +591,7 @@ impl Corpus {
     /// background worker and the synchronous pump drive the same logic.
     /// Uses the T1 stream-scoped `drain_for_stream` so it claims only `"encode"`
     /// jobs — future dreaming or signal jobs on the same queue.sqlite are never
-    /// disturbed (ADR-021 Decision 7).
+    /// disturbed.
     fn drain_with_queue(&self, queue: &IngestQueue) -> CorpusKitResult<usize> {
         let claimed = queue
             .drain_for_stream(&encode_stream_id(), drain_telemetry_now())

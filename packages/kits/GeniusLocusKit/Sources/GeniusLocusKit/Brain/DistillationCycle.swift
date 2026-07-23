@@ -236,9 +236,9 @@ private extension GeniusLocusKit {
     ) async throws -> String {
         // The factoid drawer is captured via estate.capture(_:), which files it
         // under the estate's default wing (defaultWingName = "Agentic Memory",
-        // ADR-016). The tunnel source wing must match where the factoid actually
+        // wing organization). The tunnel source wing must match where the factoid actually
         // lands — use the same constant rather than re-deriving from the manifest.
-        let factoidWing = LocusKit.defaultWingName  // "Agentic Memory" — ADR-016
+        let factoidWing = LocusKit.defaultWingName  // "Agentic Memory" — wing organization
 
         let lineageID = UUID(uuidString: clusterID) ?? UUID()
 

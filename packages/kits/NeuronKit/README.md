@@ -59,7 +59,7 @@ Use NeuronKit to add to any GeniusLocusKit application:
 - `docs/specs/NEURONKIT_SPEC_v0.1.md` — full spec
 - `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` — §§ 6–8, 11, 13, 14, 15
 - `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` — every algorithm NeuronKit implements is specified here
-- `docs/decisions/DECISION_ACCELERATOR_ROUTING_2026-05-16.md` — mandatory before any kernel mission
+- `docs/engineering/SUBSTRATE_PERFORMANCE_GATE.md#7-production-kernel-selection` — mandatory before any kernel mission
 
 ## Scope
 

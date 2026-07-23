@@ -1,6 +1,6 @@
 // PostgreSQLStorage.swift
 //
-// PostgreSQL backend per DECISION_STORAGEKIT_DESIGN.
+// PostgreSQL backend per the PersistenceKit storage surface.
 
 import Foundation
 import SubstrateTypes

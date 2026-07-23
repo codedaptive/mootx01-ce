@@ -12,7 +12,7 @@
 //! `as_of` are replayed in HLC order starting from the genesis
 //! capture event, producing the projected
 //! `(adjective, operational, provenance)` snapshot. State is keyed on
-//! HLC, not wall-clock (DECISION_CLOCK_TRIANGLE_TIME_MODEL §11:
+//! HLC, not wall-clock (single-maker HLC and event integrity:
 //! wall-clock is not a fold axis).
 //!
 //! All three bitmap columns are reconstructed from the same fold —
@@ -50,7 +50,7 @@ impl Estate {
         row_id: &str,
     ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         // The row's sealed audit events in HLC order — the audit-log
-        // source of truth (DECISION_CLOCK_TRIANGLE_TIME_MODEL). Events
+        // source of truth. Events
         // are snapshots, not deltas. The cross-row wall-clock window form
         // was dropped in the audit-log migration (§11: wall-clock is not
         // an ordering/fold axis).

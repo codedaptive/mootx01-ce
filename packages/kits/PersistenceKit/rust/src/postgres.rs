@@ -12,7 +12,7 @@
 //! without one it is skipped. Implements RowStore, BlobStore, AuditLog,
 //! StorageObserver + schema/generated-STORED-columns/append-only. The
 //! backend owns no vector-search engine; it accommodates vector workloads'
-//! storage needs through RowStore/BlobStore (ADR-008).
+//! storage needs through RowStore/BlobStore.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -61,7 +61,7 @@ fn to_param(v: &TypedValue) -> PgParam {
         TypedValue::Blob(b) => Box::new(b.clone()),
         TypedValue::Json(b) => Box::new(b.clone()),
         TypedValue::Uuid(u) => Box::new(*u),
-        // Timestamp is epoch MILLISECONDS (ADR-023) — bind through the
+        // Timestamp is epoch MILLISECONDS — bind through the
         // millisecond constructor so the TIMESTAMPTZ carries sub-second
         // precision, matching Swift and the SQLite backend.
         TypedValue::Timestamp(ms) => Box::new(
@@ -113,7 +113,7 @@ fn read_value(row: &postgres::Row, idx: usize, kit: Option<ColumnType>) -> Typed
             .try_get::<_, Option<DateTime<Utc>>>(idx)
             .ok()
             .flatten()
-            // Timestamp is epoch MILLISECONDS (ADR-023).
+            // Timestamp is epoch MILLISECONDS.
             .map(|dt| TypedValue::Timestamp(dt.timestamp_millis()))
             .unwrap_or(TypedValue::Null),
         Some(ColumnType::Bool) => row
@@ -596,7 +596,7 @@ impl Pool {
     /// no plaintext fallback) instead of silently overwriting it with `prefer`.
     ///
     /// Transport is `postgres-native-tls = "0.5"` (C-1 exception approved:
-    /// `DECISION_RUST_POSTGRES_TLS_CRATE_2026-06-28.md`). It wraps the
+    /// `the Rust PostgreSQL TLS seam`). It wraps the
     /// platform TLS stack (Security.framework / SChannel / OpenSSL) rather
     /// than bundling a cryptographic implementation.
     fn open_connection(conn_str: &str, namespace: &str) -> StorageResult<Client> {

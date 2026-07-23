@@ -17,7 +17,7 @@
 // threaded, so the OnceLock + atomic pattern below is overkill
 // for thread safety but cheap and tidy.
 //
-// See DECISION_OR_REDUCE_BACKENDS_2026-05-17.md for the
+// See measured SIMD OR-reduce selection for the
 // rationale on per-op kernel selection.
 
 use std::sync::atomic::{AtomicU8, Ordering};

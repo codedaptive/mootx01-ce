@@ -96,7 +96,7 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
     public let removedByBatch: String?
 
     /// Fractional-index ordering key for `.parent` tunnels
-    /// (ADR-017 §11). Siblings under the same parent sort by
+    ///. Siblings under the same parent sort by
     /// ascending `orderKey`. Nil for non-parent tunnel kinds.
     public let orderKey: Double?
 

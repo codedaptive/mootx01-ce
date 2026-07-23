@@ -227,7 +227,7 @@ fn structured_import_hierarchy_as_full_room_path() {
     );
 }
 
-/// Regression (ADR-023): a vault import stores `filed_at` in epoch MILLISECONDS.
+/// Regression: a vault import stores `filed_at` in epoch MILLISECONDS.
 /// The bridge passes `NOW` (ms) into `capture_with_mode`, which stores it directly
 /// into the millisecond-typed `filed_at` column — no ÷1000 — so it must round-trip
 /// as the exact millisecond value, well below PersistenceKit's RFC-3339 year-9999

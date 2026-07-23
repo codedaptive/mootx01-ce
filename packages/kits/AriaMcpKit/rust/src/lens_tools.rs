@@ -63,7 +63,7 @@ pub const LENS_TOOLS: &[&str] = &[
     "moot_lens_latent_themes",
     "moot_lens_bias",
     "moot_lens_drift",
-    // Diffusion node layer (ADR-DIFFUSION-001): a single memory's motion over time.
+    // Diffusion node layer: a single memory's motion over time.
     "moot_lens_node_motion",
     // moot_lens_cohesion: content-cohesion outlier detector (renamed from
     // moot_lens_contradiction; backed by CognitionKit run_contradiction).
@@ -111,12 +111,12 @@ pub fn dispatch(
 
     match name {
         "moot_lens_keystones" => {
-            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
+            // node-tree integrity bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             let top_k = crate::dispatch::clamp_limit(
                 Some(opt_integer(args, "topK", 5)?), "topK", 5, crate::dispatch::LIMIT_HARD_CEILING
             )?;
-            // `now` is `wall_now()` epoch MILLISECONDS (ADR-023); the keystones
+            // `now` is `wall_now` epoch MILLISECONDS; the keystones
             // VizGraph telemetry `ts` is epoch SECONDS (mirrors the Swift recipe,
             // which threads `Date.timeIntervalSince1970`). Scale ms→s for this
             // telemetry-only float — do NOT change `wall_now()`, which the i64
@@ -133,7 +133,7 @@ pub fn dispatch(
         }
 
         "moot_lens_constellation" => {
-            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
+            // node-tree integrity bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             // ms→s: `now` is `wall_now()` epoch milliseconds; the constellation
             // VizGraph `ts` is epoch seconds (mirrors the Swift recipe's
@@ -147,7 +147,7 @@ pub fn dispatch(
         }
 
         "moot_lens_free_association" => {
-            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
+            // node-tree integrity bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             let seed = require_string(args, "seedDrawerID")?;
             // walkLength ceiling 100_000: walk steps are bounded separately from result
@@ -259,7 +259,7 @@ pub fn dispatch(
         }
 
         "moot_lens_node_motion" => {
-            // Diffusion, node layer (ADR-DIFFUSION-001): fold a single memory's
+            // Diffusion, node layer: fold a single memory's
             // fresh audit history into its motion model — decay-weighted churn
             // volatility, UDC-anchor trajectory, reanchor flag — then classify a
             // write-time anomaly verdict. Mirrors Swift LensTools moot_lens_node_motion
@@ -317,7 +317,7 @@ pub fn dispatch(
             // first entry. No history => fold over the empty slice returns zero motion
             // (the EntryUUID is never displayed — the result echoes the caller's rowID
             // string, matching the Swift port). wall_now() and the fold's HLC
-            // time base are both epoch MS (ADR-023) — no scaling.
+            // time base are both epoch MS — no scaling.
             let row_uuid = entries
                 .first()
                 .map(|e| e.row_id)
@@ -449,7 +449,7 @@ pub fn dispatch(
                 lines.push("contradicts_tunnels: none".to_string());
             } else {
                 lines.push(format!("contradicts_tunnels: {}", contradicts_tunnels.len()));
-                // ADR-017 §3 bridge consumer: source_wing/target_wing used as
+                // node-tree integrity bridge consumer: source_wing/target_wing used as
                 // display fallback when drawer IDs are absent on tunnel metadata.
                 for t in contradicts_tunnels.iter().take(50) {
                     let src = match t.source_drawer_id.as_deref() {
@@ -540,7 +540,7 @@ pub fn dispatch(
                         parts.get(1).copied().unwrap_or("")
                     ));
                     for fact in *facts {
-                        // filed_at is epoch milliseconds (ADR-023); format as
+                        // filed_at is epoch milliseconds; format as
                         // ISO8601 to match the Swift contradiction lens and
                         // substrate-wide date conventions.
                         let source_field = if hidden_fact_source_ids.contains(&fact.source_drawer_id) {
@@ -654,7 +654,7 @@ pub fn dispatch(
         }
 
         "moot_lens_successors" => {
-            // ADR-017 §3 bridge consumer: user-supplied wing name passed to LocusKit lens API.
+            // node-tree integrity bridge consumer: user-supplied wing name passed to LocusKit lens API.
             let wing = require_string(args, "wing")?;
             let anchor_id = require_string(args, "anchorID")?;
             let k = opt_integer(args, "k", 5)?.max(0) as usize;
@@ -832,7 +832,7 @@ pub fn dispatch(
         }
 
         "moot_lens_moment" => {
-            // Primary window as an (start, end) epoch-milliseconds pair (ADR-023).
+            // Primary window as an (start, end) epoch-milliseconds pair.
             // The recipe reads the fingerprints through the GLK surface
             // (coord.glk_fingerprints_captured) — aria-mcp no longer reaches
             // estate.store directly (B-1 layer discipline), matching the Swift
@@ -931,7 +931,7 @@ pub fn dispatch(
             // Parity: Swift moot_lens_precedence uses requireWindowRange.
             require_window_range(start_epoch, end_epoch)?;
             // Both the eventTime pre-filter and event_lag_pairs operate in epoch
-            // milliseconds (ADR-023): require_iso8601 returns ms and drawer
+            // milliseconds: require_iso8601 returns ms and drawer
             // event_time is ms, so the bounds are used directly with no scaling.
             let lower_ms = start_epoch;
             let upper_ms = end_epoch;
@@ -1007,7 +1007,7 @@ pub fn dispatch(
             // Validate field names before calling the recipe. The complexity recipe
             // returns entropy=-0 for unknown fields, producing a misleading success
             // result. Reject early with the valid list. Mirrors Swift LensTools.
-            // ADR-017 §3 bridge consumer: "room" and "wing" are display-bridge
+            // node-tree integrity bridge consumer: "room" and "wing" are display-bridge
             // metadata field names enumerated for the complexity lens.
             const VALID_COMPLEXITY_FIELDS: &[&str] =
                 &["addedBy", "embeddingModelID", "room", "wing"];
@@ -1139,7 +1139,7 @@ fn require_iso8601(args: &BTreeMap<String, JsonValue>, key: &str) -> Result<i64,
     })
 }
 
-/// Validate a `(start, end)` epoch-milliseconds pair (ADR-023) before use as a
+/// Validate a `(start, end)` epoch-milliseconds pair before use as a
 /// query window.
 ///
 /// Two guards are applied:
@@ -1172,7 +1172,7 @@ fn require_window_range(start: i64, end: i64) -> Result<(i64, i64), JSONRPCError
 
 /// Minimal ISO8601 UTC parser — handles the subset the server accepts.
 /// Accepts "YYYY-MM-DDTHH:MM:SSZ" and "YYYY-MM-DDTHH:MM:SS+00:00".
-/// Parse an ISO8601 instant to epoch MILLISECONDS (ADR-023).
+/// Parse an ISO8601 instant to epoch MILLISECONDS.
 ///
 /// Every lens bound this parses (windowStart/windowEnd, endingAt, splitAt) is
 /// compared against drawer capture times, which are epoch milliseconds. The

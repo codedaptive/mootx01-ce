@@ -211,7 +211,7 @@ mod composite_version_tests {
 
 #[cfg(test)]
 mod audit_bridge_anchor_tests {
-    // Lattice-anchor bridging for the diffusion zone series (ADR-DIFFUSION-001
+    // Lattice-anchor bridging for the diffusion zone series (node motion modeling
     // §5, Option 3a). Mirrors Swift AuditBridgeTests.
     use super::*;
     use substrate_types::audit_event::AuditEvent;
@@ -390,8 +390,8 @@ pub fn open_hydrating(
 
     // Step 6 — Matrix rebuild (full: both passes). Build the event_time map
     // (row_id → authored-in-world epoch ms) so the temporal (T) pass keys off
-    // event_time, not the capture HLC — ADR-004. event_time and the fold's
-    // physical_time are both epoch-ms (ADR-023), so it flows through directly.
+    // event_time, not the capture HLC — authored event time. event_time and the fold's
+    // physical_time are both epoch-ms, so it flows through directly.
     // The row_id key mirrors bridge_audit_event's `EntryUUID(row_uuid.to_be_bytes())`.
     let event_times: std::collections::HashMap<EntryUUID, i64> = estate
         .all_drawers()
@@ -828,7 +828,7 @@ pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> V
     }
 
     // Lattice anchor (the FDC zone) -> the diffusion zone / topic-trajectory
-    // motion model (ADR-DIFFUSION-001 §5, Option 3a). Mirrors Swift AuditBridge:
+    // motion model (node motion modeling, Option 3a). Mirrors Swift AuditBridge:
     // the anchor is already on the event (before/after); bridging it through
     // gives the UnifiedAuditLog the zone time-series with no substrate change.
     // Emit on capture (no prior anchor) and whenever a reanchor changes it; a
@@ -909,7 +909,7 @@ pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> V
 ///
 /// Grant-lifecycle (`EstateCoordinator::issue_grant`/`revoke_grant`,
 /// coordinator.rs's `append_grant_audit_entry`, GLK-03 seam / FUP-C) and
-/// sensitivity-unlock (`append_sensitivity_audit_entry`, ADR-025 §4) both
+/// sensitivity-unlock (`append_sensitivity_audit_entry`, out-of-band sensitivity grants) both
 /// write their case's `raw_value()` verbatim as the durable event's `verb`
 /// string — these six cases are the read-back symmetric to that write.
 /// Before RUST-AUDIT-DURABILITY (2026-07-09) these six collapsed to

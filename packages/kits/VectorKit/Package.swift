@@ -6,13 +6,13 @@
 // `EmbeddingProvider` protocol; concrete adapters (MiniLM in VEC-03,
 // future models) conform to it and storage code remains pluggable.
 //
-// Refactored 2026-05-19 (mission 6): consume PersistenceKit's
+// VectorKit consumes PersistenceKit's
 // VectorIndex protocol for storage, and SubstrateLib's
 // FloatSimHash for the float-to-engram projection. Both changes
-// per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md section 4.6.
+// and keeps storage ownership outside this package.
 //
 // VECTORKIT_REPORT_001 (2026-06-06): added IntellectusLib self-report
-// telemetry. Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 +
+// telemetry. Authority: in-repository dependency direction +
 // MANAGER_1.0_PLAN §4 (P2 self-report coverage). Layering: IntellectusLib
 // has zero repo deps; adding it here is strictly downstream→upstream,
 // no cycle.
@@ -32,7 +32,7 @@ let package = Package(
         // search and insert metrics via Intellectus.report(_:), which is a
         // no-op when monitoring is disabled (the default). Off-path cost:
         // one Atomic<Bool> load + branch (~1 ns). No lock on the off-path.
-        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+        // Repository-owned dependencies use local package paths.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
     ],
     targets: [

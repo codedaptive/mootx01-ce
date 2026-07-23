@@ -107,7 +107,7 @@ public actor BasisStore {
     /// false: a retrain UPSERTs the existing (modelID, modelVersion) row, so
     /// the table holds at most one basis per provider key.
     ///
-    /// v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012):
+    /// v2 adds the nullable `.json` `ext` forward-compat slot:
     /// reserves the slot for future per-basis typed metadata (training
     /// hyperparameters, provenance) without a migration. 1.0 writes NULL /
     /// omits it on upsert and never reads it.
@@ -126,7 +126,7 @@ public actor BasisStore {
                     .timestamp("trained_at", nullable: false),
                     // INTEGER staleness anchor — NOT a Bool flag.
                     .int("trained_chunk_count", nullable: false),
-                    // ADR-012 forward-compat slot. Nullable `.json`, present
+                    // nullable entity ext slots forward-compat slot. Nullable `.json`, present
                     // from schema v2. Reserves the slot, not a shape. 1.0 omits
                     // it on upsert and never reads it.
                     .json("ext", nullable: true)

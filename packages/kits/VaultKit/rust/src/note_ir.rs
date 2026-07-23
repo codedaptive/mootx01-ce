@@ -7,7 +7,7 @@
 //! frozen-by-convention: flat, JSON-serializable (all fields are
 //! primitive or collections of primitives), no language-specific types.
 //!
-//! Per ADR-VAULTKIT-001 (f): `Block.kind` is an **open string vocabulary**
+//! Per Vault import/export (f): `Block.kind` is an **open string vocabulary**
 //! rather than a closed enum so an outliner adapter can introduce a new
 //! block kind without reshaping `NoteIR`. The degenerate case — a single
 //! block whose `kind` is `"markdown"` and whose `text` is the whole page
@@ -86,7 +86,7 @@ impl WikiLink {
 /// A pointer to an external source artifact — a file reference, never
 /// the bytes.
 ///
-/// Per ADR-VAULTKIT-001 (b), VaultKit references attachments by path +
+/// Per Vault import/export (b), VaultKit references attachments by path +
 /// content hash rather than copying blobs into the substrate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRef {
@@ -143,7 +143,7 @@ impl OccurredAt {
 ///
 /// `FactIR` is the IR-level representation of a knowledge-graph fact —
 /// a KG fact in our substrate, a graph relation (entity → relationship →
-/// entity) in programmatic external memory tools. Per ADR-007 Decision 1,
+/// entity) in programmatic external memory tools. Per data-movement privacy tiers,
 /// the full-fidelity IR carries facts as first-class data so a
 /// programmatic exporter's graph layer survives the interchange boundary.
 /// Mapping facts to substrate nouns is adapter/bridge territory
@@ -210,7 +210,7 @@ fn default_kind() -> String {
 /// `NoteIR` is the pivot of the bridge: every adapter maps vault files
 /// ⇄ `NoteIR`, and `DrawerMapping` maps `NoteIR` ⇄ a substrate `Drawer`
 /// (+ `.references` tunnels). Its shape is frozen-by-convention — flat,
-/// no language-specific boundary types. See ADR-VAULTKIT-001 (f).
+/// no language-specific boundary types. See Vault import/export (f).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoteIR {
     /// The stable identity of this note across re-imports. For the Obsidian
@@ -280,7 +280,7 @@ pub struct NoteIR {
     /// Subject / predicate / object assertions carried by this note.
     /// Empty for plain Markdown vaults (Obsidian emits none); populated
     /// by programmatic-tool adapters whose source has a graph layer.
-    /// Full-fidelity field per ADR-007 Decision 1. Mirrors Swift
+    /// Full-fidelity field per data-movement privacy tiers Mirrors Swift
     /// `NoteIR.facts: [FactIR]`. Decodes to `[]` when the key is absent
     /// (pre-extension JSON).
     #[serde(default)]

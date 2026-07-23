@@ -64,7 +64,7 @@ pub fn is_systemd_safe(s: &str) -> bool {
 /// `cmd /c "set …&& …"` wrapper to bake `MOOTX01_VAULT` (and optionally
 /// `MOOTX01_DATA_DIR`) into the task since Task Scheduler has no per-task
 /// environment block. `vault_on` governs `MOOTX01_VAULT`: true → "1"
-/// (vault surface enabled), false → "0" (vault surface hidden) per ADR-015.
+/// (vault surface enabled), false → "0" (vault surface hidden).
 ///
 /// Returns `Err` when `data_dir_override` contains characters that would
 /// allow cmd.exe command injection (planned hardening — fails CLOSED).
@@ -292,7 +292,7 @@ pub fn restart_task(task_name: &str) -> Result<(), String> {
 /// The daemon unit: runs `mootx01 serve --http auto` (§3 hunting form).
 /// `data_dir_override` bakes an MOOTX01_DATA_DIR Environment= line when set.
 /// `vault_on` bakes MOOTX01_VAULT=1 (vault surface enabled, the default) or
-/// MOOTX01_VAULT=0 (vault surface hidden, installed with --vault-off) per ADR-015.
+/// MOOTX01_VAULT=0 (vault surface hidden, installed with --vault-off).
 /// MOOTX01_VAULT is always written so the resident daemon's posture is explicit
 /// and independent of whatever the launching shell's environment happens to carry.
 ///
@@ -521,7 +521,7 @@ mod tests {
         assert!(u.contains("Restart=on-failure"));
         assert!(u.contains("WantedBy=default.target"));
         assert!(!u.contains("Environment=MOOTX01_DATA_DIR"));
-        // vault-on baked explicitly (ADR-015)
+        // vault-on baked explicitly
         assert!(u.contains("Environment=MOOTX01_VAULT=1"));
     }
 

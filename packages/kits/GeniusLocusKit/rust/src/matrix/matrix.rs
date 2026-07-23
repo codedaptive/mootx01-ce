@@ -419,7 +419,7 @@ impl MatrixTier {
         let mut tier = MatrixTier::new();
 
         // Temporal causality keys off the AUTHORED-IN-WORLD clock (event_time),
-        // never the capture HLC — ADR-004: "all temporal-cognition primitives
+        // never the capture HLC — authored event time: "all temporal-cognition primitives
         // key off eventTime, not filedAt." A bulk historical import stamps every
         // drawer with one capture HLC, so hlc-based lags are all 0 and no pairs
         // form; the real causal structure lives in each drawer's event_time. We
@@ -479,7 +479,7 @@ impl MatrixTier {
                 // causal signal, and the dominant term in the T key blow-up on a
                 // dense import window. It stays in O (rebuild()); it is dropped
                 // here only. Mirrors Swift MatrixTier.rebuildTemporal.
-                // See DECISION_MATRIXT_OCCUPANCY_CAP_2026-07-02.md.
+                // See the 512-source temporal-matrix bound.
                 if entry.field_path == "wikidataQID" {
                     return None;
                 }
@@ -573,7 +573,7 @@ impl MatrixTier {
     pub fn full_rebuild(log: &UnifiedAuditLog, event_times: &HashMap<EntryUUID, i64>) -> Self {
         // Pass 1: F, O, C, live_row_count, last_hlc.
         let mut tier = MatrixTier::rebuild(log);
-        // Pass 2: T, temporal_watermark_hlc. Keys off event_time (ADR-004); the
+        // Pass 2: T, temporal_watermark_hlc. Keys off event_time; the
         // map is empty for streaming/conformance (event_time == capture_time).
         let t_tier = MatrixTier::rebuild_temporal_from(log, HLC::ZERO, event_times);
         // Merge T into the F/O/C tier. Fields are pub in Rust so no helper needed.
@@ -614,7 +614,7 @@ impl MatrixTier {
         Self::apply_capture_entries(self, new_entries);
 
         // T — fold from the persisted temporal watermark (event_time space,
-        // ADR-004), but first check for backdated event_time entries among the
+        // authored event time), but first check for backdated event_time entries among the
         // new-since-snapshot rows. A "new" row (capture HLC > fo_cursor) can
         // carry an event_time before the persisted temporal_watermark_hlc — a
         // common pattern in bulk historical imports. The incremental fold

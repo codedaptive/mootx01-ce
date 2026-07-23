@@ -121,7 +121,7 @@ extension ToolDispatcher {
     /// (adjective sensitivity `.normal` / `.elevated`) are visible. `memory`
     /// is a bulk, path-addressed read/write surface with no grant ceremony,
     /// so it matches BitmapEvaluator's default no-claims recall posture
-    /// (`.sensitivityAtMost(.elevated)`, ADR-007 Decision 2): `.restricted`
+    /// (`.sensitivityAtMost(.elevated)`, data-movement privacy tiers): `.restricted`
     /// and `.secret` drawers neither list nor resolve here. The adjective
     /// axis is the access-gate-relevant tier (spec § 7.9.2) — the provenance
     /// sensitivity axis is deliberately NOT consulted. Mirrors

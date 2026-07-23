@@ -12,13 +12,13 @@
 // SDK consumer (CorpusKit-direct, no GLK) gets multi-core encode, and so
 // GeniusLocusKit is pure orchestration.
 //
-// T4 (ADR-021 Decision 7): the encode queue is now the SHARED per-estate
+// the encode queue is now the SHARED per-estate
 // encrypted queue — a PersistenceKitBackend over `queue.sqlite` beside the
 // estate (derived via `EstateConfiguration.queueSibling("queue.sqlite")`). This
 // replaces the old `FilesystemBackend` maildir (`corpus_ingest_queue/`) that
 // was plaintext even when the estate was encrypted — a security hole. The encode
 // stream is isolated by `stream_id = "encode"` so a future dreaming drainer can
-// share the same queue.sqlite without claiming encode jobs (ADR-021 Decision 7:
+// share the same queue.sqlite without claiming encode jobs (recall-driven dreaming:
 // one per-estate queue, per-(estate, stream) drainers). The private CorpusKit
 // `DrainLease` is replaced by the QueueKit-provided `DrainLease` (T2), keyed on
 // `stream = "encode"`.
@@ -51,7 +51,7 @@ public extension Corpus {
     /// existing queue and worker are kept). An orchestrator calls this at
     /// provision; otherwise `enqueueIngest` mounts it lazily on first use.
     ///
-    /// Backend selection follows the estate's durability (T4 — ADR-021 Decision 7):
+    /// Backend selection follows the estate's durability ( — recall-driven dreaming):
     ///   - SQLite estate → the SHARED encrypted `queue.sqlite` beside the estate.
     ///     `storage.configuration.queueSibling("queue.sqlite")` derives the sibling
     ///     config (same path directory, same encryption key). A `PersistenceKitBackend`
@@ -189,7 +189,7 @@ public extension Corpus {
     ///
     /// Jobs are stamped with `stream_id = "encode"` (T4) so the drain worker can
     /// claim only the encode stream without disturbing other streams that may share
-    /// the same queue.sqlite in the future (ADR-021 Decision 7 / T1).
+    /// the same queue.sqlite in the future.
     ///
     /// - Parameters:
     ///   - text: The verbatim text to encode.
@@ -711,7 +711,7 @@ public extension Corpus {
     /// permanently-failing job's cost.
     private static var ingestMaxAttempts: Int { 8 }
 
-    /// The encode stream id (T4 / ADR-021 Decision 7). One stream per encode
+    /// The encode stream id. One stream per encode
     /// drain; the queue.sqlite can host other streams (e.g. "dreaming") alongside
     /// without cross-contamination — each consumer drains only its own stream_id.
     static var encodeStreamID: StreamID { StreamID(rawValue: "encode") }

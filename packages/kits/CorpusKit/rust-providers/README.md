@@ -4,7 +4,7 @@ Rust port of Swift's `CorpusKitProviders` target. Hosts the concrete `Tokenizer`
 
 Sibling of `rag-kit` (the core crate). Core `rag-kit` ships traits, primitives, and engines (BM25Index, BundleStore, chunker, hybrid recall); this providers crate ships the implementations that satisfy those traits.
 
-**Status:** v1.0. `DeterministicTokenizer` is the only implementation today. Real WordPiece and SentencePiece tokenizers plus ONNX-backed embedding providers land in the v1.1 model-bundle mission (per DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
+**Status:** v1.0. `DeterministicTokenizer` is the only implementation today. Real WordPiece and SentencePiece tokenizers plus ONNX-backed embedding providers land in the v1.1 model-bundle mission (per the embedding-provider contract).
 
 ## What ships at v1.0
 

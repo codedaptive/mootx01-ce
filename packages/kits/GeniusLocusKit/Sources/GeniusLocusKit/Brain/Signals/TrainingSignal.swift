@@ -9,7 +9,7 @@ import Foundation
 ///
 /// The training daemon runs the enrichment pipeline over the post-watermark
 /// audit-log tail and folds transitions into the matrix tier. The daemon's
-/// own threshold gate (per DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21)
+/// own threshold gate (per the training transition threshold)
 /// decides whether to actually train on each invocation; the signal is the
 /// scheduler-side trigger that invokes the daemon regardless — the gate
 /// short-circuits below the threshold so the emit always returns exactly one
@@ -46,7 +46,7 @@ public enum TrainingSignal {
     public static let defaultCadenceSeconds: TimeInterval = 3_600
 
     /// Stable name surfaced in `SignalReport.name` and in
-    /// `GeniusLocusKit.defaultStandingSignalNames` (signal 9, ADR-018 F1).
+    /// `GeniusLocusKit.defaultStandingSignalNames` (signal 9, brain-layer governor ownership).
     public static let signalName = "training-daemon"
 
     /// Build a signal spec that invokes the training daemon on each fire.
