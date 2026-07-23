@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-06-08
-last_updated: 2026-06-15
+last_updated: 2026-07-22
 ---
 
 # Validation
@@ -35,10 +35,17 @@ counts as evidence.
 
 ## Subdirectories
 
-**`audits/`** — recorded audit reports (this subdirectory is created when the first audit is recorded). Each audit is
-a moment-in-time investigation that produces a finding. The
+**[`audits/`](audits/)** — recorded audit reports. Each audit is
+a moment-in-time investigation or bounded review record. The
 naming pattern is `AUDIT_<topic>_<date>.md`. Audits cite the
-ledger row they update and the commit they were run against.
+ledger row they update and the commit they were run against, or state
+explicitly when they record process rather than a ledger claim.
+
+The first retained record is the
+[`Continuous Security Review Record — June 25 to July 22, 2026`](audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md),
+with a [537-row issue-to-commit remediation ledger](audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+reconciled from the pre-reset EE campaign, the CE delivery history, and the
+retained post-reset archive.
 
 **[`substrate_math_performance/`](substrate_math_performance/)** —
 the substrate mathematics performance corpus. Reference

@@ -367,6 +367,10 @@ Neither port leads. Both must agree bit for bit.
 ## Security
 
 Security-relevant changes go through an independent adversarial review before merge, verified against the live code and gated on that pass.
+The [continuous security review record](docs/validation/audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md)
+documents **537 remediated security finding records** from June 25 through
+July 22, 2026. The linked [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+names every issue and its fix or closing commit.
 
 ## Roadmap
 

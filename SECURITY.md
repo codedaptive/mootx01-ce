@@ -159,14 +159,25 @@ bug bounty and no response-time guarantee.
 
 ## Current posture
 
-This project completed an independent external security review in
-July 2026. All findings, 108 across medium, low, and informational
-severities, have been remediated. The review covered the codebase
-at review time; the invariants above are design guarantees
-exercised continuously by the test suite.
+Security review is continuous. From June 25 through July 22, 2026,
+the project ran repeated independent adversarial review, remediation,
+cross-port verification, and current-head revalidation across the EE,
+CE, and public SDK repositories.
+
+The combined remediation record contains **537 security findings**:
+281 from the pre-reset EE campaign and 256 fixed findings from the
+retained post-reset archive. The count does not multiply dual-port
+fixes or EE-to-CE backports.
+
+The full public count, process, and commit record is in the
+[continuous security review audit](docs/validation/audits/AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md).
+Its [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+names every issue and the EE fix, workstream-closing commit, or public
+CE delivery commit that closed it.
+The review covers the codebase at each reviewed commit; the invariants
+above remain design guarantees exercised continuously by the test
+suite.
 
 ## Supported versions
 
 Only the tip of `stable/1.0.x` (the default branch) is supported.
-
-
