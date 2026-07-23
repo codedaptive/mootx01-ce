@@ -8,4 +8,8 @@ These editions focus on operating consequences, product decisions, teams, and de
 4. [Security Boundaries Are Product Design](04-security-boundaries-are-product-design.md)
 6. [Same Memory Commands. Safer Memory Records.](06-same-memory-commands-safer-memory-records.md)
 
+Article 5 remains reserved for a historical article that has not yet passed
+the current writing review. The numbering preserves the original publication
+sequence.
+
 [Return to the complete series](../README.md).
