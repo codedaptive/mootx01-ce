@@ -269,7 +269,9 @@ fn duplicate_reference_batch_commits_counts_and_checkpoint_once() {
         CorpusProviderCountsStore::new(Arc::clone(&storage))
             .references("random-indexing-v1", "1.1.0")
             .expect("load count references")
-            .len(),
+            .into_iter()
+            .filter(|reference| !reference.is_subsumed)
+            .count(),
         1,
         "duplicate reference batch must persist one exact delta"
     );
@@ -375,7 +377,9 @@ fn queue_remove_readd_does_not_double_fold_counts_reference() {
         CorpusProviderCountsStore::new(Arc::clone(&storage))
             .references("random-indexing-v1", "1.1.0")
             .expect("references")
-            .len(),
+            .into_iter()
+            .filter(|reference| !reference.is_subsumed)
+            .count(),
         1
     );
     engine.drop_ingest_queue();

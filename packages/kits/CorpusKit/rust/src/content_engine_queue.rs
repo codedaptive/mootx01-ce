@@ -759,9 +759,12 @@ mod tests {
             persisted.document_count, 2,
             "the anchor columns advance transactionally; the base blob stays compact"
         );
-        let references = CorpusProviderCountsStore::new(Arc::clone(&storage))
+        let references: Vec<_> = CorpusProviderCountsStore::new(Arc::clone(&storage))
             .references("retry-counts-v1", "1.0.0")
-            .expect("load references");
+            .expect("load references")
+            .into_iter()
+            .filter(|reference| !reference.is_subsumed)
+            .collect();
         assert_eq!(references.len(), 1, "retry must persist one exact delta");
         assert_eq!(engine.maintained_document_count(), 2);
         drop(engine);
@@ -790,8 +793,10 @@ mod tests {
             .references("retry-counts-v1", "1.0.0")
             .expect("load compacted references");
         assert!(
-            compacted_references.is_empty(),
-            "published base must subsume its exact generation's references"
+            compacted_references
+                .iter()
+                .all(|reference| reference.is_subsumed),
+            "published base must subsume every ordinary delta; only a pending-admission marker may remain"
         );
         let compacted = CorpusProviderCountsStore::new(Arc::clone(&storage))
             .load("retry-counts-v1", "1.0.0")

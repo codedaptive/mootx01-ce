@@ -1431,6 +1431,7 @@ impl CorpusContentEngine {
         // already-admitted identity — fold its NOVEL text, keep the document
         // anchor unchanged, refresh the durable reference row.)
         let mut references: Vec<(PersistedCountsReference, usize, String, bool)> = Vec::new();
+        let mut consumed_subsumed_references: Vec<(String, String, String)> = Vec::new();
         if !counts_updates.is_empty() {
             for (slot_index, slot) in self.slots.iter().enumerate() {
                 let (model_id, model_version) = {
@@ -1454,9 +1455,18 @@ impl CorpusContentEngine {
                         &model_version,
                         content_id,
                     )? {
-                        Some(existing) if existing.digest == *digest => continue,
+                        Some(existing) if existing.digest == *digest => {
+                            if existing.is_subsumed {
+                                consumed_subsumed_references.push((
+                                    model_id.clone(),
+                                    model_version.clone(),
+                                    content_id.clone(),
+                                ));
+                            }
+                            continue;
+                        }
                         Some(_) => false,
-                        None => true,
+                        None => self.index_state.state(content_id)?.is_none(),
                     };
                     references.push((
                         PersistedCountsReference {
@@ -1466,6 +1476,7 @@ impl CorpusContentEngine {
                             revision: *revision,
                             digest: digest.clone(),
                             updated_at_secs: now_millis / 1000,
+                            is_subsumed: false,
                         },
                         slot_index,
                         text.clone(),
@@ -1518,6 +1529,13 @@ impl CorpusContentEngine {
             .storage
             .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
                 let rows = txn.row_store();
+                for (model_id, model_version, content_id) in &consumed_subsumed_references {
+                    counts_store
+                        .delete_reference_into(model_id, model_version, content_id, &rows)
+                        .map_err(|error| persistence_kit::StorageError::BackendError {
+                            underlying: format!("queue subsumed reference: {error:?}"),
+                        })?;
+                }
                 for (reference, _, _, _) in &references {
                     counts_store
                         .upsert_reference_into(reference, &rows)
@@ -1593,6 +1611,11 @@ impl CorpusContentEngine {
                 0
             };
             for reference in self.counts_store.references(&model_id, &model_version)? {
+                // Already represented by the published base; retained only
+                // until the delayed admission commits its checkpoint.
+                if reference.is_subsumed {
+                    continue;
+                }
                 // Resolve by identity at reopen. A later revision contributes
                 // its current canonical text once; a removed identity no
                 // longer contributes to the post-base delta.
@@ -2019,6 +2042,13 @@ impl CorpusContentEngine {
             .counts_commit_lock
             .lock()
             .map_err(|_| CorpusKitError::StoreUnavailable("counts commit lock poisoned".into()))?;
+        let indexed_states: BTreeMap<String, CorpusIndexState> = self
+            .index_state
+            .all_states()?
+            .into_iter()
+            .filter(|state| state.content_id != FEED_CURSOR_ROW_ID)
+            .map(|state| (state.content_id.clone(), state))
+            .collect();
         let mut digests = std::collections::BTreeMap::new();
         for slot in &self.slots {
             let Some(blob) = &slot.fresh_basis_blob else {
@@ -2062,6 +2092,7 @@ impl CorpusContentEngine {
                     state.accumulator.reconstruct_trainable_basis(blob)?,
                 )
             };
+            let mut subsumed_pending_references = Vec::new();
             let mut document_count = 0usize;
             let mut cursor = 0usize;
             while cursor < all_ids.len() {
@@ -2069,6 +2100,22 @@ impl CorpusContentEngine {
                 let mut texts: Vec<String> = Vec::with_capacity(end - cursor);
                 for id in &all_ids[cursor..end] {
                     if let Some(record) = self.source.record(id)? {
+                        let indexed = indexed_states.get(&record.id);
+                        if indexed.map_or(true, |state| {
+                            state.revision != record.revision
+                                || state.digest != record.digest
+                                || state.index_version != CONTENT_ENGINE_INDEX_VERSION
+                        }) {
+                            subsumed_pending_references.push(PersistedCountsReference {
+                                model_id: model_id.clone(),
+                                model_version: model_version.clone(),
+                                content_id: record.id.clone(),
+                                revision: record.revision,
+                                digest: record.digest.clone(),
+                                updated_at_secs: now_millis / 1000,
+                                is_subsumed: true,
+                            });
+                        }
                         texts.push(record.text);
                     }
                 }
@@ -2131,6 +2178,13 @@ impl CorpusContentEngine {
                         .map_err(|e| persistence_kit::StorageError::BackendError {
                             underlying: format!("{e:?}"),
                         })?;
+                    for reference in &subsumed_pending_references {
+                        counts_store
+                            .upsert_reference_into(reference, &rows)
+                            .map_err(|e| persistence_kit::StorageError::BackendError {
+                                underlying: format!("{e:?}"),
+                            })?;
+                    }
                     Ok(())
                 })
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
@@ -2570,6 +2624,7 @@ impl CorpusContentEngine {
             self.counts_reload_required.store(false, Ordering::Release);
         }
         let mut references: Vec<(PersistedCountsReference, usize, bool)> = Vec::new();
+        let mut consumed_subsumed_references: Vec<(String, String, String)> = Vec::new();
         for (slot_index, slot) in self.slots.iter().enumerate() {
             if slot.counts.lock().unwrap().is_none() {
                 continue;
@@ -2583,9 +2638,18 @@ impl CorpusContentEngine {
                 .counts_store
                 .reference_for(&model_id, &model_version, &record.id)?
             {
-                Some(existing) if existing.digest == record.digest => continue,
+                Some(existing) if existing.digest == record.digest => {
+                    if existing.is_subsumed {
+                        consumed_subsumed_references.push((
+                            model_id.clone(),
+                            model_version.clone(),
+                            record.id.clone(),
+                        ));
+                    }
+                    continue;
+                }
                 Some(_) => false,
-                None => true,
+                None => self.index_state.state(&record.id)?.is_none(),
             };
             references.push((
                 PersistedCountsReference {
@@ -2595,6 +2659,7 @@ impl CorpusContentEngine {
                     revision: record.revision,
                     digest: record.digest.clone(),
                     updated_at_secs: now_millis / 1000,
+                    is_subsumed: false,
                 },
                 slot_index,
                 counts_document,
@@ -2627,6 +2692,13 @@ impl CorpusContentEngine {
             .storage
             .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
                 let rows = txn.row_store();
+                for (model_id, model_version, content_id) in &consumed_subsumed_references {
+                    counts_store
+                        .delete_reference_into(model_id, model_version, content_id, &rows)
+                        .map_err(|error| persistence_kit::StorageError::BackendError {
+                            underlying: format!("direct subsumed reference: {error:?}"),
+                        })?;
+                }
                 for (reference, _, _) in &references {
                     counts_store
                         .upsert_reference_into(reference, &rows)
@@ -2699,6 +2771,11 @@ impl CorpusContentEngine {
                 updated_at_secs: now_millis / 1000,
             };
             let counts_store = &self.counts_store;
+            let compacted_references: Vec<_> = counts_store
+                .references(&row.model_id, &row.model_version)?
+                .into_iter()
+                .filter(|reference| !reference.is_subsumed)
+                .collect();
             self.storage
                 .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
                     let rows = txn.row_store();
@@ -2707,11 +2784,18 @@ impl CorpusContentEngine {
                             underlying: format!("{e:?}"),
                         }
                     })?;
-                    counts_store
-                        .delete_references_into(&row.model_id, &row.model_version, &rows)
-                        .map_err(|e| persistence_kit::StorageError::BackendError {
-                            underlying: format!("{e:?}"),
-                        })?;
+                    for reference in &compacted_references {
+                        counts_store
+                            .delete_reference_into(
+                                &reference.model_id,
+                                &reference.model_version,
+                                &reference.content_id,
+                                &rows,
+                            )
+                            .map_err(|e| persistence_kit::StorageError::BackendError {
+                                underlying: format!("{e:?}"),
+                            })?;
+                    }
                     Ok(())
                 })
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;

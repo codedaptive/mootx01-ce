@@ -437,8 +437,9 @@ struct CorpusContentEngineTests {
             // The anchor columns advance in the same transaction as the
             // reference; only the serialized base blob stays frozen.
             #expect(baseAfter.documentCount == 2)
-            #expect(try await storage.rowStore.count(
-                table: "corpus_provider_count_references", where: nil) == 1)
+            #expect(try await countsStore.references(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0")
+                .filter { !$0.isSubsumed }.count == 1)
             #expect(await engine.maintainedDocumentCount() == 2)
 
             let reopened = try await CorpusContentEngine(
@@ -456,8 +457,9 @@ struct CorpusContentEngineTests {
             // Provider publication compacts only this generation's pending
             // references into its replacement base, in the same transaction.
             try await reopened.trainTrainableSlots(now: now, force: true)
-            #expect(try await storage.rowStore.count(
-                table: "corpus_provider_count_references", where: nil) == 0)
+            #expect(try await countsStore.references(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0")
+                .filter { !$0.isSubsumed }.isEmpty)
             let compacted = try #require(try await countsStore.load(
                 modelID: "random-indexing-v1", modelVersion: "1.1.0"))
             #expect(compacted.documentCount == 2)
@@ -477,6 +479,7 @@ struct CorpusContentEngineTests {
                 storage: storage, configuration: configuration, source: store,
                 models: [.randomIndexing(provider: RandomIndexingProvider())])
             try await engine.trainTrainableSlots(now: now)
+            let countsStore = CorpusProviderCountsStore(storage: storage)
 
             let first = try await store.put("identity delta", id: "readd", now: now)
             let firstJob = ContentIndexJob(
@@ -508,8 +511,9 @@ struct CorpusContentEngineTests {
                 countsUpdates: secondPrepared.countsUpdate.map { [$0] } ?? [], now: now)
 
             #expect(await engine.maintainedDocumentCount() == 2)
-            #expect(try await storage.rowStore.count(
-                table: "corpus_provider_count_references", where: nil) == 1)
+            #expect(try await countsStore.references(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0")
+                .filter { !$0.isSubsumed }.count == 1)
         }
     }
 
@@ -686,8 +690,9 @@ struct CorpusContentEngineTests {
                 modelID: "random-indexing-v1", modelVersion: "1.1.0"))
             #expect(afterFailure.documentCount == before.documentCount)
             #expect(afterFailure.vocabSize == before.vocabSize)
-            #expect(try await storage.rowStore.count(
-                table: "corpus_provider_count_references", where: nil) == 0)
+            #expect(try await countsStore.references(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0")
+                .filter { !$0.isSubsumed }.isEmpty)
             #expect(try await CorpusIndexStateStore(storage: storage)
                 .state(for: revision.id) == nil)
 
@@ -700,8 +705,9 @@ struct CorpusContentEngineTests {
             let afterRetry = try #require(try await countsStore.load(
                 modelID: "random-indexing-v1", modelVersion: "1.1.0"))
             #expect(afterRetry.documentCount == before.documentCount + 1)
-            #expect(try await storage.rowStore.count(
-                table: "corpus_provider_count_references", where: nil) == 1)
+            #expect(try await countsStore.references(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0")
+                .filter { !$0.isSubsumed }.count == 1)
             #expect(try await CorpusIndexStateStore(storage: storage)
                 .state(for: revision.id)?.digest == revision.digest)
         }
@@ -744,8 +750,9 @@ struct CorpusContentEngineTests {
             let after = try #require(try await countsStore.load(
                 modelID: "random-indexing-v1", modelVersion: "1.1.0"))
             #expect(after.documentCount == before.documentCount + 1)
-            #expect(try await storage.rowStore.count(
-                table: "corpus_provider_count_references", where: nil) == 1)
+            #expect(try await countsStore.references(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0")
+                .filter { !$0.isSubsumed }.count == 1)
         }
     }
 
@@ -792,6 +799,111 @@ struct CorpusContentEngineTests {
             #expect(try await countsStore.referenceFor(
                 modelID: "random-indexing-v1", modelVersion: "1.1.0",
                 contentID: late.id)?.digest == late.digest)
+        }
+    }
+
+    @Test func providerPublicationDoesNotRefoldPreSnapshotPendingAdmission() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let anchorText = "publication anchor"
+            let anchor = CorpusContentRecord(
+                id: "anchor", revision: 1,
+                digest: CorpusContentDigest.digest(anchorText), text: anchorText)
+            let source = PublicationRaceSource(records: [anchor])
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: source,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+            try await engine.applyChange(
+                .upsert(
+                    id: anchor.id, revision: anchor.revision,
+                    digest: anchor.digest),
+                cursor: nil, now: now)
+
+            // The canonical record is visible before the retrain snapshot, but
+            // its queue/direct admission has not committed. The replacement
+            // base therefore already contains it when that admission resumes.
+            let pendingText = "pre snapshot pending vocabulary"
+            let pending = CorpusContentRecord(
+                id: "pending", revision: 1,
+                digest: CorpusContentDigest.digest(pendingText), text: pendingText)
+            await source.add(pending)
+
+            await source.blockNextRecord(id: anchor.id)
+            let retrain = Task {
+                try await engine.trainTrainableSlots(now: now, force: true)
+            }
+            await source.waitUntilBlocked()
+            let admission = Task {
+                try await engine.applyChange(
+                    .upsert(
+                        id: pending.id, revision: pending.revision,
+                        digest: pending.digest),
+                    cursor: nil, now: now)
+            }
+            try await Task.sleep(for: .milliseconds(50))
+            await source.releaseBlockedRecord()
+            _ = try await retrain.value
+            try await admission.value
+
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let after = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(after.documentCount == 2)
+            #expect(try await countsStore.referenceFor(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0",
+                contentID: pending.id) == nil)
+            #expect(try await CorpusIndexStateStore(storage: storage)
+                .state(for: pending.id)?.digest == pending.digest)
+
+            let reopened = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: source,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            #expect(await reopened.maintainedDocumentCount() == 2)
+        }
+    }
+
+    @Test func providerPublicationMarkerSurvivesReopenBeforeAdmission() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            let text = "published before delayed admission"
+            let pending = CorpusContentRecord(
+                id: "pending-reopen", revision: 1,
+                digest: CorpusContentDigest.digest(text), text: text)
+            let source = PublicationRaceSource(records: [pending])
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: source,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+            // A public counts compaction must retain the marker because the
+            // matching admission/checkpoint is still pending.
+            try await engine.persistCountsSnapshot(now: now)
+
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            #expect(try await countsStore.referenceFor(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0",
+                contentID: pending.id)?.isSubsumed == true)
+
+            let reopened = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: source,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await reopened.applyChange(
+                .upsert(
+                    id: pending.id, revision: pending.revision,
+                    digest: pending.digest),
+                cursor: nil, now: now)
+
+            let after = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(after.documentCount == 1)
+            #expect(try await countsStore.referenceFor(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0",
+                contentID: pending.id) == nil)
+            #expect(await reopened.maintainedDocumentCount() == 1)
         }
     }
 

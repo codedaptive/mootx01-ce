@@ -70,8 +70,10 @@ pub struct CountsGrowthAnchor {
     pub vocab_size: usize,
 }
 
-/// Crash-durable, reference-only delta folded after a provider's persisted
-/// base snapshot. Canonical text is resolved from the content source on reopen.
+/// Crash-durable, reference-only counts record. Ordinary rows are post-base
+/// deltas. `is_subsumed` marks content that a training snapshot included before
+/// its delayed queue/direct admission committed, so that admission cannot fold
+/// the same canonical content twice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedCountsReference {
     pub model_id: String,
@@ -80,6 +82,7 @@ pub struct PersistedCountsReference {
     pub revision: i64,
     pub digest: String,
     pub updated_at_secs: i64,
+    pub is_subsumed: bool,
 }
 
 /// Storage for a trainable embedding provider's maintained counts.
@@ -91,6 +94,8 @@ pub struct PersistedCountsReference {
 pub struct CorpusProviderCountsStore {
     storage: Arc<dyn Storage>,
 }
+
+const SUBSUMED_REFERENCE_EXT: &[u8] = br#"{"kind":"subsumed"}"#;
 
 impl CorpusProviderCountsStore {
     /// Additive schema declaration for the maintained-counts table. Mirrors the
@@ -241,6 +246,14 @@ impl CorpusProviderCountsStore {
         values.insert(
             "updated_at".into(),
             TypedValue::Timestamp(row.updated_at_secs),
+        );
+        values.insert(
+            "ext".into(),
+            if row.is_subsumed {
+                TypedValue::Json(SUBSUMED_REFERENCE_EXT.to_vec())
+            } else {
+                TypedValue::Null
+            },
         );
         row_store
             .upsert(
@@ -420,6 +433,34 @@ impl CorpusProviderCountsStore {
         Ok(())
     }
 
+    /// Delete one identity reference through the caller's transaction.
+    pub fn delete_reference_into(
+        &self,
+        model_id: &str,
+        model_version: &str,
+        content_id: &str,
+        row_store: &std::sync::Arc<dyn persistence_kit::RowStore>,
+    ) -> CorpusKitResult<()> {
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "model_version"),
+                TypedValue::Text(model_version.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("corpus_provider_count_references", "content_id"),
+                TypedValue::Text(content_id.to_string()),
+            ),
+        ]);
+        row_store
+            .delete("corpus_provider_count_references", &predicate)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        Ok(())
+    }
+
     /// Delete every counts row. Used by `Corpus::destroy_recall_index` so a
     /// destroyed corpus leaves no orphaned counts behind.
     pub fn delete_all(&self) -> CorpusKitResult<()> {
@@ -484,6 +525,11 @@ fn decode_reference(row: &StorageRow) -> Option<PersistedCountsReference> {
             _ => return None,
         },
         updated_at_secs: decode_updated_at_secs(row.get("updated_at"))?,
+        is_subsumed: matches!(
+            row.get("ext"),
+            Some(TypedValue::Json(bytes)) | Some(TypedValue::Blob(bytes))
+                if bytes.as_slice() == SUBSUMED_REFERENCE_EXT
+        ),
     })
 }
 

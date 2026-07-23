@@ -96,9 +96,13 @@ public struct CountsGrowthAnchor: Sendable, Equatable {
     public let vocabSize: Int
 }
 
-/// A crash-durable, reference-only delta folded after the provider's persisted
-/// base counts snapshot. Canonical text remains owned by the content source and
-/// is resolved by identity when the accumulator is rebuilt after reopen.
+/// A crash-durable, reference-only counts record. Ordinary rows are deltas
+/// folded after the provider's persisted base counts snapshot. A short-lived
+/// `isSubsumed` marker closes the opposite side of the publication boundary:
+/// content visible to a training snapshot before its queue/direct admission
+/// commits is already represented by the replacement base and must not be
+/// folded again when that delayed admission resumes. Canonical text remains
+/// owned by the content source.
 public struct PersistedCountsReference: Sendable, Equatable {
     public let modelID: String
     public let modelVersion: String
@@ -106,10 +110,12 @@ public struct PersistedCountsReference: Sendable, Equatable {
     public let revision: Int64
     public let digest: String
     public let updatedAt: Date
+    public let isSubsumed: Bool
 
     public init(
         modelID: String, modelVersion: String, contentID: String,
-        revision: Int64, digest: String, updatedAt: Date
+        revision: Int64, digest: String, updatedAt: Date,
+        isSubsumed: Bool = false
     ) {
         self.modelID = modelID
         self.modelVersion = modelVersion
@@ -117,6 +123,7 @@ public struct PersistedCountsReference: Sendable, Equatable {
         self.revision = revision
         self.digest = digest
         self.updatedAt = updatedAt
+        self.isSubsumed = isSubsumed
     }
 }
 
@@ -129,6 +136,8 @@ public struct PersistedCountsReference: Sendable, Equatable {
 public actor CorpusProviderCountsStore {
 
     let storage: any Storage
+    private static let subsumedReferenceExt =
+        Data(#"{"kind":"subsumed"}"#.utf8)
 
     /// Additive schema declaration for the maintained-counts table. Mirrors the
     /// BasisStore declaration pattern. `appendOnly` is false: an incremental
@@ -255,7 +264,10 @@ public actor CorpusProviderCountsStore {
                 "content_id": .text(row.contentID),
                 "revision": .int(row.revision),
                 "digest": .text(row.digest),
-                "updated_at": .timestamp(row.updatedAt)
+                "updated_at": .timestamp(row.updatedAt),
+                "ext": row.isSubsumed
+                    ? .json(Self.subsumedReferenceExt)
+                    : .null
             ],
             conflictColumns: ["model_id", "model_version", "content_id"]
         )
@@ -358,6 +370,25 @@ public actor CorpusProviderCountsStore {
             ]))
     }
 
+    /// Delete one exact identity reference through the caller's transaction.
+    /// Delayed admission uses this to consume a training-snapshot marker in
+    /// the same commit that advances the corresponding content checkpoint.
+    public func deleteReference(
+        modelID: String, modelVersion: String, contentID: String,
+        into rowStore: any RowStore
+    ) async throws {
+        _ = try await rowStore.delete(
+            table: "corpus_provider_count_references",
+            where: .and([
+                .eq(Column(table: "corpus_provider_count_references", name: "model_id"),
+                    .text(modelID)),
+                .eq(Column(table: "corpus_provider_count_references", name: "model_version"),
+                    .text(modelVersion)),
+                .eq(Column(table: "corpus_provider_count_references", name: "content_id"),
+                    .text(contentID)),
+            ]))
+    }
+
     /// Delete every counts row. Used by `Corpus.destroyRecallIndex()` so a
     /// destroyed corpus leaves no orphaned counts behind.
     public func deleteAll() async throws {
@@ -408,7 +439,15 @@ public actor CorpusProviderCountsStore {
         else { return nil }
         return PersistedCountsReference(
             modelID: modelID, modelVersion: modelVersion, contentID: contentID,
-            revision: revision, digest: digest, updatedAt: updatedAt)
+            revision: revision, digest: digest, updatedAt: updatedAt,
+            isSubsumed: {
+                switch row["ext"] ?? .null {
+                case let .json(data), let .blob(data):
+                    return data == Self.subsumedReferenceExt
+                default:
+                    return false
+                }
+            }())
     }
 
     /// Decode `updated_at` tolerant of `.timestamp` (InMemory) and `.text`

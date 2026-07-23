@@ -508,10 +508,12 @@ fn direct_checkpoint_failure_rolls_back_counts_admission() {
     assert_eq!(after_failure.document_count, before.document_count);
     assert_eq!(after_failure.vocab_size, before.vocab_size);
     assert_eq!(
-        storage
-            .row_store()
-            .count("corpus_provider_count_references", None)
-            .expect("count references"),
+        counts_store
+            .references("random-indexing-v1", "1.1.0")
+            .expect("load references")
+            .into_iter()
+            .filter(|reference| !reference.is_subsumed)
+            .count(),
         0
     );
     assert!(
@@ -542,10 +544,12 @@ fn direct_checkpoint_failure_rolls_back_counts_admission() {
         .expect("counts row after retry");
     assert_eq!(after_retry.document_count, before.document_count + 1);
     assert_eq!(
-        storage
-            .row_store()
-            .count("corpus_provider_count_references", None)
-            .expect("count retry references"),
+        counts_store
+            .references("random-indexing-v1", "1.1.0")
+            .expect("load retry references")
+            .into_iter()
+            .filter(|reference| !reference.is_subsumed)
+            .count(),
         1
     );
     assert_eq!(
@@ -644,6 +648,198 @@ fn provider_publication_preserves_post_snapshot_admission() {
             .map(|reference| reference.digest),
         Some(content_digest(late_text))
     );
+}
+
+#[test]
+fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
+    use corpus_kit_providers::RandomIndexingProvider;
+
+    let storage = in_memory_storage();
+    let anchor_text = "publication anchor";
+    let anchor = CorpusContentRecord {
+        id: "anchor".into(),
+        revision: 1,
+        digest: content_digest(anchor_text),
+        text: anchor_text.into(),
+    };
+    let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .expect("configuration");
+    let engine = Arc::new(
+        CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+            vec![EmbeddingModelConfig::RandomIndexing {
+                provider: Box::new(RandomIndexingProvider::new()),
+            }],
+        )
+        .expect("open engine"),
+    );
+    engine
+        .train_trainable_slots(NOW, false)
+        .expect("train anchor");
+    engine
+        .apply_change(
+            &CorpusContentChange::Upsert {
+                id: anchor.id.clone(),
+                revision: anchor.revision,
+                digest: anchor.digest.clone(),
+            },
+            None,
+            NOW,
+        )
+        .expect("checkpoint anchor");
+
+    let pending_text = "pre snapshot pending vocabulary";
+    let pending = CorpusContentRecord {
+        id: "pending".into(),
+        revision: 1,
+        digest: content_digest(pending_text),
+        text: pending_text.into(),
+    };
+    source.add(pending.clone());
+
+    source.block_next_record(&anchor.id);
+    let retraining_engine = Arc::clone(&engine);
+    let retrain = std::thread::spawn(move || {
+        retraining_engine
+            .train_trainable_slots(NOW + 1, true)
+            .expect("force retrain");
+    });
+    source.wait_until_blocked();
+    let admission_engine = Arc::clone(&engine);
+    let pending_for_admission = pending.clone();
+    let admission = std::thread::spawn(move || {
+        admission_engine
+            .apply_change(
+                &CorpusContentChange::Upsert {
+                    id: pending_for_admission.id,
+                    revision: pending_for_admission.revision,
+                    digest: pending_for_admission.digest,
+                },
+                None,
+                NOW + 1,
+            )
+            .expect("apply pre-snapshot pending admission");
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    source.release_blocked_record();
+    retrain.join().expect("join retrain");
+    admission.join().expect("join admission");
+
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let after = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load counts")
+        .expect("counts row");
+    assert_eq!(after.document_count, 2);
+    assert_eq!(
+        counts_store
+            .reference_for("random-indexing-v1", "1.1.0", &pending.id)
+            .expect("load pending reference"),
+        None
+    );
+    assert_eq!(
+        CorpusIndexStateStore::new(Arc::clone(&storage))
+            .state(&pending.id)
+            .expect("load pending checkpoint")
+            .map(|state| state.digest),
+        Some(pending.digest)
+    );
+
+    let reopened = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        source as Arc<dyn CorpusContentSource>,
+        vec![EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::new()),
+        }],
+    )
+    .expect("reopen engine");
+    assert_eq!(reopened.maintained_document_count(), 2);
+}
+
+#[test]
+fn provider_publication_marker_survives_reopen_before_admission() {
+    use corpus_kit_providers::RandomIndexingProvider;
+
+    let storage = in_memory_storage();
+    let text = "published before delayed admission";
+    let pending = CorpusContentRecord {
+        id: "pending-reopen".into(),
+        revision: 1,
+        digest: content_digest(text),
+        text: text.into(),
+    };
+    let source = Arc::new(PublicationRaceSource::new(vec![pending.clone()]));
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .expect("configuration");
+    let models = || {
+        vec![EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::new()),
+        }]
+    };
+    let engine = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        models(),
+    )
+    .expect("open engine");
+    engine
+        .train_trainable_slots(NOW, false)
+        .expect("publish pending content");
+    engine
+        .persist_counts_snapshot(NOW + 1)
+        .expect("compact counts while marker is pending");
+
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    assert_eq!(
+        counts_store
+            .reference_for("random-indexing-v1", "1.1.0", &pending.id)
+            .expect("load marker")
+            .map(|reference| reference.is_subsumed),
+        Some(true)
+    );
+
+    let reopened = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        models(),
+    )
+    .expect("reopen engine");
+    reopened
+        .apply_change(
+            &CorpusContentChange::Upsert {
+                id: pending.id.clone(),
+                revision: pending.revision,
+                digest: pending.digest.clone(),
+            },
+            None,
+            NOW + 2,
+        )
+        .expect("apply delayed admission after reopen");
+
+    let after = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load counts")
+        .expect("counts row");
+    assert_eq!(after.document_count, 1);
+    assert_eq!(
+        counts_store
+            .reference_for("random-indexing-v1", "1.1.0", &pending.id)
+            .expect("load consumed marker"),
+        None
+    );
+    assert_eq!(reopened.maintained_document_count(), 1);
 }
 
 #[test]

@@ -1063,6 +1063,7 @@ public actor CorpusContentEngine {
             countsReloadRequired = false
         }
         var references: [PersistedCountsReference] = []
+        var consumedSubsumedReferences: [(modelID: String, modelVersion: String, contentID: String)] = []
         // countsDocument false = revision of an already-admitted identity:
         // fold its novel text, keep the document anchor, refresh the row.
         var folds: [(slotIndex: Int, text: String, countsDocument: Bool)] = []
@@ -1079,10 +1080,20 @@ public actor CorpusContentEngine {
                         modelID: modelID, modelVersion: modelVersion,
                         contentID: update.contentID)
                     {
-                        if existing.digest == update.digest { continue }
+                        if existing.digest == update.digest {
+                            if existing.isSubsumed {
+                                consumedSubsumedReferences.append(
+                                    (modelID, modelVersion, update.contentID))
+                            }
+                            continue
+                        }
                         countsDocument = false
                     } else {
-                        countsDocument = true
+                        // A prior checkpoint proves this canonical identity
+                        // was already represented by the published base.
+                        // Revisions add vocabulary but never another document.
+                        countsDocument = try await indexState.state(
+                            for: update.contentID) == nil
                     }
                     references.append(PersistedCountsReference(
                         modelID: modelID,
@@ -1121,11 +1132,17 @@ public actor CorpusContentEngine {
         }
 
         let pendingReferences = references
+        let pendingSubsumedDeletes = consumedSubsumedReferences
         let pendingAnchors = anchorRows
         let countsStore = self.countsStore
         let indexState = self.indexState
         do {
             try await storage.transaction(isolation: .serializable) { txn in
+                for row in pendingSubsumedDeletes {
+                    try await countsStore.deleteReference(
+                        modelID: row.modelID, modelVersion: row.modelVersion,
+                        contentID: row.contentID, into: txn.rowStore)
+                }
                 for row in pendingReferences {
                     try await countsStore.upsertReference(row, into: txn.rowStore)
                 }
@@ -1177,6 +1194,10 @@ public actor CorpusContentEngine {
                 modelID: slots[index].provider.modelID,
                 modelVersion: slots[index].provider.modelVersion)
             {
+                // Training-snapshot markers are already represented by the
+                // persisted base. They exist only to make a delayed admission
+                // consume that fact instead of folding the content twice.
+                if reference.isSubsumed { continue }
                 // A reference is identity-scoped. If the Drawer advanced, fold
                 // its current canonical text once; if it was removed, it no
                 // longer contributes to the post-base delta on reopen.
@@ -1531,6 +1552,10 @@ public actor CorpusContentEngine {
         // from publishing a post-snapshot reference before that deletion.
         await acquireCountsAdmission()
         defer { releaseCountsAdmission() }
+        let indexedStates = Dictionary(uniqueKeysWithValues:
+            try await indexState.allStates()
+                .filter { $0.contentID != Self.feedCursorRowID }
+                .map { ($0.contentID, $0) })
         var digests: [String: String] = [:]
         for slotIndex in slots.indices {
             guard let blob = slots[slotIndex].freshBasisBlob,
@@ -1563,6 +1588,7 @@ public actor CorpusContentEngine {
             // addToCounts shares training state never double-train.
             let countsAccumulator =
                 try fresh.reconstructBasis(from: blob) as? any TrainableEmbeddingBasis
+            var subsumedPendingReferences: [PersistedCountsReference] = []
             var documentCount = 0
             var cursor = 0
             while cursor < allIDs.count {
@@ -1572,6 +1598,21 @@ public actor CorpusContentEngine {
                 for id in page {
                     if let record = try await source.record(for: id) {
                         texts.append(record.text)
+                        let indexed = indexedStates[record.id]
+                        if indexed?.revision != record.revision
+                            || indexed?.digest != record.digest
+                            || indexed?.indexVersion != Self.indexVersion
+                        {
+                            subsumedPendingReferences.append(
+                                PersistedCountsReference(
+                                    modelID: provider.modelID,
+                                    modelVersion: provider.modelVersion,
+                                    contentID: record.id,
+                                    revision: record.revision,
+                                    digest: record.digest,
+                                    updatedAt: now,
+                                    isSubsumed: true))
+                        }
                     }
                 }
                 trainable.accumulateTraining(texts: texts)
@@ -1610,6 +1651,7 @@ public actor CorpusContentEngine {
             }
             let basisStore = self.basisStore
             let countsStore = self.countsStore
+            let pendingSubsumedReferences = subsumedPendingReferences
             try await storage.transaction(isolation: .serializable) { txn in
                 try await basisStore.upsert(basisRow, into: txn.rowStore)
                 if let countsRow {
@@ -1619,6 +1661,10 @@ public actor CorpusContentEngine {
                     modelID: provider.modelID,
                     modelVersion: provider.modelVersion,
                     into: txn.rowStore)
+                for reference in pendingSubsumedReferences {
+                    try await countsStore.upsertReference(
+                        reference, into: txn.rowStore)
+                }
             }
             slots[slotIndex].provider = provider
             slots[slotIndex].basisDigest = digest
@@ -1694,6 +1740,7 @@ public actor CorpusContentEngine {
             countsReloadRequired = false
         }
         var references: [(reference: PersistedCountsReference, slotIndex: Int, countsDocument: Bool)] = []
+        var consumedSubsumedReferences: [(modelID: String, modelVersion: String, contentID: String)] = []
         for index in slots.indices where slots[index].countsAccumulator != nil {
             let modelID = slots[index].provider.modelID
             let modelVersion = slots[index].provider.modelVersion
@@ -1701,10 +1748,16 @@ public actor CorpusContentEngine {
             if let existing = try await countsStore.referenceFor(
                 modelID: modelID, modelVersion: modelVersion, contentID: record.id)
             {
-                if existing.digest == record.digest { continue }
+                if existing.digest == record.digest {
+                    if existing.isSubsumed {
+                        consumedSubsumedReferences.append(
+                            (modelID, modelVersion, record.id))
+                    }
+                    continue
+                }
                 countsDocument = false
             } else {
-                countsDocument = true
+                countsDocument = try await indexState.state(for: record.id) == nil
             }
             references.append((
                 PersistedCountsReference(
@@ -1728,11 +1781,17 @@ public actor CorpusContentEngine {
                 slots[item.slotIndex].countsVocabAnchor))
         }
         let pendingReferences = references.map(\.reference)
+        let pendingSubsumedDeletes = consumedSubsumedReferences
         let pendingAnchors = anchorRows
         let countsStore = self.countsStore
         let indexState = self.indexState
         do {
             try await storage.transaction(isolation: .serializable) { txn in
+                for row in pendingSubsumedDeletes {
+                    try await countsStore.deleteReference(
+                        modelID: row.modelID, modelVersion: row.modelVersion,
+                        contentID: row.contentID, into: txn.rowStore)
+                }
                 for row in pendingReferences {
                     try await countsStore.upsertReference(row, into: txn.rowStore)
                 }
@@ -1794,11 +1853,18 @@ public actor CorpusContentEngine {
                 vocabSize: accumulator.countsVocabularySize,
                 updatedAt: now)
             let countsStore = self.countsStore
+            let compactedReferences = try await countsStore.references(
+                modelID: row.modelID, modelVersion: row.modelVersion)
+                .filter { !$0.isSubsumed }
             try await storage.transaction(isolation: .serializable) { txn in
                 try await countsStore.upsert(row, into: txn.rowStore)
-                try await countsStore.deleteReferences(
-                    modelID: row.modelID, modelVersion: row.modelVersion,
-                    into: txn.rowStore)
+                for reference in compactedReferences {
+                    try await countsStore.deleteReference(
+                        modelID: reference.modelID,
+                        modelVersion: reference.modelVersion,
+                        contentID: reference.contentID,
+                        into: txn.rowStore)
+                }
             }
         }
     }
