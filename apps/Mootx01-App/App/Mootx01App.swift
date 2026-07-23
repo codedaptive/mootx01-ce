@@ -67,10 +67,10 @@ struct Mootx01App: App {
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
                 .task {
-                    // CVK-WB2: apply the user's persisted sync preference at launch.
-                    // configure() is a no-op when called with the same value as the
-                    // current config; safe to call on every launch including cold starts
-                    // where the driver is already in the .disabled default.
+                    // FAB5-SM: migrate WB2 key → master gate once, then configure.
+                    // migrateIfNeeded() is a no-op on subsequent launches when the
+                    // master key is already present. configure() is idempotent.
+                    SyncPolicy.migrateIfNeeded()
                     await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: SyncPolicy.isEnabled()))
                     await MootSyncDriver.shared.syncNow()
                 }
@@ -81,7 +81,8 @@ struct Mootx01App: App {
                 .task { await ShareInboxDrain.drainNow() }
                 .task { await WidgetSnapshotRefresher.refreshNow() }
                 .task {
-                    // CVK-WB2: apply the user's persisted sync preference at launch.
+                    // FAB5-SM: migrate WB2 key → master gate once, then configure.
+                    SyncPolicy.migrateIfNeeded()
                     await MootSyncDriver.shared.configure(SyncPolicy.config(enabled: SyncPolicy.isEnabled()))
                     await MootSyncDriver.shared.syncNow()
                 }

@@ -1,51 +1,85 @@
 // SyncPolicy.swift
-// Persisted user preference for iCloud sync (CVK-WB2).
+// Persisted user preference for iCloud sync (CVK-WB2, FAB5-SM).
 //
-// Pattern: pure-function enum with a UserDefaults key, matching MenuBarPolicy
-// for menu-bar headless mode (M-MXA-7). The SwiftUI layer binds via
-// @AppStorage(SyncPolicy.defaultsKey); app startup calls configure() directly.
+// Pattern: pure-function enum with UserDefaults keys, matching MenuBarPolicy
+// for menu-bar headless mode (M-MXA-7). The SwiftUI master switch in
+// SettingsView binds via @AppStorage(SyncPolicy.masterEnabledKey); app startup
+// calls migrateIfNeeded() then configure() via isEnabled().
 //
 // Default: false — sync is administratively off until the user enables it in
-// the Engine tab. This matches the MootSyncDriver.disabled default and avoids
+// Settings. This matches the MootSyncDriver.disabled default and avoids
 // iCloud calls (and entitlement requirement) on builds without a provisioned
 // container.
+//
+// Migration: the WB2 toggle key ("iCloudSyncEnabled") migrates once to the
+// master key ("iCloudMasterEnabled") on first launch after FAB5-SM ships.
+// Call migrateIfNeeded() before isEnabled() at app startup.
 
 import Foundation
 
 /// Persisted user preference for iCloud sync.
 ///
-/// One UserDefaults key gates whether `MootSyncDriver` starts configured for
-/// CloudKit or stays in its `disabled` default. The setting is consulted at
-/// app launch and on every toggle change.
+/// `masterEnabledKey` is the authoritative gate consumed by the sync driver
+/// (FAB5-SM). `defaultsKey` is the legacy CVK-WB2 key retained as the
+/// migration source — migrated once by `migrateIfNeeded(defaults:)`.
 ///
 /// ## Pattern
 ///
-/// Same shape as `MenuBarPolicy` (M-MXA-7): a pure-function enum with a
-/// `defaultsKey` constant and an `isEnabled(defaults:)` reader, testable
-/// with a custom `UserDefaults` suite. The SwiftUI toggle binds via
-/// `@AppStorage(SyncPolicy.defaultsKey)`.
+/// Same shape as `MenuBarPolicy` (M-MXA-7): a pure-function enum with key
+/// constants and an `isEnabled(defaults:)` reader, testable with a custom
+/// `UserDefaults` suite. The SwiftUI master switch binds via
+/// `@AppStorage(SyncPolicy.masterEnabledKey)`.
 ///
 /// ## Default
 ///
-/// `false` — sync is off until the user explicitly enables it. A first-run
-/// device that has never seen this key behaves identically to a build that
-/// has never been configured for sync: no CloudKit calls, no entitlement
-/// requirement, no iCloud account check.
+/// `false` — sync is off until the user explicitly enables it in Settings.
+/// A first-run device that has never seen this key makes no CloudKit calls
+/// and requires no iCloud container entitlement.
 public enum SyncPolicy {
 
-    /// UserDefaults key for the iCloud sync user setting.
+    /// Authoritative UserDefaults key for the iCloud sync master gate (FAB5-SM).
     ///
-    /// Used by `@AppStorage(SyncPolicy.defaultsKey)` in the toggle view
-    /// and by `isEnabled(defaults:)` at app launch.
+    /// Used by `@AppStorage(SyncPolicy.masterEnabledKey)` in SettingsView and
+    /// SyncTileView, and by `isEnabled(defaults:)` at app launch. This is the
+    /// single source of truth — all sync-enabling logic reads this key.
+    public static let masterEnabledKey = "iCloudMasterEnabled"
+
+    /// Legacy CVK-WB2 toggle key — retained as migration source only.
+    ///
+    /// Not used for new reads. `migrateIfNeeded(defaults:)` copies its value to
+    /// `masterEnabledKey` once, then clears it. Kept public so existing test
+    /// suites can reference it during migration verification.
     public static let defaultsKey = "iCloudSyncEnabled"
 
-    /// Reads the current setting. Returns `false` when the key is absent
-    /// (first run or cleared defaults).
+    /// One-time migration from the CVK-WB2 toggle key to the master gate key.
+    ///
+    /// Call this at app startup before `isEnabled(defaults:)`. Safe to call
+    /// repeatedly: a no-op when `masterEnabledKey` is already present (migration
+    /// already ran) or when both keys are absent (fresh install, stays false).
+    ///
+    /// - Parameter defaults: The `UserDefaults` suite to migrate. Defaults to
+    ///   `.standard`; pass a custom suite in tests.
+    public static func migrateIfNeeded(defaults: UserDefaults = .standard) {
+        // Skip if master key already exists — migration already ran.
+        guard defaults.object(forKey: masterEnabledKey) == nil else { return }
+        // Carry forward the WB2 value if one was stored; otherwise leave absent
+        // (first run stays false via the ?? false in isEnabled).
+        if let legacy = defaults.object(forKey: defaultsKey) as? Bool {
+            defaults.set(legacy, forKey: masterEnabledKey)
+            defaults.removeObject(forKey: defaultsKey)
+        }
+    }
+
+    /// Reads the master sync gate. Returns `false` when the key is absent
+    /// (first run or cleared defaults — safe default, no CloudKit calls).
+    ///
+    /// Call `migrateIfNeeded(defaults:)` before this at app startup to ensure
+    /// any legacy WB2 value is already in place.
     ///
     /// - Parameter defaults: The `UserDefaults` suite to query. Defaults to
     ///   `.standard`; pass a custom suite in tests.
     public static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: defaultsKey) as? Bool ?? false
+        defaults.object(forKey: masterEnabledKey) as? Bool ?? false
     }
 
     /// Returns the `SyncConfig` corresponding to `enabled`.
