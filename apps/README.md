@@ -9,7 +9,7 @@ never the reverse.
 | [`mootx01`](mootx01/) | The unified **`mootx01` CLI** — the product binary. Subcommands: `serve` (run the resident MCP server/daemon), `install`, `uninstall`, `upgrade`, `query`, `status`, `db`, `proxy`. Links the AriaMcpKit engine for `serve`. |
 | [`aria-mcp-server`](aria-mcp-server/) | The standalone **reference MCP server** (the `aria-mcp` binary) — a thin wrapper over `AriaMcpKit`. The same runtime `mootx01 serve` runs; used as the managed external server in demos/tests. |
 | [`moot-mgr`](moot-mgr/) | The **manager/admin control surface** — the observer/manager process: admin-plane engine, gated control channel (Unix socket), loopback HTTP read-API, and dashboard. |
-| [`Mootx01-App`](Mootx01-App/) | The **Apple presentation-layer app** (macOS · iOS · iPadOS). Projects the ARIA surface onto Siri, Spotlight, Shortcuts, and App Intents. |
+| [`Mootx01-App`](Mootx01-App/) | The native **Apple presentation and local-host app** (macOS · iOS · iPadOS): capture/recall, Foundation Models, Siri/Shortcuts/App Intents, Share Sheet, widget, opt-in CloudKit sync, owner-gated LAN MCP, miners, and on-demand federation. |
 | [`moot-bridge`](moot-bridge/) | A **forking MCP memory server** that fans a client's MCP traffic out across multiple backends. |
 | [`moot-agent-skills`](moot-agent-skills/) | A **harness support kit** — starter integrations (Claude, Cline, Codex, Cursor, …) teaching AI harnesses to use MOOTx01 as an automatic memory/reasoning substrate. |
 | [`moot-math-benchmark`](moot-math-benchmark/) | Cross-platform **performance benchmarks** for the substrate math primitives (Swift in `swift-bench/`, Rust in `rust-bench/`). |

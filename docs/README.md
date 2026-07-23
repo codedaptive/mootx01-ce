@@ -32,6 +32,14 @@ surface — what each package exposes and what it promises.
 its own documentation index, concrete Swift and Rust install names, package
 overviews, implementation details, AI maps, and source provenance.
 
+**You are developing the 1.1 Apple app or retrieval engine.**
+[`Mootx01-App`](../apps/Mootx01-App/README.md) documents the native
+macOS/iOS application, its Apple surfaces, host modes, sync, LAN server,
+federation, privacy boundaries, build steps, and current limitations.
+[`CorpusKit`](../packages/kits/CorpusKit/README.md) documents the 1.1
+standalone/attached content engine, canonical identity, provider ensemble,
+queue and restart behavior, migration, and Swift/Rust test commands.
+
 **You want to know why something was built the way it was.**
 [`decisions/`](decisions/) holds the Architecture Decision Records.
 Every load-bearing choice is captured with the question asked, candidates
@@ -51,6 +59,8 @@ turns architectural assertions into testable propositions.
 
 **You operate, bridge, or benchmark the product.**
 The operator-facing application guides live with their source:
+[`MOOTx01-App`](../apps/Mootx01-App/README.md) documents the native Apple
+presentation and local-host app;
 [`moot-mgr`](../apps/moot-mgr/README.md) documents the dashboard, read API,
 control plane, configuration, and troubleshooting;
 [`moot-bridge`](../apps/moot-bridge/README.md) documents the optional

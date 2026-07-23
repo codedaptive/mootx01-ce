@@ -125,6 +125,8 @@ Show me the current status of my MOOT estate.
 - **Have an AI install it.** Give the AI [`AI_START_HERE.md`](AI_START_HERE.md).
 - **Read the story.** [`ABOUT.md`](ABOUT.md) explains why MOOTx01 exists and why memory belongs to you.
 - **Build on it.** Start with [`moot-memory`](https://github.com/codedaptive/moot-memory), [`moot-semantics`](https://github.com/codedaptive/moot-semantics), [`moot-system`](https://github.com/codedaptive/moot-system), or [`moot-core`](https://github.com/codedaptive/moot-core). [`SDK.MD`](SDK.MD) maps all 17 Apache-2.0 packages; [`SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) covers the product-tree composition path.
+- **Build the native Apple app.** [`apps/Mootx01-App/README.md`](apps/Mootx01-App/README.md) covers the macOS/iOS app, Apple intelligence and automation, sync, LAN serving, federation, build steps, and current development boundaries.
+- **Understand CorpusKit 1.1.** [`packages/kits/CorpusKit/README.md`](packages/kits/CorpusKit/README.md) explains standalone and attached modes, canonical content identity, providers, migration, and the Swift/Rust test lanes.
 - **Operate it.** [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) covers the dashboard, read API, control plane, configuration, and troubleshooting.
 - **Maintain an Obsidian vault.** [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) documents today's explicit workflow and the planned 1.1 continuous mode.
 - **Use two memory backends.** [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) explains the optional primary/secondary MCP bridge and its failure model.

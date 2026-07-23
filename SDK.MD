@@ -77,6 +77,12 @@ with the same determinism guarantees as the rest of the framework.
 **Use it when:** you are building memory, search, or retrieval into your own
 application — this is the layer most builders want first.
 
+On `develop/1.1.x`, the
+[`CorpusKit development guide`](packages/kits/CorpusKit/README.md) explains
+the new standalone/attached content-source engine, canonical IDs, provider
+state, migration, and compatibility boundary. The public `moot-memory`
+repository remains the stable SDK release line until 1.1 is published.
+
 ### [`moot-semantics`](https://github.com/codedaptive/moot-semantics) — vocabulary and grounding
 
 | Package | What it is |
