@@ -38,6 +38,8 @@ developer guide: add the substrate to a project and run the core write→read
 loop (open an estate, capture a memory, recall it), in Swift and Rust, with the
 modular module map. The example is lifted from the kit tests, so it works as
 written. Read this when you're ready to integrate, not just evaluate.
+For the standalone Apache-2.0 packages, begin with the repo-root
+[`SDK.MD`](../../SDK.MD) and the four linked public repository indexes.
 
 **[`SUBSTRATE_FOR_MAINTAINERS.md`](SUBSTRATE_FOR_MAINTAINERS.md)** —
 for port maintainers, contributors, and engineers reading the kit

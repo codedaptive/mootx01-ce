@@ -124,7 +124,7 @@ Show me the current status of my MOOT estate.
 - **Understand it fast.** Read [`docs/start-here/END_USER_EXPLAINER.md`](docs/start-here/END_USER_EXPLAINER.md).
 - **Have an AI install it.** Give the AI [`AI_START_HERE.md`](AI_START_HERE.md).
 - **Read the story.** [`ABOUT.md`](ABOUT.md) explains why MOOTx01 exists and why memory belongs to you.
-- **Build on it.** [`docs/start-here/SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) shows the open → capture → recall loop, and [`SDK.MD`](SDK.MD) maps the standalone Apache-2.0 SDK repos.
+- **Build on it.** Start with [`moot-memory`](https://github.com/codedaptive/moot-memory), [`moot-semantics`](https://github.com/codedaptive/moot-semantics), [`moot-system`](https://github.com/codedaptive/moot-system), or [`moot-core`](https://github.com/codedaptive/moot-core). [`SDK.MD`](SDK.MD) maps all 17 Apache-2.0 packages; [`SDK_QUICKSTART.md`](docs/start-here/SDK_QUICKSTART.md) covers the product-tree composition path.
 - **Operate it.** [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) covers the dashboard, read API, control plane, configuration, and troubleshooting.
 - **Maintain an Obsidian vault.** [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) documents today's explicit workflow and the planned 1.1 continuous mode.
 - **Use two memory backends.** [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) explains the optional primary/secondary MCP bridge and its failure model.
