@@ -96,6 +96,12 @@ This applies to estate mode. When consuming kits independently via the SDK (Locu
 
 At the API layer an operator may configure many separate instances of different kinds (for example three CorpusKit, two LocusKit, three GeniusLocus) and route each call to the database it belongs to. That route-to-the-right-database behaviour is an API-layer concern, not something inside a single instance.
 
+## Sync and federation
+
+**iCloud Sync** uses the CloudKit backend of ConvergenceKit. In the 1.1 native app it is available and off by default; the user enables it in Settings. When active it keeps Normal and Elevated memories synchronized across a user's Apple devices through their private iCloud. Restricted and Secret memories are blocked at the sync layer and never placed in the sync outbox — this boundary is not a preference and cannot be overridden in the app.
+
+**Federation** uses the Federation backend of ConvergenceKit. On-demand LAN federation — a timed sharing session between two nearby estates over a local network — ships in the 1.1 native app with one mode (Balanced): private memories cross at fact-and-field granularity, the session key lasts the session duration, and access expires on end or timeout. The broader cross-estate federation capability is planned for 1.2.
+
 ## FDC, the classification spine
 
 **FDC**, Free Decimal Correspondence, is the public-domain decimal classification frame MOOTx01 adopted as its v1.0 classifier. The notation is Dewey-like — a code's structure encodes where a concept sits in the tree — and it carries no license, so it can be opened, adopted, and federated freely. (An earlier MOOT-original taxonomy, MDCC, was removed in the MDCC→FDC migration; FDC is the shipped scheme.)

@@ -420,20 +420,28 @@ names every issue and its fix or closing commit.
 `develop/1.1.x` is the active beta for the following feature line. A roadmap
 item is not a shipped promise until its guide marks the behavior implemented.
 
-Version 1.1.x
-- **Docs and Specs** — Clean up agentic baggage in the documentation. Remove the noise and organize for humans
-- **Improved Sidecar and embedded examples** — reference app patterns.    
-- **Continuous Obsidian vault (insecure mode)** — an optional resident watcher automates eligible import, export, and resync for a normal Obsidian vault. Private/non-exportable, restricted, and secret data are blocked from automation; private transfers remain explicit and authorization-gated.
-- **Apple iOS Native App**  — Full App with Shortcut Support and App Intents for Mootx01 sharing to External Apps
-- **Apple Intelligence integration** — native capture and recall across Apple surfaces.  
-- **Apple iCloud Sync** Seemless default estate sharing between iOS and MacOs
-  
-Version 1.2.x
-- **Federation** — bounded cross-estate sharing.
-- **MiniLLM Support** — moot side local language model for schedule driven llm house keeping and data mining of the estates
+### Version 1.1 — iPhone app · TestFlight late July · App Store mid-September
 
-Version 1.3.x
-- **mootgres**  — full postgres extension to offload moot computations to a postgres server.
+The 1.1 release is the native iPhone app. iPad and Mac app distribution follow
+in a later release.
+
+- **App Store** — native iPhone app on the App Store
+- **iCloud Sync** — seamless estate sharing between iPhone and Mac through your private iCloud
+- **Sensitive-tier opt-ins** — per-memory privacy controls in the app (Restricted and Secret tiers stay on-device regardless of sync settings)
+
+Federation underpinnings ship in 1.1 and run dark; the user-facing cross-estate
+sharing feature arrives in 1.2.
+
+### Version 1.2 — ~November
+
+- **Federation** — bounded cross-estate sharing with a nearby device, on demand and time-limited
+- **Continuous Obsidian vault** — a resident watcher keeps a normal Obsidian vault synchronized with your estate automatically
+- **Apple Intelligence deepening** — deeper integration with Apple Intelligence surfaces
+- **MiniLLM** — a local language model for scheduled housekeeping and estate data mining
+
+### Version 1.3
+
+- **mootgres** — a Postgres extension that offloads MOOT computations to a Postgres server
 
 
 ## Repository structure
