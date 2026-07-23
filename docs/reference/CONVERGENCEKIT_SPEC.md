@@ -1,6 +1,6 @@
 ---
 title: ConvergenceKit Specification
-version: 1.3
+version: 1.4
 status: active
 date: 2026-07-17
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
@@ -279,6 +279,18 @@ CVK-WC5).
 from the manifest, not from per-entity hardcoding. Each table maps to
 record type `kitID_tableName`; sync metadata travels in reserved fields
 (`_syncHLC`, `_syncSchemaVersion`, `_syncKitID`).
+
+*Wire note (FAB5-EV — encryptedValues):* columns declared in
+`SyncManifest.encryptedContentColumns` are routed through
+`CKRecord.encryptedValues` at encode time. All other columns remain on the
+plaintext `CKRecord` channel. The `_sync*` metadata fields and registry
+(`_ck_*`) tables are always plaintext. The decode path performs dual-read:
+`encryptedValues` channel is checked first; the plaintext channel is the
+fallback for pre-migration rows. This is the zone-feed pull design
+(`fetchZoneChanges`) that neutralises the server-side no-query restriction
+on encrypted fields. No schema version bump — the empty-default preserves
+byte-identical wire format for unencrypted tables. Federation twin: this
+wire note is CloudKit-only (N4 Swift vertical; Rust leg not required).
 
 Two distinct HLC packing layouts coexist in this package — applied at
 different layers and never mixed:
