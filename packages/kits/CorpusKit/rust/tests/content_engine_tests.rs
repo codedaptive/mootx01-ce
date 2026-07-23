@@ -224,6 +224,119 @@ fn replaying_the_same_revision_changes_no_derived_bytes() {
 }
 
 #[test]
+fn direct_revisions_use_the_same_restart_stable_counts_admission() {
+    use corpus_kit_providers::RandomIndexingProvider;
+
+    let storage = in_memory_storage();
+    storage
+        .migrate(&corpus_kit::standalone_declaration(false))
+        .expect("content schema");
+    let source = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+    source
+        .put("direct training anchor", "anchor", NOW)
+        .expect("put anchor");
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .expect("configuration");
+    let models = || {
+        vec![EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::new()),
+        }]
+    };
+    let engine = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        models(),
+    )
+    .expect("engine");
+    engine
+        .train_trainable_slots(NOW, false)
+        .expect("train anchor");
+
+    let first = source
+        .put("direct firstnovel", "direct", NOW + 1)
+        .expect("put first revision");
+    engine
+        .apply_change(
+            &CorpusContentChange::Upsert {
+                id: first.id,
+                revision: first.revision,
+                digest: first.digest,
+            },
+            Some("direct-1"),
+            NOW + 1,
+        )
+        .expect("apply first revision");
+    let first_anchor = engine.maintained_vocab_anchor();
+
+    let second = source
+        .put(
+            "direct firstnovel secondnovel",
+            "direct",
+            NOW + 2,
+        )
+        .expect("put second revision");
+    engine
+        .apply_change(
+            &CorpusContentChange::Upsert {
+                id: second.id,
+                revision: second.revision,
+                digest: second.digest,
+            },
+            Some("direct-2"),
+            NOW + 2,
+        )
+        .expect("apply second revision");
+    let second_anchor = engine.maintained_vocab_anchor();
+    assert!(second_anchor > first_anchor);
+    assert_eq!(engine.maintained_document_count(), 2);
+
+    let reopened = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        models(),
+    )
+    .expect("reopen engine");
+    assert_eq!(reopened.maintained_vocab_anchor(), second_anchor);
+    assert_eq!(reopened.maintained_document_count(), 2);
+
+    let third = source
+        .put(
+            "direct firstnovel secondnovel thirdnovel",
+            "direct",
+            NOW + 3,
+        )
+        .expect("put third revision");
+    reopened
+        .apply_change(
+            &CorpusContentChange::Upsert {
+                id: third.id,
+                revision: third.revision,
+                digest: third.digest,
+            },
+            Some("direct-3"),
+            NOW + 3,
+        )
+        .expect("apply third revision");
+    let third_anchor = reopened.maintained_vocab_anchor();
+    assert!(third_anchor > second_anchor);
+
+    let reopened_again = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        source as Arc<dyn CorpusContentSource>,
+        models(),
+    )
+    .expect("reopen engine again");
+    assert_eq!(reopened_again.maintained_vocab_anchor(), third_anchor);
+    assert_eq!(reopened_again.maintained_document_count(), 2);
+}
+
+#[test]
 fn whole_content_reindex_uses_bounded_parallel_embedding_preparation() {
     let storage = in_memory_storage();
     storage

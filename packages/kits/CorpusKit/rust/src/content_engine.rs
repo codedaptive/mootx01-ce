@@ -1370,7 +1370,6 @@ impl CorpusContentEngine {
                         job.content_id, job.revision, record.revision
                     )));
                 }
-                let previously_indexed = self.index_state.state(&record.id)?.is_some();
                 if !content_already_prepared {
                     if let Some(checkpoint) = self.prepare_index_record(
                         &record,
@@ -1380,16 +1379,17 @@ impl CorpusContentEngine {
                         SlotScope::All,
                         false,
                     )? {
-                        // Counts are a monotonic vocabulary-growth anchor, not
-                        // a revision inventory. Fold one content identity once.
-                        if !previously_indexed {
-                            counts_update = Some((
-                                record.id.clone(),
-                                record.revision,
-                                record.digest.clone(),
-                                record.text.clone(),
-                            ));
-                        }
+                        // Every newly prepared revision reaches the durable-
+                        // reference admission authority at batch close. It
+                        // distinguishes a new identity, an idempotent replay,
+                        // and a changed digest whose novel vocabulary advances
+                        // the governor anchor without incrementing documents.
+                        counts_update = Some((
+                            record.id.clone(),
+                            record.revision,
+                            record.digest.clone(),
+                            record.text.clone(),
+                        ));
                         checkpoints.push(checkpoint);
                     }
                 }
@@ -1485,7 +1485,9 @@ impl CorpusContentEngine {
                 if *counts_document {
                     state.document_count += 1;
                 }
-                state.vocab_anchor = state.accumulator.counts_vocabulary_size();
+                state.vocab_anchor = state
+                    .vocab_anchor
+                    .max(state.accumulator.counts_vocabulary_size());
                 touched_slots.insert(*slot_index);
             }
         }
@@ -2548,10 +2550,9 @@ impl CorpusContentEngine {
     // ── Maintained counts ────────────────────────────────────────────────
 
     /// Direct-path (apply_change / index_content) counts admission under the
-    /// same durable-reference authority as the queue batch: write the
-    /// reference FIRST, fold only on new admission. Reopen reconstruction
-    /// (base snapshot + references resolved from the canonical source)
-    /// therefore agrees with the live accumulator.
+    /// same durable-reference authority as the queue batch. The reference and
+    /// nondecreasing anchors commit together; same-digest replay is a no-op and
+    /// a changed digest does not increment the document anchor.
     fn admit_into_counts(
         &self,
         record: &CorpusContentRecord,
@@ -2610,7 +2611,9 @@ impl CorpusContentEngine {
                 if *counts_document {
                     state.document_count += 1;
                 }
-                state.vocab_anchor = state.accumulator.counts_vocabulary_size();
+                state.vocab_anchor = state
+                    .vocab_anchor
+                    .max(state.accumulator.counts_vocabulary_size());
                 anchor_rows.push((
                     reference.model_id.clone(),
                     reference.model_version.clone(),

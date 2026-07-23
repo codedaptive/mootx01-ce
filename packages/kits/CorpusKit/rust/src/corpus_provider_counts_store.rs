@@ -6,24 +6,25 @@
 //! (RI/PPMI/LSA/NMF) builds from the corpus (vocabulary, document-frequencies,
 //! co-occurrence counts, RI context vectors) — as an opaque per-provider blob
 //! plus two cheap, queryable trigger columns. See the Swift file and
-//! the maintainer CorpusKit incremental-counts changeset for the
-//! rationale: the counts are additive, so they can be MAINTAINED on write
-//! instead of rebuilt from scratch (re-read + re-tokenize) on every reindex.
+//! the Swift twin for the lifecycle. Standalone CorpusKit may publish the blob
+//! at bounded ingest/reindex boundaries. Attached GLK freezes the published
+//! blob between provider publications and records compact canonical-content
+//! references; it never copies GLK Drawer text into this lane.
 //!
 //! Schema (one row per (model_id, model_version)):
 //!   corpus_provider_counts (
 //!     model_id      TEXT NOT NULL,
 //!     model_version TEXT NOT NULL,
 //!     counts        BLOB NOT NULL,    -- opaque per-provider serialized counts
-//!     doc_count     INTEGER NOT NULL, -- documents (chunks) folded in
-//!     vocab_size    INTEGER NOT NULL, -- distinct vocabulary terms
+//!     doc_count     INTEGER NOT NULL, -- durable monotonic document anchor
+//!     vocab_size    INTEGER NOT NULL, -- durable monotonic vocabulary anchor
 //!     updated_at    TIMESTAMP NOT NULL, -- TEXT ISO8601 at SQLite layer; never REAL
 //!     ext           JSON              -- forward-compat slot; nullable
 //!   )  PRIMARY KEY (model_id, model_version)
 //!
-//! `doc_count`/`vocab_size` are surfaced as their own columns (not just inside
-//! the blob) so the vocab-growth retrain trigger reads them with one cheap query
-//! without deserializing the counts blob. NOT append-only: an incremental update
+//! `doc_count`/`vocab_size` are durable live anchors committed with attached
+//! reference admission. Between publications they intentionally need not equal
+//! the frozen blob's internal summary. NOT append-only: an incremental update
 //! UPSERTs the row in place. Layering: core `corpus-kit`, depends only on
 //! persistence-kit; never depends on `corpus-kit-providers` (counts bytes opaque).
 
@@ -52,9 +53,9 @@ pub struct PersistedCounts {
     pub model_version: String,
     /// The provider-serialized accumulated counts (opaque to this store).
     pub counts: Vec<u8>,
-    /// Documents (chunks) folded into the counts — growth-trigger anchor.
+    /// Canonical content identities admitted into this provider generation.
     pub document_count: usize,
-    /// Distinct vocabulary terms — growth-trigger anchor.
+    /// Durable, nondecreasing vocabulary-growth anchor.
     pub vocab_size: usize,
     /// When the counts were last persisted, in Unix seconds (the caller's
     /// `now`). Stored as TEXT ISO8601 at the SQLite layer per the schema

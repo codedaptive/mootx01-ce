@@ -509,6 +509,14 @@ chunk-keyed CorpusKit vectors, and unrelated Drawer-keyed vectors migrate to
 Drawer ID, no surviving chunk-keyed artifacts, and byte-identical unrelated
 Drawer-keyed vectors.
 
+**C-14 (maintained-count restart determinism):** both ports exercise the queue
+and direct-feed paths with a new canonical identity, multiple revisions,
+remove/re-add, same-digest replay, and reopen between revisions. The document
+anchor increments once per canonical identity, the vocabulary anchor never
+decreases, the frozen base blob is unchanged until provider publication, and a
+fixed governor threshold produces the same decision immediately before and
+after reopen.
+
 ## § 8 — Self-report telemetry
 
 ### 8.1 Overview
@@ -666,11 +674,17 @@ may replace that base at bounded ingest/reindex publication points. Attached
 `CorpusContentEngine` MUST NOT serialize the full base for each canonical
 content change. It writes an idempotent row to
 `corpus_provider_count_references`, keyed by provider generation and canonical
-content identity, in the same transaction as the corresponding checkpoint.
-The row stores identity/revision/digest metadata only—never canonical text,
-tokens, or passages. Open reconstructs the accumulator from the base plus
-canonical-source hydration of pending references. A provider retrain/publication
-atomically replaces its base and deletes only that provider generation's
+content identity. In the same transaction it publishes that reference, the
+corresponding content checkpoint, and the `doc_count` / `vocab_size` anchor
+columns. The row stores identity/revision/digest metadata only—never canonical
+text, tokens, or passages. A new identity increments the document anchor once;
+a changed digest refreshes the existing identity reference, folds its text for
+novel vocabulary, and MUST NOT increment the document anchor; an identical
+digest is an idempotent no-op. Both anchors are nondecreasing. Open reconstructs
+the working accumulator from the frozen base plus canonical-source hydration of
+pending references, then restores the stored anchor columns as the governor's
+durable authority. A provider retrain/publication atomically replaces its base,
+publishes matching anchors, and deletes only that provider generation's
 subsumed references.
 
 The accumulator remains separate from the serving provider, so vocabulary
@@ -687,8 +701,10 @@ is byte-identical across ports (the provider owns it via the
 The base and reference tables are intentionally retained in attached GLK
 estates. Neither is a second content store: the base is provider-specific
 derived statistics and the reference table is identity metadata. Reopen
-conformance proves that the maintained vocabulary anchor is restored before
-serving and that reference replay is idempotent.
+conformance proves that the maintained vocabulary anchor and threshold decision
+are restored before serving, that same-digest replay is idempotent, that
+revision/remove/re-add paths do not double-count a canonical identity, and that
+queued and direct-feed revisions use the same admission authority.
 
 ### 9.4 Conformance
 
@@ -804,7 +820,8 @@ concurrent compute) carries forward unchanged — only the pool's location moves
 
 Changed B-14 attached-count persistence from complete blob replacement per
 queue burst to a published base plus reference-only canonical-content deltas.
-Added the atomic checkpoint/delta and provider-compaction requirements. Added
+Added atomic checkpoint/reference/anchor publication, revision-aware admission,
+restart-stable governor decisions, and provider-compaction requirements. Added
 the B-13 deferred resident-index requirement for full reindex. Historical 1.0
 basis fixtures remain immutable while production trainable providers use the
 1.1 tokenizer generation. Made standalone passage indexing an explicit Swift

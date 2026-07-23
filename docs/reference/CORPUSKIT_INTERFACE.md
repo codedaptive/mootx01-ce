@@ -1139,12 +1139,13 @@ It surfaces three operations:
 
 The seam also carries the **maintained-counts** operations (the incremental
 counts table — see the `CorpusProviderCountsStore` section below). These let the
-host keep each trainable provider's raw additive statistics current as chunks are
-written, through the type-erased provider, instead of rebuilding from scratch on
-every reindex:
-- `addToCounts(text:)` / `add_to_counts(&mut self, text:)` — fold one chunk into
-  the maintained accumulated counts (RI/PPMI fold a term sequence; LSA/NMF fold a
-  document into a lightweight vocab+doc-count anchor, O(vocab) not O(corpus)).
+host maintain each trainable provider's raw additive statistics through the
+type-erased provider instead of rebuilding them merely to measure growth:
+- `addToCounts(text:)` / `add_to_counts(&mut self, text:)` — fold one canonical
+  index unit into the accumulated counts (RI/PPMI fold a term sequence; LSA/NMF
+  fold a document into a lightweight vocab+doc-count anchor, O(vocab) not
+  O(corpus)). In attached GLK mode that unit is a whole GLK Drawer; standalone
+  behavior follows the standalone database's explicit index-unit policy.
 - `serializeCounts()` / `serialize_counts()` — snapshot the raw additive state
   (distinct from `serializeBasis`; the counts codec, persisted in
   `corpus_provider_counts`). Byte-identical across ports.
@@ -1234,34 +1235,38 @@ pub fn default_ensemble() -> Vec<EmbeddingModelConfig>;
 
 ### `CorpusProviderCountsStore` — base counts plus attached reference deltas (both ports)
 
-The persisted **counts table**: each trainable provider's raw additive statistics
-(RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary + document-count
-anchor), kept current as chunks are written so a retrain reads the maintained
-table instead of re-reading and re-tokenizing the whole corpus. Sibling of
+The persisted **counts table**: each trainable provider's published additive
+statistics base (RI context vectors; PPMI co-occurrence; LSA/NMF vocabulary +
+document-count anchor). Sibling of
 `BasisStore`; CorpusKit-core, depends only on PersistenceKit + SubstrateTypes,
 never interprets the bytes (the provider owns the codec via the
 `TrainableEmbeddingBasis` counts seam). One row per `(model_id, model_version)`,
-keyed identically to the basis and vector rows; the two cheap integer columns
-`doc_count` / `vocab_size` are the published growth-trigger anchors, readable
-without deserializing the blob.
+keyed identically to the basis and vector rows. The two cheap integer columns
+`doc_count` / `vocab_size` are independently maintained, durable growth-trigger
+anchors. Between provider publications they intentionally describe the live
+maintained state while `counts` remains the frozen published base blob.
 
 Standalone `Corpus` retains the established lifecycle: restore the accumulator,
-fold each newly written chunk, and publish the blob at bounded ingest/reindex
-boundaries. Attached `CorpusContentEngine` does not rewrite an estate-scale
-counts blob for each queue burst. It atomically publishes small rows in
+fold each newly written standalone index unit, and publish the blob at bounded
+ingest/reindex boundaries. Attached `CorpusContentEngine` does not rewrite an
+estate-scale counts blob for each queue burst. It atomically publishes small rows in
 `corpus_provider_count_references`, keyed by provider generation and canonical
-content identity, alongside the content checkpoint. Those rows contain no text
-or token payload. Open restores the published base blob, resolves each pending
-identity through the canonical content source, and folds the current text once.
-A provider publication/retrain atomically replaces its base counts and removes
-the reference rows that generation subsumed.
+content identity, alongside the content checkpoint and the updated anchor
+columns. A new identity advances the document anchor once. A changed digest
+refreshes the same reference and may advance the nondecreasing vocabulary anchor
+without incrementing documents; an identical digest is a no-op. Those rows
+contain no text or token payload. Open restores the published base blob, resolves
+each pending identity through the canonical content source, rebuilds the working
+accumulator, and then restores the transactional anchor columns as the governor's
+authority. A provider publication/retrain atomically replaces its base counts
+and removes the reference rows that generation subsumed.
 
-`Corpus.maintainedVocabAnchor()` /
-`maintained_vocab_anchor()` exposes the maximum maintained vocabulary size across
-trainable slots — the in-process read the autonomic governor's vocab-growth
-retrain trigger consumes (NeuronKit `CorpusGrowthProbe`). Store-level
-`growthAnchor` reads the last published base; the engine-level anchor includes
-its replayed reference deltas.
+`CorpusContentEngine.maintainedVocabAnchor()` /
+`CorpusContentEngine::maintained_vocab_anchor()` exposes the maximum durable,
+nondecreasing vocabulary anchor across trainable slots — the in-process read the
+autonomic governor's vocab-growth retrain trigger consumes (NeuronKit
+`CorpusGrowthProbe`). Store-level `growthAnchor` reads the same transactional
+anchor columns; it does not infer them from the frozen blob.
 
 **Swift:**
 
@@ -1293,6 +1298,7 @@ public actor CorpusProviderCountsStore {
     public func load(modelID: String, modelVersion: String) async throws -> PersistedCounts?
     public func growthAnchor(modelID: String, modelVersion: String) async throws -> CountsGrowthAnchor?
     public func upsertReference(_ row: PersistedCountsReference, into rowStore: any RowStore) async throws
+    public func updateAnchors(modelID: String, modelVersion: String, documentCount: Int, vocabSize: Int, into rowStore: any RowStore) async throws -> Bool
     public func references(modelID: String, modelVersion: String) async throws -> [PersistedCountsReference]
     public func deleteReferences(modelID: String, modelVersion: String, into rowStore: any RowStore) async throws
     public func deleteAll() async throws
@@ -1329,6 +1335,7 @@ impl CorpusProviderCountsStore {
     pub fn load(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<PersistedCounts>>;
     pub fn growth_anchor(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<CountsGrowthAnchor>>;
     pub fn upsert_reference_into(&self, row: &PersistedCountsReference, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
+    pub fn update_anchors_into(&self, model_id: &str, model_version: &str, document_count: usize, vocab_size: usize, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<bool>;
     pub fn references(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Vec<PersistedCountsReference>>;
     pub fn delete_references_into(&self, model_id: &str, model_version: &str, row_store: &Arc<dyn RowStore>) -> CorpusKitResult<()>;
     pub fn delete_all(&self) -> CorpusKitResult<()>;
@@ -2155,7 +2162,10 @@ both ports — token IDs in, pooled float vector out — so for any shared
 - Attached maintained counts now use a published provider base plus
   reference-only canonical-content deltas. Queue commits no longer serialize
   the complete RI/PPMI counts blobs; provider publication compacts deltas
-  atomically. The delta table stores no Drawer text.
+  atomically. The delta table stores no Drawer text. Document and vocabulary
+  anchors commit transactionally with each admitted reference, remain
+  nondecreasing across revision/reopen cycles, and drive identical governor
+  decisions before and after restart.
 - Full `CorpusContentEngine.reindex` operations defer resident-index
   publication across the corpus rewrite and publish once at completion.
 - Recorded the FDC cross-port tokenizer and macOS writable-artifact contract.

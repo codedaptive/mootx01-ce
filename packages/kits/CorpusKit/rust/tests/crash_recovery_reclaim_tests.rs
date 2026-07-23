@@ -381,6 +381,153 @@ fn queue_remove_readd_does_not_double_fold_counts_reference() {
     engine.drop_ingest_queue();
 }
 
+#[test]
+fn queue_revisions_advance_restart_stable_governor_anchors() {
+    use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
+    use corpus_kit_providers::RandomIndexingProvider;
+
+    let _guard = global_lock();
+    let (storage, _temp_dir, _sqlite_path) = make_scratch_storage();
+    storage
+        .migrate(&corpus_kit::standalone_declaration(false))
+        .expect("standalone content schema");
+    let source = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+    source
+        .put("training anchor vocabulary", "anchor", NOW_MILLIS)
+        .expect("put anchor");
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .expect("configuration");
+    let models = || {
+        vec![EmbeddingModelConfig::RandomIndexing {
+            provider: Box::new(RandomIndexingProvider::new()),
+        }]
+    };
+    let engine = Arc::new(
+        CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+            models(),
+        )
+        .expect("engine"),
+    );
+    engine
+        .train_trainable_slots(NOW_MILLIS, false)
+        .expect("train anchor");
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let base = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load base")
+        .expect("base row");
+
+    let first = source
+        .put("identity firstnovel", "revision", NOW_MILLIS + 1)
+        .expect("put first revision");
+    let first_job = ContentIndexJob::from_change(
+        &CorpusContentChange::Upsert {
+            id: first.id,
+            revision: first.revision,
+            digest: first.digest,
+        },
+        Some("revision-1".into()),
+    );
+    engine
+        .enqueue_change_batch(&[(first_job, NOW_MILLIS + 1)])
+        .expect("enqueue first revision");
+    engine.await_ingest_drain().expect("drain first revision");
+    let first_anchor = engine.maintained_vocab_anchor();
+    assert!(first_anchor > base.vocab_size);
+    assert_eq!(engine.maintained_document_count(), 2);
+
+    let second = source
+        .put(
+            "identity firstnovel secondnovel",
+            "revision",
+            NOW_MILLIS + 2,
+        )
+        .expect("put second revision");
+    let second_job = ContentIndexJob::from_change(
+        &CorpusContentChange::Upsert {
+            id: second.id,
+            revision: second.revision,
+            digest: second.digest,
+        },
+        Some("revision-2".into()),
+    );
+    engine
+        .enqueue_change_batch(&[(second_job, NOW_MILLIS + 2)])
+        .expect("enqueue second revision");
+    engine
+        .await_ingest_drain()
+        .expect("drain second revision");
+    let second_anchor = engine.maintained_vocab_anchor();
+    assert!(second_anchor > first_anchor);
+    assert_eq!(engine.maintained_document_count(), 2);
+    let after_second = counts_store
+        .load("random-indexing-v1", "1.1.0")
+        .expect("load second anchors")
+        .expect("second anchors row");
+    assert_eq!(after_second.counts, base.counts);
+    assert_eq!(after_second.vocab_size, second_anchor);
+    let fired_live = second_anchor.saturating_sub(first_anchor) >= 1;
+    engine.drop_ingest_queue();
+
+    let reopened = Arc::new(
+        CorpusContentEngine::open(
+            Arc::clone(&storage),
+            config,
+            Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+            models(),
+        )
+        .expect("reopen engine"),
+    );
+    assert_eq!(reopened.maintained_vocab_anchor(), second_anchor);
+    assert_eq!(
+        reopened
+            .maintained_vocab_anchor()
+            .saturating_sub(first_anchor)
+            >= 1,
+        fired_live
+    );
+
+    let third = source
+        .put(
+            "identity firstnovel secondnovel thirdnovel",
+            "revision",
+            NOW_MILLIS + 3,
+        )
+        .expect("put third revision");
+    let third_job = ContentIndexJob::from_change(
+        &CorpusContentChange::Upsert {
+            id: third.id,
+            revision: third.revision,
+            digest: third.digest,
+        },
+        Some("revision-3".into()),
+    );
+    reopened
+        .enqueue_change_batch(&[(third_job, NOW_MILLIS + 3)])
+        .expect("enqueue third revision");
+    reopened.await_ingest_drain().expect("drain third revision");
+    let third_anchor = reopened.maintained_vocab_anchor();
+    assert!(third_anchor > second_anchor);
+    assert_eq!(reopened.maintained_document_count(), 2);
+    reopened.drop_ingest_queue();
+
+    let reopened_again = CorpusContentEngine::open(
+        Arc::clone(&storage),
+        config,
+        source as Arc<dyn CorpusContentSource>,
+        models(),
+    )
+    .expect("reopen engine again");
+    assert_eq!(reopened_again.maintained_vocab_anchor(), third_anchor);
+    assert_eq!(reopened_again.maintained_document_count(), 2);
+}
+
 // ---------------------------------------------------------------------------
 // 1. Orphaned cur reclaim on mount
 // ---------------------------------------------------------------------------

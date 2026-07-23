@@ -1015,19 +1015,18 @@ public actor CorpusContentEngine {
                     "upsert for \(job.contentID) rev \(job.revision) does not match the current "
                     + "record rev \(record.revision) — stale job rejected without checkpoint advance")
             }
-            let previouslyIndexed = try await indexState.state(for: record.id) != nil
             if !contentAlreadyPrepared,
                let checkpoint = try await prepareIndex(
                     record: record, appliedCursor: job.cursor, force: false, now: now,
                     slotScope: .all, maintainCounts: false)
             {
                 checkpoints.append(checkpoint)
-                // Counts are a monotonic vocabulary-growth anchor, not a
-                // revision inventory. Fold a canonical identity only once;
-                // later revisions replace derived rows without inflating it.
-                if !previouslyIndexed {
-                    countsUpdate = (record.id, record.revision, record.digest, record.text)
-                }
+                // Every newly prepared revision reaches the durable-reference
+                // admission authority at batch close. That authority decides
+                // whether this is a new identity, an idempotent replay, or a
+                // changed digest whose novel vocabulary must advance the
+                // governor anchor without incrementing the document anchor.
+                countsUpdate = (record.id, record.revision, record.digest, record.text)
             }
         case .remove:
             try await clearDerivedState(id: job.contentID)
@@ -1100,8 +1099,9 @@ public actor CorpusContentEngine {
             if fold.countsDocument {
                 slots[fold.slotIndex].countsDocumentCount += 1
             }
-            slots[fold.slotIndex].countsVocabAnchor =
-                slots[fold.slotIndex].countsAccumulator?.countsVocabularySize ?? 0
+            slots[fold.slotIndex].countsVocabAnchor = max(
+                slots[fold.slotIndex].countsVocabAnchor,
+                slots[fold.slotIndex].countsAccumulator?.countsVocabularySize ?? 0)
             touchedSlots.insert(fold.slotIndex)
         }
         var anchorRows: [(modelID: String, modelVersion: String, docs: Int, vocab: Int)] = []
@@ -1679,10 +1679,9 @@ public actor CorpusContentEngine {
     // MARK: - Maintained counts
 
     /// Direct-path (applyChange / indexContent) counts admission under the
-    /// same durable-reference authority as the queue batch: write the
-    /// reference FIRST, fold only on new admission. Reopen reconstruction
-    /// (base snapshot + references resolved from the canonical source)
-    /// therefore agrees with the live accumulator.
+    /// same durable-reference authority as the queue batch. The reference and
+    /// nondecreasing anchors commit together; same-digest replay is a no-op and
+    /// a changed digest does not increment the document anchor.
     private func admitIntoCounts(record: CorpusContentRecord, now: Date) async throws {
         if countsReloadRequired {
             try await reloadCountsFromStorage()
@@ -1715,8 +1714,9 @@ public actor CorpusContentEngine {
             if item.countsDocument {
                 slots[item.slotIndex].countsDocumentCount += 1
             }
-            slots[item.slotIndex].countsVocabAnchor =
-                slots[item.slotIndex].countsAccumulator!.countsVocabularySize
+            slots[item.slotIndex].countsVocabAnchor = max(
+                slots[item.slotIndex].countsVocabAnchor,
+                slots[item.slotIndex].countsAccumulator!.countsVocabularySize)
             anchorRows.append((
                 item.reference.modelID, item.reference.modelVersion,
                 slots[item.slotIndex].countsDocumentCount,

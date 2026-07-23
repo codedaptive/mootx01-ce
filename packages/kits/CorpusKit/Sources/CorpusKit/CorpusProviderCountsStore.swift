@@ -6,26 +6,20 @@
 // co-occurrence counts, RI context vectors — kept as an opaque per-provider
 // blob plus two cheap, queryable trigger columns.
 //
-// ## Why this exists (the counts-table change set)
-//
-// The counts are ADDITIVE: a new chunk appends terms, increments
-// document-frequencies, accumulates co-occurrence. This store persists
-// them so they can be MAINTAINED as we go — incremented once per chunk
-// on write. The current code does persist maintained counts, but
-// Corpus.reindex still reads active chunks and trains from chunk texts;
-// the count-table-backed retrain path is not yet wired.
-//
-// This is HALF A of the change set (the maintained table). HALF B — re-projecting
-// existing chunk vectors when a basis actually changes (the coordinate swap) —
-// is a separate concern (shadow-swap) and is not handled here.
+// The opaque counts are ADDITIVE provider statistics. Standalone CorpusKit may
+// publish that blob at bounded ingest/reindex boundaries. Attached GLK keeps the
+// published blob frozen between provider publications and records only compact
+// canonical-content references; it never copies GLK Drawer text into this lane.
+// The independently updated integer anchors let the governor observe durable
+// growth without rewriting or decoding an estate-scale blob for every change.
 //
 // ## Schema (one row per (modelID, modelVersion))
 //   corpus_provider_counts (
 //     model_id      TEXT NOT NULL,
 //     model_version TEXT NOT NULL,
 //     counts        BLOB NOT NULL,    -- opaque per-provider serialized counts
-//     doc_count     INTEGER NOT NULL, -- documents (chunks) folded into the counts
-//     vocab_size    INTEGER NOT NULL, -- distinct terms in the vocabulary
+//     doc_count     INTEGER NOT NULL, -- durable monotonic document anchor
+//     vocab_size    INTEGER NOT NULL, -- durable monotonic vocabulary anchor
 //     updated_at    TEXT NOT NULL,    -- ISO8601 (schema invariant); never REAL
 //     ext           JSON NULL         -- nullable entity ext slots forward-compat slot
 //   )  PRIMARY KEY (model_id, model_version)
@@ -37,12 +31,11 @@
 //   - counts: the raw accumulated state, serialized by the provider itself
 //     (the provider owns the byte format, exactly as it owns the basis blob).
 //     BLOB, not TEXT — raw little-endian bytes.
-//   - doc_count / vocab_size: surfaced as their OWN columns (not just inside the
-//     blob) so the vocab-growth retrain trigger can read them with a single
-//     cheap query, WITHOUT deserializing the (potentially large) counts blob.
-//     The trigger compares the live corpus growth against the last-factored
-//     anchor; these are that anchor's cheap read surface. INTEGER, not a Bool —
-//     there are no Bool stored columns in this schema (schema-invariants rule).
+//   - doc_count / vocab_size: durable growth-trigger anchors, committed in the
+//     same transaction as attached reference admission. Between publications
+//     they intentionally describe the maintained live state, not merely the
+//     frozen `counts` blob. INTEGER, not a Bool — there are no Bool stored
+//     columns in this schema (schema-invariants rule).
 //   - updated_at: WHEN the counts were last persisted. TEXT ISO8601 per the
 //     schema invariant; the caller's `now`, never Date() in the engine.
 //
@@ -75,9 +68,9 @@ public struct PersistedCounts: Sendable, Equatable {
     public let modelVersion: String
     /// The provider-serialized accumulated counts (opaque to this store).
     public let counts: Data
-    /// Documents (chunks) folded into the counts — growth-trigger anchor.
+    /// Canonical content identities admitted into this provider generation.
     public let documentCount: Int
-    /// Distinct vocabulary terms — growth-trigger anchor.
+    /// Durable, nondecreasing vocabulary-growth anchor.
     public let vocabSize: Int
     /// When the counts were last persisted (the caller's `now`).
     public let updatedAt: Date

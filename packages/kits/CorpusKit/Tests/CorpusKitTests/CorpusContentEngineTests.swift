@@ -460,6 +460,142 @@ struct CorpusContentEngineTests {
         }
     }
 
+    @Test func queueRevisionsAdvanceRestartStableGovernorAnchors() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            _ = try await store.put("training anchor vocabulary", id: "anchor", now: now)
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+            let countsStore = CorpusProviderCountsStore(storage: storage)
+            let base = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+
+            let first = try await store.put(
+                "identity firstnovel", id: "revision", now: now)
+            let firstJob = ContentIndexJob(
+                change: .upsert(
+                    id: first.id, revision: first.revision, digest: first.digest),
+                cursor: "revision-1")
+            let firstPrepared = try await engine.prepareQueueJob(
+                firstJob, now: now, contentAlreadyPrepared: false)
+            #expect(firstPrepared.countsUpdate != nil)
+            try await engine.commitQueueBatch(
+                checkpoints: firstPrepared.checkpoints,
+                countsUpdates: firstPrepared.countsUpdate.map { [$0] } ?? [], now: now)
+            let firstAnchor = await engine.maintainedVocabAnchor()
+            #expect(firstAnchor > base.vocabSize)
+            #expect(await engine.maintainedDocumentCount() == 2)
+
+            let second = try await store.put(
+                "identity firstnovel secondnovel", id: "revision", now: now)
+            let secondJob = ContentIndexJob(
+                change: .upsert(
+                    id: second.id, revision: second.revision, digest: second.digest),
+                cursor: "revision-2")
+            let secondPrepared = try await engine.prepareQueueJob(
+                secondJob, now: now, contentAlreadyPrepared: false)
+            #expect(secondPrepared.countsUpdate != nil)
+            try await engine.commitQueueBatch(
+                checkpoints: secondPrepared.checkpoints,
+                countsUpdates: secondPrepared.countsUpdate.map { [$0] } ?? [], now: now)
+            let secondAnchor = await engine.maintainedVocabAnchor()
+            #expect(secondAnchor > firstAnchor)
+            #expect(await engine.maintainedDocumentCount() == 2)
+
+            let afterSecond = try #require(try await countsStore.load(
+                modelID: "random-indexing-v1", modelVersion: "1.1.0"))
+            #expect(afterSecond.counts == base.counts)
+            #expect(afterSecond.vocabSize == secondAnchor)
+            let firedLive = secondAnchor - firstAnchor >= 1
+
+            let reopened = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            let reopenedAnchor = await reopened.maintainedVocabAnchor()
+            #expect(reopenedAnchor == secondAnchor)
+            let firedAfterReopen = reopenedAnchor - firstAnchor >= 1
+            #expect(firedAfterReopen == firedLive)
+
+            let third = try await store.put(
+                "identity firstnovel secondnovel thirdnovel", id: "revision", now: now)
+            let thirdJob = ContentIndexJob(
+                change: .upsert(
+                    id: third.id, revision: third.revision, digest: third.digest),
+                cursor: "revision-3")
+            let thirdPrepared = try await reopened.prepareQueueJob(
+                thirdJob, now: now, contentAlreadyPrepared: false)
+            #expect(thirdPrepared.countsUpdate != nil)
+            try await reopened.commitQueueBatch(
+                checkpoints: thirdPrepared.checkpoints,
+                countsUpdates: thirdPrepared.countsUpdate.map { [$0] } ?? [], now: now)
+            let thirdAnchor = await reopened.maintainedVocabAnchor()
+            #expect(thirdAnchor > secondAnchor)
+            #expect(await reopened.maintainedDocumentCount() == 2)
+
+            let reopenedAgain = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            #expect(await reopenedAgain.maintainedVocabAnchor() == thirdAnchor)
+            #expect(await reopenedAgain.maintainedDocumentCount() == 2)
+        }
+    }
+
+    @Test func directRevisionsUseTheSameRestartStableCountsAdmission() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let storage = try makeScratchStorage()
+            try await storage.migrate(to: CorpusDocumentStore.schemaDeclaration)
+            let store = CorpusDocumentStore(storage: storage)
+            _ = try await store.put("direct training anchor", id: "anchor", now: now)
+            let configuration = try CorpusContentConfiguration(
+                mode: .attached, indexUnit: .wholeContent)
+            let engine = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            try await engine.trainTrainableSlots(now: now)
+
+            let first = try await store.put("direct firstnovel", id: "direct", now: now)
+            try await engine.applyChange(
+                .upsert(id: first.id, revision: first.revision, digest: first.digest),
+                cursor: "direct-1", now: now)
+            let firstAnchor = await engine.maintainedVocabAnchor()
+
+            let second = try await store.put(
+                "direct firstnovel secondnovel", id: "direct", now: now)
+            try await engine.applyChange(
+                .upsert(id: second.id, revision: second.revision, digest: second.digest),
+                cursor: "direct-2", now: now)
+            let secondAnchor = await engine.maintainedVocabAnchor()
+            #expect(secondAnchor > firstAnchor)
+            #expect(await engine.maintainedDocumentCount() == 2)
+
+            let reopened = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            #expect(await reopened.maintainedVocabAnchor() == secondAnchor)
+            #expect(await reopened.maintainedDocumentCount() == 2)
+
+            let third = try await store.put(
+                "direct firstnovel secondnovel thirdnovel", id: "direct", now: now)
+            try await reopened.applyChange(
+                .upsert(id: third.id, revision: third.revision, digest: third.digest),
+                cursor: "direct-3", now: now)
+            let thirdAnchor = await reopened.maintainedVocabAnchor()
+            #expect(thirdAnchor > secondAnchor)
+
+            let reopenedAgain = try await CorpusContentEngine(
+                storage: storage, configuration: configuration, source: store,
+                models: [.randomIndexing(provider: RandomIndexingProvider())])
+            #expect(await reopenedAgain.maintainedVocabAnchor() == thirdAnchor)
+            #expect(await reopenedAgain.maintainedDocumentCount() == 2)
+        }
+    }
+
     // MARK: - Standalone passages
 
 #if CORPUSKIT_STANDALONE_PASSAGES
