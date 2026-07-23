@@ -101,6 +101,12 @@ struct Mootx01App: App {
         }
 
         #if os(macOS)
+        // FAB5-SM: system Settings window (Cmd+,). SettingsView owns the master
+        // iCloud sync switch; the Engine tab's SyncTileView mirrors the same value.
+        Settings {
+            SettingsView()
+        }
+
         // Headless surface (M-MXA-7): estate status + reopen + quit; the
         // embedded engine stays alive while only this item remains.
         MenuBarExtra(

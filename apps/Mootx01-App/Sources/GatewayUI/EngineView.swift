@@ -19,6 +19,11 @@ struct EngineView: View {
     #if os(macOS)
     @State private var daemon = DaemonController()
     #endif
+    #if os(iOS)
+    // FAB5-SM: Settings sheet presented from the gear toolbar button on iOS/iPadOS.
+    // macOS uses the system Settings window (Cmd+,) — no sheet needed there.
+    @State private var showingSettings = false
+    #endif
 
     var body: some View {
         ScrollView {
@@ -48,6 +53,23 @@ struct EngineView: View {
             discovery.stop()
             Task { await portable.stop() }
         }
+        #if os(iOS)
+        // FAB5-SM: gear button opens SettingsView as a sheet on iOS/iPadOS.
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .accessibilityLabel(String(localized: "engine.settings.button.a11y",
+                                                   defaultValue: "Settings"))
+                }
+            }
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
+        #endif
     }
 
     // MARK: - Sync status tile (CVK-ICLOUD P5-M2)
@@ -266,9 +288,10 @@ struct EngineView: View {
 // and tier if the diagnostic value justifies the surface area.
 
 private struct SyncTileView: View {
-    /// Persisted user preference. Bound to the toggle; also read at app launch
-    /// in Mootx01App to configure the driver before the first syncNow() beat.
-    @AppStorage(SyncPolicy.defaultsKey) private var syncEnabled = false
+    /// Mirror of the master sync gate (FAB5-SM). Bound to masterEnabledKey —
+    /// the same UserDefaults entry SettingsView writes. Changes from either
+    /// surface reflect here immediately; there is no second source of truth.
+    @AppStorage(SyncPolicy.masterEnabledKey) private var syncEnabled = false
     @State private var lastSynced: Date? = nil
     @State private var syncRunning = false
 
