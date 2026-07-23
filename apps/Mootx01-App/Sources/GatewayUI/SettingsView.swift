@@ -100,7 +100,6 @@ public struct SettingsView: View {
         } footer: {
             Text(String(localized: "settings.sync.section.footer",
                        defaultValue: "Restricted and Secret memories never leave this device, regardless of this setting."))
-                .font(.caption)
         }
 
         // Placeholder for mission st — per-tier sync policy controls.

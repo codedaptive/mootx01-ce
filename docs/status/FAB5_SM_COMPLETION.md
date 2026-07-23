@@ -138,6 +138,17 @@ Verdict: **CLEAN-WITH-FOLLOWUPS**
 Finding #1 resolved: removed dead `syncRunning` state and its write sites from SettingsView.
 Tests re-run after fix: exit 0, all counts unchanged.
 
+## Visual Review (Friedlander)
+
+Verdict: **ADVISORY-FINDINGS** — two low-stakes observations, neither blocking.
+
+| Finding | Action |
+|---|---|
+| Section footer `.font(.caption)` explicit override inconsistent with MinerSettingsView (which lets Form defaults handle it) | Fixed in-cycle: removed explicit `.font(.caption)` from footer, matching MinerSettingsView convention |
+| Toggle subtitle label changes height on state change — eyeball-only at AX3+ sizes | No action; expected SwiftUI Form behavior. QA note: test on-device at large text sizes |
+
+Everything else clean: zero `Color()` calls, `.foregroundStyle(.secondary)` is semantic, gear button `"gearshape"` + `.topBarTrailing` matches GatewayUI pattern, Dynamic Type all system modifiers, touch targets compliant (Form row ≥44pt + navbar expansion), localization clean.
+
 ## Commits
 
 | SHA | Message |
@@ -145,6 +156,8 @@ Tests re-run after fix: exit 0, all counts unchanged.
 | 8d113923 | feat(app-sync): SyncPolicy masterEnabled gate, off by default |
 | 9e5d7fbe | feat(app-ui): SettingsView master iCloudSync switch |
 | 7876793d | test(app-sync): cold-start default-off assertions + guide update |
+| b1e7194f | fix(app-ui): remove dead syncRunning state from SettingsView |
+| (final) | fix(app-ui): Friedlander: remove explicit footer font override |
 
 ## Success Criteria Checklist
 
