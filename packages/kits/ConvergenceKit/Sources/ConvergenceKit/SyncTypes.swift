@@ -183,7 +183,7 @@ public struct SyncManifest: Sendable {
     /// Validate `encryptedContentColumns` entries before use.
     /// Rejects `_sync*` columns (reserved sync-metadata fields) and `_ck_*`
     /// tables (registry tables that must stay plaintext per the mission spec).
-    /// Callers (CloudKitSyncEngine.enable, tests) invoke this before encoding begins.
+    /// Phase-2 engine wiring will call this from CloudKitSyncEngine.enable(); tests call it directly.
     public func validateEncryptedColumns() throws {
         for (table, columns) in encryptedContentColumns {
             if table.hasPrefix("_ck_") {
