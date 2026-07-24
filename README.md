@@ -422,9 +422,8 @@ controlled collaboration, and optional Postgres scale.
 
 - **1.1:** MOOTx01-App across iOS, iPadOS, and macOS; the cross-platform
   `moot-mgr` web app; Apple Intelligence; Review Center; Work Packets; and
-  optional iCloud Sync.
-- **1.2:** bounded Federation, cross-platform local agents, and continuous
-  eligible Obsidian synchronization.
+  optional iCloud and continuous eligible Obsidian synchronization.
+- **1.2:** bounded Federation and cross-platform local agents.
 - **1.3:** PGlite for portable browser/WASM Postgres and pgMOOT for optional
   PostgreSQL server computation.
 

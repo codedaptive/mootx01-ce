@@ -41,6 +41,27 @@ And because MOOTx01 is more than a chat transcript, you can inspect its facts,
 links, journals, trust state, topology, and audit history instead of accepting a
 black box.
 
+## Version 1.0.x — move your knowledge today
+
+MOOTx01 1.0.x already ships an agent-directed, on-demand round-trip between
+your estate and normal Markdown vaults:
+
+- export eligible memories into a vault that Obsidian can open;
+- import an existing Obsidian or Markdown vault into MOOTx01;
+- inspect drift and apply added or modified notes through reconciliation;
+- preserve stable identity, links, tags, sensitivity, exportability, and
+  provenance across the round-trip;
+- use default vault output that is also a superset of Google's Open Knowledge
+  Format (OKF) v0.1.
+
+You do not need to learn an internal command language. Ask a connected AI agent
+to export your eligible memories, import an existing vault, or reconcile the
+changes in a vault you have edited.
+
+This workflow is bidirectional when you or your agent initiates it; it is not
+yet a continuously running synchronization service. Vault deletions are
+reported and never automatically erase estate memories.
+
 ## Version 1.1 — your Apple devices become memory assistants
 
 The next chapter is MOOTx01-App: one native product across iOS, iPadOS, and
@@ -81,6 +102,17 @@ remain available for deep research and difficult reasoning.
 Apple Intelligence availability depends on supported hardware, software,
 language, region, and user settings. MOOTx01 will provide a useful fallback
 when the on-device model is unavailable.
+
+### Make Obsidian continuous
+
+Version 1.1 will build on the shipped, on-demand vault workflow with an
+optional resident mode that automatically maintains eligible memories between
+MOOTx01 and an Obsidian vault.
+
+It will watch both sides, resynchronize after missed changes, surface conflicts
+and blocked items, and keep the estate—not the vault—as the authority. Private,
+restricted, secret, and non-exportable material will remain outside automatic
+exchange.
 
 ### One memory, many models
 
@@ -143,7 +175,6 @@ Version 1.2 also extends the local-agent idea beyond supported Apple devices:
 - local-model workers for Windows, Linux, Mac, and servers;
 - scheduled memory reviews and housekeeping;
 - private research-result comparison;
-- continuous eligible Obsidian synchronization;
 - no automatic destructive memory cleanup.
 
 ## Version 1.3 — PGlite, pgMOOT, and Postgres anywhere
@@ -171,8 +202,8 @@ The contract remains the same:
 
 | Release | What changes for you |
 |---|---|
-| **Today** | Your AI can remember beyond one conversation |
-| **1.1** | MOOTx01-App brings native agentic memory to iPhone, iPad, and Mac; `moot-mgr` carries it to other platforms |
+| **1.0.x today** | Your AI can remember beyond one conversation and move eligible knowledge through Obsidian, Markdown, and OKF-compatible vaults |
+| **1.1** | MOOTx01-App brings native agentic memory to iPhone, iPad, and Mac; `moot-mgr` carries it to other platforms; optional automatic Obsidian synchronization builds on the shipped vault workflow |
 | **1.2** | Local agents and explicitly paired estates can collaborate safely |
 | **1.3** | PGlite brings portable Postgres to the web; pgMOOT adds optional PostgreSQL server scale |
 

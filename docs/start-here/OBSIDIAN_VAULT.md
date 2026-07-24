@@ -1,12 +1,14 @@
 # Maintain an Obsidian vault
 
-MOOTx01 can project an estate into a normal Markdown vault, import Markdown
-notes into an estate, and compare a vault with the manifest written by the
-last export. Obsidian can open that directory like any other vault.
+MOOTx01 1.0.x can project an estate into a normal Markdown vault, import
+Markdown notes into an estate, and compare a vault with the manifest written
+by the last export. Obsidian can open that directory like any other vault.
+Default exports are also a superset of Google's Open Knowledge Format (OKF)
+v0.1.
 
 These operations are currently on demand. MOOTx01 does not yet continuously
 watch the directory or automatically keep both sides synchronized. The planned
-1.2 continuous mode is specified below so the current workflow and target
+1.1 continuous mode is specified below so the current workflow and target
 behavior are not confused.
 
 ## Enable or disable the vault tools
@@ -166,9 +168,9 @@ Import is idempotent by stable note identity. It also:
 An export is an outward projection, not a three-way merge. Preserve a backup
 when both the estate and vault changed since the previous baseline.
 
-## Planned 1.2 continuous mode
+## Planned 1.1 continuous mode
 
-Version 1.2 plans an optional, daemon-managed mode that continuously maintains
+Version 1.1 plans an optional, daemon-managed mode that continuously maintains
 a normal retail Obsidian vault. It builds on the existing manifest and
 reconcile behavior:
 
