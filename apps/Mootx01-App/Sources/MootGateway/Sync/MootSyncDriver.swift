@@ -151,7 +151,7 @@ public actor MootSyncDriver {
                 self.controller = controller
                 self.cloudKitEngine = newCKEngine
                 enabled = true
-                log.info("cloud sync enabled (ceiling: \(ceiling.rawValue, privacy: .public))")
+                log.info("cloud sync enabled (ceiling: \(ceiling.rawValue, privacy: .private))")
 
                 // APNs zone subscription (P5-M2): register after successful enable so
                 // CloudKit silent-push notifications arrive for this engine's zone.
@@ -259,7 +259,7 @@ public actor MootSyncDriver {
         await TierAuthorizationStore.shared.revoke(tier)
         let newCeiling = await TierAuthorizationStore.shared.effectiveCeiling
         await controller?.updateCeiling(to: newCeiling)
-        log.info("tier revoked: \(tier.rawValue, privacy: .public), new ceiling: \(newCeiling.rawValue, privacy: .public)")
+        log.info("tier revoked: \(tier.rawValue, privacy: .private), new ceiling: \(newCeiling.rawValue, privacy: .private)")
     }
 
     /// Update the active sync ceiling to reflect a newly-authorized tier.
@@ -276,7 +276,7 @@ public actor MootSyncDriver {
     public func reconfigureForAuthorizedTiers() async {
         let newCeiling = await TierAuthorizationStore.shared.effectiveCeiling
         await controller?.updateCeiling(to: newCeiling)
-        log.info("sync ceiling reconfigured: \(newCeiling.rawValue, privacy: .public)")
+        log.info("sync ceiling reconfigured: \(newCeiling.rawValue, privacy: .private)")
     }
 
     // MARK: - Private helpers

@@ -99,7 +99,7 @@ public actor SyncController {
         // Register with GeniusLocusKit so moot_estate_status sync: reports real state.
         // This is status-reporting only — it does NOT drive the engine lifecycle.
         try await bridge.registerSyncEngine(engine, backendName: backendName)
-        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public), ceiling \(ceiling.rawValue, privacy: .public)")
+        log.info("sync enabled: kit \(manifest.kitID, privacy: .public), zone \(manifest.zoneIdentifier, privacy: .public), ceiling \(ceiling.rawValue, privacy: .private)")
     }
 
     /// Pull remote changes (engine applies + reconciles), then push local.
@@ -156,6 +156,6 @@ public actor SyncController {
         guard let fs = filteredStorage else { return }
         // Only drawers carry adjectiveBitmap in the standard estate schema.
         await fs.retractAndLowerCeiling(to: newCeiling, tables: ["drawers"])
-        log.info("sync ceiling updated: \(newCeiling.rawValue, privacy: .public)")
+        log.info("sync ceiling updated: \(newCeiling.rawValue, privacy: .private)")
     }
 }

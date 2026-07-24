@@ -394,6 +394,17 @@ private struct SensitivityFilteredRowStore: RowStore {
             // Block the inbound tombstone — the local restricted copy must survive.
             // Caller-initiated deletes use delete() (not deleteSync()) so they are
             // not affected by this gate.
+            //
+            // Demotion edge (Perkins ADVISORY-3 — documented gap):
+            // If the row's tier rises above ceiling (retraction tombstone ships),
+            // then falls back below ceiling, and the tombstone self-delivers while
+            // the row is already demoted, the guard FORWARDS the tombstone here
+            // (demotion means exceedsCeiling returns false for the demoted row).
+            // The local row is hard-deleted. ConvergenceKit's HLC-based resurrection
+            // (the demotion UPDATE at a higher HLC than the tombstone) is expected
+            // to restore the row on the next push/pull cycle — but this behavior
+            // is not explicitly specified in CONVERGENCEKIT_SPEC and should be
+            // confirmed before the secret tier is cleared for production.
             return 0
         }
         return try await base.deleteSync(table: table, where: predicate)
@@ -583,6 +594,10 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
         to newCeiling: AdjectiveSensitivity,
         tables: [String]
     ) async {
+        // Ceiling is updated FIRST so no concurrent observer Task can slip an
+        // above-ceiling UPDATE through the stale (higher) ceiling between the
+        // last tombstone yield and the lock write (Perkins ADVISORY-2).
+        _ceiling.withLock { $0 = newCeiling }
         for table in tables {
             let rows = (try? await base.rowStore.query(
                 table: table, where: nil, orderBy: [], limit: nil, offset: nil)) ?? []
@@ -599,6 +614,5 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
                 ))
             }
         }
-        _ceiling.withLock { $0 = newCeiling }
     }
 }

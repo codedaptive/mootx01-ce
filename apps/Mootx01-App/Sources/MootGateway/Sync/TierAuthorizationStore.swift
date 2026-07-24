@@ -79,6 +79,10 @@ struct SystemTierKeychain: TierKeychainStoring, Sendable {
             kSecAttrAccount: "tier-authorized",
             kSecAttrAccessGroup: Self.accessGroup,
             kSecUseDataProtectionKeychain: true,
+            // ThisDeviceOnly: prevents the sentinel from migrating to a new device via
+            // backup restore, which would grant remote sync scope without biometric
+            // re-challenge on the new device (Perkins ADVISORY-1).
+            kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             kSecValueData: Data([0x01]),
         ]
         let status = SecItemAdd(query as CFDictionary, nil)
