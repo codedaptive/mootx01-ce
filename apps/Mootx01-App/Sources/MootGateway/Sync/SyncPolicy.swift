@@ -16,6 +16,7 @@
 // Call migrateIfNeeded() before isEnabled() at app startup.
 
 import Foundation
+import LocusKit
 
 /// Persisted user preference for iCloud sync.
 ///
@@ -90,5 +91,19 @@ public enum SyncPolicy {
     /// Pass the result directly to `MootSyncDriver.shared.configure(_:)`.
     public static func config(enabled: Bool) -> SyncConfig {
         enabled ? .cloudKitDefault : .disabled
+    }
+
+    /// Returns the set of sensitivity tiers currently authorized for sync.
+    ///
+    /// Normal and elevated are always included (the always-on base tiers that sync
+    /// whenever master sync is enabled). Restricted and secret are included only when
+    /// the user has granted per-tier authorization via `TierAuthorizationStore` (FAB5-ST).
+    ///
+    /// - Parameter store: The authorization store to query. Defaults to `.shared`.
+    public static func authorizedTiers(store: TierAuthorizationStore = .shared) async -> Set<AdjectiveSensitivity> {
+        var tiers: Set<AdjectiveSensitivity> = [.normal, .elevated]
+        if await store.isAuthorized(.restricted) { tiers.insert(.restricted) }
+        if await store.isAuthorized(.secret) { tiers.insert(.secret) }
+        return tiers
     }
 }
