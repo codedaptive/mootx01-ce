@@ -12,13 +12,12 @@
 // encrypted for the "items" table. CloudZoneFake stores the CKRecords so we
 // can inspect whether "secret" landed in record.encryptedValues or plaintext.
 //
-// Three scenarios:
-//   (1) Declared column is absent from plaintext and present via encryptedValues
-//       in the CKRecord produced by the full push path.
-//   (2) Undeclared column (golden byte-identity) stays in plaintext and absent
-//       from encryptedValues — byte-identical to a push with no declaration.
-//   (3) Push for a table not in encryptedContentColumns defaults to all-plaintext
-//       (the empty-set default path, validates the ?? [] fallback in PushCycle).
+// Two test functions covering three verification points:
+//   (1) Declared column absent from plaintext and present via encryptedValues
+//       in the CKRecord produced by the full push path; undeclared column
+//       on the same record stays plaintext (both verified in one push cycle).
+//   (2) Table not in encryptedContentColumns: all columns stay plaintext —
+//       the ?? [] fallback in PushCycle preserves byte-identical wire format.
 
 import Testing
 import Foundation
