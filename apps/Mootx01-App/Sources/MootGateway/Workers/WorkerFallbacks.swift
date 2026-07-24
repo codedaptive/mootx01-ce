@@ -15,7 +15,7 @@ enum WorkerFallbacks {
     /// is available without Apple Intelligence.
     static func summarize(input: SummarizeInput) -> SummarySuggestion {
         SummarySuggestion(
-            summary: "Apple Intelligence is not available. Enable it in System Settings to see AI-generated summaries of your recent work."
+            summary: String(localized: "Apple Intelligence is not available. Enable it in System Settings to see AI-generated summaries of your recent work.")
         )
     }
 
