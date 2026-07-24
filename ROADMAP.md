@@ -2,7 +2,7 @@
 title: The Road Ahead for MOOTx01
 status: active-roadmap
 audience: public
-updated: 2026-07-23
+updated: 2026-07-24
 ---
 
 # The Road Ahead for MOOTx01
@@ -139,7 +139,8 @@ We call it **Three Minds, One Memory**.
 Optional iCloud Sync will keep eligible memories available across supported
 Apple devices while every device retains its own local estate.
 
-Sync will be off by default. Restricted and Secret memories stay on device.
+Sync will be off by default. Restricted and Secret memories stay on device
+**by default**; keychain-authorized per-tier opt-in available.
 You choose when continuity is worth crossing the device boundary.
 
 ### A home on every other platform
