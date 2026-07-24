@@ -1,7 +1,7 @@
 import SwiftUI
 import MootGateway
 
-// MARK: - SettingsView (FAB5-SM, FAB5-ST)
+// MARK: - SettingsView (FAB5-SM, FAB5-ST, FAB5-J1)
 //
 // First-class Settings surface for the app. Entry point:
 //   - macOS: system Settings window (Cmd+,) via `Settings { SettingsView() }` in Mootx01App.
@@ -17,6 +17,12 @@ import MootGateway
 // the sentinel and emits WB1 retraction tombstones for now-above-ceiling rows.
 // The secret tier toggle ships visible but disabled pending Perkins clearance
 // (secretTierCleared build flag enables it).
+//
+// FAB5-J1 adds a Continuous Vault section (off by default). It stores:
+//   vaultResidentEnabled  — UserDefaults Bool (master toggle)
+//   vaultResidentPath     — UserDefaults String (vault root directory path)
+// The daemon reads MOOTX01_VAULT_PATH (env var); the launchd installer bridge
+// that translates UserDefaults→env var is a follow-on (out of FAB5-J1 scope).
 
 public struct SettingsView: View {
 
@@ -29,6 +35,16 @@ public struct SettingsView: View {
     /// TierAuthorizationStore on appear; updated optimistically on toggle,
     /// then snapped back if authentication fails.
     @State private var restrictedEnabled = false
+
+    /// Continuous vault sync master toggle (FAB5-J1). Off by default.
+    /// Stored in UserDefaults["vaultResidentEnabled"]. When on, the daemon
+    /// (MOOTX01_VAULT_PATH) syncs public memories with the vault continuously.
+    @AppStorage("vaultResidentEnabled") private var vaultResidentEnabled = false
+
+    /// Obsidian vault root directory path (FAB5-J1).
+    /// Stored in UserDefaults["vaultResidentPath"]. Passed to MOOTX01_VAULT_PATH
+    /// by the launchd installer bridge (follow-on, not in FAB5-J1 scope).
+    @AppStorage("vaultResidentPath") private var vaultResidentPath = ""
 
 #if secretTierCleared
     /// Secret-tier sync authorization state (FAB5-ST). Only compiled when
@@ -57,6 +73,7 @@ public struct SettingsView: View {
         Form {
             syncSection
             sensitiveTierSection
+            continuousVaultSection
         }
         .formStyle(.grouped)
         .frame(minWidth: 400, idealWidth: 480)
@@ -70,6 +87,7 @@ public struct SettingsView: View {
         Form {
             syncSection
             sensitiveTierSection
+            continuousVaultSection
         }
         .formStyle(.grouped)
     }
@@ -246,6 +264,67 @@ public struct SettingsView: View {
 #if secretTierCleared
             secretEnabled = await TierAuthorizationStore.shared.isAuthorized(.secret)
 #endif
+        }
+    }
+
+    // MARK: - Continuous Vault section (FAB5-J1)
+
+    /// Settings for the Obsidian vault resident sync service.
+    ///
+    /// Off by default. Stores two UserDefaults keys:
+    ///   - `vaultResidentEnabled` (Bool): master toggle
+    ///   - `vaultResidentPath` (String): vault root directory
+    ///
+    /// The daemon reads MOOTX01_VAULT_PATH; the launchd installer bridge that
+    /// translates these UserDefaults keys into the env var is a follow-on
+    /// mission (out of FAB5-J1 scope, listed in INTENTIONALLY_LEFT).
+    ///
+    /// Privacy: only memories marked Public ever reach the vault. This is
+    /// enforced in the daemon layer (VaultExportScope.exportable), not here.
+    private var continuousVaultSection: some View {
+        Section {
+            Toggle(isOn: $vaultResidentEnabled) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "settings.vault.toggle.label",
+                                   defaultValue: "Obsidian Vault Sync"))
+                        Text(vaultResidentEnabled
+                             ? String(localized: "settings.vault.status.on",
+                                      defaultValue: "Public memories sync continuously with your vault.")
+                             : String(localized: "settings.vault.status.off",
+                                      defaultValue: "Export your Public memories to an Obsidian vault."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .accessibilityHidden(true)
+                }
+            }
+            .accessibilityLabel(String(localized: "settings.vault.toggle.a11y.label",
+                                       defaultValue: "Obsidian Vault Sync"))
+            .accessibilityHint(String(localized: "settings.vault.toggle.a11y.hint",
+                                      defaultValue: "When on, memories marked as Public are continuously synced to and from your Obsidian vault. Private, Restricted, and Secret memories are never exported."))
+
+            if vaultResidentEnabled {
+                TextField(
+                    String(localized: "settings.vault.path.placeholder",
+                           defaultValue: "Vault path (e.g. /Users/you/Vault)"),
+                    text: $vaultResidentPath
+                )
+                .font(.caption.monospaced())
+                .autocorrectionDisabled()
+                .accessibilityLabel(String(localized: "settings.vault.path.a11y.label",
+                                           defaultValue: "Vault directory path"))
+                .accessibilityHint(String(localized: "settings.vault.path.a11y.hint",
+                                          defaultValue: "Enter the full path to your Obsidian vault folder."))
+            }
+        } header: {
+            Text(String(localized: "settings.vault.section.header",
+                       defaultValue: "Obsidian Vault"))
+        } footer: {
+            Text(String(localized: "settings.vault.section.footer",
+                       defaultValue: "Only memories you mark as Public sync to the vault. Private, Elevated, Restricted, and Secret memories are never exported, regardless of this setting."))
         }
     }
 }
