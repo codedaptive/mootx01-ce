@@ -63,11 +63,11 @@ package in the MOOTx01 product repository belongs to a standalone SDK.
 
 ## Version note
 
-This branch is `develop/1.1.x`, currently versioned `1.1.0-beta-03`. It is the
+This branch is `develop/1.1.x`, currently versioned `1.1.0-beta-04`. It is the
 fast-moving beta for 1.1 feature updates, not the supported product release.
 Stable install links resolve to the current 1.0 release; beta evaluation builds
-this checkout and records both the beta version and tested commit. The `03`
-records the three pushes to `candidate/1.1.x` since its creation.
+this checkout and records both the beta version and tested commit. The `04`
+records four pushes to `candidate/1.1.x` since its creation.
 
 Stable 1.0.x already ships explicit, agent-directed vault import, export,
 status, and reconcile operations. The resulting Markdown vault opens in

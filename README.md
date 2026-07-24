@@ -24,7 +24,7 @@
 > verify what you install.
 
 > **Branch channel:** `develop/1.1.x` is currently versioned
-> `1.1.0-beta-03`. It is the fast-moving beta for 1.1 feature work, not the
+> `1.1.0-beta-04`. It is the fast-moving beta for 1.1 feature work, not the
 > supported production release. The installers and `releases/latest` links
 > below install the current stable 1.0 line; use a source build from this
 > checkout to exercise 1.1 work in progress.

@@ -20,8 +20,9 @@ cannot ship with drifted versions.
 
 For the 1.1 beta train, `YY` is the number of pushes made to
 `candidate/1.1.x`, with the branch-creation push counted as `01`. The current
-development version is `1.1.0-beta-03`. Before the next candidate push, bump
-both CE and EE to `1.1.0-beta-04`; that candidate push then becomes number 4.
+development version is `1.1.0-beta-04` (four-push count; stamped 2026-07-24).
+Before the next candidate push, bump both CE and EE to `1.1.0-beta-05`; that
+candidate push then becomes number 5.
 
 1. `python3 scripts/release/bump_version.py <version>` on the active
    `develop/X.Y.x`.
