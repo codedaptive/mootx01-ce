@@ -5,6 +5,51 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## 1.1.0-beta-04 — 2026-07-24
+
+First internal beta cut for 1.1. Stamps the Wave-1 / FAB5 feature set
+for TestFlight evaluation. Nine streams merged since beta-03.
+
+- **Sensitive-tier sync opt-ins (FAB5-ST).** Per-tier CloudKit sync
+  authorization (Restricted, Secret) gated by LocalAuthentication and
+  Keychain. Dynamic sensitivity ceiling with WB1-style retraction
+  tombstones purge affected rows on tier revocation. Settings UI surface
+  added. Fixed a silent security bug: `SensitivityFilteredStorage` was
+  checking the wrong column key and never matched — all rows were passing
+  through regardless of tier.
+- **iCloud Sync master preference (FAB5-SM).** `SyncPolicy.masterEnabled`
+  is now the single authoritative iCloud sync gate. Settings surface
+  present on iOS (gear toolbar) and macOS (Cmd+,). Off by default on
+  clean install. Legacy WB2 key migration path included.
+- **CKRecord.encryptedValues wiring (FAB5-EV2).** `PushCycle` now passes
+  `encryptedContentColumns` to `CKRecordMapping.record(...)` so declared
+  columns route through `CKRecord.encryptedValues` on every push.
+  `CloudKitStateActor.enable()` validates column declarations before zone
+  setup. Tables without declarations are byte-identical to pre-EV behavior.
+- **CKRecord.encryptedValues opt-in (FAB5-EV).** `SyncManifest` gains an
+  `encryptedContentColumns` field for opt-in per-table encryption. Empty
+  by default — no wire format change for existing callers. Metadata columns
+  provably stay plaintext. Dual-read decode path included.
+- **First-run experience (FAB5-FR).** App Store Guideline 4.2 defense: a
+  reviewer with an empty estate can reach capture → recall in under 60
+  seconds. Engineering tabs (The Top, Edges, Engine) moved behind an
+  Advanced toggle for the App Store build.
+- **Federation durable outbox (FAB5-FO).** Durable outbox layer for the
+  federation sync surface. Fixed a TOCTOU race in the Rust echo
+  suppression mechanism in InMemoryRowStore.
+- **App Store compliance pack (FAB5-CP).** All NSUsageDescription keys
+  present and reviewer-grade. `ITSAppUsesNonExemptEncryption = false` in
+  both iOS and macOS plists. `TARGETED_DEVICE_FAMILY 1` (iPhone-only for
+  1.1). Privacy label worksheet and App Store reviewer notes ready.
+- **TestFlight & two-device validation harness (FAB5-VH).** Release
+  checklist, two-device sync matrix, and conformance scenario fixtures
+  (concurrent kill/restore, offline/rejoin) for the 1.1 TestFlight and
+  App Store submission pipeline.
+- **Docs truth-up (FAB5-DT).** TOPOLOGY.md sync/federation status section
+  added. Public docs de-agentified (zero internal codename hits in
+  `docs/start-here/`, `docs/guide/`, `README.md`). Roadmap dates
+  grounded.
+
 ## 1.1.0-beta-03 — develop/1.1.x
 
 This branch is the source beta for 1.1 feature updates. It changes continuously
