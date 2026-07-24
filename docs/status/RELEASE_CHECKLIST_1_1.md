@@ -234,3 +234,39 @@ Bob executes these manually. See `TESTFLIGHT_SUBMISSION_LOG.md` for round-by-rou
 - If rejected: triage rejection reason, assign to owning stream, fix and resubmit
 - Approval → Phased Release (7 days) or Manual Release (immediate)
 - Cut `stable/1.1.0` tag after approval
+
+---
+
+## 6. Beta.1 Release Engineering State (FAB5-B1)
+
+**Version stamped:** `1.1.0-beta-04` (push #4 to `candidate/1.1.x`).
+All stamps verified clean via `scripts/release/verify_version.py`.
+
+**CHANGELOG:** `1.1.0-beta-04` section added covering all nine FAB5 streams:
+SM, EV, EV2, CP, DT, FR, FO, VH, ST.
+
+**ROADMAP:** "Restricted and Secret memories stay on device **by default**;
+keychain-authorized per-tier opt-in available." (was: "stay on device.")
+Superset ruling confirmed: continuous Obsidian, Review Center, Work Packet,
+moot-mgr all remain in the Version 1.1 section. iPadOS listed at line 67
+(FAB5-L1 intact).
+
+**Plugin parity:** All 6 plugin.json mirrors confirmed at `1.1.0-beta-04`.
+Generated tree unchanged by this mission (verify-only per Known Ambiguities).
+
+**Test lane:** `swift test --package-path apps/Mootx01-App` → 34 tests,
+7 suites, exit 0. Zero code changes; count unchanged from pre-mission baseline.
+
+**EE coordination required (NOT done in this CE-only mission):** VERSIONING.md
+§1.5 says YY increments "across both repositories." EE beta version must be
+bumped to `1.1.0-beta-04` before the candidate push. Coordinate via EE-side
+`bump_version.py` before merging to `candidate/1.1.x`.
+
+**Bob's next steps to cut the beta:**
+
+1. Verify this stream merges cleanly to `develop/1.1.x`.
+2. Bump EE to `1.1.0-beta-04` (EE `bump_version.py 1.1.0-beta-04`).
+3. `git push origin develop/1.1.x → candidate/1.1.x` (this is push #4).
+4. CI builds unsigned pre-release tagged `1.1.0-beta-04`.
+5. Upload to TestFlight per Section 3 above.
+6. Cut the tag LAST on the `stable` HEAD when gates clear.
