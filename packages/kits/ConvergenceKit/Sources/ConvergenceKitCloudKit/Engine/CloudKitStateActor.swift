@@ -158,6 +158,9 @@ actor CloudKitStateActor {
     func enable(manifest: SyncManifest, storage: any Storage) async throws {
         if isEnabled { throw SyncError.alreadyEnabled }
         self.manifest = manifest
+        // Validate encrypted column declarations before any zone setup or push occurs.
+        // Rejects _ck_* registry tables and _sync* reserved columns (FAB5-EV Phase 2).
+        try manifest.validateEncryptedColumns()
         self.storage = storage
 
         // Resolve the database seam. Tests inject a fake via _testDatabase before
