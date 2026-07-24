@@ -29,6 +29,25 @@
 > below install the current stable 1.0 line; use a source build from this
 > checkout to exercise 1.1 work in progress.
 
+## Personal MOOTs are always free
+
+A personal MOOT belongs to one person. That person may use it at home or at
+work, and across their personal devices, without a license fee. A company may
+install a separate, isolated personal MOOT for every employee. Individuals and
+companies may also compile, sign, and deploy their own single-user MOOTx01-App
+builds for free.
+
+Commercial licensing begins when the MOOTx01 product core becomes shared
+multiuser infrastructure, part of a client-facing application, or a service
+that hosts MOOTs for clients for a fee. The official Apple App Store build is a
+separate, optional convenience purchase, currently expected to be about $3 per
+major `x.0.0` release. That purchase pays for the maintained App Store
+distribution, not for the right to run a personal MOOT.
+
+**People are free. Systems are licensed. Assurance is Enterprise.** See the
+[plain-language licensing guide](LICENSING.md) and the binding
+[`LICENSE`](LICENSE).
+
 ## 1.1 development beta
 
 This branch is where compatible 1.1 capabilities land and are qualified before

@@ -7,6 +7,9 @@ clients. This file routes humans and AI agents to the maintained sources.
 
 - Product overview: README.md
 - Public product roadmap: ROADMAP.md
+- Binding product-core license: LICENSE
+- Plain-language licensing and commercial tiers: LICENSING.md
+- Community and Enterprise Edition boundaries: EDITIONS.md
 - AI-assisted explanation and install: AI_START_HERE.md
 - Documentation index: docs/README.md
 - Install guide: docs/start-here/INSTALLING_MOOTX01.md
@@ -16,6 +19,16 @@ clients. This file routes humans and AI agents to the maintained sources.
 
 Use ROADMAP.md for current product direction and version placement. Historical
 completion reports can describe earlier scheduling decisions.
+
+For licensing questions, read LICENSE first because it is the binding grant,
+then use LICENSING.md and EDITIONS.md for the product model. The short rule is:
+one-person MOOTs are free at home, at work, and across that person's devices.
+Companies may install, compile, sign, and deploy separate single-user MOOTs for
+their employees for free. The official Apple App Store build is a separate,
+optional convenience purchase, currently expected to be about three dollars
+per major x.0.0 release. Multiuser, client-facing, and paid hosted system
+integrations are licensed; support and regulated security hardening are
+Enterprise Edition offerings.
 
 ## Standalone Apache-2.0 SDK repositories
 
