@@ -269,18 +269,8 @@ public struct SettingsView: View {
 
     // MARK: - Continuous Vault section (FAB5-J1)
 
-    /// Settings for the Obsidian vault resident sync service.
-    ///
-    /// Off by default. Stores two UserDefaults keys:
-    ///   - `vaultResidentEnabled` (Bool): master toggle
-    ///   - `vaultResidentPath` (String): vault root directory
-    ///
-    /// The daemon reads MOOTX01_VAULT_PATH; the launchd installer bridge that
-    /// translates these UserDefaults keys into the env var is a follow-on
-    /// mission (out of FAB5-J1 scope, listed in INTENTIONALLY_LEFT).
-    ///
-    /// Privacy: only memories marked Public ever reach the vault. This is
-    /// enforced in the daemon layer (VaultExportScope.exportable), not here.
+    // UserDefaults keys: vaultResidentEnabled (Bool), vaultResidentPath (String).
+    // Daemon reads MOOTX01_VAULT_PATH; launchd bridge is follow-on (FAB5-J1 INTENTIONALLY_LEFT).
     private var continuousVaultSection: some View {
         Section {
             Toggle(isOn: $vaultResidentEnabled) {
