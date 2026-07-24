@@ -144,7 +144,9 @@ targets:
         MARKETING_VERSION: "1.0.18"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
-        TARGETED_DEVICE_FAMILY: "1"
+        # FAB5-L1: restored iPad support (reverses FAB5-CP iPhone-only ruling).
+        # "1,2" = iPhone + iPad; matched by Widget-iOS and Share-iOS below.
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
         # M-ING-2: purpose strings for the live miner consent prompts
         # (EventKit + Contacts). Shown in the system dialog on first live
@@ -227,7 +229,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.widget
         PRODUCT_NAME: Mootx01Widget
         SWIFT_VERSION: "6.0"
-        TARGETED_DEVICE_FAMILY: "1"
+        # FAB5-L1: must match the app target — widget runs on iPad too.
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
     info:
       path: derived-Info-Widget-iOS.plist
@@ -284,7 +287,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.ios.share
         PRODUCT_NAME: Mootx01Share
         SWIFT_VERSION: "6.0"
-        TARGETED_DEVICE_FAMILY: "1"
+        # FAB5-L1: must match the app target — share extension runs on iPad too.
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: "MOOTx01"
     info:
       path: derived-Info-Share-iOS.plist
