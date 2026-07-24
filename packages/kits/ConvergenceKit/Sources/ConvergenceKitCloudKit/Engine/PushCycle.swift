@@ -135,7 +135,10 @@ extension CloudKitStateActor {
                         schemaVersion: manifest.schemaVersion,
                         kitID: manifest.kitID,
                         zone: zoneID,
-                        columnHLCs: columnHLCs
+                        columnHLCs: columnHLCs,
+                        // Route declared columns through CKRecord.encryptedValues (FAB5-EV Phase 2).
+                        // Empty default for undeclared tables preserves byte-identical wire format.
+                        encryptedColumns: manifest.encryptedContentColumns[entry.tableName] ?? []
                     )
                     saved.append(record)
                     recordToEntryID[record.recordID] = entry.id

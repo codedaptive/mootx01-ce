@@ -291,6 +291,11 @@ fallback for pre-migration rows. This is the zone-feed pull design
 on encrypted fields. No schema version bump — the empty-default preserves
 byte-identical wire format for unencrypted tables. Federation twin: this
 wire note is CloudKit-only (N4 Swift vertical; Rust leg not required).
+Phase 2 (FAB5-EV2): the declaration is enforced at `CloudKitSyncEngine.enable()` —
+`validateEncryptedColumns()` runs before zone setup so an invalid declaration
+fails loud before any push occurs — and applied on every push via `PushCycle`,
+which passes `manifest.encryptedContentColumns[tableName]` to `CKRecordMapping.record(...)`
+so declared columns never reach the wire in plaintext.
 
 Two distinct HLC packing layouts coexist in this package — applied at
 different layers and never mixed:
