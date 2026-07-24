@@ -23,6 +23,13 @@ import LocusKit   // LocusKitSchema.version — the cross-device schema contract
 // redundant and, worse, could import a stale projection. Brain-emitted
 // proposals/associations/learned_references are deferred until their
 // cross-device semantics are decided.
+//
+// Encrypted content columns (FAB5-EV seam, FAB5-ST activation):
+//   - drawers.content is routed through CKRecord.encryptedValues.
+//     Only the device that created the record (and devices in the same iCloud
+//     account trusted zone) can decrypt it. CloudKit infrastructure never sees
+//     plaintext. The "content" column name matches DrawerStore.drawerValues(_:)
+//     and LocusKit's structuredDrawerColumns list.
 
 public enum MootEstateSyncManifest {
 
@@ -44,6 +51,11 @@ public enum MootEstateSyncManifest {
                             primaryKeyColumn: "id", conflictPolicy: .appendOnly),
                 SyncedTable(name: "diary", direction: .bidirectional,
                             primaryKeyColumn: "id", conflictPolicy: .appendOnly),
-            ])
+            ],
+            // Drawer content rides CKRecord.encryptedValues — end-to-end encrypted
+            // in iCloud. Other drawer columns (adjectiveBitmap, operationalBitmap,
+            // metadata) remain plaintext so SensitivityFilteredStorage can inspect
+            // adjectiveBitmap in inbound records without decryption.
+            encryptedContentColumns: ["drawers": ["content"]])
     }
 }

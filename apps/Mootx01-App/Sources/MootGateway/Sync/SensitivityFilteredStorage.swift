@@ -9,13 +9,13 @@
 // storage. It gates two paths:
 //
 // OUTBOUND: Wraps StorageObserver.observe() and filters out TableChange events
-// for rows whose adjective_bitmap encodes a sensitivity tier above syncCeiling.
+// for rows whose adjectiveBitmap encodes a sensitivity tier above syncCeiling.
 // The engine's outbound observer (CloudKitStateActor.recordOutbound) feeds
 // entirely from these events. Filtering here means above-ceiling rows never
 // enter the outbox, never reach a push receipt, and never cross the CloudKit wire.
 //
 // INBOUND: Wraps RowStore.insertSync() / upsertSync() (the paths applyInbound
-// uses to write received rows). When an inbound record's adjective_bitmap exceeds
+// uses to write received rows). When an inbound record's adjectiveBitmap exceeds
 // the ceiling, the wrapper throws SensitivityCeilingError. PullCycle's per-record
 // catch counts the throw as a conflict and continues. The row is not written locally.
 //
@@ -87,8 +87,29 @@
 // produces a below-ceiling UPDATE event → passes through the observer filter
 // → enters the outbox → peers re-receive the row. The deleteSync guard checks
 // the CURRENT sensitivity, so a below-ceiling row is forwarded normally.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// FAB5-ST: Dynamic ceiling (Perkins Findings, Amendment 3)
+//
+// The ceiling is now dynamic, backed by TierAuthorizationStore. When the user
+// revokes authorization for a tier, retractAndLowerCeiling(to:tables:) is called:
+//
+// 1. Queries base storage for rows in the sensitive table(s) whose adjectiveBitmap
+//    exceeds the new (lower) ceiling.
+// 2. Yields a synthetic delete TableChange (tombstone intent) per above-ceiling
+//    row into the retraction stream.
+// 3. Updates the ceiling atomically.
+//
+// The retraction stream is merged into the "drawers" observer stream so the sync
+// engine's recordOutbound picks up the tombstones and ships them on the next push.
+// Observers for other tables are unaffected — only drawers carry adjectiveBitmap.
+//
+// SensitivityFilteredStorage is a final class (not a struct) so SyncController can
+// hold a stable reference and update the ceiling after construction.
+// ─────────────────────────────────────────────────────────────────────────────
 
 import Foundation
+import os
 import PersistenceKit
 import SubstrateTypes
 import LocusKit
@@ -96,7 +117,7 @@ import LocusKit
 // MARK: - Error
 
 /// Thrown by SensitivityFilteredRowStore when an inbound sync write carries a row
-/// whose adjective_bitmap sensitivity tier exceeds the configured syncCeiling.
+/// whose adjectiveBitmap sensitivity tier exceeds the configured syncCeiling.
 ///
 /// PullCycle catches this per-record and increments its conflict counter, then
 /// continues to the next record. The above-ceiling row is not written locally.
@@ -115,7 +136,7 @@ public struct SensitivityCeilingError: Error, Sendable, CustomStringConvertible 
 
 // MARK: - Internal bitmap helpers
 
-/// Extract the sensitivity raw value from an adjective_bitmap TypedValue.
+/// Extract the sensitivity raw value from an adjectiveBitmap TypedValue.
 ///
 /// Bits 6–11 of the Int64 bitmap carry the 6-bit sensitivity axis per
 /// LocusKit/Adjectives.swift (AdjectiveSensitivity: normal=0 / elevated=16 /
@@ -124,7 +145,7 @@ public struct SensitivityCeilingError: Error, Sendable, CustomStringConvertible 
 ///
 /// Returns nil for TypedValue cases that are not bitmap/int (unrecognised encoding
 /// or absent column). A nil result passes through — tables without an
-/// adjective_bitmap are not sensitivity-gated.
+/// adjectiveBitmap are not sensitivity-gated.
 private func sensitivityRaw(from value: TypedValue) -> Int? {
     let raw: Int64
     switch value {
@@ -137,11 +158,11 @@ private func sensitivityRaw(from value: TypedValue) -> Int? {
 
 /// True when the row encoded in `values` carries a sensitivity tier above `ceiling`.
 ///
-/// The gate is table-agnostic: any row missing an `adjective_bitmap` column returns
+/// The gate is table-agnostic: any row missing an `adjectiveBitmap` column returns
 /// false and passes through (tunnels, kg_facts, diary have no sensitivity axis).
 /// Only the `drawers` table carries the adjective bitmap in the standard estate schema.
 private func exceedsCeiling(_ values: [String: TypedValue]?, ceiling: AdjectiveSensitivity) -> Bool {
-    guard let bitmapValue = values?["adjective_bitmap"],
+    guard let bitmapValue = values?["adjectiveBitmap"],
           let raw = sensitivityRaw(from: bitmapValue) else { return false }
     return raw > ceiling.rawValue
 }
@@ -149,72 +170,84 @@ private func exceedsCeiling(_ values: [String: TypedValue]?, ceiling: AdjectiveS
 // MARK: - SensitivityFilteredObserver
 
 /// StorageObserver wrapper that filters outbound TableChange events for rows
-/// whose adjective_bitmap sensitivity tier exceeds syncCeiling.
+/// whose adjectiveBitmap sensitivity tier exceeds syncCeiling.
 ///
 /// The engine's outbound observer (CloudKitStateActor.recordOutbound, called from
 /// the storage observer stream) reads observe() to build the outbox. Filtering here
 /// prevents above-ceiling rows from ever entering the outbox, regardless of whether
 /// the write originated from a direct caller or from an integrity-hook repair.
 ///
+/// For the "drawers" table, the observer merges the upstream (filtered) stream with
+/// the parent's retraction stream so ceiling-lowering tombstones from
+/// retractAndLowerCeiling() reach the outbox without a separate channel.
+///
 /// observeBlobs() and observeDirtyChain() are forwarded unchanged — those streams
 /// carry no row-level sensitivity information.
 private struct SensitivityFilteredObserver: StorageObserver {
     let base: any StorageObserver
-    let ceiling: AdjectiveSensitivity
+    /// Reads the current ceiling at event time. Captures parent weakly.
+    let ceilingGetter: @Sendable () -> AdjectiveSensitivity
+    /// Tombstones from retractAndLowerCeiling(). Merged into the "drawers" stream only.
+    let retractionStream: AsyncStream<TableChange>
 
     func observe(table: String, events: Set<StorageEvent>) -> AsyncStream<TableChange> {
         let upstream = base.observe(table: table, events: events)
-        let cap = ceiling  // capture by value so Task closure is Sendable
-        return AsyncStream { continuation in
-            let task = Task {
-                for await change in upstream {
-                    // Only gate rows that carry an adjective_bitmap. Tables without
-                    // the column (tunnels, kg_facts, diary) always pass through.
-                    guard exceedsCeiling(change.values, ceiling: cap) else {
-                        // Below or at ceiling — pass through unchanged.
-                        continuation.yield(change)
-                        continue
-                    }
+        let getCeiling = ceilingGetter
 
-                    // Above-ceiling event. Gate by event type:
-                    //
-                    // INSERT: newly created above-ceiling row — never below ceiling on
-                    //   this device, so peers have never received it. Skip; no tombstone.
-                    //
-                    // DELETE: caller-initiated deletion of an above-ceiling row. Peers
-                    //   already don't have the row (prior retraction or was never synced).
-                    //   Skip; no peer notification needed.
-                    //
-                    // UPDATE with a valid rowKey: possible tier-rise. The row may have
-                    //   been below ceiling on a prior write and synced to peers. Emit a
-                    //   retraction tombstone (synthetic delete, origin: .local, values: nil)
-                    //   so recordOutbound enqueues it in the outbox. PushCycle sends a
-                    //   tombstone CKRecord; peers apply deleteSync through the normal path.
-                    //
-                    //   Safe to emit even if the row was always above-ceiling: a tombstone
-                    //   for a row peers never received is a no-op on their side. Outbox
-                    //   coalescing (newer HLC wins per (table, row_key)) ensures only one
-                    //   tombstone is pushed per row, not one per edit while above-ceiling.
-                    //
-                    //   Do NOT yield the original UPDATE event — above-ceiling content must
-                    //   not cross the sync boundary (sensitivity gate invariant).
-                    if change.event == .update, let rowKey = change.rowKey {
-                        // Tombstone intent: no content (nil values), origin .local so
-                        // recordOutbound treats it as an outbound change and appends it
-                        // to the outbox as a delete entry.
-                        continuation.yield(TableChange(
-                            table: change.table,
-                            event: .delete,
-                            rowKey: rowKey,
-                            values: nil,
-                            origin: .local
-                        ))
+        if table == "drawers" {
+            // For drawers: merge upstream (filtered by dynamic ceiling) +
+            // retraction tombstones from retractAndLowerCeiling().
+            let retraction = retractionStream
+            return AsyncStream { continuation in
+                let upstreamTask = Task {
+                    for await change in upstream {
+                        let cap = getCeiling()
+                        guard exceedsCeiling(change.values, ceiling: cap) else {
+                            continuation.yield(change)
+                            continue
+                        }
+                        // Above-ceiling event — emit retraction tombstone for UPDATEs.
+                        if change.event == .update, let rowKey = change.rowKey {
+                            continuation.yield(TableChange(
+                                table: change.table, event: .delete,
+                                rowKey: rowKey, values: nil, origin: .local))
+                        }
+                        // INSERT and DELETE above-ceiling: skip entirely.
                     }
-                    // INSERT and DELETE above-ceiling: skip entirely (no yield).
+                    // Upstream exhausted — do not finish continuation; retraction can
+                    // still inject tombstones (e.g. during ceiling-lowering scans).
+                    continuation.finish()
                 }
-                continuation.finish()
+                let retractionTask = Task {
+                    for await tombstone in retraction {
+                        continuation.yield(tombstone)
+                    }
+                }
+                continuation.onTermination = { _ in
+                    upstreamTask.cancel()
+                    retractionTask.cancel()
+                }
             }
-            continuation.onTermination = { _ in task.cancel() }
+        } else {
+            // Non-drawers: simple dynamic-ceiling filter (no retraction path).
+            return AsyncStream { continuation in
+                let task = Task {
+                    for await change in upstream {
+                        let cap = getCeiling()
+                        guard exceedsCeiling(change.values, ceiling: cap) else {
+                            continuation.yield(change)
+                            continue
+                        }
+                        if change.event == .update, let rowKey = change.rowKey {
+                            continuation.yield(TableChange(
+                                table: change.table, event: .delete,
+                                rowKey: rowKey, values: nil, origin: .local))
+                        }
+                    }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
         }
     }
 
@@ -228,7 +261,7 @@ private struct SensitivityFilteredObserver: StorageObserver {
 /// to enforce the sensitivity ceiling on inbound applies.
 ///
 /// When ConvergenceKit's applyInbound calls insertSync/upsertSync on this wrapper and
-/// the inbound record's adjective_bitmap exceeds the ceiling, the wrapper throws
+/// the inbound record's adjectiveBitmap exceeds the ceiling, the wrapper throws
 /// SensitivityCeilingError. PullCycle's per-record catch counts it as a conflict and
 /// continues to the next record. The row is not written locally.
 ///
@@ -241,7 +274,8 @@ private struct SensitivityFilteredObserver: StorageObserver {
 /// ceiling, the tombstone is forwarded so peer-deletion signals propagate normally.
 private struct SensitivityFilteredRowStore: RowStore {
     let base: any RowStore
-    let ceiling: AdjectiveSensitivity
+    /// Reads current ceiling at call time. Captures parent weakly via closure.
+    let ceilingGetter: @Sendable () -> AdjectiveSensitivity
 
     // MARK: Caller-initiated write paths (forwarded unchanged)
 
@@ -297,12 +331,13 @@ private struct SensitivityFilteredRowStore: RowStore {
 
     /// Inbound sync insert gate.
     ///
-    /// Throws SensitivityCeilingError when the row's adjective_bitmap sensitivity
+    /// Throws SensitivityCeilingError when the row's adjectiveBitmap sensitivity
     /// exceeds the configured ceiling. PullCycle's per-record catch counts the throw
     /// as a conflict; the row is not written locally.
     func insertSync(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        let ceiling = ceilingGetter()
         if exceedsCeiling(values, ceiling: ceiling) {
-            let raw = values["adjective_bitmap"].flatMap { sensitivityRaw(from: $0) } ?? 0
+            let raw = values["adjectiveBitmap"].flatMap { sensitivityRaw(from: $0) } ?? 0
             throw SensitivityCeilingError(table: table, sensitivityRaw: raw, ceilingRaw: ceiling.rawValue)
         }
         return try await base.insertSync(table: table, values: values)
@@ -310,7 +345,7 @@ private struct SensitivityFilteredRowStore: RowStore {
 
     /// Inbound sync upsert gate.
     ///
-    /// Throws SensitivityCeilingError when the row's adjective_bitmap sensitivity
+    /// Throws SensitivityCeilingError when the row's adjectiveBitmap sensitivity
     /// exceeds the configured ceiling. Also covers integrity-hook repair writes
     /// (hook writes use origin == .local and call upsert, not upsertSync — but the
     /// filtered observer suppresses their resulting TableChange events, so the hook
@@ -318,8 +353,9 @@ private struct SensitivityFilteredRowStore: RowStore {
     @discardableResult
     func upsertSync(table: String, values: [String: TypedValue],
                     conflictColumns: [String]) async throws -> RowHandle {
+        let ceiling = ceilingGetter()
         if exceedsCeiling(values, ceiling: ceiling) {
-            let raw = values["adjective_bitmap"].flatMap { sensitivityRaw(from: $0) } ?? 0
+            let raw = values["adjectiveBitmap"].flatMap { sensitivityRaw(from: $0) } ?? 0
             throw SensitivityCeilingError(table: table, sensitivityRaw: raw, ceilingRaw: ceiling.rawValue)
         }
         return try await base.upsertSync(table: table, values: values, conflictColumns: conflictColumns)
@@ -343,6 +379,7 @@ private struct SensitivityFilteredRowStore: RowStore {
     /// forwarded unchanged — peer-delete semantics are preserved for visible rows.
     @discardableResult
     func deleteSync(table: String, where predicate: StoragePredicate) async throws -> Int {
+        let ceiling = ceilingGetter()
         // Pre-flight: check whether the row being deleted is above-ceiling locally.
         // Use the same predicate as the delete so this compiles to one DB lookup.
         let existing = try? await base.query(
@@ -389,13 +426,13 @@ private struct SensitivityFilteredRowStore: RowStore {
 /// ## Outbound gating
 ///
 /// `observer.observe()` returns a filtered `AsyncStream<TableChange>` that drops events
-/// where `adjective_bitmap` > `syncCeiling`. The engine's recordOutbound only sees
+/// where `adjectiveBitmap` > `syncCeiling`. The engine's recordOutbound only sees
 /// below-ceiling changes; above-ceiling rows never enter the outbox.
 ///
 /// ## Inbound gating
 ///
 /// `rowStore.insertSync()` / `upsertSync()` throw `SensitivityCeilingError` when the
-/// inbound record's `adjective_bitmap` exceeds the ceiling. PullCycle counts the throw
+/// inbound record's `adjectiveBitmap` exceeds the ceiling. PullCycle counts the throw
 /// as a conflict and continues. The row is not written locally.
 ///
 /// ## Tier-rise retraction (CVK-WB1)
@@ -407,35 +444,57 @@ private struct SensitivityFilteredRowStore: RowStore {
 /// The self-delivered tombstone is blocked by SensitivityFilteredRowStore.deleteSync
 /// so the local restricted row survives. See the file header for the full design.
 ///
-/// ## Tables without adjective_bitmap
+/// ## Dynamic ceiling (FAB5-ST)
 ///
-/// Tunnels, kg_facts, and diary rows carry no `adjective_bitmap` column. The bitmap
+/// `retractAndLowerCeiling(to:tables:)` scans base storage for rows above the new
+/// ceiling, emits tombstones into the retraction stream (merged into the drawers
+/// observer), then atomically updates the ceiling. The observer and rowStore both
+/// read the ceiling at call time via a closure — no stale ceiling values.
+///
+/// ## Tables without adjectiveBitmap
+///
+/// Tunnels, kg_facts, and diary rows carry no `adjectiveBitmap` column. The bitmap
 /// extraction returns nil for those tables → all rows in those tables pass both the
 /// outbound filter and the inbound gate unchanged.
-public struct SensitivityFilteredStorage: Storage {
+public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
 
     private let base: any Storage
 
+    // OSAllocatedUnfairLock<AdjectiveSensitivity> provides fast, correct concurrent
+    // access to the ceiling from Task contexts (observer/rowStore closures) while the
+    // actor-isolated retractAndLowerCeiling writes it on the SyncController actor.
+    private let _ceiling: OSAllocatedUnfairLock<AdjectiveSensitivity>
+
+    // Retraction stream: tombstones yielded by retractAndLowerCeiling() are merged
+    // into the "drawers" observer stream so the sync engine ships them on the next push.
+    // Single-consumer by design: the sync engine's recordOutbound task reads it once
+    // per session. A new session (disable + enable) creates a new SensitivityFilteredStorage
+    // via SyncController.enable(), which has a fresh stream.
+    private let _retractionContinuation: AsyncStream<TableChange>.Continuation
+    // Internal (not private) so test targets (@testable import) can verify tombstone
+    // emission via retractAndLowerCeiling() without wiring the full merged observer.
+    let _retractionStream: AsyncStream<TableChange>
+
     /// The sensitivity ceiling applied to outbound and inbound sync.
     ///
-    /// Rows with a sensitivity tier ABOVE this value are suppressed from outbound sync
-    /// and rejected on inbound apply. The default (from `SyncConfig.disabled`) is
-    /// `.elevated` — normal and elevated rows sync freely; restricted and secret rows
-    /// are gated by this wrapper.
-    ///
-    /// This default preserves the privacy guarantee: content at the two locked
-    /// tiers (restricted / secret) does not cross device boundaries via iCloud sync
-    /// unless the operator explicitly raises the ceiling.
-    public let syncCeiling: AdjectiveSensitivity
+    /// Reads atomically from the internal lock — safe to call from any concurrency domain.
+    /// Updated only via `retractAndLowerCeiling(to:tables:)`.
+    public var syncCeiling: AdjectiveSensitivity {
+        _ceiling.withLock { $0 }
+    }
 
     /// Construct a sensitivity-filtered storage wrapper.
     ///
     /// - Parameters:
     ///   - base: The underlying Storage instance (SQLiteStorage or InMemoryStorage).
-    ///   - ceiling: Rows above this sensitivity tier are gated. Default `.elevated`.
+    ///   - ceiling: Initial rows-above-ceiling gate. Default `.elevated`.
     public init(wrapping base: any Storage, ceiling: AdjectiveSensitivity = .elevated) {
         self.base = base
-        self.syncCeiling = ceiling
+        self._ceiling = OSAllocatedUnfairLock(initialState: ceiling)
+        let (stream, continuation) = AsyncStream<TableChange>.makeStream(
+            bufferingPolicy: .bufferingNewest(256))
+        self._retractionStream = stream
+        self._retractionContinuation = continuation
     }
 
     // MARK: Storage protocol — filtered surfaces
@@ -443,16 +502,26 @@ public struct SensitivityFilteredStorage: Storage {
     public var configuration: EstateConfiguration { base.configuration }
 
     /// Filtered row store — gates inbound sync writes above syncCeiling.
+    ///
+    /// Created on each call; captures ceiling via closure for dynamic updates.
     public var rowStore: any RowStore {
-        SensitivityFilteredRowStore(base: base.rowStore, ceiling: syncCeiling)
+        SensitivityFilteredRowStore(
+            base: base.rowStore,
+            ceilingGetter: { [weak self] in self?.syncCeiling ?? .elevated })
     }
 
     public var blobStore: any BlobStore { base.blobStore }
     public var auditLog: any AuditLog { base.auditLog }
 
     /// Filtered observer — suppresses outbound TableChange events for above-ceiling rows.
+    ///
+    /// For the "drawers" table, merges the upstream (filtered) stream with the retraction
+    /// stream so ceiling-lowering tombstones from retractAndLowerCeiling() reach the outbox.
     public var observer: any StorageObserver {
-        SensitivityFilteredObserver(base: base.observer, ceiling: syncCeiling)
+        SensitivityFilteredObserver(
+            base: base.observer,
+            ceilingGetter: { [weak self] in self?.syncCeiling ?? .elevated },
+            retractionStream: _retractionStream)
     }
 
     public var datasetStore: any DatasetStore {
@@ -484,5 +553,52 @@ public struct SensitivityFilteredStorage: Storage {
 
     public func migrate(to schema: SchemaDeclaration) async throws {
         try await base.migrate(to: schema)
+    }
+
+    // MARK: Dynamic ceiling — FAB5-ST
+
+    /// Scan `tables` for rows above `newCeiling`, emit WB1-style tombstones into the
+    /// retraction stream (merged into the drawers observer), then update the ceiling.
+    ///
+    /// Called by SyncController when TierAuthorizationStore reports a ceiling change.
+    ///
+    /// Tombstone semantics: the retraction stream delivers synthetic delete TableChange
+    /// events (origin: .local, nil values) with the row's UUID as rowKey. The drawers
+    /// observer merges these into its output stream so CloudKitStateActor.recordOutbound
+    /// enqueues them in the outbox on the next push cycle. Peers receive a tombstone
+    /// CKRecord and hard-delete their below-ceiling copy (normal tombstone path).
+    ///
+    /// Self-delivery guard (CVK-WB1): SensitivityFilteredRowStore.deleteSync blocks
+    /// inbound tombstones for rows that are locally above-ceiling, so the local copy
+    /// survives the retraction round-trip.
+    ///
+    /// When ceiling RAISES (newCeiling > current): no rows are above the new ceiling
+    /// relative to the new threshold, so no tombstones are emitted. The ceiling is
+    /// updated, and new observer reads use the higher ceiling immediately.
+    ///
+    /// - Parameters:
+    ///   - newCeiling: The ceiling to enforce after retraction.
+    ///   - tables: Tables to scan for above-ceiling rows (typically `["drawers"]`).
+    public func retractAndLowerCeiling(
+        to newCeiling: AdjectiveSensitivity,
+        tables: [String]
+    ) async {
+        for table in tables {
+            let rows = (try? await base.rowStore.query(
+                table: table, where: nil, orderBy: [], limit: nil, offset: nil)) ?? []
+            for row in rows {
+                guard exceedsCeiling(row.values, ceiling: newCeiling) else { continue }
+                // Extract row ID: drawers use the "id" UUID column.
+                guard case .uuid(let rowKey) = row.values["id"] else { continue }
+                _retractionContinuation.yield(TableChange(
+                    table: table,
+                    event: .delete,
+                    rowKey: rowKey,
+                    values: nil,
+                    origin: .local
+                ))
+            }
+        }
+        _ceiling.withLock { $0 = newCeiling }
     }
 }

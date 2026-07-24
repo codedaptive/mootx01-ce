@@ -146,7 +146,7 @@ struct FederationSessionManagerTests {
                         // adjective_bitmap: sensitivity axis column. Bits 6–11 hold
                         // the sensitivity raw value (>> 6 & 0x3F). raw=0 is normal;
                         // raw=16 is elevated (ceiling for Balanced); raw>16 suppressed.
-                        .bitmap("adjective_bitmap")
+                        .bitmap("adjectiveBitmap")
                     ],
                     primaryKey: ["id"]
                 )
@@ -163,7 +163,7 @@ struct FederationSessionManagerTests {
             tables: [
                 TableDeclaration(
                     name: "items",
-                    columns: [.uuid("id"), .text("content"), .bitmap("adjective_bitmap")],
+                    columns: [.uuid("id"), .text("content"), .bitmap("adjectiveBitmap")],
                     primaryKey: ["id"]
                 )
             ],
@@ -202,7 +202,7 @@ struct FederationSessionManagerTests {
             values: [
                 "id":               .uuid(UUID()),
                 "content":          .text("normal-sensitivity row — below ceiling, would reach B if channel open"),
-                "adjective_bitmap": .bitmap(0)   // raw=0, normal: (0 >> 6) & 0x3F = 0 ≤ 16 ceiling
+                "adjectiveBitmap": .bitmap(0)   // raw=0, normal: (0 >> 6) & 0x3F = 0 ≤ 16 ceiling
             ]
         )
 
@@ -484,7 +484,7 @@ struct LANCeilingConformanceTests {
                         // adjective_bitmap: the sensitivity axis column.
                         // SensitivityFilteredObserver reads bits 6-11 of this field
                         // to determine the sensitivity tier (see SensitivityFilteredStorage.swift).
-                        .bitmap("adjective_bitmap")
+                        .bitmap("adjectiveBitmap")
                     ],
                     primaryKey: ["id"]
                 )
@@ -565,7 +565,7 @@ struct LANCeilingConformanceTests {
                 "content": .text("restricted content — must not cross LAN relay"),
                 // Encoding: bits 6–11 = sensitivity raw value.
                 // restricted sensitivity raw = 32 → adjective_bitmap = 32 << 6 = 2048.
-                "adjective_bitmap": .bitmap(Int64(32) << 6)
+                "adjectiveBitmap": .bitmap(Int64(32) << 6)
             ]
         )
 
@@ -626,7 +626,7 @@ struct LANCeilingConformanceTests {
             values: [
                 "id": .uuid(UUID()),
                 "content": .text("normal content — at or below ceiling, must sync"),
-                "adjective_bitmap": .bitmap(0)  // normal: raw 0, 0 <= ceiling 16 → passes filter
+                "adjectiveBitmap": .bitmap(0)  // normal: raw 0, 0 <= ceiling 16 → passes filter
             ]
         )
 
