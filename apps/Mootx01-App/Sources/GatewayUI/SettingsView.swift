@@ -1,7 +1,7 @@
 import SwiftUI
 import MootGateway
 
-// MARK: - SettingsView (FAB5-SM)
+// MARK: - SettingsView (FAB5-SM, FAB5-ST)
 //
 // First-class Settings surface for the app. Entry point:
 //   - macOS: system Settings window (Cmd+,) via `Settings { SettingsView() }` in Mootx01App.
@@ -11,8 +11,12 @@ import MootGateway
 // switch is the single authoritative gate — SyncTileView in EngineView mirrors
 // the same UserDefaults value and reacts immediately. No second source of truth.
 //
-// The placeholder "Sensitive Tiers" section header is reserved for mission st,
-// which will populate it with per-tier sync policy controls.
+// FAB5-ST adds a Sensitive Tiers section with per-tier opt-in toggles (restricted,
+// secret). Each requires device authentication (biometry or passcode) via
+// TierAuthorizationStore before the keychain sentinel is written. Revoking drops
+// the sentinel and emits WB1 retraction tombstones for now-above-ceiling rows.
+// The secret tier toggle ships visible but disabled pending Perkins clearance
+// (secretTierCleared build flag enables it).
 
 public struct SettingsView: View {
 
@@ -20,6 +24,17 @@ public struct SettingsView: View {
     /// views read and write UserDefaults["iCloudMasterEnabled"]; changes in
     /// one are immediately visible in the other.
     @AppStorage(SyncPolicy.masterEnabledKey) private var masterEnabled = false
+
+    /// Restricted-tier sync authorization state (FAB5-ST). Loaded from
+    /// TierAuthorizationStore on appear; updated optimistically on toggle,
+    /// then snapped back if authentication fails.
+    @State private var restrictedEnabled = false
+
+#if secretTierCleared
+    /// Secret-tier sync authorization state (FAB5-ST). Only compiled when
+    /// secretTierCleared is set — the Perkins clearance build flag.
+    @State private var secretEnabled = false
+#endif
 
     public init() {}
 
@@ -41,6 +56,7 @@ public struct SettingsView: View {
     private var macOSContent: some View {
         Form {
             syncSection
+            sensitiveTierSection
         }
         .formStyle(.grouped)
         .frame(minWidth: 400, idealWidth: 480)
@@ -53,6 +69,7 @@ public struct SettingsView: View {
     private var iosContent: some View {
         Form {
             syncSection
+            sensitiveTierSection
         }
         .formStyle(.grouped)
     }
@@ -101,8 +118,134 @@ public struct SettingsView: View {
             Text(String(localized: "settings.sync.section.footer",
                        defaultValue: "Restricted and Secret memories never leave this device, regardless of this setting."))
         }
+    }
 
-        // Placeholder for mission st — per-tier sync policy controls.
-        // This section header is intentionally empty until st populates it.
+    // MARK: - Sensitive Tiers section (FAB5-ST)
+
+    private var sensitiveTierSection: some View {
+        Section {
+            // Restricted tier toggle — auth-gated via TierAuthorizationStore.
+            // Enabling triggers biometry/passcode; disabling revokes immediately (no auth).
+            Toggle(isOn: $restrictedEnabled) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "settings.sync.tier.restricted.label",
+                                   defaultValue: "Restricted Memories"))
+                        Text(String(localized: "settings.sync.tier.restricted.detail",
+                                   defaultValue: "Sync Restricted memories to your Apple devices."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "lock.shield")
+                        .accessibilityHidden(true)
+                }
+            }
+            .disabled(!masterEnabled)
+            .accessibilityLabel(String(localized: "settings.sync.tier.restricted.a11y.label",
+                                       defaultValue: "Restricted memory sync"))
+            .accessibilityHint(String(localized: "settings.sync.tier.restricted.a11y.hint",
+                                      defaultValue: "Requires device authentication to enable. Disabling revokes authorization and removes synced content from other devices."))
+            .onChange(of: restrictedEnabled) { _, newValue in
+                Task {
+                    if newValue {
+                        let granted = await TierAuthorizationStore.shared.authorize(.restricted)
+                        if !granted {
+                            // Auth failed or cancelled — snap back to off.
+                            restrictedEnabled = false
+                        } else {
+                            await MootSyncDriver.shared.reconfigureForAuthorizedTiers()
+                        }
+                    } else {
+                        // No auth required to revoke — user is reducing sync scope.
+                        await MootSyncDriver.shared.revokeAndRetract(tier: .restricted)
+                    }
+                }
+            }
+
+#if secretTierCleared
+            // Secret tier toggle — compiled only after Perkins clearance grants
+            // the secretTierCleared build flag. Same auth flow as restricted.
+            Toggle(isOn: $secretEnabled) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "settings.sync.tier.secret.label",
+                                   defaultValue: "Secret Memories"))
+                        Text(String(localized: "settings.sync.tier.secret.detail",
+                                   defaultValue: "Sync Secret memories to your Apple devices."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "lock.shield.fill")
+                        .accessibilityHidden(true)
+                }
+            }
+            .disabled(!masterEnabled)
+            .accessibilityLabel(String(localized: "settings.sync.tier.secret.a11y.label",
+                                       defaultValue: "Secret memory sync"))
+            .accessibilityHint(String(localized: "settings.sync.tier.secret.a11y.hint",
+                                      defaultValue: "Requires device authentication to enable. Disabling revokes authorization and removes synced content from other devices."))
+            .onChange(of: secretEnabled) { _, newValue in
+                Task {
+                    if newValue {
+                        let granted = await TierAuthorizationStore.shared.authorize(.secret)
+                        if !granted {
+                            secretEnabled = false
+                        } else {
+                            await MootSyncDriver.shared.reconfigureForAuthorizedTiers()
+                        }
+                    } else {
+                        await MootSyncDriver.shared.revokeAndRetract(tier: .secret)
+                    }
+                }
+            }
+#else
+            // Secret tier sync ships visible but disabled — pending Perkins security
+            // clearance (FAB5-ST). The secretTierCleared build flag enables the live
+            // toggle. The plumbing (TierAuthorizationStore, retraction stream) is
+            // complete and tested; only this UI gate and the build flag are missing.
+            Toggle(isOn: .constant(false)) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(localized: "settings.sync.tier.secret.label",
+                                   defaultValue: "Secret Memories"))
+                        Text(String(localized: "settings.sync.tier.secret.unavailable",
+                                   defaultValue: "Not available in this build."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "lock.shield.fill")
+                        .accessibilityHidden(true)
+                }
+            }
+            .disabled(true)
+            .accessibilityLabel(String(localized: "settings.sync.tier.secret.a11y.label",
+                                       defaultValue: "Secret memory sync"))
+            .accessibilityHint(String(localized: "settings.sync.tier.secret.a11y.unavailable.hint",
+                                      defaultValue: "Not available in this build."))
+#endif
+        } header: {
+            Text(String(localized: "settings.sync.sensitivetier.header",
+                       defaultValue: "Sensitive Tiers"))
+        } footer: {
+#if secretTierCleared
+            Text(String(localized: "settings.sync.sensitivetier.footer",
+                       defaultValue: "Each tier requires device authentication to enable. Disabling removes synced content from other devices."))
+#else
+            Text(String(localized: "settings.sync.sensitivetier.footer",
+                       defaultValue: "Restricted sync requires device authentication. Secret sync is pending clearance and will be enabled in a future update."))
+#endif
+        }
+        .task {
+            // Load current authorization state from TierAuthorizationStore.
+            // Runs on section appear — safe to call async without a spinner because
+            // the keychain read is synchronous under the hood (actor serializes it).
+            restrictedEnabled = await TierAuthorizationStore.shared.isAuthorized(.restricted)
+#if secretTierCleared
+            secretEnabled = await TierAuthorizationStore.shared.isAuthorized(.secret)
+#endif
+        }
     }
 }

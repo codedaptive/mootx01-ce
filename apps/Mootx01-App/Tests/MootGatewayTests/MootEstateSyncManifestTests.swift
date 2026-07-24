@@ -38,4 +38,26 @@ struct MootEstateSyncManifestTests {
         // These rebuild locally (composite keys / projections) — never synced.
         #expect(names.isDisjoint(with: ["node_bundles", "matrix_snapshot", "container_fingerprints"]))
     }
+
+    // MARK: FAB5-EV seam / FAB5-ST encrypted content columns
+
+    @Test("drawers.content rides encryptedValues — FAB5-EV seam declaration correct")
+    func drawersContentEncrypted() throws {
+        let manifest = MootEstateSyncManifest.standard()
+
+        // Exactly one table has an encrypted-column declaration.
+        #expect(manifest.encryptedContentColumns.count == 1,
+                "only drawers declares encrypted columns")
+
+        let encrypted = try #require(manifest.encryptedContentColumns["drawers"],
+                                     "drawers must be in encryptedContentColumns")
+        #expect(encrypted == ["content"],
+                "drawers.content is the encrypted column (matches LocusKit DrawerStore)")
+
+        // The declaration must also pass ConvergenceKit's own validation gate
+        // (rejects _sync* columns and _ck_* tables).
+        #expect(throws: Never.self) {
+            try manifest.validateEncryptedColumns()
+        }
+    }
 }

@@ -193,7 +193,7 @@ private struct FixedQueryStorage: Storage {
 
 // MARK: - Helpers
 
-/// Build an adjective_bitmap Int64 encoding the given sensitivity tier.
+/// Build an adjectiveBitmap Int64 encoding the given sensitivity tier.
 /// Bits 6–11 carry the sensitivity raw value (normal=0, elevated=16,
 /// restricted=32, secret=48), matching LocusKit/Adjectives.swift.
 private func adjBitmap(sensitivity: AdjectiveSensitivity) -> TypedValue {
@@ -206,18 +206,19 @@ private func drawerChange(
     event: StorageEvent = .insert,
     rowKey: UUID = UUID()
 ) -> TableChange {
+    // Column name matches LocusKitSchema: .bitmap("adjectiveBitmap") (camelCase).
     TableChange(
         table: "drawers",
         event: event,
         rowKey: rowKey,
-        values: ["adjective_bitmap": adjBitmap(sensitivity: sensitivity)],
+        values: ["adjectiveBitmap": adjBitmap(sensitivity: sensitivity)],
         origin: .local
     )
 }
 
 /// Build a StorageRow for the drawers table with the given sensitivity tier.
-private func drawerRow(sensitivity: AdjectiveSensitivity) -> StorageRow {
-    StorageRow(values: ["adjective_bitmap": adjBitmap(sensitivity: sensitivity)])
+private func drawerRow(sensitivity: AdjectiveSensitivity, id: UUID = UUID()) -> StorageRow {
+    StorageRow(values: ["id": .uuid(id), "adjectiveBitmap": adjBitmap(sensitivity: sensitivity)])
 }
 
 // MARK: - Tests
@@ -305,9 +306,9 @@ struct SensitivityFilteredStorageTests {
         #expect(received.count == 2, "only normal and elevated events should pass; got \(received.count)")
     }
 
-    @Test("Events without adjective_bitmap (non-drawer tables) always pass through")
+    @Test("Events without adjectiveBitmap (non-drawer tables) always pass through")
     func observerPassesEventsWithoutSensitivity() async {
-        // A tunnel TableChange has no adjective_bitmap.
+        // A tunnel TableChange has no adjectiveBitmap.
         let upstream = [
             TableChange(
                 table: "tunnels",
@@ -324,8 +325,8 @@ struct SensitivityFilteredStorageTests {
         for await change in filtered.observer.observe(table: "tunnels", events: [.insert]) {
             received.append(change)
         }
-        // No adjective_bitmap → no sensitivity check → always passes.
-        #expect(received.count == 1, "tunnel event without adjective_bitmap must pass through")
+        // No adjectiveBitmap → no sensitivity check → always passes.
+        #expect(received.count == 1, "tunnel event without adjectiveBitmap must pass through")
     }
 
     // MARK: Inbound rowStore gating
@@ -337,7 +338,7 @@ struct SensitivityFilteredStorageTests {
 
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
-            "adjective_bitmap": adjBitmap(sensitivity: .restricted),
+            "adjectiveBitmap": adjBitmap(sensitivity: .restricted),
         ]
         await #expect(throws: SensitivityCeilingError.self) {
             _ = try await filtered.rowStore.insertSync(table: "drawers", values: values)
@@ -351,7 +352,7 @@ struct SensitivityFilteredStorageTests {
 
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
-            "adjective_bitmap": adjBitmap(sensitivity: .secret),
+            "adjectiveBitmap": adjBitmap(sensitivity: .secret),
         ]
         await #expect(throws: SensitivityCeilingError.self) {
             _ = try await filtered.rowStore.insertSync(table: "drawers", values: values)
@@ -365,7 +366,7 @@ struct SensitivityFilteredStorageTests {
 
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
-            "adjective_bitmap": adjBitmap(sensitivity: .elevated),
+            "adjectiveBitmap": adjBitmap(sensitivity: .elevated),
         ]
         // Should NOT throw — at-ceiling rows are permitted.
         let handle = try await filtered.rowStore.insertSync(table: "drawers", values: values)
@@ -379,7 +380,7 @@ struct SensitivityFilteredStorageTests {
 
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
-            "adjective_bitmap": adjBitmap(sensitivity: .normal),
+            "adjectiveBitmap": adjBitmap(sensitivity: .normal),
         ]
         let handle = try await filtered.rowStore.insertSync(table: "drawers", values: values)
         #expect(handle.table == "drawers", "normal-sensitivity insert should return a valid handle")
@@ -395,7 +396,7 @@ struct SensitivityFilteredStorageTests {
 
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
-            "adjective_bitmap": adjBitmap(sensitivity: .restricted),
+            "adjectiveBitmap": adjBitmap(sensitivity: .restricted),
             "content": .text("restricted-content"),
         ]
         await #expect(throws: SensitivityCeilingError.self) {
@@ -411,7 +412,7 @@ struct SensitivityFilteredStorageTests {
 
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
-            "adjective_bitmap": adjBitmap(sensitivity: .secret),
+            "adjectiveBitmap": adjBitmap(sensitivity: .secret),
         ]
         await #expect(throws: SensitivityCeilingError.self) {
             _ = try await filtered.rowStore.upsertSync(
@@ -438,9 +439,9 @@ struct SensitivityFilteredStorageTests {
         #expect(count == 0, "fake rowStore returns 0 deletes (row absent); must not throw")
     }
 
-    @Test("insertSync on table without adjective_bitmap passes — not sensitivity-gated")
+    @Test("insertSync on table without adjectiveBitmap passes — not sensitivity-gated")
     func insertSyncNoSensitivityColumnPasses() async throws {
-        // kg_facts and diary tables have no adjective_bitmap column.
+        // kg_facts and diary tables have no adjectiveBitmap column.
         // Absent bitmap → no sensitivity check → always passes through to base.
         let base = FakeSyncStorage(seededChanges: [])
         let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
@@ -450,7 +451,7 @@ struct SensitivityFilteredStorageTests {
             "subject": .text("test-subject"),
         ]
         let handle = try await filtered.rowStore.insertSync(table: "kg_facts", values: values)
-        #expect(handle.table == "kg_facts", "kg_facts insert without adjective_bitmap must pass through")
+        #expect(handle.table == "kg_facts", "kg_facts insert without adjectiveBitmap must pass through")
     }
 
     // MARK: CVK-WB1: Tier-rise retraction — observer tombstone emission
@@ -465,7 +466,7 @@ struct SensitivityFilteredStorageTests {
         let rowKey = UUID()
         let upstream = [
             TableChange(table: "drawers", event: .update, rowKey: rowKey,
-                        values: ["adjective_bitmap": adjBitmap(sensitivity: .restricted)],
+                        values: ["adjectiveBitmap": adjBitmap(sensitivity: .restricted)],
                         origin: .local),
         ]
         let base = FakeSyncStorage(seededChanges: upstream)
@@ -526,7 +527,7 @@ struct SensitivityFilteredStorageTests {
         let rowKey = UUID()
         let upstream = [
             TableChange(table: "drawers", event: .update, rowKey: rowKey,
-                        values: ["adjective_bitmap": adjBitmap(sensitivity: .elevated)],
+                        values: ["adjectiveBitmap": adjBitmap(sensitivity: .elevated)],
                         origin: .local),
         ]
         let base = FakeSyncStorage(seededChanges: upstream)
@@ -553,11 +554,11 @@ struct SensitivityFilteredStorageTests {
         let upstream = [
             // First: tier-rise UPDATE (restricted) → must produce tombstone
             TableChange(table: "drawers", event: .update, rowKey: rowKey,
-                        values: ["adjective_bitmap": adjBitmap(sensitivity: .restricted)],
+                        values: ["adjectiveBitmap": adjBitmap(sensitivity: .restricted)],
                         origin: .local),
             // Second: demotion UPDATE (elevated) → must pass through as UPDATE
             TableChange(table: "drawers", event: .update, rowKey: rowKey,
-                        values: ["adjective_bitmap": adjBitmap(sensitivity: .elevated)],
+                        values: ["adjectiveBitmap": adjBitmap(sensitivity: .elevated)],
                         origin: .local),
         ]
         let base = FakeSyncStorage(seededChanges: upstream)
@@ -576,7 +577,7 @@ struct SensitivityFilteredStorageTests {
         // Second event: demotion re-sync (passes through unchanged)
         #expect(received[1].event == .update, "second event must be the demotion UPDATE")
         #expect(received[1].rowKey == rowKey)
-        #expect(received[1].values?["adjective_bitmap"] == adjBitmap(sensitivity: .elevated),
+        #expect(received[1].values?["adjectiveBitmap"] == adjBitmap(sensitivity: .elevated),
                 "demotion UPDATE must carry elevated sensitivity")
     }
 
@@ -631,7 +632,7 @@ struct SensitivityFilteredStorageTests {
         // restricted = rawValue 32; bits 6–11 → Int64(32) << 6
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
-            "adjective_bitmap": adjBitmap(sensitivity: .restricted),
+            "adjectiveBitmap": adjBitmap(sensitivity: .restricted),
         ]
 
         var caught: SensitivityCeilingError? = nil
@@ -647,5 +648,157 @@ struct SensitivityFilteredStorageTests {
         #expect(caught?.table == "drawers")
         #expect(caught?.sensitivityRaw == 32, "sensitivity raw must be 32 (restricted tier)")
         #expect(caught?.ceilingRaw == 16, "ceiling raw must be 16 (elevated tier)")
+    }
+
+    // MARK: FAB5-ST Part 2: Dynamic ceiling — ceiling matrix
+
+    @Test("syncCeiling reflects construction-time ceiling")
+    func syncCeilingReflectsConstruction() {
+        let storage = SensitivityFilteredStorage(wrapping: FakeSyncStorage(seededChanges: []),
+                                                 ceiling: .restricted)
+        #expect(storage.syncCeiling == .restricted)
+    }
+
+    @Test("Dynamic ceiling: observer uses updated ceiling after retractAndLowerCeiling")
+    func dynamicCeilingObserverUsesUpdatedCeiling() async {
+        // Create with .restricted ceiling so restricted rows PASS through.
+        let base = FakeSyncStorage(seededChanges: [drawerChange(sensitivity: .restricted)])
+        let storage = SensitivityFilteredStorage(wrapping: base, ceiling: .restricted)
+
+        // Verify restricted row passes with .restricted ceiling.
+        var beforeUpdate: [TableChange] = []
+        for await change in storage.observer.observe(table: "drawers", events: [.insert]) {
+            beforeUpdate.append(change)
+        }
+        #expect(beforeUpdate.count == 1, "restricted row must pass when ceiling is .restricted")
+
+        // Lower ceiling to .elevated — verify syncCeiling updated.
+        await storage.retractAndLowerCeiling(to: .elevated, tables: ["drawers"])
+        #expect(storage.syncCeiling == .elevated, "syncCeiling must reflect lowered ceiling")
+
+        // New observer with fresh upstream — restricted row now blocked.
+        let base2 = FakeSyncStorage(seededChanges: [drawerChange(sensitivity: .restricted)])
+        let storage2 = SensitivityFilteredStorage(wrapping: base2, ceiling: .restricted)
+        await storage2.retractAndLowerCeiling(to: .elevated, tables: ["drawers"])
+        var afterUpdate: [TableChange] = []
+        for await change in storage2.observer.observe(table: "drawers", events: [.insert]) {
+            afterUpdate.append(change)
+        }
+        #expect(afterUpdate.isEmpty, "restricted row must be blocked after ceiling lowered to .elevated")
+    }
+
+    // MARK: FAB5-ST Part 2: Ceiling matrix (sensitivity × ceiling gate outcomes)
+
+    @Test("Ceiling matrix: restricted ceiling — restricted row passes, secret blocked")
+    func ceilingMatrixRestrictedCeiling() async {
+        // Ceiling = .restricted → restricted rows pass (raw 32 == ceiling raw 32),
+        // secret rows are blocked (raw 48 > ceiling raw 32).
+        let upstream = [
+            drawerChange(sensitivity: .restricted, event: .insert),
+            drawerChange(sensitivity: .secret, event: .insert),
+        ]
+        let base = FakeSyncStorage(seededChanges: upstream)
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .restricted)
+
+        var received: [TableChange] = []
+        for await change in filtered.observer.observe(table: "drawers", events: [.insert]) {
+            received.append(change)
+        }
+        #expect(received.count == 1, "restricted passes at .restricted ceiling; secret blocked")
+    }
+
+    @Test("Ceiling matrix: secret ceiling — all tiers pass")
+    func ceilingMatrixSecretCeiling() async {
+        // Ceiling = .secret → all tiers pass (raw 48 == ceiling raw 48, nothing above).
+        let upstream = [
+            drawerChange(sensitivity: .normal),
+            drawerChange(sensitivity: .elevated),
+            drawerChange(sensitivity: .restricted),
+            drawerChange(sensitivity: .secret),
+        ]
+        let base = FakeSyncStorage(seededChanges: upstream)
+        let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .secret)
+
+        var received: [TableChange] = []
+        for await change in filtered.observer.observe(table: "drawers", events: [.insert]) {
+            received.append(change)
+        }
+        #expect(received.count == 4, "all tiers pass at .secret ceiling")
+    }
+
+    // MARK: FAB5-ST Part 2: Revocation retraction
+
+    @Test("retractAndLowerCeiling emits tombstones for above-new-ceiling rows in base storage")
+    func retractAndLowerCeilingEmitsTombstones() async {
+        // Seed base with one restricted row (row is above new ceiling .elevated).
+        let restrictedID = UUID()
+        let restrictedRow = drawerRow(sensitivity: .restricted, id: restrictedID)
+        let fixedRowStore = FixedQueryRowStore(queryResult: [restrictedRow], deleteResult: 0)
+        let base = FixedQueryStorage(fixedRowStore: fixedRowStore, seededChanges: [])
+
+        // Start with .restricted ceiling so the row was permitted.
+        let storage = SensitivityFilteredStorage(wrapping: base, ceiling: .restricted)
+
+        // Collect tombstones from the retraction stream, returning them from the Task
+        // so no mutable state is shared across isolation domains (Swift 6).
+        let collector = Task<[TableChange], Never> {
+            var collected: [TableChange] = []
+            for await tombstone in storage._retractionStream {
+                collected.append(tombstone)
+                if collected.count >= 1 { break }
+            }
+            return collected
+        }
+
+        // Lower ceiling to .elevated — restricted row is now above-ceiling.
+        await storage.retractAndLowerCeiling(to: .elevated, tables: ["drawers"])
+        let tombstones = await collector.value
+
+        #expect(tombstones.count == 1, "one tombstone per above-ceiling row")
+        #expect(tombstones[0].event == .delete, "tombstone must be a delete event")
+        #expect(tombstones[0].table == "drawers")
+        #expect(tombstones[0].rowKey == restrictedID, "tombstone rowKey must match the row's id")
+        #expect(tombstones[0].values == nil, "tombstone must carry no content")
+        #expect(tombstones[0].origin == .local, "tombstone must be .local origin for outbox pickup")
+        #expect(storage.syncCeiling == .elevated, "ceiling updated after retraction scan")
+    }
+
+    @Test("retractAndLowerCeiling emits no tombstones when no rows exceed new ceiling")
+    func retractAndLowerCeilingNoTombstonesWhenBelowCeiling() async {
+        // All rows are elevated — none exceed the new .elevated ceiling.
+        let elevatedRow = drawerRow(sensitivity: .elevated, id: UUID())
+        let fixedRowStore = FixedQueryRowStore(queryResult: [elevatedRow], deleteResult: 0)
+        let base = FixedQueryStorage(fixedRowStore: fixedRowStore, seededChanges: [])
+        let storage = SensitivityFilteredStorage(wrapping: base, ceiling: .secret)
+
+        // Return count from Task to avoid sharing mutable state across isolation domains (Swift 6).
+        let collector = Task<Int, Never> {
+            var count = 0
+            // Read with a short timeout to confirm no tombstones arrive.
+            // Since makeStream uses bufferingNewest, tombstones yielded before
+            // Task starts are buffered. A count of 0 after retract confirms none emitted.
+            for await _ in storage._retractionStream { count += 1 }
+            return count
+        }
+        await storage.retractAndLowerCeiling(to: .elevated, tables: ["drawers"])
+        // Give collector a brief window to see any buffered events.
+        try? await Task.sleep(nanoseconds: 5_000_000)  // 5ms
+        collector.cancel()
+        let tombstoneCount = await collector.value
+
+        #expect(tombstoneCount == 0, "no tombstones when all rows are within the new ceiling")
+        #expect(storage.syncCeiling == .elevated)
+    }
+
+    @Test("retractAndLowerCeiling ceiling raise emits no tombstones and updates ceiling")
+    func retractAndLowerCeilingRaiseEmitsNothing() async {
+        // Raising ceiling: .elevated → .restricted. No rows above new ceiling (no tombstones).
+        let base = FixedQueryStorage(
+            fixedRowStore: FixedQueryRowStore(queryResult: [], deleteResult: 0),
+            seededChanges: [])
+        let storage = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
+
+        await storage.retractAndLowerCeiling(to: .restricted, tables: ["drawers"])
+        #expect(storage.syncCeiling == .restricted, "ceiling updated even when no retraction needed")
     }
 }

@@ -19,7 +19,7 @@
 //   FSM-5: F1 invariant line — non-Balanced postures throw postureUnavailable
 //   FSM-6: Session state machine — idle → active → ended → reset → idle
 //   FSM-7: [FED-OD-7 Row 3] Ceiling holds at LANRelay inbox — restricted-sensitivity
-//          row (adjective_bitmap encoding raw=32) is suppressed by
+//          row (adjectiveBitmap encoding raw=32) is suppressed by
 //          SensitivityFilteredObserver and never reaches the transport inbox
 //   FSM-8: [FED-OD-7 Row 3 positive control] Normal-sensitivity row (raw=0) is NOT
 //          suppressed and DOES reach the transport inbox after push
@@ -143,10 +143,10 @@ struct FederationSessionManagerTests {
                     columns: [
                         .uuid("id"),
                         .text("content"),
-                        // adjective_bitmap: sensitivity axis column. Bits 6–11 hold
+                        // adjectiveBitmap: sensitivity axis column. Bits 6–11 hold
                         // the sensitivity raw value (>> 6 & 0x3F). raw=0 is normal;
                         // raw=16 is elevated (ceiling for Balanced); raw>16 suppressed.
-                        .bitmap("adjective_bitmap")
+                        .bitmap("adjectiveBitmap")
                     ],
                     primaryKey: ["id"]
                 )
@@ -163,7 +163,7 @@ struct FederationSessionManagerTests {
             tables: [
                 TableDeclaration(
                     name: "items",
-                    columns: [.uuid("id"), .text("content"), .bitmap("adjective_bitmap")],
+                    columns: [.uuid("id"), .text("content"), .bitmap("adjectiveBitmap")],
                     primaryKey: ["id"]
                 )
             ],
@@ -195,14 +195,14 @@ struct FederationSessionManagerTests {
         try await engineA.pair(with: engineB, family: familySpec)
         let bKey = await engineB.identity.publicKey
 
-        // Insert a BELOW-ceiling row on A's side (adjective_bitmap = 0, raw = 0 ≤ 16).
+        // Insert a BELOW-ceiling row on A's side (adjectiveBitmap = 0, raw = 0 ≤ 16).
         // The SensitivityFilteredObserver passes this through and appends it to _fed_outbox.
         _ = try await rawStorageA.rowStore.insert(
             table: "items",
             values: [
                 "id":               .uuid(UUID()),
                 "content":          .text("normal-sensitivity row — below ceiling, would reach B if channel open"),
-                "adjective_bitmap": .bitmap(0)   // raw=0, normal: (0 >> 6) & 0x3F = 0 ≤ 16 ceiling
+                "adjectiveBitmap": .bitmap(0)   // raw=0, normal: (0 >> 6) & 0x3F = 0 ≤ 16 ceiling
             ]
         )
 
@@ -444,13 +444,13 @@ struct FederationSessionManagerTests {
 /// FSM-2 (FED-OD-4) verified that SensitivityFilteredStorage is wired at .elevated
 /// ceiling using an empty manifest. These tests extend that proof:
 ///   FSM-7 proves the filter works with an ACTUAL above-ceiling row (restricted
-///          sensitivity, adjective_bitmap = Int64(32) << 6 = 2048, bits 6-11 = raw 32)
+///          sensitivity, adjectiveBitmap = Int64(32) << 6 = 2048, bits 6-11 = raw 32)
 ///          in a manifest-declared table with a real paired peer, verifying the row
 ///          never reaches the transport inbox.
-///   FSM-8 is the positive control: a normal row (adjective_bitmap = 0, raw = 0)
+///   FSM-8 is the positive control: a normal row (adjectiveBitmap = 0, raw = 0)
 ///          is NOT suppressed and DOES reach the peer's transport inbox after push.
 ///
-/// adjective_bitmap encoding for sensitivity tiers (LocusKit/Adjectives.swift):
+/// adjectiveBitmap encoding for sensitivity tiers (LocusKit/Adjectives.swift):
 ///   Bits 6–11 hold the 6-bit sensitivity axis raw value (extracted by >> 6 & 0x3F).
 ///   normal    = 0   → bitmap = 0
 ///   elevated  = 16  → bitmap = Int64(16) << 6 = 1024  (at ceiling for Balanced session)
@@ -461,11 +461,11 @@ struct LANCeilingConformanceTests {
 
     // MARK: - Schema helpers
 
-    /// Open an in-memory storage with a table containing adjective_bitmap.
+    /// Open an in-memory storage with a table containing adjectiveBitmap.
     ///
     /// The "items" table mirrors the minimal schema needed to test the ceiling filter:
-    /// any table with an "adjective_bitmap" column is gated by SensitivityFilteredStorage.
-    /// (Only the drawers table carries adjective_bitmap in production; the generic name
+    /// any table with an "adjectiveBitmap" column is gated by SensitivityFilteredStorage.
+    /// (Only the drawers table carries adjectiveBitmap in production; the generic name
     /// "items" is used here to keep the test self-contained without importing LocusKit.)
     private func makeStorageWithAdjectiveBitmapTable() async throws -> any Storage {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -481,10 +481,10 @@ struct LANCeilingConformanceTests {
                     columns: [
                         .uuid("id"),
                         .text("content"),
-                        // adjective_bitmap: the sensitivity axis column.
+                        // adjectiveBitmap: the sensitivity axis column.
                         // SensitivityFilteredObserver reads bits 6-11 of this field
                         // to determine the sensitivity tier (see SensitivityFilteredStorage.swift).
-                        .bitmap("adjective_bitmap")
+                        .bitmap("adjectiveBitmap")
                     ],
                     primaryKey: ["id"]
                 )
@@ -508,13 +508,13 @@ struct LANCeilingConformanceTests {
 
     /// NEGATIVE TEST (FED-OD-7 Row 3):
     ///
-    /// A row with restricted sensitivity (adjective_bitmap encoding raw=32 in bits 6-11)
+    /// A row with restricted sensitivity (adjectiveBitmap encoding raw=32 in bits 6-11)
     /// is suppressed by SensitivityFilteredObserver before entering the outbox.
     /// After pairing engine A (filtered, .elevated ceiling) with engine B and pushing,
     /// the transport inbox for B's key must contain zero envelopes.
     ///
     /// Proof chain:
-    ///   1. adjective_bitmap = Int64(32) << 6 = 2048
+    ///   1. adjectiveBitmap = Int64(32) << 6 = 2048
     ///   2. sensitivityRaw(from: .bitmap(2048)) = (2048 >> 6) & 0x3F = 32
     ///   3. 32 > ceiling.rawValue (.elevated = 16) → exceedsCeiling = true
     ///   4. INSERT event: skip (no tombstone — row was never below ceiling on peers)
@@ -556,7 +556,7 @@ struct LANCeilingConformanceTests {
         // Insert above-ceiling row directly into rawStorageA (caller-initiated write,
         // forwarded unchanged by SensitivityFilteredRowStore.insert → fires the raw
         // storage's observer). The SensitivityFilteredObserver then processes the event:
-        //   adjective_bitmap = Int64(32) << 6 = 2048 → raw = (2048>>6)&0x3F = 32
+        //   adjectiveBitmap = Int64(32) << 6 = 2048 → raw = (2048>>6)&0x3F = 32
         //   32 > ceiling.rawValue (16) → INSERT suppressed (no outbox entry created).
         _ = try await rawStorageA.rowStore.insert(
             table: "items",
@@ -564,8 +564,8 @@ struct LANCeilingConformanceTests {
                 "id": .uuid(UUID()),
                 "content": .text("restricted content — must not cross LAN relay"),
                 // Encoding: bits 6–11 = sensitivity raw value.
-                // restricted sensitivity raw = 32 → adjective_bitmap = 32 << 6 = 2048.
-                "adjective_bitmap": .bitmap(Int64(32) << 6)
+                // restricted sensitivity raw = 32 → adjectiveBitmap = 32 << 6 = 2048.
+                "adjectiveBitmap": .bitmap(Int64(32) << 6)
             ]
         )
 
@@ -593,7 +593,7 @@ struct LANCeilingConformanceTests {
 
     /// POSITIVE CONTROL (FED-OD-7 Row 3):
     ///
-    /// A row with normal sensitivity (adjective_bitmap = 0, raw = 0, which is
+    /// A row with normal sensitivity (adjectiveBitmap = 0, raw = 0, which is
     /// ≤ ceiling.rawValue 16) is NOT suppressed by SensitivityFilteredObserver.
     /// After pairing and push, the transport inbox for B's key must contain at
     /// least one envelope — confirming the ceiling filter lets through below-ceiling
@@ -617,7 +617,7 @@ struct LANCeilingConformanceTests {
         try await engineA.pair(with: engineB, family: familySpec)
         let bKey = await engineB.identity.publicKey
 
-        // Insert normal-sensitivity row (adjective_bitmap = 0).
+        // Insert normal-sensitivity row (adjectiveBitmap = 0).
         // raw = (0 >> 6) & 0x3F = 0 ≤ ceiling.rawValue (16) → NOT suppressed.
         // The observer event passes through SensitivityFilteredObserver and
         // recordOutbound creates an outbox entry.
@@ -626,7 +626,7 @@ struct LANCeilingConformanceTests {
             values: [
                 "id": .uuid(UUID()),
                 "content": .text("normal content — at or below ceiling, must sync"),
-                "adjective_bitmap": .bitmap(0)  // normal: raw 0, 0 <= ceiling 16 → passes filter
+                "adjectiveBitmap": .bitmap(0)  // normal: raw 0, 0 <= ceiling 16 → passes filter
             ]
         )
 

@@ -1,6 +1,7 @@
 import Foundation
 import ConvergenceKit
 import ConvergenceKitCloudKit
+import LocusKit
 import OSLog
 #if canImport(CloudKit)
 import CloudKit
@@ -40,6 +41,13 @@ import CloudKit
 // nudge() — firing an immediate pull and resetting the poll tier to fast.
 // If the engine is not yet enabled, handleRemoteNotification returns false
 // (graceful: the polling path remains the correctness guarantee, B-11).
+//
+// FAB5-ST: DYNAMIC CEILING
+// The sensitivity ceiling is derived from TierAuthorizationStore at enable time.
+// revokeAndRetract(tier:) revokes authorization and immediately lowers the
+// active ceiling, emitting WB1 tombstones for rows that are now above-ceiling.
+// reconfigureForAuthorizedTiers() raises the ceiling when a new tier is
+// authorized while the engine is already running.
 
 public actor MootSyncDriver {
 
@@ -92,6 +100,9 @@ public actor MootSyncDriver {
 
     /// Enable-if-needed, then sync. Called on the app's ambient beats.
     ///
+    /// The sensitivity ceiling is derived from `TierAuthorizationStore.shared.effectiveCeiling`
+    /// at enable time, reflecting per-tier authorization the user has granted (FAB5-ST).
+    ///
     /// Returns `false` when:
     ///   - The current config is `.disabled`.
     ///   - CloudKit is unavailable (no container, no account, network error).
@@ -126,19 +137,21 @@ public actor MootSyncDriver {
                     newCKEngine = ck
                 }
 
-                // Enable with the sensitivity ceiling from config.
+                // Derive the sensitivity ceiling from TierAuthorizationStore (FAB5-ST).
+                // Reflects any restricted/secret tier authorization the user has granted.
                 // SyncController.enable() wraps storage in SensitivityFilteredStorage
                 // (Perkins Amendment 1) and registers with GeniusLocusKit for status.
+                let ceiling = await TierAuthorizationStore.shared.effectiveCeiling
                 try await controller.enable(
                     engine: engine,
                     manifest: MootEstateSyncManifest.standard(),
-                    ceiling: config.syncCeiling,
+                    ceiling: ceiling,
                     backendName: backendName(for: config.backend)
                 )
                 self.controller = controller
                 self.cloudKitEngine = newCKEngine
                 enabled = true
-                log.info("cloud sync enabled (ceiling: \(self.config.syncCeiling.rawValue, privacy: .public))")
+                log.info("cloud sync enabled (ceiling: \(ceiling.rawValue, privacy: .private))")
 
                 // APNs zone subscription (P5-M2): register after successful enable so
                 // CloudKit silent-push notifications arrive for this engine's zone.
@@ -226,6 +239,44 @@ public actor MootSyncDriver {
             log.info("APNs zone-change notification consumed, nudge fired (P5-M2)")
         }
         return consumed
+    }
+
+    // MARK: - FAB5-ST: Dynamic tier authorization
+
+    /// Revoke authorization for `tier` and immediately lower the active sync ceiling.
+    ///
+    /// Workflow:
+    /// 1. Removes the keychain sentinel for `tier` via TierAuthorizationStore.
+    /// 2. Derives the new effective ceiling (may be unchanged if a higher tier is still authorized).
+    /// 3. Calls SyncController.updateCeiling(to:) which emits WB1-style tombstones for
+    ///    drawers now above the new ceiling, then updates the filter atomically.
+    ///
+    /// If sync is not currently enabled, revocation still persists to the keychain
+    /// so the next syncNow() uses the correct (lower) ceiling.
+    ///
+    /// Called from SettingsView when the user toggles a sensitive-tier sync switch off.
+    public func revokeAndRetract(tier: AdjectiveSensitivity) async {
+        await TierAuthorizationStore.shared.revoke(tier)
+        let newCeiling = await TierAuthorizationStore.shared.effectiveCeiling
+        await controller?.updateCeiling(to: newCeiling)
+        log.info("tier revoked: \(tier.rawValue, privacy: .private), new ceiling: \(newCeiling.rawValue, privacy: .private)")
+    }
+
+    /// Update the active sync ceiling to reflect a newly-authorized tier.
+    ///
+    /// Called after `TierAuthorizationStore.shared.authorize(_:)` succeeds so the
+    /// active engine starts syncing the newly-unlocked tier immediately without
+    /// waiting for the next syncNow() beat.
+    ///
+    /// When the ceiling raises (new tier authorized), no retraction is emitted —
+    /// `retractAndLowerCeiling` finds no rows above the higher ceiling and just
+    /// updates the bound. The next push cycle will include newly-visible rows.
+    ///
+    /// No-op when sync is not currently enabled.
+    public func reconfigureForAuthorizedTiers() async {
+        let newCeiling = await TierAuthorizationStore.shared.effectiveCeiling
+        await controller?.updateCeiling(to: newCeiling)
+        log.info("sync ceiling reconfigured: \(newCeiling.rawValue, privacy: .private)")
     }
 
     // MARK: - Private helpers
