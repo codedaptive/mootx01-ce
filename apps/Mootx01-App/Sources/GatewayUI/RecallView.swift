@@ -19,7 +19,7 @@ struct RecallView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text(String(localized: "Serve-out — read drawers back, filtered by the export policy."))
+                Text(String(localized: "Search your saved memories."))
                     .font(.title3.weight(.semibold))
 
                 // Flexible widths: query field fills the row, controls wrap below
@@ -32,7 +32,7 @@ struct RecallView: View {
                             .frame(maxWidth: .infinity)
                     }
                     HStack {
-                        Toggle(String(localized: "Public only (filter: exportable)"), isOn: $model.recallPublicOnly)
+                        Toggle(String(localized: "Public only"), isOn: $model.recallPublicOnly)
                             .toggleStyle(.switch)
                         Spacer()
                         Button {
@@ -47,7 +47,7 @@ struct RecallView: View {
 
                 if model.recallPublicOnly {
                     Label {
-                        Text(String(localized: "Export gate ON. Returns only drawers marked public (exportability:\"public\" at capture, or promoted via moot_update_memory correctExportability(public)). CaptureView defaults to private, so results here are empty unless you used the tool path directly."))
+                        Text(String(localized: "Showing only entries marked as public. If you don't see results, try saving an entry with Visibility set to \"public\" on the Capture tab."))
                     } icon: {
                         Image(systemName: "lock.shield").foregroundStyle(.blue)
                     }
@@ -55,7 +55,7 @@ struct RecallView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                CallRecordView(title: String(localized: "moot_memory_search result"), call: model.lastRecallCall)
+                CallRecordView(title: String(localized: "Search result"), call: model.lastRecallCall)
             }
             .padding(20)
         }

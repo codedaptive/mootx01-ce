@@ -1,12 +1,15 @@
 import SwiftUI
 import MootGateway
 
-// MARK: - ContentView
+// MARK: - ContentView (FAB5-FR)
 //
-// The five-tab shell, shared by the macOS executable and the iOS app. Each tab
-// makes one face of the gateway tangible: Capture (write-in), Recall
-// (serve-out + export policy), The Top (the ARIA contract a caller sees),
-// Apple Surfaces (the adapter shells, run live), and Edges (the seam readout).
+// Profile-driven tab shell shared by macOS and iOS. Two tab profiles:
+//
+//   Standard (default): Capture, Recall, Intelligence, Settings.
+//   Advanced: Standard + The Top, Apple Surfaces, Edges, Engine, Federation, Miners.
+//
+// On first launch (hasCompletedOnboarding == false) the onboarding flow is
+// shown as a fullScreenCover. Once dismissed it never appears again.
 //
 // All user-visible chrome goes through String(localized:) per
 // docs/engineering/LOCALIZATION_GUIDE.md (English-as-key, no catalog ships).
@@ -23,6 +26,7 @@ public struct ContentView: View {
     public var body: some View {
         VStack(spacing: 0) {
             TabView {
+                // Standard profile — always visible
                 Tab(String(localized: "Capture"), systemImage: "tray.and.arrow.down") {
                     CaptureView(model: model)
                 }
@@ -32,33 +36,63 @@ public struct ContentView: View {
                 Tab(String(localized: "Intelligence"), systemImage: "brain.head.profile") {
                     IntelligenceView()
                 }
-                Tab(String(localized: "The Top"), systemImage: "list.bullet.rectangle") {
-                    SurfaceMapView(model: model)
+                Tab(String(localized: "Settings"), systemImage: "gear") {
+                    AdvancedModeToggleView(model: model)
                 }
-                Tab(String(localized: "Apple Surfaces"), systemImage: "apple.logo") {
-                    AppleSurfacesView(model: model)
-                }
-                Tab(String(localized: "Edges"), systemImage: "exclamationmark.triangle") {
-                    EdgesView(model: model)
-                }
-                Tab(String(localized: "Engine"), systemImage: "cpu") {
-                    EngineView(model: model)
-                }
-                // FED-OD-6: Federation panel — discover, pair, and start on-demand sessions.
-                // Visibility default is Off; users opt in explicitly (AirDrop-style).
-                Tab(String(localized: "Federation"), systemImage: "person.2.wave.2") {
-                    FederationPanelView()
-                }
-                // M-ING-2: per-source mining consent/config. Sources ship
-                // disabled; enabling arms them — the consent prompt fires on
-                // the first actual read, never from this view.
-                Tab(String(localized: "Miners"), systemImage: "square.and.arrow.down.on.square") {
-                    MinerSettingsView()
+
+                // Advanced-only tabs — hidden in Standard profile
+                if model.isAdvancedMode {
+                    Tab(String(localized: "The Top"), systemImage: "list.bullet.rectangle") {
+                        SurfaceMapView(model: model)
+                    }
+                    Tab(String(localized: "Apple Surfaces"), systemImage: "apple.logo") {
+                        AppleSurfacesView(model: model)
+                    }
+                    Tab(String(localized: "Edges"), systemImage: "exclamationmark.triangle") {
+                        EdgesView(model: model)
+                    }
+                    Tab(String(localized: "Engine"), systemImage: "cpu") {
+                        EngineView(model: model)
+                    }
+                    // FED-OD-6: Federation panel — discover, pair, and start on-demand sessions.
+                    // Visibility default is Off; users opt in explicitly (AirDrop-style).
+                    Tab(String(localized: "Federation"), systemImage: "person.2.wave.2") {
+                        FederationPanelView()
+                    }
+                    // M-ING-2: per-source mining consent/config. Sources ship
+                    // disabled; enabling arms them — the consent prompt fires on
+                    // the first actual read, never from this view.
+                    Tab(String(localized: "Miners"), systemImage: "square.and.arrow.down.on.square") {
+                        MinerSettingsView()
+                    }
                 }
             }
             Divider()
             statusBar
         }
+        // First-run onboarding overlay — dismissed once, never shown again.
+        // iOS: fullScreenCover for immersive first-run (hides tab bar).
+        // macOS: sheet (fullScreenCover unavailable on macOS).
+        // interactiveDismissDisabled prevents the iOS pull-down gesture from
+        // snap-back-dismissing the cover with set:{_ in}, which would leave
+        // hasCompletedOnboarding false and immediately re-present the cover.
+        #if os(iOS)
+        .fullScreenCover(isPresented: Binding(
+            get: { !model.hasCompletedOnboarding },
+            set: { _ in }
+        )) {
+            OnboardingView(model: model)
+                .interactiveDismissDisabled(true)
+        }
+        #else
+        .sheet(isPresented: Binding(
+            get: { !model.hasCompletedOnboarding },
+            set: { _ in }
+        )) {
+            OnboardingView(model: model)
+                .interactiveDismissDisabled(true)
+        }
+        #endif
         // A5: route inbound mootx01://x-callback-url/<verb>?… through MootURLRouter.
         // The verb allowlist (capture/recall/reanchor only) and the empty callback-scheme
         // allowlist (host never auto-opens return URLs) are enforced in the router.

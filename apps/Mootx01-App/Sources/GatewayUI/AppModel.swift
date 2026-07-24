@@ -27,6 +27,18 @@ struct ToolDescriptor: Identifiable, Sendable {
 @Observable
 public final class AppModel {
 
+    // First-run flag — shown once; UserDefaults-backed so it survives app restarts.
+    // Default false (not completed). Set to true when onboarding is dismissed or skipped.
+    var hasCompletedOnboarding: Bool = UserDefaults.standard.bool(forKey: "com.mootx01.gateway.hasCompletedOnboarding") {
+        didSet { UserDefaults.standard.set(hasCompletedOnboarding, forKey: "com.mootx01.gateway.hasCompletedOnboarding") }
+    }
+
+    // Tab profile — false = Standard (Capture/Recall/Intelligence/Settings only);
+    // true = Advanced (Standard + engineering tabs). Default Standard.
+    var isAdvancedMode: Bool = UserDefaults.standard.bool(forKey: "com.mootx01.gateway.isAdvancedMode") {
+        didSet { UserDefaults.standard.set(isAdvancedMode, forKey: "com.mootx01.gateway.isAdvancedMode") }
+    }
+
     // Lifecycle
     public private(set) var bridge: MootBridge?
     var statusLine: String = "Not attached"

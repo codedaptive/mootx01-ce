@@ -17,7 +17,7 @@ public struct IntelligenceView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ScrollView {
-                Text(response.isEmpty ? String(localized: "Ask your memory estate") : response)
+                Text(response.isEmpty ? String(localized: "Ask about your memories") : response)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
@@ -34,7 +34,7 @@ public struct IntelligenceView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
             HStack {
-                Toggle(String(localized: "Allow one capture"), isOn: $allowOneCapture)
+                Toggle(String(localized: "Allow saving to memory"), isOn: $allowOneCapture)
                     .toggleStyle(.switch)
                 Spacer()
                 Button {
