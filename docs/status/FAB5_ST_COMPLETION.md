@@ -96,10 +96,26 @@ See `PERKINS_FAB5_ST.md` for full report.
 
 ## Test Results
 
-**Command:** `swift test --package-path apps/Mootx01-App 2>&1 | tail -5`  
+**Command:** `swift test --package-path apps/Mootx01-App 2>&1 | tail -20`  
 **Exit code:** 0  
 **Pass count:** 169 (MootGatewayTests) + 34 (GatewayUITests) = **203 tests passed**  
 **New tests added:** 17 (TierAuthorizationStore) + 7 (SensitivityFilteredStorage Part 2) + 4 (SyncPolicy.authorizedTiers) + 1 (MootEstateSyncManifest encryptedColumns) = **29 new tests**
+
+**Verbatim tail (Adams post-flight re-run):**
+```
+Test "non-balanced postures are all locked in F1" passed after 0.001 seconds.
+Test "Sealed is absent from FederationPosture.allCases (secret has no UI)" passed after 0.001 seconds.
+Test "no posture card description mentions 'secret'" passed after 0.001 seconds.
+Test "startSession throws for all locked postures — never silently no-ops" passed after 0.001 seconds.
+Test "startSession succeeds with Balanced posture (real session manager)" passed after 0.006 seconds.
+Test "startSession throws sessionAlreadyActive when a session is in progress (real manager)" passed after 0.002 seconds.
+Test "all posture card text fields are non-empty" passed after 0.001 seconds.
+Test "posture raw values are stable (no key drift)" passed after 0.001 seconds.
+Test "endSession updates lastSession timestamp on the known peer (real manager)" passed after 0.002 seconds.
+Suite "FederationPanel — state transitions and F1 invariants (FED-OD-6b)" passed after 0.018 seconds.
+Test run with 34 tests in 7 suites passed after 0.018 seconds.
+MootGatewayTests: Test run with 169 tests in 28 suites passed after 2.218 seconds.
+```
 
 ---
 
@@ -124,6 +140,27 @@ See `PERKINS_FAB5_ST.md` for full report.
 
 ---
 
+## Adams Post-Flight
+
+**Verdict:** BLOCKED → CLEARED after remediation
+
+Adams found 4 CRITICAL findings, 2 WARNINGs, and 1 INFO. All were remediated
+before the signal file was written.
+
+| Finding | Severity | Remediation |
+|---|---|---|
+| BRR not committed | CRITICAL | Written to `docs/blast_radius/FAB5_ST_BLAST_RADIUS.md` |
+| Stale `adjective_bitmap` in `SyncConfig.swift` comments (lines 16, 74) | CRITICAL | Updated to `adjectiveBitmap` |
+| Contradictory comment at `continuation.finish()` in `SensitivityFilteredStorage.swift` | CRITICAL | Rewrote comment to accurately describe what the code does |
+| Stale `adjective_bitmap` in comment text — `FederationSessionManagerTests.swift` (16 sites) and `SensitivityFilteredStorageTests.swift` (7 sites) | CRITICAL | Global sed replacement; 0 remaining references verified |
+| `SyncConfig.syncCeiling` dead in production enable path, doc comment misleading | WARNING | Added FAB5-ST clarification note to field doc comment |
+| User guide not updated (sync section described old fixed-ceiling behavior) | WARNING | Updated guide section to reflect restricted-tier opt-in |
+| Completion report missing verbatim test output | INFO | Added verbatim tail above |
+
+**Tests re-verified by Adams:** exit 0, 169 + 34 = 203 (exact match to Bilby's claim).
+
+---
+
 ## Success Criteria Verification
 
 | Criterion | Status |
@@ -132,3 +169,5 @@ See `PERKINS_FAB5_ST.md` for full report.
 | Secret plumbing complete but capped | VERIFIED — toggle ships disabled, all code paths tested |
 | Content encrypted in transit via encryptedValues | VERIFIED — drawers.content declared in encryptedContentColumns, test passes |
 | Perkins GREEN (advisory-only) | VERIFIED — 4 advisories, 3 remediated, 1 documented |
+| BRR committed | VERIFIED — `docs/blast_radius/FAB5_ST_BLAST_RADIUS.md` |
+| User guide updated | VERIFIED — Sensitive Tier Sync section added |

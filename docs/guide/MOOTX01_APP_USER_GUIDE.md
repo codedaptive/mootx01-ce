@@ -229,20 +229,27 @@ Once both conditions are met, open the **Settings** tab and turn on the
 - Knowledge-graph facts
 - Diary entries
 
-**Never synced — stays on this device only:**
+**Never synced by default — requires explicit authorization:**
 
-- Memories marked **Restricted** or **Secret**. This is a hard boundary at the
-  sync layer, not a preference you can override in the app. A Restricted or
-  Secret memory is never placed in the sync outbox, and inbound records at
-  those tiers are rejected if they arrive. The boundary holds regardless of
-  whether iCloud sync is enabled.
+- Memories marked **Restricted**. You can opt in to syncing Restricted memories
+  across your devices from **Settings → Sensitive Tier Sync**. Enabling requires
+  biometric authentication (Face ID, Touch ID, or passcode). Once authorized,
+  Restricted memories sync like Normal and Elevated ones. You can revoke at any
+  time — revocation removes the authorization without a second challenge and
+  immediately retracts above-ceiling memories from the local sync view.
+  If iCloud sync is off, this setting has no effect.
+
+- Memories marked **Secret**. The Secret tier sync option is visible in Settings
+  but is not yet available. It is reserved for a future release pending an
+  additional security review.
+
 - Computed data (scores, rankings, index data). These are rebuilt locally on
   every device from the underlying memories — sending them would waste space
   and risk stale values overwriting fresh ones.
 
-**In plain terms:** your sensitive memories stay on the machine they were
-created on. The sync ceiling is fixed at Elevated — the two highest tiers do
-not cross any device boundary.
+**In plain terms:** Normal and Elevated memories sync whenever iCloud sync is
+on. Restricted memories sync only if you explicitly authorize it on each device.
+Secret memories never sync in this release.
 
 ### What two devices at once actually looks like
 

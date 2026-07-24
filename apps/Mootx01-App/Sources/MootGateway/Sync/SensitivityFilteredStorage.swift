@@ -214,8 +214,10 @@ private struct SensitivityFilteredObserver: StorageObserver {
                         }
                         // INSERT and DELETE above-ceiling: skip entirely.
                     }
-                    // Upstream exhausted — do not finish continuation; retraction can
-                    // still inject tombstones (e.g. during ceiling-lowering scans).
+                    // Upstream exhausted — finish continuation. onTermination cancels
+                    // retractionTask; retraction tombstones from retractAndLowerCeiling
+                    // are yielded via the retraction stream before upstream drains in
+                    // normal ceiling-lowering operation.
                     continuation.finish()
                 }
                 let retractionTask = Task {

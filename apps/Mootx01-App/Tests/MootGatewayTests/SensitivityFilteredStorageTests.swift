@@ -306,9 +306,9 @@ struct SensitivityFilteredStorageTests {
         #expect(received.count == 2, "only normal and elevated events should pass; got \(received.count)")
     }
 
-    @Test("Events without adjective_bitmap (non-drawer tables) always pass through")
+    @Test("Events without adjectiveBitmap (non-drawer tables) always pass through")
     func observerPassesEventsWithoutSensitivity() async {
-        // A tunnel TableChange has no adjective_bitmap.
+        // A tunnel TableChange has no adjectiveBitmap.
         let upstream = [
             TableChange(
                 table: "tunnels",
@@ -325,8 +325,8 @@ struct SensitivityFilteredStorageTests {
         for await change in filtered.observer.observe(table: "tunnels", events: [.insert]) {
             received.append(change)
         }
-        // No adjective_bitmap → no sensitivity check → always passes.
-        #expect(received.count == 1, "tunnel event without adjective_bitmap must pass through")
+        // No adjectiveBitmap → no sensitivity check → always passes.
+        #expect(received.count == 1, "tunnel event without adjectiveBitmap must pass through")
     }
 
     // MARK: Inbound rowStore gating
@@ -439,9 +439,9 @@ struct SensitivityFilteredStorageTests {
         #expect(count == 0, "fake rowStore returns 0 deletes (row absent); must not throw")
     }
 
-    @Test("insertSync on table without adjective_bitmap passes — not sensitivity-gated")
+    @Test("insertSync on table without adjectiveBitmap passes — not sensitivity-gated")
     func insertSyncNoSensitivityColumnPasses() async throws {
-        // kg_facts and diary tables have no adjective_bitmap column.
+        // kg_facts and diary tables have no adjectiveBitmap column.
         // Absent bitmap → no sensitivity check → always passes through to base.
         let base = FakeSyncStorage(seededChanges: [])
         let filtered = SensitivityFilteredStorage(wrapping: base, ceiling: .elevated)
@@ -451,7 +451,7 @@ struct SensitivityFilteredStorageTests {
             "subject": .text("test-subject"),
         ]
         let handle = try await filtered.rowStore.insertSync(table: "kg_facts", values: values)
-        #expect(handle.table == "kg_facts", "kg_facts insert without adjective_bitmap must pass through")
+        #expect(handle.table == "kg_facts", "kg_facts insert without adjectiveBitmap must pass through")
     }
 
     // MARK: CVK-WB1: Tier-rise retraction — observer tombstone emission
