@@ -67,7 +67,26 @@ Exit code: 0. Tests: 192 (11 suites). Baseline was 184 tests (10 suites). New te
 
 ## Post-flight gate (Adams)
 
-*Pending — Adams running.*
+Two Adams runs completed (first was killed mid-review, respawned). Both agreed:
+
+**Adams verdict: CRITICAL → FIXED. Cleared post-remediation.**
+
+Findings:
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | WARNING | `StatsStoreMonitoringControl` struct wedged inside `runResidentDaemon` docstring (MARK + struct between two docstring halves) — pre-existing, but confusing to future agents | Fixed: moved struct above docstring; docstring now contiguous |
+| 2 | CRITICAL | `ServeCommand.swift` + `AriaMCPMain.swift` created `ResidentConfig` without `vaultPath`/`vaultEstatePollSeconds` — `MOOTX01_VAULT_PATH` was parsed but never wired, making the env var a no-op | Fixed: both callers now pass `AriaResident.vaultPath(env:)` and `AriaResident.vaultEstatePollSeconds(env:)` |
+
+Remediation commit: `4d4f1898` (`fix(resident): Adams post-flight remediation — FAB5-J1`)
+
+Post-remediation build: AriaResident ✓, mootx01 binary ✓, aria-mcp binary ✓
+Post-remediation tests: 192/192 pass, exit 0.
+
+Adams independently confirmed:
+- Privacy fence holds on every export path ✓
+- Vault deletions blocked, never applied ✓
+- Symlink filtering correct ✓
 
 ## INTENTIONALLY_LEFT items
 
