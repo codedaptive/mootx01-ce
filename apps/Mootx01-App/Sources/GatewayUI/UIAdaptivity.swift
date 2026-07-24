@@ -1,4 +1,4 @@
-import CoreFoundation
+import CoreGraphics
 
 // MARK: - UIAdaptivity (FAB5-L1)
 //
