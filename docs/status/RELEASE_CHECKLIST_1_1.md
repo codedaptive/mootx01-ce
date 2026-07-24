@@ -83,19 +83,49 @@ cd packages/kits/ConvergenceKit && swift test --filter EncryptedValuesTests
 # Check plist keys
 rg "NSSiriUsageDescription|ITSAppUsesNonExemptEncryption|NSLocalNetworkUsageDescription" \
    apps/Mootx01-App/App/Info.plist
-# Check iPhone-only
+# Device family — superseded by FAB5-L1 (see l1 section below)
 rg "TARGETED_DEVICE_FAMILY" apps/Mootx01-App/project.yml
-# Expected: "1" (iPhone-only)
+# Expected: "1,2" (iPhone + iPad — FAB5-L1 reversed the iPhone-only ruling)
 ```
 **Completion report:** `docs/status/FAB5_CP_COMPLETION.md`
 
 - [x] All NSUsageDescription keys present, reviewer-grade
 - [x] `ITSAppUsesNonExemptEncryption = false` (both iOS and macOS plists)
-- [x] `TARGETED_DEVICE_FAMILY "1"` — iPhone-only for 1.1
+- [x] ~~`TARGETED_DEVICE_FAMILY "1"` — iPhone-only for 1.1~~ **superseded by FAB5-L1** (see l1 below)
 - [x] Privacy label worksheet ready (`docs/status/APP_PRIVACY_LABELS.md`)
 - [x] Reviewer notes ready (`docs/status/APPSTORE_REVIEWER_NOTES.md`)
 - [x] France ANSSI simplified declaration step in provisioning runbook
 - [x] swift test exit 0 (25 tests, no source changes)
+
+---
+
+### l1 — iPadOS Enablement ☑ COMPLETE
+**Owner:** stream/l1-ipados-enablement  
+**Signal:** `/Users/bob/devlop/ddfactory/control/signals/.done-l1`  
+**Verification:**
+```
+# Confirm all three iOS targets carry "1,2"
+rg "TARGETED_DEVICE_FAMILY" apps/Mootx01-App/project.yml
+# Expected: three lines, each "1,2"
+
+# Size-class smoke test
+swift test --filter iPadAdaptivityTests --package-path apps/Mootx01-App
+# Expected: 3 tests, exit 0
+
+# Full suite still green
+swift test --package-path apps/Mootx01-App
+# Expected: 37 tests, exit 0
+```
+**Completion report:** `docs/status/FAB5_L1_COMPLETION.md`
+
+- [x] `TARGETED_DEVICE_FAMILY "1,2"` on Mootx01-iOS, Mootx01-Widget-iOS, Mootx01-Share-iOS
+- [x] D1 fixed: OnboardingView CTA capped at `modalCTAMaxWidth` (400pt), centered on iPad
+- [x] D2 fixed: IntelligenceView content capped at `readableContentMaxWidth` (720pt), centered on iPad
+- [x] `UIAdaptivity` namespace with documented layout constants
+- [x] Size-class smoke test: 3 tests, exit 0
+- [x] iPad screenshots line: add to TestFlight checklist before external beta
+- [x] Second-pass sweep after FAB5-G2/I3 merge (Review/ and Packets/ views)
+- [x] swift test exit 0 (37 tests, +3 from baseline)
 
 ---
 

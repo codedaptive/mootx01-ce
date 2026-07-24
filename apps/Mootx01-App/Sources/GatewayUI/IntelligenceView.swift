@@ -15,6 +15,9 @@ public struct IntelligenceView: View {
     public init() {}
 
     public var body: some View {
+        // FAB5-L1 D2: two-frame centering caps the content at readableContentMaxWidth
+        // on iPad regular-width layouts. On iPhone the VStack naturally fills its
+        // narrower container (iPhone width < readableContentMaxWidth).
         VStack(alignment: .leading, spacing: 12) {
             ScrollView {
                 Text(response.isEmpty ? String(localized: "Ask about your memories") : response)
@@ -49,6 +52,8 @@ public struct IntelligenceView: View {
                 .disabled(isResponding || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
+        .frame(maxWidth: UIAdaptivity.readableContentMaxWidth)
+        .frame(maxWidth: .infinity, alignment: .center)
         .padding()
     }
 
