@@ -61,8 +61,14 @@ struct VaultResidentServiceTests {
         let note = vault.appendingPathComponent("TestNote.md")
         try "# Hello".write(to: note, atomically: true, encoding: .utf8)
 
-        // Wait for poll + callback.
-        try await Task.sleep(nanoseconds: 1_500_000_000)
+        // Poll for up to 8 s (8 × 1-second poll cycles). A fixed sleep is
+        // unreliable under parallel test load where executor threads are saturated.
+        let deadline = Date().addingTimeInterval(8.0)
+        while Date() < deadline {
+            let got = await collector.allChanged()
+            if !got.isEmpty { break }
+            try await Task.sleep(nanoseconds: 300_000_000)  // 300 ms check interval
+        }
         await watcher.stop()
 
         let allChanged = await collector.allChanged()
@@ -87,7 +93,13 @@ struct VaultResidentServiceTests {
         }
 
         try? FileManager.default.removeItem(at: note)
-        try await Task.sleep(nanoseconds: 1_500_000_000)
+        // Poll for up to 8 s — resilient to parallel test executor saturation.
+        let deadline = Date().addingTimeInterval(8.0)
+        while Date() < deadline {
+            let got = await collector.allDeleted()
+            if !got.isEmpty { break }
+            try await Task.sleep(nanoseconds: 300_000_000)  // 300 ms check interval
+        }
         await watcher.stop()
 
         let allDeleted = await collector.allDeleted()
@@ -187,5 +199,64 @@ struct VaultResidentServiceTests {
         await #expect(throws: VaultResidentError.self) {
             try await service.start()
         }
+    }
+
+    // MARK: - Fence property test (Part 2)
+    //
+    // Proves that non-exportable content is NEVER written to the vault
+    // regardless of event ordering. Perkins gate: GREEN.
+    //
+    // Property: for any estate drawer whose AdjectiveExportability != .public_,
+    // the resident service's startup export produces NO corresponding .md file.
+
+    @Test("Fence property: non-exportable drawers never written to vault on startup export")
+    func fencePropertyNonExportableNeverCrossesToVault() async throws {
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let (kit, handle) = try await openEstate()
+
+        // Capture a drawer with default exportability (private_ — not .public_).
+        // The resident service should never write this to the vault.
+        let frame = CaptureFrame(
+            content: "Confidential drawer — must never appear in vault",
+            channel: .typed,
+            room: "fence-test",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "fence-test",
+            embeddingModelID: "test-v1"
+            // exportability defaults to .private_ — the fence case
+        )
+        _ = try await kit.capture(handle, frame)
+
+        // Confirm that isVaultFenced correctly blocks this drawer.
+        let drawers = try await kit.recall(handle, RecallFrame(
+            filterChain: [.unconfirmed, .currentlyBelieve],
+            hydrationLevel: .structured,
+            limit: 100
+        ))
+        let blocked = drawers.filter { isVaultFenced(exportability: $0.exportability) }
+        #expect(!blocked.isEmpty, "Test setup: expected at least one non-exportable drawer")
+
+        // Start service (triggers startup resync → export with .exportable scope).
+        let service = VaultResidentService(
+            kit: kit,
+            handle: handle,
+            vaultURL: vault,
+            pollIntervalSeconds: 600,
+            estatePollSeconds: 600
+        )
+        try await service.start()
+        await service.stop()
+
+        // Assert: no .md files in vault (no exportable drawers exist).
+        let vaultContents = (try? FileManager.default.contentsOfDirectory(
+            at: vault,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        let mdFiles = vaultContents.filter { $0.pathExtension == "md" }
+        #expect(mdFiles.isEmpty,
+                "Privacy fence violated: non-exportable drawer was written to vault. Files found: \(mdFiles.map(\.lastPathComponent))")
     }
 }

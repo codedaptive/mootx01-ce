@@ -111,12 +111,17 @@ public actor VaultWatcher {
         var snapshot: [String: Date] = [:]
         guard let enumerator = FileManager.default.enumerator(
             at: vaultURL,
-            includingPropertiesForKeys: [.contentModificationDateKey],
+            includingPropertiesForKeys: [.contentModificationDateKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
         ) else { return snapshot }
 
         for case let url as URL in enumerator {
             guard url.pathExtension == "md" else { continue }
+            // Skip symlinks — ObsidianAdapter already rejects them on import;
+            // this prevents spurious poll events and avoids external-path traversal.
+            let isSymlink = (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?
+                .isSymbolicLink ?? false
+            guard !isSymlink else { continue }
             let rel = url.path.hasPrefix(vaultURL.path + "/")
                 ? String(url.path.dropFirst(vaultURL.path.count + 1))
                 : url.lastPathComponent
