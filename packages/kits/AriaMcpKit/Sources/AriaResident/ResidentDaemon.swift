@@ -215,6 +215,28 @@ public enum AriaResident {
         }
     }
 
+    // MARK: - MonitoringControl concrete implementation
+
+    /// Concrete `MonitoringControl` backed by the resident `StatsStore`.
+    /// Defined here because `AriaResident` imports both `AriaMCP` (for the protocol)
+    /// and `ObserverSink` (for `StatsStore`) — the only module that can. fileprivate
+    /// to prevent it from leaking into the public API surface.
+    fileprivate struct StatsStoreMonitoringControl: MonitoringControl {
+        let store: StatsStore
+
+        func read() async -> Bool? {
+            try? await store.isMonitoringEnabled()
+        }
+
+        func set(_ enabled: Bool) async {
+            do {
+                try await store.setMonitoringEnabled(enabled)
+            } catch {
+                Logging.stderr.log("AriaResident MonitoringControl set failed: \(error)")
+            }
+        }
+    }
+
     // MARK: - The resident runner
 
     /// Resident-daemon configuration (resolved by the caller; the runner reads no
@@ -257,35 +279,6 @@ public enum AriaResident {
     /// Run the resident daemon: install telemetry (if configured), spawn the Brain
     /// pump and the continuous monitoring gate, and serve the HTTP MCP transport
     /// until the process is terminated. Throws on bind failure (the caller decides
-    // MARK: - MonitoringControl concrete implementation
-
-    /// Concrete `MonitoringControl` backed by the resident `StatsStore`.
-    ///
-    /// Defined here because `AriaResident` is the only module that imports BOTH
-    /// `AriaMCP` (for the `MonitoringControl` protocol) AND `ObserverSink` (for
-    /// `StatsStore`). Keeping it `fileprivate` within the `ResidentDaemon` type
-    /// prevents it from leaking into the public surface — it is an implementation
-    /// detail of the injection seam.
-    ///
-    /// `read()` and `set(_:)` are best-effort: errors are logged to stderr and
-    /// swallowed so a transient store fault never surfaces as a tool error. The
-    /// tool runner maps `nil` from `read()` to "unavailable" rather than "disabled".
-    fileprivate struct StatsStoreMonitoringControl: MonitoringControl {
-        let store: StatsStore
-
-        func read() async -> Bool? {
-            try? await store.isMonitoringEnabled()
-        }
-
-        func set(_ enabled: Bool) async {
-            do {
-                try await store.setMonitoringEnabled(enabled)
-            } catch {
-                Logging.stderr.log("AriaResident MonitoringControl set failed: \(error)")
-            }
-        }
-    }
-
     /// the exit code); never calls `exit()`.
     public static func runResidentDaemon(
         dispatcher: ARIA_MCPDispatcher,

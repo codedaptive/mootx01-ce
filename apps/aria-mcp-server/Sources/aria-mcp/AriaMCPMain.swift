@@ -338,7 +338,9 @@ struct AriaMCPMain {
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(),
                 brainTickMs: AriaResident.brainTickMs(),
                 monitoringPollMs: AriaResident.monitoringPollMs(),
-                statsStorePath: statsStorePath
+                statsStorePath: statsStorePath,
+                vaultPath: AriaResident.vaultPath(),
+                vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds()
             )
             let gateSuffix = (statsStorePath != nil) ? " + monitoring gate" : ""
             Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, HTTP transport + autonomic governor\(gateSuffix))")
