@@ -417,31 +417,20 @@ names every issue and its fix or closing commit.
 
 ## Roadmap
 
-`develop/1.1.x` is the active beta for the following feature line. A roadmap
-item is not a shipped promise until its guide marks the behavior implemented.
+MOOTx01 is moving from durable local memory to personal agentic memory,
+controlled collaboration, and optional Postgres scale.
 
-### Version 1.1 — iPhone app · TestFlight late July · App Store mid-September
+- **1.1:** MOOTx01-App across iOS, iPadOS, and macOS; the cross-platform
+  `moot-mgr` web app; Apple Intelligence; Review Center; Work Packets; and
+  optional iCloud Sync.
+- **1.2:** bounded Federation, cross-platform local agents, and continuous
+  eligible Obsidian synchronization.
+- **1.3:** PGlite for portable browser/WASM Postgres and pgMOOT for optional
+  PostgreSQL server computation.
 
-The 1.1 release is the native iPhone app. iPad and Mac app distribution follow
-in a later release.
-
-- **App Store** — native iPhone app on the App Store
-- **iCloud Sync** — seamless estate sharing between iPhone and Mac through your private iCloud
-- **Sensitive-tier opt-ins** — per-memory privacy controls in the app (Restricted and Secret tiers stay on-device regardless of sync settings)
-
-Federation underpinnings ship in 1.1 and run dark; the user-facing cross-estate
-sharing feature arrives in 1.2.
-
-### Version 1.2 — ~November
-
-- **Federation** — bounded cross-estate sharing with a nearby device, on demand and time-limited
-- **Continuous Obsidian vault** — a resident watcher keeps a normal Obsidian vault synchronized with your estate automatically
-- **Apple Intelligence deepening** — deeper integration with Apple Intelligence surfaces
-- **MiniLLM** — a local language model for scheduled housekeeping and estate data mining
-
-### Version 1.3
-
-- **mootgres** — a Postgres extension that offloads MOOT computations to a Postgres server
+Read the full [`ROADMAP.md`](ROADMAP.md) for the product story, release
+boundaries, and ways to follow the build. Roadmap items are direction, not
+shipped promises; tagged releases and their guides remain authoritative.
 
 
 ## Repository structure
@@ -467,6 +456,7 @@ mootx01/
 | Document | Purpose |
 |----------|---------|
 | [`ABOUT.md`](ABOUT.md) | What MOOTx01 is and why — the full story |
+| [`ROADMAP.md`](ROADMAP.md) | The public path from personal agentic memory to Federation and Postgres scale |
 | [`AI_START_HERE.md`](AI_START_HERE.md) | For an AI assistant: explain MOOTx01 and install it for the user |
 | [`docs/start-here/END_USER_EXPLAINER.md`](docs/start-here/END_USER_EXPLAINER.md) | Plain-language explainer for a non-technical user |
 | [`docs/start-here/INSTALL_SURFACE.md`](docs/start-here/INSTALL_SURFACE.md) | Install fact sheet: addresses, flow, platform matrix, verification |
