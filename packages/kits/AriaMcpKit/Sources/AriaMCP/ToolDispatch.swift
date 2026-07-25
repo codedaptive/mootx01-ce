@@ -1436,7 +1436,7 @@ extension ToolDispatcher {
             let preview: String
             switch hit.drawer?.sensitivity {
             case .restricted:
-                preview = "[sensitivity: restricted — retrieve by id for content]"
+                preview = "[sensitivity: restricted — content redacted]"
             case .secret:
                 preview = "[sensitivity: secret — content access requires explicit grant]"
             case .normal, .elevated, .none:
