@@ -479,11 +479,21 @@ struct InstallCommand: AsyncParsableCommand {
                 do {
                     // §4.2: same backup discipline as native configs.
                     try Installer.backupExisting(at: configURL)
+                    // directStdio/vaultOff must be forwarded here exactly as the
+                    // native path forwards them to Installer.install() above.
+                    // Both parameters default to false, so omitting them meant a
+                    // `--no-daemon --vault-off` install still wrote an
+                    // http://127.0.0.1:4242 entry into every Parall clone: the
+                    // clone bypassed both postures, and with no daemon running
+                    // any same-user process could bind that fixed port and
+                    // impersonate the MCP server.
                     try Installer.mergeIntoJSONConfig(
                         at: configURL,
                         client: client,
                         binaryPath: binaryPath,
-                        daemonURL: MootPaths.residentEndpointURL
+                        daemonURL: MootPaths.residentEndpointURL,
+                        directStdio: noDaemon,
+                        vaultOff: vaultOff
                     )
                     parallInstalled.append((client.displayName, configURL.path))
                 } catch {
