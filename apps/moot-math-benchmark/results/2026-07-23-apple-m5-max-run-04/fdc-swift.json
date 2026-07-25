@@ -1,0 +1,221 @@
+{
+  "classifier_version" : "4.2.0",
+  "cold_start_ns" : 388288083,
+  "commit_sha" : "b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99",
+  "data_version" : "2.0.0",
+  "date" : "2026-07-23",
+  "generated_at" : "2026-07-23T08:49:14Z",
+  "hardware_tag" : "apple-m5-max",
+  "language" : "swift",
+  "measurements" : [
+    {
+      "bytes" : 42,
+      "iterations" : 46,
+      "ns_per_call_mean" : 2642845,
+      "ns_per_call_min" : 2465167,
+      "ns_per_call_stddev" : 97822,
+      "operation" : "encode",
+      "tokens" : 5,
+      "workload" : "short_resolved"
+    },
+    {
+      "bytes" : 42,
+      "iterations" : 47,
+      "ns_per_call_mean" : 2562862,
+      "ns_per_call_min" : 2470542,
+      "ns_per_call_stddev" : 88084,
+      "operation" : "encode_anchor_no_record",
+      "tokens" : 5,
+      "workload" : "short_resolved"
+    },
+    {
+      "bytes" : 42,
+      "iterations" : 3699,
+      "ns_per_call_mean" : 32423,
+      "ns_per_call_min" : 31333,
+      "ns_per_call_stddev" : 3167,
+      "operation" : "semantic_candidates_8",
+      "tokens" : 5,
+      "workload" : "short_resolved"
+    },
+    {
+      "bytes" : 42,
+      "iterations" : 77,
+      "ns_per_call_mean" : 1573818,
+      "ns_per_call_min" : 1510917,
+      "ns_per_call_stddev" : 38301,
+      "operation" : "semantic_decision",
+      "tokens" : 5,
+      "workload" : "short_resolved"
+    },
+    {
+      "bytes" : 151,
+      "iterations" : 37,
+      "ns_per_call_mean" : 3340125,
+      "ns_per_call_min" : 3200542,
+      "ns_per_call_stddev" : 119824,
+      "operation" : "encode",
+      "tokens" : 19,
+      "workload" : "medium_resolved"
+    },
+    {
+      "bytes" : 151,
+      "iterations" : 37,
+      "ns_per_call_mean" : 3269177,
+      "ns_per_call_min" : 3180709,
+      "ns_per_call_stddev" : 67937,
+      "operation" : "encode_anchor_no_record",
+      "tokens" : 19,
+      "workload" : "medium_resolved"
+    },
+    {
+      "bytes" : 151,
+      "iterations" : 1933,
+      "ns_per_call_mean" : 62069,
+      "ns_per_call_min" : 60833,
+      "ns_per_call_stddev" : 2564,
+      "operation" : "semantic_candidates_8",
+      "tokens" : 19,
+      "workload" : "medium_resolved"
+    },
+    {
+      "bytes" : 151,
+      "iterations" : 74,
+      "ns_per_call_mean" : 1641549,
+      "ns_per_call_min" : 1607458,
+      "ns_per_call_stddev" : 25005,
+      "operation" : "semantic_decision",
+      "tokens" : 19,
+      "workload" : "medium_resolved"
+    },
+    {
+      "bytes" : 1579,
+      "iterations" : 17,
+      "ns_per_call_mean" : 7458762,
+      "ns_per_call_min" : 7255333,
+      "ns_per_call_stddev" : 132493,
+      "operation" : "encode",
+      "tokens" : 180,
+      "workload" : "long_mixed"
+    },
+    {
+      "bytes" : 1579,
+      "iterations" : 17,
+      "ns_per_call_mean" : 7307941,
+      "ns_per_call_min" : 7139375,
+      "ns_per_call_stddev" : 112930,
+      "operation" : "encode_anchor_no_record",
+      "tokens" : 180,
+      "workload" : "long_mixed"
+    },
+    {
+      "bytes" : 1579,
+      "iterations" : 737,
+      "ns_per_call_mean" : 163028,
+      "ns_per_call_min" : 156875,
+      "ns_per_call_stddev" : 7770,
+      "operation" : "semantic_candidates_8",
+      "tokens" : 180,
+      "workload" : "long_mixed"
+    },
+    {
+      "bytes" : 1579,
+      "iterations" : 130,
+      "ns_per_call_mean" : 925826,
+      "ns_per_call_min" : 888458,
+      "ns_per_call_stddev" : 27570,
+      "operation" : "semantic_decision",
+      "tokens" : 180,
+      "workload" : "long_mixed"
+    },
+    {
+      "bytes" : 32,
+      "iterations" : 968,
+      "ns_per_call_mean" : 123983,
+      "ns_per_call_min" : 118708,
+      "ns_per_call_stddev" : 6991,
+      "operation" : "encode",
+      "tokens" : 5,
+      "workload" : "unresolved"
+    },
+    {
+      "bytes" : 32,
+      "iterations" : 969,
+      "ns_per_call_mean" : 123811,
+      "ns_per_call_min" : 118791,
+      "ns_per_call_stddev" : 5476,
+      "operation" : "encode_anchor_no_record",
+      "tokens" : 5,
+      "workload" : "unresolved"
+    },
+    {
+      "bytes" : 32,
+      "iterations" : 4160,
+      "ns_per_call_mean" : 28823,
+      "ns_per_call_min" : 28208,
+      "ns_per_call_stddev" : 1393,
+      "operation" : "semantic_candidates_8",
+      "tokens" : 5,
+      "workload" : "unresolved"
+    },
+    {
+      "bytes" : 32,
+      "iterations" : 4239,
+      "ns_per_call_mean" : 28291,
+      "ns_per_call_min" : 27625,
+      "ns_per_call_stddev" : 1278,
+      "operation" : "semantic_decision",
+      "tokens" : 5,
+      "workload" : "unresolved"
+    },
+    {
+      "bytes" : 73,
+      "iterations" : 613,
+      "ns_per_call_mean" : 195775,
+      "ns_per_call_min" : 178625,
+      "ns_per_call_stddev" : 10084,
+      "operation" : "encode",
+      "tokens" : 14,
+      "workload" : "code"
+    },
+    {
+      "bytes" : 73,
+      "iterations" : 1571,
+      "ns_per_call_mean" : 76359,
+      "ns_per_call_min" : 69208,
+      "ns_per_call_stddev" : 3905,
+      "operation" : "encode_anchor_no_record",
+      "tokens" : 14,
+      "workload" : "code"
+    },
+    {
+      "bytes" : 73,
+      "iterations" : 3597,
+      "ns_per_call_mean" : 33341,
+      "ns_per_call_min" : 32458,
+      "ns_per_call_stddev" : 1899,
+      "operation" : "semantic_candidates_8",
+      "tokens" : 14,
+      "workload" : "code"
+    },
+    {
+      "bytes" : 73,
+      "iterations" : 74,
+      "ns_per_call_mean" : 1638630,
+      "ns_per_call_min" : 1601292,
+      "ns_per_call_stddev" : 23803,
+      "operation" : "semantic_decision",
+      "tokens" : 14,
+      "workload" : "code"
+    }
+  ],
+  "op" : "fdc_classifier_v4",
+  "quick_mode" : false,
+  "schema_version" : "fdc-1",
+  "semantic_model_sha256" : "138e42f09478db92ca261ad544e1f3143ce4b168d0e9f726dedd80614739d227",
+  "semantic_model_version" : "1.0.0",
+  "timing" : {
+    "measure_ms" : 120,
+    "warmup_ms" : 30
+  }
+}

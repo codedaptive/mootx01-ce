@@ -32,13 +32,26 @@ func timeLoop(warmupNs: UInt64, measureNs: UInt64, _ body: () -> Void) -> (Int, 
     let clock = ContinuousClock()
     let warmupEnd = DispatchTime.now().uptimeNanoseconds + warmupNs
     while DispatchTime.now().uptimeNanoseconds < warmupEnd { body() }
+    // DispatchTime can return the same tick around sub-50 ns operations. Choose
+    // a per-sample batch large enough to cross a 10 µs timing floor, then divide
+    // back to ns/call. This removes invalid zero-duration cells without changing
+    // the operation grid.
+    var callsPerSample = 1
+    while callsPerSample < 1_048_576 {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        for _ in 0..<callsPerSample { body() }
+        if DispatchTime.now().uptimeNanoseconds - t0 >= 10_000 { break }
+        callsPerSample *= 2
+    }
     let measureEnd = DispatchTime.now().uptimeNanoseconds + measureNs
     var samples: [UInt64] = []
     samples.reserveCapacity(1024)
     while DispatchTime.now().uptimeNanoseconds < measureEnd {
         let t0 = DispatchTime.now().uptimeNanoseconds
-        body()
-        samples.append(DispatchTime.now().uptimeNanoseconds - t0)
+        for _ in 0..<callsPerSample { body() }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - t0
+        let divisor = UInt64(callsPerSample)
+        samples.append((elapsed + divisor - 1) / divisor)
     }
     let n = samples.count
     if n == 0 { return (0, 0, 0, 0) }
@@ -52,12 +65,25 @@ func timeLoop(warmupNs: UInt64, measureNs: UInt64, _ body: () -> Void) -> (Int, 
     }
     let stddev = UInt64(Double(sq / UInt64(n)).squareRoot())
     _ = clock
-    return (n, mn, mean, stddev)
+    return (n * callsPerSample, mn, mean, stddev)
 }
 
 func make(_ algo: String, _ params: String, _ t: (Int, UInt64, UInt64, UInt64)) -> Measurement {
     return Measurement(algorithm: algo, params: params, iterations: t.0,
                        nsPerCallMin: t.1, nsPerCallMean: t.2, nsPerCallStddev: t.3)
+}
+
+/// Prevent optimized builds from deleting pure benchmark work whose return
+/// value is otherwise unused. `_ = operation()` produced invalid 0 ns cells.
+nonisolated(unsafe) var blackHoleSink: UInt8 = 0
+
+@inline(never)
+@_optimize(none)
+func blackHole<T>(_ value: T) {
+    withUnsafeBytes(of: value) { bytes in
+        if let first = bytes.first { blackHoleSink ^= first }
+    }
+    _fixLifetime(value)
 }
 
 // SplitMix64 — match the Rust port's PRNG so seeds reproduce
@@ -84,9 +110,9 @@ func measureAnomaly(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -> [M
         window.reserveCapacity(n)
         for _ in 0..<n { window.append(rng.nextF32()) }
         let current = rng.nextF32()
-        var t = timeLoop(warmupNs: wu, measureNs: me) { _ = AnomalyDetection.rollingZScore(window: window, current: current) }
+        var t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(AnomalyDetection.rollingZScore(window: window, current: current)) }
         out.append(make("anomaly_z_score", "n=\(n)", t))
-        t = timeLoop(warmupNs: wu, measureNs: me) { _ = AnomalyDetection.rollingModifiedZScore(window: window, current: current) }
+        t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(AnomalyDetection.rollingModifiedZScore(window: window, current: current)) }
         out.append(make("anomaly_modified_z_score", "n=\(n)", t))
     }
     return out
@@ -142,7 +168,7 @@ func measureCommunityDetection(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UI
     var out: [Measurement] = []
     for n in [50, 200, 1_000] {
         let adj = buildAdjacency(&rng, n: n)
-        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = CommunityDetection.detect(adjacency: adj, maxPasses: 10, estate: "bench", ts: 0) }
+        let t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(CommunityDetection.detect(adjacency: adj, maxPasses: 10, estate: "bench", ts: 0)) }
         out.append(make("community_detection", "n=\(n)", t))
     }
     return out
@@ -150,8 +176,8 @@ func measureCommunityDetection(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UI
 
 func measureCompositeDistance(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -> [Measurement] {
     let t = timeLoop(warmupNs: wu, measureNs: me) {
-        _ = CompositeDistance.distance(latticeDistance: 0.42, fingerprintHammingDistance: 73,
-                                       alphaLattice: 0.6, alphaFingerprint: 0.4, compatibleSeedScope: true)
+        blackHole(CompositeDistance.distance(latticeDistance: 0.42, fingerprintHammingDistance: 73,
+                                             alphaLattice: 0.6, alphaFingerprint: 0.4, compatibleSeedScope: true))
     }
     return [make("composite_distance", "single_call", t)]
 }
@@ -160,7 +186,7 @@ func measureEigenvalueCentrality(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: 
     var out: [Measurement] = []
     for n in [50, 200, 1_000] {
         let adj = buildAdjacency(&rng, n: n)
-        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = EigenvalueCentrality.compute(adjacency: adj, maxIterations: 100, tolerance: 1e-6, estate: "bench", ts: 0) }
+        let t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(EigenvalueCentrality.compute(adjacency: adj, maxIterations: 100, tolerance: 1e-6, estate: "bench", ts: 0)) }
         out.append(make("eigenvalue_centrality", "n=\(n)", t))
     }
     return out
@@ -181,14 +207,14 @@ func measureFeatureExtractors(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UIn
                                     endDate: 1_700_003_600.0,
                                     sourceDevice: "iPhone")
     let rowID = UUID()
-    let t1 = timeLoop(warmupNs: wu, measureNs: me) { _ = hkExt.extract(hkSample, hlc: hlc, rowId: rowID) }
+    let t1 = timeLoop(warmupNs: wu, measureNs: me) { blackHole(hkExt.extract(hkSample, hlc: hlc, rowId: rowID)) }
     out.append(make("feature_extractor_healthkit", "single_sample", t1))
     let clExt = CoreLocationExtractor(hyperplanes: hyperplanes)
     let clSample = CoreLocationSample(latitude: 37.7749, longitude: -122.4194, altitude: 16.0,
                                        speed: 0.0, course: 0.0,
                                        timestamp: 1_700_000_000.0,
                                        horizontalAccuracy: 5.0)
-    let t2 = timeLoop(warmupNs: wu, measureNs: me) { _ = clExt.extract(clSample, hlc: hlc, rowId: rowID) }
+    let t2 = timeLoop(warmupNs: wu, measureNs: me) { blackHole(clExt.extract(clSample, hlc: hlc, rowId: rowID)) }
     out.append(make("feature_extractor_corelocation", "single_sample", t2))
     return out
 }
@@ -199,9 +225,9 @@ func measureFFT(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -> [Measu
         var input: [Double] = []
         input.reserveCapacity(n)
         for i in 0..<n { input.append(sin(Double(i) * 0.1)) }
-        let t1 = timeLoop(warmupNs: wu, measureNs: me) { _ = FFT.forward(real: input) }
+        let t1 = timeLoop(warmupNs: wu, measureNs: me) { blackHole(FFT.forward(real: input)) }
         out.append(make("fft_forward", "n=\(n)", t1))
-        let t2 = timeLoop(warmupNs: wu, measureNs: me) { _ = FFT.magnitudeSpectrum(real: input) }
+        let t2 = timeLoop(warmupNs: wu, measureNs: me) { blackHole(FFT.magnitudeSpectrum(real: input)) }
         out.append(make("fft_magnitude_spectrum", "n=\(n)", t2))
     }
     return out
@@ -213,7 +239,7 @@ func measureFloatSimHash(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) 
         var vec: [Float] = []
         vec.reserveCapacity(dim)
         for _ in 0..<dim { vec.append(rng.nextF32() * 2.0 - 1.0) }
-        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = FloatSimHash.project(vector: vec, seed: DEFAULT_SEED) }
+        let t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(FloatSimHash.project(vector: vec, seed: DEFAULT_SEED)) }
         out.append(make("float_simhash_project", "dim=\(dim)", t))
     }
     return out
@@ -230,11 +256,11 @@ func measureInfoTheory(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) ->
         }
         let p = makeDist()
         let q = makeDist()
-        var t = timeLoop(warmupNs: wu, measureNs: me) { _ = InformationTheory.entropy(p) }
+        var t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(InformationTheory.entropy(p)) }
         out.append(make("info_theory_entropy", "k=\(k)", t))
-        t = timeLoop(warmupNs: wu, measureNs: me) { _ = InformationTheory.klDivergence(p, q) }
+        t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(InformationTheory.klDivergence(p, q)) }
         out.append(make("info_theory_kl", "k=\(k)", t))
-        t = timeLoop(warmupNs: wu, measureNs: me) { _ = InformationTheory.crossEntropy(p, q) }
+        t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(InformationTheory.crossEntropy(p, q)) }
         out.append(make("info_theory_cross_entropy", "k=\(k)", t))
         let side = Int(Double(k).squareRoot())
         var joint: [[Float32]] = []
@@ -245,7 +271,7 @@ func measureInfoTheory(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) ->
         }
         let total = joint.flatMap{$0}.reduce(Float32(0), +)
         joint = joint.map { $0.map { $0 / total } }
-        t = timeLoop(warmupNs: wu, measureNs: me) { _ = InformationTheory.mutualInformation(joint: joint) }
+        t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(InformationTheory.mutualInformation(joint: joint)) }
         out.append(make("info_theory_mi", "k=\(k)", t))
     }
     return out
@@ -260,7 +286,7 @@ func measureLatticeDistance(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt6
         ("003.13.5.2.1.4.7.9", "003.13.5.2.1.4.7.8"),
     ]
     for (a, b) in pairs {
-        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = UDCTreeDistance.distance(a, b) }
+        let t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(UDCTreeDistance.distance(a, b)) }
         out.append(make("lattice_distance_udc", "len=\(a.count)", t))
     }
     return out
@@ -276,9 +302,9 @@ func measureLLMCalibration(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64
         }
         var t = timeLoop(warmupNs: wu, measureNs: me) { curve.observe(claimedConfidence: 0.75, actualOutcome: true) }
         out.append(make("llm_calibration_observe", "warm_obs=\(nObs)", t))
-        t = timeLoop(warmupNs: wu, measureNs: me) { _ = curve.expectedCalibrationError() }
+        t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(curve.expectedCalibrationError()) }
         out.append(make("llm_calibration_ece", "warm_obs=\(nObs)", t))
-        t = timeLoop(warmupNs: wu, measureNs: me) { _ = curve.brierScore() }
+        t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(curve.brierScore()) }
         out.append(make("llm_calibration_brier", "warm_obs=\(nObs)", t))
     }
     return out
@@ -301,7 +327,7 @@ func measureMomentSummary(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64)
         let window = TimeRange(start: HLC(physicalTime: 1_700_000_000_000, logicalCount: 0, nodeID: 1),
                                 end:   HLC(physicalTime: 1_700_000_000_000 + Int64(nRows), logicalCount: 0, nodeID: 1))
         let t = timeLoop(warmupNs: wu, measureNs: me) {
-            _ = MomentSummary.summarize(rows: rows, window: window, activeDuring: MomentSummary.capturedDuring)
+            blackHole(MomentSummary.summarize(rows: rows, window: window, activeDuring: MomentSummary.capturedDuring))
         }
         out.append(make("moment_summary", "rows=\(nRows)", t))
     }
@@ -322,7 +348,7 @@ func measureNMF(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -> [Measu
                 V.append(row)
             }
             let t = timeLoop(warmupNs: wu, measureNs: me) {
-                _ = NMFAlternatingLeastSquares.factorize(V: V, rank: rank, maxIterations: 25, tolerance: 1e-4, seed: DEFAULT_SEED)
+                blackHole(NMFAlternatingLeastSquares.factorize(V: V, rank: rank, maxIterations: 25, tolerance: 1e-4, seed: DEFAULT_SEED))
             }
             out.append(make("nmf_factorize", "m=\(m),n=\(n),rank=\(rank)", t))
         }
@@ -336,7 +362,7 @@ func measureRandomWalks(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64) -
         let adj = buildAdjacency(&rng, n: n)
         for length in [50, 200] {
             let t = timeLoop(warmupNs: wu, measureNs: me) {
-                _ = RandomWalks.walk(adjacency: adj, start: 0, length: length, restartProb: 0.15, seed: DEFAULT_SEED)
+                blackHole(RandomWalks.walk(adjacency: adj, start: 0, length: length, restartProb: 0.15, seed: DEFAULT_SEED))
             }
             out.append(make("random_walks_walk", "n=\(n),length=\(length)", t))
         }
@@ -353,7 +379,7 @@ func measureTemporalCompression(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: U
         }
         let start = HLC(physicalTime: 1_700_000_000_000, logicalCount: 0, nodeID: 1)
         let end = HLC(physicalTime: 1_700_000_000_000 + 3600, logicalCount: 0, nodeID: 1)
-        let t = timeLoop(warmupNs: wu, measureNs: me) { _ = TemporalCompression.compress(rows: rows, startHLC: start, endHLC: end, level: .hour) }
+        let t = timeLoop(warmupNs: wu, measureNs: me) { blackHole(TemporalCompression.compress(rows: rows, startHLC: start, endHLC: end, level: .hour)) }
         out.append(make("temporal_compression_compress", "rows=\(nRows)", t))
     }
     return out

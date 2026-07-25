@@ -4,7 +4,8 @@
 # single submission-ready bundle.
 #
 # The bundle is a directory with:
-#   - all six JSON files (Rust + Swift × stress + topk + ml-bench)
+#   - all math JSON files (Rust + Swift × stress + topk + ml + catalog + FDC)
+#   - product.json when a release mootx01 binary is available
 #   - a SUBMISSION.md the maintainers read
 #   - a system-report.txt with /proc/cpuinfo, uname -a, etc.
 #
@@ -15,6 +16,7 @@
 #   apps/moot-math-benchmark/submit-results.sh                  # full sweep
 #   apps/moot-math-benchmark/submit-results.sh --quick          # smoke run
 #   apps/moot-math-benchmark/submit-results.sh --tag MY-RIG     # override hw tag
+#   apps/moot-math-benchmark/submit-results.sh --product-binary /path/to/mootx01
 #
 # This script handles only the Rust + Swift ports that ship with the
 # project. To include Go or Python results, run those binaries
@@ -28,10 +30,12 @@ cd "$HERE"
 
 QUICK=""
 TAG=""
+PRODUCT_BINARY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --quick) QUICK="--quick"; shift ;;
         --tag)   TAG="$2"; shift 2 ;;
+        --product-binary) PRODUCT_BINARY="$2"; shift 2 ;;
         *) echo "unknown arg: $1"; exit 2 ;;
     esac
 done
@@ -67,9 +71,19 @@ BUNDLE="results/${DATE}-${TAG}"
 
 mkdir -p "$BUNDLE"
 
-# ---- run all six benches -------------------------------------------
+# ---- select Rust toolchain/features --------------------------------
+if command -v rustup >/dev/null 2>&1 && rustup toolchain list | grep -q '^nightly-2026-05-16'; then
+    RUST_RUN="cargo +nightly-2026-05-16 run --release --quiet"
+    RUST_NOTE="pinned nightly-2026-05-16 portable-SIMD enabled"
+else
+    RUST_RUN="cargo run --release --quiet --no-default-features"
+    RUST_NOTE="stable scalar-only (nightly unavailable)"
+fi
+
+# ---- run all math benches ------------------------------------------
 echo "==> moot-math-benchmark bundle: $BUNDLE"
 echo "==> $(date)"
+echo "==> Rust mode: $RUST_NOTE"
 echo ""
 
 run_bin() {
@@ -88,9 +102,11 @@ run_bin() {
 
 (
     cd rust-bench
-    run_bin "rust topk-bench   " "cargo run --release --quiet --bin topk-bench --"   "../$BUNDLE/hamming_topk-rust.json"
-    run_bin "rust stress-test  " "cargo run --release --quiet --bin stress-test --"  "../$BUNDLE/"
-    run_bin "rust ml-bench     " "cargo run --release --quiet --bin ml-bench --"     "../$BUNDLE/substrate_ml-rust.json"
+    run_bin "rust topk-bench   " "$RUST_RUN --bin topk-bench --"   "../$BUNDLE/hamming_topk-rust.json"
+    run_bin "rust stress-test  " "$RUST_RUN --bin stress-test --"  "../$BUNDLE/"
+    run_bin "rust ml-bench     " "$RUST_RUN --bin ml-bench --"     "../$BUNDLE/substrate_ml-rust.json"
+    run_bin "rust catalog-bench" "$RUST_RUN --bin catalog-bench -- --vectors ../../../docs/validation/substrate_math_performance/test-harness/vectors" "../$BUNDLE/catalog-rust.json"
+    run_bin "rust fdc-bench    " "$RUST_RUN --bin fdc-bench --" "../$BUNDLE/fdc-rust.json"
 )
 
 (
@@ -99,7 +115,22 @@ run_bin() {
     run_bin "swift topk-bench  " ".build/release/topk-bench"  "../$BUNDLE/hamming_topk-swift.json"
     run_bin "swift stress-test " ".build/release/stress-test" "../$BUNDLE/"
     run_bin "swift ml-bench    " ".build/release/ml-bench"    "../$BUNDLE/substrate_ml-swift.json"
+    run_bin "swift catalog-bench" ".build/release/catalog-bench --vectors ../../../docs/validation/substrate_math_performance/test-harness/vectors" "../$BUNDLE/catalog-swift.json"
+    run_bin "swift fdc-bench   " ".build/release/fdc-bench" "../$BUNDLE/fdc-swift.json"
 )
+
+# ---- actual product boundary (optional) ----------------------------
+if [ -z "$PRODUCT_BINARY" ] && [ -x "../mootx01/.build/out/Products/Release/mootx01" ]; then
+    PRODUCT_BINARY="../mootx01/.build/out/Products/Release/mootx01"
+fi
+if [ -n "$PRODUCT_BINARY" ]; then
+    echo "==> product boundary → $BUNDLE/product.json"
+    python3 product-bench.py --binary "$PRODUCT_BINARY" --out "$BUNDLE/product.json" $QUICK
+    echo ""
+else
+    echo "==> product boundary skipped (build mootx01 release or pass --product-binary)"
+    echo ""
+fi
 
 # ---- system report ---------------------------------------------------
 echo "==> system report"

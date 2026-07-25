@@ -24,6 +24,7 @@
 
 use std::env;
 use std::fs;
+use std::hint::black_box;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -31,9 +32,9 @@ use std::time::{Duration, Instant};
 
 use harness::{hardware, SplitMix64};
 
+use substrate_ml::moment_summary::TimeRange;
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::hlc::HLC;
-use substrate_ml::moment_summary::TimeRange;
 use substrate_types::hyperplane::HyperplaneFamily;
 
 use substrate_ml::anomaly::AnomalyDetection;
@@ -71,33 +72,69 @@ struct Measurement {
 
 fn time_loop<F: FnMut()>(warmup: Duration, measure: Duration, mut f: F) -> (u64, u128, u128, u128) {
     let warm_until = Instant::now() + warmup;
-    while Instant::now() < warm_until { f(); }
+    while Instant::now() < warm_until {
+        f();
+    }
+    // Batch sub-tick operations until one timed sample spans at least 10 µs;
+    // report the divided per-call duration and the true total call count.
+    let mut calls_per_sample: u64 = 1;
+    while calls_per_sample < 1_048_576 {
+        let t0 = Instant::now();
+        for _ in 0..calls_per_sample {
+            f();
+        }
+        if t0.elapsed() >= Duration::from_micros(10) {
+            break;
+        }
+        calls_per_sample *= 2;
+    }
     let measure_until = Instant::now() + measure;
     let mut samples: Vec<u128> = Vec::with_capacity(1024);
     while Instant::now() < measure_until {
         let t0 = Instant::now();
-        f();
-        samples.push(t0.elapsed().as_nanos());
+        for _ in 0..calls_per_sample {
+            f();
+        }
+        let elapsed = t0.elapsed().as_nanos();
+        let divisor = calls_per_sample as u128;
+        samples.push((elapsed + divisor - 1) / divisor);
     }
     let n = samples.len() as u128;
-    if n == 0 { return (0, 0, 0, 0); }
+    if n == 0 {
+        return (0, 0, 0, 0);
+    }
     let min = *samples.iter().min().unwrap();
     let sum: u128 = samples.iter().sum();
     let mean = sum / n;
-    let var: u128 = samples.iter().map(|s| {
-        let d = if *s > mean { s - mean } else { mean - s };
-        d * d
-    }).sum::<u128>() / n;
+    let var: u128 = samples
+        .iter()
+        .map(|s| {
+            let d = if *s > mean { s - mean } else { mean - s };
+            d * d
+        })
+        .sum::<u128>()
+        / n;
     let stddev = (var as f64).sqrt() as u128;
-    (n as u64, min, mean, stddev)
+    (n as u64 * calls_per_sample, min, mean, stddev)
 }
 
 fn make(algorithm: &'static str, params: String, t: (u64, u128, u128, u128)) -> Measurement {
-    Measurement { algorithm, params, iterations: t.0, ns_per_call_min: t.1, ns_per_call_mean: t.2, ns_per_call_stddev: t.3 }
+    Measurement {
+        algorithm,
+        params,
+        iterations: t.0,
+        ns_per_call_min: t.1,
+        ns_per_call_mean: t.2,
+        ns_per_call_stddev: t.3,
+    }
 }
 
-fn rand_f32_01(rng: &mut SplitMix64) -> f32 { (rng.next() >> 32) as u32 as f32 / u32::MAX as f32 }
-fn rand_f64_01(rng: &mut SplitMix64) -> f64 { rng.next() as f64 / u64::MAX as f64 }
+fn rand_f32_01(rng: &mut SplitMix64) -> f32 {
+    (rng.next() >> 32) as u32 as f32 / u32::MAX as f32
+}
+fn rand_f64_01(rng: &mut SplitMix64) -> f64 {
+    rng.next() as f64 / u64::MAX as f64
+}
 
 fn measure_anomaly(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
     let mut out = Vec::new();
@@ -107,15 +144,25 @@ fn measure_anomaly(rng: &mut SplitMix64, warmup: Duration, measure: Duration) ->
         // estate="" + ts=0 = telemetry off (no ObserverSink emit), so the
         // bench times pure compute. Swift's port defaults these; Rust has no
         // default args, so they are passed explicitly.
-        let t = time_loop(warmup, measure, || { let _ = AnomalyDetection::rolling_z_score(&window, current, "", 0.0); });
+        let t = time_loop(warmup, measure, || {
+            black_box(AnomalyDetection::rolling_z_score(&window, current, "", 0.0));
+        });
         out.push(make("anomaly_z_score", format!("n={}", n), t));
-        let t = time_loop(warmup, measure, || { let _ = AnomalyDetection::rolling_modified_z_score(&window, current, "", 0.0); });
+        let t = time_loop(warmup, measure, || {
+            black_box(AnomalyDetection::rolling_modified_z_score(
+                &window, current, "", 0.0,
+            ));
+        });
         out.push(make("anomaly_modified_z_score", format!("n={}", n), t));
     }
     out
 }
 
-fn measure_bradley_terry(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_bradley_terry(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     use substrate_ml::bradley_terry::RowId;
     let mut out = Vec::new();
     for &n_items in &[10usize, 100, 1_000] {
@@ -125,80 +172,151 @@ fn measure_bradley_terry(rng: &mut SplitMix64, warmup: Duration, measure: Durati
                 let winner = ids[i % n_items];
                 let losers = vec![ids[(i + 1) % n_items], ids[(i + 2) % n_items]];
                 PreferenceObservation::new(winner, losers)
-            }).collect();
+            })
+            .collect();
         let mut est = BradleyTerryEstimator::new(0.1, 0.001);
         let single = &obs[0];
-        let t = time_loop(warmup, measure, || { est.observe(single); });
-        out.push(make("bradley_terry_observe", format!("items={}", n_items), t));
+        let t = time_loop(warmup, measure, || {
+            est.observe(single);
+        });
+        out.push(make(
+            "bradley_terry_observe",
+            format!("items={}", n_items),
+            t,
+        ));
         let mut est2 = BradleyTerryEstimator::new(0.1, 0.001);
-        let t = time_loop(warmup, measure, || { est2.observe_batch(&obs); });
-        out.push(make("bradley_terry_observe_batch", format!("items={},batch={}", n_items, obs.len()), t));
+        let t = time_loop(warmup, measure, || {
+            est2.observe_batch(&obs);
+        });
+        out.push(make(
+            "bradley_terry_observe_batch",
+            format!("items={},batch={}", n_items, obs.len()),
+            t,
+        ));
     }
     out
 }
 
 fn build_adjacency(rng: &mut SplitMix64, n: usize) -> Vec<Vec<(usize, f64)>> {
-    (0..n).map(|i| {
-        let edge_count = 3 + (rng.next() as usize % 4);
-        (0..edge_count).map(|_| {
-            let dst = (rng.next() as usize) % n;
-            let w = 0.1 + rand_f64_01(rng) * 5.0;
-            (dst, w)
-        }).filter(|(dst, _)| *dst != i).collect()
-    }).collect()
+    (0..n)
+        .map(|i| {
+            let edge_count = 3 + (rng.next() as usize % 4);
+            (0..edge_count)
+                .map(|_| {
+                    let dst = (rng.next() as usize) % n;
+                    let w = 0.1 + rand_f64_01(rng) * 5.0;
+                    (dst, w)
+                })
+                .filter(|(dst, _)| *dst != i)
+                .collect()
+        })
+        .collect()
 }
 
-fn measure_community_detection(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_community_detection(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &n in &[50usize, 200, 1_000] {
         let adjacency = build_adjacency(rng, n);
         // estate="" + ts=0.0: telemetry off — bench times pure compute.
-        let t = time_loop(warmup, measure, || { let _ = CommunityDetection::detect(&adjacency, 10, "", 0.0); });
+        let t = time_loop(warmup, measure, || {
+            black_box(CommunityDetection::detect(&adjacency, 10, "", 0.0));
+        });
         out.push(make("community_detection", format!("n={}", n), t));
     }
     out
 }
 
-fn measure_composite_distance(_rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_composite_distance(
+    _rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
-    let t = time_loop(warmup, measure, || { let _ = CompositeDistance::distance(0.42, 73, 0.6, 0.4, true); });
+    let t = time_loop(warmup, measure, || {
+        black_box(CompositeDistance::distance(0.42, 73, 0.6, 0.4, true));
+    });
     out.push(make("composite_distance", "single_call".into(), t));
     out
 }
 
-fn measure_eigenvalue_centrality(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_eigenvalue_centrality(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &n in &[50usize, 200, 1_000] {
         let adjacency = build_adjacency(rng, n);
         // estate="" + ts=0 = telemetry off; bench times pure compute.
-        let t = time_loop(warmup, measure, || { let _ = EigenvalueCentrality::compute(&adjacency, 100, 1e-6, "", 0.0); });
+        let t = time_loop(warmup, measure, || {
+            black_box(EigenvalueCentrality::compute(
+                &adjacency, 100, 1e-6, "", 0.0,
+            ));
+        });
         out.push(make("eigenvalue_centrality", format!("n={}", n), t));
     }
     out
 }
 
-fn measure_feature_extractors(_rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_feature_extractors(
+    _rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     let family = HyperplaneFamily::generate(&[0u8; 32], 0, 64, 0.5);
     let family1 = HyperplaneFamily::generate(&[0u8; 32], 1, 64, 0.5);
     let family2 = HyperplaneFamily::generate(&[0u8; 32], 2, 64, 0.5);
     let family3 = HyperplaneFamily::generate(&[0u8; 32], 3, 64, 0.5);
     let hyperplanes = [family, family1, family2, family3];
-    let hlc = HLC { physical_time: 1_700_000_000_000, logical_count: 0, node_id: 1 };
-    let extractor = HealthKitExtractor { hyperplanes: &hyperplanes };
+    let hlc = HLC {
+        physical_time: 1_700_000_000_000,
+        logical_count: 0,
+        node_id: 1,
+    };
+    let extractor = HealthKitExtractor {
+        hyperplanes: &hyperplanes,
+    };
     let sample = HealthKitSample {
-        quantity_type: "stepCount".into(), value: 8500.0, unit: "count".into(),
-        start_date: 1_700_000_000.0, end_date: 1_700_003_600.0, source_device: "iPhone".into(),
+        quantity_type: "stepCount".into(),
+        value: 8500.0,
+        unit: "count".into(),
+        start_date: 1_700_000_000.0,
+        end_date: 1_700_003_600.0,
+        source_device: "iPhone".into(),
     };
-    let t = time_loop(warmup, measure, || { let _ = extractor.extract(&sample, hlc, 0x12345678); });
-    out.push(make("feature_extractor_healthkit", "single_sample".into(), t));
-    let ext2 = CoreLocationExtractor { hyperplanes: &hyperplanes };
+    let t = time_loop(warmup, measure, || {
+        black_box(extractor.extract(&sample, hlc, 0x12345678));
+    });
+    out.push(make(
+        "feature_extractor_healthkit",
+        "single_sample".into(),
+        t,
+    ));
+    let ext2 = CoreLocationExtractor {
+        hyperplanes: &hyperplanes,
+    };
     let cls = CoreLocationSample {
-        latitude: 37.7749, longitude: -122.4194, altitude: 16.0, speed: 0.0, course: 0.0,
-        timestamp: 1_700_000_000.0, horizontal_accuracy: 5.0,
+        latitude: 37.7749,
+        longitude: -122.4194,
+        altitude: 16.0,
+        speed: 0.0,
+        course: 0.0,
+        timestamp: 1_700_000_000.0,
+        horizontal_accuracy: 5.0,
     };
-    let t = time_loop(warmup, measure, || { let _ = ext2.extract(&cls, hlc, 0x12345678); });
-    out.push(make("feature_extractor_corelocation", "single_sample".into(), t));
+    let t = time_loop(warmup, measure, || {
+        black_box(ext2.extract(&cls, hlc, 0x12345678));
+    });
+    out.push(make(
+        "feature_extractor_corelocation",
+        "single_sample".into(),
+        t,
+    ));
     out
 }
 
@@ -206,25 +324,39 @@ fn measure_fft(_rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Ve
     let mut out = Vec::new();
     for &n in &[64usize, 256, 1024, 4096, 16384] {
         let input: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
-        let t = time_loop(warmup, measure, || { let _ = substrate_ml::fft::forward(&input); });
+        let t = time_loop(warmup, measure, || {
+            black_box(substrate_ml::fft::forward(&input));
+        });
         out.push(make("fft_forward", format!("n={}", n), t));
-        let t = time_loop(warmup, measure, || { let _ = substrate_ml::fft::magnitude_spectrum(&input); });
+        let t = time_loop(warmup, measure, || {
+            black_box(substrate_ml::fft::magnitude_spectrum(&input));
+        });
         out.push(make("fft_magnitude_spectrum", format!("n={}", n), t));
     }
     out
 }
 
-fn measure_float_simhash(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_float_simhash(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &dim in &[128usize, 384, 768, 1536] {
         let vector: Vec<f32> = (0..dim).map(|_| rand_f32_01(rng) * 2.0 - 1.0).collect();
-        let t = time_loop(warmup, measure, || { let _ = substrate_ml::float_simhash::project(&vector, DEFAULT_SEED); });
+        let t = time_loop(warmup, measure, || {
+            black_box(substrate_ml::float_simhash::project(&vector, DEFAULT_SEED));
+        });
         out.push(make("float_simhash_project", format!("dim={}", dim), t));
     }
     out
 }
 
-fn measure_info_theory(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_info_theory(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &k in &[64usize, 256, 1024] {
         let make_dist = |rng: &mut SplitMix64| {
@@ -234,23 +366,41 @@ fn measure_info_theory(rng: &mut SplitMix64, warmup: Duration, measure: Duration
         };
         let p = make_dist(rng);
         let q = make_dist(rng);
-        let t = time_loop(warmup, measure, || { let _ = InformationTheory::entropy(&p); });
+        let t = time_loop(warmup, measure, || {
+            black_box(InformationTheory::entropy(&p));
+        });
         out.push(make("info_theory_entropy", format!("k={}", k), t));
-        let t = time_loop(warmup, measure, || { let _ = InformationTheory::kl_divergence(&p, &q); });
+        let t = time_loop(warmup, measure, || {
+            black_box(InformationTheory::kl_divergence(&p, &q));
+        });
         out.push(make("info_theory_kl", format!("k={}", k), t));
-        let t = time_loop(warmup, measure, || { let _ = InformationTheory::cross_entropy(&p, &q); });
+        let t = time_loop(warmup, measure, || {
+            black_box(InformationTheory::cross_entropy(&p, &q));
+        });
         out.push(make("info_theory_cross_entropy", format!("k={}", k), t));
         let side = (k as f64).sqrt() as usize;
-        let mut joint: Vec<Vec<f32>> = (0..side).map(|_| (0..side).map(|_| rand_f32_01(rng)).collect()).collect();
+        let mut joint: Vec<Vec<f32>> = (0..side)
+            .map(|_| (0..side).map(|_| rand_f32_01(rng)).collect())
+            .collect();
         let total: f32 = joint.iter().flatten().sum();
-        for row in joint.iter_mut() { for v in row.iter_mut() { *v /= total; } }
-        let t = time_loop(warmup, measure, || { let _ = InformationTheory::mutual_information(&joint); });
+        for row in joint.iter_mut() {
+            for v in row.iter_mut() {
+                *v /= total;
+            }
+        }
+        let t = time_loop(warmup, measure, || {
+            black_box(InformationTheory::mutual_information(&joint));
+        });
         out.push(make("info_theory_mi", format!("k={}", k), t));
     }
     out
 }
 
-fn measure_lattice_distance(_rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_lattice_distance(
+    _rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     let pairs: &[(&str, &str)] = &[
         ("003", "004"),
@@ -259,13 +409,19 @@ fn measure_lattice_distance(_rng: &mut SplitMix64, warmup: Duration, measure: Du
         ("003.13.5.2.1.4.7.9", "003.13.5.2.1.4.7.8"),
     ];
     for (a, b) in pairs {
-        let t = time_loop(warmup, measure, || { let _ = UDCTreeDistance::distance(a, b); });
+        let t = time_loop(warmup, measure, || {
+            black_box(UDCTreeDistance::distance(a, b));
+        });
         out.push(make("lattice_distance_udc", format!("len={}", a.len()), t));
     }
     out
 }
 
-fn measure_llm_calibration(_rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_llm_calibration(
+    _rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &n_obs in &[100usize, 1_000, 10_000] {
         let mut curve = LLMCalibrationCurve::new();
@@ -275,28 +431,75 @@ fn measure_llm_calibration(_rng: &mut SplitMix64, warmup: Duration, measure: Dur
             let o = local.next() & 1 == 0;
             curve.observe(c, o);
         }
-        let t = time_loop(warmup, measure, || { curve.observe(0.75, true); });
-        out.push(make("llm_calibration_observe", format!("warm_obs={}", n_obs), t));
-        let t = time_loop(warmup, measure, || { let _ = curve.expected_calibration_error(); });
-        out.push(make("llm_calibration_ece", format!("warm_obs={}", n_obs), t));
-        let t = time_loop(warmup, measure, || { let _ = curve.brier_score(); });
-        out.push(make("llm_calibration_brier", format!("warm_obs={}", n_obs), t));
+        let t = time_loop(warmup, measure, || {
+            curve.observe(0.75, true);
+        });
+        out.push(make(
+            "llm_calibration_observe",
+            format!("warm_obs={}", n_obs),
+            t,
+        ));
+        let t = time_loop(warmup, measure, || {
+            black_box(curve.expected_calibration_error());
+        });
+        out.push(make(
+            "llm_calibration_ece",
+            format!("warm_obs={}", n_obs),
+            t,
+        ));
+        let t = time_loop(warmup, measure, || {
+            black_box(curve.brier_score());
+        });
+        out.push(make(
+            "llm_calibration_brier",
+            format!("warm_obs={}", n_obs),
+            t,
+        ));
     }
     out
 }
 
-fn measure_moment_summary(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_moment_summary(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &n_rows in &[100usize, 1_000, 10_000, 100_000] {
-        let rows: Vec<RowLite> = (0..n_rows).map(|i| RowLite {
-            fingerprint: Fingerprint256 { block0: rng.next(), block1: rng.next(), block2: rng.next(), block3: rng.next() },
-            capture_hlc: HLC { physical_time: 1_700_000_000_000 + i as i64, logical_count: 0, node_id: 1 },
-        }).collect();
+        let rows: Vec<RowLite> = (0..n_rows)
+            .map(|i| RowLite {
+                fingerprint: Fingerprint256 {
+                    block0: rng.next(),
+                    block1: rng.next(),
+                    block2: rng.next(),
+                    block3: rng.next(),
+                },
+                capture_hlc: HLC {
+                    physical_time: 1_700_000_000_000 + i as i64,
+                    logical_count: 0,
+                    node_id: 1,
+                },
+            })
+            .collect();
         let window = TimeRange {
-            start: HLC { physical_time: 1_700_000_000_000, logical_count: 0, node_id: 1 },
-            end: HLC { physical_time: 1_700_000_000_000 + n_rows as i64, logical_count: 0, node_id: 1 },
+            start: HLC {
+                physical_time: 1_700_000_000_000,
+                logical_count: 0,
+                node_id: 1,
+            },
+            end: HLC {
+                physical_time: 1_700_000_000_000 + n_rows as i64,
+                logical_count: 0,
+                node_id: 1,
+            },
         };
-        let t = time_loop(warmup, measure, || { let _ = MomentSummary::summarize(&rows, window, MomentSummary::captured_during); });
+        let t = time_loop(warmup, measure, || {
+            black_box(MomentSummary::summarize(
+                &rows,
+                window,
+                MomentSummary::captured_during,
+            ));
+        });
         out.push(make("moment_summary", format!("rows={}", n_rows), t));
     }
     out
@@ -306,44 +509,105 @@ fn measure_nmf(_rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Ve
     let mut out = Vec::new();
     for &(m, n) in &[(16usize, 16usize), (32, 32), (64, 64), (128, 128)] {
         for &rank in &[4usize, 8, 16] {
-            if rank >= m.min(n) { continue; }
+            if rank >= m.min(n) {
+                continue;
+            }
             let mut rng = SplitMix64::new(DEFAULT_SEED ^ ((m * 1000 + n * 10 + rank) as u64));
-            let v: Vec<Vec<f32>> = (0..m).map(|_| (0..n).map(|_| rand_f32_01(&mut rng)).collect()).collect();
+            let v: Vec<Vec<f32>> = (0..m)
+                .map(|_| (0..n).map(|_| rand_f32_01(&mut rng)).collect())
+                .collect();
             // estate="" + ts=0 = telemetry off; bench times pure compute.
-            let t = time_loop(warmup, measure, || { let _ = NMFAlternatingLeastSquares::factorize(&v, rank, 25, 1e-4, DEFAULT_SEED, "", 0.0); });
-            out.push(make("nmf_factorize", format!("m={},n={},rank={}", m, n, rank), t));
+            let t = time_loop(warmup, measure, || {
+                black_box(NMFAlternatingLeastSquares::factorize(
+                    &v,
+                    rank,
+                    25,
+                    1e-4,
+                    DEFAULT_SEED,
+                    "",
+                    0.0,
+                ));
+            });
+            out.push(make(
+                "nmf_factorize",
+                format!("m={},n={},rank={}", m, n, rank),
+                t,
+            ));
         }
     }
     out
 }
 
-fn measure_random_walks(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_random_walks(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &n in &[100usize, 1_000, 10_000] {
         let adjacency = build_adjacency(rng, n);
         for &length in &[50usize, 200] {
-            let t = time_loop(warmup, measure, || { let _ = RandomWalks::walk(&adjacency, 0, length, 0.15, DEFAULT_SEED); });
-            out.push(make("random_walks_walk", format!("n={},length={}", n, length), t));
+            let t = time_loop(warmup, measure, || {
+                black_box(RandomWalks::walk(&adjacency, 0, length, 0.15, DEFAULT_SEED));
+            });
+            out.push(make(
+                "random_walks_walk",
+                format!("n={},length={}", n, length),
+                t,
+            ));
         }
     }
     out
 }
 
-fn measure_temporal_compression(rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Vec<Measurement> {
+fn measure_temporal_compression(
+    rng: &mut SplitMix64,
+    warmup: Duration,
+    measure: Duration,
+) -> Vec<Measurement> {
     let mut out = Vec::new();
     for &n_rows in &[100usize, 1_000, 10_000] {
-        let rows: Vec<Fingerprint256> = (0..n_rows).map(|_| Fingerprint256 {
-            block0: rng.next(), block1: rng.next(), block2: rng.next(), block3: rng.next(),
-        }).collect();
-        let start = HLC { physical_time: 1_700_000_000_000, logical_count: 0, node_id: 1 };
-        let end = HLC { physical_time: 1_700_000_000_000 + 3600, logical_count: 0, node_id: 1 };
-        let t = time_loop(warmup, measure, || { let _ = TemporalCompression::compress(&rows, start, end, WindowLevel::Hour); });
-        out.push(make("temporal_compression_compress", format!("rows={}", n_rows), t));
+        let rows: Vec<Fingerprint256> = (0..n_rows)
+            .map(|_| Fingerprint256 {
+                block0: rng.next(),
+                block1: rng.next(),
+                block2: rng.next(),
+                block3: rng.next(),
+            })
+            .collect();
+        let start = HLC {
+            physical_time: 1_700_000_000_000,
+            logical_count: 0,
+            node_id: 1,
+        };
+        let end = HLC {
+            physical_time: 1_700_000_000_000 + 3600,
+            logical_count: 0,
+            node_id: 1,
+        };
+        let t = time_loop(warmup, measure, || {
+            black_box(TemporalCompression::compress(
+                &rows,
+                start,
+                end,
+                WindowLevel::Hour,
+            ));
+        });
+        out.push(make(
+            "temporal_compression_compress",
+            format!("rows={}", n_rows),
+            t,
+        ));
     }
     out
 }
 
-fn write_report(out: &Path, seed: u64, quick: bool, measurements: &[Measurement]) -> std::io::Result<()> {
+fn write_report(
+    out: &Path,
+    seed: u64,
+    quick: bool,
+    measurements: &[Measurement],
+) -> std::io::Result<()> {
     let mut f = fs::File::create(out)?;
     let date = chrono_date();
     let hw = hardware::tag();
@@ -387,7 +651,10 @@ fn usage() -> ! {
 
 fn parse_seed(s: &str) -> u64 {
     let s = s.trim_start_matches("0x").trim_start_matches("0X");
-    u64::from_str_radix(s, 16).unwrap_or_else(|_| { eprintln!("bad seed: {}", s); process::exit(2) })
+    u64::from_str_radix(s, 16).unwrap_or_else(|_| {
+        eprintln!("bad seed: {}", s);
+        process::exit(2)
+    })
 }
 
 fn main() {
@@ -403,12 +670,24 @@ fn main() {
             "--out" => out_arg = Some(PathBuf::from(args.next().unwrap_or_else(|| usage()))),
             "--quick" => quick = true,
             "--help" | "-h" => usage(),
-            _ => { eprintln!("unknown arg: {}", arg); usage(); }
+            _ => {
+                eprintln!("unknown arg: {}", arg);
+                usage();
+            }
         }
     }
     let want = algorithm.unwrap_or_else(|| "all".into());
-    let (warmup, measure) = if quick { (WARMUP_QUICK, MEASURE_QUICK) } else { (WARMUP_FULL, MEASURE_FULL) };
-    println!("ml-bench (Rust) seed=0x{:016x} algorithm={} {}", seed, want, if quick { "[quick]" } else { "" });
+    let (warmup, measure) = if quick {
+        (WARMUP_QUICK, MEASURE_QUICK)
+    } else {
+        (WARMUP_FULL, MEASURE_FULL)
+    };
+    println!(
+        "ml-bench (Rust) seed=0x{:016x} algorithm={} {}",
+        seed,
+        want,
+        if quick { "[quick]" } else { "" }
+    );
     let mut all = Vec::new();
     let mut rng = SplitMix64::new(seed);
     let want_all = want == "all";
@@ -416,7 +695,12 @@ fn main() {
         ($name:expr, $fn:ident) => {
             if want_all || want == $name {
                 let ms = $fn(&mut rng, warmup, measure);
-                for m in &ms { println!("  {:32} {:40} min={:>10}ns iters={}", m.algorithm, m.params, m.ns_per_call_min, m.iterations); }
+                for m in &ms {
+                    println!(
+                        "  {:32} {:40} min={:>10}ns iters={}",
+                        m.algorithm, m.params, m.ns_per_call_min, m.iterations
+                    );
+                }
                 all.extend(ms);
             }
         };
@@ -438,10 +722,16 @@ fn main() {
     run!("temporal_compression", measure_temporal_compression);
     let out = match out_arg {
         Some(p) => {
-            if p.is_dir() || p.extension().is_none() { fs::create_dir_all(&p).ok(); p.join("substrate_ml-rust.json") } else { p }
+            if p.is_dir() || p.extension().is_none() {
+                fs::create_dir_all(&p).ok();
+                p.join("substrate_ml-rust.json")
+            } else {
+                p
+            }
         }
         None => {
-            let date = chrono_date(); let hw = hardware::tag();
+            let date = chrono_date();
+            let hw = hardware::tag();
             let dir = PathBuf::from(format!("results/{}-{}", date, hw));
             fs::create_dir_all(&dir).ok();
             dir.join("substrate_ml-rust.json")

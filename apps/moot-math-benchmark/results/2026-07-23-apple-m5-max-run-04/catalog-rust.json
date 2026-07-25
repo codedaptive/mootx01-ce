@@ -1,0 +1,311 @@
+{
+  "schema_version": "catalog-1",
+  "language": "rust",
+  "op": "canonical_primitive_validation",
+  "date": "2026-07-23",
+  "generated_at": "2026-07-23T08:47:06Z",
+  "hardware_tag": "apple-m5-max",
+  "commit_sha": "b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99",
+  "vector_root": "../../../docs/validation/substrate_math_performance/test-harness/vectors",
+  "timing": {
+    "warmup_ms": 30,
+    "measure_ms": 120,
+    "quick_mode": false
+  },
+  "platform": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "measurements": [
+    {
+      "primitive": "simhash",
+      "cookbook_section": "§3.6",
+      "cases_per_iteration": 40,
+      "iterations": 367,
+      "ns_per_batch_min": 321584,
+      "ns_per_batch_mean": 327197,
+      "ns_per_batch_stddev": 5954,
+      "ns_per_case_min": 8039.6
+    },
+    {
+      "primitive": "anomaly",
+      "cookbook_section": "§8.13",
+      "cases_per_iteration": 32,
+      "iterations": 12556,
+      "ns_per_batch_min": 8541,
+      "ns_per_batch_mean": 9514,
+      "ns_per_batch_stddev": 1011,
+      "ns_per_case_min": 266.90625
+    },
+    {
+      "primitive": "association_rule_mining",
+      "cookbook_section": "§6.3",
+      "cases_per_iteration": 8,
+      "iterations": 14694,
+      "ns_per_batch_min": 7500,
+      "ns_per_batch_mean": 8125,
+      "ns_per_batch_stddev": 2175,
+      "ns_per_case_min": 937.5
+    },
+    {
+      "primitive": "formal_concept_analysis",
+      "cookbook_section": "§8 (pure engine)",
+      "cases_per_iteration": 8,
+      "iterations": 5400,
+      "ns_per_batch_min": 18583,
+      "ns_per_batch_mean": 22180,
+      "ns_per_batch_stddev": 8428,
+      "ns_per_case_min": 2322.875
+    },
+    {
+      "primitive": "hamming",
+      "cookbook_section": "§8.2",
+      "cases_per_iteration": 40,
+      "iterations": 7720,
+      "ns_per_batch_min": 14500,
+      "ns_per_batch_mean": 15505,
+      "ns_per_batch_stddev": 1576,
+      "ns_per_case_min": 362.5
+    },
+    {
+      "primitive": "or_reduce",
+      "cookbook_section": "§8.5",
+      "cases_per_iteration": 40,
+      "iterations": 1913,
+      "ns_per_batch_min": 58625,
+      "ns_per_batch_mean": 62708,
+      "ns_per_batch_stddev": 7811,
+      "ns_per_case_min": 1465.625
+    },
+    {
+      "primitive": "bitwise",
+      "cookbook_section": "§8.6",
+      "cases_per_iteration": 32,
+      "iterations": 15056,
+      "ns_per_batch_min": 7500,
+      "ns_per_batch_mean": 7932,
+      "ns_per_batch_stddev": 1051,
+      "ns_per_case_min": 234.375
+    },
+    {
+      "primitive": "hlc",
+      "cookbook_section": "§5.2",
+      "cases_per_iteration": 32,
+      "iterations": 52107,
+      "ns_per_batch_min": 2083,
+      "ns_per_batch_mean": 2264,
+      "ns_per_batch_stddev": 298,
+      "ns_per_case_min": 65.09375
+    },
+    {
+      "primitive": "fingerprint",
+      "cookbook_section": "§3.1",
+      "cases_per_iteration": 32,
+      "iterations": 17054,
+      "ns_per_batch_min": 6666,
+      "ns_per_batch_mean": 7000,
+      "ns_per_batch_stddev": 520,
+      "ns_per_case_min": 208.3125
+    },
+    {
+      "primitive": "lattice",
+      "cookbook_section": "§8.3",
+      "cases_per_iteration": 32,
+      "iterations": 44103,
+      "ns_per_batch_min": 2541,
+      "ns_per_batch_mean": 2685,
+      "ns_per_batch_stddev": 313,
+      "ns_per_case_min": 79.40625
+    },
+    {
+      "primitive": "matrix_decay",
+      "cookbook_section": "§6.8",
+      "cases_per_iteration": 32,
+      "iterations": 5543,
+      "ns_per_batch_min": 20709,
+      "ns_per_batch_mean": 21607,
+      "ns_per_batch_stddev": 1392,
+      "ns_per_case_min": 647.15625
+    },
+    {
+      "primitive": "eigenvalue_centrality",
+      "cookbook_section": "§7.2",
+      "cases_per_iteration": 32,
+      "iterations": 656,
+      "ns_per_batch_min": 177500,
+      "ns_per_batch_mean": 183136,
+      "ns_per_batch_stddev": 5989,
+      "ns_per_case_min": 5546.875
+    },
+    {
+      "primitive": "moment_summary",
+      "cookbook_section": "§8.7",
+      "cases_per_iteration": 32,
+      "iterations": 5087,
+      "ns_per_batch_min": 22416,
+      "ns_per_batch_mean": 23553,
+      "ns_per_batch_stddev": 1576,
+      "ns_per_case_min": 700.5
+    },
+    {
+      "primitive": "field_presence_matrix_f",
+      "cookbook_section": "§6.1",
+      "cases_per_iteration": 32,
+      "iterations": 858,
+      "ns_per_batch_min": 136625,
+      "ns_per_batch_mean": 139919,
+      "ns_per_batch_stddev": 7642,
+      "ns_per_case_min": 4269.53125
+    },
+    {
+      "primitive": "fnv",
+      "cookbook_section": "§3.3",
+      "cases_per_iteration": 32,
+      "iterations": 49897,
+      "ns_per_batch_min": 2166,
+      "ns_per_batch_mean": 2368,
+      "ns_per_batch_stddev": 359,
+      "ns_per_case_min": 67.6875
+    },
+    {
+      "primitive": "bit_field_masked_equals",
+      "cookbook_section": "§2.8",
+      "cases_per_iteration": 32,
+      "iterations": 44556,
+      "ns_per_batch_min": 2458,
+      "ns_per_batch_mean": 2656,
+      "ns_per_batch_stddev": 610,
+      "ns_per_case_min": 76.8125
+    },
+    {
+      "primitive": "info_theory",
+      "cookbook_section": "§8.11",
+      "cases_per_iteration": 32,
+      "iterations": 23039,
+      "ns_per_batch_min": 4708,
+      "ns_per_batch_mean": 5171,
+      "ns_per_batch_stddev": 721,
+      "ns_per_case_min": 147.125
+    },
+    {
+      "primitive": "bradley_terry",
+      "cookbook_section": "§8.12",
+      "cases_per_iteration": 32,
+      "iterations": 3244,
+      "ns_per_batch_min": 35083,
+      "ns_per_batch_mean": 36953,
+      "ns_per_batch_stddev": 1846,
+      "ns_per_case_min": 1096.34375
+    },
+    {
+      "primitive": "partial_state_recall",
+      "cookbook_section": "§8.8",
+      "cases_per_iteration": 32,
+      "iterations": 13624,
+      "ns_per_batch_min": 8250,
+      "ns_per_batch_mean": 8769,
+      "ns_per_batch_stddev": 832,
+      "ns_per_case_min": 257.8125
+    },
+    {
+      "primitive": "temporal_compression",
+      "cookbook_section": "§8.14",
+      "cases_per_iteration": 32,
+      "iterations": 3533,
+      "ns_per_batch_min": 31333,
+      "ns_per_batch_mean": 33931,
+      "ns_per_batch_stddev": 1974,
+      "ns_per_case_min": 979.15625
+    },
+    {
+      "primitive": "tier_contribution",
+      "cookbook_section": "§12.3",
+      "cases_per_iteration": 32,
+      "iterations": 7415,
+      "ns_per_batch_min": 15375,
+      "ns_per_batch_mean": 16144,
+      "ns_per_batch_stddev": 3596,
+      "ns_per_case_min": 480.46875
+    },
+    {
+      "primitive": "fft",
+      "cookbook_section": "§8.10",
+      "cases_per_iteration": 32,
+      "iterations": 3796,
+      "ns_per_batch_min": 29875,
+      "ns_per_batch_mean": 31571,
+      "ns_per_batch_stddev": 1994,
+      "ns_per_case_min": 933.59375
+    },
+    {
+      "primitive": "hamming_nn",
+      "cookbook_section": "§8.2",
+      "cases_per_iteration": 32,
+      "iterations": 980,
+      "ns_per_batch_min": 111792,
+      "ns_per_batch_mean": 122461,
+      "ns_per_batch_stddev": 9340,
+      "ns_per_case_min": 3493.5
+    },
+    {
+      "primitive": "pairing_handshake",
+      "cookbook_section": "§12.2",
+      "cases_per_iteration": 32,
+      "iterations": 18809,
+      "ns_per_batch_min": 5666,
+      "ns_per_batch_mean": 6343,
+      "ns_per_batch_stddev": 1020,
+      "ns_per_case_min": 177.0625
+    },
+    {
+      "primitive": "nmf",
+      "cookbook_section": "§6.9",
+      "cases_per_iteration": 32,
+      "iterations": 211,
+      "ns_per_batch_min": 549459,
+      "ns_per_batch_mean": 570875,
+      "ns_per_batch_stddev": 15816,
+      "ns_per_case_min": 17170.59375
+    },
+    {
+      "primitive": "audit_log_fold",
+      "cookbook_section": "§5.3+§8.15",
+      "cases_per_iteration": 32,
+      "iterations": 1564,
+      "ns_per_batch_min": 72375,
+      "ns_per_batch_mean": 76708,
+      "ns_per_batch_stddev": 4507,
+      "ns_per_case_min": 2261.71875
+    },
+    {
+      "primitive": "sampling",
+      "cookbook_section": "§8.17",
+      "cases_per_iteration": 12,
+      "iterations": 5295,
+      "ns_per_batch_min": 21500,
+      "ns_per_batch_mean": 22625,
+      "ns_per_batch_stddev": 1327,
+      "ns_per_case_min": 1791.6666666666667
+    },
+    {
+      "primitive": "shingle_similarity",
+      "cookbook_section": "§8.20",
+      "cases_per_iteration": 32,
+      "iterations": 2344,
+      "ns_per_batch_min": 49459,
+      "ns_per_batch_mean": 51153,
+      "ns_per_batch_stddev": 1942,
+      "ns_per_case_min": 1545.59375
+    },
+    {
+      "primitive": "merkle_commitment",
+      "cookbook_section": "NT-P0",
+      "cases_per_iteration": 6,
+      "iterations": 29452,
+      "ns_per_batch_min": 3833,
+      "ns_per_batch_mean": 4037,
+      "ns_per_batch_stddev": 468,
+      "ns_per_case_min": 638.8333333333334
+    }
+  ]
+}

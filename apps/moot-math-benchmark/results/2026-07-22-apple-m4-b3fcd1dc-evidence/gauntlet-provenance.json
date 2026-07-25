@@ -1,0 +1,45 @@
+{
+  "schema_version": "gauntlet-provenance-1",
+  "local_date": "2026-07-22",
+  "run_timestamp_utc": "2026-07-23T02:30:06Z",
+  "product": {
+    "name": "mootx01",
+    "version": "1.0.34 (2026-07-20)",
+    "binary_sha256": "bc940718884951b1f4ec98779e8e3094b6d4993ca73ba97eb962c36d6817bb38",
+    "repository_sha": "b3fcd1dc59b3fc022a55eda8ece54d1ac9135c99"
+  },
+  "harness": {
+    "repository": "codedaptive/mootx01-ee",
+    "path": "tools/mcp-benchmarker",
+    "sha": "fb0e77796efe9560860fb323c6def60988efb11e",
+    "temporary_change": "two-file moot-only execution mode; no corpus, scorer, MOOT write, MOOT query, or MOOT guard changes",
+    "historical_report": "tools/mcp-benchmarker/results/20260611-gauntlet-v1/report-fast-correct-final.txt",
+    "historical_report_tracking_commit": "ba2485d18a58be08918c0aad11b9395f52a18897"
+  },
+  "workload": {
+    "seed": 20260611,
+    "needles": 200,
+    "records": 1040,
+    "needles_per_tier": 40,
+    "tiers": ["T1", "T2", "T3", "T4", "T5"],
+    "distractors_per_needle": 4,
+    "k_values": [1, 5, 10],
+    "query_limit": 20,
+    "corpus_jsonl_sha256": "b0169df07fd5830bb7de2fc124bc327cfda256d84483fef064cf794e2584eae9",
+    "needles_json_sha256": "0f9d3395e04303aeb526dd8e58237e1639382d36fd81e69d947e9c0ad4540eec"
+  },
+  "execution": {
+    "transport": "MCP stdio",
+    "command_shape": "MOOTX01_DATA_DIR=<temporary> mootx01 serve --db gauntlet",
+    "isolation": "temporary named estate",
+    "full_run_reused_loaded_estate": true,
+    "normal_background_activity_enabled": true,
+    "degeneracy_guard_healthy": true,
+    "mempalace_rerun": false,
+    "superiority_evaluable": false
+  },
+  "artifacts": {
+    "gauntlet-moot-1.0.34.json": "ba019ae2ff060697b8276a1b4ed111e7b11f64aec45d00e2ae66b4bb49e295c8",
+    "gauntlet-moot-1.0.34.txt": "ffe75eeae9107bd20709dd2509ca43e0bae825890500d3ecb903e00dba3f9487"
+  }
+}

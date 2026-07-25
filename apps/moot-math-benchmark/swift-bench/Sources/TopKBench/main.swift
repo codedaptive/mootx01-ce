@@ -134,28 +134,37 @@ func timeLoop(warmupNS: UInt64, measureNS: UInt64, body: () -> Void)
     let warmupEnd = nowNS() + warmupNS
     while nowNS() < warmupEnd { body() }
 
+    var callsPerSample: UInt64 = 1
+    while callsPerSample < 1 << 20 {
+        let t0 = nowNS()
+        for _ in 0..<callsPerSample { body() }
+        if nowNS() &- t0 >= 10_000 { break }
+        callsPerSample &*= 2
+    }
+
     var samples: [UInt64] = []
     samples.reserveCapacity(1 << 16)
     let measureEnd = nowNS() + measureNS
     while nowNS() < measureEnd {
         let t0 = nowNS()
-        body()
+        for _ in 0..<callsPerSample { body() }
         let dt = nowNS() &- t0
-        samples.append(dt)
+        samples.append((dt &+ callsPerSample &- 1) / callsPerSample)
     }
 
-    let iters = UInt64(samples.count)
-    if iters == 0 { return (0, 0, 0, 0) }
+    let sampleCount = UInt64(samples.count)
+    if sampleCount == 0 { return (0, 0, 0, 0) }
+    let iters = sampleCount &* callsPerSample
     let minNS = samples.min() ?? 0
     var sum: Double = 0
     for s in samples { sum += Double(s) }
-    let mean = sum / Double(iters)
+    let mean = sum / Double(sampleCount)
     var varSum: Double = 0
     for s in samples {
         let d = Double(s) - mean
         varSum += d * d
     }
-    let stddev = (varSum / Double(iters)).squareRoot()
+    let stddev = (varSum / Double(sampleCount)).squareRoot()
     return (iters, minNS, UInt64(mean), UInt64(stddev))
 }
 

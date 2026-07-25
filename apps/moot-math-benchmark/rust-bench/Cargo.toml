@@ -19,6 +19,14 @@ path = "src/bin/topk_bench.rs"
 name = "ml-bench"
 path = "src/bin/ml_bench.rs"
 
+[[bin]]
+name = "catalog-bench"
+path = "src/bin/catalog_bench.rs"
+
+[[bin]]
+name = "fdc-bench"
+path = "src/bin/fdc_bench.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -34,8 +42,9 @@ harness = { package = "geniuslocus-test-harness", path = "../../../docs/validati
 # passed through to substrate-kernel so `KernelKind::Simd` resolves to
 # `kernel_simd::SimdKernel` instead of falling back to `ScalarKernel`.
 substrate-types = { path = "../../../packages/libs/SubstrateTypes/rust" }
-substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust", features = ["simd-nightly"] }
+substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust" }
 substrate-ml = { path = "../../../packages/libs/SubstrateML/rust" }
+lattice-lib = { path = "../../../packages/libs/LatticeLib/rust" }
 
 [features]
 default = ["simd-nightly"]

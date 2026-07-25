@@ -1,0 +1,410 @@
+================ MOOT RETRIEVAL GAUNTLET — v1 ================
+seed:                 20260611
+run label:            moot-1.0.34-full
+git SHA:              fb0e77796efe9560860fb323c6def60988efb11e
+working tree:         DIRTY (2 paths) — source may not match the SHA above
+run timestamp:        2026-07-23T02:30:06Z
+found@k depths:       1, 5, 10
+distractors/needle:   4
+tier profile:         T1=40 T2=40 T3=40 T4=40 T5=40
+DegeneracyGuard:      HEALTHY (ran on every backend)
+columns run:          mootx01:raw, mootx01:rrf, mootx01:matrixAware, precise:text, precise:hamming, precise:matrix, precise:lattice, precise:tokenExact, precise:bm25, precise:hamming+tokenExact, precise:hamming+text, precise:text+matrix, precise:lattice+hamming, precise:text+tokenExact, precise:text+mmr, precise:temporalState, precise:temporalText, precise:temporal, precise:text+temporal, precise:text+assembly, precise:tokenExact+assembly, precise:matrix-weighted, precise:matrix+hamming, precise:dense-fused, precise:weighted-all
+composition grid:     text, hamming, matrix, lattice, tokenExact, bm25, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, temporalState, temporalText, temporal, text+temporal, text+assembly, tokenExact+assembly, matrix-weighted, matrix+hamming, dense-fused, weighted-all
+
+Definition of superior: mootx01's best strategy wins or ties MemPalace on found@k, MRR, and completeness on EVERY tier, with strictly better contamination or latency, before any claim is made.
+
+superiority: NOT EVALUABLE — no MemPalace baseline column present
+
+---------------- PER-TIER RESULTS ----------------
+
+Tier T1:
+  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+  mootx01:raw             0.10    0.40    0.50    0.267   0.78    1.23    144.1    174.8
+  mootx01:rrf             0.10    0.40    0.50    0.267   0.78    1.23    145.2    175.2
+  mootx01:matrixAware     0.05    0.07    0.20    0.081   0.17    0.30    140.2    169.4
+  precise:text            0.28    0.70    0.90    0.472   1.00    0.20    31.7     47.2
+  precise:hamming         0.10    0.35    0.62    0.251   0.97    0.75    25.1     37.1
+  precise:matrix          0.10    0.35    0.62    0.251   0.97    0.75    25.7     37.3
+  precise:lattice         0.10    0.35    0.62    0.251   0.97    0.75    25.3     37.0
+  precise:tokenExact      0.00    0.05    0.17    0.053   0.50    0.70    30.3     45.1
+  precise:bm25            0.10    0.35    0.60    0.240   0.97    0.78    25.1     36.8
+  precise:hamming+tokenExa0.00    0.05    0.17    0.053   0.50    0.70    27.7     39.6
+  precise:hamming+text    0.28    0.70    0.90    0.472   1.00    0.20    28.3     40.0
+  precise:text+matrix     0.28    0.70    0.90    0.472   1.00    0.20    28.1     39.8
+  precise:lattice+hamming 0.10    0.35    0.62    0.251   0.97    0.75    25.5     37.6
+  precise:text+tokenExact 0.28    0.70    0.90    0.472   1.00    0.20    34.4     51.2
+  precise:text+mmr        0.28    0.30    0.38    0.303   0.57    1.32    1727.2   3760.1
+  precise:temporalState   0.10    0.35    0.62    0.251   0.97    0.75    25.3     37.3
+  precise:temporalText    0.00    0.00    0.03    0.004   0.00    0.30    33.0     49.4
+  precise:temporal        0.00    0.00    0.03    0.005   0.03    0.35    28.2     40.1
+  precise:text+temporal   0.07    0.57    0.90    0.273   0.97    0.65    30.7     42.2
+  precise:text+assembly   0.28    0.70    0.90    0.468   1.00    0.12    32.8     48.7
+  precise:tokenExact+assem0.00    0.05    0.17    0.053   0.50    0.70    31.8     47.4
+  precise:matrix-weighted 0.28    0.70    0.90    0.472   1.00    0.20    28.3     40.1
+  precise:matrix+hamming  0.10    0.35    0.62    0.251   0.97    0.75    25.2     37.0
+  precise:dense-fused     0.15    0.25    0.28    0.190   0.25    0.38    28.4     40.4
+  precise:weighted-all    0.12    0.40    0.53    0.255   0.90    0.82    31.6     43.7
+
+Tier T2:
+  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+  mootx01:raw             0.05    0.40    0.68    0.179   0.78    3.12    145.3    182.5
+  mootx01:rrf             0.05    0.40    0.68    0.179   0.78    3.12    145.8    184.3
+  mootx01:matrixAware     0.10    0.15    0.17    0.134   0.20    1.00    141.1    176.8
+  precise:text            0.17    0.45    0.80    0.307   0.90    3.50    30.4     46.6
+  precise:hamming         0.05    0.30    0.62    0.233   0.90    2.77    24.2     37.0
+  precise:matrix          0.05    0.30    0.62    0.233   0.90    2.77    24.4     37.2
+  precise:lattice         0.05    0.30    0.62    0.233   0.90    2.77    24.4     37.2
+  precise:tokenExact      0.00    0.00    0.12    0.037   0.40    2.23    29.3     45.0
+  precise:bm25            0.05    0.40    0.60    0.229   0.90    2.88    24.4     37.1
+  precise:hamming+tokenExa0.00    0.00    0.12    0.037   0.40    2.23    26.9     39.6
+  precise:hamming+text    0.17    0.45    0.80    0.307   0.90    3.50    27.3     40.1
+  precise:text+matrix     0.17    0.45    0.80    0.307   0.90    3.50    27.4     40.3
+  precise:lattice+hamming 0.05    0.30    0.62    0.233   0.90    2.77    24.5     37.4
+  precise:text+tokenExact 0.17    0.45    0.80    0.307   0.90    3.50    33.4     51.3
+  precise:text+mmr        0.17    0.17    0.23    0.204   0.53    3.25    1585.4   3798.0
+  precise:temporalState   0.05    0.30    0.62    0.233   0.90    2.77    24.5     37.4
+  precise:temporalText    0.00    0.05    0.05    0.011   0.00    0.00    30.3     46.4
+  precise:temporal        0.00    0.05    0.05    0.011   0.00    0.00    27.4     40.2
+  precise:text+temporal   0.10    0.38    0.78    0.237   0.90    3.45    29.4     42.2
+  precise:text+assembly   0.17    0.45    0.78    0.306   0.90    3.48    31.8     49.0
+  precise:tokenExact+assem0.00    0.00    0.12    0.035   0.38    2.23    30.9     47.5
+  precise:matrix-weighted 0.17    0.45    0.80    0.307   0.90    3.50    27.5     40.3
+  precise:matrix+hamming  0.05    0.30    0.62    0.233   0.90    2.77    24.5     37.5
+  precise:dense-fused     0.07    0.28    0.33    0.149   0.40    1.60    27.6     40.6
+  precise:weighted-all    0.10    0.40    0.60    0.242   0.80    2.27    30.8     43.8
+
+Tier T3:
+  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+  mootx01:raw             0.28    0.93    1.00    0.526   0.95    2.08    151.1    182.3
+  mootx01:rrf             0.28    0.93    1.00    0.526   0.95    2.08    150.2    182.6
+  mootx01:matrixAware     0.35    0.53    0.72    0.447   0.62    1.20    144.6    173.7
+  precise:text            0.33    0.57    0.95    0.450   0.75    3.70    31.6     47.1
+  precise:hamming         0.28    0.85    0.93    0.507   0.95    2.23    24.7     37.2
+  precise:matrix          0.28    0.85    0.93    0.507   0.95    2.23    24.7     37.1
+  precise:lattice         0.28    0.85    0.93    0.507   0.95    2.23    24.7     37.0
+  precise:tokenExact      0.00    0.12    0.28    0.064   0.45    0.85    30.3     45.3
+  precise:bm25            0.28    0.72    0.95    0.463   0.95    2.42    24.7     37.2
+  precise:hamming+tokenExa0.00    0.12    0.28    0.064   0.45    0.85    27.3     39.6
+  precise:hamming+text    0.33    0.57    0.95    0.450   0.75    3.70    27.9     40.5
+  precise:text+matrix     0.33    0.57    0.95    0.450   0.75    3.70    27.8     40.2
+  precise:lattice+hamming 0.28    0.85    0.93    0.507   0.95    2.23    25.3     38.1
+  precise:text+tokenExact 0.33    0.57    0.95    0.450   0.75    3.70    34.9     53.6
+  precise:text+mmr        0.33    0.40    0.62    0.394   0.72    1.70    1670.7   3780.9
+  precise:temporalState   0.28    0.85    0.93    0.507   0.95    2.23    25.1     37.6
+  precise:temporalText    0.03    0.23    0.40    0.134   0.80    0.60    30.6     46.4
+  precise:temporal        0.03    0.33    0.65    0.183   0.97    0.60    27.8     40.3
+  precise:text+temporal   0.95    1.00    1.00    0.975   0.97    1.27    29.9     42.6
+  precise:text+assembly   0.33    0.57    0.95    0.448   0.75    3.67    32.5     49.4
+  precise:tokenExact+assem0.00    0.12    0.28    0.064   0.45    0.85    31.4     47.7
+  precise:matrix-weighted 0.33    0.57    0.95    0.450   0.75    3.70    28.0     40.6
+  precise:matrix+hamming  0.28    0.85    0.93    0.507   0.95    2.23    24.9     37.2
+  precise:dense-fused     0.47    0.75    0.82    0.593   0.60    2.10    28.0     40.3
+  precise:weighted-all    0.88    0.95    1.00    0.914   0.93    2.33    31.3     44.0
+
+Tier T4:
+  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+  mootx01:raw             0.00    0.00    0.00    0.003   0.03    0.03    151.4    181.6
+  mootx01:rrf             0.00    0.00    0.00    0.003   0.03    0.03    151.8    182.5
+  mootx01:matrixAware     0.00    0.00    0.00    0.001   0.03    0.07    145.5    174.3
+  precise:text            0.00    0.00    0.00    0.000   0.00    0.00    32.9     48.1
+  precise:hamming         0.00    0.00    0.00    0.000   0.00    0.05    25.4     36.9
+  precise:matrix          0.00    0.00    0.00    0.000   0.00    0.05    25.7     37.0
+  precise:lattice         0.00    0.00    0.00    0.000   0.00    0.05    25.4     36.8
+  precise:tokenExact      0.00    0.00    0.00    0.000   0.00    0.00    30.8     45.0
+  precise:bm25            0.00    0.00    0.00    0.000   0.00    0.00    25.6     37.1
+  precise:hamming+tokenExa0.00    0.00    0.00    0.000   0.00    0.00    27.9     39.2
+  precise:hamming+text    0.00    0.00    0.00    0.000   0.00    0.00    28.6     39.9
+  precise:text+matrix     0.00    0.00    0.00    0.000   0.00    0.00    28.5     40.0
+  precise:lattice+hamming 0.00    0.00    0.00    0.000   0.00    0.05    27.1     39.7
+  precise:text+tokenExact 0.00    0.00    0.00    0.000   0.00    0.00    36.2     53.1
+  precise:text+mmr        0.00    0.00    0.00    0.000   0.00    0.05    1782.9   3770.8
+  precise:temporalState   0.00    0.00    0.00    0.000   0.00    0.05    25.9     37.5
+  precise:temporalText    0.00    0.00    0.00    0.000   0.00    0.00    31.4     46.2
+  precise:temporal        0.00    0.00    0.00    0.000   0.00    0.00    28.8     40.5
+  precise:text+temporal   0.00    0.00    0.00    0.000   0.00    0.00    31.3     44.5
+  precise:text+assembly   0.00    0.40    0.75    0.199   0.62    0.00    33.4     49.0
+  precise:tokenExact+assem0.00    0.00    0.00    0.006   0.10    0.00    32.3     47.4
+  precise:matrix-weighted 0.00    0.00    0.00    0.000   0.00    0.00    28.7     40.4
+  precise:matrix+hamming  0.00    0.00    0.00    0.000   0.00    0.05    25.6     37.2
+  precise:dense-fused     0.00    0.00    0.00    0.000   0.00    0.10    28.7     40.2
+  precise:weighted-all    0.00    0.00    0.00    0.000   0.00    0.10    32.0     43.6
+
+Tier T5:
+  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+  mootx01:raw             0.15    0.40    0.60    0.279   0.70    2.38    141.5    174.0
+  mootx01:rrf             0.15    0.40    0.60    0.279   0.70    2.38    141.3    176.0
+  mootx01:matrixAware     0.12    0.12    0.12    0.130   0.07    1.15    137.6    170.4
+  precise:text            0.28    0.68    0.90    0.427   0.85    3.65    29.0     46.0
+  precise:hamming         0.15    0.45    0.78    0.319   0.85    2.92    23.2     36.6
+  precise:matrix          0.15    0.45    0.78    0.319   0.85    2.92    23.3     36.8
+  precise:lattice         0.15    0.45    0.78    0.319   0.85    2.92    23.3     36.9
+  precise:tokenExact      0.03    0.07    0.15    0.065   0.33    0.57    28.1     44.9
+  precise:bm25            0.15    0.42    0.80    0.289   0.85    3.00    23.3     36.8
+  precise:hamming+tokenExa0.03    0.07    0.15    0.065   0.33    0.57    25.9     39.3
+  precise:hamming+text    0.28    0.68    0.90    0.427   0.85    3.65    27.1     40.1
+  precise:text+matrix     0.28    0.68    0.90    0.427   0.85    3.65    26.3     39.9
+  precise:lattice+hamming 0.15    0.45    0.78    0.319   0.85    2.92    24.6     39.7
+  precise:text+tokenExact 0.28    0.68    0.90    0.427   0.85    3.65    32.9     52.5
+  precise:text+mmr        0.28    0.30    0.30    0.297   0.40    1.15    1404.3   3753.8
+  precise:temporalState   0.15    0.45    0.78    0.319   0.85    2.92    24.8     39.8
+  precise:temporalText    0.00    0.00    0.03    0.003   0.00    0.10    28.8     46.1
+  precise:temporal        0.00    0.00    0.03    0.005   0.03    0.10    26.3     40.1
+  precise:text+temporal   0.03    0.45    0.90    0.221   0.85    3.30    29.1     42.2
+  precise:text+assembly   0.28    0.68    0.90    0.422   0.85    3.62    30.4     48.7
+  precise:tokenExact+assem0.03    0.07    0.15    0.065   0.33    0.57    29.5     47.5
+  precise:matrix-weighted 0.28    0.68    0.90    0.427   0.85    3.65    26.5     40.1
+  precise:matrix+hamming  0.15    0.45    0.78    0.319   0.85    2.92    23.4     37.3
+  precise:dense-fused     0.17    0.30    0.33    0.215   0.20    1.35    26.7     40.4
+  precise:weighted-all    0.17    0.30    0.55    0.267   0.75    2.10    29.8     43.5
+
+---------------- PER-STRATEGY AGGREGATE (all tiers) ----------------
+  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+  mootx01:raw             0.12    0.42    0.56    0.251   0.65    1.76    146.7    181.6
+  mootx01:rrf             0.12    0.42    0.56    0.251   0.65    1.76    146.8    180.7
+  mootx01:matrixAware     0.12    0.17    0.24    0.159   0.22    0.74    141.8    173.7
+  precise:text            0.21    0.48    0.71    0.331   0.70    2.21    31.1     47.4
+  precise:hamming         0.12    0.39    0.59    0.262   0.73    1.75    24.5     37.0
+  precise:matrix          0.12    0.39    0.59    0.262   0.73    1.75    24.8     37.2
+  precise:lattice         0.12    0.39    0.59    0.262   0.73    1.75    24.6     37.0
+  precise:tokenExact      0.01    0.05    0.14    0.044   0.34    0.87    29.8     45.1
+  precise:bm25            0.12    0.38    0.59    0.244   0.73    1.81    24.6     37.1
+  precise:hamming+tokenExa0.01    0.05    0.14    0.044   0.34    0.87    27.1     39.6
+  precise:hamming+text    0.21    0.48    0.71    0.331   0.70    2.21    27.8     40.1
+  precise:text+matrix     0.21    0.48    0.71    0.331   0.70    2.21    27.6     40.2
+  precise:lattice+hamming 0.12    0.39    0.59    0.262   0.73    1.75    25.4     39.5
+  precise:text+tokenExact 0.21    0.48    0.71    0.331   0.70    2.21    34.3     52.9
+  precise:text+mmr        0.21    0.23    0.30    0.240   0.45    1.50    1634.1   3787.9
+  precise:temporalState   0.12    0.39    0.59    0.262   0.73    1.75    25.1     37.5
+  precise:temporalText    0.01    0.06    0.10    0.030   0.16    0.20    30.8     47.6
+  precise:temporal        0.01    0.07    0.15    0.041   0.20    0.21    27.7     40.3
+  precise:text+temporal   0.23    0.48    0.71    0.341   0.74    1.74    30.1     42.6
+  precise:text+assembly   0.21    0.56    0.85    0.369   0.82    2.18    32.2     49.0
+  precise:tokenExact+assem0.01    0.05    0.14    0.045   0.35    0.87    31.2     47.5
+  precise:matrix-weighted 0.21    0.48    0.71    0.331   0.70    2.21    27.8     40.3
+  precise:matrix+hamming  0.12    0.39    0.59    0.262   0.73    1.75    24.7     37.2
+  precise:dense-fused     0.17    0.32    0.35    0.229   0.29    1.10    27.9     40.4
+  precise:weighted-all    0.26    0.41    0.54    0.335   0.68    1.52    31.1     43.7
+
+---------------- ABLATION LEADERBOARD (ranked by found@1, then MRR, then found@10) ----------------
+
+Tier T1 — winner: precise:hamming+text
+  rank  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+   1. precise:hamming+text    0.28    0.70    0.90    0.472   1.00    0.20    28.3     40.0
+   2. precise:matrix-weighted 0.28    0.70    0.90    0.472   1.00    0.20    28.3     40.1
+   3. precise:text            0.28    0.70    0.90    0.472   1.00    0.20    31.7     47.2
+   4. precise:text+matrix     0.28    0.70    0.90    0.472   1.00    0.20    28.1     39.8
+   5. precise:text+tokenExact 0.28    0.70    0.90    0.472   1.00    0.20    34.4     51.2
+   6. precise:text+assembly   0.28    0.70    0.90    0.468   1.00    0.12    32.8     48.7
+   7. precise:text+mmr        0.28    0.30    0.38    0.303   0.57    1.32    1727.2   3760.1
+   8. precise:dense-fused     0.15    0.25    0.28    0.190   0.25    0.38    28.4     40.4
+   9. precise:weighted-all    0.12    0.40    0.53    0.255   0.90    0.82    31.6     43.7
+  10. mootx01:raw             0.10    0.40    0.50    0.267   0.78    1.23    144.1    174.8
+  11. mootx01:rrf             0.10    0.40    0.50    0.267   0.78    1.23    145.2    175.2
+  12. precise:hamming         0.10    0.35    0.62    0.251   0.97    0.75    25.1     37.1
+  13. precise:lattice         0.10    0.35    0.62    0.251   0.97    0.75    25.3     37.0
+  14. precise:lattice+hamming 0.10    0.35    0.62    0.251   0.97    0.75    25.5     37.6
+  15. precise:matrix          0.10    0.35    0.62    0.251   0.97    0.75    25.7     37.3
+  16. precise:matrix+hamming  0.10    0.35    0.62    0.251   0.97    0.75    25.2     37.0
+  17. precise:temporalState   0.10    0.35    0.62    0.251   0.97    0.75    25.3     37.3
+  18. precise:bm25            0.10    0.35    0.60    0.240   0.97    0.78    25.1     36.8
+  19. precise:text+temporal   0.07    0.57    0.90    0.273   0.97    0.65    30.7     42.2
+  20. mootx01:matrixAware     0.05    0.07    0.20    0.081   0.17    0.30    140.2    169.4
+  21. precise:hamming+tokenExa0.00    0.05    0.17    0.053   0.50    0.70    27.7     39.6
+  22. precise:tokenExact      0.00    0.05    0.17    0.053   0.50    0.70    30.3     45.1
+  23. precise:tokenExact+assem0.00    0.05    0.17    0.053   0.50    0.70    31.8     47.4
+  24. precise:temporal        0.00    0.00    0.03    0.005   0.03    0.35    28.2     40.1
+  25. precise:temporalText    0.00    0.00    0.03    0.004   0.00    0.30    33.0     49.4
+
+Tier T2 — winner: precise:hamming+text
+  rank  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+   1. precise:hamming+text    0.17    0.45    0.80    0.307   0.90    3.50    27.3     40.1
+   2. precise:matrix-weighted 0.17    0.45    0.80    0.307   0.90    3.50    27.5     40.3
+   3. precise:text            0.17    0.45    0.80    0.307   0.90    3.50    30.4     46.6
+   4. precise:text+matrix     0.17    0.45    0.80    0.307   0.90    3.50    27.4     40.3
+   5. precise:text+tokenExact 0.17    0.45    0.80    0.307   0.90    3.50    33.4     51.3
+   6. precise:text+assembly   0.17    0.45    0.78    0.306   0.90    3.48    31.8     49.0
+   7. precise:text+mmr        0.17    0.17    0.23    0.204   0.53    3.25    1585.4   3798.0
+   8. precise:weighted-all    0.10    0.40    0.60    0.242   0.80    2.27    30.8     43.8
+   9. precise:text+temporal   0.10    0.38    0.78    0.237   0.90    3.45    29.4     42.2
+  10. mootx01:matrixAware     0.10    0.15    0.17    0.134   0.20    1.00    141.1    176.8
+  11. precise:dense-fused     0.07    0.28    0.33    0.149   0.40    1.60    27.6     40.6
+  12. precise:hamming         0.05    0.30    0.62    0.233   0.90    2.77    24.2     37.0
+  13. precise:lattice         0.05    0.30    0.62    0.233   0.90    2.77    24.4     37.2
+  14. precise:lattice+hamming 0.05    0.30    0.62    0.233   0.90    2.77    24.5     37.4
+  15. precise:matrix          0.05    0.30    0.62    0.233   0.90    2.77    24.4     37.2
+  16. precise:matrix+hamming  0.05    0.30    0.62    0.233   0.90    2.77    24.5     37.5
+  17. precise:temporalState   0.05    0.30    0.62    0.233   0.90    2.77    24.5     37.4
+  18. precise:bm25            0.05    0.40    0.60    0.229   0.90    2.88    24.4     37.1
+  19. mootx01:raw             0.05    0.40    0.68    0.179   0.78    3.12    145.3    182.5
+  20. mootx01:rrf             0.05    0.40    0.68    0.179   0.78    3.12    145.8    184.3
+  21. precise:hamming+tokenExa0.00    0.00    0.12    0.037   0.40    2.23    26.9     39.6
+  22. precise:tokenExact      0.00    0.00    0.12    0.037   0.40    2.23    29.3     45.0
+  23. precise:tokenExact+assem0.00    0.00    0.12    0.035   0.38    2.23    30.9     47.5
+  24. precise:temporal        0.00    0.05    0.05    0.011   0.00    0.00    27.4     40.2
+  25. precise:temporalText    0.00    0.05    0.05    0.011   0.00    0.00    30.3     46.4
+
+Tier T3 — winner: precise:text+temporal
+  rank  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+   1. precise:text+temporal   0.95    1.00    1.00    0.975   0.97    1.27    29.9     42.6
+   2. precise:weighted-all    0.88    0.95    1.00    0.914   0.93    2.33    31.3     44.0
+   3. precise:dense-fused     0.47    0.75    0.82    0.593   0.60    2.10    28.0     40.3
+   4. mootx01:matrixAware     0.35    0.53    0.72    0.447   0.62    1.20    144.6    173.7
+   5. precise:hamming+text    0.33    0.57    0.95    0.450   0.75    3.70    27.9     40.5
+   6. precise:matrix-weighted 0.33    0.57    0.95    0.450   0.75    3.70    28.0     40.6
+   7. precise:text            0.33    0.57    0.95    0.450   0.75    3.70    31.6     47.1
+   8. precise:text+matrix     0.33    0.57    0.95    0.450   0.75    3.70    27.8     40.2
+   9. precise:text+tokenExact 0.33    0.57    0.95    0.450   0.75    3.70    34.9     53.6
+  10. precise:text+assembly   0.33    0.57    0.95    0.448   0.75    3.67    32.5     49.4
+  11. precise:text+mmr        0.33    0.40    0.62    0.394   0.72    1.70    1670.7   3780.9
+  12. mootx01:raw             0.28    0.93    1.00    0.526   0.95    2.08    151.1    182.3
+  13. mootx01:rrf             0.28    0.93    1.00    0.526   0.95    2.08    150.2    182.6
+  14. precise:hamming         0.28    0.85    0.93    0.507   0.95    2.23    24.7     37.2
+  15. precise:lattice         0.28    0.85    0.93    0.507   0.95    2.23    24.7     37.0
+  16. precise:lattice+hamming 0.28    0.85    0.93    0.507   0.95    2.23    25.3     38.1
+  17. precise:matrix          0.28    0.85    0.93    0.507   0.95    2.23    24.7     37.1
+  18. precise:matrix+hamming  0.28    0.85    0.93    0.507   0.95    2.23    24.9     37.2
+  19. precise:temporalState   0.28    0.85    0.93    0.507   0.95    2.23    25.1     37.6
+  20. precise:bm25            0.28    0.72    0.95    0.463   0.95    2.42    24.7     37.2
+  21. precise:temporal        0.03    0.33    0.65    0.183   0.97    0.60    27.8     40.3
+  22. precise:temporalText    0.03    0.23    0.40    0.134   0.80    0.60    30.6     46.4
+  23. precise:hamming+tokenExa0.00    0.12    0.28    0.064   0.45    0.85    27.3     39.6
+  24. precise:tokenExact      0.00    0.12    0.28    0.064   0.45    0.85    30.3     45.3
+  25. precise:tokenExact+assem0.00    0.12    0.28    0.064   0.45    0.85    31.4     47.7
+
+Tier T4 — winner: precise:text+assembly
+  rank  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+   1. precise:text+assembly   0.00    0.40    0.75    0.199   0.62    0.00    33.4     49.0
+   2. precise:tokenExact+assem0.00    0.00    0.00    0.006   0.10    0.00    32.3     47.4
+   3. mootx01:raw             0.00    0.00    0.00    0.003   0.03    0.03    151.4    181.6
+   4. mootx01:rrf             0.00    0.00    0.00    0.003   0.03    0.03    151.8    182.5
+   5. mootx01:matrixAware     0.00    0.00    0.00    0.001   0.03    0.07    145.5    174.3
+   6. precise:bm25            0.00    0.00    0.00    0.000   0.00    0.00    25.6     37.1
+   7. precise:dense-fused     0.00    0.00    0.00    0.000   0.00    0.10    28.7     40.2
+   8. precise:hamming         0.00    0.00    0.00    0.000   0.00    0.05    25.4     36.9
+   9. precise:hamming+text    0.00    0.00    0.00    0.000   0.00    0.00    28.6     39.9
+  10. precise:hamming+tokenExa0.00    0.00    0.00    0.000   0.00    0.00    27.9     39.2
+  11. precise:lattice         0.00    0.00    0.00    0.000   0.00    0.05    25.4     36.8
+  12. precise:lattice+hamming 0.00    0.00    0.00    0.000   0.00    0.05    27.1     39.7
+  13. precise:matrix          0.00    0.00    0.00    0.000   0.00    0.05    25.7     37.0
+  14. precise:matrix+hamming  0.00    0.00    0.00    0.000   0.00    0.05    25.6     37.2
+  15. precise:matrix-weighted 0.00    0.00    0.00    0.000   0.00    0.00    28.7     40.4
+  16. precise:temporal        0.00    0.00    0.00    0.000   0.00    0.00    28.8     40.5
+  17. precise:temporalState   0.00    0.00    0.00    0.000   0.00    0.05    25.9     37.5
+  18. precise:temporalText    0.00    0.00    0.00    0.000   0.00    0.00    31.4     46.2
+  19. precise:text            0.00    0.00    0.00    0.000   0.00    0.00    32.9     48.1
+  20. precise:text+matrix     0.00    0.00    0.00    0.000   0.00    0.00    28.5     40.0
+  21. precise:text+mmr        0.00    0.00    0.00    0.000   0.00    0.05    1782.9   3770.8
+  22. precise:text+temporal   0.00    0.00    0.00    0.000   0.00    0.00    31.3     44.5
+  23. precise:text+tokenExact 0.00    0.00    0.00    0.000   0.00    0.00    36.2     53.1
+  24. precise:tokenExact      0.00    0.00    0.00    0.000   0.00    0.00    30.8     45.0
+  25. precise:weighted-all    0.00    0.00    0.00    0.000   0.00    0.10    32.0     43.6
+
+Tier T5 — winner: precise:hamming+text
+  rank  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+   1. precise:hamming+text    0.28    0.68    0.90    0.427   0.85    3.65    27.1     40.1
+   2. precise:matrix-weighted 0.28    0.68    0.90    0.427   0.85    3.65    26.5     40.1
+   3. precise:text            0.28    0.68    0.90    0.427   0.85    3.65    29.0     46.0
+   4. precise:text+matrix     0.28    0.68    0.90    0.427   0.85    3.65    26.3     39.9
+   5. precise:text+tokenExact 0.28    0.68    0.90    0.427   0.85    3.65    32.9     52.5
+   6. precise:text+assembly   0.28    0.68    0.90    0.422   0.85    3.62    30.4     48.7
+   7. precise:text+mmr        0.28    0.30    0.30    0.297   0.40    1.15    1404.3   3753.8
+   8. precise:weighted-all    0.17    0.30    0.55    0.267   0.75    2.10    29.8     43.5
+   9. precise:dense-fused     0.17    0.30    0.33    0.215   0.20    1.35    26.7     40.4
+  10. precise:hamming         0.15    0.45    0.78    0.319   0.85    2.92    23.2     36.6
+  11. precise:lattice         0.15    0.45    0.78    0.319   0.85    2.92    23.3     36.9
+  12. precise:lattice+hamming 0.15    0.45    0.78    0.319   0.85    2.92    24.6     39.7
+  13. precise:matrix          0.15    0.45    0.78    0.319   0.85    2.92    23.3     36.8
+  14. precise:matrix+hamming  0.15    0.45    0.78    0.319   0.85    2.92    23.4     37.3
+  15. precise:temporalState   0.15    0.45    0.78    0.319   0.85    2.92    24.8     39.8
+  16. precise:bm25            0.15    0.42    0.80    0.289   0.85    3.00    23.3     36.8
+  17. mootx01:raw             0.15    0.40    0.60    0.279   0.70    2.38    141.5    174.0
+  18. mootx01:rrf             0.15    0.40    0.60    0.279   0.70    2.38    141.3    176.0
+  19. mootx01:matrixAware     0.12    0.12    0.12    0.130   0.07    1.15    137.6    170.4
+  20. precise:text+temporal   0.03    0.45    0.90    0.221   0.85    3.30    29.1     42.2
+  21. precise:hamming+tokenExa0.03    0.07    0.15    0.065   0.33    0.57    25.9     39.3
+  22. precise:tokenExact      0.03    0.07    0.15    0.065   0.33    0.57    28.1     44.9
+  23. precise:tokenExact+assem0.03    0.07    0.15    0.065   0.33    0.57    29.5     47.5
+  24. precise:temporal        0.00    0.00    0.03    0.005   0.03    0.10    26.3     40.1
+  25. precise:temporalText    0.00    0.00    0.03    0.003   0.00    0.10    28.8     46.1
+
+AGGREGATE (all tiers) — winner: precise:weighted-all
+  rank  strategy                f@1     f@5     f@10    MRR     compl   contam  lat_ms   p95_ms
+   1. precise:weighted-all    0.26    0.41    0.54    0.335   0.68    1.52    31.1     43.7
+   2. precise:text+temporal   0.23    0.48    0.71    0.341   0.74    1.74    30.1     42.6
+   3. precise:text+assembly   0.21    0.56    0.85    0.369   0.82    2.18    32.2     49.0
+   4. precise:hamming+text    0.21    0.48    0.71    0.331   0.70    2.21    27.8     40.1
+   5. precise:matrix-weighted 0.21    0.48    0.71    0.331   0.70    2.21    27.8     40.3
+   6. precise:text            0.21    0.48    0.71    0.331   0.70    2.21    31.1     47.4
+   7. precise:text+matrix     0.21    0.48    0.71    0.331   0.70    2.21    27.6     40.2
+   8. precise:text+tokenExact 0.21    0.48    0.71    0.331   0.70    2.21    34.3     52.9
+   9. precise:text+mmr        0.21    0.23    0.30    0.240   0.45    1.50    1634.1   3787.9
+  10. precise:dense-fused     0.17    0.32    0.35    0.229   0.29    1.10    27.9     40.4
+  11. mootx01:matrixAware     0.12    0.17    0.24    0.159   0.22    0.74    141.8    173.7
+  12. precise:hamming         0.12    0.39    0.59    0.262   0.73    1.75    24.5     37.0
+  13. precise:lattice         0.12    0.39    0.59    0.262   0.73    1.75    24.6     37.0
+  14. precise:lattice+hamming 0.12    0.39    0.59    0.262   0.73    1.75    25.4     39.5
+  15. precise:matrix          0.12    0.39    0.59    0.262   0.73    1.75    24.8     37.2
+  16. precise:matrix+hamming  0.12    0.39    0.59    0.262   0.73    1.75    24.7     37.2
+  17. precise:temporalState   0.12    0.39    0.59    0.262   0.73    1.75    25.1     37.5
+  18. mootx01:raw             0.12    0.42    0.56    0.251   0.65    1.76    146.7    181.6
+  19. mootx01:rrf             0.12    0.42    0.56    0.251   0.65    1.76    146.8    180.7
+  20. precise:bm25            0.12    0.38    0.59    0.244   0.73    1.81    24.6     37.1
+  21. precise:tokenExact+assem0.01    0.05    0.14    0.045   0.35    0.87    31.2     47.5
+  22. precise:hamming+tokenExa0.01    0.05    0.14    0.044   0.34    0.87    27.1     39.6
+  23. precise:tokenExact      0.01    0.05    0.14    0.044   0.34    0.87    29.8     45.1
+  24. precise:temporal        0.01    0.07    0.15    0.041   0.20    0.21    27.7     40.3
+  25. precise:temporalText    0.01    0.06    0.10    0.030   0.16    0.20    30.8     47.6
+
+---------------- WORST 10 FAILURES (full request/response retained) ----------------
+
+[1] strategy=mootx01:raw needle=n0021 tier=T1 reason=not found@10
+    query:    What is the reserve value of the Quillon Charter?
+    request:  {"tool":"moot_memory_search","arguments":{"scoring":"raw","query":"What is the reserve value of the Quillon Charter?","limit":20}}
+    response: found 20 memory(s) ⏎ 2195B1D1-687A-4DE3-A028-EBE0C2927E38  [Charter/quillon-charter]  the Quillon Charter is headquartered in the district of Tarn. ⏎ 43A99F8B-1D0D-4A6D-8B26-12D73F15F9F0  [Reserve/quillon-charter]  the Quillon Charter holds a reserve valued at 46 million marks. (current as of 2022) ⏎ B71EBF5A-337E-471A-ACA9-FE5ED409C2FB  [Ledger/quillon-charter]  The charter year attributed to the …[truncated]
+
+[2] strategy=mootx01:raw needle=n0022 tier=T1 reason=not found@10
+    query:    What is the reserve value of Halloway Reach?
+    request:  {"arguments":{"limit":20,"query":"What is the reserve value of Halloway Reach?","scoring":"raw"},"tool":"moot_memory_search"}
+    response: found 20 memory(s) ⏎ 570C298B-96F1-4CAF-A855-B8499D42DF81  [Charter/halloway-reach]  Halloway Reach is headquartered in the district of Dunmere. ⏎ 2354C16D-604C-472F-ACCC-1BF30CB21311  [Reserve/halloway-reach]  Halloway Reach records its reserve value under reference REF-4072; see the matching reference entry for the value. ⏎ 19D6F05E-DA38-43D1-9A22-E47881F2CA4F  [Fleet/halloway-reach]  Halloway R …[truncated]
+
+[3] strategy=mootx01:raw needle=n0023 tier=T1 reason=not found@10
+    query:    What is the fleet size of the Ambergris League?
+    request:  {"tool":"moot_memory_search","arguments":{"query":"What is the fleet size of the Ambergris League?","limit":20,"scoring":"raw"}}
+    response: found 20 memory(s) ⏎ 2BD10656-85E6-4B66-829D-D137EA7ECE4E  [Fleet/ambergris-league]  The fleet size attributed to the Ambergris League is reported as 122 vessels. ⏎ BE3BD7F9-6526-4486-920D-F62E1BD22BA4  [Fleet/ambergris-league]  Records indicate that the Ambergris League, as to its fleet size, shows 259 vessels. ⏎ 912B794A-7481-481A-AAA0-32BACAB83B30  [Fleet/ambergris-league]  It is widely noted t …[truncated]
+
+[4] strategy=mootx01:raw needle=n0025 tier=T1 reason=not found@10
+    query:    What is the charter year of the Marrowgate Trust?
+    request:  {"tool":"moot_memory_search","arguments":{"scoring":"raw","query":"What is the charter year of the Marrowgate Trust?","limit":20}}
+    response: found 20 memory(s) ⏎ 8B5C3D94-B810-4486-ADC0-B3FB025C6336  [Ledger/marrowgate-trust]  The charter year attributed to the Marrowgate Trust is reported as 1798. ⏎ 13E6C372-56E0-4F78-B26F-0CC4125BF9A5  [Fleet/marrowgate-trust]  the Marrowgate Trust is headquartered in the district of Brenne. ⏎ 640E9FD3-914C-44C3-A20B-C899CAB21342  [Ledger/marrowgate-trust]  It is widely noted that the Marrowgate Trus …[truncated]
+
+[5] strategy=mootx01:raw needle=n0030 tier=T1 reason=not found@10
+    query:    What is the fleet size of Halloway Reach?
+    request:  {"arguments":{"limit":20,"query":"What is the fleet size of Halloway Reach?","scoring":"raw"},"tool":"moot_memory_search"}
+    response: found 20 memory(s) ⏎ 570C298B-96F1-4CAF-A855-B8499D42DF81  [Charter/halloway-reach]  Halloway Reach is headquartered in the district of Dunmere. ⏎ 80CBC4F2-9CBB-489F-B215-E496FDBB1B0E  [Fleet/halloway-reach]  Halloway Reach records its fleet size under reference REF-8269; see the matching reference entry for the value. ⏎ 20677A56-A7A8-4D6F-B5DB-41A0C31192E7  [Fleet/halloway-reach]  Halloway Reach  …[truncated]
+
+[6] strategy=mootx01:raw needle=n0032 tier=T1 reason=not found@10
+    query:    What is the fleet size of Halloway Reach?
+    request:  {"arguments":{"query":"What is the fleet size of Halloway Reach?","limit":20,"scoring":"raw"},"tool":"moot_memory_search"}
+    response: found 20 memory(s) ⏎ 570C298B-96F1-4CAF-A855-B8499D42DF81  [Charter/halloway-reach]  Halloway Reach is headquartered in the district of Dunmere. ⏎ 80CBC4F2-9CBB-489F-B215-E496FDBB1B0E  [Fleet/halloway-reach]  Halloway Reach records its fleet size under reference REF-8269; see the matching reference entry for the value. ⏎ 20677A56-A7A8-4D6F-B5DB-41A0C31192E7  [Fleet/halloway-reach]  Halloway Reach  …[truncated]
+
+[7] strategy=mootx01:raw needle=n0037 tier=T1 reason=not found@10
+    query:    What is the charter year of Stillhaven Depot?
+    request:  {"tool":"moot_memory_search","arguments":{"scoring":"raw","query":"What is the charter year of Stillhaven Depot?","limit":20}}
+    response: found 20 memory(s) ⏎ 1018DA7E-DFDB-4375-A81D-7736E2963446  [Fleet/Outpost-842]  Stillhaven Depot is headquartered in the district of Tarn. ⏎ 28120D58-2BA3-4AD5-B2F6-ADE3B10B5703  [Ledger/stillhaven-depot]  Stillhaven Depot was chartered in the year 1747. ⏎ 22A9902E-6CA8-4407-A998-31147805DC4B  [Charter/stillhaven-depot]  Stillhaven Depot is governed by the steward named Bertram Idle. ⏎ 515AD215-3A …[truncated]
+
+[8] strategy=mootx01:raw needle=n0041 tier=T2 reason=not found@10
+    query:    What is the fleet size of the Ambergris League?
+    request:  {"tool":"moot_memory_search","arguments":{"scoring":"raw","query":"What is the fleet size of the Ambergris League?","limit":20}}
+    response: found 20 memory(s) ⏎ 2BD10656-85E6-4B66-829D-D137EA7ECE4E  [Fleet/ambergris-league]  The fleet size attributed to the Ambergris League is reported as 122 vessels. ⏎ BE3BD7F9-6526-4486-920D-F62E1BD22BA4  [Fleet/ambergris-league]  Records indicate that the Ambergris League, as to its fleet size, shows 259 vessels. ⏎ 912B794A-7481-481A-AAA0-32BACAB83B30  [Fleet/ambergris-league]  It is widely noted t …[truncated]
+
+[9] strategy=mootx01:raw needle=n0043 tier=T2 reason=not found@10
+    query:    What is the reserve value of Verisade Labs?
+    request:  {"tool":"moot_memory_search","arguments":{"query":"What is the reserve value of Verisade Labs?","limit":20,"scoring":"raw"}}
+    response: found 20 memory(s) ⏎ 3A370C46-08C2-4BE9-AC18-17876590C50C  [Reserve/verisade-labs]  The reserve value attributed to Verisade Labs is reported as 79 million marks. ⏎ 9AF53DCB-4C61-4F27-A548-EC01B9B61F96  [Charter/verisade-labs]  Verisade Labs is headquartered in the district of Brenne. ⏎ 063FBB40-670F-4369-B262-243B2F7C7290  [Reserve/verisade-labs]  It is widely noted that Verisade Labs's reserve v …[truncated]
+
+[10] strategy=mootx01:raw needle=n0049 tier=T2 reason=not found@10
+    query:    What is the fleet size of the Quillon Charter?
+    request:  {"tool":"moot_memory_search","arguments":{"scoring":"raw","query":"What is the fleet size of the Quillon Charter?","limit":20}}
+    response: found 20 memory(s) ⏎ 0BBDA0B1-42D7-4542-9E3C-EE103FEA14A9  [Fleet/quillon-charter]  The fleet size attributed to the Quillon Charter is reported as 234 vessels. ⏎ 6AFDC963-9097-4B46-BDE6-CB545D8A4B5A  [Fleet/quillon-charter]  Records indicate that the Quillon Charter, as to its fleet size, shows 492 vessels. ⏎ AA27C207-2A70-426E-9BB4-EFF3162E7713  [Fleet/quillon-charter]  It is widely noted that t …[truncated]
+
+=============================================================
