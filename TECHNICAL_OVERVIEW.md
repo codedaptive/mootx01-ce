@@ -2,6 +2,10 @@
 
 How MOOTx01 is built, organized, validated, and extended.
 
+[![SDKs](https://img.shields.io/badge/SDKs-4%20Apache--2.0%20library%20repos-8A2BE2)](#developer-sdks)
+![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
+![interface](https://img.shields.io/badge/interface-ARIA%20over%20MCP-purple)
+
 This is the technical companion to the [README](README.md), which covers what
 MOOTx01 is and how to get it working. Package-level integration instructions
 live in [`SDK.MD`](SDK.MD); the authoritative architectural map is
