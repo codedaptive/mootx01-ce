@@ -92,7 +92,13 @@ let package = Package(
         ),
         .testTarget(
             name: "MootInstallerCoreTests",
-            dependencies: ["MootInstallerCore"],
+            dependencies: [
+                "MootInstallerCore",
+                // The twenty-row plaintext estate fixture (CE-1.0.35-04). Test
+                // support only: detection has to be proven against a REAL estate
+                // file, and the production estate is never an acceptable target.
+                .product(name: "LocusKitEstateFixture", package: "LocusKit"),
+            ],
             path: "Tests/MootInstallerCoreTests"
         ),
     ]
