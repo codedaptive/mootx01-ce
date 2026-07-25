@@ -166,6 +166,8 @@ struct V1ConformanceTests {
     /// 66 → 71: +2 contradiction-hunter tools (moot_hunt_contradictions,
     /// moot_review_tunnel) and +3 dataset tools (moot_file_dataset,
     /// moot_dataset_query, moot_dataset_stats).
+    /// 71 → 75: +4 packet tools (FAB5-I2: moot_file_packet, moot_packet_get,
+    /// moot_packet_list, moot_packet_lineage).
     @Test func v1ToolsListReturns71Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
@@ -182,16 +184,18 @@ struct V1ConformanceTests {
         let response = try #require(responses.first)
         let result = try #require(response["result"]?.objectValue)
         let tools = try #require(result["tools"]?.arrayValue)
-        // 71 = prior 66 + 2 contradiction-hunter tools + 3 dataset tools.
+        // 75 = prior 66 + 2 contradiction-hunter tools + 3 dataset tools + 4 packet tools.
         //   Contradiction hunter: moot_hunt_contradictions (recipe, on-demand
         //     content sweep) + moot_review_tunnel (Tier 2, settle a PROPOSED tunnel).
         //   Dataset (MX-TAB-7): moot_file_dataset, moot_dataset_query, moot_dataset_stats.
+        //   Packet (FAB5-I2): moot_file_packet, moot_packet_get, moot_packet_list,
+        //     moot_packet_lineage.
         // Prior 66 = interface + federation + recipe + lens + vault + maintenance:
         //   20th interface = moot_memory_get (Tier 1, fetch-drawer-by-ID).
         //   23rd lens = moot_lens_node_motion (diffusion node-layer lens).
         //   11th recipe = moot_recollect (DA1 distillation).
         //   moot_palace_import (PAR-PB-1), moot_drain_status, moot_reclassify_fdc.
-        #expect(tools.count == 71, "tools/list must return exactly 71 tools; got \(tools.count)")
+        #expect(tools.count == 75, "tools/list must return exactly 75 tools; got \(tools.count)")
     }
 
     // ── Test 3 — moot_estate_ping round-trip ────────────────────────────────

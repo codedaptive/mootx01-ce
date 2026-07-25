@@ -113,6 +113,11 @@ let package = Package(
         // targets that import a product directly. Test-only dep; no layering inversion.
         // Per in-repository dependency direction.
         .package(name: "QueueKit", path: "../QueueKit"),
+        // WorkPacketKit: the four moot_*_packet tools (FAB5-I2) store and retrieve
+        // agentic work packets as structuredJSON drawers. App→kit layering,
+        // no inversion. WorkPacketKit depends only on LocusKit, which AriaMcpKit
+        // already carries transitively via GeniusLocusKit.
+        .package(name: "WorkPacketKit", path: "../WorkPacketKit"),
     ],
     targets: [
         .target(
@@ -136,6 +141,8 @@ let package = Package(
                 .product(name: "EideticLib", package: "EideticLib"),
                 // LoopbackHTTP backs HTTPServer.swift (the resident HTTP MCP transport).
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
+                // WorkPacketKit backs the four moot_*_packet tools (FAB5-I2).
+                .product(name: "WorkPacketKit", package: "WorkPacketKit"),
             ],
             path: "Sources/AriaMCP",
             // Privacy manifest (M-MXA-5): deriveBuildSerial reads the running
