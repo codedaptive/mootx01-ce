@@ -50,7 +50,7 @@ struct FirstRunFlagTests {
 // MARK: - Tab profile tests (FAB5-FR Part 2)
 //
 // Verifies that isAdvancedMode defaults to Standard and that the expected
-// tab counts hold: Standard = 4, Advanced = 11 (4 + 7 engineering tabs).
+// tab counts hold: Standard = 5, Advanced = 12 (5 + 7 engineering tabs).
 
 @Suite("Tab profiles (FAB5-FR)")
 @MainActor
@@ -62,7 +62,8 @@ struct TabProfileTests {
     }
 
     // Expected tab labels per profile — mirrored from ContentView.
-    static let standardLabels = ["Capture", "Recall", "Intelligence", "Settings"]
+    // FAB5-G2: Review added third, between Recall and Intelligence.
+    static let standardLabels = ["Capture", "Recall", "Review", "Intelligence", "Settings"]
     // FAB5-I3: Packets tab added after Miners (Kong ruling: Advanced-only, shippingbox icon).
     static let advancedExtraLabels = [
         "The Top", "Apple Surfaces", "Edges", "Engine", "Federation", "Miners", "Packets",
@@ -74,9 +75,20 @@ struct TabProfileTests {
         #expect(model.isAdvancedMode == false)
     }
 
-    @Test("Standard profile has exactly 4 tabs")
+    @Test("Standard profile has exactly 5 tabs")
     func standardTabCount() {
-        #expect(Self.standardLabels.count == 4)
+        #expect(Self.standardLabels.count == 5)
+    }
+
+    // FAB5-G2: the Review tab's position is load-bearing, not incidental — Kong
+    // ruled it sits between Recall and Intelligence (capture, recall, then review
+    // what the estate surfaced). Asserting the index catches a reorder that a
+    // bare count check would pass.
+    @Test("Review is the third Standard tab, between Recall and Intelligence")
+    func reviewTabPosition() {
+        #expect(Self.standardLabels.firstIndex(of: "Review") == 2)
+        #expect(Self.standardLabels[1] == "Recall")
+        #expect(Self.standardLabels[3] == "Intelligence")
     }
 
     @Test("Advanced profile adds exactly 7 engineering tabs")

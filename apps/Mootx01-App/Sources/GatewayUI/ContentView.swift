@@ -5,7 +5,7 @@ import MootGateway
 //
 // Profile-driven tab shell shared by macOS and iOS. Two tab profiles:
 //
-//   Standard (default): Capture, Recall, Intelligence, Settings.
+//   Standard (default): Capture, Recall, Review, Intelligence, Settings.
 //   Advanced: Standard + The Top, Apple Surfaces, Edges, Engine, Federation, Miners, Packets.
 //
 // On first launch (hasCompletedOnboarding == false) the onboarding flow is
@@ -32,6 +32,13 @@ public struct ContentView: View {
                 }
                 Tab(String(localized: "Recall"), systemImage: "tray.and.arrow.up") {
                     RecallView(model: model)
+                }
+                // FAB5-G2: the Review Center — Dashboard, Morning, End-of-Day, and
+                // Weekly reviews over FAB5-G1's ReviewReports. Kong ruling: third
+                // in the Standard profile (capture, then recall, then review what
+                // the estate surfaced), SF Symbol "checklist".
+                Tab(String(localized: "Review"), systemImage: "checklist") {
+                    ReviewCenterView(model: model)
                 }
                 Tab(String(localized: "Intelligence"), systemImage: "brain.head.profile") {
                     IntelligenceView()
