@@ -144,6 +144,9 @@ public enum ToolProjection {
         // surface, not a VaultKit feature). Added after vault so the existing
         // tool-count and tier ordering tests stay stable with a simple +3 increment.
         raw.append(contentsOf: DatasetTools.tools())
+        // Packet tools (FAB5-I2): file, get, list, lineage. Always visible.
+        // Packets are structuredJSON drawers (typed content, not a new noun).
+        raw.append(contentsOf: PacketTools.tools())
         return raw.map { tool in
             ProjectedTool(
                 name: tool.name,

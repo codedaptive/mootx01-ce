@@ -417,6 +417,12 @@ public struct ToolDispatcher: Sendable {
                     name: name, args: args, kit: kit,
                     resolveHandle: resolveHandle,
                     serverIdentity: serverIdentity)
+            } else if PacketTools.isPacketTool(name) {
+                // Agentic work-packet tools (FAB5-I2): file, get, list, lineage.
+                // Packets are structuredJSON drawers; PacketTools wraps WorkPacketKit.
+                runnerResult = try await PacketTools.dispatch(
+                    name: name, args: args, kit: kit,
+                    resolveHandle: resolveHandle)
             } else if InterfaceTools.isInterfaceTool(name) {
                 // Five-tier AI-client interface tools dispatched by name.
                 runnerResult = try await InterfaceTools.dispatch(
