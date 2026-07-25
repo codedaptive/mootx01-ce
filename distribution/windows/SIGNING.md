@@ -61,15 +61,38 @@ Most secure: no long-lived secret in GitHub. On the App Registration, add
   **Environment** (e.g. `release`) on the two Windows release jobs, then a
   federated credential with subject
   `repo:codedaptive/mootx01-ce:environment:release`.
-  > The two release Windows jobs (`sign-windows-x86_64`, `sign-windows-arm64`)
-  > declare `environment: release`. Two things must exist for tag-triggered
-  > signing to authenticate: (1) a GitHub Actions **Environment** named `release`
-  > (repo → Settings → Environments), and (2) a federated credential of entity
-  > type **Environment** with value `release` on the `mootx01-ce-signing-ci` app
-  > registration. Candidate signing uses **Branch** federated credentials instead
-  > (`refs/heads/candidate/1.0.x`, `refs/heads/candidate/1.1.x`) and needs no
-  > environment. A `stable/1.0.x` Branch credential does nothing — releases are
-  > tag-triggered, not stable-branch-triggered.
+  > **SECURITY REQUIREMENT — the environment subject is a capability, not a
+  > filter.** An Environment federated credential trusts *any* run that enters
+  > the `release` environment. Authorization is therefore decided entirely by
+  > which runs can reach the job, so three things are required and none of them
+  > is optional:
+  >
+  > 1. **The signing jobs must stay restricted to tag push events.** Both
+  >    `sign-windows-x86_64` and `sign-windows-arm64` are gated on
+  >    `startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'`.
+  >    Do not widen that condition.
+  > 2. **`workflow_dispatch` and branch runs must not enter the `release`
+  >    environment.** Any step in an environment job that holds
+  >    `id-token: write` can mint an Azure-trusted token, whichever step the
+  >    `azure/login` condition happens to guard. Step-level gating does not
+  >    remove the job's capability, so a manual run on a branch named like a
+  >    version would otherwise reach the code-signing identity.
+  > 3. **The GitHub `release` environment must carry deployment protections
+  >    appropriate for published release tags before the Azure Environment
+  >    credential is added.** Configure the environment's deployment branch and
+  >    tag rules (repo → Settings → Environments → `release`) so only release
+  >    tags can deploy to it, and add required reviewers if you want a human in
+  >    the loop. Adding the federated credential first leaves a window where an
+  >    unprotected environment is Azure-trusted.
+  >
+  > With those in place, tag-triggered signing needs: (1) a GitHub Actions
+  > **Environment** named `release` (repo → Settings → Environments), and (2) a
+  > federated credential of entity type **Environment** with value `release` on
+  > the `mootx01-ce-signing-ci` app registration. Candidate signing uses
+  > **Branch** federated credentials instead (`refs/heads/candidate/1.0.x`,
+  > `refs/heads/candidate/1.1.x`) and needs no environment. A `stable/1.0.x`
+  > Branch credential does nothing — releases are tag-triggered, not
+  > stable-branch-triggered.
 
 ### Option B — client secret (simplest; works on branch and tag triggers)
 

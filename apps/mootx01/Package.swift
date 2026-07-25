@@ -52,7 +52,26 @@ let package = Package(
     targets: [
         .target(
             name: "MootInstallerCore",
-            dependencies: [],
+            // Two dependencies, each for exactly one reason — do not grow
+            // this list with domain logic.
+            //
+            // PersistenceKitSQLite: EstateKeyProvider must go through
+            // KeychainKeyStore rather than reimplement key custody. A second
+            // implementation could derive a different Keychain account and
+            // mint a second key for the same estate, which is an
+            // unopenable-estate bug, so the real store is the only
+            // acceptable path.
+            //
+            // SQLCipher: EstateEncryptionMigrator (CE-1.0.35-08) performs a
+            // PHYSICAL plaintext→encrypted clone via ATTACH +
+            // sqlcipher_export(), which needs the raw sqlite3 C API —
+            // PersistenceKitSQLite's connection type is internal, and a
+            // logical re-import through the capture seam would mint new row
+            // ids and lose trace rows, fingerprints, and the Merkle rollup.
+            dependencies: [
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "SQLCipher", package: "PersistenceKit"),
+            ],
             path: "Sources/MootInstallerCore"
         ),
         .executableTarget(
@@ -83,7 +102,13 @@ let package = Package(
         ),
         .testTarget(
             name: "MootInstallerCoreTests",
-            dependencies: ["MootInstallerCore"],
+            dependencies: [
+                "MootInstallerCore",
+                // The twenty-row plaintext estate fixture (CE-1.0.35-04). Test
+                // support only: detection has to be proven against a REAL estate
+                // file, and the production estate is never an acceptable target.
+                .product(name: "LocusKitEstateFixture", package: "LocusKit"),
+            ],
             path: "Tests/MootInstallerCoreTests"
         ),
     ]
