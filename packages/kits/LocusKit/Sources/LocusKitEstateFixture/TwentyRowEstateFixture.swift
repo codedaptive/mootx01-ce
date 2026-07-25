@@ -432,6 +432,19 @@ public enum TwentyRowEstateFixture {
         return try await generate(at: directory.appendingPathComponent("estate.sqlite"))
     }
 
+    /// Open an estate through a caller-supplied configuration and count its
+    /// drawers.
+    ///
+    /// Exists so consumers can prove a posture decision actually OPENS the file
+    /// rather than merely describing it: a wrong SQLCipher key surfaces here as a
+    /// thrown error instead of a count. Takes a full `EstateConfiguration` so the
+    /// caller supplies its own encryption config, which is the part under test.
+    public static func drawerCount(of configuration: EstateConfiguration) async throws -> Int {
+        let storage = try SQLiteStorage(configuration: configuration)
+        let store = try await DrawerStore(storage: storage)
+        return try await store.allDrawers().count
+    }
+
     /// Remove a generated estate and its WAL/SHM siblings.
     public static func cleanup(_ manifest: Manifest) {
         cleanup(manifest.estateURL)
