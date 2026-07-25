@@ -5,6 +5,11 @@ How MOOTx01 is built, organized, validated, and extended.
 [![SDKs](https://img.shields.io/badge/SDKs-4%20Apache--2.0%20library%20repos-8A2BE2)](#developer-sdks)
 ![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
 ![interface](https://img.shields.io/badge/interface-ARIA%20over%20MCP-purple)
+![channel](https://img.shields.io/badge/channel-1.1.0--beta--04-orange)
+[![macOS pkg](https://img.shields.io/badge/macOS-.pkg%20installer%20(notarized)-blue?logo=apple)](https://github.com/codedaptive/mootx01-ce/releases/latest)
+[![Windows setup](https://img.shields.io/badge/Windows-setup.exe%20·%20winget-0078D4?logo=windows)](https://github.com/codedaptive/mootx01-ce/releases/latest)
+[![Homebrew](https://img.shields.io/badge/Homebrew-codedaptive%2Fmootx01--ce-FBB040?logo=homebrew&logoColor=white)](https://github.com/codedaptive/homebrew-mootx01-ce)
+[![Linux](https://img.shields.io/badge/Linux-x86__64%20·%20aarch64-FCC624?logo=linux&logoColor=black)](https://github.com/codedaptive/mootx01-ce/releases/latest)
 
 This is the technical companion to the [README](README.md), which covers what
 MOOTx01 is and how to get it working. Package-level integration instructions
