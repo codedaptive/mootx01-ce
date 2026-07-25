@@ -6,7 +6,7 @@ import MootGateway
 // Profile-driven tab shell shared by macOS and iOS. Two tab profiles:
 //
 //   Standard (default): Capture, Recall, Intelligence, Settings.
-//   Advanced: Standard + The Top, Apple Surfaces, Edges, Engine, Federation, Miners.
+//   Advanced: Standard + The Top, Apple Surfaces, Edges, Engine, Federation, Miners, Packets.
 //
 // On first launch (hasCompletedOnboarding == false) the onboarding flow is
 // shown as a fullScreenCover. Once dismissed it never appears again.
@@ -64,6 +64,13 @@ public struct ContentView: View {
                     // the first actual read, never from this view.
                     Tab(String(localized: "Miners"), systemImage: "square.and.arrow.down.on.square") {
                         MinerSettingsView()
+                    }
+                    // FAB5-I3: work-packet list, detail, and lineage trace views.
+                    // Kong ruling: Advanced-only tab, after Miners, SF Symbol "shippingbox".
+                    // Production wiring: pass a WorkPacketStore.list closure to PacketListView;
+                    // see docs/guide/THREE_MINDS_ONE_MEMORY.md for the full demo setup.
+                    Tab(String(localized: "Packets"), systemImage: "shippingbox") {
+                        PacketListView()
                     }
                 }
             }
