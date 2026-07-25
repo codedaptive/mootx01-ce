@@ -74,6 +74,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             currentVersion: Mootx01.currentVersion)
 
         // --check: query GitHub and print the latest tag without downloading.
+        // Query-only by contract, so the encryption offer does not run here.
         if checkOnly {
             if let tag = try await downloader.latestTag() {
                 print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
@@ -107,6 +108,10 @@ struct UpgradeCommand: AsyncParsableCommand {
             }
             guard let tag else {
                 print("Already up to date (\(Mootx01.currentVersion)).")
+                // Bob's ruling: `mootx01 upgrade` is the ONLY migration
+                // vehicle, and it offers whether or not a new version is
+                // available — so the up-to-date early return still offers.
+                offerEstateEncryptionIfNeeded(home: home)
                 return
             }
             print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
@@ -184,7 +189,59 @@ struct UpgradeCommand: AsyncParsableCommand {
 
         restartAgents(home: home)
         print("\nUpgrade complete. Run `mootx01 status` to confirm.")
+
+        // The encryption offer runs AFTER the services are back up so a
+        // decline leaves a fully converged install, and an accept owns the
+        // whole stop → migrate → restart sequence itself.
+        offerEstateEncryptionIfNeeded(home: home)
     }
+
+    /// CE-1.0.35-08: offer to encrypt an unencrypted default estate.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling): no
+    /// detection or prompting lives anywhere else — not serve, not install,
+    /// not the App, not an MCP tool. The offer is macOS-only (Linux/Windows
+    /// ship the Rust binary and are already encrypted) and TTY-gated: a
+    /// non-interactive invocation (launchd, scripts, piped stdin) never
+    /// prompts and never migrates. Declining is a clean no-op; users who
+    /// stay unencrypted are assumed to have chosen that.
+    private func offerEstateEncryptionIfNeeded(home: URL) {
+        #if os(macOS)
+        let dataDir = MootPaths.resolveDataDirectory(
+            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
+        let estateURL = MootPaths.estateURL(in: dataDir)
+
+        // Only a readable plaintext estate qualifies. Absent means first run
+        // (serve creates new estates encrypted); ciphertext means done.
+        guard EstateKeyProvider.detectEstateFileState(at: estateURL) == .plaintext else { return }
+
+        // Non-TTY invocations skip the offer silently and never migrate.
+        guard isatty(fileno(stdin)) == 1 else { return }
+
+        print("""
+
+            Your memory estate at \(estateURL.path)
+            is not encrypted at rest. mootx01 can encrypt it now: the estate is
+            cloned into an encrypted copy, verified row-for-row, and swapped in
+            at the same path. Your original is moved to the Trash afterwards.
+            """)
+        print("Encrypt the estate now? Type 'yes' to proceed: ", terminator: "")
+        guard readLine()?.trimmingCharacters(in: .whitespaces) == "yes" else {
+            print("Leaving the estate as it is. Run `mootx01 upgrade` again any time to encrypt it.")
+            return
+        }
+
+        runEstateEncryptionMigration(estateURL: estateURL, home: home)
+        #endif
+    }
+
+    #if os(macOS)
+    /// Drive the accepted migration. Wired to the migrator in the next part
+    /// of this stream (CE-1.0.35-08 Part 2).
+    private func runEstateEncryptionMigration(estateURL: URL, home: URL) {
+        print("Estate encryption migration is not wired yet in this build.")
+    }
+    #endif
 
     /// See the call site's doc comment. The gating (which hosts qualify —
     /// plugin-capable AND already has a plugin directory on disk) lives in
