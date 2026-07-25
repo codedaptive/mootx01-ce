@@ -268,6 +268,18 @@ struct ReviewReportFormattingTests {
         #expect(recorded != proposed)
     }
 
+    @Test("status is a distinct GLYPH per state, not colour alone")
+    func statusSymbolsAreDistinct() {
+        // Pinned to the exact names Kong ruling B specified and that were verified
+        // present in the system symbol manifest. A misspelled SF Symbol name is
+        // not a compile error — it renders as nothing, which would silently
+        // reduce status to a colour difference and break the no-colour-only rule.
+        #expect(ReviewItemRow.statusSymbolName(.proposed) == "circle.badge.questionmark")
+        #expect(ReviewItemRow.statusSymbolName(.recorded) == "checkmark.circle")
+        #expect(ReviewItemRow.statusSymbolName(.proposed)
+            != ReviewItemRow.statusSymbolName(.recorded))
+    }
+
     @Test("item count is singular for one and plural otherwise")
     func itemCountText() {
         #expect(ReviewReportView.itemCountText(1).hasSuffix("item"))

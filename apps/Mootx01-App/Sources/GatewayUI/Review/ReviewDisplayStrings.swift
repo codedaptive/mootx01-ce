@@ -122,7 +122,10 @@ enum ReviewDisplayStrings {
             .replacingOccurrences(of: "review.section.", with: "")
             .replacingOccurrences(of: "review.item.", with: "")
         guard !tail.isEmpty else { return key }
-        // Split camelCase into words: "retireReady" → "retire Ready".
+        // Split camelCase into words, LOWERCASING the boundary letter so the
+        // result reads as a sentence rather than as Title Case:
+        // "retireReady" → "retire ready", which the final line then caps to
+        // "Retire ready".
         var words = ""
         for character in tail {
             if character.isUppercase, !words.isEmpty {

@@ -354,11 +354,23 @@ struct ReviewItemRow: View {
     /// never the only signal — a colour-blind or grayscale reader still sees two
     /// different glyphs, and VoiceOver reads the label.
     private var statusSymbol: some View {
-        Image(systemName: item.status == .proposed
-            ? "questionmark.circle"
-            : "checkmark.circle")
+        // Kong ruling B named these two glyphs. Both verified present in the
+        // system symbol manifest (`circle.badge.questionmark` since 2023,
+        // `checkmark.circle` since 2019) — well under this app's 27 floor. A
+        // misspelled symbol name renders as nothing, silently, which would take
+        // the status signal with it.
+        Image(systemName: Self.statusSymbolName(item.status))
             .foregroundStyle(item.status == .proposed ? .orange : .secondary)
             .accessibilityLabel(Self.statusLabel(item.status))
+    }
+
+    /// Named separately from the `Image` so a test can pin the exact strings: a
+    /// misspelled SF Symbol name is not a compile error and renders as nothing.
+    nonisolated static func statusSymbolName(_ status: ReviewItemStatus) -> String {
+        switch status {
+        case .proposed: return "circle.badge.questionmark"
+        case .recorded: return "checkmark.circle"
+        }
     }
 
     nonisolated static func statusLabel(_ status: ReviewItemStatus) -> String {
