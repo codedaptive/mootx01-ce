@@ -35,6 +35,7 @@ public struct PacketListView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let error = loadError {
                     VStack(spacing: 8) {
+                        // Orange = retryable warning (not hard error); Refresh button is available.
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 40))
                             .foregroundStyle(.orange)
