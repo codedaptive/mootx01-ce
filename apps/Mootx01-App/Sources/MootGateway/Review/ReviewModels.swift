@@ -135,6 +135,12 @@ public struct ReviewItem: Codable, Sendable, Equatable, Identifiable {
     /// The surface's own ranking number (momentum, centrality, divergence) when
     /// it emits one. Never computed here — parsed, or `nil`.
     public let magnitude: Double?
+    /// When the underlying record was filed, for the surfaces that report it
+    /// (`moot_fact_search` emits `filed=`, `moot_read_journal` emits a leading
+    /// `[<iso>]`). `nil` for surfaces whose text response carries no instant —
+    /// notably `moot_memory_search`, which is why recall sections are ordered by
+    /// the tool's own recency ranking rather than clipped to the review window.
+    public let occurredAt: Date?
     /// Settled vs awaiting review.
     public let status: ReviewItemStatus
     /// Mandatory — there is no initializer that omits it.
@@ -146,6 +152,7 @@ public struct ReviewItem: Codable, Sendable, Equatable, Identifiable {
         detail: String,
         subjectID: String? = nil,
         magnitude: Double? = nil,
+        occurredAt: Date? = nil,
         status: ReviewItemStatus = .recorded,
         provenance: ReviewProvenance
     ) {
@@ -154,6 +161,7 @@ public struct ReviewItem: Codable, Sendable, Equatable, Identifiable {
         self.detail = detail
         self.subjectID = subjectID
         self.magnitude = magnitude
+        self.occurredAt = occurredAt
         self.status = status
         self.provenance = provenance
     }
@@ -230,6 +238,15 @@ public struct ReviewReport: Codable, Sendable, Equatable {
     // the app is the same text a Rust consumer (moot-mgr, FAB5-K1) parses.
     // Consumers MUST use these rather than a default JSONEncoder, whose
     // `.deferredToDate` strategy emits epoch doubles.
+    //
+    // RESOLUTION IS WHOLE SECONDS. ISO8601 here carries no fractional part, so a
+    // report built with a sub-second instant does not survive an encode/decode
+    // round-trip byte-identically — the fraction is dropped. This matches every
+    // instant the estate itself emits (`filed=`, journal stamps) and every
+    // instant `ReviewSchedule` produces, all of which are whole seconds. Callers
+    // that need round-trip identity (report diffing, cache keys) must pass a
+    // whole-second `now`; passing `Date()` straight through is fine for display
+    // but will not compare equal after a round-trip.
 
     public static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
