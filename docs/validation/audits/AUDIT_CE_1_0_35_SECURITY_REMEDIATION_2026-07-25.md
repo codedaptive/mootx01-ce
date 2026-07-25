@@ -122,15 +122,37 @@ mission drawer asked for a one line verification note and the report inflated it
 into an open remediation item. The error was asserting provisioning state from
 runbook prose instead of querying it.
 
+## Identified and fixed during this wave
+
+| Severity | Issue | Fix commit |
+|---|---|---|
+| Low | PyPI publish job reachable from manual runs | `11e334d0` |
+
+Found while auditing the release workflow for other entry points into a
+credential-holding environment. `publish-pypi` carried
+`environment: pypi` and `id-token: write` under the condition
+`startsWith(github.ref, 'refs/tags/')` with no event type check.
+`workflow_dispatch` accepts a tag as its ref, so a manual run against a release
+tag could enter the `pypi` environment and publish `moot-memory` under the
+project's name. This is the same defect class as the high finding above, in a
+different environment, and it was not part of any external report.
+
+Now gated `startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'`.
+Verified by parsing the workflow and asserting that every job holding
+`id-token: write` carries the event type check. Three jobs qualify and all three
+pass. `build-pypi` was deliberately left on its existing condition because it
+holds no credential, matching the treatment of the Windows build jobs.
+
+Severity is low rather than high because exploiting it requires repository write
+access, and a tag push reaches the same job.
+
 ## Identified during this wave, not recorded here
 
-Two conditions were found while working and are held out of this public record
-until they are fixed, per this directory's rule against publishing exploit
-material. One is a workflow job that holds an OIDC write permission under a
-condition that omits an event type check. One is a source comment that repeats
-the same overstated key custody claim this wave corrects in prose, in a file
-outside the reporting finding's file list. Both are recorded privately with
-enough detail to act on. Neither is reachable without repository write access.
+One condition is held out of this public record. It is a source comment that
+states a stronger key custody guarantee than the code implements, in a file
+outside the reporting finding's file list, so a fix scoped to that finding would
+leave it in place. It is recorded privately and is a documentation inaccuracy
+rather than a reachable weakness.
 
 ## Limits of this record
 
