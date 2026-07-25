@@ -55,9 +55,24 @@ jobs:
           ref: candidate/1.0.x
           persist-credentials: false
       - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Source version constant (matches Swift Mootx01.currentVersion).
-          version="$(grep -m1 '^version = ' apps/mootx01/rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          # The candidate numbers ITSELF from the published release history.
+          # It deliberately does NOT read the committed version stamp: the tree
+          # must not carry the next release number before that release exists,
+          # because the same bump stamps distribution/plugin/ and that tree
+          # syncs outward. The tree is bumped on the way to stable, never here.
+          #
+          # Next version = one patch above the highest published v1.0.* release.
+          published="$(gh release list --limit 100 --json tagName \
+            --jq '[.[].tagName | select(test("^v1\\.0\\.[0-9]+$")) | sub("^v";"")]
+                  | sort_by(split(".") | map(tonumber)) | last // empty')"
+          if [ -z "$published" ]; then
+            echo "ERROR: no published v1.0.* release found — cannot derive the candidate version" >&2
+            exit 1
+          fi
+          version="$(echo "$published" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')"
           # Supply-chain guard: reject version strings that aren't strict
           # semver. A crafted Cargo.toml version containing shell metacharacters
           # would be interpolated into later run blocks while the signing
@@ -66,10 +81,10 @@ jobs:
             echo "ERROR: version '$version' is not valid semver — aborting" >&2
             exit 1
           fi
-          # The candidate tag preserves the source product version exactly.
-          # The source tree must be bumped to the intended release version
-          # before it reaches candidate; a 1.0.34 binary must never be labeled
-          # as a 1.0.35 prerelease.
+          # Every build job stamps the checked-out tree to $version before it
+          # builds, so the binary reports the same number the pre-release is
+          # labeled with. That stamp is ephemeral and is never committed, so
+          # nothing announces the version outside this pre-release.
           #
           # Tag carries NO leading v on purpose — a v* tag would trigger
           # release.yml and a signed public release. The `-prerelease` suffix
@@ -80,7 +95,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
-          echo "Candidate build: $tag (source version $version at $candidate_sha)"
+          echo "Candidate build: $tag (built as $version from $candidate_sha; published stable is $published)"
 
   # ── macOS builds (arm64 + x86_64) — signed best-effort ───────────────────────
   # Mirrors release.yml's signing pipeline when Apple Developer ID secrets are
@@ -102,6 +117,9 @@ jobs:
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
+
+      - name: Stamp the tree to the candidate version (ephemeral, never committed)
+        run: python3 scripts/release/bump_version.py "${{ needs.meta.outputs.version }}"
 
       - name: Build release binaries
         run: |
@@ -305,6 +323,8 @@ jobs:
           ref: ${{ needs.meta.outputs.candidate_sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Stamp the tree to the candidate version (ephemeral, never committed)
+        run: python3 scripts/release/bump_version.py "${{ needs.meta.outputs.version }}"
       - name: Build
         run: |
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml
@@ -349,6 +369,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Stamp the tree to the candidate version (ephemeral, never committed)
+        shell: pwsh
+        run: python scripts/release/bump_version.py "${{ needs.meta.outputs.version }}"
       - name: Build binaries
         shell: pwsh
         run: |
