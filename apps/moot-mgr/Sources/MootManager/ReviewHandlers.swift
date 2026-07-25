@@ -51,7 +51,12 @@ extension MootManager {
     /// - Parameter limit: Maximum recent events to include. Default 20.
     /// - Throws: `ManagerError.notStarted` when the manager has not been started.
     public func reviewPayload(limit: Int = 20) async throws -> ReviewPayload {
-        let store = try statsStore()
+        // Return pending when the manager has not been started (no store yet).
+        // Mirrors PacketsPayload.pending — callers get a valid payload, not a 500.
+        guard let store = try? statsStore() else {
+            return ReviewPayload(pending: true, estateCount: 0, captureCount: 0,
+                                 recentEvents: [])
+        }
         let events = try await store.queryEvents(dropboxID: nil)
         let estateCount = Set(events.map { $0.estate }).count
         let captureCount = events.filter { $0.kind == "capture" }.count

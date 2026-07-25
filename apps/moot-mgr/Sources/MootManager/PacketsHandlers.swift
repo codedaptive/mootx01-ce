@@ -107,10 +107,6 @@ public actor PacketsEngine {
     private let wing: String
     private let decoder: JSONDecoder
 
-    // exportability bit for .public_ (raw 32) shifted into bits 12–17.
-    // Used by the mock client; the real estate evaluates Filter.exportable via SQL.
-    static let exportabilityPublicBit: Int64 = Int64(32) << 12
-
     public init(client: any WorkPacketEstateClient,
                 wing: String = LocusKit.defaultWingName) {
         self.client = client
