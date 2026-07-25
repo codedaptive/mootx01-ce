@@ -14,7 +14,7 @@ knows what to trust, when to recall, what to consolidate, and how to talk to
 your AI out of the box — that is MOOTx01, and it lives in this repository.
 
 This document is the detailed map. The short version is in the
-[README](README.md#developer-sdks).
+[README](TECHNICAL_OVERVIEW.md#developer-sdks).
 
 ## Pick a repository
 
