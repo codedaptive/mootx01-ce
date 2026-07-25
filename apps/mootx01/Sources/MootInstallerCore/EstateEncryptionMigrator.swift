@@ -40,6 +40,9 @@ public enum EstateEncryptionMigrator {
         case sourceNotPlaintext(path: String)
         /// A sqlite3 call failed. `step` names the operation, not the SQL.
         case sqlite(step: String, detail: String)
+        /// The encrypted copy's row counts did not match the original's.
+        /// The copy has been deleted; the original is untouched.
+        case verificationFailed(source: String, copy: String)
 
         public var description: String {
             switch self {
@@ -47,6 +50,12 @@ public enum EstateEncryptionMigrator {
                 return "refusing to migrate \(path): it is not a readable plaintext SQLite database"
             case let .sqlite(step, detail):
                 return "estate encryption \(step) failed: \(detail)"
+            case let .verificationFailed(source, copy):
+                return """
+                    the encrypted copy does not match the original and has been \
+                    deleted; the original estate is untouched. original: \(source) \
+                    copy: \(copy)
+                    """
             }
         }
     }
@@ -115,6 +124,76 @@ public enum EstateEncryptionMigrator {
             try? fm.removeItem(at: url.deletingLastPathComponent()
                 .appendingPathComponent(url.lastPathComponent + suffix))
         }
+    }
+
+    // MARK: - Part 3: verification counts
+
+    /// The four row counts that gate the swap. Drawer, fact, tunnel, and
+    /// recall-trace rows are what a user cannot regenerate; if any of them
+    /// differs between the original and the encrypted copy, the copy is
+    /// wrong and must never be swapped in.
+    public struct VerificationCounts: Equatable, Sendable, CustomStringConvertible {
+        public let drawers: Int
+        public let kgFacts: Int
+        public let tunnels: Int
+        public let recallTraces: Int
+
+        public var description: String {
+            "drawers=\(drawers) kg_facts=\(kgFacts) tunnels=\(tunnels) recall_trace=\(recallTraces)"
+        }
+    }
+
+    /// TOTAL row counts (including tombstoned rows) of the four gated
+    /// tables. Totals, not active-only: the physical clone must preserve
+    /// every row, tombstoned included, so the strictest comparable number
+    /// is the right gate.
+    ///
+    /// Table names are the substrate schema's (LocusKitSchema.swift):
+    /// `drawers`, `kg_facts`, `tunnels`, `recall_trace`.
+    public static func verificationCounts(atPath path: String, keyHex: String? = nil) throws -> VerificationCounts {
+        let db = try openRaw(path: path, keyHex: keyHex)
+        defer { sqlite3_close_v2(db) }
+        return VerificationCounts(
+            drawers: try countRows(db, table: "drawers"),
+            kgFacts: try countRows(db, table: "kg_facts"),
+            tunnels: try countRows(db, table: "tunnels"),
+            recallTraces: try countRows(db, table: "recall_trace"))
+    }
+
+    /// `SELECT COUNT(*)` on one table. A missing table (or a wrong key,
+    /// which makes page 1 undecodable) surfaces as a thrown error, never
+    /// as zero — a fabricated zero could make a truncated copy "match" an
+    /// empty table.
+    static func countRows(_ db: OpaquePointer, table: String) throws -> Int {
+        var stmt: OpaquePointer?
+        // Table names come from the fixed list above, never from input.
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM \"\(table)\";", -1, &stmt, nil) == SQLITE_OK,
+              let stmt else {
+            throw MigrationError.sqlite(
+                step: "count \(table)", detail: String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw MigrationError.sqlite(
+                step: "count \(table)", detail: String(cString: sqlite3_errmsg(db)))
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Part 3's gate: compare the plaintext original against the encrypted
+    /// copy. Throws `.verificationFailed` (after deleting the copy) on any
+    /// difference — the original is never touched by this function.
+    public static func verifyEncryptedCopy(
+        original: URL, encryptedCopy: URL, key: Data
+    ) throws -> VerificationCounts {
+        let source = try verificationCounts(atPath: original.path)
+        let copy = try verificationCounts(atPath: encryptedCopy.path, keyHex: keyHex(key))
+        guard source == copy else {
+            removeDatabase(at: encryptedCopy)
+            throw MigrationError.verificationFailed(
+                source: "\(source)", copy: "\(copy)")
+        }
+        return copy
     }
 
     // MARK: - Part 2: the clone

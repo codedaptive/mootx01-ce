@@ -8,6 +8,7 @@
 import Foundation
 import LocusKitEstateFixture
 import PersistenceKit
+import SQLCipher
 import Testing
 @testable import MootInstallerCore
 
@@ -40,6 +41,83 @@ struct EstateEncryptionMigratorTests {
             .appendingPathComponent("estate.sqlite")
         await #expect(throws: (any Error).self) {
             try await TwentyRowEstateFixture.generate(at: production)
+        }
+    }
+
+    // MARK: - Part 3: verify before swap
+
+    @Test("Verification passes on a faithful copy with exact manifest counts")
+    func verificationPassesOnFaithfulCopy() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let key = makeKey()
+        let copy = encryptedSibling(of: manifest.estateURL)
+        defer { EstateEncryptionMigrator.removeDatabase(at: copy) }
+        try EstateEncryptionMigrator.exportEncryptedCopy(
+            from: manifest.estateURL, to: copy, key: key)
+
+        let counts = try EstateEncryptionMigrator.verifyEncryptedCopy(
+            original: manifest.estateURL, encryptedCopy: copy, key: key)
+
+        // Not just source==copy: the counts must equal what the fixture SAYS
+        // it wrote, so a bug that loses rows on BOTH sides cannot hide.
+        #expect(counts.drawers == manifest.drawerCount)
+        #expect(counts.kgFacts == manifest.factCount)
+        #expect(counts.tunnels == manifest.tunnelCount)
+        #expect(counts.recallTraces == 0,
+            "the fixture runs no recalls, so its trace table is empty")
+    }
+
+    @Test("An artificially damaged copy is rejected and the original survives")
+    func damagedCopyIsRejectedAndOriginalSurvives() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let key = makeKey()
+        let copy = encryptedSibling(of: manifest.estateURL)
+        defer { EstateEncryptionMigrator.removeDatabase(at: copy) }
+        try EstateEncryptionMigrator.exportEncryptedCopy(
+            from: manifest.estateURL, to: copy, key: key)
+
+        // Damage the copy the way a real fault would: rows missing, file
+        // still a valid encrypted database. Deleting drawers through the raw
+        // connection models a partial export.
+        let db = try EstateEncryptionMigrator.openRaw(
+            path: copy.path, keyHex: EstateEncryptionMigrator.keyHex(key))
+        try EstateEncryptionMigrator.exec(
+            db, sql: "DELETE FROM \"drawers\" WHERE rowid IN (SELECT rowid FROM \"drawers\" LIMIT 3);",
+            step: "damage (test)")
+        _ = sqlite3_close_v2(db)
+
+        #expect(throws: (any Error).self) {
+            _ = try EstateEncryptionMigrator.verifyEncryptedCopy(
+                original: manifest.estateURL, encryptedCopy: copy, key: key)
+        }
+        // The damaged copy must be gone; the original untouched and complete.
+        #expect(!FileManager.default.fileExists(atPath: copy.path),
+            "a rejected copy must be deleted, never left for a later swap")
+        let survivors = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: manifest.estateURL, busyTimeout: 5.0),
+            encryptionConfig: .plaintext))
+        #expect(survivors == manifest.drawerCount,
+            "the original must survive a failed verification byte-complete")
+    }
+
+    @Test("Verification with the wrong key throws rather than reporting zeros")
+    func wrongKeyThrowsInsteadOfZeroCounts() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let copy = encryptedSibling(of: manifest.estateURL)
+        defer { EstateEncryptionMigrator.removeDatabase(at: copy) }
+        try EstateEncryptionMigrator.exportEncryptedCopy(
+            from: manifest.estateURL, to: copy, key: makeKey())
+
+        // A wrong key must never read as "0 rows" — that could match an
+        // empty table and wave a garbage copy through.
+        #expect(throws: (any Error).self) {
+            _ = try EstateEncryptionMigrator.verificationCounts(
+                atPath: copy.path,
+                keyHex: EstateEncryptionMigrator.keyHex(makeKey()))
         }
     }
 
