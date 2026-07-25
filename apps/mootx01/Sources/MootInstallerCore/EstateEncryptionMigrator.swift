@@ -43,6 +43,9 @@ public enum EstateEncryptionMigrator {
         /// The encrypted copy's row counts did not match the original's.
         /// The copy has been deleted; the original is untouched.
         case verificationFailed(source: String, copy: String)
+        /// The swap could not complete. The plaintext original is back at
+        /// (or never left) the canonical path.
+        case swapFailed(detail: String)
 
         public var description: String {
             switch self {
@@ -56,6 +59,8 @@ public enum EstateEncryptionMigrator {
                     deleted; the original estate is untouched. original: \(source) \
                     copy: \(copy)
                     """
+            case let .swapFailed(detail):
+                return "estate swap failed — the original plaintext estate is still in place: \(detail)"
             }
         }
     }
@@ -124,6 +129,204 @@ public enum EstateEncryptionMigrator {
             try? fm.removeItem(at: url.deletingLastPathComponent()
                 .appendingPathComponent(url.lastPathComponent + suffix))
         }
+    }
+
+    // MARK: - Part 4: swap seams
+
+    /// Daemon control seam. The real implementation is launchd
+    /// (`DaemonControl.launchd(homeDirectory:)`); tests inject recorders and
+    /// fault throwers so every failure path is drivable without launchd.
+    public struct DaemonControl: Sendable {
+        public var isRunning: @Sendable () -> Bool
+        public var stop: @Sendable () -> Bool
+        public var start: @Sendable () -> Bool
+
+        public init(
+            isRunning: @escaping @Sendable () -> Bool,
+            stop: @escaping @Sendable () -> Bool,
+            start: @escaping @Sendable () -> Bool
+        ) {
+            self.isRunning = isRunning
+            self.stop = stop
+            self.start = start
+        }
+
+        /// The production seam: launchctl via LaunchAgent.
+        public static func launchd(homeDirectory: URL) -> DaemonControl {
+            DaemonControl(
+                isRunning: { LaunchAgent.isDaemonRunning() },
+                stop: { LaunchAgent.stopDaemon() },
+                start: { LaunchAgent.startDaemon(homeDirectory: homeDirectory) })
+        }
+
+        /// A no-daemon environment (also the test default).
+        public static let none = DaemonControl(
+            isRunning: { false }, stop: { true }, start: { true })
+    }
+
+    /// Trash seam. Production is `FileManager.trashItem`; tests inject a
+    /// recorder or a fault thrower. Returns the item's new URL in the Trash.
+    public typealias TrashItem = @Sendable (URL) throws -> URL
+
+    /// The production trash seam.
+    public static func systemTrash(_ url: URL) throws -> URL {
+        var resulting: NSURL?
+        try FileManager.default.trashItem(at: url, resultingItemURL: &resulting)
+        return (resulting as URL?) ?? url
+    }
+
+    /// What the swap did, for honest reporting. `untrashedOriginalPath` is
+    /// non-nil when the plaintext original could NOT be moved to the Trash
+    /// and is still sitting beside the estate — the caller MUST surface it.
+    public struct SwapOutcome: Sendable {
+        public let daemonWasRunning: Bool
+        public let daemonRestarted: Bool
+        public let trashedOriginalURL: URL?
+        public let untrashedOriginalPath: String?
+    }
+
+    // MARK: - Part 4: atomic swap and Trash
+
+    /// Swap the verified encrypted copy onto the canonical estate path and
+    /// move the plaintext original to the Trash.
+    ///
+    /// Sequence, chosen so the canonical path holds a complete, openable
+    /// estate at every instant — including across a crash of this process:
+    ///
+    ///   1. stop the daemon (if running) so no connection spans the swap
+    ///   2. move the original's `-wal`/`-shm` siblings aside (they belong to
+    ///      the plaintext file and must never sit next to the encrypted one)
+    ///   3. HARD-LINK the original to an aside name — the original's bytes
+    ///      now have two directory entries, so step 4 can atomically replace
+    ///      the canonical entry without ever orphaning the plaintext data
+    ///   4. `rename()` the encrypted copy onto the canonical path (atomic
+    ///      replace; the path stays constant for the launchd plist and every
+    ///      client config)
+    ///   5. restart the daemon if it was running
+    ///   6. move the aside original (+ siblings) to the Trash
+    ///
+    /// A failure in 1–4 unwinds to the plaintext original at the canonical
+    /// path (and deletes the copy). Failures in 5–6 are reported, not fatal:
+    /// the encrypted estate is already in place and working.
+    public static func swapInEncryptedCopy(
+        original: URL,
+        encryptedCopy: URL,
+        daemon: DaemonControl,
+        trash: TrashItem = systemTrash
+    ) throws -> SwapOutcome {
+        let fm = FileManager.default
+        let dir = original.deletingLastPathComponent()
+        let asideName = original.lastPathComponent + ".pre-encryption"
+        let aside = dir.appendingPathComponent(asideName)
+
+        // 1. Quiesce. A rename under a live daemon connection is the data
+        //    race this whole sequence exists to prevent.
+        let wasRunning = daemon.isRunning()
+        if wasRunning, !daemon.stop() {
+            removeDatabase(at: encryptedCopy)
+            throw MigrationError.swapFailed(
+                detail: "the resident daemon would not stop; nothing was changed")
+        }
+
+        // Unwind helper for failures before the rename lands.
+        func unwind(_ movedSiblings: [(from: URL, to: URL)], linked: Bool) {
+            for pair in movedSiblings.reversed() { try? fm.moveItem(at: pair.to, to: pair.from) }
+            if linked { try? fm.removeItem(at: aside) }
+            removeDatabase(at: encryptedCopy)
+            if wasRunning { _ = daemon.start() }
+        }
+
+        // 2. Plaintext siblings aside. Normally absent after the export's
+        //    checkpoint(TRUNCATE); moved rather than deleted so an unwind can
+        //    put them back exactly as found.
+        var movedSiblings: [(from: URL, to: URL)] = []
+        for suffix in ["-wal", "-shm"] {
+            let sibling = dir.appendingPathComponent(original.lastPathComponent + suffix)
+            guard fm.fileExists(atPath: sibling.path) else { continue }
+            let sidelined = dir.appendingPathComponent(asideName + suffix)
+            do {
+                try? fm.removeItem(at: sidelined)
+                try fm.moveItem(at: sibling, to: sidelined)
+                movedSiblings.append((from: sibling, to: sidelined))
+            } catch {
+                unwind(movedSiblings, linked: false)
+                throw MigrationError.swapFailed(
+                    detail: "could not set aside \(sibling.lastPathComponent): \(error)")
+            }
+        }
+
+        // 3. Second directory entry for the original's bytes. After this,
+        //    replacing the canonical entry cannot orphan the plaintext data.
+        do {
+            try? fm.removeItem(at: aside)
+            try fm.linkItem(at: original, to: aside)
+        } catch {
+            unwind(movedSiblings, linked: false)
+            throw MigrationError.swapFailed(
+                detail: "could not link the original aside: \(error)")
+        }
+
+        // 4. The swap itself. POSIX rename() atomically replaces the
+        //    canonical entry; FileManager.moveItem refuses existing
+        //    destinations, so the syscall is used directly.
+        if rename(encryptedCopy.path, original.path) != 0 {
+            let err = String(cString: strerror(errno))
+            unwind(movedSiblings, linked: true)
+            throw MigrationError.swapFailed(
+                detail: "atomic rename onto \(original.path) failed: \(err)")
+        }
+
+        // 5. Bring the daemon back over the encrypted estate. Failure here is
+        //    reported, never fatal: the migration itself has succeeded.
+        let restarted = wasRunning ? daemon.start() : false
+
+        // 6. Trash the plaintext original and any sidelined siblings. The
+        //    trashed copy is STILL UNENCRYPTED — the caller's success message
+        //    must say so, so emptying the Trash reads as the final step of
+        //    the migration and not optional cleanup.
+        var trashedURL: URL?
+        var untrashedPath: String?
+        do {
+            trashedURL = try trash(aside)
+            for pair in movedSiblings { _ = try? trash(pair.to) }
+        } catch {
+            // Keep the original in place and report its path rather than
+            // proceeding silently.
+            untrashedPath = aside.path
+        }
+
+        return SwapOutcome(
+            daemonWasRunning: wasRunning,
+            daemonRestarted: restarted,
+            trashedOriginalURL: trashedURL,
+            untrashedOriginalPath: untrashedPath)
+    }
+
+    // MARK: - The full migration
+
+    /// End-to-end migration for a plaintext estate at `estateURL`: clone →
+    /// verify → swap → trash, with `key` already provisioned by the caller
+    /// (EstateKeyProvider owns key custody; this type never touches the
+    /// Keychain). Throws on any failure that left the plaintext original in
+    /// place; the error says so explicitly.
+    public static func migrate(
+        estateURL: URL,
+        key: Data,
+        daemon: DaemonControl,
+        trash: TrashItem = systemTrash
+    ) throws -> (counts: VerificationCounts, swap: SwapOutcome) {
+        let copy = estateURL.deletingLastPathComponent()
+            .appendingPathComponent(estateURL.lastPathComponent + ".encrypting")
+        // A stale copy from an interrupted earlier run is untrusted by
+        // definition — regenerate rather than resume.
+        removeDatabase(at: copy)
+
+        try exportEncryptedCopy(from: estateURL, to: copy, key: key)
+        let counts = try verifyEncryptedCopy(
+            original: estateURL, encryptedCopy: copy, key: key)
+        let outcome = try swapInEncryptedCopy(
+            original: estateURL, encryptedCopy: copy, daemon: daemon, trash: trash)
+        return (counts, outcome)
     }
 
     // MARK: - Part 3: verification counts

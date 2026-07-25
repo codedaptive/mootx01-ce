@@ -236,10 +236,63 @@ struct UpgradeCommand: AsyncParsableCommand {
     }
 
     #if os(macOS)
-    /// Drive the accepted migration. Wired to the migrator in the next part
-    /// of this stream (CE-1.0.35-08 Part 2).
+    /// Drive the accepted migration: provision the key, then clone → verify
+    /// → swap → trash through EstateEncryptionMigrator. Every failure path
+    /// leaves the plaintext original working at the canonical path; the
+    /// messages below say which side of the swap the user is on.
     private func runEstateEncryptionMigration(estateURL: URL, home: URL) {
-        print("Estate encryption migration is not wired yet in this build.")
+        let key: Data
+        do {
+            // EstateKeyProvider owns key custody: returns the existing key
+            // for this estate or mints one in the Keychain. On failure
+            // nothing has been touched.
+            key = try EstateKeyProvider.provideKey(for: estateURL)
+        } catch {
+            print("""
+                Could not provision an encryption key (\(error)).
+                Nothing was changed; the estate is untouched.
+                """)
+            return
+        }
+
+        print("Encrypting the estate\u{2026}")
+        do {
+            let result = try EstateEncryptionMigrator.migrate(
+                estateURL: estateURL,
+                key: key,
+                daemon: .launchd(homeDirectory: home))
+            print("  \u{2713} Estate encrypted in place at \(estateURL.path)")
+            print("  \u{2713} Verified: \(result.counts)")
+            if result.swap.daemonWasRunning {
+                if result.swap.daemonRestarted {
+                    print("  \u{2713} Daemon restarted over the encrypted estate.")
+                } else {
+                    print("""
+                          \u{2717} The daemon did not restart cleanly. Restart it manually:
+                            launchctl kickstart -k gui/$(id -u)/com.mootx01.daemon
+                        """)
+                }
+            }
+            if let untrashed = result.swap.untrashedOriginalPath {
+                print("""
+                      \u{2717} The plaintext original could not be moved to the Trash.
+                        It is STILL UNENCRYPTED at: \(untrashed)
+                        Delete it yourself to finish the migration.
+                    """)
+            } else {
+                print("""
+                      \u{2713} Your original estate was moved to the Trash. That copy is
+                        STILL UNENCRYPTED \u{2014} emptying the Trash is the final step
+                        of this migration, not optional cleanup.
+                    """)
+            }
+        } catch {
+            print("""
+                Migration failed: \(error)
+                Your estate is still the plaintext original at \(estateURL.path) and
+                remains fully usable. Run `mootx01 upgrade` to try again.
+                """)
+        }
     }
     #endif
 

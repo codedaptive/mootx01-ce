@@ -303,6 +303,42 @@ public enum LaunchAgent {
         return .installed(plistPath: daemonPlist.path, dashboardURL: defaultDashboardURL)
     }
 
+    /// True when launchd currently has the resident daemon job registered.
+    /// `launchctl print` on the service target exits 0 only for a loaded job.
+    public static func isDaemonRunning() -> Bool {
+        runLaunchctl(["print", "gui/\(getuid())/\(MootPaths.daemonLabel)"]).code == 0
+    }
+
+    /// Stop the resident daemon WITHOUT removing its plist, so a later
+    /// `startDaemon`/`restart` can bring it back from the same registration.
+    ///
+    /// Exists for the estate encryption migration (CE-1.0.35-08): the swap
+    /// must run stop → rename → start, which `restart()` (bootout+bootstrap
+    /// in one call) cannot express, and `uninstallDaemon` would delete the
+    /// plist the restart needs. Waits up to 5 s for the launchd teardown to
+    /// complete — a rename under a still-live daemon is the exact data race
+    /// this method exists to prevent.
+    ///
+    /// - Returns: `true` once the job is no longer registered.
+    public static func stopDaemon() -> Bool {
+        let target = "gui/\(getuid())/\(MootPaths.daemonLabel)"
+        _ = runLaunchctl(["bootout", target])
+        for _ in 0..<20 {
+            if runLaunchctl(["print", target]).code != 0 { return true }
+            usleep(250_000)
+        }
+        return false
+    }
+
+    /// Start the resident daemon from its existing plist. Counterpart of
+    /// `stopDaemon()`; a no-op success when no daemon plist is installed
+    /// (nothing was running before, nothing needs to come back).
+    public static func startDaemon(homeDirectory: URL) -> Bool {
+        let plistURL = MootPaths.daemonPlistURL(homeDirectory: homeDirectory)
+        guard FileManager.default.fileExists(atPath: plistURL.path) else { return true }
+        return bootstrapJob(plistURL: plistURL, label: MootPaths.daemonLabel).ok
+    }
+
     /// Stop and remove the LaunchAgent. Idempotent — safe when nothing is
     /// installed. Call this BEFORE deleting the moot-mgr binary so the running
     /// job is stopped first.

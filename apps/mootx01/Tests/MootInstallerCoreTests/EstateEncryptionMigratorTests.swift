@@ -121,6 +121,127 @@ struct EstateEncryptionMigratorTests {
         }
     }
 
+    // MARK: - Part 4: atomic swap and Trash
+
+    /// Lock-protected event recorder so @Sendable seam closures can append
+    /// from a Swift 6 strict-concurrency context.
+    private final class EventLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [String] = []
+        func append(_ event: String) { lock.withLock { storage.append(event) } }
+        var events: [String] { lock.withLock { storage } }
+    }
+
+    /// A trash seam that moves items into a "trash" directory beside the
+    /// estate, so tests never touch the user's real Trash.
+    private func makeTestTrash(in directory: URL) -> (EstateEncryptionMigrator.TrashItem, URL) {
+        let trashDir = directory.appendingPathComponent("test-trash", isDirectory: true)
+        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        return ({ url in
+            let dest = trashDir.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: dest)
+            return dest
+        }, trashDir)
+    }
+
+    @Test("The full migration leaves ciphertext at the canonical path and plaintext in the trash")
+    func fullMigrationHappyPath() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let key = makeKey()
+        let dir = manifest.estateURL.deletingLastPathComponent()
+        let (trash, trashDir) = makeTestTrash(in: dir)
+
+        // A daemon recorder proving stop-before-swap and restart-after.
+        let log = EventLog()
+        let daemon = EstateEncryptionMigrator.DaemonControl(
+            isRunning: { log.append("isRunning"); return true },
+            stop: { log.append("stop"); return true },
+            start: { log.append("start"); return true })
+
+        let result = try EstateEncryptionMigrator.migrate(
+            estateURL: manifest.estateURL, key: key, daemon: daemon, trash: trash)
+
+        // The canonical path holds ciphertext that opens with the key.
+        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .ciphertext,
+            "the canonical estate path must now hold the encrypted estate")
+        let count = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: manifest.estateURL, busyTimeout: 5.0),
+            encryptionConfig: .fullDatabase(key: key)))
+        #expect(count == manifest.drawerCount)
+
+        // Daemon lifecycle: stopped before the swap, restarted after.
+        #expect(log.events == ["isRunning", "stop", "start"])
+        #expect(result.swap.daemonWasRunning && result.swap.daemonRestarted)
+
+        // The trash holds a READABLE plaintext copy — the mission's "still
+        // unencrypted in the Trash" promise, proven by opening it.
+        let trashed = try #require(result.swap.trashedOriginalURL)
+        #expect(trashed.path.hasPrefix(trashDir.path))
+        #expect(EstateKeyProvider.detectEstateFileState(at: trashed) == .plaintext)
+        let trashedCount = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: trashed, busyTimeout: 5.0),
+            encryptionConfig: .plaintext))
+        #expect(trashedCount == manifest.drawerCount,
+            "the trashed original must remain a complete readable estate")
+        #expect(result.swap.untrashedOriginalPath == nil)
+
+        // No leftover working files beside the estate.
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.contains(".encrypting") || $0.contains(".pre-encryption") }
+        #expect(leftovers.isEmpty, "the swap must clean up its working files: \(leftovers)")
+    }
+
+    @Test("All four sensitivity tiers survive migration with their adjective bits intact")
+    func sensitivityTiersSurvive() async throws {
+        let manifest = try await TwentyRowEstateFixture.generateInTemporaryDirectory()
+        defer { TwentyRowEstateFixture.cleanup(manifest) }
+        let key = makeKey()
+        let (trash, _) = makeTestTrash(in: manifest.estateURL.deletingLastPathComponent())
+
+        // Tier → adjectiveBitmap of every drawer, before.
+        let before = try tierBitmaps(
+            estateURL: manifest.estateURL, keyHex: nil, manifest: manifest)
+        _ = try EstateEncryptionMigrator.migrate(
+            estateURL: manifest.estateURL, key: key, daemon: .none, trash: trash)
+        let after = try tierBitmaps(
+            estateURL: manifest.estateURL,
+            keyHex: EstateEncryptionMigrator.keyHex(key), manifest: manifest)
+
+        #expect(before == after,
+            "every tier drawer's adjective bitmap must survive the migration bit-for-bit")
+        #expect(before.count == 4, "test premise: one drawer per sensitivity tier")
+    }
+
+    /// Read `adjectiveBitmap` for the four tier-anchor drawers via raw SQL,
+    /// so the comparison is on stored bits, not decoded views.
+    private func tierBitmaps(
+        estateURL: URL, keyHex: String?, manifest: TwentyRowEstateFixture.Manifest
+    ) throws -> [String: Int64] {
+        let db = try EstateEncryptionMigrator.openRaw(path: estateURL.path, keyHex: keyHex)
+        defer { _ = sqlite3_close_v2(db) }
+        var result: [String: Int64] = [:]
+        for (_, drawerID) in manifest.drawerIDsByProvenanceTier {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db, "SELECT \"adjectiveBitmap\" FROM \"drawers\" WHERE \"id\" = ?;",
+                -1, &stmt, nil) == SQLITE_OK, let stmt else {
+                throw EstateEncryptionMigrator.MigrationError.sqlite(
+                    step: "tier read (test)", detail: String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, drawerID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            guard sqlite3_step(stmt) == SQLITE_ROW else {
+                throw EstateEncryptionMigrator.MigrationError.sqlite(
+                    step: "tier read (test)", detail: "drawer \(drawerID) not found")
+            }
+            result[drawerID] = sqlite3_column_int64(stmt, 0)
+        }
+        return result
+    }
+
     // MARK: - Part 2: the clone
 
     @Test("Export produces a ciphertext file that opens with the key")
