@@ -373,6 +373,50 @@ struct EstateEncryptionMigratorTests {
         #expect(count == manifest.drawerCount)
     }
 
+    // MARK: - Part 1: the offer (source-level drift guards)
+
+    // UpgradeCommand lives in the mootx01 executable target, which this test
+    // target cannot import (same seam as CE-1.0.35-02/-06), so the offer's
+    // structural requirements are asserted at the source level — the same
+    // pattern EstateOpenPostureTests uses for the shared posture helper.
+
+    private var commandsDirectory: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // MootInstallerCoreTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // apps/mootx01
+            .appendingPathComponent("Sources/mootx01/Commands")
+    }
+
+    @Test("UpgradeCommand gates the offer on plaintext detection and a TTY")
+    func upgradeCommandGatesTheOffer() throws {
+        let source = try String(
+            contentsOf: commandsDirectory.appendingPathComponent("UpgradeCommand.swift"),
+            encoding: .utf8)
+        #expect(source.contains("detectEstateFileState"),
+            "the offer must classify via the shared detection function, never by guessing")
+        #expect(source.contains("isatty"),
+            "a non-TTY invocation must never prompt and never migrate")
+        #expect(source.contains("EstateEncryptionMigrator.migrate"),
+            "the accepted offer must run the migrator, not a bespoke path")
+        #expect(source.contains("EstateKeyProvider.provideKey"),
+            "key provisioning must go through EstateKeyProvider's custody")
+    }
+
+    @Test("No other command detects or prompts for estate encryption migration")
+    func noOtherCommandOffersMigration() throws {
+        // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle.
+        // resolveOpenPosture callers (serve/drain/dream) classify to OPEN,
+        // which is allowed; what no other command may do is drive migration.
+        for name in ["ServeCommand", "DrainCommand", "DreamCommand",
+                     "InstallCommand", "DbCommand"] {
+            let url = commandsDirectory.appendingPathComponent("\(name).swift")
+            let source = try String(contentsOf: url, encoding: .utf8)
+            #expect(!source.contains("EstateEncryptionMigrator"),
+                "\(name) must not reference the migrator — upgrade is the only vehicle")
+        }
+    }
+
     // MARK: - Part 2: the clone
 
     @Test("Export produces a ciphertext file that opens with the key")
