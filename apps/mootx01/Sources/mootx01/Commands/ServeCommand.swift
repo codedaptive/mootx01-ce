@@ -274,7 +274,9 @@ struct ServeCommand: AsyncParsableCommand {
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(env: environment),
                 brainTickMs: AriaResident.brainTickMs(env: environment),
                 monitoringPollMs: AriaResident.monitoringPollMs(env: environment),
-                statsStorePath: environment["ARIA_MCP_STATS_STORE"]
+                statsStorePath: environment["ARIA_MCP_STATS_STORE"],
+                vaultPath: AriaResident.vaultPath(env: environment),
+                vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment)
             )
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, resident HTTP on 127.0.0.1:\(port))")
             do {

@@ -172,6 +172,12 @@ let package = Package(
                 // keeping the JSON-RPC core free of ObserverSink/IntellectusLib.
                 .product(name: "ObserverSink", package: "ObserverSink"),
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
+                // VaultKit: VaultResidentService — the continuous vault↔estate
+                // sync service wired here (FAB5-J1). AriaResident is the composition
+                // layer that starts/stops the service alongside the daemon lifecycle.
+                // VaultKit is already a package-level dep (AriaMCP target); this
+                // adds the direct product reference for the AriaResident target.
+                .product(name: "VaultKit", package: "VaultKit"),
             ],
             path: "Sources/AriaResident"
         ),

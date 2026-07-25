@@ -6,6 +6,7 @@ import NeuronKit
 import ObserverSink
 import IntellectusLib
 import Synchronization
+import VaultKit
 
 /// The resident-daemon composition layer (see bounded loopback HTTP).
 ///
@@ -59,6 +60,31 @@ public enum AriaResident {
             return 5000
         }
         return min(value, 3_600_000)
+    }
+
+    /// Obsidian vault root path from `MOOTX01_VAULT_PATH` (default nil = off).
+    ///
+    /// When present, `runResidentDaemon` starts a `VaultResidentService`
+    /// that continuously syncs the estate with the vault. Off by default.
+    ///
+    /// Canonicalized via `resolvingSymlinksInPath()` per Perkins advisory-3:
+    /// the caller MUST pass a canonicalized URL to `VaultResidentService.init`
+    /// so symlink traversal at the vault root is detected at startup.
+    public static func vaultPath(env: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        guard let raw = env["MOOTX01_VAULT_PATH"], !raw.isEmpty else { return nil }
+        return URL(fileURLWithPath: raw).resolvingSymlinksInPath().path
+    }
+
+    /// Estate→vault poll interval (s) from `MOOTX01_VAULT_ESTATE_POLL_S` (default 60).
+    /// Clamped to [1, 3600]. Controls how often the daemon pushes new exportable
+    /// drawers from the estate to the Obsidian vault (estate→vault direction).
+    public static func vaultEstatePollSeconds(env: [String: String] = ProcessInfo.processInfo.environment) -> Int {
+        guard let raw = env["MOOTX01_VAULT_ESTATE_POLL_S"], !raw.isEmpty else { return 60 }
+        guard let value = Int(raw), value > 0 else {
+            Logging.stderr.log("AriaResident: MOOTX01_VAULT_ESTATE_POLL_S='\(raw)' invalid; using 60s default")
+            return 60
+        }
+        return min(max(value, 1), 3_600)
     }
 
     /// Resolve the manager stats-store path for telemetry wiring.
@@ -189,49 +215,12 @@ public enum AriaResident {
         }
     }
 
-    // MARK: - The resident runner
-
-    /// Resident-daemon configuration (resolved by the caller; the runner reads no
-    /// environment itself).
-    public struct ResidentConfig: Sendable {
-        public var port: UInt16
-        public var maxBodyBytes: Int
-        public var brainTickMs: Int
-        public var monitoringPollMs: Int
-        /// Manager stats-store path; nil/empty → telemetry off.
-        public var statsStorePath: String?
-
-        public init(
-            port: UInt16,
-            maxBodyBytes: Int,
-            brainTickMs: Int,
-            monitoringPollMs: Int,
-            statsStorePath: String?
-        ) {
-            self.port = port
-            self.maxBodyBytes = maxBodyBytes
-            self.brainTickMs = brainTickMs
-            self.monitoringPollMs = monitoringPollMs
-            self.statsStorePath = statsStorePath
-        }
-    }
-
-    /// Run the resident daemon: install telemetry (if configured), spawn the Brain
-    /// pump and the continuous monitoring gate, and serve the HTTP MCP transport
-    /// until the process is terminated. Throws on bind failure (the caller decides
     // MARK: - MonitoringControl concrete implementation
 
     /// Concrete `MonitoringControl` backed by the resident `StatsStore`.
-    ///
-    /// Defined here because `AriaResident` is the only module that imports BOTH
-    /// `AriaMCP` (for the `MonitoringControl` protocol) AND `ObserverSink` (for
-    /// `StatsStore`). Keeping it `fileprivate` within the `ResidentDaemon` type
-    /// prevents it from leaking into the public surface — it is an implementation
-    /// detail of the injection seam.
-    ///
-    /// `read()` and `set(_:)` are best-effort: errors are logged to stderr and
-    /// swallowed so a transient store fault never surfaces as a tool error. The
-    /// tool runner maps `nil` from `read()` to "unavailable" rather than "disabled".
+    /// Defined here because `AriaResident` imports both `AriaMCP` (for the protocol)
+    /// and `ObserverSink` (for `StatsStore`) — the only module that can. fileprivate
+    /// to prevent it from leaking into the public API surface.
     fileprivate struct StatsStoreMonitoringControl: MonitoringControl {
         let store: StatsStore
 
@@ -248,6 +237,48 @@ public enum AriaResident {
         }
     }
 
+    // MARK: - The resident runner
+
+    /// Resident-daemon configuration (resolved by the caller; the runner reads no
+    /// environment itself).
+    public struct ResidentConfig: Sendable {
+        public var port: UInt16
+        public var maxBodyBytes: Int
+        public var brainTickMs: Int
+        public var monitoringPollMs: Int
+        /// Manager stats-store path; nil/empty → telemetry off.
+        public var statsStorePath: String?
+        /// Obsidian vault root path (canonicalized); nil → vault resident mode off.
+        /// When non-nil, `runResidentDaemon` starts a `VaultResidentService` that
+        /// continuously syncs the estate with the vault. Callers supply this via
+        /// `AriaResident.vaultPath(env:)`. Off by default.
+        public var vaultPath: String?
+        /// Estate→vault poll interval in seconds (default 60).
+        /// Controls how often exportable drawers are pushed from estate to vault.
+        public var vaultEstatePollSeconds: Int
+
+        public init(
+            port: UInt16,
+            maxBodyBytes: Int,
+            brainTickMs: Int,
+            monitoringPollMs: Int,
+            statsStorePath: String?,
+            vaultPath: String? = nil,
+            vaultEstatePollSeconds: Int = 60
+        ) {
+            self.port = port
+            self.maxBodyBytes = maxBodyBytes
+            self.brainTickMs = brainTickMs
+            self.monitoringPollMs = monitoringPollMs
+            self.statsStorePath = statsStorePath
+            self.vaultPath = vaultPath
+            self.vaultEstatePollSeconds = vaultEstatePollSeconds
+        }
+    }
+
+    /// Run the resident daemon: install telemetry (if configured), spawn the Brain
+    /// pump and the continuous monitoring gate, and serve the HTTP MCP transport
+    /// until the process is terminated. Throws on bind failure (the caller decides
     /// the exit code); never calls `exit()`.
     public static func runResidentDaemon(
         dispatcher: ARIA_MCPDispatcher,
@@ -504,16 +535,49 @@ public enum AriaResident {
             }
         }
 
+        // Continuous vault resident mode (FAB5-J1): if MOOTX01_VAULT_PATH is set,
+        // start a VaultResidentService alongside the HTTP daemon. The service runs
+        // its own internal poll loops (vault→estate via VaultWatcher, estate→vault
+        // on the configurable estate-poll interval). Path is canonicalized at
+        // parse time (AriaResident.vaultPath) per Perkins advisory-3.
+        // Privacy fence: only .public_ drawers ever cross to the vault (enforced in
+        // VaultBridge.export via VaultExportScope.exportable — NOT configurable here).
+        let vaultResidentTask: Task<Void, Never>? = config.vaultPath.map { canonicalPath in
+            Task {
+                let vaultURL = URL(fileURLWithPath: canonicalPath)
+                do {
+                    let svc = VaultResidentService(
+                        kit: kit,
+                        handle: handle,
+                        vaultURL: vaultURL,
+                        estatePollSeconds: config.vaultEstatePollSeconds
+                    )
+                    try await svc.start()
+                    Logging.stderr.log("AriaResident vault resident: started (vault: \(canonicalPath), estatePollS: \(config.vaultEstatePollSeconds))")
+                    // Park until cancelled — the service runs its own internal loops.
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch { break }
+                    }
+                    await svc.stop()
+                    Logging.stderr.log("AriaResident vault resident: stopped")
+                } catch {
+                    Logging.stderr.log("AriaResident vault resident: start failed (vault: \(canonicalPath)): \(error)")
+                }
+            }
+        }
+
         do {
             try await server.run()   // resident: returns only on bind failure
         } catch {
             pumpTask.cancel()
             monitoringTask?.cancel()
             serverMetricsTask?.cancel()
+            vaultResidentTask?.cancel()
             throw error
         }
         pumpTask.cancel()
         monitoringTask?.cancel()
         serverMetricsTask?.cancel()
+        vaultResidentTask?.cancel()
     }
 }
