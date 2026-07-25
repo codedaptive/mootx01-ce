@@ -6,7 +6,7 @@ import MootGateway
 // Profile-driven tab shell shared by macOS and iOS. Two tab profiles:
 //
 //   Standard (default): Capture, Recall, Intelligence, Settings.
-//   Advanced: Standard + The Top, Apple Surfaces, Edges, Engine, Federation, Miners.
+//   Advanced: Standard + The Top, Apple Surfaces, Edges, Engine, Federation, Miners, Packets.
 //
 // On first launch (hasCompletedOnboarding == false) the onboarding flow is
 // shown as a fullScreenCover. Once dismissed it never appears again.

@@ -148,7 +148,7 @@ from room 'work-packets'. Summarize the key agreements and divergences
 between them. Focus on: privacy model, latency, portability, and vendor lock-in.
 ```
 
-The on-device assistant reads both packets from the estate via `moot_recall` and
+The on-device assistant reads both packets from the estate via `moot_memory_search` and
 uses SummarizeWorker to produce the comparison.
 
 > **Note (FAB5-H2):** A dedicated `CompareWorker` that takes two packet IDs and
@@ -217,7 +217,7 @@ memory trade-offs. Reference the lineage (two antecedent packets) to show
 where the synthesis came from.
 ```
 
-The agent uses `moot_recall` to retrieve the synthesis packet by room and wing,
+The agent uses `moot_memory_search` to retrieve the synthesis packet by room and wing,
 reads its fields, and resumes — without you having to re-explain the prior work.
 
 ---
@@ -257,7 +257,7 @@ You should see:
 | `moot_estate_ping` | Verify estate is reachable (Step 0) |
 | `moot_estate_status` | Show wing/room counts before and after |
 | `moot_file_memory` | File a WorkPacket-schema JSON string as a drawer |
-| `moot_recall` | Retrieve packets by room, agent, or content query |
+| `moot_memory_search` | Retrieve packets by room, agent, or content query |
 | `moot_estate_map` | Inspect which wings/rooms contain packets |
 
 All tools ship in the MOOTx01 ARIA MCP surface. Call `moot_estate_status` at
@@ -271,7 +271,7 @@ any point to confirm packets landed in the `work-packets` room.
 
 The default `PacketListView` uses a no-op loader. The Packets tab shows live
 estate content only when wired to a `WorkPacketStore`. Until that wiring lands
-(follow-on mission), use `moot_recall` from an AI client to query packets, or
+(follow-on mission), use `moot_memory_search` from an AI client to query packets, or
 inspect the estate via `moot_estate_map`.
 
 **Lineage View shows "No antecedents found"**

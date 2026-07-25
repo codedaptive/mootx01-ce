@@ -50,7 +50,7 @@ struct FirstRunFlagTests {
 // MARK: - Tab profile tests (FAB5-FR Part 2)
 //
 // Verifies that isAdvancedMode defaults to Standard and that the expected
-// tab counts hold: Standard = 4, Advanced = 10 (4 + 6 engineering tabs).
+// tab counts hold: Standard = 4, Advanced = 11 (4 + 7 engineering tabs).
 
 @Suite("Tab profiles (FAB5-FR)")
 @MainActor
@@ -63,8 +63,9 @@ struct TabProfileTests {
 
     // Expected tab labels per profile — mirrored from ContentView.
     static let standardLabels = ["Capture", "Recall", "Intelligence", "Settings"]
+    // FAB5-I3: Packets tab added after Miners (Kong ruling: Advanced-only, shippingbox icon).
     static let advancedExtraLabels = [
-        "The Top", "Apple Surfaces", "Edges", "Engine", "Federation", "Miners",
+        "The Top", "Apple Surfaces", "Edges", "Engine", "Federation", "Miners", "Packets",
     ]
 
     @Test("isAdvancedMode defaults to false (Standard profile)")
@@ -78,9 +79,9 @@ struct TabProfileTests {
         #expect(Self.standardLabels.count == 4)
     }
 
-    @Test("Advanced profile adds exactly 6 engineering tabs")
+    @Test("Advanced profile adds exactly 7 engineering tabs")
     func advancedExtraTabCount() {
-        #expect(Self.advancedExtraLabels.count == 6)
+        #expect(Self.advancedExtraLabels.count == 7)
     }
 
     @Test("Advanced profile is a superset of Standard")

@@ -49,7 +49,7 @@ public struct PacketDetailView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(packet.claims, id: \.id) { claim in
                                 HStack(alignment: .top, spacing: 8) {
-                                    Text("\(Int(claim.confidence * 100))%")
+                                    Text(claim.confidence.formatted(.percent.precision(.fractionLength(0))))
                                         .font(.caption.monospacedDigit())
                                         .foregroundStyle(.secondary)
                                         .frame(width: 36, alignment: .trailing)
