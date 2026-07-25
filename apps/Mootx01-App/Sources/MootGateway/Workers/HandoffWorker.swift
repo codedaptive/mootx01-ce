@@ -212,13 +212,18 @@ public struct HandoffWorker: MootWorker {
     /// Deterministic draft. Prose is localized boilerplate; the caller-selected
     /// context still becomes citations, so the provenance guarantee holds on this
     /// path too. Recall is not attempted — the fallback path calls no tools.
+    ///
+    /// The background names no single cause, because this path is reached both
+    /// when the model is unavailable and when `run()` throws — and the latter
+    /// happens on real estate content, where Apple's guardrail can answer "May
+    /// contain sensitive content" while Apple Intelligence is fully available.
     public func fallback(input: HandoffInput) -> HandoffDraft {
         HandoffDraft(
             objective: input.objective,
             targetModel: input.targetModel,
             background: String(
                 localized: "worker.handoff.fallback.background",
-                defaultValue: "Apple Intelligence is not available, so this draft was assembled without a written summary. The attached sources are the memory-estate material for this objective, quoted as filed."
+                defaultValue: "This draft was assembled without a written summary — the on-device model was unavailable or declined to answer. The attached sources are the memory-estate material for this objective, quoted as filed."
             ),
             ask: String(
                 localized: "worker.handoff.fallback.ask",

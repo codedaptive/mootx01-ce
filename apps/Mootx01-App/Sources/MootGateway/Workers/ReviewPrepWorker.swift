@@ -134,13 +134,18 @@ public struct ReviewPrepWorker: MootWorker {
         )
     }
 
-    /// Deterministic brief: the digest itself, introduced by a localized line
-    /// that says the prose was not model-written. Reads no clock and calls no
-    /// tools. An empty report still yields a readable brief.
+    /// Deterministic brief: the digest itself, headed by a localized line saying
+    /// the prose was not model-written. Reads no clock and calls no tools. An
+    /// empty report still yields a readable brief.
+    ///
+    /// The headline blames nothing, because this path is reached both when the
+    /// model is unavailable and when `run()` throws — and on real estate content
+    /// the second happens with Apple Intelligence switched on, as Apple's
+    /// guardrail declines some material.
     public func fallback(input: ReviewPrepInput) -> ReviewBrief {
         let advisory = String(
             localized: "worker.reviewPrep.fallback.headline",
-            defaultValue: "Review digest (no on-device summary available)"
+            defaultValue: "Review digest — not summarized by the on-device model"
         )
         let digest = Self.digest(input.report, maxItemsPerSection: input.maxItemsPerSection)
         return ReviewBrief(

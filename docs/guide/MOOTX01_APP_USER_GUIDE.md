@@ -136,6 +136,45 @@ Two things are true by design and worth knowing:
 The assistant runs on your device. It doesn't need an internet connection or a
 cloud account to answer from your memories.
 
+### The six workers
+
+Under the ask box is a row of **Workers** — six one-tap jobs that read your
+estate and hand you a result. None of them ever writes to your memory; anything
+they propose is yours to accept or ignore.
+
+| Worker | What it does | What it needs in the box above |
+|---|---|---|
+| **Summarize recent work** | A few sentences on what you've been doing lately. | Nothing. Type a topic to narrow it. |
+| **Extract facts** | Proposes a subject–relationship–object fact from your memories. Always marked *proposed*; never filed for you. | Nothing. Type a topic to narrow it. |
+| **Classify this text** | Suggests a room and tags for something you're about to file. | The text to classify. |
+| **Morning brief** | Builds this morning's review — yesterday's journal, today's context, what's still open — and narrates it in plain language, naming the tools it read. | Nothing. |
+| **Compare two bodies** | Takes two pieces of research on the same question and tells you where they agree, where they *don't*, and what a combined answer could say. | Both pieces, separated by a line containing only `---`. |
+| **Draft a handoff** | Writes the message to paste into a more capable model, with the estate material it used quoted and its sources listed. | The objective, in a sentence. |
+
+Each row shows its own state:
+
+- **Ready** — Apple Intelligence is on and the worker has what it needs.
+- **Needs input** — the box above is missing something; the row says what.
+- **Without Apple Intelligence** — the worker still runs and gives you a
+  deterministic result (a plain digest, the sources as filed) rather than
+  nothing.
+
+Two behaviours worth knowing:
+
+- **Compare never hides a disagreement.** If the two pieces conflict, the
+  conflict is shown with both positions in full, and a combined answer is
+  labelled with the disputes it leaves open. It will not report agreement it
+  didn't find, and a comparison it couldn't make says so instead of coming back
+  empty.
+- **A worker may decline.** Apple Intelligence sometimes declines to answer on
+  particular content, even when it's switched on. When that happens you get the
+  deterministic result instead, and the text tells you it wasn't written by the
+  model. Nothing is lost and nothing is invented.
+
+**Draft a handoff sends nothing anywhere.** It writes text and hands it to you;
+you decide whether to paste it into another service. The sources are listed so
+you always know which memories are in the message before it leaves your machine.
+
 ---
 
 ## Automatic capture (Miners)

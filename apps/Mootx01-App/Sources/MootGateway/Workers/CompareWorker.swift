@@ -339,6 +339,13 @@ public struct CompareWorker: MootWorker {
     /// Deterministic result: no claim-level comparison is possible without the
     /// model, so none is asserted. Zero agreements and an explaining notice —
     /// never an empty result that reads as "they matched".
+    ///
+    /// The notice names no single cause. This path is reached two ways — the model
+    /// is unavailable, or `run()` threw — and the second one happens on real
+    /// estate content: Apple's guardrail answers "May contain sensitive content"
+    /// for some material, with Apple Intelligence fully available. A notice that
+    /// blamed availability would be wrong exactly when a user checked Settings and
+    /// found it switched on.
     public func fallback(input: CompareInput) -> CompareResult {
         CompareResult(
             leftLabel: input.left.label,
@@ -347,8 +354,8 @@ public struct CompareWorker: MootWorker {
             disagreements: [],
             synthesisCandidates: [],
             notice: String(
-                localized: "worker.compare.notice.unavailable",
-                defaultValue: "Apple Intelligence is not available, so the two bodies were not compared. Their claims are neither agreed nor reconciled."
+                localized: "worker.compare.notice.notCompared",
+                defaultValue: "The two bodies were not compared — the on-device model was unavailable or declined to answer. Their claims are neither agreed nor reconciled."
             )
         )
     }
