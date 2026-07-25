@@ -9,14 +9,15 @@ import MootGateway
 // awaiting a call (FAB5-G1's `MorningReviewBuilder`).
 //
 // The `open-work` section lists PROPOSED contradiction edges — findings the
-// substrate flagged as needing a human decision rather than settled history.
-// Which is why an item's status glyph matters on this screen: `.proposed` rows
-// are the ones asking for something.
+// substrate flagged as needing a human decision rather than settled history — so
+// those rows carry Accept and Reject. The `context` section's items are drawers
+// and carry Confirm.
 
 struct MorningReviewView: View {
     let report: ReviewReport
+    let coordinator: ReviewActionCoordinator
 
     var body: some View {
-        ReviewReportView(report: report)
+        ReviewActionableReportView(report: report, coordinator: coordinator)
     }
 }

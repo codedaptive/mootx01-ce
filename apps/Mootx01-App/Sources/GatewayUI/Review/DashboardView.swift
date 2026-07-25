@@ -7,13 +7,16 @@ import MootGateway
 // remembers now." No time window: the dashboard's sections are momentum,
 // keystones, and conflicts as they stand (FAB5-G1's `DashboardReviewBuilder`).
 //
-// Read-only. Nothing here mutates the estate, so no suggestion actions are
-// passed to the shared renderer — the dashboard is a status surface.
+// Mostly a status surface: momentum rows are keyed by room name and conflict
+// rows by tunnel id, and only the latter is settleable. The `keystones` section's
+// items are drawers, so those rows carry Confirm — the one reversible suggestion
+// in the Review Center.
 
 struct DashboardView: View {
     let report: ReviewReport
+    let coordinator: ReviewActionCoordinator
 
     var body: some View {
-        ReviewReportView(report: report)
+        ReviewActionableReportView(report: report, coordinator: coordinator)
     }
 }

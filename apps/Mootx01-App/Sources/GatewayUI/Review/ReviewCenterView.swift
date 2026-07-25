@@ -16,6 +16,7 @@ import MootGateway
 
 public struct ReviewCenterView: View {
     @State private var center: ReviewCenterModel
+    @State private var actions: ReviewActionCoordinator
     @State private var selection: ReviewKind
 
     /// - Parameter model: the app model, read for its live bridge. The Review
@@ -23,6 +24,8 @@ public struct ReviewCenterView: View {
     public init(model: AppModel) {
         let center = ReviewCenterModel(appModel: model)
         _center = State(initialValue: center)
+        _actions = State(initialValue: ReviewActionCoordinator(
+            performer: AppModelReviewActionPerformer(appModel: model)))
         _selection = State(initialValue: center.kinds[0])
     }
 
@@ -100,18 +103,15 @@ public struct ReviewCenterView: View {
     }
 
     /// The per-review view. Each kind has a named view so review-specific chrome
-    /// has a home; Weekly is the one that adds suggestion actions.
+    /// has a home and so the roadmap's four named reviews map one-to-one onto
+    /// four types.
     @ViewBuilder
     private func reportView(for report: ReviewReport) -> some View {
         switch report.kind {
-        case .dashboard: DashboardView(report: report)
-        case .morning: MorningReviewView(report: report)
-        case .endOfDay, .weekly:
-            // Not reachable while `ReviewCenterModel.shippedKinds` holds only the
-            // two reviews above; the switch is exhaustive because `ReviewKind`
-            // is, and rendering the shared view is the correct behaviour for any
-            // report that does reach here.
-            ReviewReportView(report: report)
+        case .dashboard: DashboardView(report: report, coordinator: actions)
+        case .morning: MorningReviewView(report: report, coordinator: actions)
+        case .endOfDay: EndOfDayReviewView(report: report, coordinator: actions)
+        case .weekly: WeeklyReviewView(report: report, coordinator: actions)
         }
     }
 
@@ -150,8 +150,9 @@ final class ReviewCenterModel {
         case loaded(ReviewReport)
     }
 
-    /// The reviews this build ships, in picker order.
-    static let shippedKinds: [ReviewKind] = [.dashboard, .morning]
+    /// The reviews this build ships, in picker order — the four the roadmap
+    /// names, in the order a day runs through them.
+    static let shippedKinds: [ReviewKind] = [.dashboard, .morning, .endOfDay, .weekly]
 
     let kinds: [ReviewKind]
 

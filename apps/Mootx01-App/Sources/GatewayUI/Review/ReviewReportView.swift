@@ -100,6 +100,110 @@ struct ReviewReportView: View {
     }
 }
 
+// MARK: - ReviewActionableReportView
+
+/// A report plus its suggestions: the shared renderer with an action provider
+/// wired in, and the confirmation prompt that stands between a tap and a
+/// mutation.
+///
+/// All four reviews render through this. Which items actually get buttons is
+/// decided in one place — `ReviewAction.suggestions(forSectionID:item:)` — so
+/// there is no per-view action policy to drift. A report whose sections are all
+/// unactionable (the dashboard's momentum and conflicts, weekly's drift and
+/// duplicates) simply gets no buttons.
+struct ReviewActionableReportView: View {
+    let report: ReviewReport
+    let coordinator: ReviewActionCoordinator
+
+    var body: some View {
+        ReviewReportView(report: report) { section, item in
+            let actions = ReviewAction.suggestions(
+                forSectionID: section.id, item: item)
+            // No suggestions, or this row's decision is already made: render no
+            // action affordance rather than a disabled one.
+            guard !actions.isEmpty, !coordinator.isSettled(item) else { return nil }
+            return AnyView(
+                ReviewActionRow(
+                    actions: actions,
+                    outcomeMessage: coordinator.outcomeMessage(for: item),
+                    isBusy: coordinator.isPerforming,
+                    request: { coordinator.request($0) }))
+        }
+        // The confirmation prompt. `pending` is set by a tap on a suggestion
+        // button and cleared by either arm, so the estate is reached only from
+        // the confirm arm — never from the row itself.
+        .alert(
+            coordinator.pending?.confirmationTitle ?? "",
+            isPresented: Binding(
+                get: { coordinator.pending != nil },
+                set: { presented in
+                    // SwiftUI sets this false for an interactive dismissal;
+                    // treat that as Cancel, which is the safe reading.
+                    if !presented { coordinator.cancelPending() }
+                }),
+            presenting: coordinator.pending
+        ) { action in
+            Button(
+                action.label,
+                role: action.isPermanent ? .destructive : nil
+            ) {
+                Task { await coordinator.commitPending() }
+            }
+            Button(String(localized: "Cancel"), role: .cancel) {
+                coordinator.cancelPending()
+            }
+        } message: { action in
+            // The estate row this touches, then what the action does — and, for a
+            // verb the substrate cannot reverse, that it cannot be undone.
+            Text("\(action.subjectID)\n\n\(action.confirmationMessage)")
+        }
+    }
+}
+
+// MARK: - ReviewActionRow
+
+/// The suggestion buttons for one item, plus the substrate's receipt once one
+/// has run.
+struct ReviewActionRow: View {
+    let actions: [ReviewAction]
+    let outcomeMessage: String?
+    let isBusy: Bool
+    let request: (ReviewAction) -> Void
+
+    /// The 44 pt floor for a touch target (iOS HIG). Applied as a minimum frame
+    /// height rather than as padding so it holds at every Dynamic Type size.
+    private static let minimumTouchTarget: CGFloat = 44
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                ForEach(actions, id: \.self) { action in
+                    Button(action.label) { request(action) }
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: Self.minimumTouchTarget)
+                        .disabled(isBusy)
+                        .accessibilityLabel(action.accessibilityLabel)
+                        // Says out loud what the visual destructive role implies,
+                        // so the permanence is not a colour-only signal.
+                        .accessibilityHint(
+                            action.isPermanent
+                                ? String(localized: "Asks you to confirm. Cannot be undone.")
+                                : String(localized: "Asks you to confirm."))
+                }
+            }
+            if let outcomeMessage {
+                // The substrate's own words about what happened — verbatim.
+                Text(outcomeMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // MARK: - ReviewSectionView
 
 /// One `ReviewSection`: its resolved title, then either its rows or its notice.
