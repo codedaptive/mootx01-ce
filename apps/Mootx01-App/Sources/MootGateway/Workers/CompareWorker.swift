@@ -40,8 +40,12 @@ public struct ResearchBody: Sendable, Equatable {
     /// The research text itself. Bounded by the caller.
     public let text: String
     /// Optional provenance strings the caller already holds (drawer ids, packet
-    /// ids, URLs). Copied onto the result's `leftReferences` / `rightReferences`
-    /// so a comparison always says which material each side came from.
+    /// ids, URLs). Both of this worker's paths — `assemble` and `fallback` — copy
+    /// them onto the result's `leftReferences` / `rightReferences`, so a comparison
+    /// this worker produced can be traced back to its material. That is a
+    /// convention of those two call sites, not a structural guarantee like
+    /// `HandoffDraft.body`: a caller constructing a `CompareResult` by hand can
+    /// leave them empty.
     public let references: [String]
 
     public init(label: String, text: String, references: [String] = []) {
@@ -436,7 +440,11 @@ public struct CompareWorker: MootWorker {
         // agreement and synthesis lists can be short — disagreements are never cut.
         let withheldAgreements = suggestion.agreements.count - agreements.count
         let withheldSynthesis = suggestion.synthesis.count - synthesis.count
-        let truncationNotice: String? = (withheldAgreements > 0 || withheldSynthesis > 0)
+        // Only reported when something survived to be read. With nothing to show,
+        // the initializer's "nothing was compared" notice is the more useful of the
+        // two, and a cap message would displace it for no gain.
+        let anythingToShow = !agreements.isEmpty || !disagreements.isEmpty
+        let truncationNotice: String? = (anythingToShow && (withheldAgreements > 0 || withheldSynthesis > 0))
             ? String(
                 localized: "worker.compare.notice.capped",
                 defaultValue: "The comparison was capped, so some agreement or synthesis entries are not shown. No disagreement was withheld."

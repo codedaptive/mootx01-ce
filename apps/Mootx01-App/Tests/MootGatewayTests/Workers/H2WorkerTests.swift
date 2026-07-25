@@ -271,6 +271,47 @@ struct CompareDisagreementPreservationTests {
         #expect(result.notice != nil)
     }
 
+    /// A zero cap empties the agreement and synthesis lists, so there is nothing
+    /// to read: the "nothing was compared" notice is the useful one, and the cap
+    /// message must not displace it.
+    @Test("a zero cap with nothing left to show keeps the nothing-compared notice")
+    func zeroCapKeepsTheNothingComparedNotice() {
+        let result = CompareWorker.assemble(
+            CompareSuggestion(
+                agreements: [AgreementSuggestion(topic: "index warmth", statement: "warm")],
+                disagreements: [],
+                synthesis: []
+            ),
+            input: CompareInput(left: Self.left, right: Self.right, maxClaims: 0)
+        )
+        #expect(result.agreements.isEmpty)
+        #expect(result.disagreements.isEmpty)
+        #expect(result.notice != nil)
+        #expect(result.notice == CompareResult(
+            leftLabel: Self.left.label, rightLabel: Self.right.label,
+            agreements: [], disagreements: [], synthesisCandidates: []
+        ).notice)
+    }
+
+    @Test("a zero cap still carries every disagreement")
+    func zeroCapStillCarriesDisagreements() {
+        let result = CompareWorker.assemble(
+            CompareSuggestion(
+                agreements: [AgreementSuggestion(topic: "warmth", statement: "warm")],
+                disagreements: [
+                    DisagreementSuggestion(topic: "cost", firstPosition: "$5", secondPosition: "$12")
+                ],
+                synthesis: []
+            ),
+            input: CompareInput(left: Self.left, right: Self.right, maxClaims: 0)
+        )
+        // The cap zeroes the agreement list; the conflict is untouched, and the
+        // withheld agreement is disclosed because there is now something to read.
+        #expect(result.agreements.isEmpty)
+        #expect(result.disagreements.count == 1)
+        #expect(result.notice != nil)
+    }
+
     @Test("an uncapped comparison carries no truncation notice")
     func uncappedComparisonHasNoNotice() {
         let result = CompareWorker.assemble(
