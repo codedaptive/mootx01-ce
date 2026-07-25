@@ -67,11 +67,63 @@ extension EstateKeyProvider {
         /// No file yet: a key was provisioned and the estate will be created
         /// encrypted.
         case newEncrypted
+        /// No file yet, and the user explicitly opted out with `--no-encrypt`.
+        /// The estate will be created as plaintext. Reversible with
+        /// `mootx01 upgrade`.
+        case newPlaintextByOptOut
         /// The file is already encrypted and its existing key was loaded.
         case existingEncrypted
         /// The file is plaintext and stays plaintext. Migration is
         /// `mootx01 upgrade`, never implicit.
         case existingPlaintext
+    }
+
+    /// Filename of the per-estate encryption opt-out marker, written beside the
+    /// estate file by `install --no-encrypt` and `db create --no-encrypt`.
+    ///
+    /// WHY A MARKER AND NOT A FLAG ON THE OPENING COMMAND
+    /// Neither `install` nor `db create` creates an estate FILE. `install` says
+    /// so in its own output ("a fresh estate will be created on first serve"),
+    /// and `DatabaseManager.createEstate` only creates the estate DIRECTORY —
+    /// the SQLite file is written lazily by the substrate on first open. So the
+    /// surface that offers the opt-out is never the surface that creates the
+    /// thing being opted out of, and the choice has to survive the gap between
+    /// them. A marker file in the estate's own directory does that, is visible to
+    /// the user, and travels with the estate.
+    ///
+    /// It is consulted ONLY on the absent-file branch. An estate that already
+    /// exists is never re-postured by it: an existing plaintext estate stays
+    /// plaintext because it is plaintext, and an existing encrypted estate is
+    /// never downgraded by dropping a file next to it.
+    public static let encryptionOptOutMarkerName = "no-encrypt"
+
+    /// URL of the opt-out marker for an estate at `estateURL`.
+    public static func encryptionOptOutMarkerURL(forEstateAt estateURL: URL) -> URL {
+        estateURL.deletingLastPathComponent()
+            .appendingPathComponent(encryptionOptOutMarkerName)
+    }
+
+    /// True when the estate at `estateURL` carries the opt-out marker.
+    public static func hasEncryptionOptOut(forEstateAt estateURL: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: encryptionOptOutMarkerURL(forEstateAt: estateURL).path)
+    }
+
+    /// Record the opt-out for the estate that will be created at `estateURL`.
+    /// Idempotent. Creates the estate directory if needed, because the marker has
+    /// to exist before the estate file does.
+    public static func writeEncryptionOptOut(forEstateAt estateURL: URL) throws {
+        let marker = encryptionOptOutMarkerURL(forEstateAt: estateURL)
+        try FileManager.default.createDirectory(
+            at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard !FileManager.default.fileExists(atPath: marker.path) else { return }
+        try Data("""
+            This estate was created with --no-encrypt and is NOT encrypted at rest.
+            Run `mootx01 upgrade` to encrypt it. Deleting this file does not encrypt
+            an estate that already exists; it only affects an estate that has not
+            been created yet.
+
+            """.utf8).write(to: marker, options: .atomic)
     }
 
     #if canImport(PersistenceKit)
@@ -92,6 +144,12 @@ extension EstateKeyProvider {
     ) throws -> (encryption: EstateEncryptionConfig, posture: OpenPosture) {
         switch detectEstateFileState(at: estateURL) {
         case .absent:
+            // Explicit opt-out recorded at install or `db create` time. The user
+            // chose plaintext; honor it rather than encrypting behind their back.
+            // Reversible through `mootx01 upgrade`.
+            if hasEncryptionOptOut(forEstateAt: estateURL) {
+                return (.plaintext, .newPlaintextByOptOut)
+            }
             // First run. Provision (creating if needed) and open encrypted, which
             // is what brings macOS to parity with the Rust serve path.
             let key = try provideKey(for: estateURL)
