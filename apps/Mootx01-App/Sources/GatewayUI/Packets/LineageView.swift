@@ -79,6 +79,9 @@ public struct LineageView: View {
         }
         .navigationTitle(String(localized: "Lineage"))
         .task { await traceLineage() }
+        // FAB5-L1 pattern: cap and center on iPad regular-width (matches PacketListView/PacketDetailView).
+        .frame(maxWidth: UIAdaptivity.readableContentMaxWidth)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     // One antecedent row: hop number, objective, agent, link kind badge.
@@ -109,9 +112,10 @@ public struct LineageView: View {
                 if let firstLink = packet.lineageLinks.first {
                     Text(firstLink.kind.rawValue)
                         .font(.caption2)
+                        .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(firstLink.kind == .derivesFrom ? Color.blue.opacity(0.15) : Color.orange.opacity(0.15))
+                        .background(.secondary.opacity(0.15))
                         .clipShape(Capsule())
                 }
             }
