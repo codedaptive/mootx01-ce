@@ -80,6 +80,30 @@ struct ReviewModelsTests {
         #expect(!json.contains("1783956800"))
     }
 
+    @Test("dates encode at whole-second resolution — sub-second input is lossy")
+    func subSecondInstantsAreTruncated() throws {
+        // Documented contract, pinned here so it is a decision and not a surprise:
+        // a report built with a fractional instant does not round-trip identically.
+        // Callers needing identity (diffing, cache keys) pass a whole-second `now`;
+        // every instant ReviewSchedule emits already is one.
+        let fractional = Date(timeIntervalSince1970: 1_783_956_800.75)
+        let report = ReviewReport(
+            kind: .dashboard, generatedAt: fractional,
+            window: .unbounded(endingAt: fractional), sections: [])
+        let data = try ReviewReport.makeEncoder().encode(report)
+        let decoded = try ReviewReport.makeDecoder().decode(ReviewReport.self, from: data)
+        #expect(decoded != report)
+        #expect(decoded.generatedAt == Date(timeIntervalSince1970: 1_783_956_800))
+
+        // Whole-second instants do round-trip identically.
+        let whole = ReviewReport(
+            kind: .dashboard, generatedAt: Self.now,
+            window: .unbounded(endingAt: Self.now), sections: [])
+        let wholeData = try ReviewReport.makeEncoder().encode(whole)
+        let wholeDecoded = try ReviewReport.makeDecoder().decode(ReviewReport.self, from: wholeData)
+        #expect(wholeDecoded == whole)
+    }
+
     @Test("encoding is byte-stable for the same input")
     func encodingIsByteStable() throws {
         let encoder = ReviewReport.makeEncoder()
