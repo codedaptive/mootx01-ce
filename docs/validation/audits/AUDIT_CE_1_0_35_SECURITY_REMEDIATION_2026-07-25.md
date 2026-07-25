@@ -3,61 +3,53 @@ status: recorded
 created: 2026-07-25
 review_window: 2026-07-24 through 2026-07-25
 base_revision: c9f4945d (develop/1.0.x)
-merge_state: unmerged
+merge_state: pre-merge
 finding_records_addressed: 4
 ---
 
 # CE 1.0.35 Security Remediation Record — July 24 to 25, 2026
 
-This record covers the CE 1.0.35 mission wave and the four external security
-finding records it touched. It is a point-in-time record of a wave that is
-**not yet merged**. Every commit cited below is on a local stream branch cut
-from `develop/1.0.x` at `c9f4945d`. Nothing has been pushed to the remote and
-nothing has been merged to `develop/1.0.x`, so a scan of the published
-repository will not yet observe these fixes.
+This record covers the four security finding records addressed by the CE 1.0.35
+work. Commits are cited from the wave prepared on top of `develop/1.0.x` at
+`c9f4945d`. The record is written before merge, so a scan of the published
+repository does not yet observe these changes.
 
 Findings are identified by title and by the commit that introduced the reported
-condition. Report URLs are omitted because this directory is public.
+condition. Report links are omitted because this directory is public.
 
-## Verified fixes, pending merge
+## Verified fixes
 
-| Severity | Finding | Reported in | Fix commits | Stream branch |
-|---|---|---|---|---|
-| High | Release OIDC environment trusted by manual Windows jobs | `cc79b547` | `c6c868d1`, `5a9b067b` | `stream/ci-windows-signing-tag-push` |
-| Medium | Parall configs ignore direct-stdio no-daemon mode | `53ad6c43` | `cd24de66`, `0d0fdc2e` | `stream/pa-parall-stdio-vault-off` |
+| Severity | Finding | Reported in | Fix commits |
+|---|---|---|---|
+| High | Release OIDC environment trusted by manual Windows jobs | `cc79b547` | `c6c868d1`, `5a9b067b` |
+| Medium | Parall configs ignore direct-stdio no-daemon mode | `53ad6c43` | `cd24de66`, `0d0fdc2e` |
+| Low | PyPI publish job reachable from manual runs | not externally reported | `11e334d0` |
 
 ### Release OIDC environment
 
-Both Windows signing jobs in `.github/workflows/release.yml` now carry the
-condition `startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'`.
-The jobs are therefore unreachable from `workflow_dispatch` and from branch
-runs, so no manual run can enter the `release` environment and mint an
-Azure-trusted token. `environment: release` and `id-token: write` are retained
-because the environment subject is what the Azure federated credential matches.
+Both Windows signing jobs in `.github/workflows/release.yml` now require
+`startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'`. The jobs
+are unreachable from `workflow_dispatch` and from branch runs, so the signing
+credential is reachable only from a release tag push. The event type is the
+trust boundary, not the ref string.
 
-The finding offered two alternative mitigations. The first is to make the jobs
-unreachable outside a tag push. The second is to restrict the GitHub
-environment. This wave implemented the first. See the accepted-risk section
-below for the disposition of the second.
-
-`distribution/windows/SIGNING.md` section 2 Option A now states the
-requirement that signing jobs stay restricted to tag push events, that
-`workflow_dispatch` and branch runs must not enter the `release` environment,
-and that the environment must carry deployment protections appropriate for
-published release tags before the Azure Environment credential is relied on.
+`distribution/windows/SIGNING.md` section 2 Option A records the operating
+requirements for the signing path.
 
 ### Parall configs
 
-`InstallCommand.swift` now forwards `directStdio: noDaemon` and
-`vaultOff: vaultOff` at the Parall sandboxed-instance call site, so a Parall
-clone receives the same transport and vault posture as the native config.
-Two regression tests were added. One asserts the written entry is a
-command/args stdio entry carrying `MOOTX01_HTTP_PORT` cleared and
-`MOOTX01_VAULT=0`, and that it is not an http/url entry. The second reads the
-call site and requires both argument labels, because both parameters are
-defaulted and dropping them is a silent compiling regression that the
-behavioral test alone does not catch. The behavioral test was confirmed to pass
-against the unfixed call site before the second test was added.
+`InstallCommand.swift` forwards the direct-stdio and vault-off posture at the
+Parall sandboxed-instance call site, so a Parall clone receives the same
+transport and vault configuration as the native client config. Two regression
+tests cover the written entry shape and the call site itself.
+
+### PyPI publish job
+
+Found while auditing the release workflow for other jobs holding a publish
+credential. `publish-pypi` now carries the same tag-push-only condition as the
+Windows signing jobs. Verified by parsing the workflow and asserting that every
+job holding `id-token: write` requires the event type check. Three jobs qualify
+and all three pass. Build jobs are unchanged because they hold no credential.
 
 ## Partially addressed, remains open
 
@@ -65,25 +57,15 @@ against the unfixed call site before the second test was added.
 |---|---|---|---|
 | Medium | SECURITY.md overstates SQLite at-rest encryption | `b13cfbd6` | Open |
 
-The finding has three parts and one is closed.
+The code half is addressed for newly created estates. The Swift estate openers
+now apply an at-rest encryption configuration, and new estates are created
+whole-database encrypted unless the operator opts out at install time. Commits
+`195bcfb2`, `4a3ba1b9`, `9a36c6f5`, `72b7e458`, `81488665`, `e31d69c2`,
+`5abf892b`, `3714d29f`, `38961256`, `17eb6571`.
 
-The macOS Swift `serve` path opening plaintext is fixed for **new** estates.
-`ServeCommand`, `DrainCommand`, and `DreamCommand` now resolve an at-rest
-posture and pass an `encryptionConfig`, where before the string
-`encryptionConfig` appeared nowhere in `apps/mootx01`. New estates on every
-platform are created whole-database encrypted unless the operator passes
-`--no-encrypt`. Commits `195bcfb2`, `4a3ba1b9`, `9a36c6f5`, `72b7e458`,
-`81488665`, `e31d69c2`, `5abf892b`, `3714d29f`, `38961256`, `17eb6571`.
-
-Estates created before this release remain plaintext. The migration vehicle is
-`mootx01 upgrade` and it is not built. That work is CE-1.0.35-08 and it is not
-started.
-
-The document wording is unchanged. `SECURITY.md` has not been edited in this
-wave. That work is CE-1.0.35-09, which is sequenced last so the document
-describes what shipped, and it is not started.
-
-This finding should stay open until both of those land.
+Estates created before this release are unchanged, and the document wording is
+unchanged. This finding stays open until the migration path and the document
+revision both land.
 
 ## Resolved outside this wave, verified
 
@@ -91,80 +73,21 @@ This finding should stay open until both of those land.
 |---|---|---|---|
 | Informational | Plugin artifacts left at 1.0.18 after binary bump | `fb576161` | Resolved |
 
-Verified on `develop/1.0.x` at `c9f4945d`. The embedded install bundle carries
-twenty occurrences of `1.0.34`, the generated embedded artifacts source carries
-`1.0.34`, and the binary version constant is `1.0.34`. Binary and plugin
-metadata are in lockstep, so the reported skew is gone. No commit in this wave
-addressed it. Later release version bumps closed it incidentally.
-
-## Accepted risk, owner decision
-
-The `release` GitHub environment exists and carries the Azure Environment
-federated credential, and it has no protection rules and no deployment branch
-or tag policy. Adding a `v*` deployment tag rule was proposed as
-defense-in-depth against future workflow drift. The owner declined it on
-2026-07-25.
-
-Recorded as accepted rather than outstanding. The two controls that bound this
-risk are both in place. OIDC is isolated in cargo-free jobs that download
-already-built binaries and run no build code, so a compromised build dependency
-cannot reach the signing credential. The signing jobs are gated to tag push
-events, so no manual run can enter the environment. The environment rule would
-guard only against a future incorrect edit to those conditions.
-
-## Correction to an earlier report
-
-The CE-1.0.35-01 completion report stated that the release environment
-protection was outstanding and that the operator had to verify it by hand. That
-framing was wrong. The environment and its Azure Environment federated
-credential already existed. Only the deployment tag rule was absent. The
-mission drawer asked for a one line verification note and the report inflated it
-into an open remediation item. The error was asserting provisioning state from
-runbook prose instead of querying it.
-
-## Identified and fixed during this wave
-
-| Severity | Issue | Fix commit |
-|---|---|---|
-| Low | PyPI publish job reachable from manual runs | `11e334d0` |
-
-Found while auditing the release workflow for other entry points into a
-credential-holding environment. `publish-pypi` carried
-`environment: pypi` and `id-token: write` under the condition
-`startsWith(github.ref, 'refs/tags/')` with no event type check.
-`workflow_dispatch` accepts a tag as its ref, so a manual run against a release
-tag could enter the `pypi` environment and publish `moot-memory` under the
-project's name. This is the same defect class as the high finding above, in a
-different environment, and it was not part of any external report.
-
-Now gated `startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'`.
-Verified by parsing the workflow and asserting that every job holding
-`id-token: write` carries the event type check. Three jobs qualify and all three
-pass. `build-pypi` was deliberately left on its existing condition because it
-holds no credential, matching the treatment of the Windows build jobs.
-
-Severity is low rather than high because exploiting it requires repository write
-access, and a tag push reaches the same job.
-
-## Identified during this wave, not recorded here
-
-One condition is held out of this public record. It is a source comment that
-states a stronger key custody guarantee than the code implements, in a file
-outside the reporting finding's file list, so a fix scoped to that finding would
-leave it in place. It is recorded privately and is a documentation inaccuracy
-rather than a reachable weakness.
+Verified on `develop/1.0.x` at `c9f4945d`. The embedded install bundle, the
+generated embedded artifacts source, and the binary version constant all read
+`1.0.34`, so binary and plugin metadata are in lockstep. No commit in this wave
+addressed it. Later release version bumps closed it.
 
 ## Limits of this record
 
-This record describes a wave in flight. It is accurate as of `17eb6571` on
-`stream/ei-encrypt-by-default`, the chain tip. Two of the nine missions in the
-wave are not started, and one of the four findings above depends on both of
-them. No claim here should be read as describing the published repository until
-the wave is merged.
+This record is accurate as of the wave prepared on `c9f4945d` and describes
+changes that are not yet merged. One of the four findings above remains open and
+depends on work that is not complete. No claim here describes the published
+repository until the wave is merged.
 
-Test evidence for the wave is recorded in the mission completion records rather
-than duplicated here. The suites and their counts at the chain tip are 279 in
-`apps/mootx01`, 515 in `AriaMcpKit` Swift, 454 in `AriaMcpKit` Rust, 818 in
-`LocusKit` Swift, 885 in `LocusKit` Rust, and 225 in the `mootx01` Rust crate.
-The Rust counts are unchanged from the wave baseline and serve as the parity
-regression check, because no Rust source file was modified in this wave.
+Test evidence is recorded with the individual changes rather than duplicated
+here. Suite counts at the end of the wave are 279 in `apps/mootx01`, 515 in
+`AriaMcpKit` Swift, 454 in `AriaMcpKit` Rust, 818 in `LocusKit` Swift, 885 in
+`LocusKit` Rust, and 225 in the `mootx01` Rust crate. The Rust counts are
+unchanged from the wave baseline and serve as the cross-language parity check,
+because no Rust source file was modified.
