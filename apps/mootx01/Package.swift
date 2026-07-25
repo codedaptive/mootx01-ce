@@ -52,15 +52,25 @@ let package = Package(
     targets: [
         .target(
             name: "MootInstallerCore",
-            // PersistenceKitSQLite is here for exactly one reason:
-            // EstateKeyProvider must go through KeychainKeyStore rather than
-            // reimplement key custody. A second implementation could derive a
-            // different Keychain account and mint a second key for the same
-            // estate, which is an unopenable-estate bug, so the real store is
-            // the only acceptable path. This is the module's first dependency;
-            // keep it the only one.
+            // Two dependencies, each for exactly one reason — do not grow
+            // this list with domain logic.
+            //
+            // PersistenceKitSQLite: EstateKeyProvider must go through
+            // KeychainKeyStore rather than reimplement key custody. A second
+            // implementation could derive a different Keychain account and
+            // mint a second key for the same estate, which is an
+            // unopenable-estate bug, so the real store is the only
+            // acceptable path.
+            //
+            // SQLCipher: EstateEncryptionMigrator (CE-1.0.35-08) performs a
+            // PHYSICAL plaintext→encrypted clone via ATTACH +
+            // sqlcipher_export(), which needs the raw sqlite3 C API —
+            // PersistenceKitSQLite's connection type is internal, and a
+            // logical re-import through the capture seam would mint new row
+            // ids and lose trace rows, fingerprints, and the Merkle rollup.
             dependencies: [
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "SQLCipher", package: "PersistenceKit"),
             ],
             path: "Sources/MootInstallerCore"
         ),
