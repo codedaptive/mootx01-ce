@@ -9,8 +9,9 @@ import MootIntentKit
 // where they do not, and what a synthesis could say.
 //
 // The load-bearing property is structural, not stylistic: a disagreement CANNOT
-// be dissolved by this type. Three mechanisms enforce it, all in
-// `CompareResult.init` so no construction path can skip them:
+// be dissolved by this type. Four mechanisms enforce it. The first three live in
+// `CompareResult.init`, so no construction path can skip them; the fourth is the
+// cap rule in `CompareWorker.assemble`, which is where a cap could be applied:
 //
 //  1. Topic collision resolves to disagreement. If the same topic arrives in both
 //     `agreements` and `disagreements`, the agreement is dropped. A model that
@@ -21,6 +22,9 @@ import MootIntentKit
 //  3. Silence is never agreement. A result with no agreements AND no
 //     disagreements always carries a `notice` explaining why nothing was
 //     compared, so an empty result cannot read as "the two bodies matched".
+//  4. The claim cap never cuts a conflict. `maxClaims` bounds the prompt and the
+//     agreement and synthesis lists; disagreements are carried whole, and a cap
+//     that shortened either other list says so in the notice.
 //
 // Input shape note: `ResearchBody` is deliberately plain — a label, text, and
 // optional reference strings. A Work Packet's body and id fit it without this
@@ -36,7 +40,8 @@ public struct ResearchBody: Sendable, Equatable {
     /// The research text itself. Bounded by the caller.
     public let text: String
     /// Optional provenance strings the caller already holds (drawer ids, packet
-    /// ids, URLs). Carried through untouched for the caller's own audit trail.
+    /// ids, URLs). Copied onto the result's `leftReferences` / `rightReferences`
+    /// so a comparison always says which material each side came from.
     public let references: [String]
 
     public init(label: String, text: String, references: [String] = []) {
@@ -50,8 +55,10 @@ public struct ResearchBody: Sendable, Equatable {
 public struct CompareInput: Sendable {
     public let left: ResearchBody
     public let right: ResearchBody
-    /// Upper bound on claims requested per category. Bounds the prompt and the
-    /// output; the comparison is a reading aid, not an exhaustive diff.
+    /// Upper bound on claims REQUESTED per category, and the cut applied to the
+    /// agreement and synthesis lists. Disagreements are exempt — see
+    /// `CompareWorker.assemble`. The comparison is a reading aid, not an
+    /// exhaustive diff, but a conflict is never traded for brevity.
     public let maxClaims: Int
 
     public init(left: ResearchBody, right: ResearchBody, maxClaims: Int = 6) {
@@ -137,11 +144,17 @@ public struct SynthesisCandidate: Sendable, Equatable, Identifiable {
     }
 }
 
-/// The comparison. See the file header for the three preservation mechanisms
-/// this initializer enforces.
+/// The comparison. This initializer enforces preservation mechanisms 1-3 from the
+/// file header; mechanism 4 (the cap never cuts a conflict) is in
+/// `CompareWorker.assemble`.
 public struct CompareResult: Sendable, Equatable {
     public let leftLabel: String
     public let rightLabel: String
+    /// Provenance the caller supplied with the left body, carried onto the result
+    /// so a comparison can always be traced back to its material.
+    public let leftReferences: [String]
+    /// Provenance the caller supplied with the right body.
+    public let rightReferences: [String]
     /// Claims both bodies make. Never contains a topic that also appears in
     /// `disagreements`.
     public let agreements: [ComparedClaim]
@@ -157,6 +170,8 @@ public struct CompareResult: Sendable, Equatable {
     public init(
         leftLabel: String,
         rightLabel: String,
+        leftReferences: [String] = [],
+        rightReferences: [String] = [],
         agreements: [ComparedClaim],
         disagreements: [Disagreement],
         synthesisCandidates: [SynthesisCandidate],
@@ -164,6 +179,8 @@ public struct CompareResult: Sendable, Equatable {
     ) {
         self.leftLabel = leftLabel
         self.rightLabel = rightLabel
+        self.leftReferences = leftReferences
+        self.rightReferences = rightReferences
         self.disagreements = disagreements
 
         // Mechanism 1: a contested topic can never be listed as agreed.
@@ -350,6 +367,8 @@ public struct CompareWorker: MootWorker {
         CompareResult(
             leftLabel: input.left.label,
             rightLabel: input.right.label,
+            leftReferences: input.left.references,
+            rightReferences: input.right.references,
             agreements: [],
             disagreements: [],
             synthesisCandidates: [],
@@ -365,10 +384,19 @@ public struct CompareWorker: MootWorker {
     /// Map a generated suggestion onto the result types. Ordinal-keyed ids are
     /// assigned here so `CompareResult` can match a synthesis candidate's open
     /// topics to real disagreement ids.
+    ///
+    /// `maxClaims` bounds what the prompt ASKS for and what the agreement and
+    /// synthesis lists carry. It is NOT applied to disagreements: the cap is a
+    /// prompt instruction, nothing in the generation schema enforces it, and a
+    /// model that returns one conflict more than requested has found more
+    /// conflict — dropping it here would be the exact silent loss this worker
+    /// exists to prevent. Truncation of the other two lists is disclosed in the
+    /// notice rather than left invisible, the same discipline the review digest
+    /// applies to withheld items.
     static func assemble(_ suggestion: CompareSuggestion, input: CompareInput) -> CompareResult {
         let cap = max(0, input.maxClaims)
 
-        let disagreements = suggestion.disagreements.prefix(cap).enumerated().map { ordinal, raw in
+        let disagreements = suggestion.disagreements.enumerated().map { ordinal, raw in
             Disagreement(
                 id: "disagreement:\(ordinal)",
                 topic: raw.topic,
@@ -404,12 +432,26 @@ public struct CompareWorker: MootWorker {
             )
         }
 
+        // What the cap withheld, stated rather than dropped in silence. Only the
+        // agreement and synthesis lists can be short — disagreements are never cut.
+        let withheldAgreements = suggestion.agreements.count - agreements.count
+        let withheldSynthesis = suggestion.synthesis.count - synthesis.count
+        let truncationNotice: String? = (withheldAgreements > 0 || withheldSynthesis > 0)
+            ? String(
+                localized: "worker.compare.notice.capped",
+                defaultValue: "The comparison was capped, so some agreement or synthesis entries are not shown. No disagreement was withheld."
+            )
+            : nil
+
         return CompareResult(
             leftLabel: input.left.label,
             rightLabel: input.right.label,
+            leftReferences: input.left.references,
+            rightReferences: input.right.references,
             agreements: Array(agreements),
             disagreements: Array(disagreements),
-            synthesisCandidates: Array(synthesis)
+            synthesisCandidates: Array(synthesis),
+            notice: truncationNotice
         )
     }
 

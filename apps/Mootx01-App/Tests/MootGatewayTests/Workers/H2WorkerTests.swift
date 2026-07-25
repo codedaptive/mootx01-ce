@@ -231,6 +231,77 @@ struct CompareDisagreementPreservationTests {
         #expect(result.disagreements.map(\.topic) == ["topic-0", "topic-1", "topic-2", "topic-3"])
     }
 
+    /// The cap is a prompt instruction, not a schema constraint, so a model can
+    /// return more conflicts than were asked for. None may be dropped: the cap
+    /// applies to the agreement and synthesis lists only.
+    @Test("a disagreement past the cap is still carried, not silently cut")
+    func disagreementsExceedTheCapAndSurvive() {
+        let five = (0..<5).map {
+            DisagreementSuggestion(topic: "topic-\($0)", firstPosition: "a\($0)", secondPosition: "b\($0)")
+        }
+        let result = CompareWorker.assemble(
+            CompareSuggestion(agreements: [], disagreements: five, synthesis: []),
+            input: CompareInput(left: Self.left, right: Self.right, maxClaims: 2)
+        )
+        #expect(result.disagreements.count == 5)
+        #expect(result.disagreements.map(\.topic) == ["topic-0", "topic-1", "topic-2", "topic-3", "topic-4"])
+        // Ids stay dense and unique past the cap, so a synthesis candidate can
+        // still acknowledge the ones beyond it.
+        #expect(Set(result.disagreements.map(\.id)).count == 5)
+        #expect(result.disagreements.last?.id == "disagreement:4")
+    }
+
+    @Test("a capped agreement or synthesis list says so in the notice")
+    func cappedListsAreDisclosed() {
+        let result = CompareWorker.assemble(
+            CompareSuggestion(
+                agreements: (0..<4).map {
+                    AgreementSuggestion(topic: "agreed-\($0)", statement: "s\($0)")
+                },
+                disagreements: [
+                    DisagreementSuggestion(topic: "cost", firstPosition: "$5", secondPosition: "$12")
+                ],
+                synthesis: []
+            ),
+            input: CompareInput(left: Self.left, right: Self.right, maxClaims: 2)
+        )
+        #expect(result.agreements.count == 2)
+        #expect(result.disagreements.count == 1)
+        // Withheld agreements are disclosed rather than invisible.
+        #expect(result.notice != nil)
+    }
+
+    @Test("an uncapped comparison carries no truncation notice")
+    func uncappedComparisonHasNoNotice() {
+        let result = CompareWorker.assemble(
+            CompareSuggestion(
+                agreements: [AgreementSuggestion(topic: "index warmth", statement: "warm")],
+                disagreements: [
+                    DisagreementSuggestion(topic: "cost", firstPosition: "$5", secondPosition: "$12")
+                ],
+                synthesis: []
+            ),
+            input: CompareInput(left: Self.left, right: Self.right, maxClaims: 6)
+        )
+        #expect(result.notice == nil)
+    }
+
+    @Test("caller provenance survives onto the result")
+    func referencesSurviveOntoResult() {
+        let left = ResearchBody(label: "packet-7F3A", text: "finding", references: ["drawer-1", "drawer-2"])
+        let right = ResearchBody(label: "packet-91BC", text: "finding", references: ["drawer-9"])
+        let result = CompareWorker.assemble(
+            CompareSuggestion(agreements: [], disagreements: [], synthesis: []),
+            input: CompareInput(left: left, right: right)
+        )
+        #expect(result.leftReferences == ["drawer-1", "drawer-2"])
+        #expect(result.rightReferences == ["drawer-9"])
+        // And on the fallback path, where no comparison happens at all.
+        let fallback = CompareWorker().fallback(input: CompareInput(left: left, right: right))
+        #expect(fallback.leftReferences == ["drawer-1", "drawer-2"])
+        #expect(fallback.rightReferences == ["drawer-9"])
+    }
+
     @Test("an empty comparison always explains itself — silence is never agreement")
     func emptyComparisonCarriesNotice() {
         let result = CompareWorker.assemble(
@@ -277,6 +348,8 @@ struct CompareDisagreementPreservationTests {
             input: CompareInput(left: packetLike, right: Self.right)
         )
         #expect(result.leftLabel == "packet-7F3A")
+        // The packet id the caller passed as provenance is on the result.
+        #expect(result.leftReferences == ["7F3A0000-0000-0000-0000-000000000001"])
         #expect(result.notice != nil)
     }
 }

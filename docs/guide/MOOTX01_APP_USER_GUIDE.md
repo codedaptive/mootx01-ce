@@ -1,6 +1,6 @@
 ---
 title: MOOTx01 — User Guide
-version: v0.5
+version: v0.6
 status: draft
 ---
 

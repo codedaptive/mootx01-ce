@@ -230,6 +230,9 @@ enum WorkerResultText {
     }
 
     /// Disagreements are rendered before synthesis, with both positions in full.
+    /// The function stays whole because it IS the section order: reading it top to
+    /// bottom is how a reviewer checks that no category was dropped from the pane.
+    ///
     /// The comparison layer refuses to dissolve a conflict, and this view refuses
     /// to bury one: a synthesis candidate is printed with the disputes it leaves
     /// open, and a dispute no candidate acknowledged is called out by name.
@@ -417,6 +420,10 @@ public struct IntelligenceView: View {
     /// Apple's guardrail declines some material even with Apple Intelligence
     /// available. `runSafe` gives no reason back, so each worker's fallback text
     /// explains itself rather than the row's caption predicting the path.
+    ///
+    /// The `switch` stays in one function because every branch is the same three
+    /// lines — build input, `runSafe`, render — and the six sitting together is
+    /// what makes a missing or mis-wired worker obvious at a glance.
     @MainActor
     private func run(_ kind: WorkerLauncherKind) async {
         isResponding = true
