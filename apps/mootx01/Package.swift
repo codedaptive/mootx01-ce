@@ -52,7 +52,16 @@ let package = Package(
     targets: [
         .target(
             name: "MootInstallerCore",
-            dependencies: [],
+            // PersistenceKitSQLite is here for exactly one reason:
+            // EstateKeyProvider must go through KeychainKeyStore rather than
+            // reimplement key custody. A second implementation could derive a
+            // different Keychain account and mint a second key for the same
+            // estate, which is an unopenable-estate bug, so the real store is
+            // the only acceptable path. This is the module's first dependency;
+            // keep it the only one.
+            dependencies: [
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
             path: "Sources/MootInstallerCore"
         ),
         .executableTarget(
