@@ -140,7 +140,12 @@ public enum EstateKeyProvider {
     /// absent; throws when the Keychain itself fails, so a locked or broken
     /// Keychain is never mistaken for "no key yet" (which would mint a second
     /// key over a real one).
-    private static func probeExistingKey(
+    ///
+    /// `internal` rather than `private` so `existingKey(for:)` in
+    /// EstateOpenPosture.swift can reuse it. The alternative was a second copy of
+    /// this Keychain query, and duplicated key lookup is exactly the hazard that
+    /// justifies routing all custody through one place.
+    static func probeExistingKey(
         account: String,
         accessGroup: String?
     ) throws -> Data? {

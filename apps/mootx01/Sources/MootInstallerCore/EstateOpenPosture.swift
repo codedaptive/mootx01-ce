@@ -1,0 +1,141 @@
+// EstateOpenPosture.swift
+//
+// ONE decision, shared by every command that opens the live estate, so serve,
+// drain, and dream cannot drift apart on at-rest posture.
+//
+// THE RULE — DO NOT FORCE THE FLIP
+// An existing plaintext estate must keep opening. If these commands
+// unconditionally required a key, every existing macOS install would break on
+// upgrade, including a 98,000-memory estate, because migration is a separate
+// user-initiated step (`mootx01 upgrade`, CE-1.0.35-08). So:
+//
+//   file absent (first run)  → provision a key, open .fullDatabase
+//   file present, ciphertext → load the EXISTING key, open .fullDatabase;
+//                              FAIL CLOSED if the key is missing
+//   file present, plaintext  → open plaintext, behavior unchanged
+//
+// The ciphertext branch is the one with teeth. It must NOT mint a key when none
+// is found: minting would hand SQLCipher a brand-new wrong key for a file
+// already encrypted under a different one, and the open would fail in a way that
+// looks like corruption. Worse, a caller that treated that as "no estate" could
+// create a fresh plaintext file over the top. So the absent-file branch and the
+// ciphertext branch use DIFFERENT key calls, deliberately.
+//
+// Classification comes from EstateKeyProvider.detectEstateFileState, which reads
+// the file header. Never guess by attempting an encrypted open and catching the
+// error.
+
+import Foundation
+
+#if canImport(Security)
+import Security
+#endif
+
+#if canImport(PersistenceKit)
+import PersistenceKit
+#endif
+
+#if canImport(PersistenceKitSQLite)
+import PersistenceKitSQLite
+#endif
+
+extension EstateKeyProvider {
+
+    /// Why an estate could not be opened with the posture the file requires.
+    public enum PostureError: Error, CustomStringConvertible {
+        /// The file on disk is encrypted but no key could be found for it. Fail
+        /// closed: the caller must abort, NOT create a new estate and NOT retry
+        /// as plaintext.
+        case encryptedEstateKeyMissing(estateURL: URL, underlying: String)
+
+        public var description: String {
+            switch self {
+            case let .encryptedEstateKeyMissing(estateURL, underlying):
+                return """
+                    the estate at \(estateURL.path) is encrypted but its key could not be \
+                    loaded (\(underlying)). Refusing to continue: opening it without the \
+                    correct key would fail, and creating a new estate would hide the \
+                    existing one.
+                    """
+            }
+        }
+    }
+
+    /// The posture chosen for a given estate file, so a caller can log WHICH
+    /// branch it took rather than just the outcome.
+    public enum OpenPosture: Equatable, Sendable {
+        /// No file yet: a key was provisioned and the estate will be created
+        /// encrypted.
+        case newEncrypted
+        /// The file is already encrypted and its existing key was loaded.
+        case existingEncrypted
+        /// The file is plaintext and stays plaintext. Migration is
+        /// `mootx01 upgrade`, never implicit.
+        case existingPlaintext
+    }
+
+    #if canImport(PersistenceKit)
+    /// Resolve the at-rest posture for the estate at `estateURL`.
+    ///
+    /// This is THE shared decision referenced by ServeCommand, DrainCommand, and
+    /// DreamCommand. It never prompts and never migrates, which is a hard
+    /// requirement: serve runs under launchd with no TTY.
+    ///
+    /// - Returns: the encryption config to hand `EstateConfiguration`, plus which
+    ///   branch was taken.
+    /// - Throws: `PostureError.encryptedEstateKeyMissing` when the file is
+    ///   ciphertext and no key can be loaded, or a `KeyProviderError` when a new
+    ///   estate's key cannot be provisioned. Both are fail-closed outcomes: the
+    ///   caller aborts.
+    public static func resolveOpenPosture(
+        for estateURL: URL
+    ) throws -> (encryption: EstateEncryptionConfig, posture: OpenPosture) {
+        switch detectEstateFileState(at: estateURL) {
+        case .absent:
+            // First run. Provision (creating if needed) and open encrypted, which
+            // is what brings macOS to parity with the Rust serve path.
+            let key = try provideKey(for: estateURL)
+            return (.fullDatabase(key: key), .newEncrypted)
+
+        case .ciphertext:
+            // Already encrypted. Load the EXISTING key only — see the file
+            // header comment for why minting here would be destructive.
+            do {
+                let key = try existingKey(for: estateURL)
+                return (.fullDatabase(key: key), .existingEncrypted)
+            } catch {
+                throw PostureError.encryptedEstateKeyMissing(
+                    estateURL: estateURL, underlying: "\(error)")
+            }
+
+        case .plaintext:
+            // Unchanged behavior. This is the branch that keeps every existing
+            // macOS install working across the upgrade.
+            return (.plaintext, .existingPlaintext)
+        }
+    }
+    #endif
+
+    /// Load the key for an estate that ALREADY EXISTS as ciphertext, without
+    /// creating one.
+    ///
+    /// Distinct from `provideKey(for:)` on purpose. `provideKey` mints when
+    /// nothing is found, which is correct for a new estate and wrong for an
+    /// existing encrypted one. Probes the shared access group first, then the
+    /// legacy default group (estates created before #94), same precedence as
+    /// `provideKey`.
+    public static func existingKey(for estateURL: URL) throws -> Data {
+        #if canImport(Security) && canImport(PersistenceKitSQLite)
+        let account = KeychainKeyStore.estateAccount(for: estateURL)
+        for accessGroup in [sharedAccessGroup, nil] as [String?] {
+            if let existing = try probeExistingKey(account: account, accessGroup: accessGroup) {
+                return existing
+            }
+        }
+        throw KeyProviderError.keychainUnavailable(
+            "no stored key for estate \(estateURL.lastPathComponent) in either the shared or default access group")
+        #else
+        throw KeyProviderError.unsupportedPlatform
+        #endif
+    }
+}
