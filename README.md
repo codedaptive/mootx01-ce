@@ -2,11 +2,11 @@
 
 **Long-term memory for AI.**
 
-Local-first, governed memory for your AI clients and agents—one personal MOOT across your devices.
+Local-first, governed memory for your AI clients and agents. One personal MOOT across your devices.
 
 Research with ChatGPT. Implement with Claude. Monitor with Grok. Test and critique with Codex. Hand the result to OpenClaw.
 
-Different models. Different Harnesses. Different roles. One durable memory. Securely stored and locally controlled.
+Different models. Different harnesses. Different roles. One durable memory. Securely stored and locally controlled.
 
 > The frontier intelligence is rented. The memory is yours.
 
