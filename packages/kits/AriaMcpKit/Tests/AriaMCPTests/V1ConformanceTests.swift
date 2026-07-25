@@ -168,7 +168,7 @@ struct V1ConformanceTests {
     /// moot_dataset_query, moot_dataset_stats).
     /// 71 → 75: +4 packet tools (FAB5-I2: moot_file_packet, moot_packet_get,
     /// moot_packet_list, moot_packet_lineage).
-    @Test func v1ToolsListReturns71Tools() async throws {
+    @Test func v1ToolsListReturns75Tools() async throws {
         let server = try await makeServer()
         let inPipe = Pipe()
         let outPipe = Pipe()

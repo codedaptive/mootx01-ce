@@ -380,7 +380,7 @@ enum PacketTools {
             rawLimit = 20
         }
         let limit = min(max(1, rawLimit), 100)
-        let wing = args["wing"]?.stringValue
+        let wing = args["wing"]?.stringValue ?? LocusKit.defaultWingName
 
         let estate: LocusKit.Estate
         do {
@@ -390,31 +390,50 @@ enum PacketTools {
                 "moot_packet_list: estate not accessible: \(error.localizedDescription)")
         }
 
-        let store = WorkPacketStore(
-            client: EstateAdapter(estate),
-            wing: wing ?? LocusKit.defaultWingName)
-
-        let packets: [WorkPacket]
+        // Bypass WorkPacketStore.list() — it returns [WorkPacket] without the estate
+        // drawer ID. We need drawer.id (the estate UUID returned by WorkPacketStore.store())
+        // so callers can pass it to moot_packet_get / moot_packet_lineage. Call listDrawers
+        // directly via EstateAdapter and decode each drawer inline.
+        let client = EstateAdapter(estate)
+        let frame = RecallFrame(
+            filterChain: [.currentlyBelieve, .inWing(wing), .inRoom(WorkPacketStore.room)],
+            hydrationLevel: .full,
+            limit: limit,
+            ordering: .byCaptureTimeDesc
+        )
+        let drawers: [Drawer]
         do {
-            packets = try await store.list(limit: limit)
+            drawers = try await client.listDrawers(frame)
         } catch {
             return ToolDispatcher.errorResult(
                 "moot_packet_list: list failed: \(error.localizedDescription)")
         }
 
-        if packets.isEmpty {
+        if drawers.isEmpty {
             return ToolDispatcher.textResult("packets:\n  (none)")
         }
 
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
         var lines: [String] = ["packets:"]
-        for p in packets {
-            lines.append("  - objective: \(p.objective)")
-            lines.append("    model: \(p.provenance.model)")
-            lines.append("    agent: \(p.provenance.agent)")
-            lines.append("    packet_id: \(p.id)")
-            lines.append("    lineage_count: \(p.lineageLinks.count)")
+        for drawer in drawers {
+            // drawer.id is the estate-assigned UUID — what moot_packet_get and
+            // moot_packet_lineage require as drawer_id.
+            lines.append("  - drawer_id: \(drawer.id)")
+            if let data = drawer.content.data(using: .utf8),
+               let p = try? decoder.decode(WorkPacket.self, from: data) {
+                lines.append("    objective: \(p.objective)")
+                lines.append("    model: \(p.provenance.model)")
+                lines.append("    agent: \(p.provenance.agent)")
+                lines.append("    lineage_count: \(p.lineageLinks.count)")
+            } else {
+                // Content not decodable as WorkPacket — surface the drawer ID alone
+                // so the caller can still retrieve raw content via moot_memory_get.
+                lines.append("    (content not decodable as WorkPacket)")
+            }
         }
-        lines.append("total: \(packets.count)")
+        lines.append("total: \(drawers.count)")
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 

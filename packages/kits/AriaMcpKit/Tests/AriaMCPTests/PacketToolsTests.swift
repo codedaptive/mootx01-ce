@@ -51,13 +51,17 @@ struct PacketToolsTests {
         result.objectValue?["isError"]?.boolValue == true
     }
 
-    /// Parse a "  key: value" line from a multi-line response body.
+    /// Parse a "  key: value" or "  - key: value" line from a multi-line response body.
     private func extractValue(key: String, from body: String) -> String? {
         let prefix = "\(key): "
+        let listPrefix = "- \(key): "
         for line in body.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix(prefix) {
                 return String(trimmed.dropFirst(prefix.count))
+            }
+            if trimmed.hasPrefix(listPrefix) {
+                return String(trimmed.dropFirst(listPrefix.count))
             }
         }
         return nil
@@ -173,6 +177,22 @@ struct PacketToolsTests {
         #expect(listBody.contains("List-test objective."),
             "Listed packets must include the filed packet's objective")
         #expect(listBody.contains("total: 1"))
+
+        // Verify drawer_id is present and usable in a subsequent moot_packet_get.
+        // This is the key list→get round-trip: the IDs emitted by list must be
+        // the estate drawer IDs, not the WorkPacket's own UUID.
+        let drawerID = try #require(extractValue(key: "drawer_id", from: listBody),
+            "moot_packet_list must emit a drawer_id: line per packet")
+        #expect(!drawerID.isEmpty)
+
+        let getResult = try await dispatcher.dispatch(
+            name: "moot_packet_get",
+            arguments: .object(["drawer_id": .string(drawerID)]))
+        #expect(!isError(getResult),
+            "drawer_id from moot_packet_list must be usable in moot_packet_get; got isError for drawer_id=\(drawerID)")
+        let getBody = try text(getResult)
+        #expect(getBody.contains("List-test objective."),
+            "moot_packet_get via list drawer_id must return the correct packet")
     }
 
     // MARK: - moot_packet_lineage
