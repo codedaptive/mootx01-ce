@@ -122,6 +122,19 @@ test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
 # per-table bytes) on the qualification clone. Dev-dep only; rusqlite is
 # already in the tree via persistence-kit. Version matches persistence-kit's.
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+# Test-only: engram-lib is needed to implement the EmbeddingProvider trait in
+# integration tests (D5: ThrowingFloatProvider for dense_lane_status parity tests).
+# engram-lib is already a transitive dependency via vectorkit → engram-lib;
+# this dev-dep makes it directly nameable in tests/ without altering the
+# production dependency graph.
+# Per in-repository dependency direction (dev-dep, no layering inversion:
+# engram-lib is a substrate lib below GLK).
+engram-lib = { path = "../../../libs/EngramLib/rust" }
+# test-seams feature enables Corpus::open_with_provider and
+# Corpus::forced_float_error for gate-2 storeError force-testing (D-6 parity
+# test). The production [dependencies] entry above carries no features so the
+# seams are absent from the shipped binary. Dev-dep only; no inversion.
+corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
 # test-seams exposes LocusKit's test-only orphan-seal failure hook used by
 # tests/expunge_vector_orphan.rs E8. The production dependency above carries
 # no features, so this remains test-only wiring.

@@ -60,12 +60,21 @@ pub fn run(
     //   → --yes default (plugin, no prompt)
     //   → guided depth prompt (after the picker, before apply)
     //   → default (plugin) when non-interactive.
-    let depth = match depth_arg {
+    let requested_depth = match depth_arg {
         Some(InstallDepthArg::Server) => InstallDepth::Server,
         Some(InstallDepthArg::Skills) => InstallDepth::Skills,
         Some(InstallDepthArg::Plugin) => InstallDepth::Plugin,
         None if yes => InstallDepth::DEFAULT,
         None => prompt_depth(),
+    };
+    // A plugin can own its own MCP connection and route through the resident
+    // daemon. Direct stdio installs therefore stop at the skills ceiling; the
+    // client config written below remains the connection owner.
+    let depth = if no_daemon && requested_depth == InstallDepth::Plugin {
+        println!("Direct stdio requested: using skills depth instead of a connection-owning plugin.");
+        InstallDepth::Skills
+    } else {
+        requested_depth
     };
 
     let binary_path = std::env::current_exe()
@@ -91,23 +100,46 @@ pub fn run(
         // map), and an installed-but-disabled plugin does not own the
         // connection. Skipping/removing the direct entry in that state
         // would leave the client with nothing.
-        if let Some(plugin_id) = plugin_owner(client.id) {
-            if mcp_ownership::owns_connection(plugin_id, &home) {
-                match dedupe_one(client, &home, location) {
-                    Ok(merge::JsonOwnershipOutcome::NotPresent) => {}
-                    Ok(merge::JsonOwnershipOutcome::Removed) => println!(
-                        "  ⓘ {}: removed a stale direct mootx01 entry — the plugin now owns the connection",
+        if !no_daemon {
+            if let Some(plugin_id) = plugin_owner(client.id) {
+                if mcp_ownership::owns_connection(plugin_id, &home) {
+                    match dedupe_one(client, &home, location) {
+                        Ok(merge::JsonOwnershipOutcome::NotPresent) => {}
+                        Ok(merge::JsonOwnershipOutcome::Removed) => println!(
+                            "  ⓘ {}: removed a stale direct mootx01 entry — the plugin now owns the connection",
+                            client.display_name
+                        ),
+                        Ok(merge::JsonOwnershipOutcome::RetainedForeign { reason, path }) => println!(
+                            "  ⚠ {}: a non-default mootx01 entry at {} ({reason}) was left untouched — inspect it by hand",
+                            client.display_name,
+                            path.display()
+                        ),
+                        Err(e) => eprintln!(
+                            "  ✗ {}: could not check for a competing direct entry: {e}",
+                            client.display_name
+                        ),
+                    }
+                    println!(
+                        "  ⓘ MOOTx01 plugin already installed — {} connects through it; skipping direct wiring.",
                         client.display_name
-                    ),
-                    Ok(merge::JsonOwnershipOutcome::RetainedForeign { reason, path }) => println!(
-                        "  ⚠ {}: a non-default mootx01 entry at {} ({reason}) was left untouched — inspect it by hand",
-                        client.display_name,
-                        path.display()
-                    ),
-                    Err(e) => eprintln!(
-                        "  ✗ {}: could not check for a competing direct entry: {e}",
-                        client.display_name
-                    ),
+                    );
+                    // Wave 6, Defect A (live 1.0.16 machine finding): the
+                    // plugin-owned MCP connections ownership skip above applies ONLY to the direct
+                    // mcpServers entry. Before this fix, `continue` here left
+                    // `client.id` out of `wired_ids` entirely, and the depth
+                    // loop below filters on `wired_ids.contains(...)` — so a
+                    // plugin-owned client got NO depth pass at all: no package
+                    // rematerialization, no stranded-cache refresh. The stale
+                    // stdio-era package in ~/.claude/mootx01-plugin (and Claude
+                    // Code's stale cached snapshot) then survived every
+                    // subsequent `mootx01 install` run forever. A plugin-owned
+                    // connection is exactly the case where the package must
+                    // stay freshest, so this client counts as wired (its MCP
+                    // connection succeeded — via the plugin, not a direct
+                    // entry) and proceeds to the depth pass below.
+                    wired.push(client.display_name);
+                    wired_ids.push(client.id);
+                    continue;
                 }
                 println!(
                     "  ⓘ MOOTx01 plugin already installed — {} connects through it; skipping direct wiring.",
@@ -132,7 +164,20 @@ pub fn run(
                 continue;
             }
         }
-        match install_one(client, &home, &binary_path, &daemon_url, location) {
+        let install_result = if no_daemon {
+            install_one_with_transport(
+                client,
+                &home,
+                &binary_path,
+                &daemon_url,
+                location,
+                true,
+                !vault_on,
+            )
+        } else {
+            install_one(client, &home, &binary_path, &daemon_url, location)
+        };
+        match install_result {
             Ok(Some(p)) => {
                 println!("  ✓ wired {} ({})", client.display_name, p.display());
                 wired.push(client.display_name);
@@ -407,6 +452,26 @@ fn install_one(
     daemon_url: &str,
     location: Location,
 ) -> Result<Option<PathBuf>, merge::MergeError> {
+    install_one_with_transport(
+        client,
+        home,
+        binary_path,
+        daemon_url,
+        location,
+        false,
+        false,
+    )
+}
+
+fn install_one_with_transport(
+    client: &McpClient,
+    home: &Path,
+    binary_path: &str,
+    daemon_url: &str,
+    location: Location,
+    direct_stdio: bool,
+    vault_off: bool,
+) -> Result<Option<PathBuf>, merge::MergeError> {
     let Some(mut config) = client.config_path(home) else {
         println!(
             "  skipping {} (not available on this platform)",
@@ -422,26 +487,58 @@ fn install_one(
     match client.format {
         ConfigFormat::Json => {
             merge::backup_existing(&config)?;
-            let entry = merge::entry_for(client, binary_path, daemon_url);
+            let entry = if direct_stdio {
+                merge::direct_stdio_entry_for(client, binary_path, vault_off)
+            } else {
+                merge::entry_for(client, binary_path, daemon_url)
+            };
             merge::merge_into_json_config(&config, client.json_servers_key(), SERVER_NAME, entry)?;
             Ok(Some(config))
         }
         ConfigFormat::Toml => {
             merge::backup_existing(&config)?;
-            merge::merge_into_toml_config(&config, client, SERVER_NAME, binary_path, daemon_url)?;
+            if direct_stdio {
+                merge::merge_into_toml_stdio_config(
+                    &config,
+                    SERVER_NAME,
+                    binary_path,
+                    vault_off,
+                )?;
+            } else {
+                merge::merge_into_toml_config(
+                    &config,
+                    client,
+                    SERVER_NAME,
+                    binary_path,
+                    daemon_url,
+                )?;
+            }
             Ok(Some(config))
         }
         ConfigFormat::Yaml => {
             if client.id == "continue" {
                 merge::backup_existing(&config)?;
-                merge::write_continue_yaml(&config, binary_path, Some(daemon_url))?;
+                if direct_stdio {
+                    merge::write_continue_stdio_yaml(&config, binary_path, vault_off)?;
+                } else {
+                    merge::write_continue_yaml(&config, binary_path, Some(daemon_url))?;
+                }
                 Ok(Some(config))
             } else {
                 // Hermes' shared config.yaml: line-based block merge under
                 // `mcp_servers:` (schema verified against the real
                 // hermes-agent example).
                 merge::backup_existing(&config)?;
-                merge::merge_into_hermes_yaml(&config, SERVER_NAME, daemon_url)?;
+                if direct_stdio {
+                    merge::merge_into_hermes_stdio_yaml(
+                        &config,
+                        SERVER_NAME,
+                        binary_path,
+                        vault_off,
+                    )?;
+                } else {
+                    merge::merge_into_hermes_yaml(&config, SERVER_NAME, daemon_url)?;
+                }
                 Ok(Some(config))
             }
         }
@@ -1304,6 +1401,38 @@ mod tests {
             count, 1,
             "idempotent install must leave exactly one [mcp_servers.mootx01] table; got {count}"
         );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_no_daemon_install_writes_direct_stdio_without_url() {
+        let home = std::env::temp_dir()
+            .join(format!("mootx01-codex-stdio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let reg = clients::supported();
+        let codex = reg.iter().find(|c| c.id == "codex").unwrap().clone();
+        install_one_with_transport(
+            &codex,
+            &home,
+            "/usr/local/bin/mootx01",
+            "http://127.0.0.1:4242",
+            Location::Global,
+            true,
+            true,
+        )
+        .expect("direct stdio install must succeed");
+
+        let config_path = codex.config_path(&home).unwrap();
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("command = \"/usr/local/bin/mootx01\""));
+        assert!(text.contains("args = [\"serve\"]"));
+        assert!(text.contains(
+            "env = { MOOTX01_HTTP_PORT = \"\", MOOTX01_VAULT = \"0\" }"
+        ));
+        assert!(!text.contains("url = "));
 
         let _ = std::fs::remove_dir_all(&home);
     }

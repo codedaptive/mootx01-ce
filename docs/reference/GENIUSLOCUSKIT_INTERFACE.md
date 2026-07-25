@@ -1476,12 +1476,13 @@ pub fn register_preference_store(
 // columns share the weights.graph budget slice (Swift parity). Absent ⇒ 0.0.
 ```
 
-**Rust parity status:** Swift-only — `GraphCache`, `PreferenceStore`,
-`register_graph_cache`, and `register_preference_store` are not present in the
-Rust port. The `col_graph` and `col_preference` scoring columns read 0.0 in the
-Rust `recall_scored` path (no cache registered). The cache PRODUCERS
-(dreaming-cycle graph-centrality; Bradley-Terry preference training) are absent
-in both ports. See the concordance table below (`Recall cold-path seams` rows).
+**Rust parity status:** the recall-CONSUMPTION surface is wired in both ports
+(mission glk-recall-graphpref-rust, 2026-06-17, closing the recall-shape contract D-4). Trait,
+registration, per-candidate lookup, and live `RecallScoreVector` columns mirror
+Swift exactly. A constant cache (0.8 / 0.9) normalizes to `0.5` cross-port
+(`recall_shape_matrix_steer_parity.rs` / `RecallShapeMatrixSteerTests.swift`).
+The cache PRODUCERS (dreaming-cycle graph-centrality; Bradley-Terry preference
+training) are absent in BOTH ports — a separate future mission.
 
 ### `GLKRecallMode.nodeTreeNative` — 5th case
 

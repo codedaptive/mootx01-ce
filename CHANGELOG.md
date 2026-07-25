@@ -68,6 +68,28 @@ The Swift and Rust upgrade comparators now honor SemVer pre-release precedence,
 so `1.1.0` is correctly offered as newer than `1.1.0-beta-03`, and later beta
 sequence values sort after earlier ones.
 
+## v1.0.34 — 2026-07-23
+
+Direct-stdio transport, documentation-authority, and packaging-integrity
+release.
+
+- **`--no-daemon` now changes client wiring.** Both Swift and Rust installers
+  write explicit `mootx01 serve` stdio entries instead of resident HTTP URLs
+  when the flag is selected. Direct entries clear inherited HTTP-port state,
+  `--vault-off` is carried into the child-process environment, and
+  connection-owning plugin depth falls back to skills.
+- **The tighter local setup is discoverable.** The root and CLI READMEs,
+  install guide, install-surface contract, CLI help, and security policy
+  document the Codex command/args configuration, the resident-forwarding
+  wrinkle, and the checks required for genuinely socket-free operation.
+- **Engineering documentation consolidated.** The durable rules from all 59
+  legacy 1.0 decision records now live in the topic-based engineering masters.
+  The live 1.0 decision directory is retired, and source comments state their
+  behavior and invariants directly instead of depending on historical records.
+- **Embedded plugin bundle synchronized.** The Swift and Rust installer copies
+  now carry the current 10-host plugin package, its per-user update-check cache
+  behavior, and consistent 1.0.34 product/plugin version stamps.
+
 ## v1.0.33 — 2026-07-16
 
 Release-engineering release. No user-facing code changes — Windows release

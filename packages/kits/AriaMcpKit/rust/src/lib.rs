@@ -77,3 +77,9 @@ pub mod vault_tools;
 /// ensure the estate-encryption key exists at serve startup without a direct
 /// dependency on PersistenceKit.
 pub use persistence_kit::ensure_install_key;
+
+/// Re-export the plaintext→SQLCipher migration primitives (CE-1.0.35-08,
+/// Rust leg) so `mootx01 upgrade` can offer and perform estate encryption
+/// without a direct dependency on PersistenceKit. Same seam as
+/// `ensure_install_key` above.
+pub use persistence_kit::estate_migration;

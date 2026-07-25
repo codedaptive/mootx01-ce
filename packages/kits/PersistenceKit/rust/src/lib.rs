@@ -28,6 +28,7 @@ pub mod database_inventory;
 pub mod dataset_store;
 pub mod encryption;
 pub mod error;
+pub mod estate_migration;
 // gc_pin and snapshot_registry types accessed via module path (like replication).
 pub mod gc_pin;
 pub mod generated_column;

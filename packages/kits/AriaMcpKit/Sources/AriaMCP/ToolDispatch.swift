@@ -1451,7 +1451,7 @@ extension ToolDispatcher {
             let preview: String
             switch hit.drawer?.sensitivity {
             case .restricted:
-                preview = "[sensitivity: restricted — retrieve by id for content]"
+                preview = "[sensitivity: restricted — content redacted]"
             case .secret:
                 preview = "[sensitivity: secret — content access requires explicit grant]"
             case .normal, .elevated, .none:
@@ -1555,8 +1555,10 @@ extension ToolDispatcher {
     /// argument on this tool — the by-id door has no adjective knobs to
     /// widen it). A drawer that exists but fails that gate (contested/
     /// superseded/withdrawn/expired/rejected state, derived/proposed/ambient
-    /// trust, or restricted/secret sensitivity) is reported exactly like a
-    /// genuinely absent id: "Memory not found: <id>". This is deliberate —
+    /// trust, or restricted/secret ADJECTIVE sensitivity, bits 6-11) is
+    /// reported exactly like a genuinely absent id: "Memory not found: <id>".
+    /// Provenance sensitivity is a SEPARATE axis and this chain does not check
+    /// it — see the second gate below. This is deliberate —
     /// the by-id door must not become a way to confirm the EXISTENCE of
     /// content the estate would otherwise refuse to surface. Tombstoned rows
     /// are always excluded, independent of the chain.
@@ -1564,6 +1566,22 @@ extension ToolDispatcher {
     /// Hydration is `.full` (verbatim content, matching what was captured) —
     /// never `.structured`, which strips the content blob this tool exists
     /// to return.
+    ///
+    /// A SECOND gate applies past the RecallFrame chain: provenance
+    /// sensitivity (bits 30-35, `Drawer.sensitivity`) is a different axis from
+    /// the adjective sensitivity the chain checks. Provenance `.restricted`
+    /// and `.secret` stay access-controlled at the MCP boundary and are
+    /// reported with the same not-found shape as every other gate failure,
+    /// matching `moot_memory_search`'s unconditional preview redaction.
+    /// Mirrors Rust `run_memory_get`.
+    ///
+    /// An active sensitivity-unlock grant lifts the ADJECTIVE ceiling ONLY.
+    /// Provenance `.restricted` and `.secret` remain CLOSED under grant in both
+    /// verticals: the provenance gate below is unconditional and does not
+    /// consult the grant ledger. Rust returns not-found unconditionally, and
+    /// matching Swift to it is the conservative reading. If that ruling is
+    /// revisited so a grant lifts provenance too, both verticals change
+    /// together or the conformance parity breaks.
     func runMemoryGet(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
@@ -1595,6 +1613,27 @@ extension ToolDispatcher {
                 message: "Memory not found: \(rowID)"
             )
         }
+
+        // Preserve moot_memory_search's provenance-sensitivity redaction
+        // boundary for the full-content by-id path. The default RecallFrame
+        // gate above only checks adjective sensitivity (bits 6-11);
+        // Drawer.sensitivity decodes provenance sensitivity (bits 30-35),
+        // where Restricted/Secret content is access-controlled and must not be
+        // returned verbatim. Unconditional — the grant ledger lifts the
+        // adjective ceiling only, exactly as runMemorySearch's redaction is
+        // unconditional. Use the standard not-found shape so by-id lookup does
+        // not become an oracle for rows hidden by this MCP disclosure gate.
+        // Mirrors Rust `run_memory_get` (conformance parity).
+        switch drawer.sensitivity {
+        case .restricted, .secret:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Memory not found: \(rowID)"
+            )
+        case .normal, .elevated:
+            break
+        }
+
         // same read-under-grant audit recording as
         // runMemorySearch — see that function's comment for why this is
         // gated on BOTH the ceiling having been lifted AND the drawer's

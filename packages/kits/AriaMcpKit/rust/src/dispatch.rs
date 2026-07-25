@@ -4,7 +4,7 @@
 //!   0. teachme pre-check — intercepts `teachme:true` before any runner fires
 //!   1. Federation tool (moot_federated_search)
 //!   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
-//!   3. Vault tools (backed by vault-kit; drift and candidate handling)
+//!   3. Vault tools (backed by vault-kit; Vault drift and candidate handling)
 //!   3.5 Dataset tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats; MX-TAB-7b)
 //!   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 //!   5. Lens tools (moot_lens_keystones … moot_lens_concepts)

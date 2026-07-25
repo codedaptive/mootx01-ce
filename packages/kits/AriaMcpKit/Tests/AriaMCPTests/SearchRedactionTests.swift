@@ -94,7 +94,7 @@ struct SearchRedactionTests {
 
         let result = try await dispatcher.runMemorySearch(searchArgs("search-redaction-restricted-marker"))
         let body = text(of: result)
-        #expect(body.contains("[sensitivity: restricted — retrieve by id for content]"),
+        #expect(body.contains("[sensitivity: restricted — content redacted]"),
                 "restricted provenance sensitivity must redact the preview; got: \(body)")
         #expect(!body.contains("classified payload details"),
                 "raw content must never leak through a restricted preview; got: \(body)")

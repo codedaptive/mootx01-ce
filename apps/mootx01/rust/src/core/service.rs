@@ -275,6 +275,33 @@ pub fn stop_processes() {
     let _ = powershell(&cmd);
 }
 
+/// True when the scheduled task is currently running. Estate encryption
+/// migration keys "restart afterwards" on this.
+#[cfg(target_os = "windows")]
+pub fn is_task_running(task_name: &str) -> bool {
+    let cmd = format!(
+        "if ((Get-ScheduledTask -TaskName {name} -ErrorAction SilentlyContinue).State -eq 'Running') \
+         {{ exit 0 }} else {{ exit 1 }}",
+        name = ps_quote(task_name),
+    );
+    powershell(&cmd).is_ok()
+}
+
+/// Stop a registered task WITHOUT unregistering it. Estate encryption
+/// migration runs stop → clone → swap → start; `restart_task` (stop+start
+/// in one call) cannot express that.
+#[cfg(target_os = "windows")]
+pub fn stop_task(task_name: &str) -> Result<(), String> {
+    let cmd = format!(
+        "if (-not (Get-ScheduledTask -TaskName {name} -ErrorAction SilentlyContinue)) {{ \
+           throw 'task not registered' \
+         }}; \
+         Stop-ScheduledTask -TaskName {name}",
+        name = ps_quote(task_name),
+    );
+    powershell(&cmd).map(|_| ())
+}
+
 /// Stop + start a registered task (upgrade restart path).
 #[cfg(target_os = "windows")]
 pub fn restart_task(task_name: &str) -> Result<(), String> {
@@ -472,6 +499,37 @@ pub fn restart(unit_name: &str) -> Result<(), String> {
     }
     match Command::new("systemctl")
         .args(["--user", "restart", unit_name])
+        .output()
+    {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// True when the unit is currently active. Estate encryption migration
+/// (CE-1.0.35-08) keys "restart afterwards" on this, so a machine whose
+/// daemon was not running does not get one started behind its back.
+pub fn is_active(unit_name: &str) -> bool {
+    systemd_available()
+        && Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", unit_name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+}
+
+/// Stop a registered unit WITHOUT disabling or removing it, so a later
+/// `restart`/`start` brings it back from the same registration. Exists for
+/// the estate encryption migration, which must run stop → clone → swap →
+/// start; `restart()` (stop+start in one call) cannot express that, and
+/// `unregister` would delete the unit the restart needs.
+pub fn stop(unit_name: &str) -> Result<(), String> {
+    if !systemd_available() {
+        return Err("no per-user systemd on this host".into());
+    }
+    match Command::new("systemctl")
+        .args(["--user", "stop", unit_name])
         .output()
     {
         Ok(o) if o.status.success() => Ok(()),

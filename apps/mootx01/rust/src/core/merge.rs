@@ -137,6 +137,38 @@ pub fn entry_for(client: &McpClient, binary_path: &str, daemon_url: &str) -> ser
     }
 }
 
+/// A direct stdio entry for `mootx01 serve`. This is selected explicitly by
+/// `install --no-daemon`; it does not depend on the client's default resident
+/// transport capability.
+pub fn direct_stdio_entry_for(
+    client: &McpClient,
+    binary_path: &str,
+    vault_off: bool,
+) -> serde_json::Value {
+    let environment = if vault_off {
+        serde_json::json!({
+            "MOOTX01_HTTP_PORT": "",
+            "MOOTX01_VAULT": "0"
+        })
+    } else {
+        serde_json::json!({ "MOOTX01_HTTP_PORT": "" })
+    };
+    if client.id == "opencode" {
+        // OpenCode local MCP entries use a command vector and `environment`.
+        serde_json::json!({
+            "type": "local",
+            "command": [binary_path, "serve"],
+            "environment": environment
+        })
+    } else {
+        serde_json::json!({
+            "command": binary_path,
+            "args": ["serve"],
+            "env": environment
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JSON merge
 // ---------------------------------------------------------------------------
@@ -354,6 +386,37 @@ pub fn merge_into_toml_config(
     Ok(())
 }
 
+/// Direct-stdio variant for Codex-style TOML MCP configuration.
+pub fn merge_into_toml_stdio_config(
+    path: &Path,
+    server_name: &str,
+    binary_path: &str,
+    vault_off: bool,
+) -> Result<(), MergeError> {
+    let header = format!("[mcp_servers.{server_name}]");
+    let mut block = vec![
+        header.clone(),
+        format!("command = \"{binary_path}\""),
+        "args = [\"serve\"]".to_string(),
+    ];
+    if vault_off {
+        block.push(
+            "env = { MOOTX01_HTTP_PORT = \"\", MOOTX01_VAULT = \"0\" }".to_string(),
+        );
+    } else {
+        block.push("env = { MOOTX01_HTTP_PORT = \"\" }".to_string());
+    }
+    let new_table = block.join("\n");
+
+    let existing = read_toml_text(path)?;
+    let merged = replacing_toml_table(&existing, &header, &new_table);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, merged)?;
+    Ok(())
+}
+
 /// Remove the `[mcp_servers.<server>]` table from a TOML config. Absent file
 /// is a no-op. Returns true when the table was present.
 pub fn remove_from_toml_config(path: &Path, server_name: &str) -> Result<bool, MergeError> {
@@ -477,6 +540,29 @@ fn removing_toml_table_lines<'a>(text: &'a str, header: &str) -> Vec<&'a str> {
 pub fn merge_into_hermes_yaml(path: &Path, server_name: &str, url: &str) -> Result<(), MergeError> {
     let existing = read_hermes_text(path)?;
     let block = format!("  {server_name}:\n    url: {url}");
+    let merged = replacing_hermes_block(path, &existing, server_name, Some(&block))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, merged)?;
+    Ok(())
+}
+
+/// Direct-stdio variant for Hermes' shared YAML configuration.
+pub fn merge_into_hermes_stdio_yaml(
+    path: &Path,
+    server_name: &str,
+    binary_path: &str,
+    vault_off: bool,
+) -> Result<(), MergeError> {
+    let existing = read_hermes_text(path)?;
+    let mut block = format!(
+        "  {server_name}:\n    command: {binary_path}\n    args: [\"serve\"]"
+    );
+    block.push_str("\n    env:\n      MOOTX01_HTTP_PORT: \"\"");
+    if vault_off {
+        block.push_str("\n      MOOTX01_VAULT: \"0\"");
+    }
     let merged = replacing_hermes_block(path, &existing, server_name, Some(&block))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -685,6 +771,24 @@ pub fn write_continue_yaml(
     Ok(())
 }
 
+/// Write Continue's per-server YAML for a direct stdio process.
+pub fn write_continue_stdio_yaml(
+    path: &Path,
+    binary_path: &str,
+    vault_off: bool,
+) -> Result<(), MergeError> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut yaml = format!("command: {binary_path}\nargs: [\"serve\"]\n");
+    yaml.push_str("env:\n  MOOTX01_HTTP_PORT: \"\"\n");
+    if vault_off {
+        yaml.push_str("  MOOTX01_VAULT: \"0\"\n");
+    }
+    std::fs::write(path, yaml)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +857,21 @@ mod tests {
         assert!(remove_from_toml_config(&p, "mootx01").unwrap());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "model = \"o3\"\n");
         assert!(!remove_from_toml_config(&p, "mootx01").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toml_direct_stdio_writes_serve_and_vault_off_without_url() {
+        let dir = tmp("toml-stdio");
+        let p = dir.join("config.toml");
+        merge_into_toml_stdio_config(&p, "mootx01", "/b", true).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("command = \"/b\""));
+        assert!(text.contains("args = [\"serve\"]"));
+        assert!(text.contains(
+            "env = { MOOTX01_HTTP_PORT = \"\", MOOTX01_VAULT = \"0\" }"
+        ));
+        assert!(!text.contains("url = "));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -841,6 +960,29 @@ mod tests {
         assert_eq!(e["env"], serde_json::json!({}));
     }
 
+    #[test]
+    fn direct_stdio_entry_shape_is_explicit_and_carries_vault_posture() {
+        let e = direct_stdio_entry_for(&client("claude-code"), "/usr/local/bin/mootx01", true);
+        assert_eq!(e["command"], "/usr/local/bin/mootx01");
+        assert_eq!(e["args"], serde_json::json!(["serve"]));
+        assert_eq!(e["env"]["MOOTX01_VAULT"], "0");
+        assert_eq!(e["env"]["MOOTX01_HTTP_PORT"], "");
+        assert!(e.get("url").is_none());
+    }
+
+    #[test]
+    fn opencode_direct_stdio_uses_local_command_vector_schema() {
+        let e = direct_stdio_entry_for(&client("opencode"), "/usr/local/bin/mootx01", true);
+        assert_eq!(e["type"], "local");
+        assert_eq!(
+            e["command"],
+            serde_json::json!(["/usr/local/bin/mootx01", "serve"])
+        );
+        assert_eq!(e["environment"]["MOOTX01_VAULT"], "0");
+        assert_eq!(e["environment"]["MOOTX01_HTTP_PORT"], "");
+        assert!(e.get("url").is_none());
+    }
+
     // --- Backup ---
 
     #[test]
@@ -869,6 +1011,11 @@ mod tests {
         );
         write_continue_yaml(&p, "/b", None).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "command: /b\nargs: []\n");
+        write_continue_stdio_yaml(&p, "/b", true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "command: /b\nargs: [\"serve\"]\nenv:\n  MOOTX01_HTTP_PORT: \"\"\n  MOOTX01_VAULT: \"0\"\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -901,6 +1048,23 @@ mod tests {
         assert_eq!(
             got,
             "# comment\nmcp_servers:\n  mootx01:\n    url: http://127.0.0.1:4242\n  time:\n    command: uvx\n    args: [\"mcp-server-time\"]\n\ntts:\n  engine: edge\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hermes_direct_stdio_replaces_url_with_serve_command() {
+        let dir = tmp("hermes-stdio");
+        let p = dir.join("config.yaml");
+        std::fs::write(
+            &p,
+            "mcp_servers:\n  mootx01:\n    url: http://127.0.0.1:4242\n",
+        )
+        .unwrap();
+        merge_into_hermes_stdio_yaml(&p, "mootx01", "/b", true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "mcp_servers:\n  mootx01:\n    command: /b\n    args: [\"serve\"]\n    env:\n      MOOTX01_HTTP_PORT: \"\"\n      MOOTX01_VAULT: \"0\"\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
