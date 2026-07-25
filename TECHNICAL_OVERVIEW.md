@@ -123,23 +123,6 @@ documents **537 remediated security finding records** from June 25 through
 July 22, 2026. The linked [finding ledger](docs/validation/audits/SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
 names every issue and its fix or closing commit.
 
-## Roadmap
-
-MOOTx01 is moving from durable local memory to personal agentic memory,
-controlled collaboration, and optional Postgres scale.
-
-- **1.1:** MOOTx01-App across iOS, iPadOS, and macOS; the cross-platform
-  `moot-mgr` web app; Apple Intelligence; Review Center; Work Packets; and
-  optional iCloud and continuous eligible Obsidian synchronization.
-- **1.2:** bounded Federation and cross-platform local agents.
-- **1.3:** PGlite for portable browser/WASM Postgres and pgMOOT for optional
-  PostgreSQL server computation.
-
-Read the full [`ROADMAP.md`](ROADMAP.md) for the product story, release
-boundaries, and ways to follow the build. Roadmap items are direction, not
-shipped promises; tagged releases and their guides remain authoritative.
-
-
 ## Repository structure
 
 ```

@@ -187,7 +187,7 @@ Show me the current status of my MOOT estate.
 - **Maintain an Obsidian vault.** [`docs/start-here/OBSIDIAN_VAULT.md`](docs/start-here/OBSIDIAN_VAULT.md) documents today's explicit workflow and the planned 1.1 continuous mode.
 - **Use two memory backends.** [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) explains the optional primary/secondary MCP bridge and its failure model.
 - **Inspect benchmark evidence.** [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) separates reproducible performance data from conformance and memory-quality evaluation.
-- **Evaluate the tech.** [`TECHNICAL_OVERVIEW.md`](TECHNICAL_OVERVIEW.md) covers the architecture, integration models, kit stack, implementations, security record, roadmap, and repository map.
+- **Evaluate the tech.** [`TECHNICAL_OVERVIEW.md`](TECHNICAL_OVERVIEW.md) covers the architecture, integration models, kit stack, implementations, security record, and repository map.
 - **See the architecture.** [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) is the readable map of the repository.
 - **Visit the live site.** [mootx01.ai](https://mootx01.ai)
 
@@ -362,7 +362,7 @@ Applications can use it as a local sidecar, embed its libraries directly,
 or connect through MCP.
 
 See the [Technical Overview](TECHNICAL_OVERVIEW.md) for the architecture,
-implementations, kit stack, security model, roadmap, and repository map.
+implementations, kit stack, security model, and repository map.
 
 ## Security
 
