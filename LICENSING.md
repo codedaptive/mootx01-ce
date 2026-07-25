@@ -1,49 +1,63 @@
 # Licensing
 
-MOOTx01 ships under a three-layer licensing model. The ARIA interface specification is free for everyone, forever. The foundation libraries of the MOOTx01 Framework are open source under the Apache License, Version 2.0, published through dedicated public repositories. The MOOTx01 product core in this repository is source-available under the Functional Source License, Version 1.1, with Apache 2.0 as the future license (FSL-1.1-ALv2). The full FSL grant is in the LICENSE file at the repository root. This note states the model in plain language and records the tier ladder.
+MOOTx01 uses a three-layer licensing model.
 
-## The Apache-licensed foundation
+The ARIA interface specification is free for everyone. The MOOTx01 foundation libraries are published under the Apache License 2.0 through their public repositories. The MOOTx01 product core in this repository is source-available under FSL-1.1-ALv2, with Apache 2.0 as the future license. See [`LICENSE`](./LICENSE) for the controlling terms.
 
-The foundation of the MOOTx01 Framework is open source today, not on a timer. Seventeen libraries and kits are published under Apache-2.0 through four public venue repositories, generated from the canonical MOOTx01 source tree with full provenance recorded per release:
+## Apache-Licensed Foundation
 
-- [`moot-core`](https://github.com/codedaptive/moot-core) — SubstrateTypes, SubstrateKernel, SubstrateML, SubstrateLib, EngramLib, IntellectusLib
-- [`moot-semantics`](https://github.com/codedaptive/moot-semantics) — AriaLexiconLib, LatticeLib, EideticLib
-- [`moot-system`](https://github.com/codedaptive/moot-system) — PersistenceKit, QueueKit, ConvergenceKit, ObserverSink, LoopbackHTTP
-- [`moot-memory`](https://github.com/codedaptive/moot-memory) — LocusKit, VectorKit, CorpusKit
+The foundation libraries are available under Apache 2.0 from:
 
-Which license governs is determined by where you obtain the code. Code obtained from a venue repository is Apache-2.0, with everything that license permits, including commercial and hosted use, and no Competing Use restriction. The same package source obtained as part of this repository is governed by this repository's FSL grant. This is deliberate multi-licensing by the copyright owner, not a conflict.
+* [`moot-core`](https://github.com/codedaptive/moot-core)
+* [`moot-semantics`](https://github.com/codedaptive/moot-semantics)
+* [`moot-system`](https://github.com/codedaptive/moot-system)
+* [`moot-memory`](https://github.com/codedaptive/moot-memory)
 
-What remains under the FSL in this repository is the product core: GeniusLocusKit (the composition layer, estates, grants, and composed recall), NeuronKit and CognitionKit (the Brain layers), VaultKit, and the applications (the ARIA MCP server, the management console, and the installer).
+Code obtained from those repositories carries the rights granted by Apache 2.0, including commercial and hosted use.
 
-## The grant
+The product core in this repository includes GeniusLocusKit, NeuronKit, CognitionKit, VaultKit, the ARIA MCP server, the management console, and the installer.
 
-The FSL grant below governs the code in this repository. Free to build and share, pay to profit. Make something new and free, go forward, no permission needed. Profit from what you built with it, get a license. The blocked act is offering for money what you built with the code, not who you are. Running your own instance for the free uses below is always free.
+## Free Use
 
-Two years after a version is released, that version converts to the Apache License, Version 2.0, automatically. The relicensing is built into the license itself, not a separate promise. The foundation libraries above did not wait for the timer; they are Apache now.
+A personal MOOT is an isolated MOOTx01 deployment running on one computer or synchronized across multiple computers used by one person.
 
-## What is free
+Personal MOOTs are free for personal and professional use. A company may install a separate personal MOOT on every employee’s computer without paying a license fee. The company may use precompiled distributions or compile, sign, distribute, and maintain those installations itself.
 
-Use by an individual for their own life. Use by an organization inside its own internal-facing applications and the tools it uses to deliver services to its clients. Embedding MOOTx01 inside an application that the organization's own clients use. These are not competing uses and need no paid license.
+A personal MOOT may be used by a person, local AI clients, local agents, or an agentic orchestration system running on the same computer. This remains free even when the computer performs work for an organization.
 
-## What needs a license
+Building and sharing unpaid work is also free.
 
-Offering MOOTx01, or a service whose value is MOOTx01, to third parties as a hosted platform they build on. Selling the code as the product. These are the paid tiers. The Competing Use restriction applies to the FSL-licensed product core in this repository; the Apache-licensed foundation libraries carry no such restriction.
+## Commercial License Required
 
-## The tier ladder
+A commercial license is required when the MOOTx01 product core is:
 
-- Personal use: forever free.
-- Building and sharing non-paid work: free.
-- Mobile app: five hundred dollars, lifetime, per app.
-- Corporate internal: five thousand dollars, lifetime. Internal-facing only, not for hosting MOOTs as a service for third parties; support contracts available.
-- Service provider: five thousand dollars, annually.
-- FedRAMP / CMMC: negotiated.
+* connected to or embedded in a shared or multiuser enterprise system;
+* connected to or embedded in an application, product, or service provided to the organization’s paying clients;
+* offered as a hosted or managed service for third parties;
+* used as part of an MSP or service-provider offering; or
+* compiled into an application offered for sale.
 
-A lifetime tier covers every point release within a major version. The next major version is a new purchase.
+A single-computer agentic deployment remains free. It requires a license only when it becomes part of a shared system or is provided to a paying client as a product or service.
 
-## The mechanism
+## License Tiers
 
-A dual license on a source-available core, beside an open foundation. The public license, the FSL above, states the free-to-build, no-selling grant that everyone receives for this repository. The paid tiers are separate agreements alongside it, not changes to the public license. The foundation venues are governed solely by Apache-2.0 and need no agreement at all.
+* Personal use: free.
+* Separate personal MOOTs for employees: free.
+* Single-computer agentic use: free.
+* Building and sharing unpaid work: free.
+* Mobile application: one-time $500 license per application for each major version of MOOTx01 used.
+* Corporate internal system: $5,000 per major version of MOOTx01.
+* Service provider or MSP: $5,000 annually.
+* FedRAMP- or CMMC-aligned deployment: negotiated.
+
+A commercial license covers the purchased major version and all point releases within that version. The next major version requires a new license unless the commercial agreement states otherwise. MOOTx01 major versions are defined as 1.x, 2.x, and so forth.
+
+## Future License
+
+Two years after a version of the product core is released, that version converts automatically to the Apache License 2.0 under the terms of [`LICENSE`](./LICENSE).
+
+The foundation libraries are already available under Apache 2.0 and do not depend on this conversion period.
 
 ---
 
-_Current as of MOOTx01 stable/1.0.x and MOOTx01 Framework venue releases v1.0.5._
+*Current as of MOOTx01 stable/1.0.x.*
