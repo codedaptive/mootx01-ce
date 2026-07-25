@@ -8,6 +8,7 @@ limits so later work can distinguish a historical result from current state.
 
 - [Continuous Security Review Record — June 25 to July 22, 2026](AUDIT_CONTINUOUS_SECURITY_REVIEW_2026-07-22.md)
 - [Security Finding Remediation Ledger — 537 issue-to-commit records](SECURITY_FINDING_REMEDIATION_LEDGER_2026-07-22.md)
+- [CE 1.0.35 Security Remediation Record — July 24 to 25, 2026](AUDIT_CE_1_0_35_SECURITY_REMEDIATION_2026-07-25.md) (wave in flight, unmerged)
 
 ## Conventions
 
