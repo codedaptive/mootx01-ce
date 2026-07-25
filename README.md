@@ -193,6 +193,12 @@ packages and tool permissions, and restarts the background services.
 Re-running the install script works too. Every release asset is covered
 by a minisign-signed `checksums.txt` on the release page.
 
+`mootx01 upgrade` also notices when the estate in use is unencrypted and
+offers to convert it to encrypted, in place, on every platform. After
+conversion the old unencrypted copy is kept (Trash on macOS,
+`estate.sqlite.pre-encryption` beside the estate on Linux/Windows) until
+you delete it — deleting it is the final step of the conversion.
+
 ### 2 · Wire it in
 
 ```bash
