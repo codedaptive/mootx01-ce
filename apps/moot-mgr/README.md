@@ -76,6 +76,14 @@ These endpoints are loopback-only and read-only:
 | `GET /api/graph` | Node-link topology data |
 | `GET /api/lexicon` | ARIA grammar and lattice metadata |
 | `GET /api/lattice` | Lattice-address snapshot |
+| `GET /api/review` | Recent estate activity summary (estate count, capture count, event feed) |
+| `GET /api/packets` | Exportable work packets — list, metadata only |
+| `GET /api/packets/:id` | Single exportable work packet detail |
+| `GET /api/packets/:id/lineage` | Lineage links for an exportable work packet |
+
+Work-packet endpoints surface only drawers marked `AdjectiveExportability.public_`
+in the LocusKit adjective bitmap. Non-exportable drawers (the LocusKit default)
+are silently excluded from all `/api/packets*` responses.
 
 Unknown non-API `GET` paths are handled by the embedded dashboard assets.
 The server validates loopback `Host` values to resist DNS rebinding.

@@ -99,6 +99,10 @@ let package = Package(
         // shipped NeuronKit capabilities in ServerPayload.capabilities, replacing
         // the hardcoded "pending Phase-2" dashboard row. dashboard dependency direction.
         .package(name: "CognitionKit", path: "../../packages/kits/CognitionKit"),
+        // WorkPacketKit: durable agentic work-packet schema and drawer-backed store.
+        // Used by PacketsEngine (GET /api/packets*) to surface exportable work packets.
+        // FAB5-K1 Packets pane.
+        .package(name: "WorkPacketKit", path: "../../packages/kits/WorkPacketKit"),
     ],
     targets: [
         // GenStaticAssets build-tool plugin: auto-regenerates StaticAssets.swift
@@ -122,6 +126,7 @@ let package = Package(
                 .product(name: "LatticeLib", package: "LatticeLib"),
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "CognitionKit", package: "CognitionKit"),
+                .product(name: "WorkPacketKit", package: "WorkPacketKit"),
             ],
             path: "Sources/MootManager",
             // DashboardAssets/ holds the EDITABLE source of the read-plane web UI
@@ -157,6 +162,7 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "WorkPacketKit", package: "WorkPacketKit"),
             ],
             path: "Tests/MootManagerTests"
         ),
