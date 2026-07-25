@@ -65,6 +65,13 @@ public struct ContentView: View {
                     Tab(String(localized: "Miners"), systemImage: "square.and.arrow.down.on.square") {
                         MinerSettingsView()
                     }
+                    // FAB5-I3: work-packet list, detail, and lineage trace views.
+                    // Kong ruling: Advanced-only tab, after Miners, SF Symbol "shippingbox".
+                    // Production wiring: pass a WorkPacketStore.list closure to PacketListView;
+                    // see docs/guide/THREE_MINDS_ONE_MEMORY.md for the full demo setup.
+                    Tab(String(localized: "Packets"), systemImage: "shippingbox") {
+                        PacketListView()
+                    }
                 }
             }
             Divider()
